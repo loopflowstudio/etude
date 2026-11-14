@@ -11,13 +11,14 @@ from typing import Any
 
 import pytest
 
+from etude.errors import LauncherError
 from etude.launch.database import Database, launcher_file
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.machines import MachineRequest
 from etude.launch.providers.program import boot_source
 from etude.launch.providers.runpod.api import PodFact, RunPodAPI
 from etude.launch.providers.runpod.machines import STOCK_IMAGE, RunPodMachines
-from etude.launch.records import CPU, GPU, BootstrapLinks, LauncherError, MachineTemplate
+from etude.launch.records import CPU, GPU, BootstrapLinks, MachineTemplate
 from etude.launch.records import Provider as Account
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply

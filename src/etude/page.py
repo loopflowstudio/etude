@@ -6,7 +6,7 @@
     pages = Pages(storage).build_each(Path("experiments"))  # every experiment file there
     write(render_index(index(storage, pages, href=lambda stem: f"{stem}.html")), target(storage, "index"))
 
-The file names the experiment, by its stem, and may define `report()`
+The file defaults the experiment to its stem; an explicit name overrides it. It may define `report()`
 (`etude.report.Report`) and `eval(state)` (`etude.experiment`). Without
 `report()` the page is `Report(other_metrics=True)`, drawing every metric its
 runs logged, and says so at its top. The experiment's
@@ -85,14 +85,14 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import JsonValue
 
+from etude.errors import EtudeError
 from etude.eval.records import Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named
 from etude.launch.logging import explain
-from etude.report import Flame, Matches, Report, Score
-from etude.run.errors import EtudeError
-from etude.run.listing import as_storage, declared, run_folders, runs, under
-from etude.run.records import BUILT_IN_NAMES, Record
-from etude.run.storage import DirectoryStorage, S3Storage, Storage, default_root
+from etude.records import BUILT_IN_NAMES, Record
+from etude.report import Counters, Flame, Matches, Report, Score, Series
+from etude.run import as_storage, declared, run_folders, runs, under
+from etude.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import RunData, read_all
 from etude.train.report import Training, training
 
@@ -116,7 +116,7 @@ class Placement(Record):
     to a run or given an `at`; else it is an anchor.
     """
 
-    key: str  # its key (`etude.eval.records.Model.key` or `Code.key`), as the database holds it
+    key: str  # its key (`etude.eval.records.CheckpointPlayer.key` or `Code.key`), as the database holds it
     # Every name its seats gave it, the latest first, joined by "/".
     name: str
     run: str | None
@@ -345,13 +345,14 @@ class Pages:
     reflects them.
     """
 
-    def __init__(self, source: Storage | Path | str) -> None:
+    def __init__(self, source: Storage | Path | str, *, experiment: str | None = None) -> None:
+        self.experiment = experiment
         self.storage = as_storage(source)
         here = DirectoryStorage(default_root())
         self._places = list({each.name: each for each in (self.storage, here)}.values())
         self._built: dict[Path, tuple[_Inputs, Page]] = {}
         self._known: set[Path] = set()
-        # Each run's experiment by place and run, with the version of the declaration read.
+        # Each folder's experiment by place and prefix, with its declaration's version.
         self._declared: dict[tuple[str, str], tuple[str, str | None]] = {}
 
     def build(self, file: Path) -> Page:
@@ -381,15 +382,16 @@ class Pages:
 
     def _build(self, file: Path, listings: Sequence[dict[str, str]]) -> Page:
         if not file.is_file():
-            return build(self.storage, file)  # which says why there is no page
+            # The build says why there is no page.
+            return build(self.storage, file, experiment=self.experiment)
         runs = tuple(
-            self._versions(place, file.stem, listed)
+            self._versions(place, self.experiment or file.stem, listed)
             for place, listed in zip(self._places, listings, strict=True)
         )
         kept = self._built.get(file)
         if kept is not None and kept[0] == _Inputs(files=_sources(file), runs=runs):
             return kept[1]
-        page = build(self.storage, file)
+        page = build(self.storage, file, experiment=self.experiment)
         # After the build, so the neighbours this run imported are among its inputs.
         self._built[file] = (_Inputs(files=_sources(file), runs=runs), page)
         return page
@@ -400,22 +402,20 @@ class Pages:
         """The version of every object in the folders of the experiment's runs in one place."""
         keys = sorted(listed)
         found: list[tuple[str, str]] = []
-        for run, folders in sorted(run_folders(keys).items()):
-            if self._experiment(place, run, folders, listed) != experiment:
-                continue
-            found.extend((key, listed[key]) for folder in folders for key in under(keys, folder))
+        for folders in run_folders(keys).values():
+            for folder in folders:
+                if self._experiment(place, folder, listed) == experiment:
+                    found.extend((key, listed[key]) for key in under(keys, folder))
         return tuple(found)
 
-    def _experiment(
-        self, place: Storage, run: str, folders: Sequence[str], listed: dict[str, str]
-    ) -> str | None:
+    def _experiment(self, place: Storage, folder: str, listed: dict[str, str]) -> str | None:
         """The run's experiment, from its declaration, read again only once it has changed."""
-        version = next((listed[f + "run.json"] for f in folders if f + "run.json" in listed), "")
-        kept = self._declared.get((place.name, run))
+        version = listed.get(folder + "run.json", "")
+        kept = self._declared.get((place.name, folder))
         if kept is None or kept[0] != version:
-            file = declared(place, folders, listed)
+            file = declared(place, folder, listed)
             kept = (version, None if file is None else file.experiment)
-            self._declared[place.name, run] = kept
+            self._declared[place.name, folder] = kept
         return kept[1]
 
 
@@ -472,7 +472,7 @@ def _source_name(storage: Storage) -> str:
     return storage.name
 
 
-def build(source: Storage | Path | str, file: Path) -> Page:
+def build(source: Storage | Path | str, file: Path, *, experiment: str | None = None) -> Page:
     """The page of the experiment `file` names, from the runs under `source`.
 
     The file is run each time, so an edited `report()` shows on the next
@@ -481,7 +481,7 @@ def build(source: Storage | Path | str, file: Path) -> Page:
     experiment's.
     """
     storage = as_storage(source)
-    experiment = file.stem
+    experiment = experiment or file.stem
     names = _run_file(file)
     report, origin, notes = _report(names.get("report"), file)
     flames = tuple(panel.prefix for panel in (*report.perf, *report.ml) if isinstance(panel, Flame))
@@ -497,7 +497,7 @@ def build(source: Storage | Path | str, file: Path) -> Page:
             f"no runs of {experiment!r} in {_source_name(storage)}"
             + (f"; it holds {', '.join(held)}" if held else "; it holds no runs")
         )
-    trained = [run for run in data if run.file is None or run.file.declaration.kind != "evaluation"]
+    trained = [run for run in data if run.file is None or run.file.kind != "evaluation"]
     found = names.get("eval")
     want: Callable[..., object] | None = None
     if found is not None:
@@ -510,10 +510,24 @@ def build(source: Storage | Path | str, file: Path) -> Page:
         else _Evals()
     )
     # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
-    unended = [run.name for run in data if run not in trained and run.state is None]
+    unended = [run.name for run in data if run not in trained and run.outcome is None]
     partial = (
         (f"Partial results: no recorded end yet for {', '.join(unended)}.",) if unended else ()
     )
+    measured = training(trained, prefixes=flames)
+    if "ml" not in report.model_fields_set:
+        # Defaults offer the RL metrics that exist; explicit panels still
+        # diagnose missing keys, including a misspelt metric name.
+        report = report.model_copy(
+            update={
+                "ml": tuple(
+                    panel.model_copy(update={"keys": keys})
+                    for panel in report.ml
+                    if isinstance(panel, Series | Counters)
+                    and (keys := tuple(key for key in panel.keys if key in measured.metrics))
+                )
+            }
+        )
     return Page(
         experiment=experiment,
         file=str(file),
@@ -521,7 +535,7 @@ def build(source: Storage | Path | str, file: Path) -> Page:
         report=report,
         origin=origin,
         notes=(*notes, *partial, *_without_hours(trained), *evals.notes),
-        training=training(trained, prefixes=flames),
+        training=measured,
         scores=evals.scores or ((report.score,) if report.score is not None else ()),
         selections=evals.selections,
         drawn=evals.drawn,
@@ -554,7 +568,7 @@ def _without_hours(trained: Sequence[RunData]) -> tuple[str, ...]:
     ]
     if not lacking:
         return ()
-    unread = [run.name for run in lacking if not run.attempts]
+    unread = [run.name for run in lacking if not run.writers]
     why = (
         f" The attempt records (metrics/WRITER.json) of {', '.join(unread)} are not in this"
         " source to derive them from."
@@ -847,7 +861,7 @@ def _players(
         line = seat_lines[0] if seat_lines else None
         if len(seat_lines) > 1:
             notes.append(
-                f"{name} is in line {line}, as its latest seat says;"
+                f"{name} follows {line}, as its latest seat says;"
                 f" earlier seats said {', '.join(seat_lines[1:])}."
             )
         for clock in sorted(seated.keys() & recorded.keys()):
@@ -953,7 +967,7 @@ def _points(
     its point. Several pairs, such as each line of a job, are their mean.
     """
     # The optional `eval` extra, as in `_read_evals`.
-    from etude.eval.records import Benchmark, Model  # noqa: PLC0415
+    from etude.eval.records import Benchmark, CheckpointPlayer  # noqa: PLC0415
 
     index = {each.key: i for i, each in enumerate(players)}
     refs = {str(ref.key): ref for each in held for ref in each.tournament.checkpoints}
@@ -965,7 +979,7 @@ def _points(
             held_for = called.checkpoint
             if held_for is None:
                 seat = called.match.players[0]
-                if not isinstance(seat, Model):
+                if not isinstance(seat, CheckpointPlayer):
                     continue
                 held_for = seat.checkpoint.key
                 refs.setdefault(str(held_for), seat.checkpoint)
@@ -1325,8 +1339,8 @@ def _cells(
     `environments` are by identity, the newest latest match first.
     """
     # The optional `eval` extra, imported where it is used (`_read_evals`).
-    from etude.eval.match import ETUDE_TABLES  # noqa: PLC0415
     from etude.eval.query import KEYS, NUMERIC, compare  # noqa: PLC0415
+    from etude.eval.run import ETUDE_TABLES  # noqa: PLC0415
 
     # A rollup's totals have no matches to compare over.
     rollups = {name for (name,) in db.sql("select name from kept.rollups").fetchall()}
@@ -1350,6 +1364,7 @@ def _cells(
     place = {identity: number for number, identity in enumerate(environments)}
     cells: list[Cell] = []
     absent: list[Absent] = []
+    teams: set[str] = set()
     for number, score in enumerate(scores):
         held = columns.get(score.table, {})
         if score.value not in held:
@@ -1390,6 +1405,7 @@ def _cells(
                         by=by,
                     ):
                         if len(found.subject) != 1 or (found.opponent and len(found.opponent) != 1):
+                            teams.add(f"{score.table}.{score.value}")
                             continue  # a team
                         if fixed and found.opponent is not None:
                             continue  # pairs of anchors are in the unrestricted cells
@@ -1419,7 +1435,16 @@ def _cells(
         if cell.opponent is not None:
             met.setdefault(_met(cell), set()).add(cell.opponent)
     kept = [c for c in cells if c.opponent is not None or c.fixed or len(met.get(_met(c), ())) != 1]
-    return scores, kept, tuple(dict.fromkeys(absent)), mixed
+    notes = (
+        (
+            f"Team results for {', '.join(sorted(teams))} are recorded, "
+            "but report charts only draw individual players. "
+            "Read the team scores with etude.eval.query.statsdb or compare.",
+        )
+        if teams
+        else ()
+    )
+    return scores, kept, tuple(dict.fromkeys(absent)), (*mixed, *notes)
 
 
 def _newest_environment(
@@ -1604,9 +1629,10 @@ class Server(ThreadingHTTPServer):
         address: tuple[str, int],
         *,
         refresh: float | None = None,
+        experiment: str | None = None,
     ) -> None:
         super().__init__(address, _Handler)
-        self.pages, self.path, self.refresh = Pages(source), path, refresh
+        self.pages, self.path, self.refresh = Pages(source, experiment=experiment), path, refresh
         # Requests are handled on threads; a page is built by one at a time.
         self._building = threading.Lock()
         self._lock = threading.Lock()

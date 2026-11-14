@@ -16,15 +16,15 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
+from etude.block_file import block_key
 from etude.page import build
-from etude.run.block_file import block_key
-from etude.run.records import RunDeclaration, RunFile, SourceKey
-from etude.run.storage import DirectoryStorage, S3Storage, Storage, run_prefix
+from etude.records import RunRecord
+from etude.storage import DirectoryStorage, S3Storage, Storage, run_prefix
 from etude.train.block import Columns, Series, encode
 from etude.train.manifest import Index
 from etude.train.read import buckets, read
 from etude.train.records import Step, Time
-from etude.train.run import track
+from etude.train.tracking import track
 from tests.experiments import experiment_file
 from tests.run.storage import MeasuredStorage
 
@@ -136,13 +136,7 @@ def test_store_measurement(tmp_path: Path, rows: int, backend: str) -> None:
         if backend == "s3":
             for manifest in sorted((tmp_path / prefix / "metrics").glob("*.json")):
                 storage.put(prefix + f"metrics/{manifest.name}", manifest.read_bytes())
-        declaration = RunFile(
-            experiment="measure",
-            namespace="local",
-            declaration=RunDeclaration(
-                source_key=SourceKey(namespace="local", kind="run", source_id="read"), clocks=CLOCKS
-            ),
-        )
+        declaration = RunRecord(id="read", experiment="measure", clocks=CLOCKS)
         storage.put(prefix + "run.json", declaration.model_dump_json().encode())
         written = time.perf_counter() - started
         measured = MeasuredStorage(storage)

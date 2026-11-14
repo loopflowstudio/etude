@@ -1,29 +1,28 @@
 # Tracking
 
-Declare a run, log from any process wherever it runs, read it back. It writes
+Log from any process wherever it runs, and read it back. Tracking writes
 files to your own directory or bucket and reads from them. There is no server
 in this path, and nothing here starts compute or holds a provider credential.
 
+A training loop Etude calls is written as [Training](training.md) describes:
+`etude train` or the launcher says which run it is, and `track` takes only
+a config; steps and log keywords declare its clocks. This page covers what every tracked process shares: rows,
+tables, storage, reading and reports. A process Etude did not start, such as a
+notebook or another scheduler's job, names its run itself:
+
 ```python
-from etude.run.storage import storage_from_uri
-from etude.train.records import Step, Time
-from etude.train.run import track
+from etude.storage import storage_from_uri
+from etude.train.tracking import track
 
 run = track(
     experiment="capacity-pilot",
-    run="capacity-64-seed-0",  # reusing a name resumes it
+    run="capacity-64-seed-0",  # new within its experiment: a taken name is refused
     job="capacity-64",  # what its siblings share
-    seed=0,  # the only thing that differs
-    clocks=[
-        Step("updates", "optimizer updates, absolute across continuation"),
-        Step("learner_transitions", "transitions the learner trained on"),
-        Time("training_seconds", "active training time, pauses excluded"),
-    ],
     config=open("config.json").read(),  # kept byte for byte
     storages=[storage_from_uri("s3://my-bucket/runs")],  # optional
 )
 for update in training():
-    run.log({"rl/loss": loss}, updates=update, learner_transitions=n, training_seconds=t)
+    run.log({"rl/loss": loss}, updates=update, learner_transitions=n)
 run.finish()
 ```
 
@@ -34,18 +33,19 @@ uv run etude checkpoints --source s3://my-bucket/runs
 ```
 
 Runs are written to one place per computer, `~/.etude/track` (moved by
-`ETUDE_HOME`, or named with `track(directory=...)`), and `report` reads that
-place when given no source. So writing never chooses how it will be read.
+`ETUDE_HOME`, or named with `track(directory=...)`), each in
+`EXPERIMENT[/JOB][@SEED]/`, and `report` reads that place when given no source. So writing never chooses how it will be read.
 `report` and `checkpoints` take `--source`, a directory or
 `s3://bucket/prefix` or `r2://bucket/prefix`, and find runs in it at any depth. Attempts on rented
-machines write to the same `PREFIX/RUN/` folder; pointing `--source` at the
+machines write to the same run folder; pointing `--source` at the
 storage's prefix reads the whole run.
 
 One `etude` command provides compute, reports, sync and checkpoints. The
 launcher (`etude.launch`) and tracking share one package and lock file; neither
 imports the other. Tracking is `etude.train` for training runs, built on
-`etude.run`: what every run shares (its declaration, files, storage and
-delivery).
+what every run shares: `etude.storage`, `etude.records`, `etude.checkpoints`
+and `etude.errors`, with its declaration, listing and delivery in
+`etude.run`.
 Install `etude-sdk[s3]` for tracking against a bucket; local tracking does not
 need boto3. `s3://` uses boto3's own configuration. `r2://` reaches Cloudflare
 R2 at `https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com` with `R2_ACCESS_KEY_ID`
@@ -53,20 +53,23 @@ and `R2_SECRET_ACCESS_KEY`, as DuckDB's `r2://` does. Tracking commands read the
 when a launcher controller is selected. Each command loads its own dependencies;
 help and the worker do not load NumPy.
 
-Under `etude launch` the launcher has already said which run this is, so the
-same script needs only its experiment and clocks:
+Under `etude train` and `etude launch` the run has already been named, so the
+loop gives only its clocks and config:
 
 ```python
-run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates, absolute")])
+with track(config=config) as run:
+    ...
 ```
 
-The run, job, seed and cohort come from the launcher (`ETUDE_RUN`,
-`ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`); an argument passed to `track` wins.
-Launched from an experiment file, the run is that experiment's
-(`ETUDE_EXPERIMENT`): `etude launch ppo.py` starts runs of experiment `ppo`,
-so `track(clocks=...)` needs no `experiment`, and one naming another
-experiment is refused (`experiment_differs_from_launch`). Launched from a
-plain job file, the script names its experiment.
+The run, job, seed and cohort come from the command (`ETUDE_RUN`,
+`ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`), and `run.seed` reads the seed.
+The experiment is the launched file's stem (`ETUDE_EXPERIMENT`):
+`etude launch ppo.py` supplies `ppo`, including when the file defines only
+`runs()`. An explicit `--experiment` overrides the file and its job labels;
+without it a plain job file preserves an explicit `Job.experiment`. Naming another
+experiment in `track` is refused (`experiment_differs_from_launch`), so a
+reusable training function names none. A process started by another
+scheduler sets the same variables to say which run it is.
 The files are written to `ETUDE_TRACK_DIR`, one place on the machine for every
 run and attempt, and the launcher carries them to the machine's bucket as each
 file is finished, by the same rules as `sync` (`etude.carriage`): every
@@ -77,24 +80,39 @@ including in the launcher's bucket. Tracking never imports the launcher and work
 
 Rules a caller can rely on:
 
-- **Clocks are declared.** A run states its clocks once, each a step (a count)
-  or a time (seconds) with one line of meaning. They are its only x-axis
-  options besides Etude's two clocks in hours ([below](#etudes-clocks)),
-  which every row carries. Re-declaring a run with different clocks is refused.
-- **Every row should give every clock.** A row missing one is charted against
-  the clocks it did give, and Etude's. The first such row in a run raises an
-  `EtudeWarning` at the caller's line; `strict=True` makes it an error.
+- **Clocks are declared by use.** `run.steps` declares its clock; each new
+  log keyword declares another count clock, with its name as label. Optional
+  `track(clocks=["updates", "learner_transitions"])` closes the set: another
+  clock keyword is refused (an error under `strict=True`, else a warning and
+  dropped row). Use `Time(...)` in that list only for custom seconds.
+  Historical declarations keep their kinds and labels.
+- **Every row carries every used clock.** A missing clock is an error under
+  `strict=True`; otherwise it warns once and counts an incomplete row, charted
+  only against coordinates it gave. There is no sparse-clock option.
+- **Metrics may be sparse.** Put metrics in the mapping; a row can log any
+  subset. A missing metric reads as missing (null), never zero or a previous
+  value. Occasional evaluations belong to eval runs.
 - **No ordering rule in storage.** A repeated or lower clock value is accepted
   and kept. A read returns the latest write per clock value. A clock that goes
   backwards within one process warns once, and raises under `strict=True`; a
-  resume from an earlier checkpoint is a new process and does neither. A
-  resumed process's rows replace earlier attempts' from the run's latest
-  checkpoint on; one restored from elsewhere, such as its own snapshot, passes
-  `track(..., resumed_at={"step": 13})`.
+  resume from earlier state is a new process and does neither.
+- **A later attempt's rows replace earlier ones from its first row on.** The
+  first row an attempt logs says where it resumed: logging `updates=1301`
+  first replaces earlier attempts' rows from update 1301 on and keeps
+  everything before. An attempt that logs nothing replaces nothing. The caller
+  passes no resume point, whether it restored a checkpoint or its own state
+  file. Attempts written before this rule keep the resume point they recorded.
+  Remove `resumed_at=` from existing `track` calls; the argument is no longer
+  accepted. Historical run files remain readable.
+- **A run's name is taken once.** Declaring a name its experiment already
+  holds is refused; nothing is inferred from a folder that exists. Another
+  attempt of the same run is asked for by selection (`etude train FILE --resume`,
+  or the launcher's own retry), and must give the config and seed the run
+  started with.
 - **Continuation is lineage.** A run may name a parent run, a clock and the
   value it continues from. The parent is unchanged. The report does not join
   the two yet. A launched continuation (`etude continue`) declares this
-  itself, from the parent's checkpoint it is handed in `ETUDE_CONTINUES`.
+  itself, from where its parent stood (`ETUDE_CONTINUES`).
 - **Reads are bucketed and keep extremes**: per bucket first, last, min, max,
   mean, count and a count of NaN or infinite values. A range with fewer points
   than buckets returns the points themselves.
@@ -107,16 +125,25 @@ Rules a caller can rely on:
   A full queue drops the row and counts it in
   `run.dropped`. `track` is strict and raises on a bad declaration.
 - **The files are the record.** Everything about a run is in one folder named
-  for the run, `RUN/`, in the runs directory and in each storage it delivers
-  to: `run.json` (what it is, its experiment included), `state.json`,
-  `metrics/` (row blocks and their indexes, from every attempt),
-  `artifacts/` (immutable files, including logged row tables) and
-  `checkpoints/` (each named for where its first clock stood, such as
-  `steps-1000.pt` beside `steps-1000.json`). Under the launcher the same folder
-  in the bucket also holds `attempts/ATTEMPT.json` and the pieces of the job's log
-  it names, under `attempts/ATTEMPT.log/`.
-  A run's name is unique in its runs directory whatever its experiment. Config,
-  state and checkpoint records are JSON. Rows are columnar block files (the
+  for its experiment and id, `EXPERIMENT[/JOB][@SEED]/`, in the runs directory and in
+  each storage it delivers to: `run.json` (its job, seed, config, clocks, parent and inputs),
+  `outcome.json` (how its latest attempt ended), `metrics/` (row blocks and
+  their indexes, from every attempt), `artifacts/` (immutable files,
+  including logged row tables) and `out/` (`run.out`), which holds the saved
+  state in `out/state/`, one folder per save with `current.json` naming the
+  one to load, and each published checkpoint in `out/checkpoints/`,
+  named for where its first clock stood (`updates-00001000/`); a checkpoint
+  file copied from outside `out` is in `checkpoints/` with its record.
+  [Training](training.md#what-is-on-disk) shows the layout. Under the launcher
+  the same folder in the bucket also holds `attempts/ATTEMPT.json` and the
+  pieces of the job's log it names, under `attempts/ATTEMPT.log/`.
+  The allocation's `RunAttempt.writers` holds each tracking context's metadata,
+  including its run and first-row cutoff. Several writers still use one attempt
+  and one share of the machine's cost. `read(...).writers` gives the contexts
+  that wrote a run; historical `read(...).attempts` warns until 0.5.
+  A run's id is unique within its experiment. Runs stored before this
+  layout, in a flat `RUN/` folder with a `state.json` outcome, read the same.
+  Config, outcome, state and checkpoint records are JSON. Rows are columnar block files (the
   layout is described at the top of `src/etude/train/block.py`),
   sealed every few seconds and merged as they accumulate, so a chart reads two
   arrays. Rows logged since the last seal are in a local log and are not yet
@@ -134,17 +161,19 @@ Rules a caller can rely on:
   completion inapplicable. Until the new writer finishes, the report says
   “running or unfinished.” Older completion records without a writer remain
   readable, but cannot establish completion after another attempt starts.
+  An attempt that left its block by raising `Stopped` is recorded `stopped`,
+  not `failed`, and the report keeps saying “running or unfinished.”
+  An attempt refused before it began, such as a resume with another config,
+  records nothing: a finished run stays finished.
 
 ### Row tables for training results
 
 ```python
-from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 
 with track(
     experiment="self-play",
     run="policy-seed-0",
-    clocks=[Step("updates", "optimizer updates, absolute across continuation")],
 ) as run:
     run.log_table(
         "decks",
@@ -175,7 +204,7 @@ When copying a run, include `artifacts/`. Readers resolve references beside the
 selected metric block, so relocated runs keep working.
 
 ```python
-from etude.run.storage import default_root
+from etude.storage import default_root
 from etude.train.read import read
 
 history = read(default_root(), "self-play", "policy-seed-0")
@@ -190,8 +219,8 @@ inspection; these are not JSON row tables.
 
 The reader applies attempt and update supersession before fetching artifacts.
 A later table at the same update replaces the earlier one. A resumed attempt
-cuts off superseded history even before logging anything; the checkpoint
-coordinate itself survives unless replaced, as with scalar points. Unreferenced
+cuts off earlier attempts' history from its first logged row on, tables and
+scalar points alike. Unreferenced
 artifacts yield no rows. Do not reconstruct history by listing `artifacts/`.
 
 A missing or damaged selected table raises. After interrupted delivery, run
@@ -252,38 +281,43 @@ before the machine is deleted if storage is still unavailable.
 
 ### Checkpoints
 
+```sh
+uv run etude checkpoints --source s3://my-bucket/runs
+```
+
+[Training](training.md#checkpoints) covers publishing: `run.checkpoint(policy=model)`
+for named objects, `run.checkpoint(path)` for a file of your own format.
+
 ```python
-# A local file is stored: copied into the run's directory, digested, and
-# delivered to your bucket with the run's other files. An address such as
-# "s3://..." records a reference only.
 model = run.checkpoint(
     "out/latest.pt", updates=63_000, learner_transitions=n, training_seconds=t, tags=["periodic"]
 )
 run.tag(model, "best")  # tags can change later
 ```
 
-- **A checkpoint is a recorded model**: the saved artifact and where every
-  declared clock stood, numbered within the run from one, across every attempt
-  on every machine. `checkpoint` returns its reference; pass that to whatever
-  evaluates the model.
-- **Etude stores the file, in your storage**, at
-  `PREFIX/RUN/checkpoints/CLOCK-VALUE.EXT`, uploaded in the background before
-  its record. The copy is taken before `checkpoint` returns, so saving over the
-  same path afterwards is safe, and the call takes about as long as writing the
-  file did. A JSON model uses `.json.data` to keep it distinct from the JSON
-  checkpoint record. Removing stored files by rule is not built.
+- **A checkpoint is a published model**: a folder of named files, or one
+  file, and where every declared clock stood, numbered within the run from
+  one, across every attempt on every machine. `checkpoint` returns its
+  reference; pass that to whatever evaluates it.
+- **Etude stores it, in your storage.** Named objects are written to
+  `out/checkpoints/CLOCK-VALUE/` with a `checkpoint.json`. A file already in
+  `run.out` is recorded in place and must stay unchanged. Any other local file
+  is copied to `checkpoints/CLOCK-VALUE.EXT` before `checkpoint` returns, so
+  the caller can overwrite its source. All are uploaded before their records.
+  A folder's digest is over a manifest of its files' digests. An address such
+  as `s3://...` records a reference only. Removing stored files by rule is
+  not built.
 - **Nothing recorded is replaced.** Recording the same model at the same
   `at` again returns the existing reference and sends nothing. A
   different model at a recorded `at` is a new checkpoint,
   `CLOCK-VALUE.ordinal-N.EXT` beside the first. A name some file already
   holds is never reused, even one an interrupted attempt kept without its
   record. Only tags change later.
-- **Resume from the latest.** A later attempt of a run sees every checkpoint
-  recorded so far; on another machine the launcher restores the records and
-  the latest file before the job starts, and ordinals continue. A continuation gets its parent's
-  checkpoint until it records its own. Its file is on this machine:
-  `latest = run.latest_checkpoint()`, then load
-  `urllib.parse.urlparse(latest.artifact.uri).path`; it is `None` on a first start.
+- **A later attempt sees every checkpoint.** `run.checkpoints()` lists them,
+  oldest first, and ordinals continue. They are part of `out`, so they are
+  restored with it on another machine and copied with it into a continuation
+  ([the launcher](launcher.md#the-run-promise)). Carrying a run on uses its
+  saved state, not a checkpoint.
 - **Readers give storage addresses.** `etude checkpoints --source` and
   `etude.train.read` report each file where it is in the source read, not
   where the machine that wrote it kept it; a record whose file has not arrived
@@ -292,18 +326,13 @@ run.tag(model, "best")  # tags can change later
 ### Etude's clocks
 
 ```python
-import os
-
-run = track(experiment="capacity-pilot", clocks=[Step("updates", "optimizer updates, absolute")])
-hours = float(
-    os.environ["ETUDE_UNTIL_VALUE"]
-)  # the job's until=Until(clock="running_hours", value=10)
-while run.at("running_hours") < hours:
-    update, loss = train_one_update()
-    run.log({"rl/loss": loss}, updates=update)
-    if run.checkpoint_due(1):  # every running hour
-        run.checkpoint("out/latest.pt", updates=update)
-run.finish()
+with track(config=config) as run:
+    run.resume(model=model, optimizer=optimizer)
+    for update in run.steps("updates", to=config.updates):
+        run.log({"rl/loss": one_update(model, optimizer)})
+        run.save()
+        if run.checkpoint_due(1):  # every running hour
+            run.checkpoint(policy=model)
 ```
 
 Every row and checkpoint of a training run carries two clocks Etude keeps,
@@ -311,9 +340,9 @@ in hours, which no run declares or logs:
 
 - **`running_hours`** is how long the learner line has run. It starts at
   `track(...)`, so installing, booting and queueing never count, and goes on
-  from the resumed checkpoint's value, across attempts and continuations, as
-  `updates` does. What a crashed attempt ran past its last checkpoint is
-  dropped on resume, with its rows.
+  from its value at the save the attempt resumed, or at the checkpoint a
+  continuation started from, as `updates` does. What a crashed attempt ran
+  past its last save is dropped on resume, with its rows.
 - **`hours_since_start`** is wall time since the line's first attempt began,
   gaps between attempts included.
 
@@ -328,8 +357,10 @@ runs: charts and seats on these clocks leave such a checkpoint out.
 passed a multiple of `every` since the latest checkpoint. Either clock can be
 a job's `until`, the page's x axis, or a seat's clock
 (`Earlier(clock="running_hours", by=2, at_or_before=True, ...)`,
-[evaluation](evaluation.md)). Metric timers such as `time/collection` stay
-in seconds.
+[evaluation](evaluation.md)). A loop that runs to an hour target rather than
+a count asks for it with `run.until("running_hours", default=10)`
+([the pieces underneath](training.md#the-pieces-underneath)). Metric timers
+such as `time/collection` stay in seconds.
 
 ### Reading a long run's metrics
 
@@ -433,6 +464,7 @@ def report() -> Report:
 
 ```sh
 uv run etude report ppo.py --source r2://bucket/runs --open   # writes ./reports/ppo.html
+uv run etude report ppo.py --experiment wide  # reads wide, writes reports/wide.html
 uv run etude report ppo.py --watch 5 --open   # opt in to checks and page reloads every 5 s
 uv run etude report ppo.py --serve            # refresh on demand, writing nothing
 uv run etude report experiments/ --serve      # every experiment there, with an index at /
@@ -447,6 +479,8 @@ logged metric, and the page says so at its top. Reports read files and never
 launch or rent anything.
 From a directory the page goes to
 `reports/` beside its runs, from a bucket to `./reports`; `--out DIR` chooses.
+For one file, `--experiment NAME` selects a named variant and names its output
+page; it also applies with `--watch` or `--serve`.
 `--serve` has no login and defaults to this computer only
 (`--host 127.0.0.1 --port 8765`). Keep the command running to use Refresh;
 Ctrl-C stops it.
@@ -517,7 +551,7 @@ addresses both: `baseline="ppo"` dots both, `labels={"ppo": "PPO"}` shows
 "PPO 1a2b3c · 3 seeds", `Planned(jobs={"ppo": ...})` draws the planned values for
 each and `Aligned(job="ppo")` seats each. The full name, `"ppo 1a2b3c"`,
 names one, and a full-name label or plan wins over the launch name's.
-`TrainingRun.job` in `eval(state)` is this same name. Games played on different
+`TrainingRunSummary.job` in `eval(state)` is this same name. Games played on different
 devices, compute setups or code revisions contribute to the same requested
 matches; a replay counts once, from its latest delivered result. There is no Config
 control. Ask for a setup under a config's `setup` key, which is part of no
@@ -539,8 +573,9 @@ bytes are two points. A checkpoint's line, the learner it belongs to, is
 its seat's `line`, else its training run's line: the first run of the chain
 of continuations that led to it. A checkpoint a training run saved
 is drawn in that run's job; every other placed checkpoint is drawn in its
-line's curve, labelled by the line's name, or in one curve of "checkpoints
-with no line". `Crosstable` looks only within a line.
+learner's curve, labelled by its name, or in one curve of "checkpoints
+with no job". `Crosstable` keeps each learner's checkpoints separate and labels
+its tabs by job and learner.
 Every unplaced player, code or a checkpoint seated without an `at`, is an
 anchor, and the page names the unplaced checkpoints.
 
@@ -565,7 +600,7 @@ than its eval runs were held with, as they held it.
 |---|---|
 | `Curve(split=None)` | the score at each checkpoint, against one anchor the Opponent control picks; `split` draws one chart per value |
 | `Curve(matches=Matches(seating="half-training"))` | that seating over the checkpoints it was held for: a line per job, x where each held checkpoint stood |
-| `Crosstable()` | one line's checkpoints against each other, a tab per line, both axes ordered by the clock; an unplayed pair shows `·` |
+| `Crosstable()` | one learner's checkpoints against each other, a tab per job and learner, both axes ordered by the clock; an unplayed pair shows `·` |
 | `Matrix(rows, columns)` | one job's score per cell at one checkpoint: a finished job's final, else its latest evaluated |
 | `Ranking(by)` | a bar per job for each value of `by`; clicking a row filters the page |
 | `Anchors()` | the anchors against each other, and each one's strength over matches that seat no checkpoint |
@@ -662,11 +697,12 @@ seating or tag a panel names that nothing holds is said so.
 
 **Perf** draws what Etude records for training runs: `Pace` (each step clock
 per wall second between checkpoints), `Elapsed` (wall hours to each
-checkpoint), `Attempts`, and `Flame`, an icicle of the seconds logged under
+checkpoint), `Attempts` (writer lifetimes), and `Flame`, an icicle of the seconds logged under
 `time/` (`time/collection`, `time/collection/inference`: seconds since the
 previous row). **ML details** default to reinforcement learning's `Counters`
 and `Series` over `rl/` keys; pass `perf=` or `ml=` to name an experiment's
-own. Keys a panel names that no run logged are listed.
+own. Default RL panels show only logged keys. Explicit panels list keys that no
+run logged. Pace leaves a gap at the first checkpoint after a writer starts.
 
 A report reads and draws only the keys named by `Series` and `Counters` and
 the prefixes named by `Flame`. It reads each immutable block once, whole,
@@ -683,9 +719,10 @@ metric vocabulary, define `report()` and name the metrics to draw.
 
 **What a build reads.** Perf and ML details read the metric blocks of training
 runs only, once per build; `eval(state)` is given the runs' checkpoints without
-reading any metric data. An eval run contributes its `run.json`, `state.json`,
-its tournament or environment record and each block's index and tables; its
-blobs, such as replay evidence, are never read to draw a page. Unless
+reading any metric data. An eval run contributes its `run.json`, `outcome.json`
+(historically `state.json`), its tournament or environment record and each
+block's index and tables; its blobs, such as replay evidence, are never read
+to draw a page. Unless
 `other_metrics=True`, a build's memory therefore follows the metrics and tables
 the report draws, not how much data its runs hold. Bytes a build reads stay in
 Etude's storage cache, so building the same page again over unchanged runs

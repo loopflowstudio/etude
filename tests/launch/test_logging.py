@@ -19,16 +19,17 @@ from urllib.request import Request
 
 import pytest
 
+from etude.errors import LauncherError
 from etude.launch import logging, source
 from etude.launch.database import Database, launcher_file
 from etude.launch.environment import install
-from etude.launch.errors import LauncherError, LaunchError
+from etude.launch.errors import LaunchError
 from etude.launch.logging import CLOSED, LIMIT, bound, bounded
 from etude.launch.logs import LogCursor, render, snapshot_stream
 from etude.launch.providers import bootstrap
 from etude.launch.providers.package import program_archive
 from etude.launch.providers.runpod import pod
-from etude.launch.records import Diagnostic, LogSnapshot, LogStream, Run
+from etude.launch.records import Diagnostic, LogSnapshot, LogStream
 from etude.launch.records import Storage as StorageRecord
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import (
@@ -50,6 +51,7 @@ from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
 from etude.launch.worker.main import work
+from etude.spec import RunRequest
 from tests.launch.counting import Counting, Counts, job_text
 from tests.launch.fake import bench
 from tests.launch.test_runpod_machines import Storage as MemoryStorage
@@ -64,11 +66,11 @@ def test_failed_preparation_survives_restart_and_does_not_consume_id(
     b = bench(tmp_path)
     original = source.freeze
 
-    def fail(run: Run) -> Run:
+    def fail(run: RunRequest) -> RunRequest:
         raise OSError("source publication refused")
 
     monkeypatch.setattr(source, "freeze", fail)
-    requested = Run(id="baseline-seed-7", job=job())
+    requested = RunRequest(id="baseline-seed-7", job=job())
     with pytest.raises(LaunchError) as caught:
         b.scheduler.launch(requested, rent="l4")
     assert caught.value.runs == (requested.id,)
@@ -97,7 +99,7 @@ def test_failed_preparation_survives_restart_and_does_not_consume_id(
 def test_uncertain_creation_blocks_reusing_id_until_confirmed_cleanup(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.service.lose_reply = 1
-    requested = Run(id="chosen", job=job())
+    requested = RunRequest(id="chosen", job=job())
     with pytest.raises(LaunchError):
         b.scheduler.launch(requested, rent="l4")
     for _ in range(2):
@@ -129,7 +131,10 @@ def test_partial_cohort_retains_shared_failure_without_admitting_members(
     monkeypatch.setattr(b.service, "create", fail_second)
     with pytest.raises(LaunchError):
         b.scheduler.launch_cohort(
-            "pair", [Run(id="one", job=job()), Run(id="two", job=job())], rent="l4", parallel=2
+            "pair",
+            [RunRequest(id="one", job=job()), RunRequest(id="two", job=job())],
+            rent="l4",
+            parallel=2,
         )
     assert b.store.runs() == ()
     assert not b.store.cohort_exists("pair")
@@ -487,9 +492,9 @@ def test_log_reads_and_phases_never_drive_execution(tmp_path: Path) -> None:
 def test_machine_view_excludes_job_output(tmp_path: Path) -> None:
     b = bench(tmp_path)
     machine = b.scheduler.rent("l4", 2)
-    first = b.scheduler.launch(Run(id="first", job=job()), rent="l4")
+    first = b.scheduler.launch(RunRequest(id="first", job=job()), rent="l4")
     b.run(601)
-    second = b.scheduler.launch(Run(id="second", job=job()), rent="l4")
+    second = b.scheduler.launch(RunRequest(id="second", job=job()), rent="l4")
     assert "log of" not in render(b.scheduler.logs(refresh=True, machine=machine))
     assert b.scheduler.attempts(first)[0].id not in job_text(
         b.scheduler.logs(refresh=True, run=second)
@@ -622,11 +627,16 @@ def test_client_chosen_id_freezes_source_before_admission(
 ) -> None:
     repo, _ = repository
     b = bench(tmp_path)
-    identity = b.scheduler.queue(Run(id="my-scientific-id", job=job(repo=str(repo))), rent="l4")
+    identity = b.scheduler.queue(
+        RunRequest(id="my-scientific-id", job=job(repo=str(repo))), rent="l4"
+    )
     record = b.scheduler.record(identity)
     assert record.id == "my-scientific-id"
-    assert record.source is not None and record.spec.revision == record.source.commit
-    assert record.spec.revision != "HEAD"
+    assert (
+        record.launch.source is not None
+        and record.launch.spec.revision == record.launch.source.commit
+    )
+    assert record.launch.spec.revision != "HEAD"
 
 
 def test_remote_preparation_failure_keeps_controller_evidence(
@@ -634,11 +644,11 @@ def test_remote_preparation_failure_keeps_controller_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     b = bench(tmp_path)
-    launch = b.scheduler.prepare_launch((Run(id="remote-id", job=job()),), rent="l4")
+    launch = b.scheduler.prepare_launch((RunRequest(id="remote-id", job=job()),), rent="l4")
     b.scheduler.fail_launch(launch.id, "source publication failed: denied")
     assert "source publication failed" in render(b.scheduler.logs(refresh=True, run="remote-id"))
     assert b.store.runs() == () and b.service.creates == 0
-    assert b.scheduler.launch(Run(id="remote-id", job=job()), rent="l4") == "remote-id"
+    assert b.scheduler.launch(RunRequest(id="remote-id", job=job()), rent="l4") == "remote-id"
 
 
 @pytest.mark.parametrize("failure", ["install", "spawn", "import", "entry"])
@@ -650,7 +660,9 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
     storage_denied: bool,
 ) -> None:
     b = bench(tmp_path)
-    identity = b.scheduler.launch(Run(id="install-failure", job=job(max_attempts=1)), rent="l4")
+    identity = b.scheduler.launch(
+        RunRequest(id="install-failure", job=job(max_attempts=1)), rent="l4"
+    )
     session = b.scheduler.session(b.scheduler.attempts(identity)[0].session)
     marker = tmp_path / "guardian-started"
     monkeypatch.setattr(bootstrap, "GUARDIAN_MARKER", marker)
@@ -838,11 +850,11 @@ def test_failure_after_atomic_admission_does_not_relabel_it_as_failed_admission(
 
     monkeypatch.setattr(b.service, "observe", broken)
     with pytest.raises(LaunchError, match="run admitted; delivery unconfirmed"):
-        b.scheduler.launch(Run(id="admitted", job=job()), rent="l4")
+        b.scheduler.launch(RunRequest(id="admitted", job=job()), rent="l4")
     assert b.store.run("admitted").id == "admitted"
     assert b.store.launches("admitted")[0].state == "admitted"
     with pytest.raises(LauncherError, match="already admitted"):
-        b.scheduler.launch(Run(id="admitted", job=job()), rent="l4")
+        b.scheduler.launch(RunRequest(id="admitted", job=job()), rent="l4")
     assert b.service.creates == 1
 
 
@@ -893,7 +905,9 @@ def test_courier_owns_child_through_failure_cleanup_and_cached_restart(
     failure: str,
 ) -> None:
     b = bench(tmp_path)
-    identity = b.scheduler.launch(Run(id="courier-failure", job=job(max_attempts=1)), rent="l4")
+    identity = b.scheduler.launch(
+        RunRequest(id="courier-failure", job=job(max_attempts=1)), rent="l4"
+    )
     session = b.scheduler.session(b.scheduler.attempts(identity)[0].session)
     root = tmp_path / "sessions"
     home = root / session.id

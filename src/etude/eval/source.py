@@ -16,8 +16,8 @@ from collections.abc import Sequence
 from hashlib import sha256
 from pathlib import Path
 
-from etude.run.errors import EtudeError
-from etude.run.records import Digest
+from etude.errors import EtudeError
+from etude.records import Digest
 
 # Set by the launcher's worker to the source a job runs from, and the commit it is.
 SOURCE_DIR = "ETUDE_SOURCE_DIR"

@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
+from etude.errors import EtudeError
 from etude.page import Index, Page, Pages, Server, build, experiment_files, index, render, target
 from etude.report import (
     Anchors,
@@ -24,11 +25,11 @@ from etude.report import (
     PlannedPoint,
     Ranking,
     Report,
+    Series,
 )
-from etude.run.errors import EtudeError
-from etude.run.storage import DirectoryStorage, Storage, storage_from_uri
+from etude.storage import DirectoryStorage, Storage, storage_from_uri
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 from tests.experiments import experiment_file
 from tests.run.storage import MeasuredStorage
 
@@ -77,11 +78,11 @@ def test_checkpoints_with_no_etude_clock_are_named_with_the_reason(tmp_path: Pat
     file = experiment_file(tmp_path / "experiments", "lab", LAB)
     assert build(runs, file).notes == ()
     # As an older client saved it, copied without its attempt records.
-    for path in (runs / "a/checkpoints").glob("*.json"):
+    for path in (runs / "lab/a/checkpoints").glob("*.json"):
         record = json.loads(path.read_text())
         record["at"] = {"updates": record["at"]["updates"]}
         path.write_text(json.dumps(record))
-    for path in (runs / "a/metrics").glob("*.json"):
+    for path in (runs / "lab/a/metrics").glob("*.json"):
         path.unlink()
     (note,) = build(runs, file).notes
     assert "No running_hours or hours_since_start for some checkpoints of a" in note
@@ -94,7 +95,7 @@ def test_without_a_report_the_page_is_the_default_and_says_so(tmp_path: Path) ->
     run.log({"custom/score": 1.0}, updates=1)
     run.finish(timeout=30)
     page = build(runs, experiment_file(tmp_path, "lab", "def train(config: object) -> None: ...\n"))
-    assert page.report == Report(other_metrics=True) and page.origin is None
+    assert page.report == Report(other_metrics=True, ml=()) and page.origin is None
     assert page.notes == ("lab.py defines no report(), so this is the default report.",)
     assert page.report.evals == (Curve(), Anchors())
     assert "custom/score" in page.training.metrics  # nothing declared, so everything is drawn
@@ -485,24 +486,24 @@ def test_planned_marker_uses_the_current_continuation_not_an_older_overrun(
     ) as run:
         run.log({"rl/loss": 1.0}, updates=1500)
     with track(
+        resume=True,
         experiment="lab",
         run="a",
         clocks=[Step("updates", "updates")],
         directory=runs,
-        resumed_at={"updates": 1000},
     ) as run:
         run.log({"rl/loss": 0.5}, updates=1200)
     page = build(runs, file)
     assert page.training.runs[0].at["updates"] == 1200
     with track(
+        resume=True,
         experiment="lab",
         run="a",
         clocks=[Step("updates", "updates")],
         directory=runs,
-        resumed_at={"updates": 1100},
     ):
         pass
-    assert build(runs, file).training.runs[0].at["updates"] == 1100
+    assert build(runs, file).training.runs[0].at["updates"] == 1200
 
 
 def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
@@ -510,9 +511,11 @@ def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
 ) -> None:
     generations: list[Path] = []
 
-    def counted(storage: Storage | Path | str, file: Path) -> Page:
+    def counted(
+        storage: Storage | Path | str, file: Path, *, experiment: str | None = None
+    ) -> Page:
         generations.append(file)
-        return build(storage, file)
+        return build(storage, file, experiment=experiment)
 
     monkeypatch.setattr("etude.page.build", counted)
     runs = tmp_path / "runs"
@@ -545,3 +548,54 @@ def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
         shared.write_text(shared.read_text().replace("Standard", "Edited standard"))
         assert '"Edited standard"' in (server.page(refresh=True) or "")
         assert len(generations) == 2
+
+
+def test_report_experiment_override_selects_runs_and_names_the_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    source = tmp_path / "runs"
+    file = tmp_path / "coin.py"
+    file.write_text(
+        "from etude.report import Report\ndef report():\n    return Report(other_metrics=True)\n"
+    )
+    for name, score in (("coin", 1), ("wide", 9)):
+        with track(experiment=name, run=name, directory=source) as run:
+            run.log({"score": score}, updates=1)
+    pages = Pages(source, experiment="wide")
+    assert pages.build(file).experiment == "wide"
+    assert pages.build(file).training == build(source, file, experiment="wide").training
+    assert main(["report", str(file), "--experiment", "wide", "--source", str(source)]) == 0
+    assert capsys.readouterr().out.strip() == str(source / "reports/wide.html")
+    assert (source / "reports/wide.html").is_file()
+    assert not (source / "reports/coin.html").exists()
+    server = Server(source, file, ("127.0.0.1", 0), experiment="wide")
+    try:
+        html = server.page() or ""
+        payload = html.split('<script type="application/json" id="data">', 1)[1]
+        page = Page.model_validate_json(payload.split("</script>", 1)[0], extra="ignore")
+        assert page.experiment == "wide"
+        assert page.training == pages.build(file).training
+    finally:
+        server.server_close()
+    assert main(["report", str(tmp_path), "--experiment", "wide"]) == 1
+    assert "--experiment needs one Python file" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_default_rl_panels_use_logged_keys_but_explicit_panels_keep_missing_keys(
+    tmp_path: Path, explicit: bool
+) -> None:
+    runs = tmp_path / "runs"
+    with track(experiment="lab", run="a", directory=runs) as run:
+        run.log({"rl/loss": 0.5}, updates=1)
+    panels = "ml=(Series(title='Losses', keys=('rl/loss', 'rl/value_loss')),)" if explicit else ""
+    code = (
+        "from etude.report import Report, Series\n"
+        f"def report() -> Report:\n    return Report({panels})\n"
+    )
+    page = build(runs, experiment_file(tmp_path, "lab", code))
+    assert page.report.ml == (
+        Series(title="Losses", keys=("rl/loss", "rl/value_loss") if explicit else ("rl/loss",)),
+    )
+    assert page.training.series["updates"]["rl/loss"][0].mean == [0.5]

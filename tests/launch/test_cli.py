@@ -19,7 +19,7 @@ from etude.experiment import observe
 from etude.launch.client import default
 from etude.launch.database import launcher_file
 from etude.launch.schemas import Packet
-from etude.run.storage import default_root
+from etude.storage import default_root
 from tests.launch.fake import bench
 
 JOB_FILE = r"""
@@ -34,7 +34,7 @@ here = Path(__file__).parent
 def runs(steps: int = 26000, seeds: int = 2) -> list[Run]:
     return [run for arm in ("small", "large") for run in
             Job(command=command, max_hours=0.1, max_usd=Decimal(5), until=f"steps={steps}",
-                      name=arm, config=(here / (arm + ".toml")).read_text()
+                      name=arm, experiment="capacity", config=(here / (arm + ".toml")).read_text()
                       ).runs(*range(1, seeds + 1))]
 
 
@@ -49,7 +49,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 from etude.train.records import Step
-from etude.train.run import track
+from etude.train.tracking import track
 run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
 latest = run.latest_checkpoint()
 start = 0 if latest is None else int(latest.at["steps"])
@@ -69,6 +69,38 @@ def run(capsys: pytest.CaptureFixture[str], *argv: str) -> list[str]:
     return capsys.readouterr().out.splitlines()
 
 
+@pytest.mark.parametrize(
+    ("reference", "identity"),
+    [
+        (("coin-seed-0",), "coin-seed-0"),
+        (("coin/coin-seed-0",), "coin/coin-seed-0"),
+        (("coin-seed-0", "--experiment", "coin"), "coin/coin-seed-0"),
+    ],
+)
+def test_continue_explains_how_to_read_or_change_a_local_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    reference: tuple[str, ...],
+    identity: str,
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    assert main(["continue", "--run", *reference, "--until", "updates=30"]) == 1
+    error = capsys.readouterr().err
+    assert f"the launcher has no run {identity!r}" in error
+    assert "etude report FILE" in error
+    assert "new --experiment" in error
+
+
+def test_continue_help_explains_experiment_without_a_file(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["continue", "--help"]) == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "experiment label qualifying a bare run id" in help_text
+    assert "file stem" not in help_text
+
+
 def test_a_job_file_launches_a_cohort_and_each_verb_reads_it_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -83,7 +115,7 @@ def test_a_job_file_launches_a_cohort_and_each_verb_reads_it_back(
     )
     ids = [line.split()[0] for line in launched]
     names = [line.split()[1] for line in launched]
-    assert names == ["small-seed1", "small-seed2", "large-seed1", "large-seed2"]
+    assert names == [identity.rsplit("/", 1)[-1] for identity in ids]
     assert "queued (cohort runs 1 at a time)" in launched[1]
 
     # Reproduce the race: a quick first run can finish before the next command.
@@ -132,7 +164,7 @@ def test_an_experiment_file_launches_runs_of_its_experiment(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     (tmp_path / "train.py").write_text(
         "from etude.train.records import Step\n"
-        "from etude.train.run import track\n"
+        "from etude.train.tracking import track\n"
         'run = track(clocks=[Step("steps", "training steps")])\n'
         'run.log({"loss": 0.5}, steps=1)\n'
         "run.finish()\n"
@@ -151,13 +183,15 @@ def test_an_experiment_file_launches_runs_of_its_experiment(
     identity = launched.split()[0]
     assert "done: succeeded" in run(capsys, "wait", identity)[0]
     # What `etude eval ppo.py` and `etude report ppo.py` read: the runs of experiment ppo.
-    assert [each.name for each in observe(default_root(), "ppo").runs] == [identity]
-    # A job of another experiment, such as an evaluation naming one, is refused before launch.
+    assert [each.name for each in observe(default_root(), "ppo").runs] == [
+        identity.rsplit("/", 1)[-1]
+    ]
+    # An explicit launch label overrides the file and its job declaration.
     other = tmp_path / "league.py"
     named = (tmp_path / "ppo.py").read_text().replace(")\n", ", experiment='ppo')\n", 1)
     other.write_text(named)
-    assert main(["launch", str(other)]) == 1
-    assert "league.py is experiment 'league'" in capsys.readouterr().err
+    assert main(["launch", str(other), "--experiment", "league"]) == 0
+    assert default().record("league").experiment == "league"
 
 
 @pytest.mark.parametrize(
@@ -192,7 +226,7 @@ def test_machines_join_pools_and_this_computer_can_be_turned_off(
 
     assert run(capsys, "pool", "off", "local")[0] == "local  this computer (default) (off)"
     (tmp_path / "job.py").write_text(
-        'from etude.launch.records import Job, Run\ndef runs(): return Job(command="true", max_hours=1, max_usd=1)\n'
+        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="true", max_hours=1, max_usd=1)\n'
     )
     assert main(["launch", str(tmp_path / "job.py")]) == 1
     assert "pool 'local' is turned off" in capsys.readouterr().err
@@ -215,7 +249,7 @@ def test_default_target_and_owned_status(
     assert "needs a pool, an on-demand or both" in capsys.readouterr().err
     path = tmp_path / "job.py"
     path.write_text(
-        'from etude.launch.records import Job, Run\ndef runs(): return Job(command="echo hi", max_hours=0.01, max_usd=1)\n'
+        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="echo hi", max_hours=0.01, max_usd=1)\n'
     )
     (line,) = run(capsys, "launch", str(path))
     assert "machine local" in line
@@ -224,9 +258,11 @@ def test_default_target_and_owned_status(
         "local  local  owned (this computer), $0.00 committed, never expires"
     ]
     path.write_text(
-        'from etude.launch.records import Job, Run\ndef runs(): return Job(command="echo free", max_hours=0.001)\n'
+        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="echo free", name="free", max_hours=0.001)\n'
     )
-    assert "machine local" in run(capsys, "launch", str(path))[0]  # no dollars needed here
+    assert (
+        "machine local" in run(capsys, "launch", str(path), "--experiment", "free")[0]
+    )  # no dollars needed here
     for old in ("--on", "--reserve"):
         with pytest.raises(SystemExit):
             main(["launch", str(path), old])
@@ -307,7 +343,7 @@ def test_launch_makes_machines_that_start_themselves(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     path = tmp_path / "job.py"
     path.write_text(
-        'from etude.launch.records import Job, Run\ndef runs(): return Job(command="train", max_hours=1, max_usd=1)'
+        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="train", max_hours=1, max_usd=1)'
         + (".runs(1, 2)" if cohort else "")
     )
     lines = run(
@@ -320,7 +356,7 @@ def test_launch_makes_machines_that_start_themselves(
     )
     ids = [line.split()[0] for line in lines]
     assert len(ids) == (2 if cohort else 1)
-    assert all(b.scheduler.record(id).autorun is True for id in ids)
+    assert all(b.scheduler.record(id).launch.autorun is True for id in ids)
     assert all(held.packet.autorun is True for held in b.service.sessions.values())
 
 
@@ -428,20 +464,22 @@ def test_a_job_file_takes_parameters_and_records_them_on_each_run(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     path = tmp_path / "job.py"
     path.write_text(
-        "from __future__ import annotations\nfrom etude.launch.records import Job, Run\ndef runs(hidden: int = 256, seeds: int = 1, lr: float = 0.1, fast: bool = False,\n         tag='x', shape: list[int] | None = None) -> list[Run]:\n    assert type(hidden) is int and type(lr) is float and type(fast) is bool\n    job = Job(command=f'echo {hidden} {lr} {fast} {tag}', max_hours=0.01, max_usd=1, name=f'h{hidden}')\n    return job.runs(*range(seeds))\n"
+        "from __future__ import annotations\nfrom etude.launch.records import Job, RunRequest\ndef runs(hidden: int = 256, seeds: int = 1, lr: float = 0.1, fast: bool = False,\n         tag='x', shape: list[int] | None = None) -> list[RunRequest]:\n    assert type(hidden) is int and type(lr) is float and type(fast) is bool\n    job = Job(command=f'echo {hidden} {lr} {fast} {tag}', max_hours=0.01, max_usd=1, name=f'h{hidden}')\n    return job.runs(*range(seeds))\n"
     )
 
     sent = run(
         capsys, "queue", str(path), "--hidden", "512", "--seeds", "2", "--fast", "--cohort", "big"
     )
-    assert [line.split()[1] for line in sent] == ["h512-seed0", "h512-seed1"]
+    assert [line.split()[1] for line in sent] == [
+        line.split()[0].rsplit("/", 1)[-1] for line in sent
+    ]
     records = [default().record(line.split()[0]) for line in sent]
     expected = {"hidden": 512, "seeds": 2, "lr": 0.1, "fast": True, "tag": "x"}
-    assert [record.params for record in records] == [expected, expected]
+    assert [record.launch.params for record in records] == [expected, expected]
     # Identity comes from what runs, not from the arguments that led there.
     again = run(capsys, "queue", str(path), "--hidden", "512", "--fast", "--tag", "x")[0].split()[0]
     assert default().record(again).job == records[0].job
-    assert default().record(again).params["seeds"] == 1
+    assert default().record(again).launch.params["seeds"] == 1
 
     for wrong in (("--width", "3"), ("hidden=512",), ("--hidden", "big")):
         try:
@@ -458,7 +496,7 @@ def test_job_help_required_flags_mixed_order_and_collision(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     path = tmp_path / "job.py"
     path.write_text(
-        'from etude.launch.records import Job\ndef runs(width: int, fast: bool = False):\n    """Train a chosen width."""\n    return Job(command="true", max_hours=1)\n'
+        'from etude.launch.records import Job\ndef runs(width: int, fast: bool = False):\n    """Train a chosen width."""\n    return Job(command="true", name=f"width-{width}", max_hours=1)\n'
     )
     assert main(["launch", str(path), "--help"]) == 0
     help = capsys.readouterr().out
@@ -471,8 +509,41 @@ def test_job_help_required_flags_mixed_order_and_collision(
     assert not (tmp_path / "home").exists()
     assert main(["queue", str(path), "--width", "32", "--pool", "local", "--fast"]) == 0
     id = capsys.readouterr().out.split()[0]
-    assert default().record(id).params == {"width": 32, "fast": True}
-    assert main(["queue", str(path), "--", "--width", "64"]) == 0
+    assert default().record(id).launch.params == {"width": 32, "fast": True}
+    assert main(["queue", str(path), "--width", "64", "--experiment", "wider"]) == 0
     path.write_text("def runs(pool: str): return None\n")
     assert main(["queue", str(path), "--help"]) == 1
     assert "clashes" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["status", "logs", "cancel"])
+def test_missing_launcher_runs_offer_a_reading_remedy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    arguments = {
+        "status": ["coin-seed-0"],
+        "logs": ["--run", "coin-seed-0"],
+        "cancel": ["coin-seed-0"],
+    }
+    assert main([command, *arguments[command]]) == 1
+    error = capsys.readouterr().err
+    assert "the launcher has no run 'coin-seed-0'" in error
+    assert "etude report FILE" in error
+    assert "new --experiment" not in error
+
+
+@pytest.mark.parametrize("command", ["launch", "queue"])
+def test_several_seed_launch_refusals_name_the_count_and_cohort_remedy(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str
+) -> None:
+    file = tmp_path / "job.py"
+    file.write_text(
+        "from etude.spec import Job\ndef runs() -> Job:\n"
+        '    return Job(command="true", seeds=(0, 1, 2), max_hours=1)\n'
+    )
+    assert main([command, str(file)]) == 1
+    assert "3 runs need --cohort NAME" in capsys.readouterr().err

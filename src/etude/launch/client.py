@@ -3,7 +3,7 @@
     from decimal import Decimal
 
     from etude.launch.client import launch_cohort, wait
-    from etude.launch.records import Job
+    from etude.spec import Job
 
     job = Job(command="python train.py", max_hours=6, max_usd=Decimal(5))
     runs = launch_cohort("first", job.runs(1, 2, 3))
@@ -27,6 +27,7 @@ from decimal import Decimal
 from functools import cache
 from pathlib import Path
 
+from etude.errors import LauncherError
 from etude.launch.controller import PythonClient, selected
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import Execution, Executor, local
@@ -40,14 +41,11 @@ from etude.launch.providers.vast.machines import VastMachines
 from etude.launch.records import (
     Availability,
     Diagnostic,
-    Job,
-    LauncherError,
     LogSnapshot,
     Machine,
     OnDemand,
     Pool,
     Quote,
-    Run,
     Status,
 )
 from etude.launch.scheduler import Scheduler
@@ -58,6 +56,7 @@ from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import _send, open_bucket
 from etude.launch.storage.transport import HTTPReply, observe
 from etude.launch.usage import Usage
+from etude.spec import Job, RunRequest, expand_runs
 
 
 @cache
@@ -153,8 +152,9 @@ def _client() -> Scheduler | PythonClient:
     return PythonClient(address) if address else default()
 
 
-def _smoked(runs: Sequence[Run | Job], smoke: bool) -> list[Run]:
-    each = [run if isinstance(run, Run) else Run(job=run) for run in runs]
+def _smoked(runs: Job | Sequence[RunRequest | Job], smoke: bool) -> list[RunRequest]:
+    given = [runs] if isinstance(runs, Job) else runs
+    each = expand_runs(given)
     if not smoke:
         return each
     with smoke_home() as folder:
@@ -164,16 +164,23 @@ def _smoked(runs: Sequence[Run | Job], smoke: bool) -> list[Run]:
     return Smoked(train={one.job: one.step for one in trained}).stamp(each)
 
 
-def queue(
-    run: Run | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
-) -> str:
+def _one(run: RunRequest | Job, cohort_call: str, smoke: bool) -> RunRequest:
+    """The single run given, refusing a several-seed Job before smoke or submission."""
+    if isinstance(run, Job) and len(run.seeds) > 1:
+        raise LauncherError(f"{len(run.seeds)} runs need {cohort_call}(NAME, job)")
     (smoked_run,) = _smoked([run], smoke)
-    return _client().queue(smoked_run, pool, rent=rent)
+    return smoked_run
+
+
+def queue(
+    run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
+) -> str:
+    return _client().queue(_one(run, "queue_cohort", smoke), pool, rent=rent)
 
 
 def queue_cohort(
     name: str,
-    runs: list[Run],
+    runs: Job | Sequence[RunRequest | Job],
     pool: str | None = None,
     *,
     rent: str | None = None,
@@ -187,15 +194,14 @@ def queue_cohort(
 
 
 def launch(
-    run: Run | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
+    run: RunRequest | Job, pool: str | None = None, *, rent: str | None = None, smoke: bool = False
 ) -> str:
-    (smoked_run,) = _smoked([run], smoke)
-    return _client().launch(smoked_run, pool, rent=rent)
+    return _client().launch(_one(run, "launch_cohort", smoke), pool, rent=rent)
 
 
 def launch_cohort(
     name: str,
-    runs: list[Run],
+    runs: Job | Sequence[RunRequest | Job],
     pool: str | None = None,
     *,
     rent: str | None = None,
@@ -209,7 +215,7 @@ def launch_cohort(
 
 
 def quote(
-    runs: list[Run],
+    runs: list[RunRequest],
     pool: str | None = None,
     *,
     rent: str | None = None,

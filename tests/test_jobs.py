@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 import subprocess
 import sys
 import sysconfig
@@ -12,14 +13,20 @@ from pathlib import Path
 
 import pytest
 
+from etude.cache import Content
+from etude.checkpoints import CheckpointRecord
+from etude.cli import main
+from etude.errors import LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, Inference, RoundRobin, Seating
-from etude.jobs import JobOptions, evaluation
-from etude.launch.errors import LauncherError
+from etude.eval.records import Benchmark, Code, RoundRobin
+from etude.jobs import JobOptions, evaluation, training
 from etude.launch.job_file import read_job_file
-from etude.launch.records import Input, Job, Runtime, SmokeForm, Until, job_id
 from etude.launch.smoke import tiny
+from etude.records import ArtifactRef
+from etude.spec import Input, Job, Runtime, SmokeForm, Until, job_id
+from etude.train.read import read
+from tests.experiments import authored
 from tests.launch.counting import job_text
 from tests.launch.test_runpod_machines import cloud
 from tests.launch.test_worker_attempts import local
@@ -53,19 +60,24 @@ def runs(python: str) -> Job:
 """
 
 PLAY = """
+import json
 from pathlib import Path
-from urllib.parse import urlparse
 
 from etude.eval.match import Tables
-from etude.eval.records import Match, Model
+from etude.eval.records import Match, CheckpointPlayer
+
+
+def weights(checkpoint: Path) -> bytes:
+    if checkpoint.is_dir():
+        files = json.loads((checkpoint / "checkpoint.json").read_text())["files"]
+        checkpoint = checkpoint / files["policy"]
+    return checkpoint.read_bytes()
 
 
 def play(match: Match) -> Tables:
-    # A model's checkpoint file is on this machine; the row says how big it is.
+    # A model's checkpoint is on this machine; the row says how big its weights are.
     sizes = [
-        len(Path(urlparse(seated.checkpoint.artifact.uri).path).read_bytes())
-        if isinstance(seated, Model)
-        else 0
+        len(weights(seated.checkpoint.path)) if isinstance(seated, CheckpointPlayer) else 0
         for seated in match.players
     ]
     return {"plays": [{"game": 0, "seat": seat, "bytes": size} for seat, size in enumerate(sizes)]}
@@ -129,6 +141,59 @@ def test_a_training_job_calls_its_function_with_its_typed_config(
     assert "TrainConfig lr=0.25 layers=(64, 64)" in text
 
 
+@pytest.mark.parametrize("experiment", [None, "existing-study"])
+def test_a_plain_training_file_supplies_the_recipes_experiment(
+    tmp_path: Path,
+    job_python: str,
+    monkeypatch: pytest.MonkeyPatch,
+    experiment: str | None,
+) -> None:
+    module = "plain_" + (experiment or "unnamed").replace("-", "_")
+    repo = checkout(
+        tmp_path / "lab",
+        {
+            f"{module}.py": """
+from pydantic import BaseModel
+from etude.train.records import Step
+from etude.train.tracking import track
+
+class Config(BaseModel):
+    value: int = 7
+
+def train(config: Config) -> None:
+    with track(clocks=[Step("updates", "optimizer updates")], strict=True) as run:
+        saved = run.out / "final.txt"
+        saved.write_text(str(config.value))
+        run.log({"value": config.value}, updates=1)
+        run.checkpoint(saved, updates=1)
+""",
+            "plain.py": f"""
+from etude.jobs import training
+from etude.launch.records import Job, Runtime
+from {module} import Config, train
+
+def runs(python: str) -> Job:
+    job = training(train, config=Config(), max_hours=0.01, max_attempts=1,
+                   runtime=Runtime(python=python))
+    return job.model_copy(update={{"experiment": {experiment!r}}})
+""",
+        },
+    )
+    scheduler = local(tmp_path)
+    monkeypatch.setattr(importlib.import_module("etude.launch.cli"), "default", lambda: scheduler)
+    assert main(["launch", str(repo / "plain.py"), "--python", job_python]) == 0
+    (record,) = scheduler.runs()
+    (status,) = scheduler.wait(record.id, every=0.05, timeout=30)
+    assert status.outcome == "succeeded", job_text(scheduler.logs(refresh=True, run=record.id))
+    assert record.launch.spec.experiment == (experiment or "plain")
+    assert len(scheduler.attempts(record.id)) == 1
+    tracked = tmp_path / "track"
+    data = read(tracked, experiment or "plain", record.id)
+    assert authored(data.reached) == {"updates": 1}
+    assert len(data.checkpoints) == 1
+    assert (tracked / record.id / "out/final.txt").read_text() == "7"
+
+
 @pytest.mark.filterwarnings("ignore:Pydantic serializer warnings")
 @pytest.mark.parametrize(
     ("config", "refusal"),
@@ -178,7 +243,7 @@ def test_a_target_is_read_once_and_one_job_has_one_id_however_it_is_written() ->
         Until.parse("steps")
 
 
-def test_a_function_the_job_cannot_import_by_name_is_refused(tmp_path: Path) -> None:
+def test_a_job_file_names_its_own_top_level_function(tmp_path: Path) -> None:
     repo = checkout(
         tmp_path / "lab",
         {
@@ -187,8 +252,9 @@ def test_a_function_the_job_cannot_import_by_name_is_refused(tmp_path: Path) -> 
             + "    return training(train, config=TrainConfig(lr=1), max_hours=0.1)\n"
         },
     )
-    with pytest.raises(LauncherError, match="importable module"):
-        read_job_file(repo / "job.py")
+    (request,) = read_job_file(repo / "job.py")
+    assert "--function job:train" in request.job.command
+    assert request.job.repo == str(repo)
 
 
 UNPACKAGED = '[project]\nname = "lab"\nversion = "0"\ndependencies = []\n'
@@ -246,38 +312,72 @@ def test_typed_jobs_take_every_job_field_but_what_they_derive() -> None:
     assert set(JobOptions.__annotations__) == set(Job.model_fields) - derived
 
 
+@pytest.mark.parametrize("form", ["input", "file", "folder"])
 def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
-    tmp_path: Path, job_python: str, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, job_python: str, monkeypatch: pytest.MonkeyPatch, form: str
 ) -> None:
-    repo = checkout(tmp_path / "arena", {"arena_duel.py": PLAY})
-    monkeypatch.syspath_prepend(str(repo))
-    duel = importlib.import_module("arena_duel")
-    progress = Benchmark(
-        name="anchors",
-        environment=environment("duel"),
-        seatings=(
-            Seating(
-                name="model vs fixed",
-                players=(
-                    Inference(config={"search": 0}),
-                    Code(name="fixed", source=[repo / "arena_duel.py"]),
-                ),
-                conditions=({"deal": 1}, {"deal": 2}),
-                games=2,
-            ),
-        ),
+    repo = checkout(
+        tmp_path / "arena",
+        {
+            f"arena_duel_{form}.py": """from pydantic import BaseModel
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Code, Inference, Seating
+"""
+            + PLAY
+            + """
+class ArenaConfig(BaseModel):
+    games: int = 2
+
+def arena(config: ArenaConfig) -> Benchmark:
+    return Benchmark(name="anchors", environment=environment("duel"), seatings=(
+        Seating(name="model vs fixed", players=(Inference(config={"search": 0}), Code(name="fixed")),
+                configs=({"deal": 1}, {"deal": 2}), games=config.games),))
+"""
+        },
     )
+    monkeypatch.syspath_prepend(str(repo))
+    duel = importlib.import_module(f"arena_duel_{form}")
     c = cloud(tmp_path)
     weights = b"weights at updates 100\n"
-    c.storage.objects["etude/t/ppo-1/checkpoints/updates-100"] = weights
-    given = Input(
+    key = "etude/t/ppo-1/checkpoints/updates-100"
+    members = (
+        {
+            "checkpoint.json": json.dumps({"files": {"policy": "policy.pt"}}).encode(),
+            "policy.pt": weights,
+        }
+        if form == "folder"
+        else {"": weights}
+    )
+    for name, body in members.items():
+        c.storage.objects[key + ("/" + name if name else "")] = body
+    legacy = Input(
         name="updates-100",
-        key="etude/t/ppo-1/checkpoints/updates-100",
+        key="checkpoints/updates-100",
         sha256=hashlib.sha256(weights).hexdigest(),
         size_bytes=len(weights),
+        run="ppo-1",
     )
+    record = CheckpointRecord(
+        run="ppo-1",
+        ordinal=1,
+        at={"updates": 100},
+        file="checkpoints/updates-100",
+        artifact=ArtifactRef(
+            uri="s3://bucket/" + key,
+            sha256=legacy.sha256,
+            size_bytes=legacy.size_bytes,
+            members={
+                name: Content(sha256=hashlib.sha256(body).hexdigest(), size_bytes=len(body))
+                for name, body in members.items()
+            }
+            if form == "folder"
+            else {},
+        ),
+    )
+    given = legacy if form == "input" else record
     job = evaluation(
-        progress,
+        duel.arena,
+        config=duel.ArenaConfig(),
         experiment="ppo",
         play=duel.play,
         checkpoint=given,
@@ -286,12 +386,16 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
         max_attempts=1,
         runtime=Runtime(python=job_python),
     )
+    assert len(job.inputs) == len(members)
+    assert {each.key for each in job.inputs} == {
+        "checkpoints/updates-100" + ("/" + name if name else "") for name in members
+    }
     run = c.scheduler.launch(job, rent="l4")
     (status,) = c.scheduler.wait(run, every=0.05, timeout=60)
     assert status.outcome == "succeeded", job_text(c.scheduler.logs(refresh=True, run=run))
     assert c.provider.creates == 1
-    reads = [k for m, k in c.storage.asked if m == "GET" and k.startswith(given.key)]
-    assert len(reads) == 1  # the checkpoint reached the machine once, as the job's input
+    reads = [k for m, k in c.storage.asked if m == "GET" and k.startswith(key)]
+    assert len(reads) == len(members)  # each member arrives once; playing reads local files
 
     # The eval run is the launched run, delivered to the bucket like any other.
     folder = f"etude/t/{run}/"
@@ -301,6 +405,9 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
             (delivered / run / key.removeprefix(folder)).parent.mkdir(parents=True, exist_ok=True)
             (delivered / run / key.removeprefix(folder)).write_bytes(body)
     db = statsdb("ppo", delivered)
+    assert db.sql("select distinct checkpoint from players where kind = 'model'").fetchall() == [
+        (record.key,)
+    ]
     assert (
         db.sql(
             "select a.name, p.bytes from plays p join seats s using (run, match, seat)"
@@ -329,8 +436,10 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
         LauncherError, match="needs max_hours: the most hours it may hold a machine"
     ):
         # The omission under test.
-        evaluation(progress, experiment="ppo", play=lambda match: {}, checkpoint=weights, repo=None)  # type: ignore[call-arg]
-    league = RoundRobin(name="league", environment=environment("duel"), conditions=({},), games=1)
+        evaluation(progress, experiment="ppo", play=lambda match: {}, checkpoint=weights, repo=None)
+    league: RoundRobin = RoundRobin(
+        name="league", environment=environment("duel"), configs=({},), games=1
+    )
     with pytest.raises(LauncherError, match="give it entrants"):
         evaluation(league, experiment="ppo", play=lambda match: {}, max_hours=0.1, repo=None)
 
@@ -346,4 +455,81 @@ def test_the_job_command_starts_by_importing_no_other_part_of_etude() -> None:
         capture_output=True,
         text=True,
     ).stdout
-    assert loaded.strip() == "['etude', 'etude.call']"
+    assert loaded.strip() == "['etude', 'etude.call', 'etude.stopping']"
+
+
+def test_job_seeds_expand_to_named_requests_without_changing_job_identity(tmp_path: Path) -> None:
+    file = tmp_path / "job.py"
+    file.write_text(
+        'from etude.launch.records import Job\ndef runs():\n    return Job(command="true", max_hours=1, name="baseline", seeds=(0, 7))\n'
+    )
+    requests = read_job_file(file, experiment="chosen")
+    assert [(run.id, run.seed, run.job.experiment) for run in requests] == [
+        ("chosen@0", 0, "chosen"),
+        ("chosen@7", 7, "chosen"),
+    ]
+    first = requests[0].job
+    assert [(run.id, run.seed) for run in first.runs()] == [
+        ("chosen@0", 0),
+        ("chosen@7", 7),
+    ]
+    assert [(run.id, run.seed, run.params) for run in first.runs(42, params={"width": 64})] == [
+        (None, 42, {"width": 64})  # a given seed is named at admission, so it can repeat
+    ]
+    assert job_id(first) == job_id(first.model_copy(update={"seeds": (42,)}))
+    file.write_text(
+        'from etude.launch.records import Job\ndef runs():\n    return [Job(command="true", max_hours=1, name="first"), Job(command="true", max_hours=1, name="other")]\n'
+    )
+    assert [run.id for run in read_job_file(file)] == ["job/first", "job/other"]
+
+
+def test_one_allocation_owns_many_writers_without_changing_its_limits(
+    tmp_path: Path, job_python: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = (
+        """from etude.records import Clock
+from etude.train.tracking import track
+"""
+        + TRAIN
+        + """
+def write(config: TrainConfig) -> None:
+    clocks = [Clock(name="updates", kind="step", meaning="optimizer updates")]
+    with track(clocks=clocks) as run:
+        run.log({"loss": 10}, updates=1)
+        run.log({"loss": 20}, updates=2)
+        run.log({"loss": 30}, updates=3)
+    with track(clocks=clocks) as run:
+        run.log({"loss": 200}, updates=2)
+        run.log({"loss": 300}, updates=3)
+    with track(clocks=clocks, run="another") as run:
+        run.log({"loss": 4}, updates=1)
+    with track(clocks=clocks):
+        pass
+"""
+    )
+    repo = checkout(tmp_path / "writers", {"allocation_writers.py": source})
+    monkeypatch.syspath_prepend(str(repo))
+    author = importlib.import_module("allocation_writers")
+    scheduler = local(tmp_path)
+    job = training(
+        author.write,
+        config=author.TrainConfig(lr=0.1),
+        max_hours=0.01,
+        max_attempts=1,
+        runtime=Runtime(python=job_python),
+    )
+    run = scheduler.launch(job.model_copy(update={"experiment": "pilot"}))
+    (status,) = scheduler.wait(run, every=0.05, timeout=30)
+    assert (status.outcome, status.attempts, status.usd) == ("succeeded", 1, Decimal(0)), str(
+        scheduler.logs(refresh=True, run=run)
+    )
+    (attempt,) = scheduler.attempts(run)
+    assert len(attempt.writers) == 4
+    assert len({writer.writer for writer in attempt.writers}) == 4
+    assert {writer.attempt for writer in attempt.writers} == {attempt.id}
+    assert {writer.run for writer in attempt.writers} == {run, "pilot/another"}
+    data = read(tmp_path / "track", "pilot", run.removeprefix("pilot/"))
+    points = data.points("loss", "updates")
+    assert list(points.x) == [1, 2, 3]
+    assert list(points.y) == [10, 200, 300]
+    assert [writer.first_row for writer in data.writers] == [True, True, False]

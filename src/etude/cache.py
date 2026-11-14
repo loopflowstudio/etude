@@ -22,7 +22,7 @@ stays. ETags establish freshness, never integrity. An interrupted acquisition
 keeps its completed ranges, each with its own digest, and resumes from them
 only under the same ETag, so ranges never mix object versions.
 
-Transports (`etude.run.storage.S3Storage`, `etude.launch.storage.download`)
+Transports (`etude.storage.S3Storage`, `etude.launch.storage.download`)
 are `Source`s: they perform the I/O and keep nothing of their own. Beyond
 `max_bytes` the least recently used content no holder pins goes first;
 eviction removes only this computer's copies. Held content is read-only

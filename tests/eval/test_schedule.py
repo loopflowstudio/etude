@@ -8,10 +8,12 @@ from pathlib import Path
 
 import duckdb
 
-from etude.eval.match import Tables, environment, evaluate
-from etude.eval.records import CheckpointKey, CheckpointRef, Code, Inference, Match, Model
+from etude.checkpoints import CheckpointId, CheckpointRef, checkpoint_id
+from etude.eval.match import environment, evaluate
+from etude.eval.records import CheckpointPlayer, Code, Inference, Match
+from etude.eval.run import Tables
 from etude.eval.schedule import checkpoints, ordered
-from etude.run.records import ArtifactRef
+from etude.records import ArtifactRef
 from tests.eval.games import play
 
 WORLD = environment("duel", config={"world": "w6"})
@@ -23,13 +25,15 @@ class Runtime:
     """An author's inference runtime: the two checkpoints used last stay loaded."""
 
     def __init__(self) -> None:
-        self.resident: list[CheckpointKey] = []
+        self.resident: list[CheckpointId] = []
         self.loads = 0
         self.played: list[str] = []
 
     def play(self, match: Match) -> Tables:
         for key in dict.fromkeys(
-            seated.checkpoint.key for seated in match.players if isinstance(seated, Model)
+            seated.checkpoint.key
+            for seated in match.players
+            if isinstance(seated, CheckpointPlayer)
         ):
             if key in self.resident:
                 self.resident.remove(key)
@@ -40,11 +44,11 @@ class Runtime:
         return play(match)
 
 
-def checkpoint(updates: int) -> Model:
+def checkpoint(updates: int) -> CheckpointPlayer:
     name = f"updates-{updates}.pt"
     artifact = ArtifactRef(uri=f"s3://models/{name}", sha256=sha256(name.encode()).hexdigest())
-    ref = CheckpointRef(key=CheckpointKey(run="ppo-1", name=name), artifact=artifact)
-    return Inference().model(ref)
+    ref = CheckpointRef(key=checkpoint_id(run="ppo-1", name=name), artifact=artifact)
+    return Inference().player(ref)
 
 
 def code(name: str, strength: int) -> Code:
@@ -56,12 +60,12 @@ def rating(checkpoints: int, deals: int, paired: int) -> list[Match]:
     rated = [checkpoint(50 * ordinal) for ordinal in range(1, checkpoints + 1)]
     heuristic = code("heuristic", 3)
     grid = [
-        Match(players=(each, heuristic), conditions={"deal": deal}, games=2)
+        Match(players=(each, heuristic), config={"deal": deal}, games=2)
         for each in rated
         for deal in range(deals)
     ]
     pairs = [
-        Match(players=pair, conditions={"deal": deal}, games=2)
+        Match(players=pair, config={"deal": deal}, games=2)
         for pair in zip(rated, rated[1:], strict=False)
         for deal in range(paired)
     ]
@@ -108,7 +112,7 @@ def test_evaluate_plays_in_scheduled_order_and_order_changes_no_row(tmp_path: Pa
 def test_a_queue_of_code_players_plays_in_the_callers_order(tmp_path: Path) -> None:
     field = [code(f"script{strength}", strength) for strength in range(4)]
     given: Sequence[Match] = [
-        Match(players=(field[a], field[b]), conditions={"deal": deal})
+        Match(players=(field[a], field[b]), config={"deal": deal})
         for deal in range(3)
         for a in range(4)
         for b in range(4)
@@ -123,8 +127,8 @@ def test_a_queue_of_code_players_plays_in_the_callers_order(tmp_path: Path) -> N
 def test_two_checkpoint_keys_holding_the_same_bytes_are_two_checkpoints() -> None:
     file = ArtifactRef(uri="s3://models/init.pt", sha256=sha256(b"init").hexdigest())
     starts = [
-        Inference().model(CheckpointRef(
-            key=CheckpointKey(run=run, name="updates-100.pt"), artifact=file))
+        Inference().player(CheckpointRef(
+            key=checkpoint_id(run=run, name="updates-100.pt"), artifact=file))
         for run in ("ppo-1", "ppo-2")
     ]  # fmt: skip
     assert len(checkpoints(Match(players=(starts[0], starts[1])))) == 2

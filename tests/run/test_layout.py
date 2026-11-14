@@ -10,13 +10,19 @@ import ast
 import sys
 from pathlib import Path
 
+from etude.eval.run import EvalRun
+from etude.run import Run
+from etude.train.tracking import TrainingRun
+
 SOURCE = Path(__file__).resolve().parents[2] / "src"
+SHARED = ("run", "spec", "block_file", "errors", "storage", "records", "checkpoints")
 
 
 def _imports(package: str) -> dict[Path, set[str]]:
-    """Every module each file of a package names in an import, at any depth in the file."""
+    """Every module each file of a package, or one module, names in an import, at any depth."""
     found: dict[Path, set[str]] = {}
-    for path in (SOURCE / package.replace(".", "/")).rglob("*.py"):
+    folder = SOURCE / package.replace(".", "/")
+    for path in folder.rglob("*.py") if folder.is_dir() else [folder.with_suffix(".py")]:
         names: set[str] = set()
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, ast.Import):
@@ -32,8 +38,9 @@ def _within(name: str, package: str) -> bool:
 
 
 def test_shared_run_code_imports_no_kind_of_run_and_training_imports_no_evaluation() -> None:
+    kinds = ("etude.train", "etude.eval", "etude.launch")
     rules = {
-        "etude.run": ("etude.train", "etude.eval", "etude.launch"),
+        **{"etude." + shared: kinds for shared in SHARED},
         "etude.train": ("etude.eval", "etude.launch"),
         "etude.eval": ("etude.train", "etude.launch"),
     }
@@ -58,19 +65,20 @@ def test_only_the_top_level_command_and_typed_jobs_import_evaluation() -> None:
 
 
 def test_the_eval_run_imports_nothing_arranged_on_top_of_it() -> None:
-    path = SOURCE / "etude/eval/match.py"
-    names = _imports("etude.eval")[path]
+    imports = _imports("etude.eval")
     above = ("etude.eval.tournament", "etude.eval.query")
-    assert not [n for n in names for f in above if _within(n, f)]
+    for module in ("match", "run"):
+        names = imports[SOURCE / f"etude/eval/{module}.py"]
+        assert not [n for n in names for f in above if _within(n, f)], module
 
 
 def test_carriage_rules_import_only_the_standard_library() -> None:
     """Both carriers import them, so they import neither the launcher nor tracking."""
-    path = SOURCE / "etude/carriage.py"
-    names: set[str] = set()
-    for node in ast.walk(ast.parse(path.read_text())):
-        if isinstance(node, ast.Import):
-            names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            names.add(node.module or "")
+    [names] = _imports("etude.carriage").values()
     assert {name.split(".")[0] for name in names} <= sys.stdlib_module_names | {"__future__"}
+
+
+def test_training_and_evaluation_are_live_kinds_of_run() -> None:
+    assert issubclass(TrainingRun, Run)
+    assert issubclass(EvalRun, Run)
+    assert not (SOURCE / "etude/tracking/__init__.py").exists()

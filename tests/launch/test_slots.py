@@ -8,8 +8,9 @@ from pathlib import Path
 
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import local as local_service
-from etude.launch.records import Job, Machine, Pool
+from etude.launch.records import Machine, Pool
 from etude.launch.scheduler import Scheduler
+from etude.spec import Job
 from tests.launch.fake import bench, output_bytes
 
 JOB = Job(command="train", max_hours=1, max_usd=Decimal(1))
@@ -84,11 +85,12 @@ def test_each_run_on_a_shared_machine_publishes_its_own_outputs(tmp_path: Path) 
 
 def test_quote_shows_runs_sharing_one_rental(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=2, slots=2)
-    quote = b.scheduler.quote(JOB.runs(1, 2, 3), rent="l4", cohort="trial", parallel=2)
+    job = JOB.model_copy(update={"experiment": "trial", "seeds": (1, 2, 3)})
+    quote = b.scheduler.quote(job.runs(), rent="l4", cohort="trial", parallel=2)
     assert [(q.run, q.alongside) for q in quote.machines] == [
-        ("seed1", ("seed2",)),
-        ("seed2", ("seed1",)),
-        ("seed3", ()),
+        ("trial@1", ("trial@2",)),
+        ("trial@2", ("trial@1",)),
+        ("trial@3", ()),
     ]
     assert {q.slots for q in quote.machines} == {2}
     assert quote.machines[0].max_usd == quote.machines[1].max_usd

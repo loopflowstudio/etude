@@ -19,19 +19,20 @@ from typing import Any
 import pytest
 
 from etude.cli import main
+from etude.errors import LauncherError
 from etude.launch import cli, client
 from etude.launch.commands import Kind
 from etude.launch.database import launcher_file
-from etude.launch.errors import LauncherError
 from etude.launch.executor import Execution
 from etude.launch.measurement import span
 from etude.launch.providers.runpod.http import PodHTTP
-from etude.launch.records import Job, Machine, OnDemand
+from etude.launch.records import Machine, OnDemand
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Packet
 from etude.launch.ssh import SSH, SessionRequest
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
+from etude.spec import Job
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import Bench, bench
 from tests.launch.test_source import repository  # noqa: F401
@@ -145,19 +146,19 @@ def test_cohort_git_and_database_counts(
 @pytest.mark.parametrize(
     ("command", "count", "forbidden"),
     [
-        (["--help"], 10, ("numpy", "pydantic", "etude.launch.scheduler", "etude.launch.worker")),
+        (["--help"], 8, ("numpy", "pydantic", "etude.launch.scheduler", "etude.launch.worker")),
         (
             ["worker", "--help"],
-            10,
+            8,
             ("numpy", "pydantic", "etude.launch.worker", "etude.launch.scheduler"),
         ),
         # Client composition includes four modules each for Vast and Lium, the
         # request every provider shares, the storage socket policy it forwards
-        # to workers, and its smoke of jobs.
-        (["pools"], 54, ("numpy", "boto3", "etude.launch.worker")),
+        # to workers, its smoke of jobs, and shared run-identity validation.
+        (["pools"], 57, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            33,  # includes the storage socket policy every request applies
+            35,  # shared run/job records, out membership and storage socket policy
             (
                 "numpy",
                 "boto3",
@@ -210,9 +211,7 @@ def test_command_import_counts(
         if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)
     ]
     # One `etude` command: tracking contributes only its command table.
-    assert {name for name in loaded if name.startswith(("etude.run", "etude.train"))} <= {
-        "etude.run",
-        "etude.run.errors",
+    assert {name for name in loaded if name.startswith("etude.train")} <= {
         "etude.train",
         "etude.train.cli",
     }

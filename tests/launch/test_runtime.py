@@ -6,10 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from etude.launch.records import Cause, Job, Outcome, Runtime, job_id
+from etude.launch.records import Cause, Outcome
 from etude.launch.runtime import RuntimeInfo, select_runtime
 from etude.launch.schemas import Packet, Work
 from etude.launch.worker import attempts
+from etude.spec import Job, Runtime, job_id
 from tests.launch.counting import job_text
 from tests.launch.test_worker_attempts import local
 

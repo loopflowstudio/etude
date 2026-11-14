@@ -3,8 +3,8 @@
 A `Benchmark` (`etude.eval.records`) is named seatings a training run's
 checkpoints are held for; a `RoundRobin` is hand-picked players, every two of
 them once.
-`hold` plays, as one eval run (`etude.eval.match.evaluate`), the matches a
-tournament adds. `scores` follows each seating over training; `standings`
+`evaluating` opens one EvalRun for the matches a tournament adds; its
+`play` executes them. `scores` follows each seating over training; `standings`
 ranks a round robin. Both read an experiment's database (`etude.eval.query.statsdb`).
 
 A tournament is stored nowhere but in its eval runs: each keeps, in its own
@@ -35,22 +35,24 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Callable, Iterator, Sequence
+import warnings
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import ValidationError
+from pydantic import BaseModel, JsonValue, ValidationError
 
+from etude.checkpoints import CheckpointRef
+from etude.errors import EtudeError
 from etude.eval.block import Block, run_blocks
-from etude.eval.match import ETUDE_TABLES, KIND, EvalRun, Result, Tables, evaluate
+from etude.eval.match import KIND
 from etude.eval.query import compare, estimate
 from etude.eval.records import (
     IDENTIFIER,
     TOURNAMENT_FILE,
     Benchmark,
-    CheckpointRef,
     Environment,
     Line,
     Match,
@@ -66,12 +68,11 @@ from etude.eval.records import (
     folder_name,
     outcomes,
 )
+from etude.eval.run import ETUDE_TABLES, EvalResult, EvalRun, Result, Tables, _evaluating_matches
 from etude.eval.schedule import ordered
-from etude.run.declaration import declare
-from etude.run.errors import EtudeError
-from etude.run.listing import run_folders, under
-from etude.run.records import Digest, Record, RunFile
-from etude.run.storage import DirectoryStorage, Storage, default_root
+from etude.records import Digest, Record, RunRecord
+from etude.run import declare, run_folders, under
+from etude.storage import DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
     import duckdb
@@ -80,11 +81,11 @@ if TYPE_CHECKING:
 _ENVIRONMENT_FILE = "environment.json"
 
 
-def hold(
-    tournament: Benchmark | RoundRobin,
+@contextmanager
+def evaluating(
+    tournament: Benchmark | RoundRobin | Environment,
     *,
-    experiment: str,
-    play: Callable[[Match], Tables | Result],
+    experiment: str | None = None,
     checkpoint: CheckpointRef | None = None,
     checkpoints: Sequence[CheckpointRef] = (),
     enter: Sequence[Player] = (),
@@ -93,45 +94,39 @@ def hold(
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
     share: Share = Share(),
-    rollups: Sequence[Rollup] = (),
+    resume: bool = False,
+    run: str | None = None,
     lines: Sequence[Line] = (),
-) -> EvalRun:
-    """Play, as one eval run of `experiment`, the matches the tournament adds; the run records what was given.
+) -> Iterator[EvalRun]:
+    """Open one tournament's eval run, or an environment's explicit matches.
 
-    The tournament only decides which matches to play: its results are the
-    experiment's, beside its training runs, wherever the experiment's
-    database (`etude.eval.query.statsdb`) reads them.
-
-    A benchmark held with `checkpoint` (on the go) plays each of the given
-    seatings with the checkpoint in their inference seats. Held without one
-    (batch), it plays every seating any eval run defined for every checkpoint
-    any held or `checkpoints` adds, and each seating of fixed players once,
-    skipping what any eval run of its environment delivered, so a seating
-    added later is played for every checkpoint so far. A relative seat finds
-    its checkpoint among `lines`, the experiment's training lines; one that
-    finds none yet plays nothing until a later hold finds it. A round robin held
-    with `enter` plays every pair of the players given; with none, every pair
-    of every entrant so far not yet delivered.
-
-    `matches` plays exactly those, as `played` found them new elsewhere, and
-    reads nothing: each must be one the tournament calls for with what is
-    given. Their checkpoints' files may lie elsewhere than the definition's,
-    such as copied to this machine; a key never depends on where.
-
-    `share=Share(index=k, count=n)` cuts the scheduled matches, in the order
-    `etude.eval.schedule.ordered` plays them, into n contiguous parts and plays
-    the kth, counting from 0, so n machines may split one hold with at most one match between
-    their shares, each seating (and fetching) only some of the checkpoints.
-    The cut covers delivered matches too, so a resumed share keeps its part.
-    Under `etude launch` the eval run is the launched run (`ETUDE_RUN`);
-    elsewhere it is named for what is given, so the same call resumes it. A
-    batch hold raises `EtudeError("tournament_conflict")` when the
-    tournament's eval runs or this definition disagree on its format,
-    environment or rules, and `EtudeError("seating_conflict")` when they
-    define a seating name two ways;
-    an on-the-go hold leaves those to be found on read. Raises whatever
-    `evaluate` raises.
+    A checkpoint fills benchmark inference seats; entrants fill a round robin.
+    With neither, plan every missing match of the stored tournament. Relative
+    seats use the supplied experiment lines; planned jobs carry these in their
+    specification. Explicit matches are checked against the tournament before
+    opening. Share partitions its ordered schedule into disjoint parts.
+    Outside a launched attempt, resume must be explicit. Environment, rollups
+    and tournament definitions must agree with the run already stored.
     """
+    experiment = experiment or os.environ.get("ETUDE_EXPERIMENT")
+    if experiment is None:
+        raise EtudeError("experiment_not_named", detail="give experiment= outside a launch")
+    resume = resume or bool(os.environ.get("ETUDE_ATTEMPT"))
+    if isinstance(tournament, Environment):
+        if matches is None:
+            raise EtudeError("evaluation_needs_matches", 422)
+        with _evaluating_matches(
+            experiment=experiment,
+            environment=tournament,
+            matches=matches,
+            workers=workers,
+            run=run,
+            directory=directory,
+            storages=storages,
+            resume=resume,
+        ) as active:
+            yield active
+        return
     if checkpoint is not None and checkpoints:
         raise EtudeError("hold_one_checkpoint_on_the_go_or_add_checkpoints", 422)
     given = (checkpoint,) if checkpoint is not None else tuple(checkpoints)
@@ -162,21 +157,65 @@ def hold(
             for match in order[start : start + size + (share.index < larger)]
             if match.key not in delivered
         ]
-    run = os.environ.get("ETUDE_RUN") or (
-        f"{folder_name(tournament.name)}.{digest(added.model_dump(mode='json'))[:12]}"
+    run = (
+        run
+        or os.environ.get("ETUDE_RUN")
+        or (f"{folder_name(tournament.name)}.{digest(added.model_dump(mode='json'))[:12]}")
     )
-    _record(added, experiment, run, directory)
-    return evaluate(
+    _record(added, experiment, run, directory, resume=resume)
+    with _evaluating_matches(
         experiment=experiment,
         environment=tournament.environment,
         matches=pending,
-        play=play,
         workers=workers,
         run=run,
         directory=directory,
         storages=storages,
-        rollups=rollups,
+        rollups=tournament.rollups,
+        resume=True,
+    ) as active:
+        yield active
+
+
+def hold[C: BaseModel | Mapping[str, JsonValue]](
+    tournament: Benchmark | RoundRobin,
+    *,
+    experiment: str,
+    play: Callable[[Match[C]], Tables | Result],
+    checkpoint: CheckpointRef | None = None,
+    checkpoints: Sequence[CheckpointRef] = (),
+    enter: Sequence[Player] = (),
+    matches: Sequence[Match] | None = None,
+    workers: int = 1,
+    directory: Path | str | None = None,
+    storages: Sequence[Storage] = (),
+    share: Share = Share(),
+    rollups: Sequence[Rollup] = (),
+    lines: Sequence[Line] = (),
+) -> EvalResult:
+    """Deprecated one-call spelling; use evaluating and run.play, removed in 0.5."""
+    warnings.warn(
+        "hold is now evaluating(...), then run.play(play); removed in 0.5",
+        DeprecationWarning,
+        stacklevel=2,
     )
+    if rollups:
+        tournament = tournament.model_copy(update={"rollups": tuple(rollups)})
+    with evaluating(
+        tournament,
+        experiment=experiment,
+        checkpoint=checkpoint,
+        checkpoints=checkpoints,
+        enter=enter,
+        matches=matches,
+        workers=workers,
+        directory=directory,
+        storages=storages,
+        share=share,
+        lines=lines,
+        resume=True,
+    ) as active:
+        return active.play(play)
 
 
 class Delivered(Record):
@@ -412,10 +451,14 @@ def _found(seated: Seated) -> tuple[str, str, tuple[tuple[tuple[str | None, ...]
     return seated.seating, str(seated.checkpoint), pairings
 
 
-def _record(added: TournamentRun, experiment: str, run: str, directory: Path | str | None) -> None:
+def _record(
+    added: TournamentRun, experiment: str, run: str, directory: Path | str | None, *, resume: bool
+) -> None:
     """Write `tournament.json` in the eval run's folder; a resumed run must have been held alike."""
-    declared = declare(experiment=experiment, clocks=(), run=run, kind=KIND, directory=directory)
-    if declared.declaration.kind != KIND:
+    declared = declare(
+        experiment=experiment, clocks=(), run=run, kind=KIND, directory=directory, resume=resume
+    )
+    if declared.record.kind != KIND:
         raise EtudeError("run_is_not_an_eval_run", 409)
     path = declared.root / TOURNAMENT_FILE
     if not path.is_file():
@@ -481,7 +524,7 @@ def _stored(tournament: Benchmark | RoundRobin, runs: StoredRuns) -> _Stored:
 def _experiment(place: Storage, folder: str) -> str | None:
     """The experiment a run folder's `run.json` names; None before it arrives."""
     try:
-        return RunFile.model_validate_json(place.get(folder + "run.json")).experiment
+        return RunRecord.model_validate_json(place.get(folder + "run.json")).experiment
     except (FileNotFoundError, ValidationError):
         return None
 
@@ -524,7 +567,7 @@ def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int,
 class ScorePoint(Record):
     """A seating's value for one held checkpoint, and where its training run stood when it was saved."""
 
-    # Its key (`etude.eval.records.CheckpointKey`), encoded.
+    # Its key (`etude.eval.records.CheckpointId`), encoded.
     checkpoint: str
     # What the checkpoint's players are called: the latest name its seats give, the least of
     # several players'. A benchmark's inference seat names it for its file (`Inference.model`).

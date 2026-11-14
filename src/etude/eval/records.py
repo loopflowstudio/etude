@@ -20,9 +20,9 @@ training `Line`s, which the caller passes, since evaluation reads no training
 run. What it finds is exact, so found for good: the hold records it
 (`Seated`), and every later read schedules from the record.
 
-A `Player` is whatever takes a seat: a `Model`, a checkpoint and how it plays
+A `Player` is whatever takes a seat: a `CheckpointPlayer`, a checkpoint and how it plays
 (`Inference`), or `Code`. A player is identified by its key: the checkpoint's
-own key (`CheckpointKey`) or the code's name, together with its config. One
+own key (`CheckpointId`) or the code's name, together with its config. One
 checkpoint at two search budgets is two models; two checkpoint keys holding
 the same bytes are two models too, since where a checkpoint's bytes came from
 is not part of what it is. The code's commit and source digest are its
@@ -31,8 +31,8 @@ the learner it belongs to is `CheckpointRef.line`; all are recorded with each
 match but not part of the key: a match one
 version played counts as played for every version, and reads can select a
 version. A match seats players by position (`seat`), names groups of seats
-and fixes the conditions it is played under. A match's key is the digest of
-its players' keys, its groups and conditions.
+and fixes the config it is played with. A match's key is the digest of
+its players' keys, its groups and config.
 
 Records published etude-sdk wrote, with `agents` and etude-sdk 0.2's digest
 identities, load as players (`_player`); a 0.2 player's key equals no key
@@ -43,26 +43,33 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from collections.abc import Iterable, Mapping, Sequence
 from hashlib import sha256
 from itertools import combinations
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, Self
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     BeforeValidator,
+    ConfigDict,
     Field,
     JsonValue,
+    SerializeAsAny,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
+from typing_extensions import TypeVar
 
+from etude.checkpoints import CheckpointId, CheckpointRef, checkpoint_id
+from etude.errors import EtudeError
 from etude.eval.source import digest_files, source_commit
-from etude.run.errors import EtudeError
-from etude.run.records import BUILT_IN_NAMES, ArtifactRef, Digest, Name, Record
+from etude.records import BUILT_IN_NAMES, Digest, Name, Record
 
 type Config = dict[str, JsonValue]
 type ColumnType = Literal["BOOLEAN", "BIGINT", "DOUBLE", "VARCHAR"]
@@ -125,58 +132,6 @@ def folder_name(name: str) -> str:
 def version_of(code: Sequence[Path | str]) -> Version:
     """The version of the code in these source files: its commit, and their digest."""
     return Version(commit=source_commit(code), source=digest_files(code))
-
-
-class CheckpointKey(Record):
-    """A checkpoint by where its experiment keeps it: a training run's file, or an outside address.
-
-    `run` and `name` name a training run's checkpoint (`RUN/checkpoints/NAME`);
-    `address` names any other, such as a URI. Never its bytes' digest: two keys
-    holding the same bytes are two checkpoints.
-    """
-
-    run: Name | None = None
-    name: str | None = Field(default=None, min_length=1, max_length=500)
-    address: str | None = Field(default=None, min_length=1, max_length=1000)
-
-    @model_validator(mode="after")
-    def one_place(self) -> Self:
-        if (self.run is None) != (self.name is None) or (self.run is None) == (
-            self.address is None
-        ):
-            raise ValueError("checkpoint_key_is_a_run_and_name_or_an_address")
-        return self
-
-    def __str__(self) -> str:
-        return self.address if self.address is not None else f"{self.run}/checkpoints/{self.name}"
-
-    @property
-    def label(self) -> str:
-        """Its last path part, as a report names it."""
-        return str(self).rstrip("/").rsplit("/", 1)[-1] or str(self)
-
-
-class CheckpointRef(Record):
-    """A checkpoint to seat: its key, and the file holding it, which must carry its digest.
-
-    `at` is where it stood on each clock, such as `{"updates": 600}`: a
-    declared fact the seat carries to its matches so a report can place it,
-    and part of no key. `line` names the learner it belongs to, such as a
-    seed or a recipe, so a report compares it with that learner's other
-    checkpoints; also part of no key. A tracked checkpoint's ref fills both
-    from its run; give them yourself for a checkpoint no Etude run recorded.
-    """
-
-    key: CheckpointKey
-    artifact: ArtifactRef
-    at: dict[str, float] = {}
-    line: str | None = None
-
-    @model_validator(mode="after")
-    def verifiable(self) -> Self:
-        if self.artifact.sha256 is None:
-            raise ValueError("model_checkpoint_requires_digest")
-        return self
 
 
 class Version(Record):
@@ -255,15 +210,24 @@ class Inference(Record):
             data["version"] = {"source": data.pop("code")}
         return _versioned(data)
 
-    def model(self, checkpoint: CheckpointRef) -> Model:
-        """The model `checkpoint` is when it plays this way, named for its file."""
-        return Model(
-            name=re.sub(r"\s", "_", checkpoint.key.label), checkpoint=checkpoint, inference=self
+    def player(self, checkpoint: CheckpointRef) -> CheckpointPlayer:
+        """The player `checkpoint` is when it plays this way, named for its files."""
+        return CheckpointPlayer(
+            name=re.sub(r"\s", "_", checkpoint.key.rstrip("/").rsplit("/", 1)[-1]),
+            checkpoint=checkpoint,
+            inference=self,
         )
 
+    def model(self, checkpoint: CheckpointRef) -> CheckpointPlayer:
+        """Released spelling; use player()."""
+        warnings.warn(
+            "Inference.model() is now player(); removed in 0.5", DeprecationWarning, stacklevel=2
+        )
+        return self.player(checkpoint)
 
-class Model(Record):
-    """A checkpoint and how it plays (`Inference`). One checkpoint at two configs is two models."""
+
+class CheckpointPlayer(Record):
+    """A checkpoint and how it plays (`Inference`). One checkpoint at two configs is two players."""
 
     kind: Literal["model"] = "model"
     # What a report calls it.
@@ -316,7 +280,7 @@ class Code(Record):
 
 
 def _player(data: Any) -> Any:
-    """A player as published etude-sdk stored it (an `Agent`), as a `Model` or `Code`.
+    """A player as published etude-sdk stored it (an `Agent`), as a `CheckpointPlayer` or `Code`.
 
     An Agent was keyed by `key.checkpoint` or `key.code` with its config; an
     etude-sdk 0.2 agent by a digest of `kind`, `artifact`, `code` and `config`,
@@ -360,7 +324,9 @@ def _player(data: Any) -> Any:
 
 
 # What takes a seat: a checkpoint playing some way, or code.
-type Player = Annotated[Model | Code, Field(discriminator="kind"), BeforeValidator(_player)]
+type Player = Annotated[
+    CheckpointPlayer | Code, Field(discriminator="kind"), BeforeValidator(_player)
+]
 
 
 class Environment(Record):
@@ -380,8 +346,25 @@ class Environment(Record):
         return digest([self.name, self.files, identifying(self.config)])
 
 
-class Match(Record):
-    """Players in their seats under fixed conditions, played for some games.
+def _match_config_name(
+    data: object, info: ValidationInfo, name: Literal["config", "configs"]
+) -> object:
+    # JSON retains the released field name so match keys and wire data stay stable.
+    if info.mode == "python" and isinstance(data, dict) and "conditions" in data:
+        warnings.warn(f"conditions is now {name}; removed in 0.5", DeprecationWarning, stacklevel=3)
+    return data
+
+
+_MatchConfig = TypeVar(
+    "_MatchConfig",
+    bound=BaseModel | Mapping[str, JsonValue],
+    default=Mapping[str, JsonValue] | BaseModel,
+    covariant=True,
+)
+
+
+class Match(Record, Generic[_MatchConfig]):
+    """Players in their seats under a fixed config, played for some games.
 
     The unit Etude schedules, resumes and resamples. Group `all` holds every
     seat and is added when not given.
@@ -390,8 +373,28 @@ class Match(Record):
     # By seat: `seat` in a row is a position here.
     players: tuple[Player, ...] = Field(min_length=1)
     groups: dict[Name, tuple[int, ...]] = {}
-    conditions: Config = {}
+    model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
+    # The empty JSON default is validated into the specialized author type too.
+    config: SerializeAsAny[_MatchConfig] = Field(
+        default_factory=dict,
+        validate_default=True,
+        validation_alias=AliasChoices("config", "conditions"),
+        serialization_alias="conditions",
+    )
+
     games: int = Field(default=1, ge=1)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _config_name(cls, data: object, info: ValidationInfo) -> object:
+        return _match_config_name(data, info, "config")
+
+    @property
+    def conditions(self) -> _MatchConfig:
+        warnings.warn(
+            "Match.conditions is now Match.config; removed in 0.5", DeprecationWarning, stacklevel=2
+        )
+        return self.config
 
     @model_validator(mode="before")
     @classmethod
@@ -420,7 +423,7 @@ class Match(Record):
         """Identifies the match wherever it is played."""
         seating = [player.key for player in self.players]
         groups = {name: list(seats) for name, seats in self.groups.items()}
-        return digest([seating, groups, self.conditions, self.games])
+        return digest([seating, groups, as_config(self.config), self.games])
 
     @property
     def seed(self) -> int:
@@ -636,7 +639,7 @@ class Seated(Record):
     """
 
     seating: str
-    checkpoint: CheckpointKey
+    checkpoint: CheckpointId
     pairings: tuple[Pairing, ...]
     # The lines of both sides it counted, by name.
     lines: tuple[str, ...] = ()
@@ -650,24 +653,32 @@ class Gap(Record):
     """
 
     seating: str
-    checkpoint: CheckpointKey
+    checkpoint: CheckpointId
     missing: Missing
     seat: Relative
     value: float | None = None
 
 
-class Seating(Record):
-    """The rule for who meets whom: `players` in seat order, played under each of `conditions`.
+_SeatingConfig = TypeVar(
+    "_SeatingConfig",
+    bound=BaseModel | Mapping[str, JsonValue],
+    default=Mapping[str, JsonValue] | BaseModel,
+    covariant=True,
+)
+
+
+class Seating(Record, Generic[_SeatingConfig]):
+    """The rule for who meets whom: `players` in seat order, played under each of `configs`.
 
     A seat is a fixed player, an `Inference` that each checkpoint the
     benchmark is held for fills, or a relative seat (`Earlier`, `Fraction`,
     `At`, `Final`, `Aligned`) naming a checkpoint by where it stands relative
     to the held one. Its value is the first player's against the second. With
     no inference seat it is played once, not for each checkpoint, so two
-    chosen checkpoints can meet: `Inference.model(checkpoint)` seats one as the
-    benchmark would. It makes one match per condition (`matches`).
+    chosen checkpoints can meet: `Inference.player(checkpoint)` seats one as the
+    benchmark would. It makes one match per config (`matches`).
 
-    `games` is per condition and point: an `at` of the held checkpoint's
+    `games` is per config and point: an `at` of the held checkpoint's
     job, whatever its seeds. With `seeds="every"` a point plays every pair of
     a seed of that job and a seed of the other seat's (its own line, or a
     fixed player, counting as one), its games split evenly over the pairs,
@@ -678,8 +689,24 @@ class Seating(Record):
 
     name: str = Field(min_length=1, max_length=200)
     players: tuple[Player | Inference | Relative, Player | Inference | Relative]
-    # Mapping, so a literal like `{"deal": 1}` type-checks as a condition.
-    conditions: tuple[Mapping[str, JsonValue], ...] = Field(min_length=1)
+    # Mapping, so a literal like `{"deal": 1}` type-checks as a config.
+    model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
+    configs: tuple[SerializeAsAny[_SeatingConfig], ...] = Field(
+        min_length=1,
+        validation_alias=AliasChoices("configs", "conditions"),
+        serialization_alias="conditions",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _config_name(cls, data: object, info: ValidationInfo) -> object:
+        return _match_config_name(data, info, "configs")
+
+    @property
+    def conditions(self) -> tuple[_SeatingConfig, ...]:
+        warnings.warn("conditions is now configs; removed in 0.5", DeprecationWarning, stacklevel=2)
+        return self.configs
+
     games: int = Field(ge=1)
     # The author's labels, such as "anchor" or "held-out", for choosing
     # which seatings a reading counts; `schedule` carries them.
@@ -717,12 +744,21 @@ class Seating(Record):
         ]
         # Default seeds leave the definition every seating was first held with.
         seeds = [] if self.seeds == "every" else [self.seeds]
-        return digest([self.name, players, self.conditions, self.games, self.tags, *seeds])
+        return digest(
+            [
+                self.name,
+                players,
+                [as_config(each) for each in self.configs],
+                self.games,
+                self.tags,
+                *seeds,
+            ]
+        )
 
     def matches(
         self, checkpoint: CheckpointRef | None = None, seated: Seated | None = None
     ) -> list[Match]:
-        """One match per condition and pairing: `checkpoint` in every inference seat, and in
+        """One match per config and pairing: `checkpoint` in every inference seat, and in
         a relative seat the checkpoint the pairing found. Without `seated`, one pairing
         playing every game, as for a checkpoint of a job with one seed."""
         if seated is None:
@@ -739,11 +775,11 @@ class Seating(Record):
                     _seat(each, checkpoint, found)
                     for each, found in zip(self.players, pairing.seats, strict=True)
                 ),
-                conditions=dict(given),
+                config=as_config(given),
                 games=pairing.games,
             )
             for pairing in pairings
-            for given in self.conditions
+            for given in self.configs
         ]
 
     def resolve(self, checkpoint: CheckpointRef, lines: Sequence[Line]) -> Seated | Gap:
@@ -827,11 +863,11 @@ def _seat(
     if isinstance(each, _RELATIVE):
         if found is None:
             raise ValueError("relative_seat_needs_its_checkpoints")
-        return each.inference.model(found)
+        return each.inference.player(found)
     if isinstance(each, Inference):
         if checkpoint is None:
             raise ValueError("inference_seat_needs_a_checkpoint")
-        return each.model(checkpoint)
+        return each.player(checkpoint)
     return each
 
 
@@ -921,6 +957,7 @@ class Benchmark(Record):
 
     name: str = Field(min_length=1, max_length=200)
     environment: Environment
+    rollups: tuple[Rollup, ...] = Field(default=(), exclude_if=lambda rollups: not rollups)
     seatings: tuple[Seating, ...] = ()
 
     @model_validator(mode="before")
@@ -938,8 +975,8 @@ class Benchmark(Record):
         return self
 
 
-class RoundRobin(Record):
-    """Hand-picked players, every two of them once per condition.
+class RoundRobin(Record, Generic[_SeatingConfig]):
+    """Hand-picked players, every two of them once per config.
 
     Its entrants are every player any of its eval runs entered. Seat swaps
     belong inside the author's match.
@@ -947,17 +984,34 @@ class RoundRobin(Record):
 
     name: str = Field(min_length=1, max_length=200)
     environment: Environment
-    # Mapping, so a literal like `{"deal": 1}` type-checks as a condition.
-    conditions: tuple[Mapping[str, JsonValue], ...] = Field(min_length=1)
+    rollups: tuple[Rollup, ...] = Field(default=(), exclude_if=lambda rollups: not rollups)
+    # Mapping, so a literal like `{"deal": 1}` type-checks as a config.
+    model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
+    configs: tuple[SerializeAsAny[_SeatingConfig], ...] = Field(
+        min_length=1,
+        validation_alias=AliasChoices("configs", "conditions"),
+        serialization_alias="conditions",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _config_name(cls, data: object, info: ValidationInfo) -> object:
+        return _match_config_name(data, info, "configs")
+
+    @property
+    def conditions(self) -> tuple[_SeatingConfig, ...]:
+        warnings.warn("conditions is now configs; removed in 0.5", DeprecationWarning, stacklevel=2)
+        return self.configs
+
     games: int = Field(ge=1)
 
     def matches(self, entrants: Iterable[Player]) -> list[Match]:
-        """Each pair once per condition, in key order; of two entrants with one key, the later."""
+        """Each pair once per config, in key order; of two entrants with one key, the later."""
         ordered = sorted({each.key: each for each in entrants}.items())
         return [
-            Match(players=(a, b), conditions=dict(given), games=self.games)
+            Match(players=(a, b), config=as_config(given), games=self.games)
             for (_, a), (_, b) in combinations(ordered, 2)
-            for given in self.conditions
+            for given in self.configs
         ]
 
 
@@ -1018,7 +1072,7 @@ class Scheduled(Record):
 
     match: Match
     seating: str | None = None
-    checkpoint: CheckpointKey | None = None
+    checkpoint: CheckpointId | None = None
     tags: tuple[Name, ...] = ()
 
 
@@ -1098,7 +1152,7 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
     """The tournament its eval runs make together, from the first of them on.
 
     Raises `EtudeError("tournament_conflict")` when they disagree on its
-    format or environment (its setup aside), or a round robin's conditions or games, and
+    format or environment (its setup aside), or a round robin's configs or games, and
     `EtudeError("seating_conflict")` when they define one seating name two ways.
     Versions are not definitions: a later run's seating, checkpoint or entrant
     with the same key replaces an earlier one, so what is played next records
@@ -1116,10 +1170,9 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
             or given.environment.identity != first.environment.identity
         ):
             raise EtudeError("tournament_conflict", 409) from ValueError(first.name)
-        if (
-            isinstance(given, RoundRobin)
-            and given.model_copy(update={"environment": first.environment}) != first
-        ):
+        if isinstance(given, RoundRobin) and given.model_copy(
+            update={"environment": first.environment}
+        ).model_dump(mode="json") != first.model_dump(mode="json"):
             raise EtudeError("tournament_conflict", 409) from ValueError(first.name)
         if isinstance(given, Benchmark):
             for each in given.seatings:
@@ -1139,3 +1192,19 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
         entrants=tuple(entrants[key] for key in sorted(entrants)),
         seated=_most_lines(each for run in runs for each in run.seated),
     )
+
+
+def __getattr__(name: str) -> object:
+    if name == "Model":
+        warnings.warn(
+            "Model is now CheckpointPlayer; removed in 0.5", DeprecationWarning, stacklevel=2
+        )
+        return CheckpointPlayer
+    if name == "CheckpointKey":
+        warnings.warn(
+            "CheckpointKey is now checkpoint_id from etude.checkpoints; removed in 0.5",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return checkpoint_id
+    raise AttributeError(name)

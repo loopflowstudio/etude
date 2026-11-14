@@ -19,18 +19,18 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
+from etude.carriage import listing
 from etude.cli import main
+from etude.errors import EtudeError
 from etude.launch.database import launcher_file
 from etude.page import Server, build
-from etude.run.delivery import sync
-from etude.run.errors import EtudeError
-from etude.run.listing import runs
-from etude.run.storage import DirectoryStorage, S3Storage, default_root
+from etude.run import runs, sync
+from etude.storage import DirectoryStorage, S3Storage, default_root
 from etude.train.block import rows
 from etude.train.read import buckets, read
 from etude.train.records import Step, Time
 from etude.train.report import training
-from etude.train.run import EtudeWarning, Run, track
+from etude.train.tracking import EtudeWarning, TrainingRun, track
 from tests.experiments import authored, experiment_file
 
 CLOCKS = [
@@ -55,8 +55,12 @@ def manabot_row(update: int) -> dict[str, object]:
 def test_a_launched_run_is_its_experiment_files_and_refuses_another(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    with pytest.raises(EtudeError, match="experiment_not_named"):
+    with pytest.raises(EtudeError, match="experiment_not_named") as refusal:
         track(clocks=CLOCKS, directory=tmp_path)
+    assert str(refusal.value) == (
+        "experiment_not_named: use etude train FILE or etude launch FILE; "
+        "for a process Etude did not start, name the run with track(experiment=..., run=...)"
+    )
     monkeypatch.setenv("ETUDE_EXPERIMENT", "ppo")
     with pytest.raises(EtudeError, match="experiment_differs_from_launch"):
         track(experiment="capacity", clocks=CLOCKS, directory=tmp_path)
@@ -91,9 +95,9 @@ def test_rows_round_trip_through_files_and_a_bucket_directory(tmp_path: Path) ->
     run.finish()
     assert run.dropped == 0 and run.incomplete == 2 and run.problems == {}
 
-    prefix = "training-3f9a/"
+    prefix = "capacity-pilot/training-3f9a/"
     keys = bucket.keys(prefix)
-    assert prefix + "run.json" in keys and prefix + "state.json" in keys
+    assert prefix + "run.json" in keys and prefix + "outcome.json" in keys
     # A finished run this small is one block, and its rows read back as logged.
     assert len([key for key in keys if key.endswith(".blk")]) == 1
     stored = [
@@ -113,13 +117,13 @@ def test_rows_round_trip_through_files_and_a_bucket_directory(tmp_path: Path) ->
     assert values["availability/rl/loss"] is True and values["ppo/losses/policy"] == pytest.approx(
         0.3
     )
-    declared = json.loads(bucket.get(prefix + "run.json"))["declaration"]
-    assert declared["config_json"] == '{"lr": 0.0003,   "seed": 7}'  # Byte for byte.
+    declared = json.loads(bucket.get(prefix + "run.json"))
+    assert declared["config"] == '{"lr": 0.0003,   "seed": 7}'  # Byte for byte.
 
     # Read from the bucket's copy alone.
     data = read(bucket, "capacity-pilot", "training-3f9a")
-    assert data.state is not None and data.state.state == "finished"
-    assert data.job == "capacity-64" and data.state.counters.incomplete == 2
+    assert data.outcome is not None and data.outcome.state == "finished"
+    assert data.job == "capacity-64" and data.outcome.counters.incomplete == 2
     assert set(data.metrics()) == {"rl/loss", "rl/entropy", "ppo/losses/policy"}
     entropy = data.points("rl/entropy", "progress/training_seconds")
     assert len(entropy) == 200 and int(np.isnan(entropy.y).sum()) == 1
@@ -143,13 +147,18 @@ def test_resume_replays_harmlessly_and_sync_delivers_what_an_outage_left(
     first.finish()
     # A second process resumes the same name behind the last row and replays ten.
     second = track(
-        experiment="pilot", run="seed-1", clocks=CLOCKS, directory=local, segment_seconds=0.05
+        resume=True,
+        experiment="pilot",
+        run="seed-1",
+        clocks=CLOCKS,
+        directory=local,
+        segment_seconds=0.05,
     )
     for update in range(40, 80):
-        second.log(manabot_row(update), **{"rl/loss": 9.0})
+        second.log({**manabot_row(update), "rl/loss": 9.0})
     second.finish()
     with pytest.raises(EtudeError, match="run_clock_conflict"):
-        track(experiment="pilot", run="seed-1", clocks=CLOCKS[:1], directory=local)
+        track(experiment="pilot", run="seed-1", clocks=[Step("other", "other")], directory=local)
 
     bucket = DirectoryStorage(tmp_path / "bucket")
     assert sync(local, storages=[bucket]) == {}
@@ -206,15 +215,15 @@ def test_files_alone_read_back_and_report_with_a_seed_sample(tmp_path: Path) -> 
             segment_seconds=0.05,
         )
         for update in range(length):
-            run.log(manabot_row(update), **{"rl/loss": float(seed)})
+            run.log({**manabot_row(update), "rl/loss": float(seed)})
         with pytest.warns(EtudeWarning, match="went backwards"):
             # A later write at an old value: warned about, and still kept.
-            run.log(manabot_row(5), **{"rl/loss": 100.0 + seed})
+            run.log({**manabot_row(5), "rl/loss": 100.0 + seed})
         run.finish()
 
     assert runs(tmp_path) == [("pilot", f"seed-{seed}") for seed in range(3)]
     data = read(tmp_path, "pilot", "seed-1")
-    assert data.rows == 121 and data.job == "arm" and data.state is not None
+    assert data.rows == 121 and data.job == "arm" and data.outcome is not None
     points = data.points("rl/loss", "progress/updates")
     assert len(points) == 120 and (points.x[5], points.y[5]) == (5.0, 101.0)
     assert (points.x[6], points.y[6]) == (6.0, 1.0)
@@ -308,7 +317,7 @@ def test_metrics_and_checkpoints_reach_an_s3_bucket_and_read_back(
         run.finish(timeout=30)
         assert run.problems == {} and run.incomplete == 0
 
-        prefix = "team/a/s3/"
+        prefix = "team/a/pilot/s3/"
         assert first.uri == f"s3://runs/{prefix}checkpoints/progress_updates-50.pt"
         assert first.sha256 == sha256(weights).hexdigest() and first.size_bytes == len(weights)
         stored = client.get_object(Bucket="runs", Key=prefix + "checkpoints/progress_updates-50.pt")
@@ -317,7 +326,7 @@ def test_metrics_and_checkpoints_reach_an_s3_bucket_and_read_back(
 
         # Everything reads back from the bucket alone.
         data = read(bucket, "pilot", "s3")
-        assert data.rows == 50 and data.state is not None
+        assert data.rows == 50 and data.outcome is not None
         assert [c.tags for c in data.checkpoints] == [("best",), ()]
         assert data.checkpoints[0].artifact == first and authored(data.checkpoints[0].at) == AT
         pilot = experiment_file(tmp_path / "experiments", "pilot")
@@ -337,7 +346,7 @@ def test_checkpoints_are_stored_locally_and_tagged_after_a_resume(
     model = tmp_path / "step.pt"
     model.write_bytes(b"weights")
 
-    def opened() -> Run:
+    def opened() -> TrainingRun:
         return track(
             experiment="pilot",
             run="local",
@@ -355,7 +364,7 @@ def test_checkpoints_are_stored_locally_and_tagged_after_a_resume(
         run.checkpoint(tmp_path / "absent.pt", AT)
     run.finish()
     assert run.incomplete == 1
-    copied = tmp_path / "copy/local/checkpoints/progress_updates-50.pt"
+    copied = tmp_path / "copy/pilot/local/checkpoints/progress_updates-50.pt"
     assert copied.read_bytes() == b"weights" and stored.uri == copied.resolve().as_uri()
     assert referenced.sha256 is None and referenced.size_bytes is None
 
@@ -385,7 +394,7 @@ def test_logging_from_training_code_imports_no_command_line_library() -> None:
         [
             sys.executable,
             "-c",
-            "import sys, etude.train.run, etude.train.read, etude.train.report; "
+            "import sys, etude.train.tracking, etude.train.read, etude.train.report; "
             "print(sorted(name for name in ('typer', 'rich', 'boto3') if name in sys.modules))",
         ],
         capture_output=True,
@@ -490,9 +499,15 @@ def test_finish_retries_retained_files_when_storage_recovers(tmp_path: Path) -> 
     run.finish(timeout=2)
     assert not run.problems
     assert not run._shipper.is_alive()
-    assert destination.get("final/state.json") == (run.files.root / "state.json").read_bytes()
-    assert destination.requests == len(destination.keys("final")) + 1
-    assert not run.files.pending(destination.name)
+    assert (
+        destination.get("pilot/final/outcome.json")
+        == (run.files.root / "outcome.json").read_bytes()
+    )
+    assert destination.requests == len(destination.keys("pilot/final")) + 1
+    assert all(
+        destination.get("pilot/final/" + key) == (run.files.root / key).read_bytes()
+        for key in listing(run.files.root, tail_seconds=run.files.tail_age)
+    )
 
 
 def test_a_job_relaunched_at_another_commit_pools_with_its_seeds(

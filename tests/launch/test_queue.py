@@ -9,15 +9,18 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.launch.client import queue, queue_cohort, wait
+from etude.errors import LauncherError
+from etude.launch.client import launch, launch_cohort, queue, queue_cohort, wait
 from etude.launch.database import Database, launcher_file
 from etude.launch.errors import LaunchError
 from etude.launch.executor import Refused
-from etude.launch.records import Job, LauncherError, Offer, OnDemand, Pool, Stale, Until
+from etude.launch.job_file import read_job_file
+from etude.launch.records import Offer, OnDemand, Pool, Stale
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Packet, Work
-from etude.train.records import ParentCheckpoint, Step
-from etude.train.run import track
+from etude.spec import Job, RunRequest, Until
+from etude.train.records import ParentRun, Step
+from etude.train.tracking import track
 from tests.experiments import authored
 from tests.launch.fake import L4, bench
 
@@ -104,7 +107,7 @@ def test_cli_queue_records_the_choice(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     path = tmp_path / "job.py"
     path.write_text(
-        'from etude.launch.records import Job, Run\ndef runs(): return Job(command="train", max_hours=1, max_usd=1)'
+        'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="train", max_hours=1, max_usd=1)'
         + (".runs(1, 2)" if cohort else "")
     )
     assert (
@@ -112,7 +115,7 @@ def test_cli_queue_records_the_choice(
     )
     ids = [line.split()[0] for line in capsys.readouterr().out.splitlines()]
     assert len(ids) == (2 if cohort else 1)
-    assert all(b.scheduler.record(id).autorun for id in ids)
+    assert all(b.scheduler.record(id).launch.autorun for id in ids)
     assert b.service.creates == 0
     b.scheduler.tick()
     assert b.service.creates == 1
@@ -214,10 +217,11 @@ def test_cli_continue_waits_without_capacity(
     assert main(argv) == 0
     child = capsys.readouterr().out.split()[0]
     record = b.scheduler.record(child)
-    (given,) = record.spec.environment
-    handed = ParentCheckpoint.model_validate_json(given.value)
+    (given,) = record.launch.spec.environment
+    handed = ParentRun.model_validate_json(given.value)
+    assert handed.checkpoint is not None
     assert (handed.parent.source_id, authored(handed.checkpoint.at)) == (parent, {"steps": 3})
-    assert str(record.spec.until) == "steps=7" and record.autorun
+    assert str(record.launch.spec.until) == "steps=7" and record.launch.autorun
     assert b.scheduler.read(child).phase == "queued"
 
 
@@ -390,3 +394,55 @@ def test_machines_lists_rented_windows_and_terminate_takes_the_machine_name(
     assert capsys.readouterr().out == ""  # nothing is rented now
     assert main(["machines", "--all"]) == 0
     assert f"{name}  l4  rented, ended " in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("queued", [False, True])
+@pytest.mark.parametrize("listed", [False, True])
+def test_seeded_jobs_expand_equally_for_file_and_python_clients(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, queued: bool, listed: bool
+) -> None:
+    b = bench(tmp_path)
+    monkeypatch.setattr(import_module("etude.launch.client"), "_client", lambda: b.scheduler)
+    file = tmp_path / "chosen.py"
+    file.write_text(
+        "from etude.spec import Job\ndef runs() -> Job:\n"
+        '    return Job(command="train", name="baseline", seeds=(0, 7), '
+        "max_hours=1, max_usd=1)\n"
+    )
+    expected = read_job_file(file)
+    job = expected[0].job
+    submit_one = queue if queued else launch
+    with pytest.raises(
+        LauncherError, match="2 runs need " + ("queue" if queued else "launch") + "_cohort"
+    ):
+        submit_one(job, rent="l4", smoke=True)
+    assert b.scheduler.runs() == ()
+    assert b.service.creates == 0
+    submit = queue_cohort if queued else launch_cohort
+    # An explicit request remains independent of the Job's declared repetitions.
+    explicit = RunRequest(job=job, id="chosen/explicit", seed=42, params={"width": 64})
+    ids = submit("capacity", [job, explicit] if listed else job, rent="l4")
+    records = [b.scheduler.record(identity) for identity in ids]
+    assert [(record.id, record.seed) for record in records[:2]] == [
+        (request.id, request.seed) for request in expected
+    ]
+    if listed:
+        assert (records[2].id, records[2].seed, records[2].launch.params) == (
+            "chosen/explicit",
+            42,
+            {"width": 64},
+        )
+
+
+@pytest.mark.parametrize("queued", [False, True])
+def test_singular_python_clients_use_the_jobs_declared_seed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, queued: bool
+) -> None:
+    b = bench(tmp_path)
+    monkeypatch.setattr(import_module("etude.launch.client"), "_client", lambda: b.scheduler)
+    submit = queue if queued else launch
+    identity = submit(
+        Job(command="train", name="single", seeds=(7,), max_hours=1, max_usd=Decimal(1)), rent="l4"
+    )
+    record = b.scheduler.record(identity)
+    assert (record.id, record.seed) == ("single", 7)

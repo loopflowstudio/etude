@@ -106,7 +106,9 @@ terminal, log or chat: consume it inline or redirect it. If one leaks, say so
 and flag it for rotation without quoting it again.
 
 Launcher records use frozen Pydantic models with named constructor fields and
-model-owned JSON serialization. Keep `providers/runpod/http.py`,
+model-owned JSON serialization. For `Json[Model]` fields, pass serialized text
+through `model_validate`: the typed constructor describes the decoded model,
+while runtime validation expects JSON text. Keep `providers/runpod/http.py`,
 `providers/runpod/pod.py`, `providers/vast/http.py`, `providers/vast/instance.py`,
 `providers/lium/pod.py`,
 `providers/http.py`, `providers/bootstrap.py`, `providers/package.py` and `environment.py`
@@ -127,6 +129,29 @@ monotonic allowance capped by the provider deadline; uncertain exit or collectio
 leaves the stream incomplete while parent cleanup still runs.
 An explicit empty worker cleanup command leaves deletion to its parent; omitted
 cleanup selects the provider's command.
+Out membership (`out.json`) carries each key, SHA256 and byte length, published
+after its files using the delivery fingerprints. Continuation reads membership
+without out bytes; sources without membership are hashed. Recovery selects
+members without imposing their fingerprints on newer mutable saves. Retained
+checkpoint objects are not evidence that they still belong in `out`. Complete
+host relays include `checkpoints/.stored`; single-file inputs do not. Only a
+complete restoration reconciles stale out files.
+
+State delivery freezes `out/state/**/current.json` before enumerating its
+selected save. Recovery follows that pointer even when `out.json` is older.
+A launched training process must not prune saves: its courier owns storage
+acknowledgement and local retention; the controller removes remote saves
+where upload-only grants cannot.
+
+Run addresses use `EXPERIMENT[/JOB][@SEED]`, omitting a sole job or seed
+before selection. Job code sees the local `ETUDE_RUN` name;
+`ETUDE_RUN_ADDRESS` preserves its full storage address, including when a job
+is named for its experiment. Discovery permits sibling runs below a compact
+run address while excluding its `out`, `artifacts` and metric data. `Input.run` names the producer for relay; its unsigned `uri` locates the
+actual bytes and is excluded from scientific job identity. `Storage.uri` uses
+literal keys in `s3://` and `r2://` locators, including `%`, `?` and `#`;
+file URIs use normal URL escaping. Fixtures that call `track` as a worker must
+supply its assigned `ETUDE_RUN`, `ETUDE_ATTEMPT` and `ETUDE_OUT` environment.
 
 Etude has one cache of storage reads, `etude/cache.py`, keyed by content
 SHA256 and length with locators for where bytes came from. Tracking, reports and
