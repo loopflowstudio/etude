@@ -356,6 +356,45 @@ Probed with `examples/coin.py` in a temporary `ETUDE_HOME`; output in
 Delete — do not maintain: nothing. No schema, query or provider count
 changes; no new command or option.
 
+## Corrections from the fourth concept review (2026-11-13): to build
+
+Probed at `cbdefd7` with `examples/coin.py` and a failing recipe in a
+temporary `ETUDE_HOME`; output in `questions.md` (fourth pass). Fresh, timed
+stop, failure, `--resume` and `--resume --until` on a finished run all behave
+as the Training page says. What follows is what a person meets next.
+
+1. **Calling `train` yourself is refused without saying what to do.**
+   `python -c "import coin; coin.train(coin.Config())"` raises a bare
+   `EtudeError: experiment_not_named`. The Training page never says `train`
+   must be called by `etude run` or the launcher, and it is the first thing a
+   test, a debugger or a notebook does. Keep the refusal (principle 8: nothing
+   inferred); give it a detail naming the remedy (`etude run FILE`, or
+   `track(experiment=, run=)` for a process Etude did not start), and say so
+   in Training (One function, one config), linking Tracking's opening
+   example. One focused test asserting the refusal's detail. Whether a direct
+   call should instead start a run is open (`questions.md`).
+2. **Where a run started here can be seen.** `etude runs` ("List every run,
+   finished ones included") and `etude status` print nothing after
+   `etude run`: they read the launcher database, which `etude run` never
+   writes. Make the words true and add no command: Training (Running it) says
+   a run started here is its folder under `~/.etude/track/EXPERIMENT/`, read
+   by `etude report FILE` and `etude checkpoints --source`, and that
+   `etude runs`, `status`, `cancel` and `continue` are for launched runs; the
+   `runs` help and `docs/launcher.md` say "every launched run". Whether local
+   runs should be listed is open with local branching (`questions.md`).
+3. **The on-disk contract leaves out what is there.** The Training page's
+   layout omits `checkpoints/CLOCK-VALUE.json` (each checkpoint's record,
+   which Tracking mentions), and says a run's id is `train-seed-0` while
+   `run.json`, in the folder the reader is told to open with `json`, has
+   `"id": "train/train-seed-0"`. Add the records line and say `run.json`'s
+   `id` is the reference `EXPERIMENT/RUN`. Use "id" for the run part in the
+   two places that say "run name" (`docs/tracking.md` The files are the
+   record; `docs/launcher.md` on `etude status RUN --experiment`). The stored
+   field is not changed here (`questions.md`).
+
+Delete — do not maintain: nothing. No schema, query or provider count
+changes; no new command or option.
+
 ## Manabot (MTG-329)
 
 Separate Task; do not edit its checkout here. The full loop sketch, recipe

@@ -303,3 +303,52 @@ failed `train` print no object and exit 1 (taken id, bad config, not found,
 already finished, config changed, recipe exception); the code is in the
 stderr line only. `outcome.json` does record `failed`.
 
+
+## Concept review, fourth pass (2026-11-13): one open choice widened, one new name
+
+Three corrections the design implies are in `design-train-api.md` (fourth
+concept review). What the runs showed at `cbdefd7`, temporary `ETUDE_HOME`,
+no network, `examples/coin.py` unless said:
+
+    run --until updates=10                              coin-seed-0            exit 0
+    run --name slow --seconds 0.001 --json              outcome "stopped"      exit 75
+    run --resume slow-seed-0 --json                     outcome "finished"     exit 0
+    run --resume coin-seed-0                            etude: run_already_finished: give --until with a later target   exit 1
+    run --resume coin-seed-0 --until updates=20         coin-seed-0            exit 0
+    recipe raising at update 3 (saves every step)       traceback; outcome.json failed; current.json save-00000003
+    run --resume of it, after the fix                   finished; writers resumed_at updates 1 and 4; one run, reached 6
+    runs                                                (no output)            exit 0
+    status                                              last loop: never       exit 0
+    checkpoints --source HOME/track                     eight lines, both runs
+    report examples/coin.py                             HOME/track/reports/coin.html
+    python -c "import coin; coin.train(coin.Config())"  etude.errors.EtudeError: experiment_not_named
+    run.json                                            "id": "coin/slow-seed-0", "job_name": "slow", "seed": 0
+
+**Open, widening the third pass's branching question: what is a run started
+with `etude run` to the rest of Etude?** It is files only. The launcher
+database never hears of it, so `etude runs`, `status`, `cancel` and
+`continue` do not see it, and nothing lists local runs but `ls`, a report or
+`checkpoints --source`. Options: (a) files only, said plainly (the docs
+correction now directed); (b) `etude run` records the run in the launcher
+database as a run on this computer, so the same reads and `continue` work
+for it; (c) the reads take the runs directory (`etude runs --source DIR`)
+and branching stays as the third pass's (b)/(c). Matters because the page
+teaches one word, run, for both, and the first run anyone makes is a local
+one. Does not hold the implement direction.
+
+**Open: what a direct call of `train(config)` means.** Today it is refused
+(`experiment_not_named`); the directed correction only makes the refusal
+say what to do. Options: (a) keep refusing; (b) a direct call is a new run
+as `etude run FILE` would make it (experiment from the module's file, seed
+0, a taken id refused), so a test or debugger needs nothing else; (c) a
+Python entry taking the function and a config object, since
+`etude.local.run` takes a file path and a JSON string. Evidence: Jack Heart's
+"You can just call our code" (principle 1) against "Nothing is inferred"
+(principle 8). Does not hold the implement direction.
+
+**Open name, small.** The docs' "id" is `train-seed-0`; the code's
+`RunRecord.id` and the stored `run.json` field are `train/train-seed-0`, and
+the code's word for the short form is `RunRecord.name`, while `--name` names
+the job. Options: (a) keep, with the docs saying what the file holds (now
+directed); (b) store the short id beside `experiment`; (c) teach "name" for
+the short form and rename `--name`. Does not hold the implement direction.

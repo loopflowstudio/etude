@@ -99,6 +99,14 @@ Check: `uv run pytest tests/train/test_local.py` — **10 passed**; mypy on
 `local.py`, ruff check/format and diff check pass.
 Full acceptance stays with gate; PR #103 remains draft.
 
+Fourth-review corrections to build (`design-train-api.md`): the
+`experiment_not_named` refusal names its remedy and Training says who calls
+`train`; docs and `runs` help say local runs are files outside the launcher
+database; the on-disk layout shows checkpoint records and `run.json`'s
+qualified `id`. Docs, one error detail, one help string, one focused test.
+Open in `questions.md`: what a local run is to the launcher, a direct call of
+`train`, the id/name words.
+
 Earlier checks and indexed-query receipts: `ef6099a:scratch/exp-56.md`.
 
 Acceptance remains the design's fresh/stop/resume example; two models in one
