@@ -116,7 +116,10 @@ def test_cli_queue_records_the_choice(
     monkeypatch.setattr(import_module("etude.launch.client"), "_client", lambda: b.scheduler)
     path = tmp_path / "job.py"
     path.write_text(
-        'from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\nfrom etude.launch.records import Job, RunRequest\ndef training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="train"), max_hours=1, max_usd=1, name="base", repo=None)'
+        r"""from etude.jobs import TrainingJob
+from tests.launch.tasks import Command, RUNTIME, train_command
+from etude.launch.records import Job, RunRequest
+def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="train"), max_hours=1, max_usd=1, name="base", repo=None)"""
         + (".runs(1, 2)" if several else "")
     )
     assert (
@@ -430,7 +433,12 @@ def test_seeded_jobs_expand_equally_for_file_and_python_clients(
     monkeypatch.setattr(import_module("etude.launch.client"), "_client", lambda: b.scheduler)
     file = tmp_path / "chosen.py"
     file.write_text(
-        'from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\nfrom etude.spec import Job\ndef training_jobs() -> Job:\n    return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="train"), name="baseline", seeds=(0, 7), max_hours=1, max_usd=1, repo=None)\n'
+        r"""from etude.jobs import TrainingJob
+from tests.launch.tasks import Command, RUNTIME, train_command
+from etude.spec import Job
+def training_jobs() -> Job:
+    return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="train"), name="baseline", seeds=(0, 7), max_hours=1, max_usd=1, repo=None)
+"""
     )
     expected = read_job_file(file)
     job = expected[0].job
@@ -462,3 +470,15 @@ def test_singular_python_clients_use_the_jobs_declared_seed(
     )
     record = b.scheduler.record(identity)
     assert (record.id, record.seed) == ("single@7", 7)
+
+
+def test_launch_queues_an_unplaceable_first_run_and_places_a_later_one(tmp_path: Path) -> None:
+    b = bench(tmp_path, max_machines=1)
+    expensive = job().model_copy(update={"max_usd": Decimal("0.01")})
+    ids = b.scheduler.launch(
+        [RunRequest(id="too-small", job=expensive), RunRequest(id="fits", job=job())], rent="l4"
+    )
+    assert ids == ("too-small", "fits")
+    assert b.scheduler.read("too-small").phase == "queued"
+    assert b.scheduler.read("fits").machine is not None
+    assert b.service.creates == 1

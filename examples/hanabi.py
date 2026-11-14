@@ -18,7 +18,6 @@ from etude.eval.match import environment
 from etude.eval.records import Benchmark, CheckpointPlayer, Code, Inference, Match, Seating
 from etude.eval.run import Tables
 from etude.jobs import EvalJob, ExperimentState
-from etude.spec import Job
 from etude.train.tracking import track
 
 
@@ -199,7 +198,7 @@ def play(match: Match[Deal]) -> Tables:
     return {"teams": rows}
 
 
-def eval_jobs(state: ExperimentState) -> Job:
+def eval_jobs(state: ExperimentState) -> EvalJob:
     checkpoints = tuple(
         c for run in state.runs for c in run.checkpoints if c.ordinal == 1 or c == run.final
     )

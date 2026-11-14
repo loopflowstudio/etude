@@ -21,7 +21,7 @@ _creation_check: ContextVar[Callable[[], None] | None] = ContextVar("creation_ch
 
 @contextmanager
 def creation_guard(check: Callable[[], None]) -> Iterator[None]:
-    """Carry the server's placement fence through provider preparation."""
+    """Carry the scheduler's placement fence through provider preparation."""
     token = _creation_check.set(check)
     try:
         yield

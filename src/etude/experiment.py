@@ -81,7 +81,7 @@ def state_of(
             data.outcome.state
             if data.outcome is not None and data.outcome.state != "stopped"
             else "failed"
-            if data.outcome is None and data.name in lost
+            if data.name in lost
             else "running"
         )
         runs.append(

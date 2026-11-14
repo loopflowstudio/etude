@@ -139,7 +139,12 @@ def test_queue_status_and_logs_use_the_selected_address(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     file = tmp_path / "sweep.py"
     file.write_text(
-        "from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\nfrom etude.spec import Job\ndef training_jobs():\n    return [TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command='true'), name=name, seeds=(0, 7), max_hours=1, repo=None) for name in ('small', 'wide')]\n"
+        r"""from etude.jobs import TrainingJob
+from tests.launch.tasks import Command, RUNTIME, train_command
+from etude.spec import Job
+def training_jobs():
+    return [TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command='true'), name=name, seeds=(0, 7), max_hours=1, repo=None) for name in ('small', 'wide')]
+"""
     )
     assert main(["queue", str(file), "--job", "wide", "--seed", "7"]) == 0
     assert "sweep/wide@7  new, queued" in capsys.readouterr().out

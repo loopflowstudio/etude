@@ -257,7 +257,12 @@ def test_a_job_file_names_its_own_top_level_function(tmp_path: Path) -> None:
         tmp_path / "lab",
         {
             "job.py": TRAIN
-            + "\nfrom etude.jobs import TrainingJob\n\n\ndef training_jobs() -> object:\n"
+            + r"""
+from etude.jobs import TrainingJob
+
+
+def training_jobs() -> object:
+"""
             + "    return TrainingJob(name='base', train=train, config=TrainConfig(lr=1), max_hours=0.1)\n"
         },
     )
@@ -475,7 +480,12 @@ def test_the_job_command_starts_by_importing_no_other_part_of_etude() -> None:
 def test_job_seeds_expand_to_named_requests_without_changing_job_identity(tmp_path: Path) -> None:
     file = tmp_path / "job.py"
     file.write_text(
-        'from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\nfrom etude.launch.records import Job\ndef training_jobs():\n    return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="baseline", seeds=(0, 7), repo=None)\n'
+        r"""from etude.jobs import TrainingJob
+from tests.launch.tasks import Command, RUNTIME, train_command
+from etude.launch.records import Job
+def training_jobs():
+    return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="baseline", seeds=(0, 7), repo=None)
+"""
     )
     requests = read_job_file(file, experiment="chosen")
     assert [(run.id, run.seed, run.job.experiment) for run in requests] == [
@@ -492,7 +502,12 @@ def test_job_seeds_expand_to_named_requests_without_changing_job_identity(tmp_pa
     ]
     assert job_id(first) == job_id(first.model_copy(update={"seeds": (42,)}))
     file.write_text(
-        'from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\nfrom etude.launch.records import Job\ndef training_jobs():\n    return [TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="first", repo=None), TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="other", repo=None)]\n'
+        r"""from etude.jobs import TrainingJob
+from tests.launch.tasks import Command, RUNTIME, train_command
+from etude.launch.records import Job
+def training_jobs():
+    return [TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="first", repo=None), TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="other", repo=None)]
+"""
     )
     assert [run.id for run in read_job_file(file)] == ["job/first@0", "job/other@0"]
 

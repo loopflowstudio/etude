@@ -396,9 +396,8 @@ Three levels do the work, each built only on the one below it:
   queued or running until it ends or you `etude cancel` it.
 - **Where state is read**: `--source` when given, else where the target's
   machines deliver ([Experiments](evaluation.md#experiments)). State is read
-  once per pass, and only when a declaration takes it: a file whose
-  `training_jobs()` takes no `state` and that has no `eval_jobs` reads no
-  storage.
+  once per pass. Even a declaration without a `state` parameter needs that
+  read, so runs already stored by another launcher are left alone.
 - **`--quote`** prints the same lines with `new, would launch`, then the
   machines and planned rental costs for what the pass would hand down, and
   submits nothing.
@@ -420,8 +419,7 @@ more writers does not consume more attempts or change the allocation's cost.
 # ppo.py
 from decimal import Decimal
 
-from etude.jobs import ExperimentState
-from etude.jobs import EvalJob, TrainingJob
+from etude.jobs import EvalJob, ExperimentState, TrainingJob
 from etude.report import Report
 
 from train import TrainConfig, train
@@ -1457,7 +1455,7 @@ Training code reads `ETUDE_OUT`, `ETUDE_OUTPUT_DIR`, `ETUDE_STOP_FILE`,
 A job can be given files by name:
 
 ```python
-from etude.jobs import training_job
+from etude.jobs import TrainingJob
 from etude.spec import Input
 
 policy = Input(
@@ -2027,7 +2025,7 @@ and guardian readiness inherit this budget without separate 30/60-second caps.
 ### Prepare a framework image before renting
 
 ```python
-from etude.jobs import training_job
+from etude.jobs import TrainingJob
 from etude.launch.images import prepare_pytorch, resolve_image
 from etude.launch.records import MachineTemplate
 
@@ -2083,7 +2081,7 @@ command from installing Torch again. Cold image pulls can still dominate startup
 ### Reuse a preinstalled job runtime
 
 ```python
-from etude.jobs import training_job
+from etude.jobs import TrainingJob
 from etude.spec import Runtime
 
 job = TrainingJob(

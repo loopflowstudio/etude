@@ -246,16 +246,18 @@ def usage(*, run: str | None = None, machine: str | None = None) -> Usage:
     return _client().usage(run=run, machine=machine)
 
 
-def standing(experiment: str, *, local: bool = False) -> tuple[Standing, ...]:
+def standing(
+    experiment: str | None = None, *, local: bool = False, job: str | None = None
+) -> tuple[Standing, ...]:
     """Retained runs and statuses; a page can explicitly read only this computer."""
     address = None if local else selected()
     if address:
-        return PythonClient(address).standing(experiment)
+        return PythonClient(address).standing(experiment, job=job)
     path = launcher_file(home())
     if not path.exists():
         return ()
     store = Database(path)
     try:
-        return Scheduler(store, {}).standing(experiment)
+        return Scheduler(store, {}).standing(experiment, job=job)
     finally:
         store.close()

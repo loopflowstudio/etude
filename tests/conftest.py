@@ -1,6 +1,9 @@
 """Every test keeps Etude's files, including its caches, in its own temporary home."""
 
 import os
+import subprocess
+import sys
+import sysconfig
 from pathlib import Path
 
 import pytest
@@ -18,10 +21,6 @@ def _etude_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.Mo
 @pytest.fixture(scope="session")
 def command_python(tmp_path_factory: pytest.TempPathFactory) -> str:
     """A separate offline job environment for the command-driven training fixtures."""
-    import subprocess  # noqa: PLC0415 - fixture setup loads only what these jobs need
-    import sys  # noqa: PLC0415 - fixture setup
-    import sysconfig  # noqa: PLC0415 - fixture setup
-
     directory = tmp_path_factory.mktemp("command-env") / "venv"
     subprocess.run(
         ["uv", "venv", "--offline", "--python", sys.executable, str(directory)],

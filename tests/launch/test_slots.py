@@ -85,12 +85,12 @@ def test_each_run_on_a_shared_machine_publishes_its_own_outputs(tmp_path: Path) 
 
 def test_quote_shows_runs_sharing_one_rental(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=2, slots=2)
-    job = JOB.model_copy(update={"experiment": "trial", "seeds": (1, 2, 3)})
+    job = JOB.model_copy(update={"experiment": "trial", "name": "baseline", "seeds": (1, 2, 3)})
     quote = b.scheduler.quote(job.runs(), rent="l4")
     assert [(q.run, q.alongside) for q in quote.machines] == [
-        ("trial@1", ("trial@2",)),
-        ("trial@2", ("trial@1",)),
-        ("trial@3", ()),
+        ("trial/baseline@1", ("trial/baseline@2",)),
+        ("trial/baseline@2", ("trial/baseline@1",)),
+        ("trial/baseline@3", ()),
     ]
     assert {q.slots for q in quote.machines} == {2}
     assert quote.machines[0].max_usd == quote.machines[1].max_usd

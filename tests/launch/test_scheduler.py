@@ -393,7 +393,11 @@ def test_quote_prints_planned_first_wave_costs_and_rents_nothing(
     monkeypatch.setattr(import_module("etude.launch.client"), "_client", lambda: b.scheduler)
     path = tmp_path / "job.py"
     path.write_text(
-        "from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\nfrom etude.launch.records import Job\ndef training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command='train'), max_hours=1, max_usd=2, name=\"base\", repo=None).runs(1, 2, 3)\n"
+        r"""from etude.jobs import TrainingJob
+from tests.launch.tasks import Command, RUNTIME, train_command
+from etude.launch.records import Job
+def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command='train'), max_hours=1, max_usd=2, name="base", repo=None).runs(1, 2, 3)
+"""
     )
     counting = Counting(b.store, b.service)
     with counting.record():

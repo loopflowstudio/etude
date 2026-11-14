@@ -48,7 +48,7 @@ A curve of seatings draws points (`Point`): each checkpoint a seating was
 held for, where it stood, with the first seat's score against the second
 over that checkpoint's matches, or why it has none. Relative seats find
 their checkpoints among the experiment's training lines
-(`etude.experiment.ExperimentState.lines`), read once with its runs.
+(`etude.jobs.ExperimentState.lines`), read once with its runs.
 
 Gaps stay visible. A checkpoint nothing played is not evaluated; one with a
 match no eval run delivered is not yet played; one whose relative seat has

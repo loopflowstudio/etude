@@ -9,12 +9,14 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
+from etude.jobs import TrainingJob
 from etude.launch.client import default
-from etude.spec import RunRequest, Until
+from etude.spec import RunRequest, Runtime, Until
 from etude.storage import default_root
 from etude.train.read import read
 from tests.launch.counting import Counting
 from tests.launch.fake import bench
+from tests.launch.tasks import Command, train_command
 from tests.launch.test_scheduler import job
 from tests.launch.test_source import git
 
@@ -82,7 +84,7 @@ def test_resume_refuses_a_live_allocation(tmp_path: Path) -> None:
     spec = job()
     (identity,) = b.scheduler.launch(spec, rent="l4")
     with pytest.raises(LauncherError, match="allocated attempt"):
-        b.scheduler.launch(RunRequest(job=spec, id=identity, resume=True), rent="l4")
+        b.scheduler.launch(RunRequest(job=spec, id=identity, seed=0, resume=True), rent="l4")
     assert len(b.scheduler.attempts(identity)) == 1
 
 
@@ -95,7 +97,7 @@ def test_resumed_failure_can_stop_and_retry_without_replaying_old_failures(tmp_p
     b.service.outcome = lambda work: (
         "stopped" if work.attempt == b.scheduler.attempts(identity)[1].id else "succeeded"
     )
-    b.scheduler.queue(RunRequest(job=spec, id=identity, resume=True), rent="l4")
+    b.scheduler.queue(RunRequest(job=spec, id=identity, seed=0, resume=True), rent="l4")
     b.scheduler.tick()
     b.run(601)
     b.run(601)
@@ -104,8 +106,13 @@ def test_resumed_failure_can_stop_and_retry_without_replaying_old_failures(tmp_p
 
 
 def test_cli_resume_runs_current_source_over_the_same_saved_state(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command_python: str,
 ) -> None:
+    monkeypatch.setenv("ETUDE_TEST_PYTHON", command_python)
+    monkeypatch.setattr("tests.launch.tasks.RUNTIME", Runtime(python=command_python))
     # CLI and worker execute the real recipe; the source repository and origin are disposable.
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     repo = tmp_path / "repo"
@@ -134,11 +141,10 @@ with track(clocks=[Step("steps", "training steps")], config=json.loads(Path(os.e
     (repo / "train.py").write_text(recipe)
     file = repo / "job.py"
     file.write_text(
-        "from etude.launch.records import Job\n"
+        "from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\n"
         "from pathlib import Path\n"
-        "def training_jobs() -> Job:\n"
-        f"    return Job(command={sys.executable!r} + ' train.py', repo=str(Path(__file__).parent), "
-        "max_hours=0.1, seeds=(7,), config='{\"rate\": 0.1}')\n"
+        "def training_jobs():\n"
+        f"    return TrainingJob(name='base', train=train_command, runtime=RUNTIME, config=Command(command={sys.executable!r} + ' train.py', text='{{\"rate\": 0.1}}'), repo=str(Path(__file__).parent), max_hours=0.1, seeds=(7,))\n"
     )
     git(repo, "add", ".")
     git(repo, "commit", "-m", "First recipe")
@@ -172,6 +178,7 @@ def test_failed_resume_admission_leaves_the_previous_run_untouched(tmp_path: Pat
     request = RunRequest(
         job=spec.model_copy(update={"until": Until(clock="steps", value=20)}),
         id=identity,
+        seed=0,
         resume=True,
     )
     with pytest.raises(LauncherError, match="machine limit"):
@@ -187,7 +194,7 @@ def test_resumed_waiting_query_indexes_supply_and_allocation_number(tmp_path: Pa
     spec = job()
     (identity,) = b.scheduler.launch(spec, rent="l4")
     b.run(601)
-    b.scheduler.queue(RunRequest(job=spec, id=identity, resume=True), rent="l4")
+    b.scheduler.queue(RunRequest(job=spec, id=identity, seed=0, resume=True), rent="l4")
     statements: list[str] = []
     b.store._db.set_trace_callback(statements.append)
     try:
@@ -205,7 +212,7 @@ def test_resume_can_replace_unallocated_queued_work(tmp_path: Path) -> None:
     spec = job(command="first recipe")
     (identity,) = b.scheduler.queue(spec, rent="l4")
     request = RunRequest(
-        job=spec.model_copy(update={"command": "fixed recipe"}), id=identity, resume=True
+        job=spec.model_copy(update={"command": "fixed recipe"}), id=identity, seed=0, resume=True
     )
     assert b.scheduler.queue(request, rent="l4")[0] == identity
     b.scheduler.tick()
@@ -219,14 +226,24 @@ def test_cli_selects_the_stored_job_and_seed_from_hand_built_requests(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     b = bench(tmp_path)
-    spec = job(name="recipe", experiment="job", until=Until(clock="steps", value=10))
+    spec = TrainingJob(
+        name="recipe",
+        train=train_command,
+        config=Command(command="train"),
+        repo=None,
+        max_hours=1,
+        max_usd=Decimal(5),
+        experiment="job",
+        until=Until(clock="steps", value=10),
+    ).plain()
     (identity,) = b.scheduler.launch(RunRequest(job=spec, seed=7), rent="l4")
     b.run(601)
     file = tmp_path / "job.py"
     file.write_text(
-        "from etude.launch.records import Job, RunRequest\n"
-        "def training_jobs() -> list[RunRequest]:\n"
-        f"    job = Job.model_validate_json({spec.model_dump_json()!r})\n"
+        "from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, train_command\n"
+        "from etude.spec import RunRequest, Until\n"
+        "def training_jobs():\n"
+        "    job = TrainingJob(name='recipe', train=train_command, config=Command(command='train'), repo=None, max_hours=1, max_usd=5, experiment='job', until=Until(clock='steps', value=10))\n"
         f"    return [RunRequest(job=job, seed=7, id={identity!r}), RunRequest(job=job, seed=8)]\n"
     )
     monkeypatch.setattr("etude.launch.cli.default", lambda: b.scheduler)

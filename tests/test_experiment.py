@@ -299,17 +299,17 @@ class _Launcher:
         self.queued = False
 
     def launch(
-        self, run: RunRequest, pool: str | None = None, *, rent: str | None = None
+        self, runs: list[RunRequest], pool: str | None = None, *, rent: str | None = None
     ) -> tuple[str, ...]:
-        self.launched.append(run)
-        return (str(run.id),)
+        self.launched.extend(runs)
+        return tuple(str(run.id) for run in runs)
 
     def queue(
-        self, run: RunRequest, pool: str | None = None, *, rent: str | None = None
+        self, runs: list[RunRequest], pool: str | None = None, *, rent: str | None = None
     ) -> tuple[str, ...]:
         self.queued = True
-        self.launched.append(run)
-        return (str(run.id),)
+        self.launched.extend(runs)
+        return tuple(str(run.id) for run in runs)
 
     def standing(self, experiment: str, *, local: bool = False) -> tuple[Standing, ...]:
         return tuple(

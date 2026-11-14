@@ -227,7 +227,7 @@ class Evaluation(Record):
     # A round robin's entrants.
     entrants: tuple[Player, ...] = ()
     workers: int = Field(default=1, ge=1)
-    # The matches a pass found new (`etude.experiment.advance`), and the
+    # The matches a pass found new (`etude.controller.advance`), and the
     # job input holding each checkpoint they seat, by its key encoded.
     matches: tuple[Match, ...] | None = None
     files: dict[str, str] = {}

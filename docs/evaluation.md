@@ -488,8 +488,7 @@ with evaluating(
 # ppo.py: experiment "ppo"
 from decimal import Decimal
 
-from etude.jobs import ExperimentState
-from etude.jobs import EvalJob
+from etude.jobs import EvalJob, ExperimentState
 
 from arena import play, progress  # play(match) -> Tables; progress is a Benchmark
 
@@ -567,8 +566,7 @@ declares those training runs, so `track()` in the training code needs no
 ```python
 # capacity.py: jobs "small" and "large", a checkpoint every 200 updates
 from etude.eval.records import Aligned, Benchmark, Earlier, Final, Fraction, Seating
-from etude.jobs import ExperimentState
-from etude.jobs import EvalJob
+from etude.jobs import EvalJob, ExperimentState
 
 # direct is an Inference, heuristic Code, deals the configs
 from arena import deals, direct, heuristic, play, world

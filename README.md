@@ -80,8 +80,7 @@ names, chosen from what the experiment's runs have stored so far:
 
 ```python
 # job.py, continued
-from etude.jobs import ExperimentState
-from etude.jobs import EvalJob
+from etude.jobs import EvalJob, ExperimentState
 
 from arena import play, progress  # play(match) -> Tables; progress is a Benchmark
 
@@ -105,8 +104,7 @@ been run, so the same command launches training first and, typed again as
 checkpoints arrive, the matches nobody has played. `etude eval job.py` plays
 them on this computer instead.
 
-Everything a run records goes to your own directory or S3 bucket. There is no
-server to run and no account to make. Saved state and checkpoints are JSON
+Everything a run records goes to your own directory or S3 bucket. Saved state and checkpoints are JSON
 and your framework's own files, [readable without Etude](docs/training.md#what-is-on-disk).
 
 ## Install

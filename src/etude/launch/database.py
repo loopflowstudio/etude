@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS attempts(
   version INTEGER NOT NULL DEFAULT 1, planned_at TEXT, added INTEGER NOT NULL DEFAULT 0,
   prepared TEXT, tally TEXT, writers TEXT NOT NULL DEFAULT '[]');
 CREATE INDEX IF NOT EXISTS runs_job ON runs(job);
+CREATE INDEX IF NOT EXISTS runs_name ON runs(json_extract(spec, '$.name'), seq);
 CREATE INDEX IF NOT EXISTS runs_experiment ON runs(json_extract(spec, '$.experiment'), seq);
 CREATE INDEX IF NOT EXISTS runs_pool ON runs(pool, seq);
 CREATE INDEX IF NOT EXISTS runs_rent ON runs(rent, seq);
@@ -694,14 +695,19 @@ class Database:
             )
         return _run_from_row(row)
 
-    def runs(self, *, experiment: str | None = None) -> tuple[RunRecord, ...]:
-        if experiment is None:
-            rows = self._db.execute(f"{_RUNS} ORDER BY r.seq")
-        else:
-            rows = self._db.execute(
-                f"{_RUNS} WHERE json_extract(r.spec, '$.experiment') = ? ORDER BY r.seq",
-                (experiment,),
-            )
+    def runs(
+        self, *, experiment: str | None = None, job: str | None = None
+    ) -> tuple[RunRecord, ...]:
+        clauses: list[str] = []
+        values: list[str] = []
+        if experiment is not None:
+            clauses.append("json_extract(r.spec, '$.experiment') = ?")
+            values.append(experiment)
+        if job is not None:
+            clauses.append("(r.job = ? OR json_extract(r.spec, '$.name') = ?)")
+            values.extend((job, job))
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self._db.execute(f"{_RUNS}{where} ORDER BY r.seq", values)
         return tuple(_run_from_row(row) for row in rows)
 
     def job_runs(self, job: str) -> tuple[RunRecord, ...]:

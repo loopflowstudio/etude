@@ -188,6 +188,8 @@ def cancel(
     """Ask runs to stop."""
     from etude.launch.listing import resolve_runs, show_runs
 
+    if not runs and experiment is None and job is None:
+        raise typer.BadParameter("name run addresses, --experiment or --job")
     scheduler = default()
     ids = resolve_runs(scheduler, runs or [], experiment=experiment, job=job)
     for run in ids:
@@ -218,6 +220,7 @@ def logs(
     """Read retained preparation, startup, execution and cleanup evidence."""
     import time
 
+    from etude.identity import run_address
     from etude.launch.client import _client
     from etude.launch.logs import LogCursor, render
 
@@ -229,9 +232,9 @@ def logs(
         raise typer.BadParameter("--timeout bounds --follow")
     scheduler = _client()
     runs: list[str | None] = (
-        [run]
+        [run_address(run, experiment) if run is not None else None]
         if run is not None or machine is not None
-        else [r.id for r in default().runs(done=True, experiment=experiment, job=job)]
+        else [r.record.id for r in scheduler.standing(experiment, job=job)]
     )
     if not follow:
         snapshots = [scheduler.logs(run=identity, machine=machine) for identity in runs]

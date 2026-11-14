@@ -549,8 +549,7 @@ and returns the second job once the first has stored what it needs:
 # job.py
 from decimal import Decimal
 
-from etude.jobs import ExperimentState
-from etude.jobs import TrainingJob
+from etude.jobs import ExperimentState, TrainingJob
 
 from train import ImitateConfig, SelfPlayConfig, imitate, self_play
 
@@ -608,8 +607,8 @@ stored, read fresh each time the file is read
 ([Experiments](evaluation.md#experiments)). Anything a later stage should
 know, an earlier run records. The declaration still returns the whole list:
 `imitate` stays in it after it has finished, and is left alone. A file whose
-`training_jobs` takes no `state` is never given one, and no storage is read
-for it.
+`training_jobs` takes no `state` is never given one. Etude still reads the
+source to recognise its stored addresses.
 
 `run.input(name)` is the path of a file or checkpoint folder the run was
 given. The launcher delivers the exact bytes, checked by digest, to whatever

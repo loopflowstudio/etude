@@ -763,7 +763,7 @@ class Scheduler:
     ) -> float:
         """Seconds a first-wave rental is held: its share of the hours, within the dollars.
 
-        A rental shared by `placed` runs lasts at least as long as the longest of them.
+        The target covers the longest placed run; the available dollars may shorten it.
         """
         machines = max(
             1,
@@ -953,20 +953,14 @@ class Scheduler:
                 rental is None or (rental.deadline - now).total_seconds() >= budgets[run.id].seconds
             )
 
-        def cost(placement: Placement, runs: Sequence[RunRecord]) -> Decimal:
-            """What `runs` on this machine would be admitted at: a new rental's window,
-            or each run's hours at the machine's price."""
+        def cost(placement: Placement, run: RunRecord) -> Decimal:
+            hours = Decimal(str(budgets[run.id].seconds)) / 3600
             if placement.machine is None and ondemand is not None:
-                if not runs:
-                    return Decimal(0)
-                hours = max(Decimal(str(budgets[r.id].seconds)) / 3600 for r in runs)
                 hours += Decimal(ondemand.setup_seconds) / 3600
                 return self._rental_cost(ondemand, placement.price, hours * 3600)
-            return sum(
-                (placement.price * Decimal(str(budgets[r.id].seconds)) / 3600 for r in runs),
-                Decimal(0),
-            )
+            return placement.price * hours
 
+        reason = "no free machine"
         for run in records:
             reason = "no free machine"
             joined = next(
@@ -1015,7 +1009,6 @@ class Scheduler:
                     offer = self._rentable(ondemand, additional=made)
                     reason = self._trouble.get(ondemand.name, reason)
                     if offer is not None:
-                        made += 1
                         held = Placement(
                             runs=(),
                             free=ondemand.slots,
@@ -1027,18 +1020,24 @@ class Scheduler:
                         )
             if held is not None:
                 # A run is admitted only if its dollars would cover it alone on this machine.
-                if cost(held, (run,)) > budgets[run.id].usd:
+                if cost(held, run) > budgets[run.id].usd:
                     reason = "job dollars do not cover the hours"
+                    if held.session is not None:
+                        used.discard(held.session.id)
+                    elif held.machine is not None:
+                        used.discard(held.machine.name)
                     held = None
             if held is None:
-                if placements:
-                    continue
-                raise LauncherError(f"cannot launch on {label}: {reason}; etude queue would wait")
+                continue
             held = held.model_copy(update={"runs": (*held.runs, run)})
             if joined is None:
+                if held.machine is None:
+                    made += 1
                 placements.append(held)
             else:
                 placements[joined] = held
+        if not placements:
+            raise LauncherError(f"cannot launch on {label}: {reason}; etude queue would wait")
         return placements
 
     def start_phases(self, run: str) -> tuple[StartPhase, ...]:
@@ -1102,11 +1101,13 @@ class Scheduler:
         self.tick()
         return self.read(run)
 
-    def standing(self, experiment: str) -> tuple[Standing, ...]:
+    def standing(
+        self, experiment: str | None = None, *, job: str | None = None
+    ) -> tuple[Standing, ...]:
         """Read all runs labelled with this experiment, including completed runs."""
         return tuple(
             Standing(record=r, status=self.read(r.id))
-            for r in self._store.runs(experiment=experiment)
+            for r in self._store.runs(experiment=experiment, job=job)
         )
 
     def runs(
@@ -1122,11 +1123,10 @@ class Scheduler:
         """Runs oldest first, filtered without advancing execution. `done` includes history."""
         return tuple(
             r
-            for r in self._store.runs(experiment=experiment)
+            for r in self._store.runs(experiment=experiment, job=job)
             if (done or not self.read(r.id).done)
             and (pool is None or r.launch.pool == pool)
             and (rent is None or r.launch.rent == rent)
-            and (job is None or r.job == job or r.launch.spec.name == job)
             and (contains is None or source.contains(r, contains))
         )
 
@@ -1558,7 +1558,7 @@ class Scheduler:
             for _ in range(free):
                 if not waiting:
                     return
-                planned = self._next_run(waiting, price, now, fit=left, session=held)
+                planned = self._next_run(waiting, price, now, fit=left)
                 if planned is None:
                     break
                 placed = len(self._store.attempts(session=held.id))
@@ -1790,9 +1790,8 @@ class Scheduler:
         price: Decimal,
         now: datetime,
         fit: int | None = None,
-        session: Session | None = None,
     ) -> PlannedRun | None:
-        """Oldest eligible run, bounded by its remaining time and shared dollars.
+        """Oldest eligible run, bounded by its remaining time and dollars.
 
         Each placement is one attempt, priced as if it had its machine alone.
         Later passes fill free slots as attempts finish, checking the limits again.

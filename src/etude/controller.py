@@ -37,7 +37,8 @@ class Pass(Record):
     failed: int = 0
     played: int = 0
     launched: str | None = None
-    state: str | None = None
+    state: Literal["queued", "running", "would launch", "not queued"] | None = None
+    reason: str | None = None
 
 
 def source_for(pool: str | None, rent: str | None, source: str | None = None) -> str:
@@ -54,7 +55,10 @@ def source_for(pool: str | None, rent: str | None, source: str | None = None) ->
     if pool is not None:
         names.update(m.storage for m in scheduler.machines(pool))
     if rent is not None:
-        names.add(next(r for r in scheduler.ondemands() if r.name == rent).storage)
+        ondemand = next((r for r in scheduler.ondemands() if r.name == rent), None)
+        if ondemand is None:
+            raise LauncherError(f"no on-demand {rent!r}")
+        names.add(ondemand.storage)
     uris = {
         default_root()
         if name is None
@@ -108,6 +112,8 @@ def advance(
     until: Until | None = None,
 ) -> list[Pass]:
     """One pass. Existing addresses stay put; explicit retries preserve delivered matches."""
+    if max_usd is not None and (not max_usd.is_finite() or max_usd < 0):
+        raise LauncherError("--max-usd must be a finite, nonnegative dollar limit")
     listed = source.keys("")
     state = observe(source, experiment.name, keys=listed)
     committed = state.committed_usd
@@ -122,12 +128,9 @@ def advance(
         and not resume
         and until is None
     )
-    jobs = (
-        [with_experiment(j, experiment.name) for j in asked(experiment.eval, state)]
-        if evaluate and experiment.eval is not None
-        else []
-    )
     before = None
+    new: list[RunRequest] = []
+    requests: list[RunRequest] = []
     if mode != "local" and callable(experiment.training):
         assert experiment.file is not None
         requests = read_job_file(
@@ -139,8 +142,27 @@ def advance(
         )
         if job is not None or seed is not None:
             requests = select_runs(requests, job=job, seed=seed)
-        new: list[RunRequest] = []
+        if resume and len(requests) != 1:
+            raise LauncherError("--resume needs one run; select --job and --seed")
+        resumed = client.standing(experiment.name) if resume else ()
         for request in requests:
+            if resume:
+                existing = next(
+                    (
+                        item
+                        for item in resumed
+                        if item.record.launch.spec.name == request.job.name
+                        and item.record.seed == request.seed
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    request = request.model_copy(update={"id": existing.record.id})
+                    committed -= (
+                        existing.status.usd
+                        if existing.status.done
+                        else existing.record.launch.spec.max_usd or Decimal(0)
+                    )
             if not resume and _show_training(request, state):
                 continue
             if not _fits(request.job, committed, max_usd):
@@ -149,8 +171,6 @@ def advance(
                 )
                 continue
             if resume:
-                if len(requests) != 1:
-                    raise LauncherError("--resume needs one run; select --job and --seed")
                 request = request.model_copy(
                     update={
                         "resume": True,
@@ -159,33 +179,17 @@ def advance(
                 )
             new.append(request)
             committed += request.job.max_usd or Decimal(0)
-        if smoke_file_first and not quote:
-            assert experiment.file is not None
-            before = smoke_file(experiment.file, requests)
-            new = before.stamp(new)
-            smoke = Smoke(steps=before.rest)
-        if new:
-            if quote:
-                for request in new:
-                    print(f"{request.id}  new, would launch")
-                show_quote(client.quote(new, pool, rent=rent))
-            else:
-                submit = client.queue if mode == "queue" else client.launch
-                ids = submit(new, pool, rent=rent)
-                statuses = {
-                    item.record.id: item.status for item in client.standing(experiment.name)
-                }
-                for identity in ids:
-                    status = statuses[identity]
-                    print(f"{identity}  new, {'queued' if status.phase == 'queued' else 'running'}")
-    if (
-        experiment.eval is None
-        or job is not None
-        or seed is not None
-        or resume
-        or until is not None
-    ):
-        return []
+    jobs = (
+        [with_experiment(j, experiment.name) for j in asked(experiment.eval, state)]
+        if evaluate and experiment.eval is not None
+        else []
+    )
+    if smoke_file_first and callable(experiment.training) and not quote:
+        assert experiment.file is not None
+        before = smoke_file(experiment.file, requests)
+        new = before.stamp(new)
+        smoke = Smoke(steps=before.rest)
+    planned = list(new)
     running = {
         key for run in state.eval_runs if run.state in {"queued", "running"} for key in run.matches
     }
@@ -196,7 +200,7 @@ def advance(
     passes: list[Pass] = []
     if smoke_file_first and before is None and not quote:
         assert experiment.file is not None
-        before = smoke_file(experiment.file, ())
+        before = smoke_file(experiment.file, steps=("eval", "report"), source=source)
         smoke = Smoke(steps=before.rest)
     stored = StoredRuns.read(experiment.name, source, keys=listed) if jobs else None
     for executable in jobs:
@@ -205,6 +209,7 @@ def advance(
             spec.tournament,
             experiment=experiment.name,
             checkpoints=tuple(each.ref for each in spec.checkpoints),
+            enter=spec.entrants,
             runs=stored,
             lines=state.lines,
         )
@@ -238,32 +243,47 @@ def advance(
                     while identity in taken:
                         identity = f"{stem}-{number}"
                         number += 1
-                    if quote:
-                        done = done.model_copy(
-                            update={"launched": identity, "state": "would launch"}
-                        )
-                        show_quote(
-                            client.quote([RunRequest(id=identity, job=executable)], pool, rent=rent)
-                        )
-                    else:
-                        submit = client.queue if mode == "queue" else client.launch
-                        (identity,) = submit(
-                            RunRequest(id=identity, job=executable, smoke=smoke), pool, rent=rent
-                        )
-                        done = done.model_copy(
-                            update={
-                                "launched": identity,
-                                "state": "queued" if mode == "queue" else "running",
-                            }
-                        )
+                    planned.append(RunRequest(id=identity, job=executable, smoke=smoke))
+                    done = done.model_copy(update={"launched": identity})
                     running.update(m.key for m in pending)
                     taken.add(identity)
                     committed += executable.max_usd or Decimal(0)
                 else:
                     done = done.model_copy(
                         update={
-                            "state": f"not queued: --max-usd {max_usd} (${committed:.2f} committed)"
+                            "state": "not queued",
+                            "reason": f"--max-usd {max_usd} (${committed:.2f} committed)",
                         }
                     )
         passes.append(done)
+    if planned:
+        if quote:
+            for request in new:
+                print(f"{request.id}  new, would launch")
+            show_quote(client.quote(planned, pool, rent=rent))
+            passes = [
+                p.model_copy(update={"state": "would launch"}) if p.launched else p for p in passes
+            ]
+        else:
+            submit = client.queue if mode == "queue" else client.launch
+            submit(planned, pool, rent=rent)
+            statuses = {item.record.id: item.status for item in client.standing(experiment.name)}
+            for request in new:
+                assert request.id is not None
+                status = statuses[request.id]
+                print(
+                    f"{request.id}  new, {'queued' if status.phase in {'queued', 'renting'} else 'running'}"
+                )
+            passes = [
+                p.model_copy(
+                    update={
+                        "state": "queued"
+                        if statuses[p.launched].phase in {"queued", "renting"}
+                        else "running"
+                    }
+                )
+                if p.launched
+                else p
+                for p in passes
+            ]
     return passes

@@ -48,7 +48,7 @@ def baseline(count: int) -> dict[str, Counts]:
     selection and one indexed delivery timestamp (2026-11-11).
     """
     return {
-        "status": Counts(database=50 * count + 1),
+        "status": Counts(database=49 * count + 1),
         "runs": Counts(database=17 * count + 1),
         "tick": Counts(provider=2 * count, bucket=count, database=25 * count + 13),
     }
@@ -120,10 +120,10 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
     assert ask == Counts(database=22)  # target: ask records intent without remote effects
     # Creation also reads provider safeguards for affordable time and the reserved budget,
     # and the status it returns reads the machine's attempts for how many shared it.
-    assert wait == Counts(provider=4, bucket=1, database=78)  # known debt: wait advances work
+    assert wait == Counts(provider=4, bucket=1, database=79)  # known debt: wait advances work
 
 
-def test_cohort_git_and_database_counts(
+def test_several_run_git_and_database_counts(
     tmp_path: Path,
     repository: tuple[Path, Path],  # noqa: F811
 ) -> None:
@@ -136,7 +136,7 @@ def test_cohort_git_and_database_counts(
             rent="l4",
         )
         result = counting.snapshot()
-    assert result == Counts(git=57, database=35)  # known debt: 19 git calls per run
+    assert result == Counts(git=57, database=34)  # known debt: 19 git calls per run
 
 
 @pytest.mark.parametrize(
@@ -154,7 +154,7 @@ def test_cohort_git_and_database_counts(
         (["pools"], 57, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            35,  # shared run/job records, out membership and storage socket policy
+            34,  # shared run/job records, out membership and storage socket policy
             (
                 "numpy",
                 "boto3",
@@ -227,7 +227,7 @@ def test_phases_reads_only_retained_records(
     assert "queued" in output and "machine asked for" in output and "code started" in output
     assert "finished not recorded" in output
     assert "machine confirmed not recorded (receipt retained)" in output
-    assert result == Counts(database=8)  # one evidence selection; no external calls
+    assert result == Counts(database=7)  # one evidence selection; no external calls
 
 
 def test_reads_need_no_provider_key(

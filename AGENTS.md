@@ -230,6 +230,10 @@ queries, and modules imported at start-up. Pin those numbers in tests.
 in bounded directory or mocked-bucket fixtures. A change to a path that reaches
 another machine comes with a counting test.
 
+Experiment declarations import `TrainingJob`, `EvalJob` and `ExperimentState`
+from `etude.jobs`, where they are defined. `etude.experiment` reads state; the
+worker startup path must not import either module.
+
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any
 machine. Session is internal: one start of Etude's process on a machine, and its

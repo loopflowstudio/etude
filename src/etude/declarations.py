@@ -237,6 +237,8 @@ def _namespace(path: Path) -> dict[str, Any]:
 
 
 def read_experiment(path: Path, *, experiment: str | None = None) -> Experiment:
+    if path.suffix != ".py":
+        raise LauncherError("experiment files must be Python (.py)")
     refuse_renamed(path)
     namespace = _namespace(path)
     found = namespace.get("eval_jobs")

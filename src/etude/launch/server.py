@@ -108,7 +108,8 @@ class RunOperation(Record):
 
 class StandingRequest(Record):
     operation: Literal["standing"] = "standing"
-    experiment: str
+    experiment: str | None = None
+    job: str | None = None
 
 
 class WaitRequest(Record):
@@ -487,9 +488,11 @@ class PythonClient:
             self._request(AvailabilityRequest(ondemand=rent, timeout=timeout))
         )
 
-    def standing(self, experiment: str) -> tuple[Standing, ...]:
+    def standing(
+        self, experiment: str | None = None, *, job: str | None = None
+    ) -> tuple[Standing, ...]:
         return TypeAdapter(tuple[Standing, ...]).validate_json(
-            self._request(StandingRequest(experiment=experiment))
+            self._request(StandingRequest(experiment=experiment, job=job))
         )
 
     def record(self, run: str) -> RunRecord:
@@ -595,7 +598,7 @@ def receive(scheduler: Scheduler) -> int:
         case RunOperation(operation="cancel"):
             response = scheduler.cancel(request.run)
         case StandingRequest():
-            response = scheduler.standing(request.experiment)
+            response = scheduler.standing(request.experiment, job=request.job)
         case WaitRequest():
             response = scheduler.wait(*request.runs, every=request.every, timeout=request.timeout)
         case EvidenceRequest(operation="usage"):

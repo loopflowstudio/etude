@@ -131,7 +131,13 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     (tmp_path / "config.txt").write_text("frozen config\n")
     job = tmp_path / "job.py"
     job.write_text(
-        'from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\nfrom etude.launch.records import Job, RunRequest\nfrom pathlib import Path\nhere = Path(__file__).parent\ndef training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="sh train.sh", text=(here / "config.txt").read_text()), experiment="capacity", max_hours=0.01, max_usd=1, repo=str(here / "source with spaces"), until="steps=10", name="base").runs(1, 2)\n'
+        r"""from etude.jobs import TrainingJob
+from tests.launch.tasks import Command, RUNTIME, train_command
+from etude.launch.records import Job, RunRequest
+from pathlib import Path
+here = Path(__file__).parent
+def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="sh train.sh", text=(here / "config.txt").read_text()), experiment="capacity", max_hours=0.01, max_usd=1, repo=str(here / "source with spaces"), until="steps=10", name="base").runs(1, 2)
+"""
     )
     launched = command("launch", str(job), "--experiment", "capacity")
     assert launched.returncode == 0, launched.stderr
@@ -180,7 +186,11 @@ def test_loop_survives_an_empty_queue_and_places_later_work(
             _until_while_alive(process, heartbeat.exists)
             job = tmp_path / "job.py"
             job.write_text(
-                'from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\nfrom etude.launch.records import Job, RunRequest\ndef training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="sleep 0.2"), max_hours=0.01, max_usd=1, name="base", repo=None).runs(1, 2)\n'
+                r"""from etude.jobs import TrainingJob
+from tests.launch.tasks import Command, RUNTIME, train_command
+from etude.launch.records import Job, RunRequest
+def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="sleep 0.2"), max_hours=0.01, max_usd=1, name="base", repo=None).runs(1, 2)
+"""
             )
             assert command("launch", str(job)).returncode == 0
             scheduler = _open(remote)
@@ -252,7 +262,11 @@ def test_remote_queue_preserves_choice_without_local_database(
     assert command("pool", "add", "waiting").returncode == 0
     path = tmp_path / "queued.py"
     path.write_text(
-        'from etude.jobs import TrainingJob\nfrom tests.launch.tasks import Command, RUNTIME, train_command\nfrom etude.launch.records import Job, RunRequest\ndef training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, max_usd=1, name="base", repo=None).runs(1, 2)\n'
+        r"""from etude.jobs import TrainingJob
+from tests.launch.tasks import Command, RUNTIME, train_command
+from etude.launch.records import Job, RunRequest
+def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, max_usd=1, name="base", repo=None).runs(1, 2)
+"""
     )
     result = command("queue", str(path), "--pool", "waiting")
     assert result.returncode == 0, result.stderr

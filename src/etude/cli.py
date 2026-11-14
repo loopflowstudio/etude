@@ -99,7 +99,7 @@ def _submit(
             return
         raise typer.BadParameter("a Python experiment FILE is required")
     import time
-    from decimal import Decimal
+    from decimal import Decimal, InvalidOperation
 
     from etude.controller import advance, source_for
     from etude.declarations import read_experiment, read_job_file
@@ -115,6 +115,10 @@ def _submit(
         raise LauncherError("--until needs --resume")
     if resume and quote:
         raise LauncherError("--resume cannot be combined with --quote")
+    try:
+        budget = None if max_usd is None else Decimal(max_usd)
+    except InvalidOperation:
+        raise LauncherError("--max-usd must be a dollar amount") from None
     storage = storage_from_uri(source_for(pool, rent, source))
     try:
         while True:
@@ -124,7 +128,7 @@ def _submit(
                 pool=pool,
                 rent=rent,
                 mode="queue" if queued else "launch",
-                max_usd=None if max_usd is None else Decimal(max_usd),
+                max_usd=budget,
                 quote=quote,
                 smoke_file_first=smoke,
                 given=ctx.args,
@@ -154,6 +158,8 @@ def _show_pass(done: Pass) -> None:
         line += f", {done.played} played"
     elif done.state:
         line += f", {done.state}"
+        if done.reason:
+            line += f": {done.reason}"
     print(line, flush=True)
 
 
