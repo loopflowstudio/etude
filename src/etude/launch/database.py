@@ -34,7 +34,6 @@ from etude.launch.errors import SchemaAdvanced
 from etude.launch.records import (
     RETRYABLE,
     Cause,
-    Cohort,
     Diagnostic,
     Hardware,
     Image,
@@ -571,7 +570,6 @@ class Database:
                 lambda row: Provider.model_validate(dict(row)),
             ),
             "storages": ("SELECT * FROM storages", lambda row: Storage.model_validate(dict(row))),
-            "cohorts": ("SELECT * FROM cohorts", lambda row: Cohort.model_validate(dict(row))),
         }
         bodies: dict[str, type[Record]] = {
             "launches": Launch,
@@ -932,8 +930,8 @@ class Database:
         row = self._db.execute("SELECT body FROM ondemands WHERE name = ?", (name,)).fetchone()
         return self.pool(name) if row is None else OnDemand.model_validate_json(row[0])
 
-    def name_controller_pool(self) -> None:
-        """The controller's built-in machine must not be advertised as client-local.
+    def name_server_pool(self) -> None:
+        """The server's built-in machine must not be advertised as client-local.
 
         Only labels and their references change. Journal IDs and receipts stay put.
         """
@@ -941,15 +939,15 @@ class Database:
             return
         with self._together():
             if self._db.execute(
-                "SELECT 1 FROM pools WHERE name='controller' UNION SELECT 1 FROM ondemands"
-                " WHERE name='controller'"
+                "SELECT 1 FROM pools WHERE name='server' UNION SELECT 1 FROM ondemands"
+                " WHERE name='server'"
             ).fetchone():
-                raise LauncherError("cannot rename local pool: 'controller' is already named")
-            self._write("UPDATE pools SET name='controller' WHERE name='local'")
+                raise LauncherError("cannot rename local pool: 'server' is already named")
+            self._write("UPDATE pools SET name='server' WHERE name='local'")
             for table in ("machines", "runs"):
-                self._write(f"UPDATE {table} SET pool='controller' WHERE pool='local'")
+                self._write(f"UPDATE {table} SET pool='server' WHERE pool='local'")
             self._write(
-                "UPDATE settings SET value='controller' WHERE name='default_pool' AND value='local'"
+                "UPDATE settings SET value='server' WHERE name='default_pool' AND value='local'"
             )
 
     def set_pool_startup(self, name: str, seconds: float | None) -> None:
@@ -1015,12 +1013,11 @@ class Database:
         )
         return tuple(_machine_from_row(row) for row in rows)
 
-    # Jobs, runs and cohorts
+    # Jobs and runs
 
     def launch(
         self,
         runs: Sequence[RunRecord],
-        cohort: Cohort | None,
         attempts: Sequence[RunAttempt] = (),
         *,
         launch: str | None = None,
@@ -1028,19 +1025,6 @@ class Database:
         with self._together():
             for supply in {self.session(a.session).supply for a in attempts}:
                 self.check_lock(supply)
-            if cohort is not None:
-                try:
-                    self._write(
-                        "INSERT INTO cohorts(name, parallel, max_usd, created_at) VALUES (?, ?, ?, ?)",
-                        (
-                            cohort.name,
-                            cohort.parallel,
-                            None if cohort.max_usd is None else str(cohort.max_usd),
-                            cohort.created_at.isoformat(),
-                        ),
-                    )
-                except sqlite3.IntegrityError as error:
-                    raise LauncherError(f"cohort {cohort.name!r} already exists") from error
             evidence = self.launch_evidence(launch) if launch is not None else None
             resuming = (
                 {r.run for r in evidence.requests if r.resume_version is not None}
@@ -1072,9 +1056,9 @@ class Database:
                     )
                     continue
                 self._write(
-                    """INSERT INTO runs(id, job, spec, seed, pool, rent, cohort,
+                    """INSERT INTO runs(id, job, spec, seed, pool, rent,
                        created_at, autorun, queued, params, source, smoke)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         run.id,
                         run.job,
@@ -1082,7 +1066,6 @@ class Database:
                         run.seed,
                         run.launch.pool,
                         run.launch.rent,
-                        run.cohort,
                         run.launch.created_at.isoformat(),
                         int(run.launch.autorun),
                         int(run.launch.queued),
@@ -1108,36 +1091,25 @@ class Database:
             )
         return _run_from_row(row)
 
-    def runs(self, *, experiment: str | None = None) -> tuple[RunRecord, ...]:
-        if experiment is None:
-            rows = self._db.execute(f"{_RUNS} ORDER BY r.seq")
-        else:
-            rows = self._db.execute(
-                f"{_RUNS} WHERE json_extract(r.spec, '$.experiment') = ? ORDER BY r.seq",
-                (experiment,),
-            )
+    def runs(
+        self, *, experiment: str | None = None, job: str | None = None
+    ) -> tuple[RunRecord, ...]:
+        clauses: list[str] = []
+        values: list[str] = []
+        if experiment is not None:
+            clauses.append("json_extract(r.spec, '$.experiment') = ?")
+            values.append(experiment)
+        if job is not None:
+            clauses.append("(r.job = ? OR json_extract(r.spec, '$.name') = ?)")
+            values.extend((job, job))
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self._db.execute(f"{_RUNS}{where} ORDER BY r.seq", values)
         return tuple(_run_from_row(row) for row in rows)
 
     def job_runs(self, job: str) -> tuple[RunRecord, ...]:
         """Every run of one job, oldest first: its seeds side by side."""
         rows = self._db.execute(f"{_RUNS} WHERE r.job = ? ORDER BY r.seq", (job,))
         return tuple(_run_from_row(row) for row in rows)
-
-    def cohort_exists(self, name: str) -> bool:
-        return (
-            self._db.execute("SELECT 1 FROM cohorts WHERE name=?", (name,)).fetchone() is not None
-        )
-
-    def cohort(self, name: str) -> Cohort:
-        row = self._db.execute("SELECT * FROM cohorts WHERE name = ?", (name,)).fetchone()
-        if row is None:
-            raise LauncherError(f"no cohort {name!r}")
-        return Cohort(
-            name=row["name"],
-            parallel=row["parallel"],
-            max_usd=None if row["max_usd"] is None else Decimal(row["max_usd"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-        )
 
     def waiting(self, supply: str) -> tuple[RunRecord, ...]:
         """Runs that may use this pool or on-demand and want a new attempt, oldest first.
@@ -1377,27 +1349,6 @@ class Database:
                ORDER BY w.seq"""
         )
         return tuple(_session_from_row(row) for row in rows)
-
-    def cohort_sessions(self, name: str) -> tuple[Session, ...]:
-        rows = self._db.execute(
-            f"""{_SESSIONS} WHERE w.id IN (SELECT a.session FROM attempts a
-               JOIN runs r ON r.id = a.run WHERE r.cohort = ?) ORDER BY w.seq""",
-            (name,),
-        )
-        return tuple(_session_from_row(row) for row in rows)
-
-    def cohort_runs(self, name: str) -> tuple[RunRecord, ...]:
-        self.cohort(name)  # raises if no such cohort
-        rows = self._db.execute(f"{_RUNS} WHERE r.cohort = ? ORDER BY r.seq", (name,))
-        return tuple(_run_from_row(row) for row in rows)
-
-    def cohort_attempts(self, name: str) -> tuple[RunAttempt, ...]:
-        rows = self._db.execute(
-            """SELECT a.* FROM attempts a JOIN runs r ON r.id = a.run
-               WHERE r.cohort = ? ORDER BY a.seq""",
-            (name,),
-        )
-        return tuple(_attempt_from_row(row) for row in rows)
 
     # Attempts
 

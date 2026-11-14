@@ -83,7 +83,7 @@ def test_failed_preparation_survives_restart_and_does_not_consume_id(
     assert snapshot.launches[0].id == caught.value.launch
     assert snapshot.streams == ()
     monkeypatch.setattr(source, "freeze", original)
-    assert scheduler.launch(requested, rent="l4") == "baseline-seed-7"
+    assert scheduler.launch(requested, rent="l4")[0] == "baseline-seed-7"
     assert len(store.runs()) == 1
     assert [
         launch.state for launch in scheduler.logs(refresh=True, run="baseline-seed-7").launches
@@ -129,22 +129,19 @@ def test_partial_cohort_retains_shared_failure_without_admitting_members(
         return create(packet)
 
     monkeypatch.setattr(b.service, "create", fail_second)
-    with pytest.raises(LaunchError):
-        b.scheduler.launch_cohort(
-            "pair",
-            [RunRequest(id="one", job=job()), RunRequest(id="two", job=job())],
-            rent="l4",
-            parallel=2,
-        )
-    assert b.store.runs() == ()
-    assert not b.store.cohort_exists("pair")
+    ids = b.scheduler.launch(
+        [RunRequest(id="one", job=job()), RunRequest(id="two", job=job())], rent="l4"
+    )
+    assert ids == ("one", "two")
+    assert b.scheduler.read("one").machine is not None
+    assert b.scheduler.read("two").phase == "queued"
     first, second = (
         b.scheduler.logs(refresh=True, run="one"),
         b.scheduler.logs(refresh=True, run="two"),
     )
     assert first.launches == second.launches
     assert "no capacity" in render(first)
-    assert all(s.ended_at or s.refused_at for s in b.store.sessions())
+    assert b.store.sessions()[1].refused_at is not None
     assert b.service.creates == 2
 
 
@@ -153,7 +150,7 @@ def test_all_attempts_retained_after_cleanup_and_storage_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     b = bench(tmp_path)
-    run = b.scheduler.queue(job(), rent="l4")
+    (run,) = b.scheduler.queue(job(), rent="l4")
     cursor = LogCursor()
     snapshots = [b.scheduler.logs(refresh=True, run=run)]
     followed = [cursor.render(snapshots[-1])]
@@ -253,7 +250,7 @@ def test_bucket_completion_during_log_read_keeps_cached_output_refreshable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     b = bench(tmp_path)
-    run = b.scheduler.launch(job(), rent="l4")
+    (run,) = b.scheduler.launch(job(), rent="l4")
     attempt = b.scheduler.attempts(run)[0]
     session = b.service.sessions[attempt.session]
     packet = session.packet.model_copy(update={"work": tuple(w for w, _ in session.work())})
@@ -472,7 +469,7 @@ def test_follow_positions_survive_truncation_without_repeating_text() -> None:
 
 def test_log_reads_and_phases_never_drive_execution(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    run = b.scheduler.launch(job(), rent="l4")
+    (run,) = b.scheduler.launch(job(), rent="l4")
     counting = Counting(b.store, b.service)
     with counting.record():
         b.scheduler.logs(refresh=True, run=run)
@@ -492,9 +489,9 @@ def test_log_reads_and_phases_never_drive_execution(tmp_path: Path) -> None:
 def test_machine_view_excludes_job_output(tmp_path: Path) -> None:
     b = bench(tmp_path)
     machine = b.scheduler.rent("l4", 2)
-    first = b.scheduler.launch(RunRequest(id="first", job=job()), rent="l4")
+    (first,) = b.scheduler.launch(RunRequest(id="first", job=job()), rent="l4")
     b.run(601)
-    second = b.scheduler.launch(RunRequest(id="second", job=job()), rent="l4")
+    (second,) = b.scheduler.launch(RunRequest(id="second", job=job()), rent="l4")
     assert "log of" not in render(b.scheduler.logs(refresh=True, machine=machine))
     assert b.scheduler.attempts(first)[0].id not in job_text(
         b.scheduler.logs(refresh=True, run=second)
@@ -529,7 +526,7 @@ def test_cached_partial_output_and_refresh_error_are_both_visible(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     b = bench(tmp_path)
-    identity = b.scheduler.launch(job(), rent="l4")
+    (identity,) = b.scheduler.launch(job(), rent="l4")
     before = b.scheduler.logs(refresh=True, run=identity)
 
     def unavailable(*args: object, **kwargs: object) -> LogStream:
@@ -547,7 +544,7 @@ def test_cached_partial_output_and_refresh_error_are_both_visible(
 
 def test_queue_is_not_mistaken_for_complete_logs(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    identity = b.scheduler.queue(job(), rent="l4")
+    (identity,) = b.scheduler.queue(job(), rent="l4")
     snapshot = b.scheduler.logs(refresh=True, run=identity)
     assert snapshot.streams == () and not snapshot.complete
     assert b.service.creates == 0
@@ -561,9 +558,9 @@ def test_diagnostics_use_positions_without_showing_another_attempts_error(
 ) -> None:
     b = bench(tmp_path)
     b.scheduler.rent("l4", 2)
-    first = b.scheduler.launch(job(), rent="l4")
+    (first,) = b.scheduler.launch(job(), rent="l4")
     b.run(601)
-    second = b.scheduler.launch(job(), rent="l4")
+    (second,) = b.scheduler.launch(job(), rent="l4")
     previous = b.scheduler.attempts(first)[0]
     error = Diagnostic(
         id="previous-error",
@@ -627,7 +624,7 @@ def test_client_chosen_id_freezes_source_before_admission(
 ) -> None:
     repo, _ = repository
     b = bench(tmp_path)
-    identity = b.scheduler.queue(
+    (identity,) = b.scheduler.queue(
         RunRequest(id="my-scientific-id", job=job(repo=str(repo))), rent="l4"
     )
     record = b.scheduler.record(identity)
@@ -639,7 +636,7 @@ def test_client_chosen_id_freezes_source_before_admission(
     assert record.launch.spec.revision != "HEAD"
 
 
-def test_remote_preparation_failure_keeps_controller_evidence(
+def test_remote_preparation_failure_keeps_server_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -648,7 +645,7 @@ def test_remote_preparation_failure_keeps_controller_evidence(
     b.scheduler.fail_launch(launch.id, "source publication failed: denied")
     assert "source publication failed" in render(b.scheduler.logs(refresh=True, run="remote-id"))
     assert b.store.runs() == () and b.service.creates == 0
-    assert b.scheduler.launch(RunRequest(id="remote-id", job=job()), rent="l4") == "remote-id"
+    assert b.scheduler.launch(RunRequest(id="remote-id", job=job()), rent="l4")[0] == "remote-id"
 
 
 @pytest.mark.parametrize("failure", ["install", "spawn", "import", "entry"])
@@ -660,7 +657,7 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
     storage_denied: bool,
 ) -> None:
     b = bench(tmp_path)
-    identity = b.scheduler.launch(
+    (identity,) = b.scheduler.launch(
         RunRequest(id="install-failure", job=job(max_attempts=1)), rent="l4"
     )
     session = b.scheduler.session(b.scheduler.attempts(identity)[0].session)
@@ -805,7 +802,7 @@ def test_cleanup_failure_retains_reason_and_never_claims_deletion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     b = bench(tmp_path)
-    identity = b.scheduler.launch(job(), rent="l4")
+    (identity,) = b.scheduler.launch(job(), rent="l4")
 
     def unavailable(session: str) -> None:
         raise OSError("deletion endpoint unavailable")
@@ -823,7 +820,7 @@ def test_expired_log_read_uses_cache_without_starting_another_request(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     b = bench(tmp_path)
-    identity = b.scheduler.launch(job(), rent="l4")
+    (identity,) = b.scheduler.launch(job(), rent="l4")
     before = b.scheduler.logs(refresh=True, run=identity)
     clock = iter([0.0, 2.0, 2.0, 2.0])
     monkeypatch.setattr("etude.deadline.time.monotonic", lambda: next(clock))
@@ -905,7 +902,7 @@ def test_courier_owns_child_through_failure_cleanup_and_cached_restart(
     failure: str,
 ) -> None:
     b = bench(tmp_path)
-    identity = b.scheduler.launch(
+    (identity,) = b.scheduler.launch(
         RunRequest(id="courier-failure", job=job(max_attempts=1)), rent="l4"
     )
     session = b.scheduler.session(b.scheduler.attempts(identity)[0].session)

@@ -25,17 +25,19 @@ from typing import cast
 
 from pydantic import BaseModel
 
+from etude.cache import Artifact, Content, ContentMismatch, Corrupt
 from etude.call import changed_config, config_type
+from etude.declarations import find_training_run, format_known_run, read_training_jobs, select_runs
 from etude.errors import EtudeError, LauncherError
-from etude.experiment_file import defined_functions
+from etude.experiment import observe
+from etude.experiment_file import defined_functions, refuse_renamed
 from etude.identity import run_address
 from etude.jobs import load_job_function
-from etude.launch.job_file import read_job_file, select_runs
 from etude.records import RunRecord
 from etude.run import RunFiles, run_name_taken, validate_resume
-from etude.spec import Until
+from etude.spec import Input, Until, Variable
 from etude.stopping import Stopped
-from etude.storage import DirectoryStorage, default_root, run_directory
+from etude.storage import DirectoryStorage, default_root, place_artifact, run_directory
 from etude.train.read import read
 from etude.train.state import saved_states
 
@@ -55,32 +57,41 @@ def train(
     """Train the selected jobs' seeds here, stopping the selection after a saved stop.
 
     Files with only `train(config)` define one job with seed 0. Files with
-    `runs()` use exactly the same declarations and addresses as a launch.
+    `training_jobs()` use exactly the same declarations and addresses as a launch.
     """
     if seconds is not None and (not math.isfinite(seconds) or seconds <= 0):
         raise ValueError("--seconds must be finite and positive")
     if file.suffix != ".py":
-        raise ValueError("a Python file defining train(config) or runs() is required")
+        raise ValueError("a Python file defining train(config) or training_jobs() is required")
     file = file.resolve()
     label = experiment or file.stem
-    if "runs" in defined_functions(file):
+    functions = defined_functions(file)
+    refuse_renamed(file)
+    if "training_jobs" in functions:
+        state = observe(default_root(), label)
         requests = select_runs(
-            read_job_file(file, experiment=experiment, local=True), job=job, seed=seed
+            read_training_jobs(file, experiment=experiment, local=True, state=state),
+            job=job,
+            seed=seed,
         )
-        prepared: list[_Training | _Finished] = []
-        refusals: list[str] = []
-        for request in requests:
-            try:
-                if request.id is None:
-                    raise ValueError(
-                        "local training needs an addressed request; return a Job or give RunRequest.id"
-                    )
-                prepared.append(
-                    _prepare(
+        with TemporaryDirectory(prefix="etude-inputs-") as folder:
+            prepared: list[_Training | _Finished] = []
+            refusals: list[str] = []
+            for request in requests:
+                assert request.id is not None  # read_training_jobs addresses every run
+                try:
+                    prior = find_training_run(request, state)
+                    known = format_known_run(request, prior)
+                    if known is not None and job is None and seed is None and not resume:
+                        print(known, file=sys.stderr if json_output else sys.stdout)
+                        continue
+                    identity = run_address(prior.name, label) if prior is not None else request.id
+                    directory = Path(folder) / "runs" / request.id
+                    attempt = _prepare(
                         file,
                         load_job_function(request.job, current=True),
                         label=request.job.experiment or label,  # a job may name its own
-                        identity=request.id,
+                        identity=identity,
                         job=request.job.name,
                         initial=request.job.config,
                         config=config,
@@ -88,24 +99,29 @@ def train(
                         resume=resume,
                         until=until or request.job.until,
                         seconds=seconds,
+                        known=prior is not None,
+                        environment=request.job.environment,
+                        inputs_directory=directory,
                     )
-                )
-            except (EtudeError, LauncherError, ValueError, TypeError) as error:
-                if len(requests) == 1:
-                    raise
-                refusals.append(f"{request.id or request.job.name}: {error}")
-        if refusals:
-            raise EtudeError("selection_refused", detail="\n".join(refusals))
-        return _train_each(prepared, json_output=json_output)
+                    if isinstance(attempt, _Training):
+                        _place_inputs(request.job.inputs, directory, Path(folder) / "artifacts")
+                    prepared.append(attempt)
+                except (EtudeError, LauncherError, ValueError, TypeError) as error:
+                    if len(requests) == 1:
+                        raise
+                    refusals.append(f"{request.id}: {error}")
+            if refusals:
+                raise EtudeError("selection_refused", detail="\n".join(refusals))
+            return _train_each(prepared, json_output=json_output)
     if job not in (None, file.stem) or seed not in (None, 0):
         raise ValueError(
-            "select the file's sole job and seed 0; define runs() for other jobs or seeds"
+            "select the file's sole job and seed 0; define training_jobs() for other jobs or seeds"
         )
     sys.path.insert(0, str(file.parent))
     try:
         found = runpy.run_path(str(file)).get("train")
         if not callable(found):
-            raise ValueError(f"{file.name}: define train(config)")
+            raise ValueError(f"{file.name}: define train(config) or training_jobs()")
         return _train_each(
             [
                 _prepare(
@@ -141,14 +157,23 @@ def _prepare(
     resume: bool,
     until: Until | None,
     seconds: float | None,
+    known: bool = False,
+    environment: tuple[Variable, ...] = (),
+    inputs_directory: Path | None = None,
 ) -> _Training | _Finished:
-    """Check one run's identity and build its attempt, touching nothing stored."""
+    """Check one run's identity and build its attempt, touching nothing stored.
+
+    A known run that stored nothing here (a launch cancelled or lost before its
+    first save) has no attempt to resume, so `resume` starts its first one.
+    """
     base = default_root()
     root = run_directory(base, label, identity)[1]
     prior = RunFiles(root).run_file()
     kind = config_type(recipe)
     if resume and prior is None:
-        raise EtudeError("run_not_found", 404, detail=run_address(identity, label))
+        if not known:
+            raise EtudeError("run_not_found", 404, detail=run_address(identity, label))
+        resume = False
     # Given fields change the declared config; an omitted config resumes the stored one.
     stored = prior.config_json if prior is not None and resume and config is None else initial
     settings = changed_config(kind, "{}" if config is None else config, stored=stored)
@@ -170,6 +195,7 @@ def _prepare(
         check=False,
     )
     values = {
+        **{v.name: v.value for v in environment},
         "ETUDE_EXPERIMENT": label,
         "ETUDE_RUN": identity.rsplit("/", 1)[-1],
         "ETUDE_RUN_ADDRESS": run_address(identity, label),
@@ -180,6 +206,8 @@ def _prepare(
     }
     if "ETUDE_HOME" in os.environ:
         values["ETUDE_HOME"] = os.environ["ETUDE_HOME"]
+    if inputs_directory is not None:
+        values["ETUDE_INPUTS_DIR"] = str(inputs_directory)
     if seed is not None:  # a historical run may have declared none
         values["ETUDE_SEED"] = str(seed)
     if commit.returncode == 0:
@@ -235,12 +263,12 @@ def _train_each(attempts: list[_Training | _Finished], *, json_output: bool) -> 
 
 def _train(attempt: _Training, *, json_output: bool) -> bool:
     """Call the recipe as one attempt; true when it stopped after saving."""
-    stopped = False
     values = dict(attempt.values)
     if attempt.seconds is not None:
         values["ETUDE_DEADLINE"] = datetime.fromtimestamp(
             time.time() + attempt.seconds, UTC
         ).isoformat()
+    stopped = False
     with _attempt(values):
         if not json_output:
             print(attempt.address, flush=True)
@@ -252,6 +280,40 @@ def _train(attempt: _Training, *, json_output: bool) -> bool:
     if json_output:
         _print_outcome(attempt.address, attempt.experiment, stopped=stopped)
     return stopped
+
+
+def _place_inputs(inputs: tuple[Input, ...], directory: Path, artifacts: Path) -> None:
+    """Verify each distinct input once per pass and link the run's names to it."""
+    directory.mkdir(parents=True)
+    for given in inputs:
+        uri = given.uri
+        if uri is None:
+            if given.run is None:
+                raise EtudeError(
+                    "input_not_located",
+                    detail=f"{given.name}: bucket key {given.key!r}; give uri or run for local training",
+                )
+            uri = DirectoryStorage(default_root()).uri(f"{given.run}/{given.key}")
+        content = Content(sha256=given.sha256, size_bytes=given.size_bytes)
+        path = artifacts / content.name
+        try:
+            if not path.exists():
+                place_artifact(
+                    Artifact(location=uri, sha256=given.sha256, size_bytes=given.size_bytes),
+                    path,
+                )
+                path.chmod(0o444)
+        except FileNotFoundError:
+            raise EtudeError(
+                "input_undelivered", 404, detail=f"{given.name}: {uri}: file is missing"
+            ) from None
+        except (ContentMismatch, Corrupt):
+            raise EtudeError(
+                "input_undelivered", 409, detail=f"{given.name}: {uri}: bytes differ"
+            ) from None
+        link = directory / given.name  # a checkpoint folder's members are FOLDER/MEMBER
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(path)
 
 
 def _print_outcome(address: str, experiment: str, *, stopped: bool) -> None:
@@ -313,7 +375,8 @@ def _resumed(
 @contextmanager
 def _attempt(values: dict[str, str]) -> Iterator[None]:
     # Clear inherited launch settings: a local call is its own attempt.
-    prior = {key: value for key, value in os.environ.items() if key.startswith("ETUDE_")}
+    names = set(values) | {key for key in os.environ if key.startswith("ETUDE_")}
+    prior = {key: os.environ[key] for key in names if key in os.environ}
     signals = (signal.SIGINT, signal.SIGTERM)
     handlers = {sig: signal.getsignal(sig) for sig in signals}
     with TemporaryDirectory(prefix="etude-stop-") as folder:
@@ -335,6 +398,6 @@ def _attempt(values: dict[str, str]) -> Iterator[None]:
             for sig, handler in handlers.items():
                 signal.signal(sig, handler)
             for key in list(os.environ):
-                if key.startswith("ETUDE_"):
+                if key in names or key.startswith("ETUDE_"):
                     os.environ.pop(key)
             os.environ.update(prior)

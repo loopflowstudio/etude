@@ -19,8 +19,8 @@ from etude.errors import LauncherError
 from etude.launch.client import _open
 from etude.launch.database import Database, launcher_file
 from etude.launch.errors import ProviderUnavailable
-from etude.launch.executor import Execution, Executor, Refused
-from etude.launch.machines import MachineRequest
+from etude.launch.executor import Execution, Executor
+from etude.launch.machines import MachineRequest, Refused
 from etude.launch.providers import bootstrap as bootstrap_module
 from etude.launch.providers.bootstrap import guard
 from etude.launch.providers.lium.api import Create, LiumAPI, Pod
@@ -413,7 +413,7 @@ def test_public_rental_budget_covers_fallback_timer(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("cancel", [False, True])
-def test_lium_executes_and_retains_outputs_before_controller_deletion(
+def test_lium_executes_and_retains_outputs_before_server_deletion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     cancel: bool,
@@ -430,14 +430,14 @@ def test_lium_executes_and_retains_outputs_before_controller_deletion(
     monkeypatch.setattr("etude.launch.providers.lium.machines._start", start)
     errors: list[Exception] = []
 
-    def leave_deletion_to_controller() -> None:
+    def leave_deletion_to_server() -> None:
         pass
 
     def worker() -> None:
         try:
             run_courier(
                 environments[0]["ETUDE_BOOTSTRAP_URL"],
-                leave_deletion_to_controller,
+                leave_deletion_to_server,
                 root=tmp_path / "pod",
                 send=storage,
                 every=0.05,
@@ -453,9 +453,7 @@ def test_lium_executes_and_retains_outputs_before_controller_deletion(
         max_usd=Decimal(2),
         max_attempts=1,
     )
-    runs = scheduler.launch_cohort(
-        "lium-cohort", job.runs(17) if cancel else job.runs(17, 18), rent="5090", max_usd=Decimal(2)
-    )
+    runs = scheduler.launch(job.runs(17) if cancel else job.runs(17, 18), rent="5090")
     thread: threading.Thread | None = None
     try:
         assert market.pod is not None
@@ -610,7 +608,7 @@ def test_lium_bootstrap_requires_watchdog_before_install(
     assert pod_main(["rental", "boot"]) == 1
     assert events == (["guardian spawned", "install"] if guardian_ready else ["guardian spawned"])
     log = (tmp_path / "sessions/fixture/bootstrap.log").read_text()
-    assert "provider timer and controller own machine deletion" in log
+    assert "provider timer and server own machine deletion" in log
     assert "bootstrap exit" in log
 
 
@@ -661,7 +659,7 @@ def test_unacknowledged_timer_still_allows_cleanup_at_startup_deadline(
         assert market.pod is not None
         clock[0] += timedelta(seconds=11)
         scheduler.tick()  # recover the receipt without trying to start expired work
-        scheduler.tick()  # controller deletes despite the failed schedule acknowledgement
+        scheduler.tick()  # server deletes despite the failed schedule acknowledgement
         assert market.pod is None
         assert store.machine(name).deleted_at is not None
         assert market.counts[f"POST executors/{NODE}/rent"] == 1

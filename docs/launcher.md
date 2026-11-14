@@ -19,9 +19,10 @@ before renting from R. A run that cannot start yet waits.
 
 | Command | Meaning |
 | --- | --- |
-| `etude queue FILE.py [--pool P] [--rent R]` | Add runs. They start when a machine is free or can be rented; lack of capacity leaves them waiting. |
-| `etude launch FILE.py [--pool P] [--rent R]` | Acquire machines for the first runs (up to cohort parallelism), then record the runs. Failure records no runs. |
-| `etude launch FILE.py ... --quote` | Print the machines the first wave would take and their planned rental costs. Rents nothing. |
+| `etude queue FILE.py [--pool P] [--rent R]` | Add the file's training and eval runs that have not been run. They start when a machine is free or can be rented; lack of capacity leaves them waiting. |
+| `etude launch FILE.py [--pool P] [--rent R]` | The same runs, with machines now: place as many as free slots, owned machines and new rentals allow, and queue the rest. It fails, recording no runs, only when none can be placed. |
+| `etude launch FILE.py ... --quote` | Print what the pass decided for every declared run and tournament, the machines the first wave would take and their planned rental costs. Submits and rents nothing. |
+| `etude train FILE.py`, `etude eval FILE.py` | Do the file's training, or play its evals, on this computer, without the launcher. |
 | `etude smoke FILE.py` | Run the file's training, evaluation and report in smoke form on this computer. Spends nothing. `launch --smoke` and `queue --smoke` do this first ([Smoke before you spend](#smoke-before-you-spend)). |
 | `etude availability R` | Ask R's provider what it would rent now, at what price. Rents nothing. |
 | `etude rent R --hours H` | Rent a machine for a window of time; it takes queued runs. |
@@ -31,21 +32,23 @@ Launch claims free machines and asks the provider to confirm any new machines
 before recording runs. Each pool and on-demand has a placement lock with an
 owner and a five-minute expiry; a launch holds the locks of everything it may
 use, without holding a database transaction. Other pools, on-demands and
-readers keep working. Machines are acquired with empty inboxes; only after all first-wave
-machines are confirmed are runs and attempts recorded together and work delivered.
-A refusal or unknown create reply is an error, with no runs recorded. Confirmed
-machines made for the failed launch are deleted; unknown creates retain their
+readers keep working. Machines are acquired with empty inboxes; only after the machines for the runs
+it can place are confirmed are runs and attempts recorded together and work
+delivered. A run with no free slot, and no machine its on-demand may still
+rent, is recorded queued. When no run can be placed, by refusal or an unknown
+create reply, the launch is an error with no runs recorded. Confirmed
+machines made for a failed launch are deleted; unknown creates retain their
 identity for lookup and cleanup. Machine acquisition and rental records and costs remain in history.
 A crashed launch's lock expires, and the next scheduling pass cleans up its unused
 machines. New machines also retain their independent deadline.
 
 The guarantee is capacity at admission, not successful boot or training. Later
-boot failure follows existing retry rules. Later waves use the same queue as
-ordinary submissions. Launch checks the on-demand's machine limit,
+boot failure follows existing retry rules. The runs a launch queued start through the same queue as ordinary
+submissions, with no further command. Launch checks the on-demand's machine limit,
 availability, price ceiling and dollars for the requested hours before spending.
 
 Queue submission only writes intent and never waits for a provider. The standing
-`etude controller run` loop, `etude wait`, or another command's scheduling pass
+`etude server run` loop, `etude wait`, or another command's scheduling pass
 matches waiting runs, visiting every pool before any on-demand, and rents
 within each on-demand's limits. Keep that loop running
 when the queue must move without further commands.
@@ -78,14 +81,14 @@ expiry it leaves its pool; an attempt still on it ends as lost with the machine
 Owned machines are never deleted. A machine bought for a window, such as SF
 Compute's, is an owned machine with that window's price and end.
 
-Python exposes `queue(job_or_run, pool, rent=...)` and
-`queue_cohort(name, runs, pool, rent=..., ...)`, with the same cohort limits as
-launch, plus `quote(...)` and `availability(rent)`. All use the configured SSH
-controller. With neither a pool nor an on-demand named, a launch uses the
+Python exposes `launch(runs, pool, rent=...)` and `queue(runs, pool, rent=...)`,
+each taking a run, a job (its seeds) or a list of them and returning the run
+ids, plus `quote(...)` and `availability(rent)`. All use the selected
+[server](#the-server). With neither a pool nor an on-demand named, a launch uses the
 configured default, initially the pool `local`.
 
 Rental admission is bounded by the job's `max_usd` and
-`max_hours`, the cohort's `max_usd`, the on-demand's price ceiling and its
+`max_hours`, the on-demand's price ceiling and its
 limit on machines at once. Quoted costs assume the quoted rate and deletion
 on time. Provider delays can exceed these budgets; external storage charges
 are excluded. These limits bound admitted rental allocations, not provider bills.
@@ -101,8 +104,7 @@ computer, SSH hosts, RunPod and Lium pods, and Vast.ai instances, without any Et
 A **Job** specifies what runs, source commit, config, target and limits. It has
 no seed or machine settings. A **run** is a job with a seed, and goes to a
 pool, an on-demand or both; a job launched with `seeds=(0, 1, 2)` is three
-runs. A **Cohort** is a named envelope of limits (`parallel`, `max_usd`) that
-runs are admitted under. A **RunAttempt**
+runs. A **RunAttempt**
 allocates a run to a machine for a bounded execution window. `status` shows the machine.
 
 `OnDemand.template` is a **MachineTemplate** that chooses the provider, GPU,
@@ -114,14 +116,13 @@ stay outside these records.
 
 ```python
 # job.py
-from etude.jobs import training
-from etude.spec import Job
+from etude.jobs import TrainingJob
 
 from train import TrainConfig, train  # train(config: TrainConfig) -> None
 
 
-def runs() -> Job:
-    return training(train, config=TrainConfig(lr=1e-3), max_hours=0.1)
+def training_jobs() -> list[TrainingJob]:
+    return [TrainingJob(name="base", train=train, config=TrainConfig(lr=1e-3), max_hours=0.1)]
 ```
 
 A job always states `max_hours`. It needs `max_usd` only when it may rent,
@@ -129,11 +130,11 @@ that is, when it names an on-demand. Sending a job with no `max_usd` to an
 on-demand is an error that says so.
 
 ```sh
-etude launch job.py
+etude launch job.py                  # job/base@0  new, running
 etude status
 etude wait
-etude logs --run RUN --follow
-etude fetch RUN checkpoint.pt out
+etude logs --run job/base@0 --follow
+etude fetch job/base@0 checkpoint.pt out
 ```
 
 With neither `--pool` nor `--rent`, launch uses the configured default,
@@ -211,17 +212,41 @@ temporary keys are kept in the courier's memory and never written to disk.
 ```python
 from decimal import Decimal
 
-from etude.experiment import observe
-from etude.jobs import evaluation, training
+from etude.jobs import EvalJob, TrainingJob
 
-job = training(train, config=TrainConfig(lr=1e-3), max_hours=6, max_usd=Decimal(30))
-weights = observe("s3://my-bucket/runs", "ppo").run("ppo").final
-check = evaluation(
-    progress, experiment="ppo", play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1)
+base = TrainingJob(
+    name="base",
+    train=train,
+    config=TrainConfig(lr=1e-3),
+    seeds=(0, 1, 2),
+    max_hours=6,
+    max_usd=Decimal(30),
 )
+wide = base.model_copy(update={"name": "wide", "config": TrainConfig(lr=1e-3, hidden=1024)})
+check = EvalJob(play=play, tournament=progress, checkpoints=saved, workers=8, max_hours=0.5)
 ```
 
-The job type decides the command. Both return a `Job` whose command imports
+A **job** is one function called with one Pydantic value, with a name, limits,
+source and inputs. `TrainingJob` and `EvalJob` are the two kinds of `Job` an
+experiment file declares:
+
+| | Calls | With | Named by | Varies by |
+| --- | --- | --- | --- | --- |
+| `TrainingJob` | one training function, `train(config)` | one config | `name=`, required | seed: each seed is one run |
+| `EvalJob` | one play function, `play(match)` | one tournament and the checkpoints to play it for | its tournament | match: checkpoint, seating and config |
+
+A job says what to run and its limits. Which machine runs it, and how many
+runs share one, belong to the launch command and its pools and on-demands
+([Several runs on one machine](#several-runs-on-one-machine)); a job has no
+field for either. `EvalJob.workers`, the parallel processes that play its
+matches, is the one setting of that kind.
+
+A typed job keeps its config's type, so a variant is a copy with a new name:
+`wide` above runs the same function under the same limits with another
+config, and its command, config text and inputs are derived afresh. Seeds,
+like a job's name and limits, are no part of its identity.
+
+The job type decides the command: it imports
 the function in the job's own environment and calls it with the config:
 `uv run python -m etude.call --function MODULE:NAME` in the checkout, which is
 then a uv project depending on `etude-sdk`, or `"$ETUDE_PYTHON" -m etude.call ...`
@@ -236,39 +261,173 @@ type of the function's one parameter and calls it in `ETUDE_SOURCE_DIR`. It
 imports nothing else of Etude before the function's own module.
 
 - **Functions** are named by import path, so they are defined at the top of a
-  module: not in the job file, `__main__` or another function. The job's
-  `repo` is the git checkout the function's file is in (for an evaluation,
+  module: not in the experiment file, `__main__` or another function. The job's
+  `repo` is the git checkout the function's file is in (for an eval job,
   `play`'s) unless `repo` is given; `repo=None` names a function installed in
   the job's environment. The module is imported from the folder its name
-  starts in, so a job file beside `train.py`, a package at the root and a
+  starts in, so an experiment file beside `train.py`, a package at the root and a
   `src/` layout all work.
 - **Configs** are Pydantic models: the model's defaults are the recipe, and its
   JSON is the job's config, so it is part of the job's identity. A config of
   another type, or one that would not validate back into the parameter's
-  type, raises `LauncherError` when the job is made, before any quote, launch
-  or rental.
+  type, raises `LauncherError` where the job is written, before any quote,
+  launch or rental. A copy made with `model_copy(update=...)` is checked when
+  the file is read.
+- **Project extras.** Set `extras=("eval",)` on `TrainingJob` or `EvalJob`
+  to select uv project extras. Etude includes them in `uv run` or its derived
+  `uv sync` preparation; the preparation key includes that selection. Use
+  `environment=(Variable(name="NAME", value="value"),)` for ordinary job
+  settings (`Variable` is from `etude.spec`). Replace edits to `job.command`
+  with these fields. Remove `UV_NO_SYNC=1`: Etude owns synchronization and
+  uses the prepared interpreter directly when preparation supplies one.
+  An explicit `prepare` with its own interpreter owns its dependencies, so
+  `extras=` beside it raises `LauncherError`; put the extras in that
+  preparation's install command. Local `train`
+  and `eval` use the interpreter they were invoked with; select its extras
+  with `uv run --extra eval etude ...`.
 - **Every other `Job` field** (`max_hours`, `max_usd`, `until`, `inputs`,
-  `runtime`, `setup`, `name`, ...) is a keyword of both (`JobOptions`).
-- **The job file imports the function**, so `etude launch` must be able to
+  `runtime`, `setup`, `seeds`, ...) is a field of both. Neither takes
+  `command=`.
+- **The experiment file imports the function**, so `etude launch` must be able to
   import its module. When it imports training libraries at its top, launch
   from the project's environment: `uv run etude launch job.py`.
-- **An evaluation** holds a [tournament](evaluation.md#tournaments) as one eval
-  run, which is the launched run. A benchmark's `checkpoint` is a
-  `CheckpointRecord`, read from its training run as above. Each member reaches
+- **An eval job** holds a [tournament](evaluation.md#tournaments) as one eval
+  run, which is the launched run. A benchmark's `checkpoints` are
+  `CheckpointRecord`s, read from the experiment's state
+  ([Evaluation jobs](evaluation.md#evaluation-jobs)). Each member reaches
   the machine verified by digest; the checkpoint fills every inference seat, where
   `play` finds the folder or file at the player's `checkpoint.path`. A round robin
-  takes `enter=` players. A single-file `Input` is also accepted.
-  Holding nothing new (batch) is refused, since a launched job reads no
-  other eval run. `workers=` plays matches in parallel processes. The job's
-  environment needs `etude-sdk[eval]`.
+  takes `enter=` players. A single-file `Input` is also accepted. `workers=`
+  plays matches in parallel processes. The job's environment needs
+  `etude-sdk[eval]`.
 - **Commands are for work that is not Python**:
   `Job(command="./simulate --games 1000", max_hours=1)` runs by `sh` in the
-  checkout with the `ETUDE_*` environment below. Python work is a typed job,
-  so there is one way to run it.
+  checkout with the `ETUDE_*` environment below. A command job is launched
+  from Python (`etude.launch.client`, [Launching from Python](#launching-from-python)),
+  not returned from an experiment file's declarations. Python work is a typed
+  job, so there is one way to run it.
 
-To evaluate as training goes, an experiment file's `eval(state)` chooses the
-checkpoints and `etude eval` launches what is new
-([Experiments](evaluation.md#experiments)).
+## One pass over the file
+
+```python
+# two.py: "base" with seeds 0 and 1; then "fine", from base@0's final checkpoint
+def training_jobs(state: ExperimentState) -> list[TrainingJob]: ...
+
+
+# a ladder for every final checkpoint
+def eval_jobs(state: ExperimentState) -> list[EvalJob]: ...
+```
+
+```text
+$ etude launch two.py --max-usd 20         # the local pool: one machine, one slot
+two: state from /home/me/.etude/track: 0 training runs, 0 eval runs; $0.00 of $20.00 committed
+two/base@0  new, running
+two/base@1  new, queued
+eval ladder: nothing to play
+$ etude launch two.py --max-usd 20         # after both finished
+two: state from /home/me/.etude/track: 2 training runs, 0 eval runs; $0.00 of $20.00 committed
+two/base@0  finished
+two/base@1  finished
+two/fine@0  new, running
+eval ladder: 4 new, 0 running, 0 failed, queued two/ladder-1a2b3c4d5e6f
+$ etude launch two.py --max-usd 20         # again, straight away
+two: state from /home/me/.etude/track: 3 training runs, 1 eval run; $0.00 of $20.00 committed
+two/base@0  finished
+two/base@1  finished
+two/fine@0  running
+eval ladder: 0 new, 4 running, 0 failed
+```
+
+Each declaration returns every job that should have been run, or can be run,
+by now. `etude launch FILE` and `etude queue FILE` read the file once, call
+`training_jobs` and `eval_jobs(state)`, and hand down what has not been run:
+training first, then eval, from one reading of the state. A file with only one
+of the declarations does only that stage. Typing the command again is always
+safe, and is how a later stage starts once an earlier one has stored what it
+needs; `--watch SECONDS` on `etude launch` types it for you.
+
+Three levels do the work, each built only on the one below it:
+
+| Level | What it does | What it knows |
+| --- | --- | --- |
+| **Controller** | One pass: reads the file and the state, calls the declarations, hands down each new run once. Owns the experiment's dollar limit. | Experiments, and a run as `queued`, `running`, `stopped`, `finished` or `failed` |
+| **Scheduler** | Queues runs and starts each on a machine with room. Owns a job's `max_hours`, `max_usd` and `max_attempts`. | Runs and machines; an experiment's name is a label |
+| **Provisioner** | Rents and terminates machines within an on-demand's `--max` and price ceiling. | Machines: `starting`, `available`, `unavailable`, `deleted` |
+
+- **Already run is decided by address.** A training run is its
+  `EXPERIMENT/JOB@SEED`, and a pass leaves alone every address the state
+  holds. It never compares job digests, so editing your code or a job's
+  limits does not train a finished run again. Nor does editing its config:
+  the address is the same, and the run is left alone. Give a new config a
+  new job name.
+- **State is storage and the scheduler's records together.** Runs that have
+  stored something come from the source; queued runs, and running ones that
+  have stored nothing yet, come from the scheduler's records, the ones
+  `etude runs` and `etude status` show. Each run has one state: `queued`,
+  `running`, `stopped`, `finished` or `failed`. The pass keeps no memory of its own and
+  writes nothing else. A `stopped` run saved its state short of its target
+  and no launcher on this computer is continuing it. A stopped training run
+  resumes only when asked. A stopped eval needs no action: its undelivered
+  matches are new on the next pass and play in a new run. While this computer's
+  launcher owns continuation, either kind reads its `queued` or `running` phase.
+  If the launcher ends without success, it reads `failed`; a stored `finished`
+  or `failed` outcome always wins.
+- **One line for everything considered.** A training run already in the state
+  prints that state. A new one prints `new, running` when a machine took it,
+  `new, queued` when it waits for room (always, under `etude queue`), or
+  `new, not queued` with the limit that held it back. A tournament's line
+  counts its matches that are new, in flight and failed, and names the eval
+  run handed down for the new ones.
+- **A queued run needs no later pass.** The scheduler starts it as soon as a
+  machine has room: when `two/base@0` leaves the one slot above, `two/base@1`
+  starts. A later pass is needed only for work that does not exist yet, such
+  as `two/fine`.
+- **Room is the machines'.** How many runs go at once is what the pool and
+  on-demand allow: a pool's machines, an on-demand's `--max` machines, and
+  `--slots` runs on each
+  ([Several runs on one machine](#several-runs-on-one-machine)). One launch
+  may rent up to the on-demand's `--max`. The experiment has no "at once"
+  limit of its own.
+- **`--max-usd D` is the experiment's limit**, and its only one. What the
+  experiment has committed is the cost of its ended runs plus the `max_usd`
+  of each one queued or running; a job with no `max_usd`, which can only use
+  machines you own, adds nothing. A new run is handed down only when the
+  committed dollars plus its own `max_usd` fit under D. Otherwise it is not
+  queued, and its line says so:
+
+  ```text
+  two/fine@0  new, not queued: --max-usd 20 ($18.50 committed)
+  ```
+
+  The limit is checked when a run is handed down and is not stored. Each pass
+  applies the D it is given, to every run of the experiment whenever it was
+  launched; a pass without the flag applies none. A run that did not fit is
+  not remembered: the next pass considers it again, so raise D and type the
+  command again. Each job's own `max_hours` and `max_usd` bound its runs
+  whatever the pass.
+- **A failed run is left alone.** A failed training run is printed with the
+  command that resumes it (`etude launch two.py --job base --seed 1
+  --resume`). A pass leaves a failed eval run's undelivered matches alone,
+  hands down unaffected training and eval work, and prints every decision.
+  Then it stops with `launched_pass_failed` until `--retry-failed`;
+  `--quote` prints the same decisions without failing
+  ([Experiments](evaluation.md#experiments)).
+- **Dropped work is never cancelled.** A job that leaves a declaration stays
+  queued or running until it ends or you `etude cancel` it.
+- **Where state is read**: `--source` when given, else where the target's
+  machines deliver ([Experiments](evaluation.md#experiments)). State is read
+  once per pass. Even a declaration without a `state` parameter needs that
+  read, so runs already stored by another launcher are left alone.
+- **`--quote`** prints the same lines with `new, would launch`, then the
+  machines and planned rental costs for what the pass would hand down, and
+  submits nothing.
+- **`--job`, `--seed`, `--resume` and `--until` name training work**, so a
+  command that gives one skips the eval stage.
+- **An experiment's runs are selected by name.** `etude status --experiment
+  two --job base` lists both seeds; `wait`, `cancel` and `logs` take the same
+  two flags, or run addresses.
+- **`etude queue FILE` is one pass that only records.** It prints `new,
+  queued` for each new run and returns; it has no `--watch`.
 
 A run attempt is one machine allocation. Its `writers` are the training or
 evaluation contexts opened inside it, each with its own row cutoff. Opening
@@ -280,25 +439,26 @@ more writers does not consume more attempts or change the allocation's cost.
 # ppo.py
 from decimal import Decimal
 
-from etude.experiment import ExperimentState
-from etude.jobs import training
-from etude.spec import Job
+from etude.jobs import EvalJob, ExperimentState, TrainingJob
 from etude.report import Report
 
 from train import TrainConfig, train
 
 
-def runs() -> Job:
-    return training(
-        train,
-        config=TrainConfig(lr=3e-4),
-        smoke=TrainConfig(updates=1),  # the same job, tiny
-        max_hours=6,
-        max_usd=Decimal(30),
-    )
+def training_jobs() -> list[TrainingJob]:
+    return [
+        TrainingJob(
+            name="base",
+            train=train,
+            config=TrainConfig(lr=3e-4),
+            smoke=TrainConfig(updates=1),  # the same job, tiny
+            max_hours=6,
+            max_usd=Decimal(30),
+        )
+    ]
 
 
-def eval(state: ExperimentState) -> list[Job]: ...  # as before
+def eval_jobs(state: ExperimentState) -> list[EvalJob]: ...  # as before
 
 
 def report() -> Report: ...  # as before
@@ -306,23 +466,24 @@ def report() -> Report: ...  # as before
 
 ```sh
 $ etude smoke ppo.py
-smoke train ppo: passed in 41.2 s (1 checkpoint)
+smoke train base: passed in 41.2 s (1 checkpoint)
 smoke eval ladder: passed in 3.1 s (6 matches, 1 game each)
 smoke report: passed in 0.8 s
 $ etude launch ppo.py --rent l4 --smoke  # smokes first; rents only if it passes
 ```
 
-Smoke is manual: run `etude smoke`, or pass `--smoke` to `launch`, `queue` or a
-launching `etude eval`. Nothing smokes on its own.
+Smoke is manual: run `etude smoke`, or pass `--smoke` to `launch` or `queue`,
+which smoke the whole file before they submit anything. Nothing smokes on its
+own.
 
 A smoke runs each part of an experiment file through the same code as the real
 thing, only small, in order:
 
-1. **Train.** Each job `runs()` returns, run once on this computer with its
+1. **Train.** Each job `training_jobs()` returns, run once on this computer with its
    smoke form, through the `local` pool's real path: its environment is prepared,
    a worker starts, and it writes a real tracked checkpoint. Seeds are dropped,
-   so a cohort of three seeds is smoked once.
-2. **Evaluate.** `eval(state)` is called on the smoke's runs and checkpoints.
+   so a job with three seeds is smoked once.
+2. **Evaluate.** `eval_jobs(state)` is called on the smoke's runs and checkpoints.
    Each match it calls for plays one game here, under every condition, so a
    game that breaks under only one deal is still caught.
 3. **Report.** `report()` (or the default `Report()`) is drawn from those tiny
@@ -331,7 +492,7 @@ thing, only small, in order:
 Each step's line goes to standard error, so standard output stays the list of
 submitted runs. The first failure stops the smoke: it prints that step's
 output, names the step, and exits 1. `launch --smoke` and `queue --smoke` then
-submit, queue, rent and publish nothing. A file with no `eval(state)` skips evaluation, and a
+submit, queue, rent and publish nothing. A file with no `eval_jobs(state)` skips evaluation, and a
 file that is no experiment file skips evaluation and report; each says so.
 
 **A job's smoke form is declared on the job.** Etude does not look inside your
@@ -340,12 +501,12 @@ of the job's own for the smoke run; any it leaves unset keep the job's value:
 
 | Field | Replaces | Example |
 | --- | --- | --- |
-| `config` | the typed job's config | `training(train, config=..., smoke=TrainConfig(updates=1))` |
-| `command` | a command job's command | `Job(command="manabot train", smoke=SmokeForm(command="manabot train --smoke"), ...)` |
+| `config` | a training job's config | `TrainingJob(..., config=..., smoke=TrainConfig(updates=1))` |
+| `command` | a command job's command, launched from Python | `Job(command="manabot train", smoke=SmokeForm(command="manabot train --smoke"), ...)` |
 | `until` | the target | `SmokeForm(until=Until(clock="steps", value=1))` |
 
-`training(..., smoke=)` takes a config of the same type as `config`, and is
-checked the same way when the job is made. The smoke form is not part of the
+`TrainingJob(..., smoke=)` takes a config of the same type as `config`, and is
+checked the same way where the job is written. The smoke form is not part of the
 job's identity: changing it does not make a new job. A job with no smoke form is
 reported `not smoked`, never passed, and a file none of whose jobs has one
 launches as before, each job's line reporting `not smoked (no smoke form)`.
@@ -366,9 +527,7 @@ etude smoke ppo.py --step eval --step report --source s3://bucket/etude/launch
 ```
 
 They are played against that source's checkpoints and delivered to the
-temporary store, never to the source. `etude eval FILE --pool P` or `--rent R`
-`--smoke` smokes its evaluation and report this way first, against its
-`--source`, and launches nothing if that fails.
+temporary store, never to the source.
 
 **In CI.** `etude smoke` needs no provider key, no launcher database and no
 network beyond what preparing the job's environment fetches, and it exits 1 on
@@ -390,15 +549,14 @@ jobs:
 not smoked (no `--smoke`, or a step it could not run), with each step's outcome
 and seconds.
 A run's steps are its own job's training and the file's evaluation and report,
-so in a cohort where only some jobs have a smoke form the others record
+so in a launch where only some jobs have a smoke form the others record
 `not smoked (train: no smoke form)`. A declared step the smoke could not
 exercise, such as an evaluation with no checkpoints to play, is not smoked too
 (`not smoked (eval: no checkpoints)`). `etude status RUN` shows it
 (`smoke: passed in 45.1 s (train, eval, report)`); a run launched without
 `--smoke` shows no smoke line. `record.smoke` holds it in Python.
 
-**From Python**, the client's `queue`, `queue_cohort`, `launch` and
-`launch_cohort` take `smoke: bool = False`. With `smoke=True` they smoke the
+**From Python**, the client's `queue` and `launch` take `smoke: bool = False`. With `smoke=True` they smoke the
 train step of each job that has a smoke form before submitting, and raise
 `LauncherError` naming the failed job. For the whole chain, as the command runs
 it:
@@ -406,11 +564,12 @@ it:
 ```python
 from pathlib import Path
 
-from etude.launch.job_file import read_job_file
+from etude.declarations import read_training_jobs
 from etude.smoke import smoke_file
 
 path = Path("ppo.py")
-runs = read_job_file(path, ["--seeds", "2"])  # runs() with these flags; omitted, its defaults
+# Call training_jobs() with these flags; omit them to use its defaults.
+runs = read_training_jobs(path, ["--seeds", "2"])
 result = smoke_file(path, runs)  # raises LauncherError on the first failure
 for run in result.stamp(runs):  # each run with its own job's smoke, as submitted
     print(run.job.name, run.seed, run.smoke)
@@ -432,7 +591,7 @@ etude launch job.py --rent l4
 
 For Vast.ai, inject `VAST_API_KEY` in the launcher's environment (RunPod uses
 `RUNPOD_API_KEY`). Register an SSH public key in the Vast account before renting.
-Use the same job file and storage, with an explicit provider:
+Use the same experiment file and storage, with an explicit provider:
 
 ```sh
 etude provider set vast --kind vast --storage west
@@ -450,7 +609,7 @@ The equivalent Python path uses the same scheduler and ordinary runs:
 ```python
 from decimal import Decimal
 
-from etude.launch.client import default, launch_cohort, wait
+from etude.launch.client import default, launch, wait
 from etude.spec import Job
 from etude.launch.records import MachineTemplate, OnDemand, Provider
 
@@ -465,7 +624,7 @@ launcher.add_ondemand(
     )
 )
 job = Job(command="./train.sh", repo=".", max_hours=0.5, max_usd=Decimal("0.50"))
-runs = launch_cohort("trial", job.runs(1, 2), rent="rtx4090", max_usd=Decimal("1.00"))
+runs = launch(job.runs(1, 2), rent="rtx4090")
 print(wait(*runs))
 ```
 
@@ -478,7 +637,7 @@ a country code for Vast; RunPod uses its data center IDs. Public images are
 supported; a custom image must contain Python 3.12. There is no cross-provider
 fallback. No compatible offer leaves queued work waiting.
 
-The controller retains the selected offer and instance receipt in the session
+The scheduler retains the selected offer and instance receipt in the session
 folder. Creation is sent once; uncertain replies reconcile by the session label
 across inventory pages. Destruction requires that retained ownership and matching
 provider identity. `VastAPI.charges(instance, now)` reads the reported GPU, disk
@@ -495,13 +654,13 @@ caller loss leaves the guardian active until the rental deadline. Stopping an
 instance alone does not stop storage billing. A host that never boots or a provider
 API outage can delay deletion: the rental quote is not a provider-enforced total
 cost guarantee and excludes charges from external storage services. Keep the
-controller running to reconcile uncertain creation and deletion. Inspect SSH via
+scheduler's loop running to reconcile uncertain creation and deletion. Inspect SSH via
 Vast's instance **Connect** tab.
 
 ### Lium
 
 ```sh
-# Inject LIUM_API_KEY into the controller's environment through your secret store.
+# Inject LIUM_API_KEY into the launcher's environment through your secret store.
 export LIUM_SSH_PUBLIC_KEY="$(cat ~/.ssh/id_ed25519.pub)"
 etude provider set lium --kind lium --storage west
 etude ondemand add rtx5090 --provider lium --gpu "RTX 5090" --gpu-count 1 \
@@ -514,10 +673,10 @@ etude fetch RUN checkpoint.pt out
 ```
 
 Use a funded Lium account with `read` and `rent` permissions. Keep the private SSH
-key in the controller's OpenSSH agent/configuration, and configure host trust
+key in the launcher's OpenSSH agent/configuration, and configure host trust
 there. Etude keeps normal host-key checking enabled. Configuration and retained
 status reads work without keys or network; availability and rental operations
-need the controller's credentials.
+need the launcher's credentials.
 
 ```python
 from decimal import Decimal
@@ -549,7 +708,7 @@ Hourly admission includes Lium's one-cent-per-GPU price-change tolerance. Rental
 budgets reserve whole hours for the initial `termination_hours` timer, even for
 a shorter job. This is a reserve, not Lium's billing minimum: billing is per
 second. A five-minute rental at a quoted $0.76/hour requires a $0.76 reservation.
-The controller rechecks stock, allocation and price before sending one create;
+The scheduler rechecks stock, allocation and price before sending one create;
 lost replies reconcile by session name without creating another pod.
 
 Etude supplies its public pinned image through a Dockerfile, then bootstraps over
@@ -558,14 +717,14 @@ need Python 3.12 and OpenSSH support. Signed bootstrap links travel over SSH;
 `LIUM_API_KEY` never goes to the pod. The client and job keep separate environments.
 
 Lium shutdown is **best effort**. Creation includes a whole-hour timer from boot;
-the controller immediately schedules the absolute rental deadline and verifies
+the scheduler immediately schedules the absolute rental deadline and verifies
 readback. A local standard-library watchdog starts before client installation and
 stops bootstrap/work at the deadline. Unlike RunPod/Vast's self-scoped guardians,
 it cannot delete the pod or end billing: Lium exposes no documented pod-scoped
-self-deletion key. Completion, failure and cancellation rely on controller deletion;
-controller loss relies on the provider timer. Boot delays, the gap before exact
+self-deletion key. Completion, failure and cancellation rely on the scheduler's deletion;
+without its loop, on the provider timer. Boot delays, the gap before exact
 scheduling, and undocumented removal processing delays can exceed the reservation.
-Keep the controller running for reconciliation and cleanup retries. Optional
+Keep the scheduler's loop running for reconciliation and cleanup retries. Optional
 per-key spending caps are operator-managed additional protection; Etude never
 changes account settings.
 
@@ -585,8 +744,9 @@ On a CPU pod `os.cpu_count()` reports the host's CPUs; size worker pools from
 ```sh
 etude ondemand add cpu --provider runpod --vcpus 8 --memory-gb 16 --max 2 --max-usd-per-hour 0.40
 etude availability cpu
-etude launch job.py --rent cpu --cohort evals --parallel 2 --max-usd 1 --quote
-etude launch job.py --rent cpu --cohort evals --parallel 2 --max-usd 1
+etude launch job.py --rent cpu --max-usd 1 --quote
+etude launch job.py --rent cpu --max-usd 1     # rents up to the on-demand's 2 machines
+
 ```
 
 `availability` asks the provider, so it is a wait: it prints what would be
@@ -595,7 +755,7 @@ and when the provider answered; `--timeout` bounds it. `--quote` places the
 first wave as launch would, asking the provider for prices, and prints one line
 per run: an owned or already rented machine it would use, or the hardware it
 would rent and that window's planned rental cost. It then prints the planned
-first-wave rental cost and the job/cohort rental budget for the whole launch.
+first-wave rental cost and the jobs' rental budget for the whole launch.
 These amounts assume timely deletion at the quoted rate, not a guaranteed
 total bill; provider delays can exceed the budget and external storage is excluded. It
 records nothing and rents nothing; without capacity it fails as launch would.
@@ -661,7 +821,9 @@ etude machines
 etude terminate MACHINE
 ```
 
-`etude machines` is the one list. Each owned machine shows its pool, its
+`etude machines` is the one list. Each machine shows its state: `starting`,
+`available`, `unavailable` (refused, expired, or its pool off) or `deleted`.
+Each owned machine shows its pool, its
 committed cost and its expiry (or that it never expires). Each rented machine
 shows its on-demand, the hardware the provider was asked for (a GPU type with the minimum vCPUs
 and memory its host must have, or a CPU flavor and its exact vCPUs), the end of its window and its cost; `etude status` names it beside the
@@ -674,7 +836,7 @@ A rental made by hand boots with no runs, then takes work from its bucket
 inbox. There is one rental record and execution path. A window made by hand stays
 until its deadline or termination; one rented for queued work ends when no work is left.
 Every rented machine takes waiting runs that fit its remaining time. The
-controller delivers each next run; keep its loop running to drain the queue.
+scheduler delivers each next run; keep its loop running to drain the queue.
 A machine rented for queued work ends when no waiting run fits any free slot; a
 manually rented one waits until its deadline or termination. Terminate refuses
 while it still has unfinished work. Ending a machine rented for queued work is asked of it
@@ -693,7 +855,7 @@ omitting it lets RunPod place the machine. `ondemand image` affects future machi
 ```sh
 etude ondemand add l4x2 --provider runpod --gpu "NVIDIA L4" --vcpus 6 --memory-gb 48 \
     --max 1 --max-usd-per-hour 0.80 --slots 2
-etude launch sweep.py --cohort sweep --rent l4x2 --quote   # sweep@1  rent ... , 2 slots with sweep@2  ...
+etude launch sweep.py --rent l4x2 --quote                    # sweep/base@1  rent ... , 2 slots with sweep/base@2  ...
 etude status                                               # running, steps 1200, shared by 2 runs, ~$0.03
 ```
 
@@ -705,12 +867,13 @@ cancelling or failing one leaves the others running.
 
 A new machine is given up to N waiting runs at once, and takes more as slots
 free while its window has time for them. Its window covers the longest run it
-was given, or its share of a cohort's hours when that is longer, within the
-runs' dollars. A launch fills a machine's slots before taking another;
-a cohort's `parallel` still counts machines.
+was given, or its share of the hours of the runs waiting on its on-demand when that is
+longer (their total, divided among the machines the on-demand may still rent
+and their slots), within the runs' dollars. A launch fills a machine's slots
+before taking another; the on-demand's `--max` counts machines.
 
 Cost is split by placed time: each moment of a rental is shared equally among
-the runs on it then, and run budgets and cohort spend charge that share.
+the runs on it then, and run budgets and an experiment's `--max-usd` charge that share.
 Admission and a run's own time limit still price it as if it had the machine
 alone, so a run never outspends its `max_usd`. `status` says `shared by K runs`
 when K ran together, and `--quote` lists each run's machine, its slots and the
@@ -734,7 +897,7 @@ independent guardian bounding its lifetime. Supplying links for machines Etude
 did not make is outside this build.
 
 The bucket serves two purposes: results survive a deleted on-demand machine,
-and it is the only communication channel for a rented machine. The controller
+and it is the only communication channel for a rented machine. The scheduler
 writes work and stop requests to the inbox; the worker reads it and uploads
 logs, progress and outputs. No inbound connection is needed. This computer and
 owned SSH hosts need no bucket; an owned host can optionally use one for records
@@ -752,7 +915,7 @@ etude status sweep/baseline@7 --phases
 
 A run log includes launch preparation, shared machine startup, every execution
 attempt and cleanup. It keeps that meaning before admission and after machine
-deletion. `--cohort NAME` selects the admitted members of a cohort. Machine logs
+deletion. `--experiment NAME` and `--job NAME` select several runs, as for `etude runs`. Machine logs
 contain operational output; run logs select only that run's job output and
 attempt diagnostics. The worker's log says what changed, such as an inbox with
 new work or a delivery that failed, not every poll: an inbox read that finds
@@ -777,11 +940,10 @@ leaves independent launch evidence, without creating a run or RunAttempt or
 consuming that identity. A corrected launch can reuse it. An already-admitted
 identity is a conflict; an unresolved acquisition remains fenced until confirmed
 refused or deleted. A new launch ID cannot bypass that fence. `LaunchError.launch`
-and `.runs` identify the retained evidence when admission fails. Cohort admission
-remains atomic.
+and `.runs` identify the retained evidence when admission fails.
 
 `etude logs` is a read: it shows what the database retains, with each stream's
-collection time, and needs no provider key or network. Each controller pass
+collection time, and needs no provider key or network. Each scheduler pass
 retains a running job's new output, at most every 30 seconds, and a stream's last
 output when its session ends; each read takes at most the supply's `log_seconds`,
 or 30 seconds without one. `--follow` is the wait: it collects new
@@ -795,9 +957,9 @@ cleanup producers. A queued run or a missing final stream is incomplete.
 
 Headers distinguish output not received, a silent producer, retrieval failure and
 retention truncation. A failed refresh returns the last received content with its
-collection time. Startup snapshots and controller log caches retain at most 1 MiB
+collection time. Startup snapshots and scheduler log caches retain at most 1 MiB
 of text per stream: opening milestones and a recent tail, with omitted positions
-marked. Worker observations retain producer timestamps separately from controller
+marked. Worker observations retain producer timestamps separately from scheduler
 observation times; clocks on different machines do not establish a total order.
 
 Bootstrap uses a write-only capability for one log object, independent of reading
@@ -808,7 +970,7 @@ once it has read its bootstrap, to its session's `out/` in appended pieces like 
 job's, below; a worker that never read it sends its log whole, once, at exit. The guardian starts first and remains independent of publication.
 A storage outage or death before bootstrap runs can leave an explicit evidence
 gap. Reading logs never needs a live machine after its bucket evidence was
-published or its output cached by the controller.
+published or its output cached by the scheduler.
 
 A job's output reaches storage as appended pieces, each sent once and never
 rewritten, and the attempt's record names them; a reader reads each piece once.
@@ -828,76 +990,84 @@ for event in diagnostics(run="sweep/baseline@7"):
 ```
 
 Diagnostics and `status --phases` read retained database facts without provider or
-bucket calls. With an SSH controller selected, those facts live on the controller.
+bucket calls. With a server selected, those facts live on the server.
 Preparation intent is recorded there before the submitting client publishes its
 source. A disconnected submitting client can leave a preparing launch; it is
 reported as unresolved and does not authorize automatic resubmission.
 
-## The controller
+## The server
 
-The controller holds the database and matches waiting runs to machines. No
-separate controller is required: without a setting, CLI commands use this
+The server holds the database and matches waiting runs to machines. No
+separate server is required: without a setting, CLI commands use this
 computer's database and match while they run.
 
 ```sh
-etude controller                     # selection, last loop time, waiting-work warning
-etude controller set user@host       # an SSH address or configured alias
+etude server                         # selection, last loop time, waiting-work warning
+etude server set user@host           # an SSH address or configured alias
 etude launch job.py --rent l4
 etude logs --run RUN
 etude fetch RUN checkpoint.pt out
-etude controller unset               # use this computer again
+etude server unset                   # use this computer again
 ```
 
-The setting is a small `controller` file beside the local database, under
+A **server** is another machine that holds the launcher's database and
+provider keys and runs the scheduler's loop; this computer is then its
+client. No server is required: without a setting, commands use this
+computer's database and match waiting runs to machines while they run.
+
+The setting is a small `server` file beside the local database, under
 `ETUDE_HOME` (default `~/.etude`). Setting or clearing it needs no database and
-moves no existing records. With a controller selected, CLI commands run there
+moves no existing records. With a server selected, CLI commands run there
 through the user's `ssh`, except selection commands, `worker` and source
 checkout, which run on the machine where invoked. The remote database's built-in `local` pool
-is renamed `controller`, including the default selection if it named `local`.
+is renamed `server`, including the default selection if it named `local`.
 It is never advertised as the client's local machine.
 
-`etude controller set` installs this
+`etude server set` installs this
 client's own package over SSH, where it and its environment are kept by digest under
 `ETUDE_HOME/programs`, and every later command runs that exact version. The two
 sides therefore cannot be different versions; after the client changes, the
 next command sends the new code first, and that command upgrades the
-controller's launcher file ([Upgrading Etude](#upgrading-etude)). The controller needs Python 3.12, uv
-and working SSH keys. If it cannot take the program, `controller set` fails
+server's launcher file ([Upgrading Etude](#upgrading-etude)). The server needs Python 3.12, uv
+and working SSH keys. If it cannot take the program, `server set` fails
 with the reason and the setting is not changed.
 
-Commands on a controller, and on any host reached by SSH, run through that
+Commands on a server, and on any host reached by SSH, run through that
 account's login shell. A bare SSH command gets a minimal PATH, which on a Mac
 hides Homebrew's Python; the login shell gives the PATH a terminal there has.
 `ETUDE_REMOTE_PYTHON` names a Python other than `python3.12`.
 
-Provider and storage credentials belong in the controller's own environment;
-the client sends none. How a controller obtains them is not settled: a command
+Provider and storage credentials belong in the server's own environment;
+the client sends none. How a server obtains them is not settled: a command
 arriving over SSH does not see secrets that a terminal session there loads.
 
-The functions in `etude.launch.client` (`queue`, `launch`, their cohort forms,
-`status`, `wait`, `cancel`, `logs` and `fetch`) use the
-selected controller and return the same Python values. An explicitly
-constructed `Scheduler` remains the owner of a local database.
+The functions in `etude.launch.client` (`queue`, `launch`, `status`, `wait`,
+`cancel`, `logs` and `fetch`) use the selected server and return the same
+Python values. An explicitly constructed `Scheduler` remains the owner of a
+local database.
 
-Launch reads the job file and config on the client, freezes and publishes source there, and
-sends frozen runs and one source archive per repository/commit. The controller
-stores archives under `ETUDE_HOME/sources` and can launch or continue without a
-repository checkout. Logs stream back over SSH. Fetch copies to the client's
+Launch reads the experiment file and config on the client, runs the
+controller's pass there, freezes and publishes source there, and sends frozen
+runs and one source archive per repository/commit. The server stores archives
+under `ETUDE_HOME/sources` and can launch or continue without a repository
+checkout. A pass asks the server once for where the experiment's runs stand;
+with a server selected it needs `--source` to say where their stored state
+is. Logs stream back over SSH. Fetch copies to the client's
 chosen directory and checks the returned digest before replacing its output.
 A lost SSH reply is an error; launch is not automatically retried.
 
-Run the standing loop on the controller under a process supervisor:
+Run the standing loop on the server under a process supervisor:
 
 ```sh
-etude controller run
+etude server run
 ```
 
 It uses the same matching operation as `wait`, but remains alive through an
-empty queue. It records the last completed pass in `controller-heartbeat` beside
-the database. `controller` and `status` warn when work is waiting and no pass
-has completed in 30 seconds. Slow provider operations may also cause this
+empty queue. It records the last completed pass in `server-heartbeat` beside
+the database. `etude server` and `status` warn when work is waiting and no
+pass has completed in 30 seconds. Slow provider operations may also cause this
 warning. `wait` still exits when its runs finish. Workers read their own disk or
-bucket inboxes; they never need a reachable address for the controller.
+bucket inboxes; they never need a reachable address for the server.
 
 ## Upgrading Etude
 
@@ -924,7 +1094,7 @@ that started them, and the upgraded launcher reads the journals a previous
 release's worker writes.
 
 Before upgrading, stop commands of the older etude that are still running on
-this computer or the controller (`etude wait`, `etude controller run`). They
+this computer or the server (`etude wait`, `etude controller run`). They
 would keep writing to the file they opened, which nothing reads afterwards.
 Start them again with the new etude. Another project on the same `ETUDE_HOME`
 still pinned to etude ≤ 0.4.0 keeps launching into its own file, which the
@@ -967,7 +1137,7 @@ uvx --from etude-sdk==0.2.15 etude status
 | `launcher: an older etude wrote launcher-17.db 2s ago; stop its commands (etude wait, etude controller run), then run this again` | The file or its WAL was written in the last 30 seconds. Taking it over now could leave two schedulers placing the same queued runs and renting twice. | Stop the older commands, wait until the file has been quiet for 30 seconds, repeat the command, then start them with the new etude. |
 | `launcher.sqlite needs etude >= 0.5.0 (raised by: rental_regions)` | A newer etude upgraded this file past what this one can read. | Upgrade this etude, or restore a backup (below). |
 | `etude was upgraded while this ran; run it again` | This process opened the file before such an upgrade; it writes nothing more. | Run the command again. |
-| `launcher: migration remove_cohorts needs SQLite >= 3.35; this Python has 3.31.1` | The Python on this machine carries an older SQLite. Nothing was changed. | Use a Python with a newer SQLite, on a controller through `ETUDE_REMOTE_PYTHON`. |
+| `launcher: migration remove_cohorts needs SQLite >= 3.35; this Python has 3.31.1` | The Python on this machine carries an older SQLite. Nothing was changed. | Use a Python with a newer SQLite, on a server through `ETUDE_REMOTE_PYTHON`. |
 
 ### Older and newer etude on one file
 
@@ -981,7 +1151,7 @@ still open a file holding it.
   ends `; etude < 0.5.0 can no longer open it`, and the release notes say the
   same. An etude below the floor is refused with the message above.
 - **Processes open across such an upgrade write nothing more**, and
-  `etude controller run` replaces itself with the newer program's loop, so a
+  `etude server run` replaces itself with the newer program's loop, so a
   supervised loop needs no restart.
 
 Etude 0.4.0 and earlier know nothing of `launcher.sqlite` or of this handover.
@@ -1091,9 +1261,10 @@ defines it, by its full path, and relative imports are a lint error:
 
 | Import | What it is |
 | --- | --- |
-| `from etude.jobs import training, evaluation` | typed jobs: Etude decides the command |
-| `from etude.spec import Job, RunRequest` | what to run |
-| `from etude.launch.client import queue, launch, status, wait, ...` | the calls a script makes; they go to the controller when one is set |
+| `from etude.jobs import TrainingJob, EvalJob` | typed jobs: Etude decides the command |
+| `from etude.jobs import ExperimentState` | what an experiment's runs have stored, as declarations are given it |
+| `from etude.spec import Job, RunRequest` | a command job, and one run of any job |
+| `from etude.launch.client import queue, launch, status, wait, ...` | the calls a script makes; they go to the server when one is set |
 | `from etude.launch.database import Database` | the SQLite records in `launcher.sqlite` |
 | `from etude.launch.schemas import Packet, Work, Progress` | frozen worker messages |
 | `from etude.launch.executor import Executor` | machine acquisition, startup and journal composition |
@@ -1106,26 +1277,27 @@ loads the whole launcher: 33 modules and Pydantic, about 70 ms measured on
 2026-10-13. A test pins the module count. Each remote command imports client dependencies once
 in its installed environment.
 
-## Cohorts and Python
+## Launching from Python
 
 ```python
 from decimal import Decimal
 from pathlib import Path
 
-from etude.jobs import continue_from, training
-from etude.launch.client import default, fetch, logs, queue, queue_cohort, wait
+from etude.jobs import TrainingJob, continue_from
+from etude.launch.client import default, fetch, logs, queue, wait
 from etude.spec import Until
 from train import TrainConfig, train
 
-job = training(
-    train,
+job = TrainingJob(
+    name="wide",
+    train=train,
     config=TrainConfig(hidden=1024),
     until=Until(clock="steps", value=26000),
     max_hours=6,
     max_usd=Decimal(5),
     seeds=(1, 2, 3),
 )
-runs = queue_cohort("capacity", job, rent="l4", parallel=1, max_usd=Decimal(15))
+runs = queue(job, rent="l4")  # ("job/wide@1", "job/wide@2", "job/wide@3")
 wait(*runs)
 logs(run=runs[0])
 fetch(runs[0], "weights.pt", Path("out"))  # a file the job left in its output directory
@@ -1135,55 +1307,64 @@ continued = queue(
 )
 ```
 
-`queue_cohort` and `launch_cohort` take a Job, or a list of Jobs and
-RunRequests. Each Job expands to its declared seeds; `queue` and `launch`
-require one run and direct several-seed jobs to the cohort calls.
+`queue` and `launch` take a run, a Job, or a list of Jobs and RunRequests, and
+return the run ids as a tuple. Each Job expands to its declared seeds. `launch`
+places what the pool and on-demand have room for now and queues the rest;
+`queue` records and returns. These are the scheduler's calls: they know
+nothing of experiments, so an experiment's `--max-usd` belongs to
+`etude launch FILE` ([One pass over the file](#one-pass-over-the-file)).
 
-For the command line, a Python file defines a function `runs()` that returns a
-Job or a nonempty list of Jobs. Each job is launched once per seed in its
-`seeds`, or once with seed 0. The function describes work without
-sending it. The command calls it once, on the machine the command is typed on,
-before anything goes to a controller:
+For the command line, an experiment file defines `training_jobs()`, which
+returns `TrainingJob`s: every training job of the experiment, the whole list
+each time it is called. A single job is also accepted. Each job has one run
+per seed in its `seeds`, or one with seed 0. The function describes work
+without sending it. The command calls it once, on the machine the command is typed on,
+before anything goes to a server, and submits the runs that have not been
+run ([One pass over the file](#one-pass-over-the-file)):
 
 ```python
 # capacity.py
 from decimal import Decimal
 
-from etude.jobs import training
-from etude.launch.client import launch_cohort
-from etude.spec import Job, Until
+from etude.jobs import TrainingJob
+from etude.launch.client import launch
+from etude.spec import Until
 from train import TrainConfig, train
 
 
-def runs(hidden: int = 256, seeds: int = 3) -> Job:
-    return training(
-        train,
-        config=TrainConfig(hidden=hidden),
-        max_hours=2,
-        max_usd=Decimal(1),
-        until=Until(clock="steps", value=26000),
-        name=f"hidden{hidden}",
-        seeds=tuple(range(seeds)),
-    )
+def training_jobs(hidden: int = 256, seeds: int = 3) -> list[TrainingJob]:
+    return [
+        TrainingJob(
+            name=f"hidden{hidden}",
+            train=train,
+            config=TrainConfig(hidden=hidden),
+            max_hours=2,
+            max_usd=Decimal(1),
+            until=Until(clock="steps", value=26000),
+            seeds=tuple(range(seeds)),
+        )
+    ]
 
 
 if __name__ == "__main__":
-    launch_cohort("capacity", runs(hidden=512), rent="l4", parallel=2)
+    launch(training_jobs(hidden=512), rent="l4")
 ```
 
 ```sh
-etude queue capacity.py --rent l4 --cohort capacity --parallel 2 --max-usd 20
-etude launch capacity.py --hidden 512 --seeds 5 --pool lab --rent l4 --cohort big
-python capacity.py          # whatever its __main__ block does
+etude queue capacity.py --rent l4 --max-usd 20
+etude launch capacity.py --hidden 512 --seeds 5 --pool lab --rent l4
+uv run python capacity.py   # whatever its __main__ block does
 ```
 
-Job parameters are ordinary flags parsed by Typer from `runs()`'s signature.
+Job parameters are ordinary flags parsed by Typer from `training_jobs()`'s signature.
 Required parameters become required options; annotated types and defaults govern
 conversion. Boolean flags use `--fast` / `--no-fast`. Launcher flags and job flags
 may be mixed after FILE; a bare `--` before job flags is accepted but not needed.
 `etude launch capacity.py --help` shows launcher options, then job parameter types,
-defaults and the function's docstring, without invoking `runs()`.
+defaults and the function's docstring, without invoking `training_jobs()`.
 A parameter named like a launcher option is rejected when the file loads.
+A parameter named `state` is no flag: it is given the experiment's state.
+
 The old `NAME=VALUE` parameter syntax is removed; targets still use `steps=26000`
 as a single clock value. The command does not run the file's `__main__` block.
 
@@ -1193,47 +1374,102 @@ what it runs: its command, config, source and target. Two calls with different
 arguments that produce the same four things are the same job. Seeds, like a
 job's name and limits, are how it is launched and no part of that identity.
 
-A job file never has to name the record underneath. Code that builds a launch
+An experiment file never has to name the record underneath. Code that builds a launch
 by hand uses it: `RunRequest(job=job, seed=7, id="sweep/baseline@7")`, or
 `job.runs(0, 1, params={"hidden": 64})` for several, which records its own
-`params`; the command leaves those alone.
+`params`; the command leaves those alone. A declaration may return
+`RunRequest`s of its own kind of job, and an explicit `id` is kept as written.
 
 A sweep is Python that calls the function:
 
 ```python
 # sweep.py
 import capacity
-from etude.spec import Job
+from etude.jobs import TrainingJob
 
 
-def runs() -> list[Job]:
-    return [capacity.runs(hidden=hidden) for hidden in (64, 256, 1024)]
+def training_jobs() -> list[TrainingJob]:
+    return [job for hidden in (64, 256, 1024) for job in capacity.training_jobs(hidden=hidden)]
 ```
 
-Several runs require `--cohort`. Cohort limits belong to command flags, not the
-file. A job file's folder is on the import path, as for `python job.py`, so it
+How many runs go at once belongs to the pool and on-demand, and the
+experiment's dollar limit to `--max-usd`
+([One pass over the file](#one-pass-over-the-file)); neither is in the file. An experiment file's folder is on the import path, as for `python job.py`, so it
 imports its neighbours. A relative `repo` is relative to the directory the
 command is run from, exactly as when Python calls the launcher directly. A
 config is a Pydantic model in Python, not a file beside the job: a named
 setting is a function or class method returning one, such as
 `TrainConfig.large()`.
 
-`etude launch job.py` supplies experiment `job` to every unnamed job, even
-when the file defines only `runs()`. A `train` function calls
-`track(clocks=..., config=config)` without naming an experiment. A plain job file preserves explicit `Job.experiment`
-values; a file defining `eval(state)` or `report()` requires its own stem
+`etude launch job.py` supplies experiment `job` to every job that names
+none, even when the file defines only `training_jobs()`. A `train` function calls
+`track(clocks=..., config=config)` without naming an experiment. A file defining only `training_jobs()` preserves explicit `Job.experiment`
+values; a file defining `eval_jobs(state)` or `report()` requires its own stem
 and refuses jobs naming another experiment.
 
-Previously, a plain job file left the experiment for the script to name.
+Previously, a plain experiment file left the experiment for the script to name.
 For an existing script using `track(experiment="capacity-pilot", ...)`, set
 `experiment="capacity-pilot"` on its `Job`, or remove the argument from
 `track` to use the file stem. A conflicting name now fails with
 `experiment_differs_from_launch`. The experiment participates in job identity,
 so previously unnamed plain-file jobs also receive new job digests.
 
-TOML job files are no longer accepted. A script may also call `queue` or `launch` from
-`etude.launch.client` directly. Where commands accept run IDs, a cohort name selects
-its runs.
+TOML experiment files are no longer accepted. A script may also call `queue` or `launch` from
+`etude.launch.client` directly; that is how a command job
+(`Job(command=...)`) is launched. Where commands
+accept run addresses, `--experiment` and `--job` select several.
+
+### Upgrading an experiment file
+
+| Before | Now |
+| --- | --- |
+| `def runs(...)`, `def training_runs(...)` | `def training_jobs(...)` |
+| `def eval(state)` | `def eval_jobs(state)` |
+| `training(train, config=c, ...)` | `TrainingJob(name="...", train=train, config=c, ...)`; `name` is required |
+| `evaluation(benchmark, play=play, ...)` | `EvalJob(play=play, tournament=benchmark, ...)` |
+| `evaluation(arena, config=c, play=play, ...)` | `EvalJob(play=play, tournament=arena(c), ...)` |
+| a standalone `evaluation(...)` returned beside training jobs | an `EvalJob` returned from `eval_jobs(state)` |
+| `Job(command=...)` returned from the file | `launch` or `queue` from `etude.launch.client`, or a typed job |
+| `etude eval FILE --pool P`, `--rent R`, `--queue` | `etude launch FILE --pool P --rent R`, `etude queue FILE` |
+| `etude eval FILE --rent R --smoke` | `etude launch FILE --rent R --smoke` |
+| addresses `ppo`, `ppo@1`, `ppo/wide` | `ppo/NAME@0`, `ppo/NAME@1`, `ppo/wide@0` |
+| `--cohort NAME`, `--parallel N` | removed; room is the pool's machines, the on-demand's `--max` and `--slots` |
+| `--max-usd D` bounding one cohort | `--max-usd D` on `etude launch FILE` or `etude queue FILE` bounds the experiment |
+| `launch_cohort(name, runs, ...)`, `queue_cohort(name, runs, ...)` | `launch(runs, ...)`, `queue(runs, ...)`; both return a tuple of run ids |
+| `etude status COHORT`, `wait`, `cancel`, `logs --cohort` | `--experiment E`, `--job J`, or run addresses |
+| `etude continue --run COHORT --cohort NEXT` | `etude continue --run RUN`, one run at a time |
+| `ETUDE_COHORT`, `track(cohort=...)` | removed |
+| `etude controller`, `server set`, `unset`, `run` | `etude server`, `server set`, `unset`, `run` |
+
+Every command that reads the file refuses an old declaration whose
+replacement is absent, before anything runs or is stored:
+
+```text
+capacity.py: rename runs() to training_jobs()
+capacity.py: rename eval() to eval_jobs()
+```
+
+There is no alias or warning period, and `from etude.jobs import training`
+is an ordinary `ImportError`. If both an old and a new declaration exist,
+only the new one is used. Keep a declaration's parameters. `Job.runs(...)`,
+`ExperimentState.runs`, `report()`, `play(match)` and the `etude runs` command
+keep their names. A job's identity, its command and what is stored for it do
+not change, and nothing in a bucket is rewritten.
+
+Stored runs keep the address they were stored under. A run stored as `ppo` or
+`ppo@1` recorded its job's name, which was the file's stem unless you gave
+one, so name the job the same (`TrainingJob(name="ppo", ...)`) and the run is
+recognised as `ppo/ppo@0` or `ppo/ppo@1` rather than trained again. Commands
+go on accepting the stored spelling.
+
+The launcher database is a new version: an older file is refused and left
+untouched, so let its runs finish under the version that made it. A server
+selection is not carried over; run `etude server set` again. A stored
+`run.json` that names a cohort still reads.
+
+`~/.etude/experiments/launched.json` is no longer read or written; delete it.
+An eval run launched by an earlier version is found in the launcher's own
+records.
 
 ## The run promise
 
@@ -1294,7 +1530,7 @@ carried: the save `out/state/current.json` names and every checkpoint
 published under `out/checkpoints/`. A historical run's latest checkpoint stored under
 `checkpoints/` is restored too. A checkpoint recorded
 inside `out/` is restored only while it belongs to that directory. To an owned
-host without a bucket, the controller relays the same from the bucket or the
+host without a bucket, the scheduler relays the same from the bucket or the
 host that last ran the run. A retry waits until its complete restoration is
 available. Automatic recovery retains the run ID, seed and checkpoint
 ordinals. `etude continue` instead goes further than the
@@ -1314,7 +1550,7 @@ target is given, when the file's config or the seed differs from the run's
 (the error names the fields), or while an attempt of the run is still
 allocated. A refusal changes nothing recorded about the run.
 
-Run addresses print as `EXPERIMENT[/JOB][@SEED]`, omitting a sole job or seed. Commands accept that address;
+Run addresses print as `EXPERIMENT/JOB@SEED`, in full; a run stored under a shorter spelling keeps it. Commands accept that address;
 `etude status RUN --experiment EXPERIMENT` and `etude continue --run RUN --experiment
 EXPERIMENT --until clock=value` also accept the run id alone.
 `etude launch FILE --resume` resumes the selection from its `--experiment`,
@@ -1358,14 +1594,14 @@ present or gone.
 | --- | --- | --- | --- |
 | the machine | save folders numbered below the one storage last acknowledged in `current.json`; with no storage, below the one `current.json` names | the courier, or `run.save()` with no storage | the unsent saves since the last delivery |
 | a bucket, grant can delete | save folders numbered below the stored `current.json`'s | the courier, after storing that `current.json` | two saves for about one pass |
-| a bucket, upload-only grant | the same | the controller, with the launcher's own keys, each time its loop looks at the run | one replaced save for each save delivered since the controller last ran |
+| a bucket, upload-only grant | the same | the scheduler, with the launcher's own keys, each time its loop looks at the run | one replaced save for each save delivered since its loop last ran |
 
 The last row is the one to know about. The courier cannot delete with an
 upload-only grant (S3 without `sts:GetFederationToken`, or after a grant's
-temporary keys expire), and without a selected controller the loop runs only
+temporary keys expire), and without a server the loop runs only
 while a command such as `etude launch` or `etude wait` does. A run saving
 every five minutes then leaves twelve replaced saves an hour in the bucket
-until the next such command. `etude controller set` keeps the loop running;
+until the next such command. `etude server run` keeps the loop running;
 R2 grants and S3 federation grants delete on the machine and do not wait
 for it.
 
@@ -1400,17 +1636,18 @@ Training code reads `ETUDE_OUT`, `ETUDE_OUTPUT_DIR`, `ETUDE_STOP_FILE`,
 A job can be given files by name:
 
 ```python
-from etude.jobs import training
+from etude.jobs import TrainingJob
 from etude.spec import Input
 
 policy = Input(
     name="policy.pt",
-    key="etude/launch/EXPERIMENT[/JOB][@SEED]/checkpoints/policy.pt",
+    key="etude/launch/EXPERIMENT/JOB@SEED/checkpoints/policy.pt",
     sha256="…",
     size_bytes=1048576,
 )
-job = training(
-    finetune,  # opens run.input("policy.pt")
+job = TrainingJob(
+    name="finetune",
+    train=finetune,  # opens run.input("policy.pt")
     config=FinetuneConfig(),
     inputs=(policy,),
     max_hours=1,
@@ -1446,11 +1683,11 @@ match the record.
 
 The job is also told who it is: `ETUDE_RUN` (the run's id), `ETUDE_JOB` (the
 digest its job's runs share), `ETUDE_JOB_NAME` when the job has a name,
-`ETUDE_ATTEMPT`, and `ETUDE_COHORT` when the run has one. It runs in
+and `ETUDE_ATTEMPT`. It runs in
 `ETUDE_SOURCE_DIR`, its commit's files without `.git`; [evaluation](evaluation.md)
 hashes identity files relative to it. `ETUDE_EXPERIMENT` is the launch's
 `--experiment NAME`, else the job's explicit experiment, else the launched
-file's stem; files defining `eval(state)` or `report()` require their own
+file's stem; files defining `eval_jobs(state)` or `report()` require their own
 stem. The experiment is part of the job's
 identity. [Tracking](tracking.md) reads these, so a launched recipe names
 only its clocks. A tracked script
@@ -1461,7 +1698,7 @@ attempt on every machine, and the machines' own session files apart. Runs
 stored before experiments had folders stay at `PREFIX/RUN/` and read the same:
 
 ```text
-PREFIX/EXPERIMENT[/JOB][@SEED]/           everything about one run
+PREFIX/EXPERIMENT/JOB@SEED/           everything about one run
   attempts/ATTEMPT.log/OFFSET    what the job printed, in pieces named by first byte
   attempts/ATTEMPT.json          when it started, its progress, how it ended, its pieces
   attempts/ATTEMPT/NAME          files the job left in its output directory
@@ -1481,7 +1718,7 @@ PREFIX/sources/SHA256.tar        a commit's source archive, named by its digest
 
 The job is given `ETUDE_TRACK_DIR`, `track` beside the `sessions` directory
 (on this computer `~/.etude/track`), and tracking keeps the run's files in
-`ETUDE_TRACK_DIR/EXPERIMENT[/JOB][@SEED]/`. The courier copies that folder into the run's folder
+`ETUDE_TRACK_DIR/EXPERIMENT/JOB@SEED/`. The courier copies that folder into the run's folder
 in storage while the job runs; the job still holds no keys. A second attempt,
 on this machine or another, writes into the same run folder. The courier and
 tracking's own `sync` follow one set of rules (`etude.carriage`): files ending
@@ -1496,7 +1733,7 @@ membership is published after all files in that pass succeed, including when
 no files remain. A courier restart reconstructs membership from the local
 directory. This also works with upload-only grants; absence does not depend
 on deleting bucket objects. Under such a grant a replaced save's objects stay
-in the bucket, outside membership and never restored, until the controller
+in the bucket, outside membership and never restored, until the scheduler
 deletes them ([The run promise](#the-run-promise)).
 
 A job reports its progress by atomically replacing `etude-result.json` in the
@@ -1542,7 +1779,7 @@ coverage rules, and neither Python package imports the other.
 ```sh
 etude continue --run RUN --until updates=6400 --source s3://bucket/etude/launch
 etude continue --run RUN --until steps=63000 --ordinal 4 --source s3://bucket/etude/launch
-etude continue --run COHORT --until steps=63000 --cohort NEXT --source s3://bucket/etude/launch
+
 etude cancel RUN
 ```
 
@@ -1592,7 +1829,7 @@ parent's tracked folder is (its bucket, or a runs directory). Without
 `--source`, it reads this computer's runs directory, else the records on the
 owned host that last ran the parent. The copy comes from the bucket where the
 parent's folder was carried, or, without one, from that host's folder for the
-parent. To an owned host without a bucket the controller relays it before the
+parent. To an owned host without a bucket the scheduler relays it before the
 run starts, from the parent's bucket or host, and the run waits while neither
 can be read. Tracking is told the parent and where it stood in
 `ETUDE_CONTINUES`, and the child declares that lineage itself. The `continue`
@@ -1605,19 +1842,35 @@ or reports an undelivered input instead of starting with different state.
 
 ## Ownership and failure behavior
 
-The code has three layers:
+The code has three levels, each built only on the public functions of the one
+below. Kubernetes calls the first a controller (the loop that compares what is
+declared with what exists); Slurm and Ray call the second a scheduler;
+Karpenter and SkyPilot call the third a provisioner.
 
-1. `machines.py` defines allocations, requests and safeguards. `providers/runpod/machines.py`
-   obtains machines, supplies stock-image boot, reads prices/bills and deletes
-   exact provider identities. `OwnedMachine` represents an existing address.
-2. `executor.py` composes startup (`startup.py`, `ssh.py`) with directory,
-   SSH or bucket journals. `worker/attempts.py` executes packets without knowing
-   jobs or providers; `worker/courier.py` moves inboxes and evidence. Rented
-   machines start themselves; owned hosts use their configured connection.
-3. `controller.py` forwards CLI commands and runs the standing loop; `source.py`
-   freezes and publishes git source, reads its history and caches transport archives.
-   `scheduler.py` owns jobs, runs, cohorts, queue placement and limits in `database.py`. Lower layers are public Python types and can be used without
-   the run scheduler.
+| Level | Modules | States it owns |
+| --- | --- | --- |
+| Controller | `etude/controller.py` (the pass), `experiment.py` (state), `declarations.py` (reads an experiment file), `jobs.py`, `smoke.py`, `local.py` | a run's `queued`, `running`, `stopped`, `finished`, `failed` |
+| Scheduler | `etude/launch/`, apart from the provisioner's modules | `Phase`, `Outcome`, `Cause`, `Status` |
+| Provisioner | `launch/machines.py`, `launch/providers/`, `launch/images.py` | `Machine.state`: `starting`, `available`, `unavailable`, `deleted` |
+
+- **Controller.** Reads the experiment file, observes state through
+  `client.standing(experiment)` and storage, and calls the scheduler's
+  `launch` or `queue` once for each new run. It holds the experiment's
+  `--max-usd` and nothing else between passes.
+- **Scheduler.** `scheduler.py` owns runs, the queue, placement and each
+  job's limits in `database.py`. `executor.py` composes startup (`startup.py`,
+  `ssh.py`) with directory, SSH or bucket journals. `worker/attempts.py`
+  executes packets without knowing jobs or providers; `worker/courier.py`
+  moves inboxes and evidence. `server.py` forwards CLI commands to a selected
+  server and runs the standing loop; `source.py` freezes and publishes git
+  source, reads its history and caches transport archives. It reads no
+  experiment file and holds no limit that spans runs.
+- **Provisioner.** `machines.py` defines allocations, requests, safeguards
+  and definite capacity refusal. `providers/runpod/machines.py` obtains
+  machines, supplies stock-image boot, reads prices/bills and deletes exact
+  provider identities. `OwnedMachine` represents an existing address. It
+  knows nothing of jobs or runs. Rented machines start themselves; owned
+  hosts use their configured connection.
 
 The SQLite file is `$ETUDE_HOME/launcher.sqlite` (default `~/.etude`), carried
 across releases by migrations; see [Upgrading Etude](#upgrading-etude). Versioned
@@ -1642,8 +1895,8 @@ A session on a machine you added has no deadline; every run still enforces its h
 `etude wait` without names keeps looking until queued work finishes. Started
 workers execute their delivered work independently; a launched machine with
 an inbox is cleaned up on the next scheduling pass or at its own deadline.
-`launch_cohort` first acquires one machine per first-wave run. Each machine
-then takes waiting work that fits its remaining window. `etude controller run` keeps matching new work
+`launch` first acquires machines for the runs it can place. Each machine
+then takes waiting work that fits its remaining window. `etude server run` keeps matching new work
 after commands exit. Sweeps, spot recovery and additional providers remain open.
 
 ## Layout and dependency rules
@@ -1654,9 +1907,13 @@ serialized message shapes schemas. RunPod supplies machines; S3 stores evidence.
 SSH remains the connection to a host, including its disk.
 
 ```text
+etude/
+  controller.py  experiment.py  declarations.py  jobs.py  smoke.py  local.py
 etude/launch/
+
   records.py  schemas.py  client.py  cli.py  commands.py
-  scheduler.py  executor.py  database.py  source.py  controller.py
+    scheduler.py  executor.py  database.py  source.py  server.py
+
   ssh.py  startup.py  machines.py  environment.py  errors.py  measurement.py
   storage/    disk.py  bucket.py  s3.py
   worker/     main.py  attempts.py  courier.py  remote.py
@@ -1665,8 +1922,12 @@ etude/launch/
 
 One AST test, `tests/launch/test_layout.py`, enforces the rules:
 
-- Workers cannot reach the scheduler, database, client, CLI or controller through
+- Workers cannot reach the scheduler, database, client, CLI or server through
   imports. Workers execute packets and return evidence, without placing runs.
+- The provisioner's modules import nothing of the scheduler (`scheduler`,
+  `executor`, `database`, `client`, `server`, `cli`, workers) and no `Job` or
+  `RunRequest`. No `etude.launch` module imports a controller-level module,
+  and nothing outside `etude.launch` imports an underscore name from it.
 - Provider implementations are named only inside `providers/`, with `client.py`
   as the single composition point. Generic cleanup and package manifests keep
   machine-specific choices out of workers and SSH.
@@ -1676,8 +1937,7 @@ One AST test, `tests/launch/test_layout.py`, enforces the rules:
 - Imports use full module paths and all package initializers stay empty.
 
 `Record` lives in `records.py`; `schemas.py` owns packet, result, bootstrap and
-inbox models. `executor.py` owns `Executor`, its `Execution` interface,
-and definite capacity refusal. There is one representation of each record.
+inbox models. `executor.py` owns `Executor` and its `Execution` interface. There is one representation of each record.
 
 The stock-image bootstrap and guardian live in `providers/runpod/pod.py`;
 `providers/package.py` builds the immutable archive and its bare-Python subset.
@@ -1689,19 +1949,23 @@ bucket keys are named by its session id.
 Each command declares `Kind.read`, `Kind.ask` or `Kind.wait` beside its definition
 in `cli.py`. Declarations do not change execution; every read is pinned at zero
 provider, bucket, SSH and git calls with no provider key set, and other current
-deviations remain pinned in counting tests. `status` answers as of the controller
+deviations remain pinned in counting tests. `status` answers as of the scheduler
 loop's last pass and prints when that was (`last loop: ...`); run `etude wait` or
-`etude controller run` to move work along.
+`etude server run` to move work along.
 
 | Kind | Commands | Allowed dependency | Expected result |
 | --- | --- | --- | --- |
-| Read | `status`, `runs`, `logs`, `pools`, `ondemands`, `machines`, `providers`, `storages`, `controller`, `usage` | database only | immediate answer with freshness |
+| Read | `status`, `runs`, `logs`, `pools`, `ondemands`, `machines`, `providers`, `storages`, `server`, `usage` | database only | immediate answer with freshness |
 | Ask | `queue`, `cancel`, `terminate`, `rent`, `pool` and `ondemand` mutations, `default`, `machine add`, `provider set`, `storage add` | database only | recorded intent and an id where applicable |
 | Wait | `wait`, `launch` (with or without `--quote` or `--resume`), `availability`, `fetch`, `logs --follow`, `source`, `continue` | other machines with a time limit | completion or the limit |
 
-Controller selection mutations are asks. `worker` and `controller run` are waits
+Server selection mutations are asks. `worker` and `server run` are waits
 because they deliberately execute long-lived loops; they retain their existing
-lifetime rules. Job-file `runs()` is an input function, not a launcher command.
+lifetime rules. An experiment file's `training_jobs()` and `eval_jobs(state)` are input
+functions, not launcher commands. `queue` stays an ask for a file that takes no state;
+for one whose declarations take `state` it reads the source once before recording. `eval`
+is a wait: it reads the source and plays on this computer, and needs no provider key or
+launcher database.
 `smoke` is a wait on this computer alone: it runs the file tiny in a temporary
 home and touches neither the database nor another machine. `train` is the same
 kind: it calls a file's `train` here, writes the run to this computer's runs
@@ -1709,12 +1973,12 @@ directory, and needs no provider key, launcher database or network; `--seconds`
 is its optional limit. `queue --smoke` and
 `launch --smoke` run it first, on this computer.
 
-The full expectation also gives external work to the controller loop, makes asks
+The full expectation also gives external work to the scheduler loop, makes asks
 safe to repeat with caller-chosen identities, restricts waits to watching, bounds
 lists, states answer freshness and prevents one supply's trouble delaying another.
 Commands require only dependencies implied by their kind: reads work without
 provider keys or a network. The rest are documented expectations for the follow-up;
-this foundation does not enforce them, add ids or deadlines, or change controller
+this foundation does not enforce them, add ids or deadlines, or change server
 forwarding.
 
 ## Measurement and profiling
@@ -1729,11 +1993,11 @@ statements, including transactions. Fixture construction is outside measurement.
 Counts retain no SQL text, process arguments, payloads or credentials.
 
 The normal suite pins read/ask/wait costs, live-worker scaling at 1 and 10 workers,
-one controller pass, a three-run git-backed cohort, and five Etude modules loaded
+one scheduler pass, a three-run git-backed launch, and five Etude modules loaded
 by help. The help check excludes platform-dependent standard-library module totals.
 The physical transport test checks provider, bucket and SSH counts with local replies.
 Zero external effects for queue are a target; wait advancing work, repeated SQL
-scans and repeated cohort git preparation are known debt.
+scans and repeated git preparation across runs are known debt.
 
 Scale cases are excluded by default. Run them explicitly:
 
@@ -1750,13 +2014,13 @@ scale check at gate:
 | ---: | --- | ---: | ---: | ---: | ---: | ---: |
 | 10 | status | 0 | 0 | 0 | 0 | 501 |
 | 10 | runs | 0 | 0 | 0 | 0 | 171 |
-| 10 | controller pass | 20 | 10 | 0 | 0 | 263 |
+| 10 | scheduler pass | 20 | 10 | 0 | 0 | 263 |
 | 100 | status | 0 | 0 | 0 | 0 | 5001 |
 | 100 | runs | 0 | 0 | 0 | 0 | 1701 |
-| 100 | controller pass | 200 | 100 | 0 | 0 | 2513 |
+| 100 | scheduler pass | 200 | 100 | 0 | 0 | 2513 |
 | 1000 | status | 0 | 0 | 0 | 0 | 50001 |
 | 1000 | runs | 0 | 0 | 0 | 0 | 17001 |
-| 1000 | controller pass | 2000 | 1000 | 0 | 0 | 25013 |
+| 1000 | scheduler pass | 2000 | 1000 | 0 | 0 | 25013 |
 
 Queueing one source-free run costs 23 SQL statements and no external calls.
 A wait with a zero timeout still advances one pass: 4 provider calls, 1 journal
@@ -1785,10 +2049,10 @@ uv run python -m pstats /tmp/status.pstats
 ETUDE_SPANS=/tmp/etude-spans.log etude status
 ```
 
-`--profile FILE` precedes the command and profiles this process, including controller
+`--profile FILE` precedes the command and profiles this process, including server
 forwarding when selected. It does not activate profiling in a remote worker.
 `ETUDE_SPANS` enables named elapsed-second lines around provider HTTP, bucket calls,
-SSH (including controller commands) and git waits in the process where it is set.
+SSH (including server commands) and git waits in the process where it is set.
 Nested spans may overlap; do not sum them as total runtime. Names are fixed and
 exclude arguments and payloads. Unset means no span file or timing calls. A failed
 span write never changes execution. Timing is diagnostic evidence, not a test
@@ -1808,7 +2072,7 @@ rejection cause. Missing timestamps say `not recorded`.
 The existing database has a provider receipt but no timestamp for its confirmation;
 the confirmation phase therefore has no timestamp and says `receipt retained`
 when that evidence exists. It never borrows another phase's
-clock. Times are UTC observations retained by the controller, with their existing
+clock. Times are UTC observations retained by the scheduler, with their existing
 precision. They are historical evidence, not a claim of current machine freshness.
 
 ## Checks
@@ -1856,9 +2120,9 @@ keeps a local run ref, and recovery needs that repository. Local refs also keep
 origin-backed source available while runs wait to be sent to workers.
 
 Workers receive tars and never need git keys. Tars under `ETUDE_HOME/sources`
-are transport caches, not the source record. With an SSH controller, the
+are transport caches, not the source record. With a server, the
 submitting client snapshots and pushes, then sends the frozen metadata and tar.
-The controller does not pull launch source itself in this build.
+The server does not pull launch source itself in this build.
 
 A run displayed by `etude status` includes a source line, for example:
 
@@ -1875,14 +2139,14 @@ job digest or display name. An unknown revision is an error.
 
 ```sh
 etude runs
-etude runs --contains v0.3.0 --cohort capacity --rent l4
+etude runs --contains v0.3.0 --experiment capacity --rent l4
 etude runs --job JOB_ID
 etude source RUN_ID recovered-source
 etude source RUN_ID                     # creates etude-source-RUN_ID
 ```
 
 `source` fetches the recorded commit from origin and checks it out detached in
-a new directory on the requesting client, including when a controller is set.
+a new directory on the requesting client, including when a server is set.
 It refuses an existing destination and does not use the tar cache. Local-only
 runs fetch from their original local repository. Both commands inspect history
 without advancing the queue. Ancestry needs git history: it uses the original
@@ -1895,7 +2159,7 @@ not contained by a run sent earlier from its branch, even if its code is the sam
 
 The records pass increases local SQL counts because paid windows and machine
 acquisition are now explicit reads rather than fields joined into every Session:
-status adds 27 statements per active worker, runs adds 6 and a controller pass
+status adds 27 statements per active worker, runs adds 6 and a scheduler pass
 adds 9. Remote counts are unchanged.
 
 
@@ -1924,10 +2188,10 @@ CLI zero means unlimited startup. Install output is retained while it runs; logs
 identify the effective deadline when it expires. SSH startup detaches installation
 and returns pending; a lost reply never authorizes a second installer or worker.
 Image pull occurs before the in-machine guardian starts, so cleanup during that
-phase requires an active controller and a confirmed provider identity.
+phase requires the scheduler's loop running and a confirmed provider identity.
 
-Explicit controller installation also accepts `startup_seconds` in Python and
-`etude controller set ADDRESS --startup-seconds SECONDS`. The default is no
+Server installation also accepts `startup_seconds` in Python and
+`etude server set ADDRESS --startup-seconds SECONDS`. The default is no
 timeout; a configured allowance governs both the local wait and remote install.
 A timed-out wait is not proof the remote installation stopped. A log read retains
 its own explicitly chosen deadline. Downloads, SSH key generation, sshd startup
@@ -1937,14 +2201,15 @@ and guardian readiness inherit this budget without separate 30/60-second caps.
 ### Prepare a framework image before renting
 
 ```python
-from etude.jobs import training
+from etude.jobs import TrainingJob
 from etude.launch.images import prepare_pytorch, resolve_image
 from etude.launch.records import MachineTemplate
 
 prepared = prepare_pytorch(torch="2.10.0", cuda="12.8")
 template = MachineTemplate(provider="runpod", gpu="NVIDIA L4", image=prepared.image)
-job = training(
-    train,
+job = TrainingJob(
+    name="base",
+    train=train,
     config=TrainConfig(),
     runtime=prepared.runtime,
     setup='"$ETUDE_PYTHON" -m pip install etude-sdk',  # the stock image has no Etude
@@ -1976,7 +2241,7 @@ images use `resolve_image` plus an explicit `Runtime`.
 Version combinations must exist in the upstream registry. Resolution establishes
 artifact identity and platform, not framework ABI compatibility or a speedup.
 
-Each acquired machine retains its selection across on-demand edits and controller
+Each acquired machine retains its selection across on-demand edits and scheduler
 restarts; `machines --images` reads those facts without registry access. Bootstrap
 logs include the same selection. `ondemand add --image` and existing digest strings
 remain available when resolution has already happened; their platform is unchecked.
@@ -1992,11 +2257,12 @@ command from installing Torch again. Cold image pulls can still dominate startup
 ### Reuse a preinstalled job runtime
 
 ```python
-from etude.jobs import training
+from etude.jobs import TrainingJob
 from etude.spec import Runtime
 
-job = training(
-    train,
+job = TrainingJob(
+    name="base",
+    train=train,
     config=TrainConfig(),
     max_hours=1,
     runtime=Runtime(
@@ -2029,8 +2295,9 @@ in the checkout and a command runs in the shell's environment.
 ```python
 from etude.spec import Preparation, Runtime
 
-job = training(
-    train,
+job = TrainingJob(
+    name="base",
+    train=train,
     config=TrainConfig(),
     max_hours=1,
     inputs=(engine_wheel, *weight_shards),
@@ -2094,8 +2361,9 @@ CUDA execution test.
 ### Setup, training and cleanup
 
 ```python
-job = training(
-    train,
+job = TrainingJob(
+    name="base",
+    train=train,
     config=TrainConfig(),
     setup='"$ETUDE_PYTHON" prepare_data.py',
     cleanup='"$ETUDE_PYTHON" collect_diagnostics.py',
@@ -2182,20 +2450,20 @@ uploads it adds body bytes divided by the configured rate: a 64 MiB part gets
 124 seconds with the defaults. Response reads reset the base socket allowance
 as bytes arrive, so a progressing large download has no short total limit.
 Every socket allowance is capped by an enclosing operation deadline. Set these
-variables in the controller environment before launching; rentals and SSH
+variables in the launcher's environment before launching; rentals and SSH
 workers receive its explicit settings in their bootstrap environment. Job
 variables alone do not configure the parent uploader. Bootstrap log publication
 uses the same policy. For SDK clients, see [tracking](tracking.md#storage-outages-and-recovery).
 
 Status's delivery age comes from the latest retained successful write for the
 current attempt, or its allocation time before any write is observed. Failed
-requests and successful reads do not reset it. The controller may simply have
+requests and successful reads do not reset it. The scheduler may simply have
 stopped collecting evidence; use the worker log to distinguish that from a
 storage outage. Completed and local-only attempts have no delivery-age warning.
 
 Finite HTTP operations also bound waiting for the complete response, even when
 a connection keeps streaming bytes. Expiry leaves the in-flight outcome unknown:
-Etude does not infer absence or replay writes. The controller's persisted startup
+Etude does not infer absence or replay writes. The scheduler's persisted startup
 deadline and the independent rental guardian remain the lifecycle authorities. A successful transport call does not
 prove that remote work completed or was cancelled.
 
@@ -2267,8 +2535,8 @@ print(outputs.estimate(S3_US_WEST_2), outputs.estimate(R2))
 `etude usage --run RUN` reads the same retained evidence. `observed_at` is the
 latest included event timestamp, not a claim that remote evidence is current.
 The worker's ordinary synchronization/tick retains session events; the read
-never refreshes them. With a selected SSH controller, the public call still uses
-the existing SSH connection to that controller; the database read itself contacts
+never refreshes them. With a server selected, the public call still uses
+the existing SSH connection to that server; the database read itself contacts
 no worker, provider or artifact store. Failed downloads and bootstrap runtime reads remain in
 session evidence when publication succeeds. Hard kills, missing journals and
 truncated operational logs leave unknown intervals.
@@ -2283,7 +2551,7 @@ apart from one it downloaded:
 input: received 0 bytes, reused 19300000000 bytes
 ```
 Use `usage()` or `usage(machine=...)` for totals that include shared and
-unattributed controller traffic once. Deduplicate exports by `Transfer.id` when
+unattributed launcher traffic once. Deduplicate exports by `Transfer.id` when
 combining scopes. Upload counts are body bytes supplied to urllib, including
 multipart form framing, not confirmed socket bytes. Response counts are actual
 body reads, including partial responses and failures; object length is separate.
@@ -2320,7 +2588,7 @@ A local HTTP fixture completes two synthetic runs on one kept machine. It
 installs a fixture runtime, retries a denied source download, shares a 2,097,150
 byte source and 1 MiB checkpoint input, publishes two identical 24 MiB
 checkpoints, collects worker journals through scheduler ticks, and fetches each
-result twice through `Scheduler.fetch`. Worker and controller caches are separate.
+result twice through `Scheduler.fetch`. Worker and launcher caches are separate.
 
 | Public result fetches (both runs) | First pair | Warm pair |
 | --- | ---: | ---: |
@@ -2369,12 +2637,12 @@ out of exports. Provider log delivery may omit or duplicate requests, and a GET
 is not by itself proof of billable internet egress. Reconciliation does not
 change observed transport totals or turn them into billed amounts.
 
-Adoption requires the SDK revision containing these APIs on both controller
+Adoption requires the SDK revision containing these APIs on both launcher
 and worker; generated archives include the same revision automatically.
 Use a fresh `ETUDE_HOME` for offline integration proof and install the reviewed
 PR commit with `uv add 'etude-sdk @ git+https://github.com/loopflowstudio/etude@COMMIT'`.
 
-Replaced remote training saves are removed by the controller when worker grants
-only permit uploads. Keep `etude controller run` or `etude wait` running for
+Replaced remote training saves are removed by the scheduler when worker grants
+only permit uploads. Keep `etude server run` or `etude wait` running for
 prompt cleanup; with neither, they remain until the next command that observes
 the worker journal. No hidden background process starts to remove them.

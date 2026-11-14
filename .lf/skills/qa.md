@@ -63,7 +63,7 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    clocks=[...], directory=RUNS)`, `run.log(...)`, `run.checkpoint(file, updates=N)`,
    `run.finish(timeout=60)`, via `uv run --project REPO python script.py`. Track the
    same run again to make a resumed attempt.
-2. Put `NAME.py` (with `eval(state)` and `report()`) and its play module in the lab,
+2. Put `NAME.py` (with `eval_jobs(state)` and `report()`) and its play module in the lab,
    then `git init` and commit: `etude eval` refuses play functions outside a git checkout.
    Play with `uv run --project REPO etude eval NAME.py --source RUNS` from that folder.
 3. Serve with `uv run --project REPO etude report NAME.py --source RUNS --serve --port P`
@@ -160,18 +160,18 @@ accept-new` and its own `UserKnownHostsFile`). With an isolated `ETUDE_HOME`:
 `etude storage add qa --bucket manabot --prefix etude-qa/NAME --provider r2`,
 `etude machine add box ALIAS --storage qa`, then from a committed job repo (a uv
 project depending on `etude-sdk`, with `package = false`) run `etude launch job.py
---pool box` followed by `etude controller run` in the background. Both need
+--pool box` followed by `etude server run` in the background. Both need
 `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` **and `R2_API_TOKEN`**
 from Doppler `manabot/prd`. Without the token, launch is refused (`capacity_refused`).
 Cut storage with `docker exec box iptables -A OUTPUT -p tcp --dport 443 -j DROP`;
 `-D` restores it. Read the worker's own log with `etude logs --machine box` or
 `/root/.etude/sessions/*/worker.log` and `usage.jsonl` in the container. Restart
-the controller after code changes. Afterwards remove the container and delete the
+that loop after code changes. Afterwards remove the container and delete the
 `etude-qa/NAME/` prefix.
 
 ## Etude: launching an experiment file on this computer
 
-A lab that runs typed jobs (`training(train, config=...)`) is a git repo, outside the
+A lab that runs typed jobs (`TrainingJob(name=..., train=train, config=...)`) is a git repo, outside the
 repo, with an isolated `ETUDE_HOME`:
 
 - `pyproject.toml`: `dependencies = ["etude-sdk[eval]"]` (the `eval` extra brings
@@ -180,11 +180,11 @@ repo, with an isolated `ETUDE_HOME`:
   `uv lock`, add `.gitignore` with `.venv/` and `__pycache__/`, and commit, or every
   run says "plus uncommitted changes".
 - `train.py` with a Pydantic config whose real size raises, so a passing smoke shows
-  its smoke form ran; `games.py` with `play(match)`; `ppo.py` with `runs()`, `eval(state)`
+  its smoke form ran; `games.py` with `play(match)`; `ppo.py` with `training_jobs()`, `eval_jobs(state)`
   and `report()`. A job's `max_usd` must be more than zero or omitted.
-- `uv run etude smoke ppo.py`, `uv run etude launch ppo.py --cohort NAME`, then
-  `etude status`. Nothing runs a controller here: cancel what you queued
-  (`etude cancel COHORT`) and `etude wait RUN` until each says `done: cancelled`,
+- `uv run etude smoke ppo.py`, `uv run etude launch ppo.py`, then
+  `etude status`. Nothing runs the scheduler's loop here: cancel what you queued
+  (`etude cancel --experiment ppo`) and `etude wait RUN` until each says `done: cancelled`,
   so no worker is left behind. macOS has no `timeout`; use
   `perl -e 'alarm 60; exec @ARGV' uv run etude wait RUN`.
 - Client jobs submitted directly from Python need `experiment=`
@@ -226,7 +226,7 @@ with a `time.sleep` per step so a stop lands mid-run. Then:
   changed `--config` (`run_identity_conflict`), a target on a clock the recipe
   does not count (`until_clock_undeclared`). Never pipe a run into `head`: the
   SIGPIPE fails the run.
-- A `runs()` file with `seeds=(0, 1, 2)` trains `NAME@0..2` in order; `--job`
+- A `training_jobs()` file with `seeds=(0, 1, 2)` trains `NAME@0..2` in order; `--job`
   and `--seed` select. Do not teach `--resume` as finishing a partly started
   selection (an unstarted member is refused; Open 6).
 - Read rows with `etude.train.read.read(ETUDE_HOME/track, EXPERIMENT, ADDRESS)
@@ -236,9 +236,9 @@ with a `time.sleep` per step so a stop lands mid-run. Then:
   etude` from the repo root, then `docs/hanabi.md`'s commands; 2000 updates take
   long enough to interrupt at ~5 s.
 
-Launch a plain file defining only `runs()` to check that its
+Launch a plain file defining only `training_jobs()` to check that its
 stem supplies the experiment. Also check an explicit `Job.experiment`: plain
-files preserve it, while files defining `report()` or `eval(state)` require
+files preserve it, while files defining `report()` or `eval_jobs(state)` require
 their own stem.
 
 For an installed-package check, build with `uv build --wheel --out-dir /tmp/qa-dist`,
@@ -255,11 +255,10 @@ To exercise automatic retries without renting, declare a job with `max_hours`,
 `max_attempts=2` and `Runtime(python=...)` pointing to a **separate job environment**
 containing the wheel. Using the client environment as the job runtime is refused.
 Have the real recipe register a counter, save at update 2, and raise `Stopped`;
-its next allocation resumes at 3. Run `etude launch FILE --pool local --cohort C`,
-then `etude wait C`, inspect `etude logs --run ADDRESS`, and require a stopped
+its next allocation resumes at 3. Run `etude launch FILE --pool local`,
+then `etude wait --experiment NAME`, inspect `etude logs --run ADDRESS`, and require a stopped
 attempt followed by success. Check `etude continue --run ADDRESS --until updates=N`
-too: implicit recipe clocks must work across branching. When ADDRESS is also a
-cohort name, supply `--cohort CHILD` on continue. Check cleanup receipts and ensure
+too: implicit recipe clocks must work across branching. Check cleanup receipts and ensure
 no owned worker remains after waiting. A wait command's exit 0 alone does not mean
 the run succeeded; read its printed final outcome.
 
@@ -291,20 +290,27 @@ leaves it `stopping`. Use a fresh `ETUDE_HOME` and prefix after installing an
 interim schema. Afterwards remove the containers and delete the prefixes
 (`aws s3 rm --recursive` under Doppler, as above).
 
-## Driving Etude
+## Etude: one pass over an experiment file (train, eval, launch, queue)
 
-- Point every command at a scratch home: `ETUDE_HOME=/tmp/<name>/home uv run etude status`.
-  Read the real `~/.etude` only, and do it through a SQLite backup-API snapshot
-  (`sqlite3.connect("file:...?mode=ro", uri=True).backup(dst)`), since live
-  files are WAL-mode and may be open.
-- For a released baseline, run `ETUDE_HOME=<copy> uvx --from etude-sdk==X.Y.Z etude runs`
-  on a separate copy, because an old etude writes the file it opens.
-- Take-over refuses a source written in the last 30 s. A fresh copy counts, so
-  age it with `touch -t 202611141300 launcher-17.db*` and don't wait.
-- A real local run needs a small git project with a `pyproject.toml` depending on
-  `etude-sdk @ file://<worktree>`, plus a `job.py` like the README's. `max_usd`
-  must be above zero, and `run.save()` needs `run.resume(...)` first. Then use
-  `uv run etude launch job.py --experiment NAME` and `uv run etude wait NAME`.
-- To simulate a branch build, drop an unreleased `src/etude/launch/migrations/<name>.sql`
-  (`-- after: run_resume_and_writers`) into the worktree. For a released one,
-  also append `{name, sha256, floor}` to `released.json`. Remove both afterwards.
+Lab as in "launching an experiment file on this computer", with `two.py` declaring
+`training_jobs(state)` (base, seeds 0 and 1; then `fine` with `start=` base@0's
+`final` once it is finished) and `eval_jobs(state)` (a `Benchmark` over every
+`run.final`). Use a recipe that checkpoints a folder (`run.checkpoint(policy=...)`):
+single-file checkpoints hide nested input names (`start/checkpoint.json`).
+
+- Here: `etude train two.py` three times (stage one, stage two, all `finished`),
+  `etude eval two.py` twice (`N new ... N played`, then `nothing to play`), `etude report two.py`.
+- Launched: fresh `ETUDE_HOME`, `etude launch two.py --max-usd 5`, then
+  `perl -e 'alarm 240; exec @ARGV' uv run etude wait --experiment two` (wait drives the
+  local pool), and `launch` again, immediately and after waiting. In-flight matches read
+  `0 new, N running`. `--max-usd 1.5` with `max_usd=1` per job holds the second seed.
+- Ctrl-C: a slower copy of the file (`pause=0.5`) under the `Popen`/`SIGINT` driver after
+  ~7 s gives exit 75; the next pass prints `stopped; --job base --seed N --resume`
+  (which seed depends on timing); follow that hint.
+- Cancelled before start: `etude queue two.py`, `etude cancel --experiment two`, wait;
+  the next pass prints `failed; --job base --seed 0 --resume`; following it with both
+  `etude train` and `etude launch` must start the run.
+- Returning user: `git worktree add --detach /tmp/X main`, a lab whose pyproject points
+  at it, train `runs()` files (compact `ppo@0`, `solo`) and `etude queue` (makes
+  `launcher-19.db`). Repoint the pyproject at this checkout, `uv lock`, rename per
+  `release/UNRELEASED.md`, and check stored runs read `finished`.

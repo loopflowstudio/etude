@@ -33,7 +33,7 @@ def test_phases_keep_original_failure_and_never_replay_user_errors(
     trained: bool,
 ) -> None:
     scheduler = local(tmp_path)
-    run = scheduler.launch(Job(setup=setup, command=command, cleanup=cleanup, max_hours=0.01))
+    (run,) = scheduler.launch(Job(setup=setup, command=command, cleanup=cleanup, max_hours=0.01))
     status = scheduler.wait(run, every=0.05, timeout=10)[0]
     text = job_text(scheduler.logs(refresh=True, run=run))
     assert status.outcome == outcome
@@ -48,7 +48,7 @@ def test_phases_keep_original_failure_and_never_replay_user_errors(
 def test_cancellation_runs_cleanup_without_restarting_setup(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
     ready = tmp_path / "ready"
-    run = scheduler.launch(
+    (run,) = scheduler.launch(
         Job(
             setup="echo prepared",
             command=f'touch "{ready}"; sleep 30',
@@ -70,7 +70,7 @@ def test_cancellation_runs_cleanup_without_restarting_setup(tmp_path: Path) -> N
 
 def test_cleanup_can_follow_job_limit_but_cannot_run_unbounded(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
-    run = scheduler.launch(
+    (run,) = scheduler.launch(
         Job(
             command="sleep 30",
             cleanup="echo cleanup-began; sleep 30; echo too-late",

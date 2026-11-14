@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import time
 import zipfile
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -19,6 +20,7 @@ from etude.errors import LauncherError
 from etude.launch import database
 from etude.launch.database import (
     Migration,
+    Released,
     additive,
     copies,
     launcher_file,
@@ -32,6 +34,24 @@ from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Finished
 
 FIXTURES = Path(__file__).with_name("fixtures")
+
+
+@pytest.fixture(autouse=True)
+def _released_schema(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Exercise the upgrade lifecycle as a release; copy behavior is tested separately."""
+    recorded = database.released()
+    pending = [m for m in migrations() if m.floor is None]
+    monkeypatch.setattr(
+        database,
+        "released",
+        lambda: (
+            *recorded,
+            *(Released(name=m.name, sha256=m.sha256, floor="0.4.0") for m in pending),
+        ),
+    )
+    migrations.cache_clear()
+    yield
+    migrations.cache_clear()
 
 
 def _released(home: Path, version: str, name: str | None = None) -> Path:
@@ -71,7 +91,10 @@ def test_takes_over_released_facts(
     assert len(store.runs()) == 2
     assert len(store.sessions()) == 2
     assert len(store.rentals()) == 1
-    assert store.cohort("sweep").parallel == 2
+    assert (
+        store._db.execute("SELECT name FROM sqlite_master WHERE name='cohorts'").fetchone() is None
+    )
+    assert "cohort" not in {r[1] for r in store._db.execute("PRAGMA table_info(runs)")}
     scheduler = Scheduler(store, {})
     phases = {scheduler.read(run.id).phase for run in store.runs()}
     assert phases == {"running", "queued"}
@@ -81,14 +104,18 @@ def test_takes_over_released_facts(
     assert all(
         attempt.writers == () for run in store.runs() for attempt in store.attempts(run=run.id)
     )
-    # Compare every original column, including JSON and operational evidence.
+    # Cohort ownership is removed; every other original column survives unchanged.
     with sqlite3.connect(source) as original:
         tables = [
             r[0] for r in original.execute("SELECT name FROM sqlite_master WHERE type='table'")
         ]
         for table in tables:
+            if table == "cohorts":
+                continue
             columns = ",".join(
-                '"' + r[1] + '"' for r in original.execute(f'PRAGMA table_info("{table}")')
+                '"' + r[1] + '"'
+                for r in original.execute(f'PRAGMA table_info("{table}")')
+                if table != "runs" or r[1] != "cohort"
             )
             query = f'SELECT {columns} FROM "{table}" ORDER BY rowid'
             assert [tuple(row) for row in store._db.execute(query)] == original.execute(
@@ -255,7 +282,7 @@ def test_failing_migration_rolls_back(
         ("ALTER TABLE runs ADD COLUMN note TEXT;", True),
         ("ALTER TABLE runs ADD COLUMN note TEXT NOT NULL DEFAULT '';", True),
         ("ALTER TABLE runs ADD COLUMN note TEXT NOT NULL;", False),
-        ("ALTER TABLE runs DROP COLUMN cohort;", False),
+        ("ALTER TABLE runs DROP COLUMN resume_after;", False),
         ("CREATE INDEX extra ON runs(id);", True),
         ("CREATE UNIQUE INDEX extra ON runs(job);", False),
         ("UPDATE runs SET queued=0;", False),
@@ -347,12 +374,15 @@ def test_loop_hands_over_before_tick(tmp_path: Path) -> None:
     script = """
 import sys
 from pathlib import Path
+from etude.launch import database
 from etude.launch.database import open_home
-from etude.launch.controller import loop
+from etude.launch.server import loop
+known = tuple(m.model_copy(update={"floor": "0.4.0"}) for m in database.migrations())
+database.migrations = lambda: known
 from etude.launch.scheduler import Scheduler
 store = open_home(Path(sys.argv[1]))
 store._db.execute("INSERT INTO migrations(name,sha256,applied_at,floor,program) VALUES ('future','digest','now','999.0.0',?)", (sys.argv[2],))
-store._db.execute("PRAGMA user_version=3")
+store._db.execute(f"PRAGMA user_version={len(known) + 1}")
 loop(Scheduler(store, {}))
 """
     result = subprocess.run(
@@ -445,7 +475,9 @@ def test_sqlite_requirement_names_migration(
     before = _dump(launcher_file(tmp_path))
     known = migrations()
     monkeypatch.setattr(
-        database, "migrations", lambda: (*known, _migration("ALTER TABLE runs DROP COLUMN cohort;"))
+        database,
+        "migrations",
+        lambda: (*known, _migration("ALTER TABLE runs DROP COLUMN resume_after;")),
     )
     monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 31, 1))
     monkeypatch.setattr(sqlite3, "sqlite_version", "3.31.1")
@@ -468,7 +500,9 @@ def test_backups_keep_two_and_restore_previous_schema(
     backups = sorted(tmp_path.glob("launcher.sqlite.backup-*"))
     assert len(backups) == 2
     with sqlite3.connect(backups[-1]) as previous:
-        assert previous.execute("SELECT count(*) FROM migrations").fetchone() == (4,)
+        assert previous.execute("SELECT count(*) FROM migrations").fetchone() == (
+            len(applied) - 1,
+        )
         assert (
             previous.execute("SELECT name FROM sqlite_master WHERE name='extra2'").fetchone()
             is None
@@ -482,19 +516,19 @@ def test_released_migration_cannot_change(tmp_path: Path, monkeypatch: pytest.Mo
     with (tmp_path / "baseline.sql").open("a") as stream:
         stream.write("-- edited\n")
     monkeypatch.setattr(database, "_FOLDER", tmp_path)
-    database.migrations.cache_clear()
+    migrations.cache_clear()
     try:
         with pytest.raises(LauncherError, match="released migration baseline was edited"):
             database.migrations()
     finally:
-        database.migrations.cache_clear()
+        migrations.cache_clear()
 
 
 @pytest.mark.parametrize(
     "sql,reason,floor",
     [
         ("ALTER TABLE pools ADD COLUMN note TEXT;", None, "0.4.0"),
-        ("ALTER TABLE runs DROP COLUMN cohort;", None, "0.5.0"),
+        ("ALTER TABLE runs DROP COLUMN resume_after;", None, "0.5.0"),
         ("CREATE TABLE extra(value TEXT);", "new JSON shape", "0.5.0"),
         ("ALTER TABLE pools ADD COLUMN note TEXT NOT NULL DEFAULT NULL;", None, "0.5.0"),
     ],
@@ -557,3 +591,26 @@ def test_editing_unreleased_migration_starts_new_snapshot(
     assert {pool.name for pool in next_copy.pools()} == {"later"}
     next_copy.close()
     real.close()
+
+
+def test_remove_cohorts_stays_in_copy_until_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _released(tmp_path, "0.4.0")
+    before = source.read_bytes()
+    recorded = tuple(r for r in database.released() if r.name != "remove_cohorts")
+    monkeypatch.setattr(database, "released", lambda: recorded)
+    migrations.cache_clear()
+    store = open_home(tmp_path)
+    assert store._path.parent.parent == tmp_path / "copies"
+    assert {Scheduler(store, {}).read(run.id).phase for run in store.runs()} == {
+        "running",
+        "queued",
+    }
+    assert (
+        store._db.execute("SELECT name FROM sqlite_master WHERE name='cohorts'").fetchone() is None
+    )
+    assert "cohort" not in {row[1] for row in store._db.execute("PRAGMA table_info(runs)")}
+    store.close()
+    assert not launcher_file(tmp_path).exists()
+    assert source.read_bytes() == before

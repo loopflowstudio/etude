@@ -17,8 +17,14 @@ from decimal import Decimal
 
 from etude.deadline import limit_time
 from etude.launch.errors import ProviderUnavailable
-from etude.launch.executor import Refused, check_creation
-from etude.launch.machines import Allocation, Bill, MachineRequest, Safeguards
+from etude.launch.machines import (
+    Allocation,
+    Bill,
+    MachineRequest,
+    Refused,
+    Safeguards,
+    check_creation,
+)
 from etude.launch.providers.program import Program, boot_source
 from etude.launch.providers.vast.api import Create, Instance, VastAPI, VastOffer
 from etude.launch.records import STOCK_IMAGE, MachineTemplate, Offer

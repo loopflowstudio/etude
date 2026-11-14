@@ -1,4 +1,4 @@
-"""Git owns run source; archives are only the worker/controller transport cache.
+"""Git owns run source; archives are only the worker/server transport cache.
 
 Submission freezes working bytes and history before recording a run. The cache
 is keyed by repository and absolute commit, never by a movable branch name.
@@ -221,7 +221,7 @@ def _publish(
 
 
 def freeze(run: RunRequest) -> RunRequest:
-    """Freeze at the submitting client; a controller receives this same identity."""
+    """Freeze at the submitting client; a server receives this same identity."""
     id = run_address(run.id or uuid4().hex[:12], run.job.experiment)
     if run.id is not None and (run.job.repo is None or run.source is not None):
         if run.job.repo is not None and (

@@ -39,7 +39,7 @@ app = _app(help="Launch runs on your own or rented machines, and track what they
 pool_app = _app(help="Add a pool of machines you own, or change whether it takes runs.")
 ondemand_app = _app(help="Add an on-demand to rent from: a machine template and a budget.")
 machine_app = _app(help="Add a machine you own.")
-controller_app = _app(
+server_app = _app(
     help="Show or choose the machine that holds the database, or run its loop.",
     invoke_without_command=True,
 )
@@ -50,7 +50,7 @@ for name, sub in (
     ("pool", pool_app),
     ("ondemand", ondemand_app),
     ("machine", machine_app),
-    ("controller", controller_app),
+    ("server", server_app),
     ("provider", provider_app),
     ("storage", storage_app),
     ("image", image_app),
@@ -79,7 +79,7 @@ def worker(
 def status(
     runs: Annotated[
         list[str] | None,
-        typer.Argument(help="run ids or cohort names; none means all unfinished"),
+        typer.Argument(help="run addresses; none means all unfinished"),
     ] = None,
     phases: Annotated[
         bool,
@@ -88,19 +88,18 @@ def status(
     experiment: Annotated[
         str | None, typer.Option(help="select this experiment; names may be unqualified")
     ] = None,
+    job: Annotated[str | None, typer.Option(help="select a job")] = None,
 ) -> None:
-    """Show where runs stand, as of the controller loop's last pass."""
+    """Show where runs stand, as of the server loop's last pass."""
     from datetime import UTC, datetime
 
-    from etude.launch import controller
+    from etude.launch import server
     from etude.launch.database import copies
     from etude.launch.listing import resolve_runs, show_runs
     from etude.launch.source import home
 
     scheduler = default()
-    selected = resolve_runs(scheduler, runs or [], experiment=experiment) or [
-        r.id for r in scheduler.runs(experiment=experiment)
-    ]
+    selected = resolve_runs(scheduler, runs or [], experiment=experiment, job=job)
     if phases:
         for run in selected:
             for phase in scheduler.start_phases(run):
@@ -110,7 +109,7 @@ def status(
                 print(f"{run} {phase.name} {at}{evidence}{attempt}")
         return
     show_runs(scheduler, selected)
-    controller.show_freshness(scheduler)
+    server.show_freshness(scheduler)
     for copy in copies(home(), datetime.now(UTC)):
         print(
             f"copy {Path(copy.path).name} ({', '.join(copy.unreleased)}): "
@@ -125,7 +124,6 @@ def history(
     contains: Annotated[
         str | None, typer.Option(help="only runs whose source includes this git commit or tag")
     ] = None,
-    cohort: Annotated[str | None, typer.Option(help="only runs of this cohort")] = None,
     pool: Annotated[str | None, typer.Option(help="only runs sent to this pool")] = None,
     rent: Annotated[str | None, typer.Option(help="only runs that may rent from this")] = None,
     job: Annotated[
@@ -144,7 +142,6 @@ def history(
             for r in scheduler.runs(
                 done=True,
                 contains=contains,
-                cohort=cohort,
                 pool=pool,
                 rent=rent,
                 job=job,
@@ -163,11 +160,11 @@ def source(
     ] = None,
 ) -> None:
     """Fetch the exact source a run used from git and check it out."""
-    from etude.launch import controller
+    from etude.launch import server
     from etude.launch.source import checkout
 
-    address = controller.selected()
-    client = controller.PythonClient(address) if address else default()
+    address = server.selected()
+    client = server.PythonClient(address) if address else default()
     record = client.record(run)
     print(checkout(record, directory or Path(f"etude-source-{record.id}")))
 
@@ -177,28 +174,34 @@ def source(
 def wait(
     runs: Annotated[
         list[str] | None,
-        typer.Argument(help="run ids or cohort names; none means all unfinished"),
+        typer.Argument(help="run addresses; none means all unfinished"),
     ] = None,
+    experiment: Annotated[str | None, typer.Option(help="select an experiment")] = None,
+    job: Annotated[str | None, typer.Option(help="select a job")] = None,
 ) -> None:
     """Keep work moving until these runs finish."""
     from etude.launch.listing import resolve_runs, show_runs
 
     scheduler = default()
-    ids = resolve_runs(scheduler, runs or []) or [r.id for r in scheduler.runs()]
-    scheduler.wait(*(ids if runs else ()))
+    ids = resolve_runs(scheduler, runs or [], experiment=experiment, job=job)
+    scheduler.wait(*ids)
     show_runs(scheduler, ids)
 
 
 @app.command()
 @kind(Kind.ask)
 def cancel(
-    runs: Annotated[list[str], typer.Argument(help="run ids or cohort names")],
+    runs: Annotated[list[str] | None, typer.Argument(help="run addresses")] = None,
+    experiment: Annotated[str | None, typer.Option(help="select an experiment")] = None,
+    job: Annotated[str | None, typer.Option(help="select a job")] = None,
 ) -> None:
     """Ask runs to stop."""
     from etude.launch.listing import resolve_runs, show_runs
 
+    if not runs and experiment is None and job is None:
+        raise typer.BadParameter("name run addresses, --experiment or --job")
     scheduler = default()
-    ids = resolve_runs(scheduler, runs)
+    ids = resolve_runs(scheduler, runs or [], experiment=experiment, job=job)
     for run in ids:
         scheduler.cancel(run)
     show_runs(scheduler, ids)
@@ -211,7 +214,8 @@ def logs(
         str | None, typer.Option(help="requested run ID, including failed admission")
     ] = None,
     machine: Annotated[str | None, typer.Option(help="machine operational logs")] = None,
-    cohort: Annotated[str | None, typer.Option(help="all runs in a cohort")] = None,
+    experiment: Annotated[str | None, typer.Option(help="select an experiment")] = None,
+    job: Annotated[str | None, typer.Option(help="select a job")] = None,
     job_only: Annotated[bool, typer.Option(help="only job stdout/stderr")] = False,
     follow: Annotated[
         bool,
@@ -226,15 +230,22 @@ def logs(
     """Read retained preparation, startup, execution and cleanup evidence."""
     import time
 
+    from etude.identity import run_address
     from etude.launch.client import _client
     from etude.launch.logs import LogCursor, render
 
-    if sum(value is not None for value in (run, machine, cohort)) != 1:
-        raise typer.BadParameter("name exactly one --run, --machine or --cohort")
+    if machine is not None and any(value is not None for value in (run, experiment, job)):
+        raise typer.BadParameter("select a machine or runs")
+    if all(value is None for value in (run, machine, experiment, job)):
+        raise typer.BadParameter("name --run, --machine, --experiment or --job")
     if timeout and not follow:
         raise typer.BadParameter("--timeout bounds --follow")
     scheduler = _client()
-    runs = [r.id for r in scheduler.cohort_runs(cohort)] if cohort else [run]
+    runs: list[str | None] = (
+        [run_address(run, experiment) if run is not None else None]
+        if run is not None or machine is not None
+        else [r.record.id for r in scheduler.standing(experiment, job=job)]
+    )
     if not follow:
         snapshots = [scheduler.logs(run=identity, machine=machine) for identity in runs]
         sys.stdout.write("".join(render(snapshot, job_only=job_only) for snapshot in snapshots))
@@ -270,15 +281,15 @@ def fetch(
     directory: Annotated[Path, typer.Argument(help="where to copy it")] = Path("."),
 ) -> None:
     """Copy one of a run's output files here and check it against its digest."""
-    from etude.launch import controller
+    from etude.launch import server
 
-    address = controller.selected()
+    address = server.selected()
     if address:
         raise typer.Exit(
-            controller.forward(
+            server.forward(
                 address,
                 [],
-                fetch=controller.FetchRequest(run=run, name=name, destination=directory),
+                fetch=server.FetchRequest(run=run, name=name, destination=directory),
             )
         )
     print(default().fetch(run, name, directory))
@@ -635,46 +646,46 @@ def machine_add(
     pools()
 
 
-@controller_app.callback()
+@server_app.callback()
 @kind(Kind.read)
-def controller_show(ctx: typer.Context) -> None:
+def server_show(ctx: typer.Context) -> None:
     """Show which machine holds the database, and when its loop last ran."""
-    from etude.launch.controller import show
+    from etude.launch.server import show
 
     if ctx.invoked_subcommand is None:
         show(default())
 
 
-@controller_app.command("set")
+@server_app.command("set")
 @kind(Kind.ask)
-def controller_set(
+def server_set(
     address: str,
     startup_seconds: Annotated[
         float, typer.Option(min=0, help="install allowance; 0 disables it")
     ] = 0,
 ) -> None:
-    """Name another machine as the controller. Commands then run there over SSH."""
-    from etude.launch import controller
+    """Name another machine as the server. Commands then run there over SSH."""
+    from etude.launch import server
 
-    controller.set_address(address, startup_seconds=startup_seconds or None)
-    print("controller: " + address)
+    server.set_address(address, startup_seconds=startup_seconds or None)
+    print("server: " + address)
 
 
-@controller_app.command("unset")
+@server_app.command("unset")
 @kind(Kind.ask)
-def controller_unset() -> None:
+def server_unset() -> None:
     """Use this machine's own database again."""
-    from etude.launch.controller import unset
+    from etude.launch.server import unset
 
     unset()
-    print("controller: this machine")
+    print("server: this machine")
 
 
-@controller_app.command("run")
+@server_app.command("run")
 @kind(Kind.wait)
-def controller_run() -> None:
-    """Keep matching waiting runs to machines until stopped. Run this on the controller."""
-    from etude.launch.controller import loop
+def server_run() -> None:
+    """Keep matching waiting runs to machines until stopped. Run this on the server."""
+    from etude.launch.server import loop
 
     loop(default())
 

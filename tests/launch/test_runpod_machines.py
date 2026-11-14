@@ -426,10 +426,10 @@ def test_a_runs_source_is_in_storage_before_any_pod_is_rented_for_it(
         command="sh train.sh", repo=str(repository(tmp_path)), max_hours=0.05, max_usd=Decimal(1)
     )
     if queued:
-        runs = c.scheduler.queue_cohort("pair", job.runs(1, 2), rent="l4", parallel=2)
+        runs = c.scheduler.queue(job.runs(1, 2), rent="l4")
         c.scheduler.tick()
     else:
-        runs = c.scheduler.launch_cohort("pair", job.runs(1, 2), rent="l4", parallel=2)
+        runs = c.scheduler.launch(job.runs(1, 2), rent="l4")
     timeline = [(method, key.partition("?")[0]) for method, key in c.storage.asked]
     uploads = [
         i for i, (method, key) in enumerate(timeline) if method == "PUT" and "/sources/" in key
@@ -460,7 +460,7 @@ def test_inputs_reach_the_job_by_name_once_and_wrong_bytes_are_refused(tmp_path:
         max_usd=Decimal(1),
         max_attempts=1,
     )
-    run = c.scheduler.launch(job, rent="l4")
+    (run,) = c.scheduler.launch(job, rent="l4")
     (status,) = c.scheduler.wait(run, every=0.05, timeout=30)
     assert status.outcome == "succeeded"
     verified, said = job_text(c.scheduler.logs(refresh=True, run=run)).split("\n", 1)
@@ -471,7 +471,7 @@ def test_inputs_reach_the_job_by_name_once_and_wrong_bytes_are_refused(tmp_path:
     released(c.scheduler, run)  # a machine told to finish is given no more work
 
     wrong = given.model_copy(update={"sha256": hashlib.sha256(b"other").hexdigest()})
-    refused = c.scheduler.launch(
+    (refused,) = c.scheduler.launch(
         job.model_copy(update={"inputs": (wrong,), "max_attempts": 3}), rent="l4"
     )
     (status,) = c.scheduler.wait(refused, every=0.05, timeout=30)
@@ -514,7 +514,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
         max_hours=0.05,
         max_usd=Decimal(1),
     )
-    first = c.scheduler.launch(RunRequest(job=job, seed=7), rent="l4")
+    (first,) = c.scheduler.launch(RunRequest(job=job, seed=7), rent="l4")
     c.scheduler.wait(first, every=0.05, timeout=30)
     status = released(c.scheduler, first)
     assert (status.outcome, authored(status.clocks)) == ("succeeded", {"steps": 3})
@@ -525,7 +525,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
 
     # The parent's checkpoint, resolved from the bucket, reaches the next pod as an input.
     parent = c.scheduler.record(first)
-    second = c.scheduler.launch(
+    (second,) = c.scheduler.launch(
         continue_from(parent, "steps=7", source=BucketObjects(c.storage, "journals")), rent="l4"
     )
     c.scheduler.wait(second, every=0.05, timeout=30)
@@ -585,7 +585,7 @@ def test_a_pods_checkpoint_reaches_an_owned_host_without_its_storage_from_the_bu
         max_hours=0.05,
         max_usd=Decimal(1),
     )
-    first = c.scheduler.launch(RunRequest(job=job, seed=7), rent="l4")
+    (first,) = c.scheduler.launch(RunRequest(job=job, seed=7), rent="l4")
     assert released(c.scheduler, first).outcome == "succeeded"
     assert c.provider.pods == {}  # nothing holds the parent's folder but the bucket
 
@@ -604,7 +604,7 @@ def test_a_pods_checkpoint_reaches_an_owned_host_without_its_storage_from_the_bu
     parent = c.scheduler.record(first)
     source = BucketObjects(c.storage, "journals")
     for until in ("steps=7", "steps=5"):
-        run = c.scheduler.launch(continue_from(parent, until, source=source), "mini")
+        (run,) = c.scheduler.launch(continue_from(parent, until, source=source), "mini")
         (status,) = c.scheduler.wait(run, every=0.05, timeout=30)
         assert (status.outcome, authored(status.clocks)) == ("succeeded", {"steps": int(until[6:])})
         verified, said = job_text(c.scheduler.logs(refresh=True, run=run)).split("\n", 1)
@@ -612,7 +612,7 @@ def test_a_pods_checkpoint_reaches_an_owned_host_without_its_storage_from_the_bu
         assert said.splitlines()[-1] == f"seed 7 from 3 to {until[6:]}"
     relayed = tmp_path / "mini" / "track" / first / "checkpoints"
     assert (relayed / "steps-3.pt").read_text() == "trained to 3\n"
-    # The controller read the parent's file from storage once, through its cache.
+    # The server read the parent's file from storage once, through its cache.
     reads = [
         k
         for m, k in c.storage.asked
@@ -637,7 +637,7 @@ def test_a_checkpoint_gone_or_changed_in_the_bucket_ends_the_attempt_undelivered
         max_usd=Decimal(1),
         max_attempts=3,
     )
-    first = c.scheduler.launch(RunRequest(job=job, seed=7), rent="l4")
+    (first,) = c.scheduler.launch(RunRequest(job=job, seed=7), rent="l4")
     assert released(c.scheduler, first).outcome == "succeeded"
     folder = f"etude/t/{first}/"
     child = continue_from(
@@ -648,7 +648,7 @@ def test_a_checkpoint_gone_or_changed_in_the_bucket_ends_the_attempt_undelivered
     else:
         c.storage.objects[folder + "checkpoints/steps-3.pt"] = change
 
-    run = c.scheduler.queue(child, "mini")
+    (run,) = c.scheduler.queue(child, "mini")
     (status,) = c.scheduler.wait(run, every=0.05, timeout=30)
     assert (status.outcome, status.cause, status.attempts) == ("lost", "input_undelivered", 1)
 
@@ -664,7 +664,9 @@ def test_a_checkpoint_gone_or_changed_in_the_bucket_ends_the_attempt_undelivered
 def test_a_lost_create_reply_finds_the_pod_by_name_and_never_asks_twice(tmp_path: Path) -> None:
     c = cloud(tmp_path)
     c.provider.lose_reply = True
-    one = c.scheduler.queue(Job(command="echo hi", max_hours=0.05, max_usd=Decimal(1)), rent="l4")
+    (one,) = c.scheduler.queue(
+        Job(command="echo hi", max_hours=0.05, max_usd=Decimal(1)), rent="l4"
+    )
     c.scheduler.tick()
     assert c.scheduler.read(one).phase == "renting"
     (status,) = c.scheduler.wait(one, every=0.05, timeout=30)
@@ -680,7 +682,7 @@ def test_machines_and_status_show_the_hardware_rented(
 ) -> None:
     # Without a GPU, 6 vCPUs and 48 GB round up to the 16 vCPU size of a 4 GB/vCPU flavor.
     c = cloud(tmp_path, gpu=gpu)
-    one = c.scheduler.launch(Job(command="true", max_hours=0.05, max_usd=Decimal(1)), rent="l4")
+    (one,) = c.scheduler.launch(Job(command="true", max_hours=0.05, max_usd=Decimal(1)), rent="l4")
     (status,) = c.scheduler.wait(one, every=0.05, timeout=30)
     assert status.outcome == "succeeded"
     capsys.readouterr()
@@ -688,7 +690,7 @@ def test_machines_and_status_show_the_hardware_rented(
     show_machines(c.scheduler, ended=True)
     run_line, machine_line = capsys.readouterr().out.splitlines()
     assert f"machine {status.machine} ({shown})" in run_line
-    assert machine_line.startswith(f"{status.machine}  l4  {shown}, rented")
+    assert machine_line.startswith(f"{status.machine}  l4  available, {shown}, rented")
 
 
 def test_no_stock_is_a_refusal_and_cancel_reaches_a_running_pod(tmp_path: Path) -> None:
@@ -698,7 +700,7 @@ def test_no_stock_is_a_refusal_and_cancel_reaches_a_running_pod(tmp_path: Path) 
     with pytest.raises(LauncherError, match="no available machines.*etude queue"):
         c.scheduler.launch(Job(command="true", max_hours=0.05, max_usd=Decimal(1)), rent="l4")
     assert not c.scheduler.runs(done=True)
-    one = c.scheduler.queue(
+    (one,) = c.scheduler.queue(
         Job(command="sleep 30", max_hours=0.05, max_usd=Decimal(1), max_attempts=2),
         rent="l4",
     )
@@ -733,11 +735,11 @@ def test_an_r2_storage_that_cannot_grant_keys_fails_the_launch_before_renting(
 def test_a_kept_session_takes_work_through_its_inbox(tmp_path: Path) -> None:
     c = cloud(tmp_path)
     machine = c.scheduler.rent("l4", hours=0.05)
-    first = c.scheduler.launch(
+    (first,) = c.scheduler.launch(
         Job(command="echo one", max_hours=0.01, max_usd=Decimal(1)), rent="l4"
     )
     (status,) = c.scheduler.wait(first, every=0.05, timeout=30)
-    second = c.scheduler.launch(
+    (second,) = c.scheduler.launch(
         Job(command="echo two", max_hours=0.01, max_usd=Decimal(1)), rent="l4"
     )
     (again,) = c.scheduler.wait(second, every=0.05, timeout=30)
@@ -919,7 +921,7 @@ def test_tracking_files_reach_storage_while_the_job_runs(tmp_path: Path) -> None
         'run.log({"loss": 0.5}, steps=1)\n'
         "time.sleep(30)\n"
     )
-    run = c.scheduler.launch(
+    (run,) = c.scheduler.launch(
         Job(command=f"{sys.executable} {script}", max_hours=0.05, max_usd=Decimal(1)), rent="l4"
     )
     until(c.scheduler, run, "running")
@@ -1039,7 +1041,7 @@ def test_a_finished_rental_delivers_its_end_and_log_tail_before_it_is_deleted(
     monkeypatch.setenv("ETUDE_STORAGE_TIMEOUT_SECONDS", "120")
     monkeypatch.setenv("ETUDE_STORAGE_BYTES_PER_SECOND", "524288")
     c = cloud(tmp_path)
-    run = c.scheduler.launch(
+    (run,) = c.scheduler.launch(
         Job(command="echo done", max_hours=0.05, max_usd=Decimal(1)), rent="l4"
     )
     c.scheduler.wait(run, every=0.05, timeout=30)

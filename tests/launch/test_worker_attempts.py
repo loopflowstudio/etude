@@ -85,7 +85,7 @@ def test_a_run_from_a_commit_reports_progress_and_keeps_its_outputs(
         max_hours=0.1,
         max_usd=Decimal(1),
     )
-    first = scheduler.launch(RunRequest(job=spec, seed=3))
+    (first,) = scheduler.launch(RunRequest(job=spec, seed=3))
     (status,) = scheduler.wait(first, every=0.05, timeout=30)
     assert (status.outcome, status.rental_ended) == ("succeeded", None)
     assert status.clocks == {"agent_steps": 26_000, "wall_time_ms": 1500}
@@ -126,7 +126,7 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
         max_hours=0.1,
         max_usd=Decimal(1),
     )
-    first = scheduler.launch(RunRequest(job=spec, seed=3))
+    (first,) = scheduler.launch(RunRequest(job=spec, seed=3))
     assert scheduler.wait(first, every=0.05, timeout=30)[0].outcome == "succeeded"
     tracked = tmp_path / "track"
     with pytest.raises(LauncherError, match="not beyond the checkpoint's steps=2"):
@@ -159,7 +159,7 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     assert job_id(continued.job) == identity
     assert {key for key in measured.got if key.endswith("run.json")} == {f"{first}/run.json"}
 
-    second = scheduler.launch(continued)
+    (second,) = scheduler.launch(continued)
     (status,) = scheduler.wait(second, every=0.05, timeout=30)
     assert (status.outcome, authored(status.clocks)) == ("succeeded", {"steps": 5})
     data = read(tracked, "capacity", second)
@@ -173,8 +173,8 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
 
 def test_runs_queue_through_one_machine_and_cancel_stops_the_running_one(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
-    running = scheduler.launch(Job(command="sleep 30", max_hours=0.1, max_usd=Decimal(1)))
-    queued = scheduler.queue(Job(command="echo next", max_hours=0.1, max_usd=Decimal(1)))
+    (running,) = scheduler.launch(Job(command="sleep 30", max_hours=0.1, max_usd=Decimal(1)))
+    (queued,) = scheduler.queue(Job(command="echo next", max_hours=0.1, max_usd=Decimal(1)))
     scheduler.tick()
     until(scheduler, running, "running")
     assert scheduler.read(queued).reason == "waiting for local: no free machine"
@@ -186,7 +186,7 @@ def test_runs_queue_through_one_machine_and_cancel_stops_the_running_one(tmp_pat
 
 def test_a_run_past_its_hours_is_ended_on_the_machine_with_nobody_watching(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
-    one = scheduler.launch(Job(command="sleep 30", max_hours=1.5 / 3600, max_usd=Decimal(1)))
+    (one,) = scheduler.launch(Job(command="sleep 30", max_hours=1.5 / 3600, max_usd=Decimal(1)))
     del scheduler  # nobody is watching while the limit passes
     time.sleep(3)
     (status,) = local(tmp_path).wait(one, every=0.05, timeout=30)
@@ -195,7 +195,7 @@ def test_a_run_past_its_hours_is_ended_on_the_machine_with_nobody_watching(tmp_p
 
 def test_a_killed_session_retries_its_run(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
-    one = scheduler.launch(Job(command="sleep 5", max_hours=0.1, max_usd=Decimal(1)))
+    (one,) = scheduler.launch(Job(command="sleep 5", max_hours=0.1, max_usd=Decimal(1)))
     status = until(scheduler, one, "running")
     session = scheduler.attempts(one)[0].session
     os.kill(
@@ -210,7 +210,9 @@ def test_a_killed_session_retries_its_run(tmp_path: Path) -> None:
 
 def test_added_work_has_a_session_but_no_rental_or_session_deadline(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
-    first = scheduler.launch(Job(command="sleep 2; echo one", max_hours=0.01, max_usd=Decimal(1)))
+    (first,) = scheduler.launch(
+        Job(command="sleep 2; echo one", max_hours=0.01, max_usd=Decimal(1))
+    )
     attempt = scheduler.attempts(first)[0]
     session = scheduler._store.session(attempt.session)
     assert attempt.machine == "local" and scheduler._store.rental_for(session) is None
@@ -247,7 +249,7 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
         max_hours=0.1,
         max_usd=Decimal(1),
     )
-    ids = scheduler.queue_cohort("seeds", job.runs(0, 1), "local")
+    ids = scheduler.queue(job.runs(0, 1), "local")
     assert [status.outcome for status in scheduler.wait(*ids, every=0.05, timeout=30)] == [
         "succeeded"
     ] * 2
@@ -266,7 +268,7 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
             record.job,
             "hidden256",
             record.seed,
-            "seeds",
+            None,
         )
         (attempt,) = data.attempts
         assert attempt.attempt == launched.id
@@ -309,7 +311,7 @@ def test_an_attempt_links_its_held_inputs_read_only_without_copying(tmp_path: Pa
     weights = _Weights(b"weights " * 1000)
     held = Cache().hold(weights.artifact, weights, holder="session", staging=tmp_path / "x")
     scheduler = local(tmp_path)
-    one = scheduler.launch(
+    (one,) = scheduler.launch(
         Job(
             command='cat "$ETUDE_INPUTS_DIR/weights" | wc -c',
             inputs=(weights.input,),
@@ -332,7 +334,7 @@ def test_a_corrupted_held_input_is_refused_before_the_job_starts(tmp_path: Path)
     held.chmod(0o644)
     held.write_bytes(b"W" + weights.body[1:])
     scheduler = local(tmp_path)
-    one = scheduler.launch(
+    (one,) = scheduler.launch(
         Job(
             command="touch started",
             inputs=(weights.input,),
@@ -367,7 +369,7 @@ def test_a_folder_checkpoint_reaches_a_job_as_verified_nested_inputs(tmp_path: P
     inputs = checkpoint_inputs_for(checkpoint, "start")
     # Put the parent where a machine holds tracked folders; no provider or bucket needed.
     put_back(tmp_path / "track/tiny/r", restore_set(run.files.root))
-    one = scheduler.launch(
+    (one,) = scheduler.launch(
         Job(
             command='cat "$ETUDE_INPUTS_DIR/start/nested/policy" "$ETUDE_INPUTS_DIR/start/value"',
             inputs=inputs,

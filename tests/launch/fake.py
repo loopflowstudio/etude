@@ -17,9 +17,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from etude.launch.database import Database, open_home
-from etude.launch.executor import Refused
 from etude.launch.logs import snapshot_stream
-from etude.launch.machines import Allocation, Bill
+from etude.launch.machines import Allocation, Bill, Refused
 from etude.launch.records import (
     GPU,
     Image,

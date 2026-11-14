@@ -14,7 +14,7 @@ import pytest
 from moto import mock_aws
 
 from etude.block_file import block_key, tail_key
-from etude.cache import Cache
+from etude.cache import Artifact, Cache, Content, ContentMismatch
 from etude.carriage import listing
 from etude.errors import EtudeError
 from etude.page import Pages, build
@@ -24,6 +24,7 @@ from etude.storage import (
     DirectoryStorage,
     S3Storage,
     Storage,
+    place_artifact,
     run_prefix,
     storage_from_uri,
 )
@@ -975,3 +976,31 @@ def report():
         read_once = client.bytes
         assert build(S3Storage("runs", client=client, cache=cache), file) == first
         assert client.bytes == read_once
+
+
+@pytest.mark.parametrize("uri", ["s3://runs/producer/out/weights%?#.pt", "file"])
+def test_placing_a_checkpoint_verifies_and_reuses_its_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    uri: str,
+) -> None:
+    body = b"earlier experiment weights"
+    content = Content.of(body)
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="runs")
+        client.put_object(Bucket="runs", Key="producer/out/weights%?#.pt", Body=body)
+        monkeypatch.setattr("etude.storage._client", lambda provider: client)
+        if uri == "file":
+            path = tmp_path / "weights%?#.pt"
+            path.write_bytes(body)
+            uri = path.as_uri()
+        artifact = Artifact(location=uri, sha256=content.sha256, size_bytes=content.size_bytes)
+        assert place_artifact(artifact, tmp_path / "first").read_bytes() == body
+        assert place_artifact(artifact, tmp_path / "second").read_bytes() == body
+        assert client.requests == (1 if uri.startswith("s3:") else 0)
+        assert client.bytes == (len(body) if uri.startswith("s3:") else 0)
+        wrong = artifact.model_copy(update={"sha256": "0" * 64})
+        with pytest.raises(ContentMismatch):
+            place_artifact(wrong, tmp_path / "refused")
+        assert not (tmp_path / "refused").exists()

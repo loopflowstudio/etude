@@ -29,7 +29,7 @@ EVAL_READERS = tuple(
     ("command", "count", "forbidden"),
     [
         (["report", "--help"], 8, ("numpy", "pydantic")),
-        # No eval run and no eval(state), so nothing that reads or plays evaluations
+        # No eval run and no eval_jobs(state), so nothing that reads or plays evaluations
         # loads: only `etude.eval.records`, whose `Gap` a page's points carry. The report
         # recognises experiment files as `etude launch` does (`etude.experiment_file`).
         (

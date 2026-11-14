@@ -1,7 +1,7 @@
 """Publish the client program and prepare rental bootstrap inputs.
 
 Program owns package publication for one provider composition. Remote archive
-unpacking and bootstrap stay independent of this controller-side module.
+unpacking and bootstrap stay independent of this server-side module.
 """
 
 from __future__ import annotations

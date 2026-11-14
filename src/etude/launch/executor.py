@@ -6,41 +6,24 @@ The launcher depends on its public execution protocol, never on SSH or a provide
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from etude.launch.machines import Allocation, Bill, MachineRequest, Machines, OwnedMachine
+from etude.launch.machines import (
+    Allocation,
+    Bill,
+    MachineRequest,
+    Machines,
+    OwnedMachine,
+    Refused,
+    check_creation,
+)
 from etude.launch.records import BootstrapLinks, LogStream, Offer
 from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
 from etude.storage_timeout import StorageUnavailable
-
-_creation_check: ContextVar[Callable[[], None] | None] = ContextVar("creation_check", default=None)
-
-
-@contextmanager
-def creation_guard(check: Callable[[], None]) -> Iterator[None]:
-    """Carry the controller's placement fence through provider preparation."""
-    token = _creation_check.set(check)
-    try:
-        yield
-    finally:
-        _creation_check.reset(token)
-
-
-def check_creation() -> None:
-    check = _creation_check.get()
-    if check is not None:
-        check()
-
-
-class Refused(Exception):
-    """The provider definitely supplied no machine; other errors mean unknown."""
 
 
 class Execution(Protocol):

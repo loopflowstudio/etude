@@ -1,7 +1,7 @@
 """Pre-install Lium watchdog. Stops this pod's work, never ends provider billing.
 
-The account credential stays on the controller. Provider removal timers cover
-controller loss; this process adds a local deadline for bootstrap and execution.
+The account credential stays on the server. Provider removal timers cover
+server loss; this process adds a local deadline for bootstrap and execution.
 """
 
 from __future__ import annotations

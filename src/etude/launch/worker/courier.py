@@ -802,7 +802,7 @@ def _serve(
         for folder in ("stop", "work"):
             (home / folder).mkdir(exist_ok=True)
         write_log("source fetch", "starting")
-        # A packet of one work's files is that run's usage; a cohort's stay shared.
+        # A packet of one work's files is that run's usage; shared machine bytes stay shared.
         only = packet.work[0] if len(packet.work) == 1 else None
         with limit_time(startup_timeout()):
             with attribute(

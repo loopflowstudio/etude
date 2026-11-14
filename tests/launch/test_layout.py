@@ -80,7 +80,7 @@ def test_folder_rules() -> None:
             pending.extend(edges.get(name, ()))
         return seen
 
-    forbidden = {"scheduler", "database", "client", "cli", "controller"}
+    forbidden = {"scheduler", "database", "client", "cli", "server"}
     for module in modules:
         if module.startswith("etude.launch.worker."):
             assert not reachable(module) & {"etude.launch." + name for name in forbidden}, module
@@ -108,3 +108,62 @@ def test_folder_rules() -> None:
     ):
         for module in reachable(entry):
             assert module in modules or module.split(".")[0] in sys.stdlib_module_names, module
+
+
+def test_launch_levels_import_only_downward() -> None:
+    root = Path(__file__).resolve().parents[2] / "src/etude"
+    controller = {
+        "controller",
+        "experiment",
+        "declarations",
+        "jobs",
+        "smoke",
+        "local",
+        "eval",
+        "page",
+        "report",
+        "cli",
+    }
+    above_machines = {
+        "scheduler",
+        "executor",
+        "database",
+        "client",
+        "server",
+        "cli",
+        "listing",
+        "source",
+        "schemas",
+        "ssh",
+        "startup",
+        "worker",
+    }
+    for path in root.rglob("*.py"):
+        parts = path.relative_to(root).parts
+        lower = parts[0] == "launch"
+        provisioner = lower and (parts[1] == "providers" or path.stem in {"machines", "images"})
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            modules = (
+                [a.name for a in node.names]
+                if isinstance(node, ast.Import)
+                else [node.module or ""]
+            )
+            for module in modules:
+                if lower:
+                    assert module.split(".")[:2] not in [["etude", name] for name in controller], (
+                        path
+                    )
+                if provisioner:
+                    assert module.split(".")[:3] not in [
+                        ["etude", "launch", name] for name in above_machines
+                    ], path
+                    if isinstance(node, ast.ImportFrom):
+                        assert not {a.name for a in node.names} & {"Job", "RunRequest"}, path
+                if (
+                    not lower
+                    and isinstance(node, ast.ImportFrom)
+                    and module.startswith("etude.launch")
+                ):
+                    assert not any(a.name.startswith("_") for a in node.names), path

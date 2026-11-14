@@ -34,7 +34,7 @@ def test_startup_policy_survives_restart_and_ondemand_changes(
     b.scheduler.set_startup("l4", seconds)
     monkeypatch.setattr(b.service, "started", lambda session: False)
     monkeypatch.setattr(b.service, "observe", lambda session: Observation(alive=True, progress=()))
-    run = b.scheduler.launch(
+    (run,) = b.scheduler.launch(
         Job(command="train", max_hours=1, max_usd=Decimal(1), max_attempts=1), rent="l4"
     )
     session = b.store.session(b.scheduler.attempts(run)[0].session)

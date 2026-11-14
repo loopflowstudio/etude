@@ -6,12 +6,37 @@ how to create/delete machines; owned machines use their configured startup path.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Protocol
 
 from etude.launch.records import BootstrapLinks, Hardware, Offer
 from etude.spec import Record
+
+_creation_check: ContextVar[Callable[[], None] | None] = ContextVar("creation_check", default=None)
+
+
+@contextmanager
+def creation_guard(check: Callable[[], None]) -> Iterator[None]:
+    """Carry the scheduler's placement fence through provider preparation."""
+    token = _creation_check.set(check)
+    try:
+        yield
+    finally:
+        _creation_check.reset(token)
+
+
+def check_creation() -> None:
+    check = _creation_check.get()
+    if check is not None:
+        check()
+
+
+class Refused(Exception):
+    """The provider definitely supplied no machine; other errors mean unknown."""
 
 
 class Safeguards(Record):

@@ -79,7 +79,7 @@ def _job(repo: Path, count: Path, **changes: object) -> Job:
 
 
 def _launch(scheduler: Scheduler, job: Job) -> tuple[Status, str]:
-    run = scheduler.launch(job)
+    (run,) = scheduler.launch(job)
     (status,) = scheduler.wait(run, every=0.05, timeout=60)
     return status, job_text(scheduler.logs(refresh=True, run=run))
 
@@ -210,7 +210,7 @@ def test_a_killed_build_leaves_no_receipt_and_is_built_again(tmp_path: Path) -> 
         ' else touch "$ETUDE_PREPARED_DIR/partial"; sleep 5; fi'
     )
     prepare = Preparation(command=command, paths=("lock.txt",))
-    run = scheduler.launch(_job(repo, count, prepare=prepare, command="true", max_attempts=2))
+    (run,) = scheduler.launch(_job(repo, count, prepare=prepare, command="true", max_attempts=2))
     for _ in range(300):
         partial = [p for p in home().glob("*/partial")] if home().exists() else []
         if partial:

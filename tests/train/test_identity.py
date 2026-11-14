@@ -212,7 +212,6 @@ def test_new_run_json_contains_only_declared_facts(
         "job",
         "job_name",
         "seed",
-        "cohort",
         "kind",
         "config",
         "continues",
