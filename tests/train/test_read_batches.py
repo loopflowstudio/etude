@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import tracemalloc
+import weakref
 from pathlib import Path
 
 import numpy as np
 import pytest
+from numpy.typing import NDArray
 
 from etude.block_file import block_key
 from etude.errors import EtudeError
@@ -101,32 +102,23 @@ def _long_run(root: Path, blocks: int, rows: int = 8192) -> None:
     Index(root, FIRST).write()
 
 
-def _peak(blocks: int, root: Path, streaming: bool) -> int:
-    _long_run(root / run_prefix("r"), blocks)
-    tracemalloc.start()
-    try:
-        if streaming:
-            total = sum(
-                len(batch.points["rl/metric_0"])
-                for batch in read_batches(root, "e", "r", clock="updates", metrics=["rl/metric_0"])
-            )
-        else:
-            total = len(read(root, "e", "r").points("rl/metric_0", "updates"))
-        assert total == blocks * 8192
-        return tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-
-
-def test_peak_memory_stays_flat_as_the_run_grows(tmp_path: Path) -> None:
-    small, large = (
-        {s: _peak(blocks, tmp_path / f"{blocks}-{s}", s) for s in (True, False)}
-        for blocks in (4, 32)
-    )
-    # Eight times the blocks: the whole-run reader grows with them, batches do not.
-    assert large[False] > 4 * small[False]
-    assert large[True] < 1.5 * small[True]
-    assert large[True] < large[False] / 4
+@pytest.mark.parametrize("blocks", [4, 32])
+def test_batches_release_arrays_as_the_run_grows(tmp_path: Path, blocks: int) -> None:
+    rows = 16
+    _long_run(tmp_path / run_prefix("r"), blocks, rows=rows)
+    previous: list[weakref.ReferenceType[NDArray[np.float64]]] = []
+    total = 0
+    for batch in read_batches(tmp_path, "e", "r", clock="updates", metrics=["rl/metric_0"]):
+        # Advancing the reader must release the preceding batch's selected arrays.
+        assert all(array() is None for array in previous)
+        points = batch.points["rl/metric_0"]
+        np.testing.assert_array_equal(points.x, np.arange(total, total + rows))
+        np.testing.assert_array_equal(points.y, np.sin(points.x))
+        total += len(points)
+        previous = [weakref.ref(points.x), weakref.ref(points.y)]
+        del points, batch
+    assert total == blocks * rows
+    assert all(array() is None for array in previous)
 
 
 def test_reads_each_block_twice_and_only_its_selected_arrays(tmp_path: Path) -> None:
