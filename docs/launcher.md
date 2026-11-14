@@ -1153,9 +1153,10 @@ target is given, when the file's config or the seed differs from the run's
 allocated. A refusal changes nothing recorded about the run.
 
 Launched references print as `EXPERIMENT/RUN`. Commands accept that reference;
-`etude status RUN --experiment EXPERIMENT` and `etude continue RUN --experiment
-EXPERIMENT` also accept the run name alone. `etude launch FILE --resume RUN`
-uses the file’s experiment (or its `--experiment` override).
+`etude status RUN --experiment EXPERIMENT` and `etude continue --run RUN --experiment
+EXPERIMENT --until clock=value` also accept the run name alone.
+`etude launch FILE --resume RUN` uses the file’s experiment (or its
+`--experiment` override).
 
 A launch whose run id is taken in its experiment is refused the same way,
 before renting: ids are never reused and a taken id is never resumed. The

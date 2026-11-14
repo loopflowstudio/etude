@@ -90,18 +90,16 @@ stop/resume/refusal/failure, reports) **13 passed, 126 deselected**;
 Full acceptance stays with gate. Open writer/allocation and eval planning
 choices remain in `questions.md`; PR #103 stays draft.
 
-Third-review corrections are not built: `etude run --resume EXPERIMENT/RUN`
-and refusals that name a working command; docs for `etude continue` (needs
-`--until`, launched runs only, `--run RUN`); the printed config refusal.
-Direction and probe output: `design-train-api.md` (third concept review),
-`questions.md` (third pass). New open choice there: branching a run started
-with `etude run`.
+Third-review corrections built: local `--resume EXPERIMENT/RUN` uses
+`run_address`; missing-run refusals name the searched experiment and taken-name
+hints give a qualified reference. Training and launcher docs show `--run` and
+required `--until` for launched continuation, plus the actual config refusal.
+Local branching, writer/allocation and eval planning stay open in `questions.md`.
+Check: `uv run pytest tests/train/test_local.py` — **10 passed**; mypy on
+`local.py`, ruff check/format and diff check pass.
+Full acceptance stays with gate; PR #103 remains draft.
 
-Earlier checks: `394aa37:scratch/exp-56.md`.
-
-The 4,096-run fixture selects 32 records plus one keyed row in 2 SQL statements;
-EXPLAIN uses `runs_experiment` and the primary key.
-Existing count pins pass. PR #103 stays draft.
+Earlier checks and indexed-query receipts: `ef6099a:scratch/exp-56.md`.
 
 Acceptance remains the design's fresh/stop/resume example; two models in one
 save and checkpoint seated in evaluation; taken-name/config/seed refusals;
@@ -109,10 +107,7 @@ changed-source provenance; `start=` links; stop between phases; a finished
 run not overwritten by a refused attempt. Existing local CLI tests cover
 these, including a genuine learner failure before any row.
 
-The original Manabot stub-swap check is superseded by the accepted API:
-MTG-329 replaces its stand-in, manual state files and `train --out` with
-`etude run`, registration, `steps`, `save` and folder checkpoints. Its actual
-adoption/smoke stays in that Task.
+Manabot adoption and its smoke remain MTG-329; see its constraints in the design.
 
 ## Folded and later work
 

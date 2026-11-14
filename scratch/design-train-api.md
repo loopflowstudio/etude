@@ -83,19 +83,8 @@ The sentence the nouns make:
 > checkpoint with code that plays it is a player. Players take seats in
 > matches in an environment. A report shows rows and match scores.
 
-| Thing | Name | Replaces |
-| --- | --- | --- |
-| what a loop holds in `train` | `TrainingRun(Run)`, from `track` in `etude.train.tracking` | `etude.train.run.Run` |
-| a job and a seed to launch | `RunRequest`, never named by authors | `etude.launch.records.Run` |
-| the stored run | `RunRecord`, one class | `RunRecord`, `RunDeclaration`, `RunFile`, `TrainingRun` |
-| one machine allocation of a run | `RunAttempt` | `RunAttempt` (launcher, kept) |
-| one tracking context writing rows | `RunWriter` | `Attempt` (tracking) |
-| a published model with its clocks | `CheckpointRecord`, plus one reference type | `CheckpointRecord`, `Checkpoint`, `CheckpointKey`, `CheckpointRef` |
-| a checkpoint and the code that plays it, or code alone | player | `Model`, `Code` |
-| how a run attempt ended | `outcome.json` | `state.json` at the run's root |
-| what a run keeps to carry on | state: `out/state/state.json` | (new) |
-| what training and evaluation runs share | `etude.run` (`Run`, declaration, delivery, listing) | `etude.tracking`, proposed below and withdrawn |
-| groups a user sees | experiment (the label) and job | also cohort and report "line" |
+Built names and predecessors are in `exp-56.md` (Delete — do not maintain).
+The full naming table is retained at `ef6099a:scratch/design-train-api.md`.
 
 - Report "line" becomes job. Cohort stays a launch option for shared limits
   and is not taught as a concept.
@@ -123,30 +112,9 @@ The sentence the nouns make:
 
 ### What the author writes
 
-A file with a `train` function and a config class:
-
-```python
-# train.py
-class TrainConfig(BaseModel):       # yours; any fields; no seed
-    lr: float = 3e-4
-    updates: int = 1000
-
-def train(config: TrainConfig) -> None:
-    with track(clocks=[Step("updates", "optimizer updates")], config=config) as run:
-        torch.manual_seed(run.seed)
-        model, optimizer = build(config)
-        run.resume(model=model, optimizer=optimizer)
-        for update in run.steps("updates", to=config.updates):
-            metrics = one_update(model, optimizer)
-            run.log(metrics)
-            run.save()
-            if update % 100 == 0:
-                run.checkpoint(policy=model)
-        run.checkpoint(policy=model)
-```
-
-That is the whole client experience for the default case: seven Etude lines,
-no state class, no stop check, no resume branch.
+The default loop is the opening example in `docs/training.md`: register
+objects with `resume`, iterate `steps`, log, save and publish checkpoints.
+It has no state class, stop check or resume branch.
 
 Requirements, stated in the docs: the config is a Pydantic model with no Etude
 base class and no required field; it survives a trip through JSON, checked at
@@ -158,18 +126,8 @@ at the top level of an importable file.
 
 ### The calls
 
-| Call | Does | Read by | PR #103 |
-| --- | --- | --- | --- |
-| `track(clocks=, config=)` | opens the run; takes the config model | launcher, reports | built; takes a dict today |
-| `run.seed` | this run's seed | declaration, reports | new (env var today) |
-| `run.resume(**objects, extra=)` | registers what to keep; loads the last save into it; returns `extra`, else the last saved folder (`run.at(clock)` gives the position) | launcher carriage, continuation | new |
-| `run.steps(clock, to=)` | counts from the resumed position to the target; raises `Stopped` on the pass after a stop is asked for | launcher retry, budgets | new |
-| `run.save()` | writes the registered objects when due, and always before a stop | launcher carriage | new |
-| `run.log(row)`, `run.log_table(name, rows)` | rows on the declared clocks; the stepped clock is filled in | reports, queries, live view | built; clock fill new |
-| `run.checkpoint(**objects)` or `(path)` or `(export_fn)` | publishes an immutable player with its clocks | evaluation, other runs, reports | path form built; rest new |
-| `run.checkpoints()` | this run's published checkpoints, oldest first | (same list evaluation uses) | new; `latest_checkpoint` built |
-| `run.input(name)` | a file or checkpoint folder this run was given | launcher (digest-checked), lineage | built as `ETUDE_INPUTS_DIR`; accessor new |
-| `run.out`, `run.stopping()`, `run.until()`, `Stopped` | the pieces `steps`/`save` are made of | launcher | built |
+The surviving public calls are documented in `docs/training.md` (Calls).
+The original implementation table is at `ef6099a:scratch/design-train-api.md`.
 
 Details that matter:
 
@@ -206,32 +164,11 @@ Details that matter:
 
 ### What is on disk
 
-Published as a contract in the docs. Readable with `json` and the author's
-framework, without Etude.
-
-```text
-<experiment>/<run>/
-  run.json                       job, seed, config, clocks, parent and inputs
-  ...rows and tables              as today
-  out/
-    state/
-      current.json                {"save": "save-00000007"}; the only file rewritten, published last
-      save-00000007/              one save; self-contained and immutable; replaced ones are removed by Etude
-        state.json                {"at": {"updates": 400}, "seed": 0, "commit": "...", "extra": {...}, "files": {"model": "model.pt", ...}}
-        model.pt                  the framework's own format (torch.save of a state_dict)
-        optimizer.pt
-    checkpoints/
-      updates-00000100/           never changes
-        checkpoint.json           {"at": {"updates": 100}, "files": {"policy": "policy.pt"}}
-        policy.pt
-```
-
-A checkpoint folder is digested as a whole (a manifest of its files'
-digests), since `CheckpointRecord` holds one digest today.
-
-Writers are per framework, chosen by the object's type, imported only when
-used: PyTorch in this work; MLX and JAX when Manabot's other backends need
-them. Etude's core stays free of framework imports.
+The layout contract is in `docs/training.md` (What is on disk):
+self-contained immutable saves, selected by `current.json`, published last;
+checkpoint folders hold their manifest and named framework files. A folder
+checkpoint is digested by a manifest of its files' digests. PyTorch writers
+are imported only when used; MLX/JAX wait for an adoption need.
 
 ### Jobs, runs, names, and the commands
 
@@ -273,7 +210,7 @@ hand.
 | the same run, after a lost machine or `Stopped` | none; the launcher calls again | a new attempt of the same run |
 | the same run, after it ended unfinished | `etude run train.py --resume RUN`, `etude launch job.py --resume RUN` | a new attempt of the same run, on current code |
 | the same run, further | `--resume RUN --until ...` on either | a new attempt of the same run, finished or not (Open 2) |
-| changed, or a branch | `etude continue --run RUN --config ...` | a new run descended from the first (as built) |
+| changed, or a branch of a launched run | `etude continue --run RUN --until clock=value [--config ...]` | a new run descended from the first |
 
 - `--name` chooses the job name; the run id adds its seed (`wide-seed-7`).
   An exact run id without that suffix is chosen with `RunRequest(id=...)`.
@@ -382,7 +319,7 @@ Review evidence and the detailed direction remain at
 
 No schema, query or provider count changes.
 
-## Corrections from the third concept review (2026-11-13): to build
+## Corrections from the third concept review (2026-11-13): built
 
 Probed with `examples/coin.py` in a temporary `ETUDE_HOME`; output in
 `questions.md` (third pass).

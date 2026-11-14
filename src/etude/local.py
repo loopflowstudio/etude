@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from etude.call import config_type
 from etude.errors import EtudeError
+from etude.identity import run_address
 from etude.job import Until
 from etude.run import RunFiles, validate_resume
 from etude.stopping import Stopped
@@ -71,14 +72,18 @@ def run(
         label = experiment or file.stem
         base = default_root()
         if resume is not None:
-            identity = resume
-            seed, until = _resumed(base, label, resume, config=text, seed=seed, until=until)
+            if experiment is None:  # EXPERIMENT/RUN names its own experiment
+                label = resume.rpartition("/")[0] or label
+            identity = run_address(resume, label).removeprefix(f"{label}/")
+            seed, until = _resumed(base, label, identity, config=text, seed=seed, until=until)
         else:
             seed = 0 if seed is None else seed
             identity = f"{name or file.stem}-seed-{seed}"
         root = run_directory(base, label, identity)[1]
         if resume is None and (root / "run.json").exists():
-            raise EtudeError("run_name_taken", detail=f"{identity}; use --resume {identity}")
+            raise EtudeError(
+                "run_name_taken", detail=f"{identity}; use --resume {run_address(identity, label)}"
+            )
         commit = subprocess.run(
             ["git", "-C", str(file.parent), "rev-parse", "HEAD"],
             capture_output=True,
@@ -140,7 +145,7 @@ def _resumed(
     root = run_directory(base, label, run)[1]
     prior = RunFiles(root).run_file()
     if prior is None:
-        raise EtudeError("run_not_found", 404, detail=run)
+        raise EtudeError("run_not_found", 404, detail=run_address(run, label))
     if prior.experiment != label:
         raise EtudeError("run_name_belongs_to_another_experiment")
     if seed is None:

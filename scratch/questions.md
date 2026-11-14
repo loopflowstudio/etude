@@ -163,42 +163,13 @@ also want to have an eval run"; then, quoting the layout below back,
 skips". On folding the split into this Task: "do it in 56". On moving
 errors, storage, records and checkpoints to the top level: "agreed".
 
-    etude/run.py          Run: shared base. declare (run.json), delivery
-                          (ship, destinations, RunFiles, StorageDestination),
-                          outcome (RunState, RunCounters), listing
-                          (run_folders, under, as_storage)
-    etude/train/tracking  TrainingRun(Run): what track() returns; adds
-                          log/log_table, steps, save/resume, checkpoint,
-                          stopping(); `with ... as run` finishes it
-    etude/eval/...        EvalRun(Run): what evaluate() runs as; adds
-                          matches, rollups, skips. evaluate() keeps its
-                          one-call shape.
-    etude/errors.py, etude/storage.py, etude/records.py, etude/checkpoints.py
-
-`etude.tracking` goes away. Layout rule: `etude.run` (and the four top-level
-modules) import neither train, eval nor launch; train and eval do not import
-each other. Names freed for the subclasses (proposed, not objected to): the
-read-side `etude.experiment.TrainingRun` becomes `TrainingRunSummary` (or
-folds into `train/report.RunSummary`); `etude.eval.match.EvalRun` (result of
-`evaluate`) becomes `EvalResult`. Renamed public names keep a warning alias
-until 0.5. EXP-64 is folded into EXP-56.
-
-## Remaining implementation choices (2026-11-13)
-
-Reversible choices in the current cut: launched references are qualified
-`EXPERIMENT/RUN` strings; file-based resume supplies the experiment for a bare
-run name, and status/continuation take `--experiment` for that selection.
-Unlabelled hand-built command jobs retain flat opaque references. New local
-run folders are experiment-scoped; an existing flat declaration retains its
-physical folder only when its own experiment matches.
-
-`RunRecord.submission` is absent for standalone runs. `launch` raises when a
-caller asks a standalone record for a launcher specification. Config bytes
-have one owner: the specification for launched runs, the run record otherwise.
-`etude.job` owns the shared execution types rather than making shared records
-import the launcher. The source folder a checkpoint reader resolved is a
-read-side locator. Input source URIs are unsigned and excluded from scientific
-job identity; continuation keeps logical run references separate from locations.
+Built layout and record ownership are in `exp-56.md` and the design.
+The full built package mapping and implementation choices are retained at
+`ef6099a:scratch/questions.md`. The enforced boundary remains: shared run,
+records, errors, storage and checkpoints import neither train, eval nor
+launch; train and eval do not import each other. Public warning aliases end
+in 0.5. Unlabelled command jobs retain flat addresses; historical flat run
+folders remain selected only by a matching declaration.
 
 ## Eval API made consistent with training (2026-11-13)
 

@@ -183,7 +183,8 @@ carried on from a save at 400 it starts at 401.
 
 - **The target is the launch's when it gave one**, else `to`. `etude run
   train.py --until updates=2000`, a job's `until` and `etude continue --run
-  RUN --until updates=6400` all set it without changing the config.
+  RUN --until updates=6400` (for a launched run) all set it without changing
+  the config.
 - **Inside the loop the stepped clock is filled in**: `run.log(metrics)` and
   `run.checkpoint(policy=model)` are placed at the current value. Other
   declared clocks are yours to give: `run.log(metrics, training_seconds=t)`.
@@ -255,9 +256,12 @@ Rules you can rely on:
   differ:
 
   ```text
-  train-seed-0 was started with another config: lr was 0.0003, is 0.001.
-  Start a new run, or change it on purpose with `etude continue --run train-seed-0 --config ...`.
+  etude: run_identity_conflict: lr was 0.1, is 0.2
   ```
+
+  Choose a new `--name` to try another config here. For a launched run,
+  `etude continue --run RUN --until clock=value --config ...` creates a child
+  with the changed config.
 
 - **Keeping your code compatible between attempts is yours.** Etude does not
   check that the model's shape, your file formats or your environment are the
@@ -580,7 +584,7 @@ directory that happens to exist.
 | the same run, after a lost machine or `Stopped` | none: the launcher calls `train` again | another attempt of the same run |
 | the same run, after it ended unfinished | `etude run train.py --resume RUN`, `etude launch job.py --resume RUN` | another attempt of the same run, on your current code |
 | the same run, further | `etude run train.py --resume RUN --until updates=6400`, and the same on `etude launch` | another attempt of the same run, to a later target; a finished run too |
-| a changed config, or a branch | `etude continue --run RUN --config ...` | a new run that starts from a copy of the first one's state and records it as its parent |
+| a changed config, or a branch of a launched run | `etude continue --run RUN --until clock=value [--config ...]` | a new run that starts from a copy of the first one's state and records it as its parent |
 
 ```sh
 etude run train.py --config '{"lr": 0.001}' --seed 7 --name wide --until updates=2000
@@ -604,10 +608,12 @@ etude smoke job.py                      # the smoke config, here, spending nothi
 - **`--resume RUN`** is for a run that ended without finishing: it failed and
   you fixed the bug, it ran out of hours, you cancelled it, or you pressed
   Ctrl-C. It takes the file because it runs your current code. It keeps the
-  run's id, seed and target; `--name` does not apply. The config is worked
-  out as for a new run, the file's defaults changed by `--config`, and must
-  equal the run's: repeat the `--config` the run was started with, and expect
-  a refusal naming the field if a default in the file has changed since.
+  run's id, seed and target; `--name` does not apply. The reference is its id
+  in `--experiment` (defaulting to the file's stem), or `EXPERIMENT/RUN`.
+  The config is worked out as for a new run, the file's defaults changed by
+  `--config`, and must equal the run's: repeat the `--config` the run was
+  started with, and expect a refusal naming the field if a default in the
+  file has changed since.
 - **`--resume RUN --until updates=6400`** takes the same run further. This
   also works on a finished run, which becomes unfinished again until it
   reaches the new target. Its rows, checkpoints and id go on as one run.
@@ -618,9 +624,12 @@ etude smoke job.py                      # the smoke config, here, spending nothi
 - **A taken id is refused** before `train` is called, and under a launch
   before anything is rented. Choose another `--name` or `--seed`, or mean
   `--resume`.
-- **`etude continue`** changes the config on purpose, or goes further while
-  leaving the first run as it is. It makes a new run
-  ([the launcher](launcher.md#progress-and-continuation)).
+- **`etude continue --run RUN --until clock=value [--config ...]`** branches
+  a run the launcher started, optionally changing its config. It makes a new
+  run, leaving the first as it is
+  ([the launcher](launcher.md#progress-and-continuation)). A run started with
+  `etude run` cannot be branched with this command; choose a new `--name` for
+  a fresh run here.
 
 A run's hours, dollars and attempts span every attempt, whoever asked for it
 ([The run promise](launcher.md#the-run-promise)).

@@ -101,6 +101,40 @@ def test_local_stop_resume_and_finished_refusals_preserve_one_run(
     assert extended.points("games", "updates").y.tolist() == [3, 6, 9, 12, 15, 18]
 
 
+def test_local_resume_resolves_qualified_and_explicit_experiments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    file = tmp_path / "train.py"
+    file.write_text(RECIPE)
+    args = ["run", str(file)]
+    new = [*args, "--experiment", "lab", "--name", "wide", "--seed", "7"]
+    assert main([*new, "--json"]) == 75
+    assert json.loads(capsys.readouterr().out) == {
+        "run": "wide-seed-7",
+        "experiment": "lab",
+        "outcome": "stopped",
+    }
+    assert main(new) == 1
+    assert "use --resume lab/wide-seed-7" in capsys.readouterr().err
+    assert main([*args, "--resume", "wide-seed-7"]) == 1
+    assert "run_not_found: train/wide-seed-7" in capsys.readouterr().err
+    assert main([*args, "--resume", "lab/wide-seed-7", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "run": "wide-seed-7",
+        "experiment": "lab",
+        "outcome": "finished",
+    }
+    assert (
+        main([*args, "--resume", "wide-seed-7", "--experiment", "lab", "--until", "updates=6"]) == 0
+    )
+    data = read(DirectoryStorage(tmp_path / "home/track"), "lab", "wide-seed-7")
+    assert len(data.attempts) == 3
+    assert data.outcome is not None and data.outcome.state == "finished"
+    assert data.points("games", "updates").y.tolist() == [3, 6, 9, 12, 15, 18]
+    assert not (tmp_path / "home/track/train").exists()
+
+
 def test_a_new_recipe_failure_before_any_rows_is_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
