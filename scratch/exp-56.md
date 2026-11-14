@@ -68,66 +68,17 @@ stack another migration; the launcher refuses older database files.
 
 ## Remaining work and verification
 
-The eval consistency steer is built: pure author functions return the tournament
-at submission, before match/input planning. `evaluating` opens the live run;
-`run.play` executes it. `hold`/`evaluate` warn and delegate until 0.5. Relative
-seats in authored jobs use the existing planner's lines and selected inputs;
-the low-level opener retains explicit `lines=` (demo detail in questions.md).
+The first eight reviews, eval/writer and typed-match cuts are built. Their
+exact directions and receipts remain at `312928d:scratch/exp-56.md`; those
+receipts predate this pass and are not current acceptance evidence. The accepted
+surface is in user docs. Historical outcomes/records, state publication,
+planned stops, continuation, row replacement and cumulative budgets survive.
 
-Reviews one through six and compress are built. Their exact directions and
-focused receipts are retained at `297abf7:scratch/exp-56.md`; full acceptance
-remains gate's. Sixth-review changes give checkpoints a default source and
-empty-selection remedy, qualify continue ids, explain missing launcher runs,
-and name the current evaluation calls. No schema, query or provider-count
-change. PR #103 stays draft.
-
-Seventh-review corrections are built: evaluation(checkpoint=) accepts a
-CheckpointRecord and delivers its members while preserving its key; released
-single-file Input still works. Local run/new/resume and continue share JSON
-change validation; omitted resume config still reads the stored model.
-Finished-run refusals include actual clock positions. README and training,
-launcher and evaluation docs match. No schema, SQL or new remote reads.
-
-Eighth-review corrections are built (design, "Corrections from the eighth
-concept review"). Fetch's separate refusal is preserved (questions.md).
-Compress: `_one` holds the singular refusal for queue/launch. Seeds given to
-`Job.runs(1, 2)` keep admission-time ids (ids for them broke resubmission in
-test_smoke/test_cli); only declared seeds are `NAME-seed-N`.
-
-Steer built (Jack Heart: "i feel like it should be etude traine hanabi"):
-`etude run FILE` is `etude train FILE` (`etude.local.train`), no alias; run
-stays a noun. Unbuilt: experiment/job/seed addresses (design, "Run
-addresses").
-Check: `uv run pytest tests/test_jobs.py tests/test_smoke.py
-tests/launch/test_queue.py tests/launch/test_cli.py tests/train/test_local.py
-tests/train/test_track.py tests/launch/test_lium.py` — 158 passed; mypy,
-ruff check and format pass. Realign: writer warnings read `etude: run
-NAME:`; design says `etude train`; test_track.py 14 passed.
-
-Compress: `_resumed` computes the reached positions once; `_hold` and
-`evaluation` share `_BENCHMARK_CHECKPOINT`; the test `play` reads weights
-through one helper. Check: `uv run pytest tests/test_jobs.py
-tests/train/test_local.py tests/test_continuation_out.py` — 61 passed; mypy
-clean on jobs/local/call and tests/test_jobs.py; ruff check, format and
-`git diff --check` pass. Gate owns full acceptance. PR #103 remains draft.
-
-Hanabi command receipt and the compress pass's 139-test receipt:
-`06ff0f6:scratch/exp-56.md`; stop/resume evidence is in demo.md.
-
-Writer/eval and typed-match cuts are built. questions.md holds decisions;
-docs/hanabi.md prepares the optional OpenSpiel/PyTorch demo. No PufferLib
-adoption or EXP-62 work is included.
-
-Older check receipts: `e40e1a2:scratch/exp-56.md` (typed-match, writer,
-stop/resume, CLI imports) and `ef6099a:scratch/exp-56.md` (indexed queries).
-
-Acceptance remains the design's fresh/stop/resume example; two models in one
-save and checkpoint seated in evaluation; taken-name/config/seed refusals;
-changed-source provenance; `start=` links; stop between phases; a finished
-run not overwritten by a refused attempt. Existing local CLI tests cover
-these, including a genuine learner failure before any row.
-
-Manabot adoption and its smoke remain MTG-329; see its constraints in the design.
+Full acceptance stays with gate: fresh/stop/resume; two models in one save and
+checkpoint seated in evaluation; name/config/seed refusals; changed-source
+provenance; start= links; stop between phases; finished outcome unchanged by a
+refusal. The hands-on Hanabi evidence is in demo-hanabi.md. Manabot adoption
+and smoke remain MTG-329; do not edit its checkout. PR #103 stays draft.
 
 ## Folded and later work
 
@@ -141,3 +92,27 @@ quotes are retained at `224e45c:scratch/exp-56.md`.
 Later Tasks: EXP-57 live view; EXP-58 machines/metrics; EXP-59 broader JSON;
 EXP-60 population/evaluation expansion; EXP-61 joinable budgets. EXP-64's
 package split is folded into EXP-56.
+
+## Address and loop ergonomics pass (2026-11-13)
+
+Built the recorded experiment/job@seed selection design and the later cadence,
+automatic-clock and should_stop steer. `design-train-api.md` holds the settled
+semantics and deletion cut. No schema or SQL-query change. Historical delivery
+uses stored ids; compact training and nested eval discovery excludes out data.
+Focused verification is recorded below. Gate owns the
+full suite, acceptance and PR handoff; PR #103 remains draft.
+
+Later steers built: string clock declarations optionally close the set;
+first-use log keywords declare count clocks when open; every row requires all
+used clocks; metric sets may differ and missing metrics remain null. Step is
+only a released warning alias through 0.5; moved module paths gain none.
+The Manabot malformed historical-record defect is fixed with focused coverage.
+
+Checks: `uv run pytest tests/train/test_steps.py tests/train/test_addresses.py
+ tests/train/test_local.py tests/train/test_identity.py -q --disable-warnings`
+— 58 passed. The qualified-name/checkpoint-producer regression added afterward
+passed separately (1 passed). Narrow launch/resume, worker/eval contexts,
+continuation and smoke checks passed in this pass; full acceptance stays gate's.
+Mypy on the 19 affected source/test files, ruff check, ruff format --check and
+`git diff --check` pass. Measured discovery: 1 listing, 2 declaration reads for
+a compact training root and its nested eval root. Context under both limits.

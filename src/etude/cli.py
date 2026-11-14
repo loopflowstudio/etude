@@ -36,9 +36,11 @@ def train_recipe(
         str | None, typer.Option(help="JSON config fields; omitted on resume keeps stored config")
     ] = None,
     seed: Annotated[int | None, typer.Option(help="the run's seed")] = None,
-    name: Annotated[str | None, typer.Option(help="job name, defaulting to the file stem")] = None,
+    job: Annotated[str | None, typer.Option(help="select a job defined in runs()")] = None,
     experiment: ExperimentOption = None,
-    resume: Annotated[str | None, typer.Option(help="resume this run on current source")] = None,
+    resume: Annotated[
+        bool, typer.Option(help="resume the selected runs on current source")
+    ] = False,
     until: Annotated[str | None, typer.Option(help="absolute target, such as updates=2000")] = None,
     seconds: Annotated[
         float | None, typer.Option(help="execution allowance before a saved stop")
@@ -55,7 +57,7 @@ def train_recipe(
             file,
             config=config,
             seed=seed,
-            name=name,
+            job=job,
             experiment=experiment,
             resume=resume,
             until=target,
@@ -79,7 +81,9 @@ def _submit(
     smoke: bool,
     quote: bool = False,
     experiment: str | None = None,
-    resume: str | None = None,
+    resume: bool = False,
+    job: str | None = None,
+    seed: int | None = None,
     until: str | None = None,
 ) -> None:
     if help:
@@ -90,9 +94,8 @@ def _submit(
         raise typer.BadParameter("a Python FILE defining runs() is required")
     from decimal import Decimal
 
-    from etude.identity import run_address
     from etude.launch import controller
-    from etude.launch.job_file import read_job_file
+    from etude.launch.job_file import read_job_file, select_runs
     from etude.launch.listing import show_runs
     from etude.launch.records import CohortSpec
     from etude.spec import Until
@@ -100,32 +103,20 @@ def _submit(
     runs = read_job_file(file, ctx.args, help=help, experiment=experiment)
     if help:
         return
-    if until is not None and resume is None:
+    runs = select_runs(runs, job=job, seed=seed)
+    if until is not None and not resume:
         raise LauncherError("--until needs --resume")
-    if resume is not None:
-        resume = run_address(resume, experiment or (runs[0].job.experiment if runs else file.stem))
+    if resume:
         if quote or cohort is not None:
             raise LauncherError("--resume cannot be combined with --quote or --cohort")
-        selected = [run for run in runs if run.id == resume]
-        if not selected and len(runs) == 1:
-            selected = runs
-        elif not selected:
-            address = controller.selected()
-            reader = controller.PythonClient(address) if address else launch_cli.default()
-            prior = reader.record(resume)
-            selected = [
-                run
-                for run in runs
-                if run.seed == prior.seed and run.job.name == prior.launch.spec.name
-            ]
-        if len(selected) != 1:
-            raise LauncherError("--resume must select one run from the file's jobs and seeds")
-        request = selected[0]
+        if len(runs) != 1:
+            raise LauncherError("--resume needs one run; select --job and --seed")
+        request = runs[0]
         if until is not None:
             request = request.model_copy(
                 update={"job": request.job.model_copy(update={"until": Until.parse(until)})}
             )
-        runs = [request.model_copy(update={"id": resume, "resume": True})]
+        runs = [request.model_copy(update={"resume": True})]
     if cohort is None:
         if len(runs) > 1:
             raise LauncherError(f"{len(runs)} runs need --cohort NAME")
@@ -205,7 +196,11 @@ def launch(
     smoke: SmokeOption = False,
     help: FileHelp = False,
     experiment: ExperimentOption = None,
-    resume: Annotated[str | None, typer.Option(help="resume this run on current source")] = None,
+    job: Annotated[str | None, typer.Option(help="select a declared job")] = None,
+    seed: Annotated[int | None, typer.Option(help="select a declared seed")] = None,
+    resume: Annotated[
+        bool, typer.Option(help="resume the selected runs on current source")
+    ] = False,
     until: Annotated[str | None, typer.Option(help="absolute target for the resumed run")] = None,
 ) -> None:
     """Queue a file's runs and get the machines to start them now, or fail and queue nothing."""
@@ -222,6 +217,8 @@ def launch(
         smoke=smoke,
         quote=quote,
         experiment=experiment,
+        job=job,
+        seed=seed,
         resume=resume,
         until=until,
     )
@@ -243,6 +240,8 @@ def queue(
     smoke: SmokeOption = False,
     help: FileHelp = False,
     experiment: ExperimentOption = None,
+    job: Annotated[str | None, typer.Option(help="select a declared job")] = None,
+    seed: Annotated[int | None, typer.Option(help="select a declared seed")] = None,
 ) -> None:
     """Add a file's runs to the queue. They start when a machine has room or can be rented."""
     _submit(
@@ -254,9 +253,11 @@ def queue(
         parallel,
         max_usd,
         help,
+        experiment=experiment,
+        job=job,
+        seed=seed,
         queued=True,
         smoke=smoke,
-        experiment=experiment,
     )
 
 
@@ -426,6 +427,7 @@ def eval_experiment(
         Path,
         typer.Argument(help="a Python file defining eval(state); the experiment is named for it"),
     ],
+    experiment: ExperimentOption = None,
     source: Annotated[
         str | None,
         typer.Option(
@@ -469,7 +471,7 @@ def eval_experiment(
     from etude.spec import Smoke
     from etude.storage import default_root, storage_from_uri
 
-    experiment = read_experiment(file)
+    definition = read_experiment(file, experiment=experiment)
     storage = storage_from_uri(source or default_root())
     before = Smoke()
     if smoke and (pool or rent):
@@ -478,7 +480,7 @@ def eval_experiment(
     try:
         while True:
             for done in advance(
-                experiment,
+                definition,
                 source=storage,
                 pool=pool,
                 rent=rent,
@@ -588,7 +590,7 @@ def continue_run(
             for parent in resolve_runs(scheduler, [run], experiment=experiment)
         ]
     except LauncherError as error:
-        raise LauncherError(f"{error}; a changed config needs a new --name") from error
+        raise LauncherError(f"{error}; a changed config needs a new --experiment") from error
     first = parents[0]
     with tempfile.TemporaryDirectory() as relayed:
         if source is None:

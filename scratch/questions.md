@@ -41,76 +41,15 @@ demo below) remain at `e40e1a2:scratch/questions.md`. Experiment-scoped reads
 select folders by their own declarations; wholly undeclared historical metric
 fixtures remain readable.
 
-## Writer/allocation evidence
+## Built layout and writer decisions
 
-Full writer probes and resume/report-label choices remain at
-`acf036f:scratch/questions.md`. The persisted job digest is identity;
-report labels are derived. Resume keeps cohort limits; queued runs without
-allocations replace their pending specification.
-
-## Package layout: run, training run, eval run (2026-11-13)
-
-Jack Heart, in order: "ok so this is should be in run then, and run should be
-top level not in training"; "and ten we can move tracking inside training";
-"to be clear this is because we also have eval runs, right"; "These should be
-training runs, which I think should be a subclass of `run`"; "We probably
-also want to have an eval run"; then, quoting the layout below back,
-"etude/eval/... EvalRun(Run): what evaluate() runs as. Adds matches, rollups,
-skips". On folding the split into this Task: "do it in 56". On moving
-errors, storage, records and checkpoints to the top level: "agreed".
-
-Built layout and record ownership are in `exp-56.md` and the design.
-The full built package mapping and implementation choices are retained at
-`ef6099a:scratch/questions.md`. The enforced boundary remains: shared run,
-records, errors, storage and checkpoints import neither train, eval nor
-launch; train and eval do not import each other. Public warning aliases end
-in 0.5. Unlabelled command jobs retain flat addresses; historical flat run
-folders remain selected only by a matching declaration.
-
-## Earlier review history
-
-Eval consistency requests, the superseded author-owned execution sketch and
-review-one-through-four probes remain at `297abf7:scratch/questions.md`.
-The pure tournament boundary below supersedes that sketch; local branching,
-listing and direct-call choices remain as recorded under Decisions through demo.
-
-## RunAttempt and writers (2026-11-13)
-
-Options put to Jack Heart: (a) keep `RunWriter` beside `RunAttempt`; (b) one
-`RunAttempt` with writers as a part of it (Slurm job/steps shape); (c) another
-name for the writer. He answered: "- b. one RunAttempt with writers as a part
-of it i think  probably?" (tentative; show at demo). Keep the many-writers-
-per-allocation behaviour: each writer keeps its own first-row cutoff, and
-writers do not count against attempt limits or rental accounting.
-
-## Eval planning boundary: the author function returns the tournament (2026-11-13)
-
-Proposed: `def arena(config: ArenaConfig) -> Benchmark` is pure (no I/O);
-`evaluation(arena, config=ArenaConfig(), play=play)` makes the job; the planner
-calls `arena(config)` at submission and plans pending matches and checkpoint
-inputs as today; on the machine Etude runs `with evaluating(benchmark) as run:
-run.play(play)`. Prior art: Inspect AI `@task -> Task`, HELM
-`run_spec_function -> RunSpec`. Jack Heart: "I guess thats fine." This
-replaces the earlier sketch where the author function ran the eval itself.
-
-## Typed match conditions (2026-11-13)
-
-Built. Jack Heart: "i do think conditions should be pydantic"; "and be like
-MatchConfig or something"; "but only i guess similar to TrainConfig, doesnt
-need to be named by us"; "just needs to be a pydantic model". The proposed
-shape and readings are at `acf036f:scratch/questions.md`.
-
-## Implementation choices for demo (2026-11-13)
-
-Built: `RunAttempt.writers` holds the tracking/eval contexts, each with its
-own id and first-row cutoff; the allocation keeps one id, machine, rental
-share and attempt-limit charge. Schema 19 edited in place; no new query or
-remote read.
-
-Reversible choice to show at demo: authored evaluation jobs use the planner's
-selected matches, lines and inputs; the low-level `evaluating` opener keeps
-explicit `lines=`. Detail and controlled-check receipts:
-`acf036f:scratch/questions.md` (Implementation choices for demo).
+Exact package-layout, allocation/writer, pure-eval and typed-match replies are
+retained at `312928d:scratch/questions.md` (Writer/allocation evidence through
+Implementation choices for demo). Keep shared run/records/storage independent
+of train, eval and launch; train/eval independent of each other. Allocation
+writers keep independent cutoffs without extra budget charges. Authored evals
+use planned lines and inputs; the low-level opener keeps explicit lines=.
+The writer shape remains a demo choice, not an attributed acceptance verdict.
 
 ## Decisions through demo (2026-11-13)
 
@@ -173,3 +112,41 @@ so. The run-address steer (design, "Run addresses") may replace this.
 Contrary evidence: `fetch coin-seed-0 weights.pt DIR` reports `run coin-seed-0
 has not reached a session`, not the shared refusal. Left alone: changing it
 would add a database read.
+
+
+## Headless choices for addresses and loop ergonomics (2026-11-13)
+
+Use the demo's recorded `@` address choice. Omission uses the full declaration
+before --job/--seed selection. A train-only file has seed 0; declare runs() to
+select other seeds. Explicit RunRequests retain their supplied ids; local
+execution requires an id. Local selections run in order and stop at the first
+saved stop; launch --resume selects one run. Existing cohort requirements stand.
+Both save cadence options mean either threshold; specifying only save_every
+replaces the default 300-second cadence. These are reversible implementation
+choices, not additional replies from Jack Heart. Continue's existing child
+suffix remains; status/logs and continuation consume the same full address.
+Report-file naming remains file-based; named variants can be read with the
+Python readers. A broader report override is outside this pass.
+
+The later clock steer supersedes the wrapper choice above. Jack Heart, quoting
+"any keyword on run.log is a clock, so the first row that uses it declares it /
+it's a count unless you declare it Time / its name is its label / a later row
+missing it is refused": "these all sound fine to me". Keep Step only as its
+released warning alias until 0.5. Table row keywords follow the same rule;
+missing used clocks follow the existing strict/warn policy. Dynamic declarations
+are serialized across contexts; queued rows seal with their original columns.
+
+Later clock strictness: Jack Heart, "i do think we should have some amount of
+config between: - no non-init-declared clocks vs not - all clocks set every
+update vs not"; then "Right be we have a separate eval paradigm". Given
+`track(clocks=["updates", ...])`, close the set; omitted, declare by use.
+Every row requires all used clocks, with strict raise versus warn-once;
+no sparse-clock switch. Jack Heart: "i think we should allow sparsity in
+WHAT gets logged, but i see little reason to be loose with clocks". Metrics
+may differ per row; missing reads null, never zero or carried forward.
+
+Manabot check steer `9f5a3e52-f52e-458a-9c62-51efc6b0cb10`, source branch
+382c653ec8 checked against ddff7d4: 33/35 loop/recipe tests passed after module
+moves. Jack Heart: "i think we dont need warnings, were teh only users".
+No aliases for moved paths. Malformed nested declarations now raise a Pydantic
+validation error rather than KeyError. Minimal id-only records remain valid.

@@ -35,7 +35,7 @@ class Counts(BaseModel):
 def train(config: Config) -> None:
     with track(clocks=[Step("updates", "updates")], config=config) as run:
         counts = run.resume(extra=Counts())
-        for update in run.steps("updates", to=config.updates, every=1):
+        for update in run.steps("updates", to=config.updates, save_every=1):
             counts.games += 3
             run.log({"games": counts.games, "seed": run.seed})
             run.save()
@@ -57,50 +57,50 @@ def test_local_stop_resume_and_finished_refusals_preserve_one_run(
             'def train(config: Config) -> None:\n    print("recipe progress")\n',
         )
     )
-    args = ["train", str(file), "--seed", "7"]
+    args = ["train", str(file)]
     assert main([*args, "--json"]) == 75
     stopped = capsys.readouterr()
     assert "recipe progress" in stopped.err
     assert json.loads(stopped.out) == {
-        "run": "train-seed-7",
+        "run": "train",
         "experiment": "train",
         "outcome": "stopped",
     }
     base = tmp_path / "home/track/train"
-    root = base / "train-seed-7"
+    root = base
     assert not (root / "out/phase-two").exists()
-    first = read(DirectoryStorage(base), "train", "train-seed-7")
+    first = read(DirectoryStorage(base.parent), "train", "train")
     assert first.outcome is not None and first.outcome.state == "stopped"
     assert first.points("games", "updates").y.tolist() == [3, 6]
     capsys.readouterr()
-    assert main(["train", str(file), "--resume", "train-seed-7", "--json"]) == 0
+    assert main(["train", str(file), "--resume", "--json"]) == 0
     output = capsys.readouterr()
     assert "recipe progress" in output.err
     assert json.loads(output.out) == {
-        "run": "train-seed-7",
+        "run": "train",
         "experiment": "train",
         "outcome": "finished",
     }
     assert (root / "out/phase-two").read_text() == "12"
-    completed = read(DirectoryStorage(base), "train", "train-seed-7")
+    completed = read(DirectoryStorage(base.parent), "train", "train")
     assert completed.points("games", "updates").y.tolist() == [3, 6, 9, 12]
     assert len(completed.attempts) == 2
     outcome = (root / "outcome.json").read_bytes()
     assert main(args) == 1
     assert "run_name_taken" in capsys.readouterr().err
-    assert main(["train", str(file), "--resume", "train-seed-7"]) == 1
+    assert main(["train", str(file), "--resume"]) == 1
     assert "finished at updates=4" in capsys.readouterr().err
     for target in ("updates=3", "updates=4"):
-        assert main(["train", str(file), "--resume", "train-seed-7", "--until", target]) == 1
+        assert main(["train", str(file), "--resume", "--until", target]) == 1
         assert "finished at updates=4" in capsys.readouterr().err
-    assert main(["train", str(file), "--resume", "train-seed-7", "--config", '{"lr":0.2}']) == 1
+    assert main(["train", str(file), "--resume", "--config", '{"lr":0.2}']) == 1
     assert "lr was 0.1, is 0.2" in capsys.readouterr().err
-    assert main(["train", str(file), "--resume", "train-seed-7", "--seed", "8"]) == 1
-    assert "seed was 7, is 8" in capsys.readouterr().err
+    assert main(["train", str(file), "--resume", "--seed", "8"]) == 1
+    assert "select the file's sole job and seed 0" in capsys.readouterr().err
     assert (root / "outcome.json").read_bytes() == outcome
-    assert len(read(DirectoryStorage(base), "train", "train-seed-7").attempts) == 2
-    assert main(["train", str(file), "--resume", "train-seed-7", "--until", "updates=6"]) == 0
-    extended = read(DirectoryStorage(base), "train", "train-seed-7")
+    assert len(read(DirectoryStorage(base.parent), "train", "train").attempts) == 2
+    assert main(["train", str(file), "--resume", "--until", "updates=6"]) == 0
+    extended = read(DirectoryStorage(base.parent), "train", "train")
     assert extended.points("games", "updates").y.tolist() == [3, 6, 9, 12, 15, 18]
 
 
@@ -129,13 +129,13 @@ def test_local_config_refusals_name_fields_before_calling_the_recipe(
             "lr: float = 0.1", "lr: float = Field(default=0.1, gt=0)"
         )
     )
-    root = tmp_path / "home/track/train/train-seed-0"
+    root = tmp_path / "home/track/train"
     outcome = None
     args = ["train", str(file)]
     if resume:
         assert main(args) == 75
         outcome = (root / "outcome.json").read_bytes()
-        args += ["--resume", "train-seed-0"]
+        args += ["--resume"]
     capsys.readouterr()
     assert main([*args, "--config", changes]) == 1
     error = capsys.readouterr().err
@@ -143,7 +143,7 @@ def test_local_config_refusals_name_fields_before_calling_the_recipe(
     assert "https://errors.pydantic.dev" not in error
     if resume:
         assert (root / "outcome.json").read_bytes() == outcome
-        assert len(read(tmp_path / "home/track", "train", "train-seed-0").writers) == 1
+        assert len(read(tmp_path / "home/track", "train", "train").writers) == 1
     else:
         assert not root.exists()
 
@@ -157,42 +157,29 @@ def test_local_config_keeps_explicitly_allowed_extras(
         RECIPE.replace("class Config(BaseModel):", 'class Config(BaseModel, extra="allow"):')
     )
     assert main(["train", str(file), "--config", '{"custom":7}']) == 75
-    assert main(["train", str(file), "--resume", "train-seed-0"]) == 0
-    data = read(tmp_path / "home/track", "train", "train-seed-0")
+    assert main(["train", str(file), "--resume"]) == 0
+    data = read(tmp_path / "home/track", "train", "train")
     assert data.file is not None and data.file.config_json is not None
     assert json.loads(data.file.config_json)["custom"] == 7
 
 
-def test_local_resume_resolves_qualified_and_explicit_experiments(
+def test_local_experiment_override_and_resume_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     file = tmp_path / "train.py"
     file.write_text(RECIPE)
-    args = ["train", str(file)]
-    new = [*args, "--experiment", "lab", "--name", "wide", "--seed", "7"]
-    assert main([*new, "--json"]) == 75
-    assert json.loads(capsys.readouterr().out) == {
-        "run": "wide-seed-7",
-        "experiment": "lab",
-        "outcome": "stopped",
-    }
-    assert main(new) == 1
-    assert "use --resume lab/wide-seed-7" in capsys.readouterr().err
-    assert main([*args, "--resume", "wide-seed-7"]) == 1
-    assert "run_not_found: train/wide-seed-7" in capsys.readouterr().err
-    assert main([*args, "--resume", "lab/wide-seed-7", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {
-        "run": "wide-seed-7",
-        "experiment": "lab",
-        "outcome": "finished",
-    }
-    assert (
-        main([*args, "--resume", "wide-seed-7", "--experiment", "lab", "--until", "updates=6"]) == 0
-    )
-    data = read(DirectoryStorage(tmp_path / "home/track"), "lab", "wide-seed-7")
+    args = ["train", str(file), "--experiment", "lab"]
+    assert main([*args, "--json"]) == 75
+    assert json.loads(capsys.readouterr().out)["run"] == "lab"
+    assert main(args) == 1
+    error = capsys.readouterr().err
+    assert "use --resume" in error and "--until" in error
+    assert main([*args, "--resume", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["run"] == "lab"
+    assert main([*args, "--resume", "--until", "updates=6"]) == 0
+    data = read(tmp_path / "home/track", "lab", "lab")
     assert len(data.attempts) == 3
-    assert data.outcome is not None and data.outcome.state == "finished"
     assert data.points("games", "updates").y.tolist() == [3, 6, 9, 12, 15, 18]
     assert not (tmp_path / "home/track/train").exists()
 
@@ -210,7 +197,7 @@ def test_a_new_recipe_failure_before_any_rows_is_recorded(
     )
     with pytest.raises(RuntimeError, match="learner failed"):
         main(["train", str(file)])
-    data = read(DirectoryStorage(tmp_path / "home/track/fail"), "fail", "fail-seed-0")
+    data = read(DirectoryStorage(tmp_path / "home/track"), "fail", "fail")
     assert data.outcome is not None and data.outcome.state == "failed"
     assert data.rows == 0
 
@@ -224,9 +211,9 @@ def test_outcome_reader_keeps_historical_state_files(
     file.write_text(RECIPE)
     assert main(["train", str(file)]) == 75
     base = tmp_path / "home/track/train"
-    root = base / "train-seed-0"
+    root = base
     (root / "outcome.json").rename(root / filename)
-    data = read(DirectoryStorage(base), "train", "train-seed-0")
+    data = read(DirectoryStorage(base.parent), "train", "train")
     assert data.outcome is not None and data.outcome.state == "stopped"
     with pytest.warns(DeprecationWarning, match=r"RunData.state.*RunData.outcome; removed in 0.5"):
         assert data.state is data.outcome
@@ -251,7 +238,7 @@ def test_signal_stops_saved_and_restores_the_callers_environment(
     )
     file.write_text(recipe)
     assert main(["train", str(file)]) == 75
-    root = tmp_path / "home/track/signal_recipe/signal_recipe-seed-0"
+    root = tmp_path / "home/track/signal_recipe"
     assert not (root / "out/phase-two").exists()
     pointer = json.loads((root / "out/state/current.json").read_text())["save"]
     state = json.loads((root / "out/state" / pointer / "state.json").read_text())
@@ -297,8 +284,8 @@ def test_changed_source_resumes_and_each_attempt_records_its_commit(
     ):
         _git(tmp_path, args)
     second = _git(tmp_path, ["rev-parse", "HEAD"])
-    assert main(["train", str(file), "--resume", "train-seed-0"]) == 0
-    data = read(DirectoryStorage(tmp_path / "home/track/train"), "train", "train-seed-0")
+    assert main(["train", str(file), "--resume"]) == 0
+    data = read(DirectoryStorage(tmp_path / "home/track"), "train", "train")
     assert [attempt.commit for attempt in data.attempts] == [first, second]
     assert first != second
 
@@ -316,8 +303,8 @@ def test_a_resumed_attempt_keeps_its_launch_target(
     file = tmp_path / "train.py"
     file.write_text(RECIPE)
     assert main(["train", str(file), "--until", "updates=3"]) == 75
-    assert main(["train", str(file), "--resume", "train-seed-0"]) == 0
-    data = read(DirectoryStorage(tmp_path / "home/track/train"), "train", "train-seed-0")
+    assert main(["train", str(file), "--resume"]) == 0
+    data = read(DirectoryStorage(tmp_path / "home/track"), "train", "train")
     assert data.reached["updates"] == 3
     assert {attempt.until for attempt in data.attempts} == {"updates=3.0"}
 
@@ -330,10 +317,10 @@ def test_seconds_deadline_stops_before_the_first_step_when_expired(
     file = tmp_path / "train.py"
     file.write_text(RECIPE)
     assert main(["train", str(file), "--seconds", "1"]) == 75
-    data = read(DirectoryStorage(tmp_path / "home/track/train"), "train", "train-seed-0")
+    data = read(DirectoryStorage(tmp_path / "home/track"), "train", "train")
     assert data.outcome is not None and data.outcome.state == "stopped"
     assert data.rows == 0
-    assert not (tmp_path / "home/track/train/train-seed-0/out/phase-two").exists()
+    assert not (tmp_path / "home/track/train/out/phase-two").exists()
 
 
 def test_two_model_cli_recipe_resumes_and_its_checkpoint_can_be_seated(
@@ -356,12 +343,12 @@ def test_two_model_cli_recipe_resumes_and_its_checkpoint_can_be_seated(
     file.write_text(recipe)
     assert main(["train", str(file), "--experiment", "tiny"]) == 75
     base = tmp_path / "home/track/tiny"
-    root = base / "models-seed-0"
+    root = base
     first = read_state(root / "out/state")
     assert first is not None
     weights = {name: (first.path / f"{name}.pt").read_bytes() for name in ("policy", "value")}
-    assert main(["train", str(file), "--experiment", "tiny", "--resume", "models-seed-0"]) == 0
-    checkpoint = observe(base, "tiny").run("models-seed-0").final
+    assert main(["train", str(file), "--experiment", "tiny", "--resume"]) == 0
+    checkpoint = observe(base.parent, "tiny").run("tiny").final
     assert checkpoint is not None and checkpoint.at["updates"] == 4
     assert {name: (checkpoint.path / f"{name}.pt").read_bytes() for name in weights} == weights
     seated = Match(players=(checkpoint.player(Inference()), Code(name="opponent")), games=1)
@@ -385,8 +372,8 @@ def test_resume_uses_stored_config_when_defaults_change(
     file.write_text(RECIPE)
     assert main(["train", str(file), "--config", '{"lr":0.2}']) == 75
     file.write_text(RECIPE.replace("lr: float = 0.1", "lr: float = 0.9"))
-    assert main(["train", str(file), "--resume", "train-seed-0"]) == 0
-    data = read(tmp_path / "home/track", "train", "train-seed-0")
+    assert main(["train", str(file), "--resume"]) == 0
+    data = read(tmp_path / "home/track", "train", "train")
     assert data.file is not None and data.file.config_json is not None
     assert json.loads(data.file.config_json)["lr"] == 0.2
     assert (
@@ -395,7 +382,6 @@ def test_resume_uses_stored_config_when_defaults_change(
                 "train",
                 str(file),
                 "--resume",
-                "train-seed-0",
                 "--config",
                 "{}",
                 "--until",
@@ -422,7 +408,7 @@ def test_second_interrupt_exits_a_loop_that_has_not_observed_its_stop(
         "                signal.raise_signal(signal.SIGINT)\n" + recipe[end:]
     )
     assert main(["train", str(file)]) != 0
-    data = read(tmp_path / "home/track", "train", "train-seed-0")
+    data = read(tmp_path / "home/track", "train", "train")
     assert data.outcome is not None and data.outcome.state == "failed"
     assert data.reached["updates"] == 2
-    assert not (tmp_path / "home/track/train/train-seed-0/out/phase-two").exists()
+    assert not (tmp_path / "home/track/train/out/phase-two").exists()

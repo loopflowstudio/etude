@@ -246,7 +246,7 @@ class Experiment:
     eval: EvalFunction
 
 
-def read_experiment(path: Path) -> Experiment:
+def read_experiment(path: Path, *, experiment: str | None = None) -> Experiment:
     """The file's experiment. The file may import its neighbours, as a job file may."""
     if path.suffix != ".py":
         raise EtudeError("experiment_file_must_be_python", 422) from ValueError(path)
@@ -256,7 +256,7 @@ def read_experiment(path: Path) -> Experiment:
     found = runpy.run_path(str(path.resolve())).get("eval")
     if not callable(found):
         raise EtudeError("experiment_file_defines_no_eval", 422) from ValueError(path)
-    return Experiment(name=path.stem, eval=cast(EvalFunction, found))
+    return Experiment(name=experiment or path.stem, eval=cast(EvalFunction, found))
 
 
 def asked(function: EvalFunction, state: ExperimentState) -> list[Job]:

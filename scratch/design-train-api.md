@@ -142,7 +142,7 @@ Details that matter:
   `fn` an empty one.
 - **`run.save()`** is called every pass. Etude writes on the last pass before
   a stop and otherwise on an interval (default by wall time, overridable with
-  `every=` in steps). The write replaces the previous state whole or not at
+  `save_every=` in steps). The write replaces the previous state whole or not at
   all: a new self-contained save folder, then the pointer naming it.
   Recovery and `run.resume` follow the pointer. Delivery sends only the save
   the pointer names, whole, then the pointer; Etude removes replaced saves
@@ -203,34 +203,10 @@ def runs() -> Job:
 ```
 
 One job with three seeds is three runs. Without `seeds`, one run with seed 0.
-A run's id is the job's name and its seed (`baseline-seed-7`) unless given.
-`RunRequest` remains the record underneath for code that builds launches by
-hand.
-
-| Intent | Command | Result |
-| --- | --- | --- |
-| a new run, here | `etude train train.py [--config JSON] [--seed N] [--name NAME] [--until clock=value] [--seconds N]` | always new; prints the id |
-| a new run, on machines | `etude launch job.py [--rent ...]` | always new |
-| the same run, after a lost machine or `Stopped` | none; the launcher calls again | a new attempt of the same run |
-| the same run, after it ended unfinished | `etude train train.py --resume RUN`, `etude launch job.py --resume RUN` | a new attempt of the same run, on current code |
-| the same run, further | `--resume RUN --until ...` on either | a new attempt of the same run, finished or not (Open 2) |
-| changed, or a branch of a launched run | `etude continue --run RUN --until clock=value [--config ...]` | a new run descended from the first |
-
-- `--name` chooses the job name; the run id adds its seed (`wide-seed-7`).
-  An exact run id without that suffix is chosen with `RunRequest(id=...)`.
-  It is unique within its experiment. The authority is the run's folder:
-  `run.json` is created create-only, so a second claimant fails on any
-  computer. The launcher also refuses early, before renting.
-- A taken name is refused, never resumed. This changes `declare`, which today
-  resumes a re-used name.
-- `--resume` refuses a changed config or seed, and a finished run given no
-  later target.
-- `etude train` replaces `local_launch` in user code and Manabot's
-  `train --out`. Exit codes: 0 finished, 75 stopped, other failed.
-- New commands print JSON with `--json` from the start (EXP-59 covers the
-  rest).
-- Bug already assigned to EXP-56: a refused or interrupted attempt must not
-  mark a finished run failed.
+Addresses and command selection follow "Run addresses" below. `RunRequest`
+remains available for explicit ids and admission-time repetitions; local
+training of an explicit request needs an id. New and resumed attempts are
+separate calls. A refusal never changes the stored outcome.
 
 ### Beyond one stage, one model
 
@@ -281,109 +257,17 @@ the authority for a run's experiment: a name given at launch wins, the file's
 stem is only the default when none is given, and training code never needs to
 name its experiment. Launch commands take the name as an argument.
 
-## Later steers (2026-11-13): built, writer shape for demo
+## Built cuts and review history
 
-`questions.md` records the exact replies. Writers are sub-parts of the
-allocation's `RunAttempt`, with separate first-row cutoffs and no effect on
-allocation limits or cost. Existing metric files remain the writer evidence;
-the progress/finished journals carry their metadata to the allocation record.
+The writer/eval, typed-match and first eight review cuts are built. Their
+exact directions, deletion lists and earlier receipts remain at
+`312928d:scratch/design-train-api.md`; current behavior is in user docs and
+`exp-56.md`. Preserve allocation-owned writers and their independent row
+cutoffs, pure eval author functions, selected checkpoint members and stable
+match keys. Warning aliases for released names end in 0.5. Schemas stay at
+launcher 19 and statsdb 14, the single unreleased changes over main.
 
-The eval author returns a pure tournament:
-`evaluation(arena, config=..., play=play)` validates config and calls it at
-submission, preserving pending-match planning and selected checkpoint inputs.
-The worker opens `evaluating(benchmark)` and calls `run.play(play)`. Rollups
-belong to Benchmark/RoundRobin. Planned stops seal results and raise Stopped;
-resume is explicit outside launched retries. Low-level relative-seat contexts
-retain `lines=`; authored jobs carry the planner's lines without runtime
-training reads. This detail and the tentative writer shape stay for demo.
-
-Delete — do not maintain: match execution, worker pool and progress ownership
-in `eval.match.evaluate`; it and `hold` are warning-only wrappers until 0.5.
-The execution owner is `EvalRun`. Remove the launch-only progress/Tally record
-implementations; shared `RunProgress` and `Tally` own the journal data.
-Readers and reports use writers rather than treating contexts as allocations.
-Preserve old records, cutoffs, command jobs with no contexts, multiple contexts
-and runs in one allocation, row replacement, planned-stop retries and costs.
-Schema stays 19 (edited in place); full acceptance stays with gate.
-
-## Typed match config and demo (2026-11-13): built
-
-`questions.md` holds the exact new words and chosen defaults. Match[AuthorModel]
-receives config validated at the playing boundary, including worker processes;
-Seating/RoundRobin accept author models. Python config fields serialize under
-historical conditions, so keys and stored JSON stay stable. Old keyword and
-property warn until 0.5. statsdb calls its column config (same unreleased schema
-14 cut). No Etude-owned MatchConfig class or stored Python type name.
-
-Delete — do not maintain: mapping-only Python conditions fields and their
-live consumers; the unreleased etude.job module; the CLI-file top-level
-function refusal. Shared types live in etude.spec, constructors in etude.jobs.
-Preserve historical JSON, keys, seeds, scheduling and selected inputs.
-
-The optional Hanabi example is examples/hanabi.py and docs/hanabi.md. OpenSpiel
-is an optional extra, absent from required/test dependencies. It trains one
-small shared PyTorch policy, stops/resumes whole episodes and evaluates a pure
-benchmark with typed match configs and team group rows. The demo must be felt
-by a person; headless checks prepare it without inventing reactions.
-
-## Built review corrections (2026-11-13)
-
-Reviews one through six are built; exact directions and deletion lists remain
-at `297abf7:scratch/design-train-api.md`. They preserve historical outcomes,
-records and warning aliases until 0.5. The accepted surface is the current
-user docs; gate owns full acceptance. No extra schema, query or provider-count
-change belongs to these corrections.
-
-## Corrections from the seventh concept review (2026-11-13): built
-
-Walked at `c8310bc` in a fresh ETUDE_HOME; evidence is in `questions.md`
-(Seventh concept review), the full direction at
-`297abf7:scratch/design-train-api.md`.
-
-1. `evaluation(checkpoint=)` accepts a `CheckpointRecord`, expanded by the
-   same `checkpoint_inputs_for` as `start=`. On the machine the player's
-   checkpoint keeps the record's own key and its `path` is the delivered
-   folder or file, so eval rows carry the same key whichever way it was
-   given. A released single-file `Input` is still accepted, unwarned. Docs
-   read the record with `observe(SOURCE, "ppo").run("ppo-seed-0").final`.
-   The job's inputs are exactly the record's members; no launcher schema
-   change.
-2. `etude.call.changed_config` owns "JSON changes over a config type" for
-   `etude train` (new and `--resume`) and `etude continue`: unknown top-level
-   fields are refused by name unless the model allows extras; problems
-   print one line per field. Stored configs are read as before.
-3. A finished run's refusal says where it stands (`finished at
-   updates=200`).
-
-## Corrections from the eighth concept review (2026-11-13): built
-
-Evidence is in questions.md (Eighth concept review). File and Python clients
-now share `Job.runs()`: omitted seeds select the Job's declared seeds, with
-`NAME-seed-N` ids for named Jobs. The file supplies an unnamed Job's stem.
-Cohort clients accept a Job or a list of Jobs/RunRequests. Singular launch
-and queue refuse several-seed Jobs before smoke or submission and name the
-cohort call. Explicit RunRequests keep their ids, seeds and parameters.
-
-Delete — do not maintain: the file reader's own seed-expansion loop.
-No schema, SQL or provider-count change. The focused fixture checks both
-Python clients against file-reader ids, mixed requests and singular refusals.
-Training launch examples spell `--cohort`, explain its name and default
-one-machine parallelism; refusals name the run count and remedy. README
-uses experiment `job` throughout launch/report/evaluation. The shared
-missing-run refusal offers `etude report FILE`; only `continue` appends the
-changed-config/new-name advice. Contrary evidence: fetch uses its own
-"has not reached a session" refusal, preserved here (questions.md).
-
-Open, for demo (reversible assumption taken in 2): the design says cohort
-"is not taught as a concept", and seeds on the job now make several runs the
-first thing a reader launches. Should `etude launch job.py` with a
-several-seed job need no `--cohort`? If so the launch needs a default for
-how many machines run at once (one, or one per seed, which decides how many
-are rented by the first command) and a default name that a second launch of
-the same file does not collide with (cohort names are create-only; joining
-one is EXP-61).
-
-## Run addresses (Hanabi demo steers, 2026-11-13): directed, unbuilt
+## Run addresses (Hanabi demo steers, 2026-11-13)
 
 Words and the superseded `--run`/`--job`-naming steers are in demo-hanabi.md.
 `etude train FILE` (was `etude run`) is built. The latest steers stand:
@@ -407,12 +291,52 @@ Words and the superseded `--run`/`--job`-naming steers are in demo-hanabi.md.
 - Same addressing in train, launch, continue, eval, status, logs. Historical
   runs stay readable under their stored names.
 
-Not built in compress; needs design first. It replaces `EXPERIMENT/RUN`
-references and the `NAME-seed-N` ids of `Job.runs` (eighth review), and
-`etude.local.train` reads only `train(config)` today, so selecting a file's
-jobs locally is new. The reading changed five times in three minutes;
-confirm it before building. Still open from the demo: `run_name_taken`
-pointed at `--resume` without `--until`.
+Implementation design, settled headlessly from the recorded choices:
+
+- Expand the full job/seed declarations before selection, in `etude.spec`;
+  file and Python clients share it. Explicit `RunRequest` ids are preserved.
+- `etude train` selects `runs()` jobs and calls their typed functions here.
+  With only `train(config)`, the file defines one job and seed 0. Selected
+  seeds run in order; a saved stop leaves later seeds unstarted. Local resume
+  covers the selection; launch resume requires one selected run.
+- `run.json` is still the sole stored identity. New ids, folders, prefixes and
+  writer addresses use the compact spelling. The worker supplies a full
+  address beside the local run name. Historical records keep their stored ids
+  when read or delivered; no rewrite, schema change or extra remote read.
+- A compact training root may contain sibling eval roots. Discovery traverses
+  those while excluding the parent's own `out`, artifacts and metric data.
+- Remove `--name`, resume's run-name argument, `NAME-seed-N` generation and
+  the file reader's seed expansion. Preserve explicit historical ids, row
+  replacement, state publication, continuation links and budgets.
+- Taken-name refusals show `--resume` and `--resume --until CLOCK=TARGET`.
+  Changed local config names fields and points to `--experiment`.
+
+## Loop ergonomics (Hanabi steer, 2026-11-13)
+
+Exact words: demo-hanabi.md and steer
+`23932ad5-e4c7-43cc-b086-96c4f5bd0bcb`. Jack Heart: "1a",
+"2a - but i still dont exactly undersatnd why/when we need to add the wraper",
+"3a". `steps(clock, to=, save_every=, save_every_seconds=)` declares a missing
+step clock with its name as label. Later steer `7df6a146-0f10-4a94-921b-2a6b64dee635` supersedes extra-axis
+wrappers: each log keyword declares a count clock, labelled by its name.
+`track(clocks=...)` is optional; Time stays for custom seconds. Step is only
+a released warning alias through 0.5. Historical declarations stay readable. Rows before any clock
+raise with this remedy, even in non-strict mode. Later rows missing a used
+clock raise in strict mode or warn and count incomplete rows otherwise. Default cadence is 300 seconds;
+step cadence replaces that default; explicit seconds plus steps saves at either
+threshold. Stops and completion always save. `should_stop` is a property on
+training and eval runs. Delete the unreleased `every=` and `stopping()`
+spellings; no aliases. Publish added clocks before their rows and seal the
+writer's prior columns before switching, preserving already queued rows.
+Resume retains stored clocks even when the recipe omits the primary clock.
+Steer `6cf6a4f2-1c7c-4b48-8beb-f82b005f1dd8`: optional
+`track(clocks=["updates", ...])` closes the set; omitted, declarations are by
+use. Unknown closed-set keywords refuse their row (strict raises, otherwise
+warn once and drop); steps on an unknown closed-set axis raise. Every row
+requires all clocks in use; no sparse switch. A closed resumed set must match
+the stored kinds and names; stored labels survive.
+Steer `cf6392bc-72d6-4aee-a020-909704a9bcb2`: metrics may vary per row;
+missing means null, never zero or carried forward. Evals are separate runs.
 
 ## Manabot (MTG-329)
 
@@ -479,7 +403,7 @@ population reads and ratings (EXP-60); a spending limit across launches
 1. The name `track` stands. The concern about two classes named `Run` was
    resolved with `RunRequest`; Jack Heart did not explicitly choose the name
    `track`.
-2. Jack Heart chose "Both": `--resume RUN --until ...` extends the same run,
+2. Jack Heart chose "Both": `--resume --until ...` extends the same run,
    including a finished run; `continue` creates a child when config changes.
    The same config and seed identify the same run.
 3. Jack Heart chose "Show how to keep them" for games in flight. The docs
@@ -487,4 +411,4 @@ population reads and ratings (EXP-60); a spending limit across launches
 4. The public non-Magic example remains unanswered. Use a tiny game shipped
    with Etude, also for the two-model acceptance example.
 5. Save cadence outside a stop remains unanswered. Use wall time by default,
-   or a step count when `every=` is given.
+   or a step count when `save_every=` is given.

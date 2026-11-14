@@ -6,29 +6,23 @@ in this path, and nothing here starts compute or holds a provider credential.
 
 A training loop Etude calls is written as [Training](training.md) describes:
 `etude train` or the launcher says which run it is, and `track` takes only
-clocks and a config. This page covers what every tracked process shares: rows,
+a config; steps and log keywords declare its clocks. This page covers what every tracked process shares: rows,
 tables, storage, reading and reports. A process Etude did not start, such as a
 notebook or another scheduler's job, names its run itself:
 
 ```python
 from etude.storage import storage_from_uri
-from etude.train.records import Step, Time
 from etude.train.tracking import track
 
 run = track(
     experiment="capacity-pilot",
     run="capacity-64-seed-0",  # new within its experiment: a taken name is refused
     job="capacity-64",  # what its siblings share
-    clocks=[
-        Step("updates", "optimizer updates, absolute across continuation"),
-        Step("learner_transitions", "transitions the learner trained on"),
-        Time("training_seconds", "active training time, pauses excluded"),
-    ],
     config=open("config.json").read(),  # kept byte for byte
     storages=[storage_from_uri("s3://my-bucket/runs")],  # optional
 )
 for update in training():
-    run.log({"rl/loss": loss}, updates=update, learner_transitions=n, training_seconds=t)
+    run.log({"rl/loss": loss}, updates=update, learner_transitions=n)
 run.finish()
 ```
 
@@ -40,7 +34,7 @@ uv run etude checkpoints --source s3://my-bucket/runs
 
 Runs are written to one place per computer, `~/.etude/track` (moved by
 `ETUDE_HOME`, or named with `track(directory=...)`), each in
-`EXPERIMENT/RUN/`, and `report` reads that place when given no source. So writing never chooses how it will be read.
+`EXPERIMENT[/JOB][@SEED]/`, and `report` reads that place when given no source. So writing never chooses how it will be read.
 `report` and `checkpoints` take `--source`, a directory or
 `s3://bucket/prefix` or `r2://bucket/prefix`, and find runs in it at any depth. Attempts on rented
 machines write to the same run folder; pointing `--source` at the
@@ -63,7 +57,7 @@ Under `etude train` and `etude launch` the run has already been named, so the
 loop gives only its clocks and config:
 
 ```python
-with track(clocks=[Step("updates", "optimizer updates, absolute")], config=config) as run:
+with track(config=config) as run:
     ...
 ```
 
@@ -71,8 +65,8 @@ The run, job, seed and cohort come from the command (`ETUDE_RUN`,
 `ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`), and `run.seed` reads the seed.
 The experiment is the launched file's stem (`ETUDE_EXPERIMENT`):
 `etude launch ppo.py` supplies `ppo`, including when the file defines only
-`runs()`. A plain job file preserves an explicit `Job.experiment`; a file
-defining `eval(state)` or `report()` requires its own stem. Naming another
+`runs()`. An explicit `--experiment` overrides the file and its job labels;
+without it a plain job file preserves an explicit `Job.experiment`. Naming another
 experiment in `track` is refused (`experiment_differs_from_launch`), so a
 reusable training function names none. A process started by another
 scheduler sets the same variables to say which run it is.
@@ -86,13 +80,18 @@ including in the launcher's bucket. Tracking never imports the launcher and work
 
 Rules a caller can rely on:
 
-- **Clocks are declared.** A run states its clocks once, each a step (a count)
-  or a time (seconds) with one line of meaning. They are its only x-axis
-  options besides Etude's two clocks in hours ([below](#etudes-clocks)),
-  which every row carries. Re-declaring a run with different clocks is refused.
-- **Every row should give every clock.** A row missing one is charted against
-  the clocks it did give, and Etude's. The first such row in a run raises an
-  `EtudeWarning` at the caller's line; `strict=True` makes it an error.
+- **Clocks are declared by use.** `run.steps` declares its clock; each new
+  log keyword declares another count clock, with its name as label. Optional
+  `track(clocks=["updates", "learner_transitions"])` closes the set: another
+  clock keyword is refused (an error under `strict=True`, else a warning and
+  dropped row). Use `Time(...)` in that list only for custom seconds.
+  Historical declarations keep their kinds and labels.
+- **Every row carries every used clock.** A missing clock is an error under
+  `strict=True`; otherwise it warns once and counts an incomplete row, charted
+  only against coordinates it gave. There is no sparse-clock option.
+- **Metrics may be sparse.** Put metrics in the mapping; a row can log any
+  subset. A missing metric reads as missing (null), never zero or a previous
+  value. Occasional evaluations belong to eval runs.
 - **No ordering rule in storage.** A repeated or lower clock value is accepted
   and kept. A read returns the latest write per clock value. A clock that goes
   backwards within one process warns once, and raises under `strict=True`; a
@@ -107,7 +106,7 @@ Rules a caller can rely on:
   accepted. Historical run files remain readable.
 - **A run's name is taken once.** Declaring a name its experiment already
   holds is refused; nothing is inferred from a folder that exists. Another
-  attempt of the same run is asked for by name (`etude train FILE --resume RUN`,
+  attempt of the same run is asked for by selection (`etude train FILE --resume`,
   or the launcher's own retry), and must give the config and seed the run
   started with.
 - **Continuation is lineage.** A run may name a parent run, a clock and the
@@ -126,7 +125,7 @@ Rules a caller can rely on:
   A full queue drops the row and counts it in
   `run.dropped`. `track` is strict and raises on a bad declaration.
 - **The files are the record.** Everything about a run is in one folder named
-  for its experiment and id, `EXPERIMENT/RUN/`, in the runs directory and in
+  for its experiment and id, `EXPERIMENT[/JOB][@SEED]/`, in the runs directory and in
   each storage it delivers to: `run.json` (its job, seed, config, clocks, parent and inputs),
   `outcome.json` (how its latest attempt ended), `metrics/` (row blocks and
   their indexes, from every attempt), `artifacts/` (immutable files,
@@ -170,13 +169,11 @@ Rules a caller can rely on:
 ### Row tables for training results
 
 ```python
-from etude.train.records import Step
 from etude.train.tracking import track
 
 with track(
     experiment="self-play",
     run="policy-seed-0",
-    clocks=[Step("updates", "optimizer updates, absolute across continuation")],
 ) as run:
     run.log_table(
         "decks",
@@ -329,7 +326,7 @@ run.tag(model, "best")  # tags can change later
 ### Etude's clocks
 
 ```python
-with track(clocks=[Step("updates", "optimizer updates")], config=config) as run:
+with track(config=config) as run:
     run.resume(model=model, optimizer=optimizer)
     for update in run.steps("updates", to=config.updates):
         run.log({"rl/loss": one_update(model, optimizer)})

@@ -265,7 +265,10 @@ class Database:
                     request.resume_version is None
                     and self._db.execute("SELECT 1 FROM runs WHERE id=?", (request.run,)).fetchone()
                 ):
-                    raise LauncherError(f"run {request.run!r} already admitted")
+                    raise LauncherError(
+                        f"run {request.run!r} already admitted; choose --experiment NAME for a new run; "
+                        "use --resume to carry on, or --resume --until CLOCK=TARGET to train further"
+                    )
                 for previous in self.launches(request.run):
                     if previous.state in {"preparing", "admitting"} or (
                         previous.state != "admitted"

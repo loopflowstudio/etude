@@ -89,7 +89,7 @@ def test_continue_explains_how_to_read_or_change_a_local_run(
     error = capsys.readouterr().err
     assert f"the launcher has no run {identity!r}" in error
     assert "etude report FILE" in error
-    assert "new --name" in error
+    assert "new --experiment" in error
 
 
 def test_continue_help_explains_experiment_without_a_file(
@@ -186,12 +186,12 @@ def test_an_experiment_file_launches_runs_of_its_experiment(
     assert [each.name for each in observe(default_root(), "ppo").runs] == [
         identity.rsplit("/", 1)[-1]
     ]
-    # A job of another experiment, such as an evaluation naming one, is refused before launch.
+    # An explicit launch label overrides the file and its job declaration.
     other = tmp_path / "league.py"
     named = (tmp_path / "ppo.py").read_text().replace(")\n", ", experiment='ppo')\n", 1)
     other.write_text(named)
-    assert main(["launch", str(other)]) == 1
-    assert "league.py is experiment 'league'" in capsys.readouterr().err
+    assert main(["launch", str(other), "--experiment", "league"]) == 0
+    assert default().record("league").experiment == "league"
 
 
 @pytest.mark.parametrize(
@@ -260,7 +260,9 @@ def test_default_target_and_owned_status(
     path.write_text(
         'from etude.launch.records import Job, RunRequest\ndef runs(): return Job(command="echo free", name="free", max_hours=0.001)\n'
     )
-    assert "machine local" in run(capsys, "launch", str(path))[0]  # no dollars needed here
+    assert (
+        "machine local" in run(capsys, "launch", str(path), "--experiment", "free")[0]
+    )  # no dollars needed here
     for old in ("--on", "--reserve"):
         with pytest.raises(SystemExit):
             main(["launch", str(path), old])
@@ -508,7 +510,7 @@ def test_job_help_required_flags_mixed_order_and_collision(
     assert main(["queue", str(path), "--width", "32", "--pool", "local", "--fast"]) == 0
     id = capsys.readouterr().out.split()[0]
     assert default().record(id).launch.params == {"width": 32, "fast": True}
-    assert main(["queue", str(path), "--", "--width", "64"]) == 0
+    assert main(["queue", str(path), "--width", "64", "--experiment", "wider"]) == 0
     path.write_text("def runs(pool: str): return None\n")
     assert main(["queue", str(path), "--help"]) == 1
     assert "clashes" in capsys.readouterr().err
@@ -531,7 +533,7 @@ def test_missing_launcher_runs_offer_a_reading_remedy(
     error = capsys.readouterr().err
     assert "the launcher has no run 'coin-seed-0'" in error
     assert "etude report FILE" in error
-    assert "new --name" not in error
+    assert "new --experiment" not in error
 
 
 @pytest.mark.parametrize("command", ["launch", "queue"])

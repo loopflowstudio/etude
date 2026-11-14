@@ -6,6 +6,7 @@ from pathlib import Path
 from shutil import copytree
 
 import pytest
+from pydantic import ValidationError
 
 from etude.experiment import observe, state_of
 from etude.page import Pages
@@ -70,7 +71,12 @@ def test_report_refresh_tracks_same_named_runs_in_each_experiment(tmp_path: Path
     source = tmp_path / "runs"
     files = tmp_path / "experiments"
     for experiment in ("one", "two"):
-        with track(experiment=experiment, run="r", clocks=[], directory=source / experiment):
+        with track(
+            experiment=experiment,
+            run="r",
+            clocks=[Step("updates", "updates")],
+            directory=source / experiment,
+        ):
             pass
         experiment_file(
             files,
@@ -89,8 +95,14 @@ def test_report_refresh_tracks_same_named_runs_in_each_experiment(tmp_path: Path
         }
 
     assert rows() == {"one": [0], "two": [0]}
-    with track(resume=True, experiment="two", run="r", clocks=[], directory=source / "two") as run:
-        run.log({"score": 7})
+    with track(
+        resume=True,
+        experiment="two",
+        run="r",
+        clocks=[Step("updates", "updates")],
+        directory=source / "two",
+    ) as run:
+        run.log({"score": 7}, updates=1)
     assert rows() == {"one": [0], "two": [1]}
 
 
@@ -116,8 +128,10 @@ def test_continuation_in_another_experiment_cannot_assign_a_runs_lineage(tmp_pat
 
 
 def test_reading_another_experiment_does_not_return_a_flat_runs_rows(tmp_path: Path) -> None:
-    with track(experiment="one", run="r", clocks=[], directory=tmp_path) as run:
-        run.log({"score": 10})
+    with track(
+        experiment="one", run="r", clocks=[Step("updates", "updates")], directory=tmp_path
+    ) as run:
+        run.log({"score": 10}, updates=1)
     data = read(tmp_path, "two", "r")
     assert data.file is None and data.rows == 0 and data.outcome is None
 
@@ -152,7 +166,9 @@ def test_run_record_reads_historical_identity_and_round_trips_the_exact_config()
 def test_a_run_json_in_out_is_carried_as_data_and_never_discovered_as_a_run(tmp_path: Path) -> None:
     from_json = RunRecord(id="pretend/nested", experiment="pretend").model_dump_json()
     source = tmp_path / "source"
-    with track(experiment="real", run="r", clocks=[], directory=source) as live:
+    with track(
+        experiment="real", run="r", clocks=[Step("updates", "updates")], directory=source
+    ) as live:
         nested = live.out / "model"
         nested.mkdir()
         (nested / "run.json").write_text(from_json)
@@ -235,3 +251,22 @@ def test_default_filled_stored_run_json_still_decodes() -> None:
     assert record.config_json == '{ "lr": 0.1 }'
     assert record.submission is None
     assert record.name == "r"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"schema_version": 1, "declaration": {}},
+        {"schema_version": 1, "declaration": {"experiment": "old"}},
+        {
+            "schema_version": 1,
+            "declaration": {},
+            "source_key": {"namespace": "local", "kind": "run", "source_id": "r"},
+        },
+    ],
+)
+def test_malformed_historical_run_declarations_are_validation_errors(
+    body: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError, match="historical run declaration requires"):
+        RunRecord.model_validate(body)

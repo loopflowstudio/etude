@@ -143,8 +143,11 @@ A launched training process must not prune saves: its courier owns storage
 acknowledgement and local retention; the controller removes remote saves
 where upload-only grants cannot.
 
-Launcher references use `EXPERIMENT/RUN`; job code sees the local `ETUDE_RUN`
-name. `Input.run` names the producer for relay; its unsigned `uri` locates the
+Run addresses use `EXPERIMENT[/JOB][@SEED]`, omitting a sole job or seed
+before selection. Job code sees the local `ETUDE_RUN` name;
+`ETUDE_RUN_ADDRESS` preserves its full storage address, including when a job
+is named for its experiment. Discovery permits sibling runs below a compact
+run address while excluding its `out`, `artifacts` and metric data. `Input.run` names the producer for relay; its unsigned `uri` locates the
 actual bytes and is excluded from scientific job identity. `Storage.uri` uses
 literal keys in `s3://` and `r2://` locators, including `%`, `?` and `#`;
 file URIs use normal URL escaping. Fixtures that call `track` as a worker must

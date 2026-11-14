@@ -126,7 +126,7 @@ class State(BaseModel):
     steps: int = 0
 with track(clocks=[Step("steps", "training steps")], config=json.loads(Path(os.environ["ETUDE_CONFIG"]).read_text())) as run:
     state = run.resume(extra=State())
-    for step in run.steps("steps", to=2, every=1):
+    for step in run.steps("steps", to=2, save_every=1):
         state.steps = step
         run.log({"revision": 1}, steps=step)
         run.save()
@@ -147,12 +147,12 @@ with track(clocks=[Step("steps", "training steps")], config=json.loads(Path(os.e
     scheduler = default()
     identity = scheduler.runs()[0].id
     assert scheduler.wait(identity, every=0.01, timeout=10)[0].outcome == "succeeded"
-    assert main(["launch", str(file), "--resume", identity]) == 1
+    assert main(["launch", str(file), "--resume"]) == 1
     assert "later target" in capsys.readouterr().err
     (repo / "train.py").write_text(recipe.replace('"revision": 1', '"revision": 2'))
     git(repo, "commit", "-am", "Revised recipe")
     next_commit = git(repo, "rev-parse", "HEAD")
-    assert main(["launch", str(file), "--resume", identity, "--until", "steps=4"]) == 0
+    assert main(["launch", str(file), "--resume", "--until", "steps=4"]) == 0
     assert scheduler.wait(identity, every=0.01, timeout=10)[0].outcome == "succeeded"
     data = read(default_root(), "job", identity)
     assert [attempt.commit for attempt in data.attempts] == [first_commit, next_commit]
@@ -247,11 +247,14 @@ def test_cli_selects_the_stored_job_and_seed_from_hand_built_requests(
     file.write_text(
         "from etude.launch.records import Job, RunRequest\n"
         "def runs() -> list[RunRequest]:\n"
-        f"    return Job.model_validate_json({spec.model_dump_json()!r}).runs(7, 8)\n"
+        f"    job = Job.model_validate_json({spec.model_dump_json()!r})\n"
+        f"    return [RunRequest(job=job, seed=7, id={identity!r}), RunRequest(job=job, seed=8)]\n"
     )
     monkeypatch.setattr("etude.launch.cli.default", lambda: b.scheduler)
     assert (
-        main(["launch", str(file), "--resume", identity, "--rent", "l4", "--until", "steps=20"])
+        main(
+            ["launch", str(file), "--seed", "7", "--resume", "--rent", "l4", "--until", "steps=20"]
+        )
         == 0
     )
     b.run(601)

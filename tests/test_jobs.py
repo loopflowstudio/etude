@@ -465,22 +465,22 @@ def test_job_seeds_expand_to_named_requests_without_changing_job_identity(tmp_pa
     )
     requests = read_job_file(file, experiment="chosen")
     assert [(run.id, run.seed, run.job.experiment) for run in requests] == [
-        ("chosen/baseline-seed-0", 0, "chosen"),
-        ("chosen/baseline-seed-7", 7, "chosen"),
+        ("chosen@0", 0, "chosen"),
+        ("chosen@7", 7, "chosen"),
     ]
     first = requests[0].job
     assert [(run.id, run.seed) for run in first.runs()] == [
-        ("baseline-seed-0", 0),
-        ("baseline-seed-7", 7),
+        ("chosen@0", 0),
+        ("chosen@7", 7),
     ]
     assert [(run.id, run.seed, run.params) for run in first.runs(42, params={"width": 64})] == [
         (None, 42, {"width": 64})  # a given seed is named at admission, so it can repeat
     ]
     assert job_id(first) == job_id(first.model_copy(update={"seeds": (42,)}))
     file.write_text(
-        'from etude.launch.records import Job\ndef runs():\n    return [Job(command="true", max_hours=1), Job(command="true", max_hours=1, name="other")]\n'
+        'from etude.launch.records import Job\ndef runs():\n    return [Job(command="true", max_hours=1, name="first"), Job(command="true", max_hours=1, name="other")]\n'
     )
-    assert [run.id for run in read_job_file(file)] == ["job/job-seed-0", "job/other-seed-0"]
+    assert [run.id for run in read_job_file(file)] == ["job/first", "job/other"]
 
 
 def test_one_allocation_owns_many_writers_without_changing_its_limits(

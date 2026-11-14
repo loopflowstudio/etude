@@ -10,7 +10,6 @@ For a complete small recipe, see [learning a coin’s bias](../examples/coin.py)
 import torch
 from pydantic import BaseModel
 
-from etude.train.records import Step
 from etude.train.tracking import track
 
 
@@ -20,7 +19,7 @@ class TrainConfig(BaseModel):  # yours: any fields you like, and no seed
 
 
 def train(config: TrainConfig) -> None:
-    with track(clocks=[Step("updates", "optimizer updates")], config=config) as run:
+    with track(config=config) as run:
         torch.manual_seed(run.seed)
         model, optimizer = build(config)
         run.resume(model=model, optimizer=optimizer)  # loads the last save, if there is one
@@ -35,16 +34,16 @@ def train(config: TrainConfig) -> None:
 
 ```sh
 etude train train.py                             # a new run on this computer; prints its id
-etude train train.py --resume train-seed-0       # the same run, from its last save
+etude train train.py --resume       # the same run, from its last save
 etude launch job.py --cohort baseline --rent l4  # new runs on rented machines
 ```
 
 ```text
 $ etude train train.py --until updates=300
-train-seed-0
+train
 ^C                                    # finishes the pass, saves, exits 75
-$ etude train train.py --resume train-seed-0 --until updates=300
-train-seed-0
+$ etude train train.py --resume --until updates=300
+train
 $ etude report train.py --open        # one run, updates 1 to 300, three checkpoints
 ```
 
@@ -82,7 +81,7 @@ Calling `train` is one attempt at the whole job. It ends in one of three ways:
 | `train` | Means | Etude then |
 | --- | --- | --- |
 | returns | the job is finished | records the run `finished` |
-| raises `Stopped` | it saved and left on purpose | under a launch, calls it again inside the run's limits; `etude train` exits 75, then `--resume RUN` carries on |
+| raises `Stopped` | it saved and left on purpose | under a launch, calls it again inside the run's limits; `etude train` exits 75, then `--resume` carries on |
 | raises anything else | it failed | records the run `failed` |
 
 `run.steps` raises `Stopped` for you. A loop written as above never names it.
@@ -95,7 +94,7 @@ the seed is not a config field. The config says what is being tried; the seed
 says which repetition this is. Read it from the run:
 
 ```python
-with track(clocks=[Step("updates", "optimizer updates")], config=config) as run:
+with track(config=config) as run:
     torch.manual_seed(run.seed)
 ```
 
@@ -123,44 +122,60 @@ def runs() -> Job:
     )
 ```
 
-One job with three seeds is three runs: `baseline-seed-0`, `baseline-seed-1`
-and `baseline-seed-2`. Launch them with
-`etude launch job.py --cohort baseline --rent l4`. A cohort names the runs
-launched together; `--parallel` sets how many machines it uses at once (one
-unless given). Without `seeds`, it is one run with seed 0. On this
-computer, `etude train train.py --seed 7` chooses it.
+One job with three seeds in `job.py` has addresses `job@0`, `job@1`
+and `job@2`. Launch them with `etude launch job.py --cohort baseline --rent l4`.
+A cohort names runs launched together; `--parallel` sets machines at once
+(one unless given). Without `seeds`, the job has one run with seed 0.
 
-A run's id is its job's name and its seed. An unnamed job is named for its
-file, so `etude train train.py` starts `train-seed-0`. Choose another job name with
-`--name` (`etude train train.py --name wide --seed 7` starts `wide-seed-7`).
-An id is unique within its experiment, and **a taken id is refused, never
-resumed**: starting a run and carrying one on are different commands
-([below](#running-it)).
+An address is `experiment/job@seed`. Omit the job when the file defines one
+job, and the seed when that job defines one seed: `hanabi`, `sweep@1`,
+`sweep/wide@1`. Selection never changes the spelling: `--job wide --seed 1`
+selects what `runs()` defines. On this computer, `etude train job.py` trains
+the declared runs in order; `--job` and `--seed` select a subset. A file with
+only `train(config)` defines one job, named for the file, with seed 0.
 
-An experiment is a label runs share. It comes from the launch, never from
-`train`: `etude launch ppo.py` and `etude train ppo.py` both record experiment
-`ppo`, and `--experiment NAME` on either gives another.
+`--experiment NAME` names the experiment on train, launch, queue and eval;
+the file stem is its default. `--job` and `--seed` select, never rename.
+A taken address is refused. Use `--resume` for the same selection, and
+`--resume --until updates=300` to train it further. Historical runs stay
+readable under their stored names.
 
 ## The run and its clocks
 
 ```python
-from etude.train.records import Step, Time
-
-clocks = [
-    Step("updates", "optimizer updates"),
-    Time("training_seconds", "active collection and learning seconds"),
-]
-with track(clocks=clocks, config=config) as run:
-    ...
+with track(config=config) as run:
+    for update in run.steps("updates", to=config.updates):
+        ...
+        run.log({"loss": loss}, learner_transitions=n)
 ```
 
 `track` opens the run this call of `train` belongs to. `etude train` or the
 launcher has already said which run that is, its seed and its experiment, so
 `track` takes only what the loop knows: its clocks and its config.
 
-A clock is an x-axis you declare once, with a line saying what it counts: a
-`Step` (a count) or a `Time` (seconds). Every row and every checkpoint is
-placed on every declared clock. Declare a second clock when one is not enough.
+`run.steps("updates", to=N)` declares its count clock automatically.
+Each keyword on `run.log({"loss": loss}, learner_transitions=n)` declares
+another count clock the first time it is used, with its name as axis label.
+Put metrics in the mapping, and coordinates in keywords. Every later row
+must include each used clock, either in the mapping or keywords; a missing
+clock raises in strict mode and otherwise warns and counts an incomplete row.
+`track(clocks=["updates", "learner_transitions"])` optionally closes the set:
+other clock keywords are refused, catching typos. Omit `clocks` to declare by
+use. `strict=True` raises for a bad row; otherwise Etude warns once. There is
+no sparse-clock switch. Metrics may vary per row: absent metrics read as
+missing (null), never zero or carried forward. Evals have their own runs.
+Use `Time("simulation_seconds")` only when an extra clock counts custom
+seconds rather than steps. The built-in hours
+below already measure real process and wall time:
+
+```python
+from etude.train.records import Time
+
+with track(clocks=["updates", Time("simulation_seconds")], config=config) as run:
+    run.log({"loss": loss}, updates=1, simulation_seconds=simulated)
+```
+
+Old clock declarations remain readable; the released `Step` spelling warns until 0.5.
 Clock values are absolute: a run carried on at update 400 logs 401 next, and a
 continuation of a run that reached 3,200 starts at 3,201.
 
@@ -231,8 +246,10 @@ refused at this call.
 
 `run.save()` writes the registered objects. Call it every pass: Etude writes
 when a save is due, and always on the last pass before a stop. A save is due
-five minutes after the last one; `run.steps("updates", to=n, every=25)` makes
-it every 25 steps instead.
+five minutes after the last one; `run.steps("updates", to=n, save_every=25)` makes
+it every 25 steps instead. `save_every_seconds=60` chooses a time interval.
+With both options, either threshold saves. Completion and a stop always save.
+A row before any clock exists is refused: pass a clock keyword or log inside `run.steps`.
 
 Each save replaces the previous one whole or not at all. A save is a new
 folder holding every registered object, complete in itself. Once it is
@@ -244,7 +261,7 @@ one save.
 Under a launch the bucket follows the same order: a save's files are
 uploaded, then the file that names it. Each upload is a whole save, including
 files whose bytes did not change, so choose an interval you would pay to
-upload. Only the newest save is sent. With `every=` set shorter than an
+upload. Only the newest save is sent. With `save_every=` set shorter than an
 upload takes, the saves in between stay on the machine and cost nothing to
 store.
 
@@ -267,7 +284,7 @@ Rules you can rely on:
   etude: run_identity_conflict: lr was 0.1, is 0.2
   ```
 
-  Choose a new `--name` to try another config here. For a launched run,
+  Choose a new `--experiment` to try another config here. For a launched run,
   `etude continue --run RUN --until clock=value --config ...` creates a child
   with the changed config.
 
@@ -434,7 +451,7 @@ as one checkpoint:
 
 ```python
 def train(config: LimitedConfig) -> None:
-    with track(clocks=[Step("iterations", "draft, build, play rounds")], config=config) as run:
+    with track(config=config) as run:
         models, optimizers = build(config, seed=run.seed)  # dictionaries by name
         run.resume(**models, **{f"{name}_optimizer": o for name, o in optimizers.items()})
         for iteration in run.steps("iterations", to=config.iterations):
@@ -489,7 +506,7 @@ earlier run's checkpoint by name:
 # job.py
 from etude.experiment import observe
 
-imitation = observe("s3://my-bucket/runs", "imitate").run("imitate-seed-0").final
+imitation = observe("s3://my-bucket/runs", "imitate").run("imitate").final
 
 
 def runs() -> Job:
@@ -506,7 +523,7 @@ def runs() -> Job:
 ```python
 # train.py
 def self_play(config: SelfPlayConfig) -> None:
-    with track(clocks=[Step("updates", "optimizer updates")], config=config) as run:
+    with track(config=config) as run:
         model, optimizer = build(config)
         model.load_state_dict(torch.load(run.input("start") / "policy.pt"))
         run.resume(model=model, optimizer=optimizer)  # a later attempt's save wins
@@ -532,7 +549,7 @@ This layout is a contract. Everything in it reads with `json` and your own
 framework, without Etude installed.
 
 ```text
-EXPERIMENT/RUN/
+EXPERIMENT[/JOB][@SEED]/
   run.json                 job, seed, config, clocks, parent run and inputs
   outcome.json             how the latest attempt ended
   metrics/  artifacts/     rows and tables (Tracking)
@@ -552,8 +569,8 @@ EXPERIMENT/RUN/
         policy.pt
 ```
 
-`run.json` stores its `id` as the qualified reference `EXPERIMENT/RUN`, such
-as `train/train-seed-0`; the run's id within that experiment is `train-seed-0`.
+`run.json` stores its `id` as the address, such as `train` or `sweep/wide@1`.
+The same spelling is its folder below the runs directory and its bucket prefix.
 
 ```python
 import json
@@ -561,7 +578,7 @@ from pathlib import Path
 
 import torch
 
-folder = Path("~/.etude/track/train/train-seed-0/out/checkpoints/updates-00000100").expanduser()
+folder = Path("~/.etude/track/train/out/checkpoints/updates-00000100").expanduser()
 files = json.loads((folder / "checkpoint.json").read_text())["files"]
 weights = torch.load(folder / files["policy"])
 ```
@@ -569,7 +586,7 @@ weights = torch.load(folder / files["policy"])
 The saved state is read the same way, through its pointer:
 
 ```python
-state = Path("~/.etude/track/train/train-seed-0/out/state").expanduser()
+state = Path("~/.etude/track/train/out/state").expanduser()
 save = state / json.loads((state / "current.json").read_text())["save"]
 files = json.loads((save / "state.json").read_text())["files"]
 weights = torch.load(save / files["model"])
@@ -595,20 +612,20 @@ directory that happens to exist.
 | a new run, here | `etude train train.py` | always a new run; prints its id |
 | a new run, on machines | `etude launch job.py --cohort baseline --rent l4` | always new runs |
 | the same run, after a lost machine or `Stopped` | none: the launcher calls `train` again | another attempt of the same run |
-| the same run, after it ended unfinished | `etude train train.py --resume RUN`, `etude launch job.py --resume RUN` | another attempt of the same run, on your current code |
-| the same run, further | `etude train train.py --resume RUN --until updates=6400`, and the same on `etude launch` | another attempt of the same run, to a later target; a finished run too |
+| the same run, after it ended unfinished | `etude train train.py --resume`, `etude launch job.py --resume` | another attempt of the same run, on your current code |
+| the same run, further | `etude train train.py --resume --until updates=6400`, and the same on `etude launch` | another attempt of the same run, to a later target; a finished run too |
 | a changed config, or a branch of a launched run | `etude continue --run RUN --until clock=value [--config ...]` | a new run that starts from a copy of the first one's state and records it as its parent |
 
 ```sh
-etude train train.py --config '{"lr": 0.001}' --seed 7 --name wide --until updates=2000
+etude train train.py --config '{"lr": 0.001}' --experiment wide --until updates=2000
 etude train train.py --seconds 600      # stop after ten minutes: saved, exit 75
-etude train train.py --resume wide-seed-7
-etude train train.py --json             # {"run": "train-seed-0", "experiment": "train", "outcome": "finished"}
+etude train train.py --experiment wide --resume
+etude train train.py --json             # {"run": "train", "experiment": "train", "outcome": "finished"}
 etude smoke job.py                      # the smoke config, here, spending nothing
 ```
 
-- **`etude train FILE`** calls the file's `train` on this computer with its
-  config's defaults, changed by `--config`, a JSON object checked against the
+- **`etude train FILE`** trains the selected `runs()` jobs here, or calls
+  `train` when the file defines only a recipe. `--config` changes its config, a JSON object checked against the
   config type. Unknown top-level fields are refused by name unless your model
   allows extras. Validation problems print one line per field, such as
   `lr: Input should be greater than 0`. It needs no provider key and no network.
@@ -618,18 +635,18 @@ etude smoke job.py                      # the smoke config, here, spending nothi
   error; a failed run prints no object.
 - **Ctrl-C asks the run to stop**, as `--seconds` and a `kill` (SIGTERM) do:
   the pass in progress finishes, `run.save()` writes, and the command exits
-  75. A stop is noticed by `run.steps` or `run.stopping()`, so a loop that
+  75. A stop is noticed by `run.steps` or `run.should_stop`, so a loop that
   asks neither runs on to its end. A second Ctrl-C interrupts immediately;
   that attempt ends failed and can resume from its last whole save.
-- **`--resume RUN`** is for a run that ended without finishing: it failed and
+- **`--resume`** is for a run that ended without finishing: it failed and
   you fixed the bug, it ran out of hours, you cancelled it, or you pressed
   Ctrl-C. It takes the file because it runs your current code. It keeps the
-  run's id, seed and target; `--name` does not apply. The reference is its id
-  in `--experiment` (defaulting to the file's stem), or `EXPERIMENT/RUN`.
+  run's address, seed and target. Repeat the experiment, job and seed selection
+  from the original command; `--resume` takes no run name.
   With no `--config`, it uses the stored config, checked against the current
   recipe's type. An explicit `--config` is applied to the current defaults
   and must equal the stored config; a refusal names the changed fields.
-- **`--resume RUN --until updates=6400`** takes the same run further. This
+- **`--resume --until updates=6400`** takes the same run further. This
   also works on a finished run, which becomes unfinished again until it
   reaches the new target. Its rows, checkpoints and id go on as one run.
 - **What `--resume` refuses**: a config or seed that no longer matches, and a
@@ -638,13 +655,13 @@ etude smoke job.py                      # the smoke config, here, spending nothi
   or interrupted attempt changes nothing already recorded: a finished run
   stays finished.
 - **A taken id is refused** before `train` is called, and under a launch
-  before anything is rented. Choose another `--name` or `--seed`, or mean
+  before anything is rented. Choose another `--experiment`, or mean
   `--resume`.
 - **`etude continue --run RUN --until clock=value [--config ...]`** branches
   a run the launcher started, optionally changing its config. It makes a new
   run, leaving the first as it is
   ([the launcher](launcher.md#progress-and-continuation)). A run started with
-  `etude train` cannot be branched with this command; choose a new `--name` for
+  `etude train` cannot be branched with this command; choose a new `--experiment` for
   a fresh run here.
 
 A run's hours, dollars and attempts span every attempt, whoever asked for it
@@ -663,6 +680,7 @@ not count on one clock uses them directly:
 
 ```python
 from etude.stopping import Stopped
+from etude.train.records import Time
 from etude.train.tracking import track
 
 
@@ -671,7 +689,7 @@ def train(config: SearchConfig) -> None:
         saved = run.out / "frontier.json"
         frontier = load(saved) if saved.exists() else new()
         budget = run.until("training_seconds", default=config.seconds)
-        while frontier.seconds < budget and not run.stopping():
+        while frontier.seconds < budget and not run.should_stop:
             frontier = expand(frontier)
             run.log({"open": len(frontier)}, training_seconds=frontier.seconds)
             save(frontier, saved)  # write beside it, then rename over it
@@ -683,8 +701,8 @@ def train(config: SearchConfig) -> None:
 | --- | --- |
 | `run.out` | a directory that follows the run: the same on every attempt, carried to storage as it is written and restored before each attempt on another machine |
 | `run.until(clock, default=)` | the absolute target: the launch's for that clock, else the default |
-| `run.stopping()` | true once a stop was asked for, or once the deadline is nearer than the slowest pass so far; ask once per pass |
-| `Stopped` | raised after saving, short of the target: the attempt is recorded `stopped`; the launcher retries inside the run's limits, while `etude train` exits 75 and needs `--resume RUN` |
+| `run.should_stop` | true once a stop was asked for, or once the deadline is nearer than the slowest pass so far; ask once per pass |
+| `Stopped` | raised after saving, short of the target: the attempt is recorded `stopped`; the launcher retries inside the run's limits, while `etude train` exits 75 and needs `--resume` |
 
 Returning normally short of the target would read as finished. Files you
 write in `run.out` yourself are carried one at a time, so write each
@@ -697,17 +715,17 @@ under a folder whose name starts with `.` stays on the machine.
 
 | Call | Does |
 | --- | --- |
-| `track(clocks=, config=)` | opens the run for this call of `train` |
+| `track(config=, clocks=)` | opens the run for this call of `train` |
 | `run.seed` | this run's seed |
 | `run.resume(**objects, extra=, name=)` | registers what to keep and loads the last save into it |
-| `run.steps(clock, to=, every=)` | counts from where the run stands to the target; raises `Stopped` on the pass after a stop is asked for |
+| `run.steps(clock, to=, save_every=, save_every_seconds=)` | counts from where the run stands to the target; raises `Stopped` on the pass after a stop is asked for |
 | `run.save()`, `run.save(fn)` | writes the registered objects when due, and always before a stop |
 | `run.log(row, **clocks)`, `run.log_table(name, rows, **clocks)` | rows on the declared clocks |
 | `run.checkpoint(**objects)`, `run.checkpoint(path)`, `run.checkpoint(fn)` | publishes a checkpoint that never changes, with its clocks |
 | `run.checkpoints()` | this run's published checkpoints, oldest first |
 | `run.at(clock)`, `run.checkpoint_due(every, clock="running_hours")` | where the run stands on a clock; whether the clock passed a multiple of `every` since the latest checkpoint |
 | `run.input(name)` | a file or checkpoint folder this run was given |
-| `run.out`, `run.until()`, `run.stopping()`, `Stopped` | [the pieces underneath](#the-pieces-underneath) |
+| `run.out`, `run.until()`, `run.should_stop`, `Stopped` | [the pieces underneath](#the-pieces-underneath) |
 
 ## Upgrading a loop
 
@@ -716,12 +734,12 @@ under a folder whose name starts with `.` stays on the machine.
 | `seed` in the config, `track(seed=config.seed)` | `training(..., seeds=(...))` or `etude train --seed`; read `run.seed` |
 | `track(config=config.model_dump())` | `track(config=config)` |
 | `with local_launch(out=DIR, experiment=NAME): train(config)` | `etude train train.py` |
-| a state file in `run.out`, `while ... and not run.stopping()`, `raise Stopped` | `run.resume(...)`, `run.steps(...)`, `run.save()` |
+| a state file in `run.out`, `while ... and not run.should_stop`, `raise Stopped` | `run.resume(...)`, `run.steps(...)`, `run.save()` |
 | `run.checkpoint(path, updates=n)` inside the loop | `run.checkpoint(policy=model)`, or `run.checkpoint(path)` |
 | `run.latest_checkpoint()` | `run.checkpoints()[-1]` |
 | `Path(os.environ["ETUDE_INPUTS_DIR"]) / NAME` | `run.input(NAME)` |
 | `RunData.state` | `RunData.outcome` |
-| a re-used run name resumes | a taken id is refused; `--resume RUN` resumes |
+| a re-used run name resumes | a taken id is refused; `--resume` resumes |
 
 `track(seed=)`, `local_launch`, `run.latest_checkpoint()` and `RunData.state`
 still work, warn when used, and are removed in 0.5. Runs already stored

@@ -4,9 +4,10 @@ Ownership and invariants:
 
 - `track` is strict and local. It validates the declaration, writes `run.json`
   and starts two daemon threads. It never touches the network.
-- `log` is a put on a bounded in-memory queue. It never blocks, never does
-  I/O and never raises into training code. A full queue drops the row and
-  counts it; rows still in the queue when the process dies are not durable.
+- `log` declares first-use keyword clocks before queueing their rows. With
+  an established clock set it only queues: overflow drops and counts the row.
+  `strict` raises for malformed coordinates; otherwise the writer warns once.
+  Rows still queued when the process dies are not durable.
 - `log_table` serializes JSON rows to a local immutable artifact, then queues
   its digest through `log`. Its local I/O and validation errors are visible.
 - The writer thread appends each row to a local log at once and keeps it by
@@ -65,7 +66,6 @@ from etude.carriage import OUT_PRESENT, checkpoint_key, note_retired, taken
 from etude.checkpoints import CheckpointRecord
 from etude.deadline import limit_time
 from etude.errors import EtudeError
-from etude.identity import run_address
 from etude.records import (
     BUILT_IN_NAMES,
     HOURS_SINCE_START,
@@ -82,6 +82,7 @@ from etude.run import (
     RunFiles,
     StorageDestination,
     declare,
+    declare_clock,
     destinations,
     prune,
     report_progress,
@@ -252,6 +253,11 @@ class _Row:
 
 
 @dataclass(frozen=True)
+class _Clocks:
+    names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class _Kept:
     """A checkpoint record for the writer, and the name it is kept under."""
 
@@ -274,6 +280,7 @@ class TrainingRun(Run):
         segment_seconds: float,
         segment_rows: int,
         strict: bool,
+        closed_clocks: bool,
         metric_name_limit: int | None = 1000,
         inherited: CheckpointRecord | None = None,
         seed: int = 0,
@@ -282,6 +289,7 @@ class TrainingRun(Run):
         super().__init__(experiment=experiment, name=name, root=root, targets=destinations)
         self.clocks = clocks
         self.strict = strict
+        self._closed_clocks = closed_clocks
         self._until_clock = os.environ.get("ETUDE_UNTIL_CLOCK")
         value = os.environ.get("ETUDE_UNTIL_VALUE")
         self._until_value = None if value is None else float(value)
@@ -311,6 +319,7 @@ class TrainingRun(Run):
         self._step_clock: str | None = None
         self._step_target: float | None = None
         self._save_every: int | None = None
+        self._save_every_seconds: float | None = 300
         self._clock_names = tuple(clock.name for clock in clocks)
         # The clock columns every row and checkpoint carries: the author's, then Etude's.
         self._columns = (*self._clock_names, *BUILT_IN_NAMES)
@@ -353,7 +362,7 @@ class TrainingRun(Run):
         # earlier attempts' (`first_row`); one that logs nothing replaces nothing.
         self._writer_record = RunWriter(
             writer=self._writer_id,
-            run=f"{experiment}/{name}",
+            run=self.address,
             started_ms=started_ms,
             host=socket.gethostname(),
             attempt=os.environ.get("ETUDE_ATTEMPT"),
@@ -396,25 +405,46 @@ class TrainingRun(Run):
             raise ValueError(f"undeclared clock: {clock!r}")
         return self._high.get(clock, 0.0)
 
-    def steps(self, clock: str, *, to: int, every: int | None = None) -> Iterator[int]:
-        """Count from restored state, saving before a planned stop raises Stopped."""
-        if (
-            clock not in self._clock_names
-            or next(c for c in self.clocks if c.name == clock).kind != "step"
+    def steps(
+        self,
+        clock: str,
+        *,
+        to: int,
+        save_every: int | None = None,
+        save_every_seconds: float | None = None,
+    ) -> Iterator[int]:
+        """Declare a step clock, count each step, and save before a planned stop."""
+        if save_every is not None and save_every < 1:
+            raise ValueError("save_every must be at least one step")
+        if save_every_seconds is not None and (
+            not math.isfinite(save_every_seconds) or save_every_seconds <= 0
         ):
-            raise ValueError("steps requires a declared step clock")
-        if every is not None and every < 1:
-            raise ValueError("save cadence must be at least one step")
+            raise ValueError("save_every_seconds must be finite and positive")
+        if clock not in self._clock_names:
+            if self._closed_clocks:
+                raise EtudeError(
+                    "clock_undeclared",
+                    422,
+                    detail=f"{clock}; include it in track(clocks=) or omit clocks=",
+                )
+            self._declare_clock(Clock(name=clock, kind="step", meaning=clock))
+        elif next(c for c in self.clocks if c.name == clock).kind != "step":
+            raise ValueError("steps requires a step clock")
         target = self.until(clock, default=to)
         position = self.at(clock)
         if target < 0 or not float(target).is_integer() or not float(position).is_integer():
             raise ValueError("steps requires whole positions and a whole target")
-        self._step_clock, self._save_every = clock, every
+        self._step_clock, self._save_every = clock, save_every
+        self._save_every_seconds = (
+            save_every_seconds
+            if save_every_seconds is not None
+            else (300 if save_every is None else None)
+        )
         self._step_target = target
         for state in self._states.values():
             state.saved_step = position
         for value in range(int(position) + 1, int(target) + 1):
-            if self.stopping():
+            if self.should_stop:
                 for state in self._states.values():
                     if state.last_at is None or any(
                         state.last_at.get(name) != self.at(name) for name in self._clock_names
@@ -423,6 +453,14 @@ class TrainingRun(Run):
                 raise Stopped()
             self._high[clock] = float(value)
             yield value
+
+    def _declare_clock(self, clock: Clock) -> None:
+        """Publish the clock before rows; the writer seals before changing columns."""
+        updated = declare_clock(self.files, clock)
+        self.clocks = updated.clocks
+        self._clock_names = tuple(item.name for item in self.clocks)
+        self._columns = (*self._clock_names, *BUILT_IN_NAMES)
+        self._queue.put(_Clocks(self._columns))
 
     @overload
     def resume[T: BaseModel](
@@ -454,16 +492,19 @@ class TrainingRun(Run):
             state.export = export
         clock = self._step_clock
         due = (
-            time.monotonic() - state.saved_at >= 300
-            if self._save_every is None
-            else (clock is not None and self.at(clock) - state.saved_step >= self._save_every)
+            self._save_every_seconds is not None
+            and time.monotonic() - state.saved_at >= self._save_every_seconds
+        ) or (
+            self._save_every is not None
+            and clock is not None
+            and self.at(clock) - state.saved_step >= self._save_every
         )
         final = (
             clock is not None
             and self._step_target is not None
             and self.at(clock) >= self._step_target
         )
-        if due or final or self.stopping():
+        if due or final or self.should_stop:
             self._save_state(state)
 
     def _save_state(self, state: State) -> None:
@@ -504,7 +545,8 @@ class TrainingRun(Run):
         """The run's persistent output folder, shared by its attempts."""
         return self._out
 
-    def stopping(self) -> bool:
+    @property
+    def should_stop(self) -> bool:
         """Whether to save and stop: a request, or less than the slowest step left."""
         now = time.monotonic()
         if self._asked is not None:
@@ -517,8 +559,33 @@ class TrainingRun(Run):
         )
         return self._stop_requested
 
+    def _use_clocks(self, clocks: Mapping[str, float]) -> bool:
+        unknown = [name for name in clocks if name not in (*self._clock_names, *BUILT_IN_NAMES)]
+        if unknown and self._closed_clocks:
+            message = (
+                "undeclared clocks: "
+                + ", ".join(unknown)
+                + "; include them in track(clocks=) or omit clocks="
+            )
+            if self.strict:
+                raise EtudeError("clock_undeclared", 422, detail=message)
+            self._warn("undeclared_clock", message)
+            self._count_dropped()
+            return False
+        for name in unknown:
+            self._declare_clock(Clock(name=name, kind="step", meaning=name))
+        if not self._clock_names:
+            raise EtudeError(
+                "row_has_no_clock",
+                422,
+                detail='declare a clock with run.log(values, updates=N) or log inside run.steps("updates", to=N)',
+            )
+        return True
+
     def log(self, values: Logged | None = None, /, **clocks: float) -> None:
-        """Record one row. Every declared clock must be present, as a key or keyword."""
+        """Record metrics; keywords declare count clocks, present on every later row."""
+        if not self._use_clocks(clocks):
+            return
         try:
             row = {**(values or {}), **clocks}
             if self._step_clock is not None:
@@ -560,6 +627,8 @@ class TrainingRun(Run):
         `log`: the reference is dropped and counted, leaving a harmless orphan.
         Do not reuse the table's name for scalar or ordinary text values.
         """
+        if not self._use_clocks(clocks):
+            return
         if self._step_clock is not None:
             clocks = {self._step_clock: self.at(self._step_clock), **clocks}
         if not name or name in self._clock_names:
@@ -883,7 +952,7 @@ class TrainingRun(Run):
         key = kept.relative_to(self.files.root).as_posix()
         remote = next(iter(self._destinations), None)
         uri = (
-            remote.storage.uri(run_prefix(run_address(self.name, self.experiment)) + key)
+            remote.storage.uri(run_prefix(self.address) + key)
             if remote
             else kept.resolve().as_uri()
         )
@@ -936,7 +1005,8 @@ class TrainingRun(Run):
     def _write(self) -> None:
         stream: IO[str] | None = None
         opened_at = 0.0
-        builder = Builder(self._columns)
+        clock_names = self._columns
+        builder = Builder(clock_names)
 
         def seal(final: bool = False) -> None:
             nonlocal stream, builder
@@ -948,7 +1018,7 @@ class TrainingRun(Run):
                 stream.close()
                 Path(stream.name).unlink()  # The block now holds these rows.
                 self._tails.append(columns)
-                stream, builder = None, Builder(self._columns)
+                stream, builder = None, Builder(clock_names)
                 self._sequence += 1
             self._fold(final)
             self._report_progress()
@@ -964,7 +1034,11 @@ class TrainingRun(Run):
                 if item is _STOP:
                     seal(final=True)
                     return
-                if isinstance(item, _Kept):
+                if isinstance(item, _Clocks):
+                    seal()
+                    clock_names = item.names
+                    builder = Builder(clock_names)
+                elif isinstance(item, _Kept):
                     self._save("checkpoints", item.name, item.record)
                     self._dirty = True
                 elif isinstance(item, _Row):
@@ -973,7 +1047,7 @@ class TrainingRun(Run):
                         log.parent.mkdir(parents=True, exist_ok=True)
                         stream = log.open("a")
                         opened_at = time.monotonic()
-                    row = self._stored(item)
+                    row = self._stored(item, clock_names)
                     stream.write(log_line(row))
                     stream.flush()
                     if not self._writer_record.resumed_at:
@@ -1056,7 +1130,7 @@ class TrainingRun(Run):
         """
         report_progress(writer=self._writer_record, clocks=dict(self._high))
 
-    def _stored(self, row: _Row) -> LoggedRow:
+    def _stored(self, row: _Row, columns: tuple[str, ...]) -> LoggedRow:
         """A logged row as its clock values and everything else, ready to store."""
         values: dict[str, Json] = {}
         for name, value in flatten(row.values):
@@ -1068,7 +1142,7 @@ class TrainingRun(Run):
                 except (TypeError, ValueError):
                     values[name] = type(value).__name__
         at: dict[str, float] = {}
-        for name in self._columns:
+        for name in columns:
             value = values.get(name)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 if math.isfinite(value):
@@ -1078,7 +1152,7 @@ class TrainingRun(Run):
                     self._warn(
                         "incomplete", f"a logged row's clock {name!r} is not a finite number"
                     )
-        if len(at) != len(self._columns):
+        if len(at) != len(columns):
             # Charted against the clocks it does give, and wall time; counted.
             self.incomplete += 1
         if self._metric_name_limit is not None and "metric_names" not in self._warned:
@@ -1188,7 +1262,7 @@ class TrainingRun(Run):
 def track(
     *,
     experiment: str | None = None,
-    clocks: Sequence[Clock],
+    clocks: Sequence[str | Clock] | None = None,
     run: str | None = None,
     job: str | None = None,
     seed: int | None = None,
@@ -1233,10 +1307,6 @@ def track(
             DeprecationWarning,
             stacklevel=2,
         )
-    if (target_clock := os.environ.get("ETUDE_UNTIL_CLOCK")) is not None and target_clock not in {
-        clock.name for clock in clocks
-    } | set(BUILT_IN_NAMES):
-        raise EtudeError("target_clock_undeclared", detail=target_clock)
     launched = os.environ.get("ETUDE_EXPERIMENT") or None
     if experiment is not None and launched not in (None, experiment):
         raise EtudeError("experiment_differs_from_launch", 409) from ValueError(
@@ -1261,7 +1331,12 @@ def track(
         continues = Continuation(parent=handed.parent, clock=clock, value=at[clock])
     declared = declare(
         experiment=experiment,
-        clocks=clocks,
+        clocks=None
+        if clocks is None
+        else tuple(
+            Clock(name=clock, kind="step", meaning=clock) if isinstance(clock, str) else clock
+            for clock in clocks
+        ),
         run=run,
         job=job,
         seed=seed,
@@ -1285,6 +1360,7 @@ def track(
         segment_seconds=segment_seconds,
         segment_rows=segment_rows,
         strict=strict,
+        closed_clocks=clocks is not None,
         metric_name_limit=metric_name_limit,
         inherited=None if handed is None else handed.checkpoint,
         seed=declared.record.seed or 0,

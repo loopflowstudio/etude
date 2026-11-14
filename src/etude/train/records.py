@@ -8,6 +8,7 @@ the latest write.
 from __future__ import annotations
 
 import re
+import warnings
 
 from pydantic import Field, JsonValue
 
@@ -16,13 +17,18 @@ from etude.records import Clock, Name, Record, SourceKey
 
 
 def Step(name: str, meaning: str) -> Clock:  # noqa: N802 - reads as a declaration
-    """A clock that counts something, such as updates or learner transitions."""
+    """Released declaration spelling; count clocks are now declared by use."""
+    warnings.warn(
+        "Step is no longer needed: run.steps or run.log keywords declare count clocks; removed in 0.5",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return Clock(name=name, kind="step", meaning=meaning)
 
 
-def Time(name: str, meaning: str) -> Clock:  # noqa: N802 - reads as a declaration
+def Time(name: str, meaning: str | None = None) -> Clock:  # noqa: N802 - reads as a declaration
     """A clock in seconds, such as active training time. Not wall time."""
-    return Clock(name=name, kind="time", meaning=meaning)
+    return Clock(name=name, kind="time", meaning=name if meaning is None else meaning)
 
 
 class ParentRun(Record):

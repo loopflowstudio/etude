@@ -98,19 +98,19 @@ def test_stopping_reserves_the_slowest_step_and_remembers_a_request(
     monkeypatch.setenv("ETUDE_STOP_FILE", str(stop))
     with local_launch(out=tmp_path / "run", experiment="recipe"):
         with track(clocks=CLOCKS) as run:
-            assert not run.stopping()
+            assert not run.should_stop
             now[0] = 4
-            assert not run.stopping()
+            assert not run.should_stop
             now[0] = 7
-            assert run.stopping()  # three seconds left; slowest update took four
+            assert run.should_stop  # three seconds left; slowest update took four
             monkeypatch.delenv("ETUDE_DEADLINE")
-            assert run.stopping()
+            assert run.should_stop
         with track(clocks=CLOCKS) as run:
-            assert not run.stopping()
+            assert not run.should_stop
             stop.touch()
-            assert run.stopping()
+            assert run.should_stop
             stop.unlink()
-            assert run.stopping()
+            assert run.should_stop
 
 
 @pytest.mark.parametrize("logged", ["none", "other", "loss"])

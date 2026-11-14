@@ -1,7 +1,7 @@
 """A run's identity: its address, and the config and seed its attempts must share.
 
-`run_address` qualifies a run's name by its experiment for storage and the
-launcher. `resume_conflicts` supplies field-level refusals to local and launched
+`run_address` qualifies a run's name by its experiment, preserving compact
+addresses and historical stored spellings. `resume_conflicts` supplies field-level refusals to local and launched
 callers; source revisions and progress targets may change without changing
 this identity.
 """
@@ -46,8 +46,9 @@ def resume_conflicts(
 def run_address(run: str, experiment: str | None) -> str:
     """The storage and launcher address of a run, qualified by its experiment.
 
-    Unlabelled command jobs retain a flat address. A qualified address is safe
-    to pass again, and cannot be silently moved into another experiment.
+    A sole job uses its experiment as its local name (optionally with @seed).
+    Already qualified historical names retain their spelling. Unlabelled
+    command jobs retain a flat address.
     """
     if not experiment:
         return run

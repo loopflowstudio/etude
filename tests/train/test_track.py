@@ -155,10 +155,10 @@ def test_resume_replays_harmlessly_and_sync_delivers_what_an_outage_left(
         segment_seconds=0.05,
     )
     for update in range(40, 80):
-        second.log(manabot_row(update), **{"rl/loss": 9.0})
+        second.log({**manabot_row(update), "rl/loss": 9.0})
     second.finish()
     with pytest.raises(EtudeError, match="run_clock_conflict"):
-        track(experiment="pilot", run="seed-1", clocks=CLOCKS[:1], directory=local)
+        track(experiment="pilot", run="seed-1", clocks=[Step("other", "other")], directory=local)
 
     bucket = DirectoryStorage(tmp_path / "bucket")
     assert sync(local, storages=[bucket]) == {}
@@ -215,10 +215,10 @@ def test_files_alone_read_back_and_report_with_a_seed_sample(tmp_path: Path) -> 
             segment_seconds=0.05,
         )
         for update in range(length):
-            run.log(manabot_row(update), **{"rl/loss": float(seed)})
+            run.log({**manabot_row(update), "rl/loss": float(seed)})
         with pytest.warns(EtudeWarning, match="went backwards"):
             # A later write at an old value: warned about, and still kept.
-            run.log(manabot_row(5), **{"rl/loss": 100.0 + seed})
+            run.log({**manabot_row(5), "rl/loss": 100.0 + seed})
         run.finish()
 
     assert runs(tmp_path) == [("pilot", f"seed-{seed}") for seed in range(3)]

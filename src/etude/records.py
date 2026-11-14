@@ -153,6 +153,8 @@ class RunRecord(Record):
         declaration = data.pop("declaration", None)
         if isinstance(declaration, dict):
             data.update(declaration)
+            if "source_key" not in data or "experiment" not in data:
+                raise ValueError("historical run declaration requires source_key and experiment")
             source = SourceKey.model_validate(data.pop("source_key"))
             data.update(
                 id=f"{data['experiment']}/{source.source_id}",

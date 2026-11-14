@@ -56,7 +56,7 @@ from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import _send, open_bucket
 from etude.launch.storage.transport import HTTPReply, observe
 from etude.launch.usage import Usage
-from etude.spec import Job, RunRequest
+from etude.spec import Job, RunRequest, expand_runs
 
 
 @cache
@@ -154,11 +154,7 @@ def _client() -> Scheduler | PythonClient:
 
 def _smoked(runs: Job | Sequence[RunRequest | Job], smoke: bool) -> list[RunRequest]:
     given = [runs] if isinstance(runs, Job) else runs
-    each = [
-        request
-        for run in given
-        for request in ([run] if isinstance(run, RunRequest) else run.runs())
-    ]
+    each = expand_runs(given)
     if not smoke:
         return each
     with smoke_home() as folder:

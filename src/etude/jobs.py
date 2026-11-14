@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import runpy
 import shlex
 import sys
 import tomllib
@@ -331,9 +332,14 @@ def checkpoint_inputs_for(checkpoint: CheckpointRecord, name: str) -> tuple[Inpu
         files = {"": Content(sha256=artifact.sha256, size_bytes=artifact.size_bytes)}
     owner = run_address(checkpoint.run, checkpoint.experiment) if checkpoint.run else None
     if checkpoint.folder is not None and owner is not None:
-        # Released flat and machine-nested folders belonged to globally named
-        # launcher runs; modern copies retain the experiment/run suffix.
-        if checkpoint.folder != owner and not checkpoint.folder.endswith("/" + owner):
+        # Stored folders distinguish a compact sole job from an explicitly
+        # qualified job bearing the experiment's name, including historical copies.
+        qualified = f"{checkpoint.experiment}/{checkpoint.run}"
+        if checkpoint.experiment and (
+            checkpoint.folder == qualified or checkpoint.folder.endswith("/" + qualified)
+        ):
+            owner = qualified
+        elif checkpoint.folder != owner and not checkpoint.folder.endswith("/" + owner):
             owner = checkpoint.run
     return tuple(
         Input(
@@ -523,14 +529,33 @@ def _input_name(name: str, inputs: Mapping[str, Input]) -> str:
     return name
 
 
-def load_job_function(job: Job) -> Callable[..., object]:
-    """Load the function of a typed job; command jobs have no config model."""
+def load_job_function(job: Job, *, current: bool = False) -> Callable[..., object]:
+    """Load a typed job's function; `current` executes checkout source afresh.
+
+    Config inspection uses the imported model type, preserving Python class
+    identity. Local attempts execute current source even in a persistent client.
+    """
     command = shlex.split(job.command)
     if "etude.call" not in command or "--function" not in command:
         raise LauncherError("config changes require a typed job")
     function = command[command.index("--function") + 1]
     path = command[command.index("--path") + 1] if "--path" in command else ""
     module, _, name = function.partition(":")
+    source = Path(job.repo or ".") / path / (module.replace(".", "/") + ".py")
+    if current and source.is_file():
+        # A local attempt runs current source, even when this process imported it before.
+        folder = str((Path(job.repo or ".") / path).resolve())
+        sys.path.insert(0, folder)
+        try:
+            parts = name.split(".")
+            found: object = runpy.run_path(str(source)).get(parts[0])
+            for part in parts[1:]:
+                found = getattr(found, part)
+        finally:
+            sys.path.remove(folder)
+        if not callable(found):
+            raise LauncherError(f"{module}:{name} is not a function")
+        return found
     return Function(module=module, name=name, path=path).load(job.repo)
 
 

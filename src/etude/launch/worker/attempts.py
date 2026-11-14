@@ -147,6 +147,7 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
     environment["ETUDE_ATTEMPT"] = work.attempt
     for name, value in (
         ("ETUDE_RUN", work.run.rsplit("/", 1)[-1]),
+        ("ETUDE_RUN_ADDRESS", work.run),
         ("ETUDE_JOB", work.job),
         ("ETUDE_JOB_NAME", work.job_name),
         ("ETUDE_COHORT", work.cohort),

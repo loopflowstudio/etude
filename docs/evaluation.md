@@ -128,7 +128,7 @@ db.sql("""select a.name, avg(score) from plays
 
 `evaluating` opens one `EvalRun`. Pass a tournament, or an environment with
 an explicit match list; `run.play(play)` plays its unstored matches.
-Outside a launch, give `experiment=`. `run.stopping()` checks
+Outside a launch, give `experiment=`. `run.should_stop` checks
 stop requests between matches; a planned stop seals completed tables and
 raises `Stopped`. `hold` and `evaluate` are warning wrappers until 0.5.
 
@@ -515,7 +515,7 @@ from arena import ArenaConfig, arena, play  # arena(config) -> Benchmark; play(m
 
 
 def runs() -> Job:
-    weights = observe("s3://my-bucket/runs", "ppo").run("ppo-seed-0").final
+    weights = observe("s3://my-bucket/runs", "ppo").run("ppo").final
     return evaluation(
         arena,
         config=ArenaConfig(),

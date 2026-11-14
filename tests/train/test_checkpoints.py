@@ -43,7 +43,7 @@ def test_two_models_publish_one_checkpoint_and_read_the_same_record(
         strict=True,
     ) as run:
         run.resume(policy=policy, value=value)
-        for _ in run.steps("updates", to=2, every=1):
+        for _ in run.steps("updates", to=2, save_every=1):
             run.save()
         first = run.checkpoint(policy=policy, value=value)
         assert run.checkpoint(policy=policy, value=value) == first

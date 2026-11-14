@@ -2,14 +2,14 @@
 
 ```sh
 uv sync --extra train --extra eval --extra hanabi
-.venv/bin/etude train examples/hanabi.py --name team --config '{"updates":20}'
+.venv/bin/etude train examples/hanabi.py --config '{"updates":20}'
 # Ctrl-C once after a few episodes: the current episode completes and saves (exit 75).
-.venv/bin/etude train examples/hanabi.py --resume team-seed-0
+.venv/bin/etude train examples/hanabi.py --resume
 .venv/bin/etude eval examples/hanabi.py
 .venv/bin/etude report examples/hanabi.py
 ```
 
-Use a fresh name each time. `ETUDE_HOME=/path/to/demo` keeps these runs apart
+Use `--experiment NAME` for a fresh variant on train and eval; `--resume --until updates=200` trains the same team further. `ETUDE_HOME=/path/to/demo` keeps these runs apart
 from your other work; set it for every command. Run from this checkout's root.
 The example dependency is optional and is absent from Etude's required
 installation and offline test environment.
@@ -22,7 +22,7 @@ The default is twenty episodes, a demonstration of the API rather than a
 competitive Hanabi learner. No JAX or PufferLib is used.
 
 `run.resume` registers the policy, Adam state and cumulative transition count.
-`run.steps` checks `run.stopping()` between episodes; `run.save()` publishes a
+`run.steps` checks `run.should_stop` between episodes; `run.save()` publishes a
 whole save each episode. Episode randomness follows the absolute update, so
 there is no game in flight or random stream to reconstruct after a saved stop.
 A second Ctrl-C interrupts immediately. Resume with no `--config` uses the

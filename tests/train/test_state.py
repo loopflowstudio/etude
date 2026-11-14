@@ -33,7 +33,7 @@ def test_two_models_and_extra_resume_from_one_save(tmp_path: Path) -> None:
         strict=True,
     ) as run:
         counts = run.resume(model=model, rival=rival, optimizer=optimizer, extra=Counts())
-        for value in run.steps("updates", to=2, every=1):
+        for value in run.steps("updates", to=2, save_every=1):
             counts.games += value
             run.log({"loss": value})
             run.save()
@@ -55,7 +55,7 @@ def test_two_models_and_extra_resume_from_one_save(tmp_path: Path) -> None:
         assert torch.equal(model2.weight, expected)
         assert torch.equal(rival2.weight, expected_rival)
         assert optimizer2.param_groups[0]["lr"] == 0.25
-        assert list(resumed.steps("updates", to=4, every=1)) == [3, 4]
+        assert list(resumed.steps("updates", to=4, save_every=1)) == [3, 4]
         assert resumed.seed == 0
     assert read(tmp_path, "e", "r").points("loss", "updates").x.tolist() == [1, 2]
     assert json.loads((tmp_path / "e/r/run.json").read_text())["config"] == '{"games": 3}'
@@ -70,7 +70,7 @@ def test_callback_save_failure_leaves_the_previous_save_whole(tmp_path: Path) ->
         strict=True,
     ) as run:
         assert run.resume() is None
-        for value in run.steps("updates", to=2, every=1):
+        for value in run.steps("updates", to=2, save_every=1):
 
             def export(folder: Path) -> None:
                 (folder / "model").write_text(str(value))
@@ -126,7 +126,7 @@ def test_stop_saves_the_pass_before_raising_and_never_enters_the_next_phase(
     ) as resumed:
         path = resumed.resume(name="policy")
         assert path is not None and (path / "policy").read_text() == "1"
-        assert list(resumed.steps("updates", to=3, every=1)) == [2, 3]
+        assert list(resumed.steps("updates", to=3, save_every=1)) == [2, 3]
         assert list(resumed.steps("fits", to=2)) == [1, 2]
 
 
@@ -143,7 +143,7 @@ def test_running_hours_resume_from_saved_state_instead_of_a_checkpoint(
         strict=True,
     ) as run:
         run.resume()
-        for _ in run.steps("updates", to=1, every=1):
+        for _ in run.steps("updates", to=1, save_every=1):
             now += 3600
             run.save()
     with track(
@@ -183,7 +183,7 @@ def test_both_hour_clocks_survive_a_relay_without_checkpoints(
         strict=True,
     ) as run:
         run.resume()
-        for _ in run.steps("updates", to=1, every=1):
+        for _ in run.steps("updates", to=1, save_every=1):
             now += 3600
             wall_ms += 3_600_000
             run.save()

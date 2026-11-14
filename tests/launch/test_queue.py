@@ -445,4 +445,4 @@ def test_singular_python_clients_use_the_jobs_declared_seed(
         Job(command="train", name="single", seeds=(7,), max_hours=1, max_usd=Decimal(1)), rent="l4"
     )
     record = b.scheduler.record(identity)
-    assert (record.id, record.seed) == ("single-seed-7", 7)
+    assert (record.id, record.seed) == ("single", 7)

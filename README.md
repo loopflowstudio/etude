@@ -28,7 +28,6 @@ def runs() -> Job:
 import torch
 from pydantic import BaseModel
 
-from etude.train.records import Step
 from etude.train.tracking import track
 
 
@@ -38,7 +37,7 @@ class TrainConfig(BaseModel):
 
 
 def train(config: TrainConfig) -> None:
-    with track(clocks=[Step("updates", "optimizer updates")], config=config) as run:
+    with track(config=config) as run:
         torch.manual_seed(run.seed)
         model, optimizer = build(config)
         run.resume(model=model, optimizer=optimizer)  # loads the last save, if there is one
@@ -77,7 +76,7 @@ the same way, with your `play`:
 from etude.experiment import observe
 from etude.jobs import evaluation
 
-weights = observe("s3://my-bucket/runs", "job").run("job-seed-0").final
+weights = observe("s3://my-bucket/runs", "job").run("job").final
 evaluation(
     progress, experiment="job", play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1)
 )

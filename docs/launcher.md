@@ -215,7 +215,7 @@ from etude.experiment import observe
 from etude.jobs import evaluation, training
 
 job = training(train, config=TrainConfig(lr=1e-3), max_hours=6, max_usd=Decimal(30))
-weights = observe("s3://my-bucket/runs", "ppo").run("ppo-seed-0").final
+weights = observe("s3://my-bucket/runs", "ppo").run("ppo").final
 check = evaluation(
     progress, experiment="ppo", play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1)
 )
@@ -743,11 +743,11 @@ that outlive its disk. Only Amazon S3 is supported.
 ## Retained launch evidence
 
 ```sh
-etude logs --run baseline-seed-7                     # retained evidence, from the database
-etude logs --run baseline-seed-7 --follow --timeout 60
-etude logs --run baseline-seed-7 --job-only     # the job's output alone
+etude logs --run sweep/baseline@7                     # retained evidence, from the database
+etude logs --run sweep/baseline@7 --follow --timeout 60
+etude logs --run sweep/baseline@7 --job-only     # the job's output alone
 etude logs --machine MACHINE
-etude status baseline-seed-7 --phases
+etude status sweep/baseline@7 --phases
 ```
 
 A run log includes launch preparation, shared machine startup, every execution
@@ -772,7 +772,7 @@ bucket. See [tracking recovery](tracking.md#storage-outages-and-recovery) to
 deliver a retained copy later.
 
 A run's id is its scientific identity: its job's name and seed
-(`baseline-seed-7`), or the `id` of a `RunRequest` built by hand. Failed admission
+(`sweep/baseline@7`), or the `id` of a `RunRequest` built by hand. Failed admission
 leaves independent launch evidence, without creating a run or RunAttempt or
 consuming that identity. A corrected launch can reuse it. An already-admitted
 identity is a conflict; an unresolved acquisition remains fenced until confirmed
@@ -819,11 +819,11 @@ hundred pieces. The last piece goes with the attempt's ending.
 ```python
 from etude.launch.client import diagnostics, logs
 
-snapshot = logs(run="baseline-seed-7", refresh=True, timeout=30)
+snapshot = logs(run="sweep/baseline@7", refresh=True, timeout=30)
 for stream in snapshot.streams:
     print(stream.producer, stream.attempt, stream.received, stream.complete)
     print(stream.text)
-for event in diagnostics(run="baseline-seed-7"):
+for event in diagnostics(run="sweep/baseline@7"):
     print(event.observed_at, event.operation, event.message)
 ```
 
@@ -1037,7 +1037,7 @@ arguments that produce the same four things are the same job. Seeds, like a
 job's name and limits, are how it is launched and no part of that identity.
 
 A job file never has to name the record underneath. Code that builds a launch
-by hand uses it: `RunRequest(job=job, seed=7, id="baseline-seed-7")`, or
+by hand uses it: `RunRequest(job=job, seed=7, id="sweep/baseline@7")`, or
 `job.runs(0, 1, params={"hidden": 64})` for several, which records its own
 `params`; the command leaves those alone.
 
@@ -1085,7 +1085,7 @@ etude launch ppo.py --rent runpod-cpu8   # attempt 1: its machine is lost at upd
 etude status RUN                         # running, updates 1400, ~$0.61: attempt 2, from update 800
 etude status RUN                         # running, updates 2140, ~$1.02: attempt 3, after a planned stop
 etude logs --run RUN                     # every attempt, and how each ended
-etude launch ppo.py --resume RUN         # after it ended unfinished: another attempt, on current code
+etude launch ppo.py --resume         # after it ended unfinished: another attempt, on current code
 ```
 
 A run ends when it reaches its target, fails, is cancelled, or uses up its hours
@@ -1145,23 +1145,24 @@ target or branches from a completed run, making a new run with a parent.
 
 A run that ended unfinished, because it failed, was cancelled, or used up its
 hours, dollars or attempts, is given another attempt by name: `etude launch
-job.py --resume RUN`. The file is given because the attempt runs its current
+job.py --resume`. The file is given because the attempt runs its current
 commit, which is what a fixed bug needs; the attempt records that commit. The
 run keeps its id, seed, config, out and checkpoint ordinals, and the job's
 limits as the file now states them bound the whole run, earlier attempts
 included, so raise `max_hours`, `max_usd` or `max_attempts` there to give it
-more. `--resume RUN --until updates=6400` gives the same run a later target,
+more. `--resume --until updates=6400` gives the same run a later target,
 and is how a finished run goes further without becoming a new one. A resume
 is refused before anything is rented when the run finished and no later
 target is given, when the file's config or the seed differs from the run's
 (the error names the fields), or while an attempt of the run is still
 allocated. A refusal changes nothing recorded about the run.
 
-Launched references print as `EXPERIMENT/RUN`. Commands accept that reference;
+Run addresses print as `EXPERIMENT[/JOB][@SEED]`, omitting a sole job or seed. Commands accept that address;
 `etude status RUN --experiment EXPERIMENT` and `etude continue --run RUN --experiment
 EXPERIMENT --until clock=value` also accept the run id alone.
-`etude launch FILE --resume RUN` uses the file’s experiment (or its
-`--experiment` override).
+`etude launch FILE --resume` resumes the selection from its `--experiment`,
+`--job` and `--seed` flags. `--job` and `--seed` select declarations from the
+file; neither names a new job or seed. Use `--experiment` for a new variant.
 
 A launch whose run id is taken in its experiment is refused the same way,
 before renting: ids are never reused and a taken id is never resumed. The
@@ -1233,8 +1234,8 @@ Training code reads `ETUDE_OUT`, `ETUDE_OUTPUT_DIR`, `ETUDE_STOP_FILE`,
 | --- | --- | --- |
 | `ETUDE_OUT` | Out, the same on every attempt, carried to storage as it is written and restored before each attempt. | `run.resume`, `run.save`, `run.checkpoint`; `run.out` |
 | `ETUDE_OUTPUT_DIR` | This attempt's output directory: `etude-result.json` and files to keep under `attempts/ATTEMPT/`. A later attempt does not see it. | nothing; tracking reports progress |
-| `ETUDE_STOP_FILE` | Appears when the attempt should stop. | `run.steps`; `run.stopping()` |
-| `ETUDE_DEADLINE` | When the attempt's window ends, as an ISO time. The process is killed then. | `run.steps`; `run.stopping()` |
+| `ETUDE_STOP_FILE` | Appears when the attempt should stop. | `run.steps`; `run.should_stop` |
+| `ETUDE_DEADLINE` | When the attempt's window ends, as an ISO time. The process is killed then. | `run.steps`; `run.should_stop` |
 | `ETUDE_UNTIL_CLOCK`, `ETUDE_UNTIL_VALUE` | The launch's absolute target on a named clock. | `run.steps("updates", to=config.updates)`; `run.until` |
 | `ETUDE_SEED` | The run's seed. | `run.seed` |
 | `ETUDE_INPUTS_DIR` | The files and checkpoint folders the run was given. | `run.input(NAME)` |
@@ -1247,7 +1248,7 @@ from etude.spec import Input
 
 policy = Input(
     name="policy.pt",
-    key="etude/launch/EXPERIMENT/RUN/checkpoints/policy.pt",
+    key="etude/launch/EXPERIMENT[/JOB][@SEED]/checkpoints/policy.pt",
     sha256="…",
     size_bytes=1048576,
 )
@@ -1303,7 +1304,7 @@ attempt on every machine, and the machines' own session files apart. Runs
 stored before experiments had folders stay at `PREFIX/RUN/` and read the same:
 
 ```text
-PREFIX/EXPERIMENT/RUN/           everything about one run
+PREFIX/EXPERIMENT[/JOB][@SEED]/           everything about one run
   attempts/ATTEMPT.log/OFFSET    what the job printed, in pieces named by first byte
   attempts/ATTEMPT.json          when it started, its progress, how it ended, its pieces
   attempts/ATTEMPT/NAME          files the job left in its output directory
@@ -1323,7 +1324,7 @@ PREFIX/sources/SHA256.tar        a commit's source archive, named by its digest
 
 The job is given `ETUDE_TRACK_DIR`, `track` beside the `sessions` directory
 (on this computer `~/.etude/track`), and tracking keeps the run's files in
-`ETUDE_TRACK_DIR/EXPERIMENT/RUN/`. The courier copies that folder into the run's folder
+`ETUDE_TRACK_DIR/EXPERIMENT[/JOB][@SEED]/`. The courier copies that folder into the run's folder
 in storage while the job runs; the job still holds no keys. A second attempt,
 on this machine or another, writes into the same run folder. The courier and
 tracking's own `sync` follow one set of rules (`etude.carriage`): files ending

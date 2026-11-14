@@ -361,15 +361,18 @@ def default_root() -> Path:
 
 def run_directory(directory: Path | str | None, experiment: str, run: str) -> tuple[Path, Path]:
     """The runs directory and this run's folder in it; refuses names unsafe as paths."""
-    for name in (experiment, run):
+    for name in (experiment, run.removeprefix(experiment + "/")):
         if not SAFE_NAME.match(name):
             raise EtudeError("unsafe_run_or_experiment_name", 422)
     base = Path(directory) if directory else default_root()
-    root = base / run_address(run, experiment)
-    if os.environ.get("ETUDE_ATTEMPT") and os.environ.get("ETUDE_RUN") == run:
+    address = os.environ.get("ETUDE_RUN_ADDRESS") if os.environ.get("ETUDE_RUN") == run else None
+    root = base / run_address(address or run, experiment)
+    if os.environ.get("ETUDE_ATTEMPT") and os.environ.get("ETUDE_RUN") == run.removeprefix(
+        experiment + "/"
+    ):
         if out := os.environ.get("ETUDE_OUT"):
             root = Path(out).parent
-    qualified = base / experiment / run / "run.json"
+    qualified = base / experiment / run.removeprefix(experiment + "/") / "run.json"
     if not (root / "run.json").is_file() and qualified.is_file():
         prior = RunRecord.model_validate_json(qualified.read_bytes())
         if prior.experiment == experiment:

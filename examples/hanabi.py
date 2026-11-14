@@ -20,7 +20,6 @@ from etude.eval.run import Tables
 from etude.experiment import ExperimentState
 from etude.jobs import evaluation
 from etude.spec import Job
-from etude.train.records import Step
 from etude.train.tracking import track
 
 
@@ -121,12 +120,12 @@ def _episode(
 def train(config: Config) -> None:
     torch.set_num_threads(1)
     game = _game()
-    with track(clocks=[Step("updates", "completed team episodes")], config=config) as run:
+    with track(config=config) as run:
         torch.manual_seed(run.seed)
         policy = _policy(game)
         optimizer = torch.optim.Adam(policy.parameters(), lr=config.lr)
         counts = run.resume(policy=policy, optimizer=optimizer, extra=Counts())
-        for update in run.steps("updates", to=config.updates, every=1):
+        for update in run.steps("updates", to=config.updates, save_every=1):
             episode = _episode(game, (policy, policy), seed=run.seed + update, learn=True)
             if episode.loss is None:
                 raise RuntimeError("Hanabi ended without a policy decision")

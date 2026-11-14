@@ -56,7 +56,6 @@ from etude.eval.records import (
     outcomes,
 )
 from etude.eval.schedule import ordered
-from etude.identity import run_address
 from etude.records import Record, RunCounters, RunWriter, Tally
 from etude.run import Run, StorageDestination, declare, destinations, report_progress
 from etude.stopping import Stopped
@@ -130,7 +129,7 @@ class EvalRun(Run):
         self.id = secrets.token_hex(6)
         self.writer = RunWriter(
             writer=self.id,
-            run=f"{experiment}/{name}",
+            run=self.address,
             started_ms=_now_ms(),
             host=socket.gethostname(),
             attempt=os.environ.get("ETUDE_ATTEMPT"),
@@ -158,7 +157,8 @@ class EvalRun(Run):
         )
         self._report.write()
 
-    def stopping(self) -> bool:
+    @property
+    def should_stop(self) -> bool:
         """A requested stop is observed between matches, after retaining completed tables."""
         now = time.monotonic()
         if self._asked is not None:
@@ -182,7 +182,7 @@ class EvalRun(Run):
 
         def pending_matches() -> Iterator[Match]:
             for match in pending:
-                if self.stopping():
+                if self.should_stop:
                     raise Stopped()
                 yield match
 
@@ -218,10 +218,7 @@ class EvalRun(Run):
         One listing per place and one read of each block not already read here.
         """
         places: list[tuple[Storage, str]] = [(DirectoryStorage(self.files.root), "")]
-        places += [
-            (target.storage, run_prefix(run_address(self.name, self.experiment)))
-            for target in self._destinations
-        ]
+        places += [(target.storage, run_prefix(self.address)) for target in self._destinations]
         found: list[MatchRecord] = []
         known: dict[str, Block] = {}
         for storage, prefix in places:

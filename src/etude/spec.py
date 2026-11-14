@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import Literal
 
@@ -22,6 +23,7 @@ from pydantic import (
 
 from etude.carriage import within
 from etude.errors import LauncherError
+from etude.identity import run_address
 
 
 class Record(BaseModel):
@@ -262,22 +264,51 @@ class Job(Record):
     def runs(self, *seeds: int, params: dict[str, Param] | None = None) -> list[RunRequest]:
         """This job once per given seed, or once per declared seed when none is given.
 
-        A named job's declared seeds are the runs `NAME@N` (the seed suffix is omitted for one seed), created once.
+        Declared seeds use compact addresses, omitting a sole job or seed.
         Given seeds are a caller's own repetitions: they take ids at admission,
         so the same job and seed can be submitted again.
         """
         if seeds:
             return [RunRequest(job=self, seed=seed, params=dict(params or {})) for seed in seeds]
-        return [
-            RunRequest(
-                job=self,
-                seed=seed,
-                id=(self.name + (f"@{seed}" if len(self.seeds) > 1 else ""))
-                if self.name else None,
-                params=dict(params or {}),
+        return expand_runs([self], params=params)
+
+
+def expand_runs(
+    given: Sequence[Job | RunRequest], *, params: dict[str, Param] | None = None
+) -> list[RunRequest]:
+    """Expand declared seeds, omitting a sole job or seed from its address.
+
+    Explicit requests keep their ids and admission-time repetitions. Selection
+    happens after expansion, so selecting one seed never changes its address.
+    """
+    jobs: list[Job] = []
+    for each in given:
+        job = each if isinstance(each, Job) else each.job
+        if job not in jobs:
+            jobs.append(job)
+    requests: list[RunRequest] = []
+    for each in given:
+        if isinstance(each, RunRequest):
+            requests.append(each)
+            continue
+        name = each.experiment if len(jobs) == 1 and each.experiment else each.name
+        for seed in each.seeds:
+            local = name + (f"@{seed}" if len(each.seeds) > 1 else "") if name else None
+            requests.append(
+                RunRequest(
+                    job=each,
+                    seed=seed,
+                    params=dict(params or {}),
+                    id=(
+                        f"{each.experiment}/{local}"
+                        if len(jobs) > 1 and each.experiment
+                        else run_address(local, each.experiment)
+                    )
+                    if local
+                    else None,
+                )
             )
-            for seed in self.seeds
-        ]
+    return requests
 
 
 def job_id(job: Job) -> str:

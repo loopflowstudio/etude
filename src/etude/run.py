@@ -68,6 +68,8 @@ class Run:
         self.experiment = experiment
         self.name = name
         self.files = RunFiles(root)
+        record = self.files.run_file()
+        self.address = record.id if record is not None else run_address(name, experiment)
         self._destinations = list(targets)
         self.problems: dict[str, str] = {}
 
@@ -145,7 +147,7 @@ class StorageDestination:
 
     def ship(self, files: RunFiles, run: str) -> None:
         record = files.run_file()
-        prefix = run_prefix(run_address(run, record.experiment if record else None))
+        prefix = run_prefix(record.id if record else run)
         # Freeze mutable objects together with the permanent-file listing. No
         # network I/O holds the writer's lock, and large immutable files stream.
         with TemporaryDirectory(prefix=".out-", dir=files.root) as staging:
@@ -277,7 +279,9 @@ def run_directories(directory: Path | str) -> Iterator[Path]:
     """Run roots at any depth; a run's own files are data, never nested runs."""
     for parent, folders, files in os.walk(directory):
         if "run.json" in files:
-            folders.clear()
+            folders[:] = sorted(
+                name for name in folders if name not in RUN_DATA and not name.startswith(".")
+            )
             yield Path(parent)
         else:
             folders[:] = sorted(name for name in folders if not name.startswith("."))
@@ -300,7 +304,7 @@ def sync(
     for root in sorted(run_directories(base)):
         files = RunFiles(root, tail_age=0.0 if stopped else 60.0)
         record = files.run_file()
-        run = run_address(root.name, record.experiment if record else None)
+        run = record.id if record else root.name
         targets = destinations(base, storages)
         prune(files, targets)
         for destination in targets:
@@ -326,7 +330,7 @@ class Declared:
 def declare(
     *,
     experiment: str,
-    clocks: Sequence[Clock],
+    clocks: Sequence[Clock] | None,
     run: str | None = None,
     job: str | None = None,
     seed: int | None = None,
@@ -351,15 +355,16 @@ def declare(
     name = (run or handed.get("ETUDE_RUN") or secrets.token_hex(8)).removeprefix(experiment + "/")
     if seed is None and "ETUDE_SEED" in handed:
         seed = int(handed["ETUDE_SEED"])
-    base, root = run_directory(directory, experiment, name)
+    address = run or handed.get("ETUDE_RUN_ADDRESS") or name
+    base, root = run_directory(directory, experiment, address)
     text = (
         config if isinstance(config, str) or config is None else json.dumps(config, sort_keys=True)
     )
     declaration = RunRecord(
-        id=run_address(name, experiment),
+        id=run_address(address, experiment),
         experiment=experiment,
         namespace=namespace,
-        clocks=tuple(clocks),
+        clocks=tuple(clocks or ()),
         job=job or handed.get("ETUDE_JOB"),
         job_name=None if job else handed.get("ETUDE_JOB_NAME"),
         seed=seed,
@@ -374,10 +379,15 @@ def declare(
         if prior.experiment != experiment:
             # Runs are kept by name alone, so a name belongs to one experiment.
             raise EtudeError("run_name_belongs_to_another_experiment", 409)
-        if prior.clocks != declaration.clocks:
+        if clocks is not None and {clock.name: clock.kind for clock in clocks} != {
+            clock.name: clock.kind for clock in prior.clocks
+        }:
             raise EtudeError("run_clock_conflict", 409)
         if not resume:
-            raise EtudeError("run_name_taken", detail=f"{name}; use --resume {name}")
+            raise EtudeError(
+                "run_name_taken",
+                detail=f"{address}; use --resume; to train further give --resume --until CLOCK=TARGET",
+            )
         validate_resume(prior, config=text, seed=seed)
         return Declared(base, root, prior)
     root.mkdir(parents=True, exist_ok=True)
@@ -390,6 +400,29 @@ def declare(
         except FileExistsError:
             raise EtudeError("run_name_taken", detail=name) from None
     return Declared(base, root, declaration)
+
+
+def declare_clock(files: RunFiles, clock: Clock) -> RunRecord:
+    """Add an axis atomically across the run's contexts, retaining existing labels."""
+    descriptor = os.open(files.root, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        prior = files.run_file()
+        if prior is None:
+            raise ValueError("run declaration is missing")
+        known = next((item for item in prior.clocks if item.name == clock.name), None)
+        if known is not None:
+            if known.kind != clock.kind:
+                raise EtudeError("run_clock_conflict", 409, detail=clock.name)
+            return prior
+        updated = RunRecord.model_validate_json(
+            prior.model_copy(update={"clocks": (*prior.clocks, clock)}).model_dump_json()
+        )
+        with files.lock:
+            DirectoryStorage(files.root).put("run.json", updated.model_dump_json().encode())
+        return updated
+    finally:
+        os.close(descriptor)
 
 
 def validate_resume(prior: RunRecord, *, config: str | None, seed: int | None) -> None:
@@ -414,6 +447,7 @@ def as_storage(source: Storage | Path | str) -> Storage:
 # `tables` and `matches` an eval run's of the per-file layout, kept until converted.
 RUN_FOLDERS = ("metrics", "checkpoints", "blocks", "tables", "matches")
 RUN_FILES = ("run.json", "environment.json", "tournament.json", "state.json", "outcome.json")
+RUN_DATA = frozenset((*RUN_FOLDERS, "out", "artifacts"))
 
 
 def run_folders(keys: Sequence[str]) -> dict[str, list[str]]:
@@ -438,7 +472,12 @@ def run_folders(keys: Sequence[str]) -> dict[str, list[str]]:
         kept = [
             folder
             for folder in folders
-            if not any(parent.as_posix() + "/" in roots for parent in PurePosixPath(folder).parents)
+            if not any(
+                parent.as_posix() + "/" in roots
+                and PurePosixPath(folder).relative_to(parent).parts[0] in RUN_DATA
+                for parent in PurePosixPath(folder).parents
+                if parent != PurePosixPath(".")
+            )
         ]
         if kept:
             result[run] = kept
