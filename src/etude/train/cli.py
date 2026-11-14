@@ -47,6 +47,7 @@ def checkpoints(
     experiment: Annotated[str | None, typer.Option(help="only this experiment")] = None,
 ) -> None:
     """List recorded checkpoints."""
+    from etude.identity import run_address
     from etude.run import runs
     from etude.storage import default_root, storage_from_uri
     from etude.train.read import read
@@ -55,12 +56,14 @@ def checkpoints(
     storage = storage_from_uri(source)
     found = [pair for pair in runs(storage) if experiment in (None, pair[0])]
     for name, run in found:
-        for record in read(storage, name, run).checkpoints:
+        data = read(storage, name, run)
+        address = data.file.id if data.file is not None else run_address(run, name)
+        for record in data.checkpoints:
             artifact = record.artifact
             size = "reference" if artifact.size_bytes is None else f"{artifact.size_bytes} bytes"
             at = " ".join(f"{clock}={value:g}" for clock, value in record.at.items())
             tags = ",".join(record.tags) or "-"
-            print(f"{name}/{run}\t{record.ordinal}\t{at}\t{tags}\t{size}\t{artifact.uri}")
+            print(f"{address}\t{record.ordinal}\t{at}\t{tags}\t{size}\t{artifact.uri}")
     if not found:
         selection = f" for experiment {experiment!r}" if experiment is not None else ""
         print(f"no runs{selection} in {source}", file=sys.stderr)

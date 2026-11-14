@@ -23,11 +23,17 @@ from etude.spec import Job, RunRequest, expand_runs
 
 
 def read_job_file(
-    path: Path, given: Sequence[str] = (), *, help: bool = False, experiment: str | None = None
+    path: Path,
+    given: Sequence[str] = (),
+    *,
+    help: bool = False,
+    experiment: str | None = None,
+    local: bool = False,
 ) -> list[RunRequest]:
     """Let Typer validate runs()'s signature, then invoke it once with typed flags.
 
     Default unnamed jobs to the file's stem; qualify them before expanding seeds.
+    `local` reads declarations for training here, without rental or git requirements.
     """
 
     if path.suffix != ".py":
@@ -113,6 +119,13 @@ def read_job_file(
     jobs: list[Job] = []
     for each in returned:
         candidate = each if isinstance(each, Job) else each.job
+        if not local:
+            candidate.require_hours()
+            if candidate.repo is not None and not any(
+                (folder / ".git").exists()
+                for folder in (Path(candidate.repo), *Path(candidate.repo).parents)
+            ):
+                raise LauncherError(f"{candidate.repo} is in no git checkout")
         if candidate not in jobs:
             jobs.append(candidate)
     names = [job.name or path.stem for job in jobs]

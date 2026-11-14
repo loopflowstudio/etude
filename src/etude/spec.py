@@ -220,7 +220,7 @@ class Job(Record):
     # Run by sh in the source checkout; reads the ETUDE_* environment. A typed job's
     # (`etude.jobs`) is Etude's own; written by hand only for work that is not Python.
     command: str
-    max_hours: float
+    max_hours: float | None = None  # local training needs no machine allowance
     max_usd: Decimal | None = None  # required when the run may rent
     name: str = ""
     seeds: tuple[int, ...] = (0,)  # launch repetitions; excluded from job identity
@@ -238,6 +238,12 @@ class Job(Record):
     # How to run it tiny before spending (`etude smoke`). Not part of its identity:
     # changing it does not make a new job.
     smoke: SmokeForm | None = None
+
+    def require_hours(self) -> float:
+        """The machine allowance; launch, queue and smoke require it."""
+        if self.max_hours is None:
+            raise LauncherError("a job needs max_hours: the most hours it may hold a machine")
+        return self.max_hours
 
     _check_inputs = field_validator("inputs")(_distinct)
 

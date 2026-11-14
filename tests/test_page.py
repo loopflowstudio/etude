@@ -545,3 +545,35 @@ def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
         shared.write_text(shared.read_text().replace("Standard", "Edited standard"))
         assert '"Edited standard"' in (server.page(refresh=True) or "")
         assert len(generations) == 2
+
+
+def test_report_experiment_override_selects_runs_and_names_the_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    source = tmp_path / "runs"
+    file = tmp_path / "coin.py"
+    file.write_text(
+        "from etude.report import Report\ndef report():\n    return Report(other_metrics=True)\n"
+    )
+    for name, score in (("coin", 1), ("wide", 9)):
+        with track(experiment=name, run=name, directory=source) as run:
+            run.log({"score": score}, updates=1)
+    pages = Pages(source, experiment="wide")
+    assert pages.build(file).experiment == "wide"
+    assert pages.build(file).training == build(source, file, experiment="wide").training
+    assert main(["report", str(file), "--experiment", "wide", "--source", str(source)]) == 0
+    assert capsys.readouterr().out.strip() == str(source / "reports/wide.html")
+    assert (source / "reports/wide.html").is_file()
+    assert not (source / "reports/coin.html").exists()
+    server = Server(source, file, ("127.0.0.1", 0), experiment="wide")
+    try:
+        html = server.page() or ""
+        payload = html.split('<script type="application/json" id="data">', 1)[1]
+        page = Page.model_validate_json(payload.split("</script>", 1)[0], extra="ignore")
+        assert page.experiment == "wide"
+        assert page.training == pages.build(file).training
+    finally:
+        server.server_close()
+    assert main(["report", str(tmp_path), "--experiment", "wide"]) == 1
+    assert "--experiment needs one Python file" in capsys.readouterr().err

@@ -439,7 +439,12 @@ def validate_resume(prior: RunRecord, *, config: str | None, seed: int | None) -
         prior_seed=prior.seed,
     )
     if differences:
-        raise EtudeError("run_identity_conflict", detail="; ".join(differences))
+        raise EtudeError(
+            "run_identity_conflict",
+            detail="; ".join(differences)
+            + "; use --resume --until CLOCK=TARGET to train this run further; "
+            "choose --experiment NAME for a changed config",
+        )
 
 
 def as_storage(source: Storage | Path | str) -> Storage:

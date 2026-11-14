@@ -39,7 +39,7 @@ from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Required, TypedDict, Unpack, cast
+from typing import TypedDict, Unpack, cast
 
 from pydantic import BaseModel, Field, JsonValue, ValidationError
 
@@ -89,7 +89,7 @@ class JobOptions(TypedDict, total=False):
     smoke form: a training job's `smoke` config; an evaluation's is Etude's.
     """
 
-    max_hours: Required[float]
+    max_hours: float
     max_usd: Decimal | None
     name: str
     seeds: tuple[int, ...]
@@ -125,7 +125,6 @@ def training[C: BaseModel](
     `LauncherError` when it is not, or when a config is not of that type or
     would not validate back into it.
     """
-    _require_hours(options)
     if start is not None:
         options["inputs"] = (*options.get("inputs", ()), *checkpoint_inputs_for(start, "start"))
         options["environment"] = (
@@ -725,7 +724,7 @@ def _present(repo: Path, *names: str) -> tuple[str, ...]:
 
 
 def _repo(origin: Callable[..., object], options: JobOptions) -> Path | None:
-    """The job's source: `repo` when given, else the git checkout `origin`'s file is in."""
+    """The explicit source, the function's git checkout, or its local import root."""
     if "repo" in options:
         given = options["repo"]
         return None if given is None else Path(given).resolve()
@@ -733,7 +732,11 @@ def _repo(origin: Callable[..., object], options: JobOptions) -> Path | None:
     for folder in file.parents:
         if (folder / ".git").exists():
             return folder
-    raise LauncherError(f"{file} is in no git checkout; name the job's source with repo=")
+    # Without git, local training still needs the root from which Python imports it.
+    if origin.__module__ not in ("__main__", "<run_path>"):
+        parts = origin.__module__.split(".")
+        return file.parents[len(parts) if file.name == "__init__.py" else len(parts) - 1]
+    return file.parent
 
 
 def _function(function: Callable[..., object], repo: Path | None) -> Function:

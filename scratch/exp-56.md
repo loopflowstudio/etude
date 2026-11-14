@@ -93,52 +93,28 @@ Later Tasks: EXP-57 live view; EXP-58 machines/metrics; EXP-59 broader JSON;
 EXP-60 population/evaluation expansion; EXP-61 joinable budgets. EXP-64's
 package split is folded into EXP-56.
 
-## Address and loop ergonomics pass (2026-11-13)
+## Address, loop and selection corrections (2026-11-13)
 
-Built the recorded experiment/job@seed selection design and the later cadence,
-automatic-clock and should_stop steer. `design-train-api.md` holds the settled
-semantics and deletion cut. No schema or SQL-query change. Historical delivery
-uses stored ids; compact training and nested eval discovery excludes out data.
-Focused verification is recorded below. Gate owns the
-full suite, acceptance and PR handoff; PR #103 remains draft.
+Address and loop ergonomics are built; their earlier receipts and compression
+notes remain at `0dcf4d7:scratch/exp-56.md`. Current contracts are in user docs.
 
-Later steers built: string clock declarations optionally close the set;
-first-use log keywords declare count clocks when open; every row requires all
-used clocks; metric sets may differ and missing metrics remain null. Step is
-only a released warning alias through 0.5; moved module paths gain none.
-The Manabot malformed historical-record defect is fixed with focused coverage.
+Ninth review corrections are built: whole-selection preflight; finished members
+skip during multi-run resume (including ordered JSON outcomes); shared config
+refusal remedies; local declarations without hours/git; stored checkpoint
+addresses; report experiment overrides, including watch/serve. Unstarted resume
+members remain refused before any work (Open 6); variants remain new experiments
+(Open 7). PR #103 remains draft. Gate still owns full acceptance.
 
-Checks: `uv run pytest tests/train/test_steps.py tests/train/test_addresses.py
- tests/train/test_local.py tests/train/test_identity.py -q --disable-warnings`
-— 58 passed. The qualified-name/checkpoint-producer regression added afterward
-passed separately (1 passed). Narrow launch/resume, worker/eval contexts,
-continuation and smoke checks passed in this pass; full acceptance stays gate's.
-Mypy on the 19 affected source/test files, ruff check, ruff format --check and
-`git diff --check` pass. Measured discovery: 1 listing, 2 declaration reads for
-a compact training root and its nested eval root. Context under both limits.
+Delete — do not maintain: the per-run validation/execution path and training
+constructor's rental-only requirement are removed. One preflight/execution path
+serves both file forms; launch/queue/smoke still require machine hours and git.
+No SQL or remote-read path changed; no schema increment.
 
-Compress after that pass: local training reads the stored record once and
-picks its config through `changed_config` alone; `run_directory` names the
-local run once and loops over the two historical folders; `run.run_name_taken`
-owns the taken-run wording for `declare` and `etude train`. No behavior change.
-`uv run pytest tests/train/test_addresses.py tests/train/test_local.py
-tests/train/test_identity.py tests/test_jobs.py tests/launch/test_resume.py
-tests/run/test_layout.py tests/test_continuation_out.py tests/eval/test_context.py
-tests/train/test_track.py -q` — passed (106, then 82 on the overlapping rerun);
-mypy and ruff clean on the touched files. Left alone: `load_job_function`'s
-`current=` re-execution (only `etude train` uses it; whether a persistent
-client needs it is a demo judgment) and the launcher's separate
-"already admitted" wording.
+Focused checks (2026-11-13):
+- `uv run pytest tests/train/test_addresses.py tests/train/test_local.py tests/test_page.py -q -k 'selection_preflight or local_declarations or checkpoint_listing or experiment_override or local_selection' --disable-warnings` — 6 passed before the package-source case was added.
+- `uv run pytest tests/train/test_addresses.py tests/train/test_local.py -q -k 'selection or local_stop_resume' --disable-warnings` — 8 passed, including skipped JSON outcomes and untouched-run refusals.
+- `uv run pytest tests/test_jobs.py tests/launch/test_resume.py tests/launch/test_scheduler.py -q -k 'job_file_names or evaluation_holds_what or typed_jobs_take or resume_retains_allocations or refused_resume_preserves or hours_and_dollars or run_longer_than_its_storage or a_job_is_what_decides or assigned_run_name' --disable-warnings` — 14 passed.
+- `uv run pytest tests/train/test_addresses.py -q -k 'local_declarations or local_selection' --disable-warnings` — 3 passed, including package sources outside git and both config remedies.
 
-Realign after that pass: the addressing, historical-read compatibility and
-`--until` wording in `run.run_name_taken` were already built; nothing of that
-direction remains. Quote labels for id-less requests now read `JOB@SEED`
-(`Scheduler.quote`), and the launcher doc's quote example matches.
-`tests/launch/test_scheduler.py` — 42 passed; mypy and ruff clean. Still
-spelled `NAME-seed-N` by choice: explicit standalone `track(run=...)` names in
-`docs/tracking.md` and historical-id fixtures.
-
-Ninth concept review: next implement direction is design-train-api.md (Ninth
-concept review), six items on several-run selections, refusal wording, local
-requirements of a `runs()` file, printed addresses and `report --experiment`.
-Unbuilt. Open 6 and 7 there are unanswered and do not hold the build.
+Mypy on the 13 touched Python files, ruff check, ruff format --check and
+`git diff --check` pass. Full suites and acceptance remain for gate.

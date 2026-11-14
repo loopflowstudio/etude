@@ -16,6 +16,7 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext, redirect_stdout
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -25,9 +26,9 @@ from typing import cast
 from pydantic import BaseModel
 
 from etude.call import changed_config, config_type
-from etude.errors import EtudeError
+from etude.errors import EtudeError, LauncherError
 from etude.experiment_file import defined_functions
-from etude.identity import resume_conflicts, run_address
+from etude.identity import run_address
 from etude.jobs import load_job_function
 from etude.launch.job_file import read_job_file, select_runs
 from etude.records import RunRecord
@@ -63,27 +64,60 @@ def train(
     file = file.resolve()
     label = experiment or file.stem
     if "runs" in defined_functions(file):
-        requests = select_runs(read_job_file(file, experiment=experiment), job=job, seed=seed)
+        requests = select_runs(
+            read_job_file(file, experiment=experiment, local=True), job=job, seed=seed
+        )
+        prepared: list[_Training | _Finished] = []
+        refusals: list[str] = []
         for request in requests:
-            recipe = load_job_function(request.job, current=True)
-            if request.id is None:
-                raise ValueError(
-                    "local training needs an addressed request; return a Job or give RunRequest.id"
+            address = request.id
+            try:
+                recipe = load_job_function(request.job, current=True)
+                if address is None:
+                    raise ValueError(
+                        "local training needs an addressed request; return a Job or give RunRequest.id"
+                    )
+                prepared.append(
+                    _prepare(
+                        file,
+                        recipe,
+                        label=request.job.experiment or label,
+                        identity=address,
+                        job=request.job.name,
+                        initial=request.job.config,
+                        config=config,
+                        seed=request.seed,
+                        resume=resume,
+                        until=until or request.job.until,
+                        seconds=seconds,
+                    )
                 )
-            result = _train(
-                file,
-                recipe,
-                label=request.job.experiment or label,  # a job may name its own
-                identity=request.id,
-                job=request.job.name,
-                initial=request.job.config,
-                config=config,
-                seed=request.seed,
-                resume=resume,
-                until=until or request.job.until,
-                seconds=seconds,
-                json_output=json_output,
-            )
+            except (EtudeError, LauncherError, ValueError, TypeError) as error:
+                if len(requests) == 1:
+                    raise
+                if isinstance(error, EtudeError) and error.code == "run_already_finished":
+                    assert address is not None  # _prepare reached the stored run's outcome.
+                    prepared.append(
+                        _Finished(
+                            address=address,
+                            experiment=request.job.experiment or label,
+                            position=str(error).split(": ", 1)[1].split(";", 1)[0],
+                        )
+                    )
+                else:
+                    refusals.append(f"{address or request.job.name}: {error}")
+        if refusals:
+            raise EtudeError("selection_refused", detail="\n".join(refusals))
+        for attempt in prepared:
+            if isinstance(attempt, _Finished):
+                print(
+                    f"{attempt.address} {attempt.position}",
+                    file=sys.stderr if json_output else sys.stdout,
+                )
+                if json_output:
+                    _print_outcome(attempt.address, attempt.experiment, stopped=False)
+                continue
+            result = _train(attempt, json_output=json_output)
             if result:
                 return result
         return 0
@@ -97,24 +131,26 @@ def train(
         if not callable(found):
             raise ValueError(f"{file.name}: define train(config)")
         return _train(
-            file,
-            cast(Callable[[BaseModel], object], found),
-            label=label,
-            identity=label,
-            job=file.stem,
-            initial=None,
-            config=config,
-            seed=0,
-            resume=resume,
-            until=until,
-            seconds=seconds,
+            _prepare(
+                file,
+                cast(Callable[[BaseModel], object], found),
+                label=label,
+                identity=label,
+                job=file.stem,
+                initial=None,
+                config=config,
+                seed=0,
+                resume=resume,
+                until=until,
+                seconds=seconds,
+            ),
             json_output=json_output,
         )
     finally:
         sys.path.remove(str(file.parent))
 
 
-def _train(
+def _prepare(
     file: Path,
     recipe: Callable[..., object],
     *,
@@ -127,8 +163,7 @@ def _train(
     resume: bool,
     until: Until | None,
     seconds: float | None,
-    json_output: bool,
-) -> int:
+) -> _Training:
     base = default_root()
     root = run_directory(base, label, identity)[1]
     prior = RunFiles(root).run_file()
@@ -146,17 +181,7 @@ def _train(
             base, root, prior, label, identity, config=text, seed=seed, until=until
         )
     elif prior is not None:
-        differences = resume_conflicts(
-            config=text,
-            seed=seed,
-            prior_config=prior.config_json,
-            prior_seed=prior.seed,
-        )
-        if differences:
-            raise EtudeError(
-                "run_identity_conflict",
-                detail="; ".join(differences) + "; choose --experiment NAME",
-            )
+        validate_resume(prior, config=text, seed=seed)
         raise run_name_taken(run_address(identity, label))
     commit = subprocess.run(
         ["git", "-C", str(file.parent), "rev-parse", "HEAD"],
@@ -181,28 +206,63 @@ def _train(
         values["ETUDE_COMMIT"] = commit.stdout.strip()
     if until is not None:
         values.update(ETUDE_UNTIL_CLOCK=until.clock, ETUDE_UNTIL_VALUE=str(until.value))
-    if seconds is not None:
-        values["ETUDE_DEADLINE"] = datetime.fromtimestamp(time.time() + seconds, UTC).isoformat()
+    return _Training(
+        recipe=recipe,
+        settings=settings,
+        values=values,
+        address=run_address(identity, label),
+        experiment=label,
+        seconds=seconds,
+    )
+
+
+@dataclass(frozen=True)
+class _Finished:
+    address: str
+    experiment: str
+    position: str
+
+
+@dataclass(frozen=True)
+class _Training:
+    recipe: Callable[..., object]
+    settings: BaseModel
+    values: dict[str, str]
+    address: str
+    experiment: str
+    seconds: float | None
+
+
+def _train(attempt: _Training, *, json_output: bool) -> int:
     result = 0
+    values = dict(attempt.values)
+    if attempt.seconds is not None:
+        values["ETUDE_DEADLINE"] = datetime.fromtimestamp(
+            time.time() + attempt.seconds, UTC
+        ).isoformat()
     with _attempt(values):
         if not json_output:
-            print(run_address(identity, label), flush=True)
+            print(attempt.address, flush=True)
         try:
             with redirect_stdout(sys.stderr) if json_output else nullcontext():
-                recipe(settings)
+                attempt.recipe(attempt.settings)
         except Stopped:
             result = 75
     if json_output:
-        print(
-            json.dumps(
-                {
-                    "run": run_address(identity, label),
-                    "experiment": label,
-                    "outcome": "stopped" if result else "finished",
-                }
-            )
-        )
+        _print_outcome(attempt.address, attempt.experiment, stopped=result == 75)
     return result
+
+
+def _print_outcome(address: str, experiment: str, *, stopped: bool) -> None:
+    print(
+        json.dumps(
+            {
+                "run": address,
+                "experiment": experiment,
+                "outcome": "stopped" if stopped else "finished",
+            }
+        )
+    )
 
 
 def _resumed(

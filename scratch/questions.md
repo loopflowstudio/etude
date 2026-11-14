@@ -41,15 +41,8 @@ demo below) remain at `e40e1a2:scratch/questions.md`. Experiment-scoped reads
 select folders by their own declarations; wholly undeclared historical metric
 fixtures remain readable.
 
-## Built layout and writer decisions
-
-Exact package-layout, allocation/writer, pure-eval and typed-match replies are
-retained at `312928d:scratch/questions.md` (Writer/allocation evidence through
-Implementation choices for demo). Keep shared run/records/storage independent
-of train, eval and launch; train/eval independent of each other. Allocation
-writers keep independent cutoffs without extra budget charges. Authored evals
-use planned lines and inputs; the low-level opener keeps explicit lines=.
-The writer shape remains a demo choice, not an attributed acceptance verdict.
+Built package-layout, allocation/writer and typed-match decisions remain at
+`312928d:scratch/questions.md`; the writer shape remains a demo choice.
 
 ## Decisions through demo (2026-11-13)
 
@@ -97,22 +90,8 @@ Sixth and seventh review probes and reversible choices remain at
 The sixth review's open prose choice remains: should "hold" / "held checkpoint"
 follow the current calls `evaluating` / `run.play`, and with which word?
 
-## Eighth concept review (2026-11-13)
-
-Built (exp-56.md). What the probe showed at `acf036f`: with `seeds=(0, 1, 2)` in `job.py`, `etude queue job.py` -> `several
-runs or cohort limits need --cohort NAME`; `_smoked([job], False)` (what
-`launch(job)` sent) gave one request with seed and id `None`;
-`queue_cohort("capacity", job)` raised a pydantic `ValidationError`. `status
-coin-seed-0` appended `a changed config needs a new --name` to the missing-run
-refusal.
-
-Assumption, reversible: several runs still need `--cohort`, and the docs say
-so. The run-address steer (design, "Run addresses") may replace this.
-
-Contrary evidence: `fetch coin-seed-0 weights.pt DIR` reports `run coin-seed-0
-has not reached a session`, not the shared refusal. Left alone: changing it
-would add a database read.
-
+The eighth review's probes and contrary fetch wording remain at
+`0dcf4d7:scratch/questions.md` (Eighth concept review); its corrections are built.
 
 ## Headless choices for addresses and loop ergonomics (2026-11-13)
 
@@ -125,8 +104,7 @@ Both save cadence options mean either threshold; specifying only save_every
 replaces the default 300-second cadence. These are reversible implementation
 choices, not additional replies from Jack Heart. Continue's existing child
 suffix remains; status/logs and continuation consume the same full address.
-Report-file naming remains file-based; named variants can be read with the
-Python readers. A broader report override is outside this pass.
+Report now follows --experiment for a single file (ninth review correction).
 
 The later clock steer supersedes the wrapper choice above. Jack Heart, quoting
 "any keyword on run.log is a clock, so the first row that uses it declares it /
@@ -145,37 +123,19 @@ no sparse-clock switch. Jack Heart: "i think we should allow sparsity in
 WHAT gets logged, but i see little reason to be loose with clocks". Metrics
 may differ per row; missing reads null, never zero or carried forward.
 
-Manabot check steer `9f5a3e52-f52e-458a-9c62-51efc6b0cb10`, source branch
-382c653ec8 checked against ddff7d4: 33/35 loop/recipe tests passed after module
-moves. Jack Heart: "i think we dont need warnings, were teh only users".
-No aliases for moved paths. Malformed nested declarations now raise a Pydantic
-validation error rather than KeyError. Minimal id-only records remain valid.
+Manabot's module-move probe and malformed-record fix are retained at
+`0dcf4d7:scratch/questions.md`. Jack Heart: "i think we dont need warnings, were
+teh only users". No aliases for moved paths.
 
 ## Ninth concept review (2026-11-13)
 
 Probed at `ca88f10` with an empty `ETUDE_HOME`; direction is in
 design-train-api.md (Ninth concept review), open choices in its Open 6 and 7.
 
-`examples/coin.py`, after `etude train examples/coin.py --until updates=10`:
-- `--config '{"updates":40}'` -> `run_identity_conflict: updates was 20, is 40;
-  choose --experiment NAME`
-- no flags -> `run_name_taken: coin; use --resume; to train further give
-  --resume --until CLOCK=TARGET`
-- `--resume` -> `run_already_finished: finished at updates=10; give --until
-  with a later target`; `--resume --until updates=20` trained on, exit 0
-- `--resume --config '{"lr":0.2}'` -> `run_identity_conflict: lr was 0.1, is 0.2`
-- `etude checkpoints` lists the run as `coin/coin`
-- `etude report examples/coin.py --experiment wide` -> `No such option`
-
-A file with `runs()`: two jobs, `narrow` seeds 0-2 and `wide` seeds 0-1:
-- without `max_hours`: `a job needs max_hours`; outside git: `is in no git
-  checkout; name the job's source with repo=`
-- with `narrow@0` finished, `narrow@1` ended at 3, `narrow@2` never started:
-  `etude train F` -> `run_name_taken: sweep/narrow@0`; `--resume` and `--job
-  narrow --resume` -> `run_already_finished: finished at updates=6`;
-  `--job narrow --resume --until updates=8` trained `@0` and `@1`, then
-  `run_not_found: sweep/narrow@2`, exit 1
-- `--job wide --json` printed two objects, one per run
+Exact coin and multi-job command output is retained at
+`0dcf4d7:scratch/questions.md` (Ninth concept review). The probe found partial
+selection execution before a later refusal, missing local declaration support,
+misprinted compact addresses and no report override; the design lists the fixes.
 
 Assumption, reversible: never-started runs under `--resume` stay refused
 (Open 6); a changed config still points to `--experiment` (Open 7).

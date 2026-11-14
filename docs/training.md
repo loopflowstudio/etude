@@ -131,10 +131,12 @@ An address is `experiment/job@seed`. Omit the job when the file defines one
 job, and the seed when that job defines one seed: `hanabi`, `sweep@1`,
 `sweep/wide@1`. Selection never changes the spelling: `--job wide --seed 1`
 selects what `runs()` defines. On this computer, `etude train job.py` trains
-the declared runs in order; `--job` and `--seed` select a subset. A file with
+the declared runs in order; `--job` and `--seed` select a subset. Local training
+needs neither `max_hours` nor a git checkout; launch, queue and smoke need both.
+When git is available, local attempts record the current commit. A file with
 only `train(config)` defines one job, named for the file, with seed 0.
 
-`--experiment NAME` names the experiment on train, launch, queue and eval;
+`--experiment NAME` names the experiment on train, launch, queue, eval and report;
 the file stem is its default. `--job` and `--seed` select, never rename.
 A taken address is refused. Use `--resume` for the same selection, and
 `--resume --until updates=300` to train it further. Historical runs stay
@@ -630,9 +632,10 @@ etude smoke job.py                      # the smoke config, here, spending nothi
   allows extras. Validation problems print one line per field, such as
   `lr: Input should be greater than 0`. It needs no provider key and no network.
   It exits 0 when the run finished, 75 when it stopped with its state saved, and otherwise
-  nonzero. With `--json` the last line of output is one object whose `outcome`
-  is `finished` or `stopped`, and anything `train` prints goes to standard
-  error; a failed run prints no object.
+  nonzero. With `--json` it prints one object per selected run, in selection order,
+  whose `outcome` is `finished` or `stopped` (including skipped finished runs).
+  Recipe output and skipped-run messages go to standard error. A failed run
+  prints no JSON object; after a failure or saved stop, later members do not run.
 - **Ctrl-C asks the run to stop**, as `--seconds` and a `kill` (SIGTERM) do:
   the pass in progress finishes, `run.save()` writes, and the command exits
   75. A stop is noticed by `run.steps` or `run.should_stop`, so a loop that
@@ -642,7 +645,11 @@ etude smoke job.py                      # the smoke config, here, spending nothi
   you fixed the bug, it ran out of hours, you cancelled it, or you pressed
   Ctrl-C. It takes the file because it runs your current code. It keeps the
   run's address, seed and target. Repeat the experiment, job and seed selection
-  from the original command; `--resume` takes no run name.
+  from the original command; `--resume` takes no run name. The whole selection
+  is checked before any recipe runs: a refusal lists every conflicting address
+  and leaves all selected runs untouched. Never-started members are refused.
+  With several runs selected, finished members without a later target are
+  skipped with their address and final clocks; unfinished members carry on.
   With no `--config`, it uses the stored config, checked against the current
   recipe's type. An explicit `--config` is applied to the current defaults
   and must equal the stored config; a refusal names the changed fields.
@@ -650,7 +657,7 @@ etude smoke job.py                      # the smoke config, here, spending nothi
   also works on a finished run, which becomes unfinished again until it
   reaches the new target. Its rows, checkpoints and id go on as one run.
 - **What `--resume` refuses**: a config or seed that no longer matches, and a
-  finished run given no later target, which has nothing left to do. The refusal
+  single selected finished run given no later target, which has nothing left to do. The refusal
   says where it finished, such as `finished at updates=200`. A refused
   or interrupted attempt changes nothing already recorded: a finished run
   stays finished.

@@ -339,17 +339,18 @@ the stored kinds and names; stored labels survive.
 Steer `cf6392bc-72d6-4aee-a020-909704a9bcb2`: metrics may vary per row;
 missing means null, never zero or carried forward. Evals are separate runs.
 
-## Ninth concept review (2026-11-13): next implement direction
+## Ninth concept review (2026-11-13): built corrections
 
 Walked `etude train` at `ca88f10` on the coin example and a two-job,
 several-seed file; what each command printed is in `questions.md` (Ninth
 concept review). One run, stopped and resumed, reads as designed. Carrying on
-a selection of several runs does not, and four smaller spellings disagree with
-this design. Settled here from what the design already says; no stored format,
+a selection of several runs did not, and four smaller spellings disagreed with
+this design. The corrections below are built; focused receipts are in exp-56.md.
+Settled here from what the design already says; no stored format,
 schema or remote read changes.
 
 1. **A several-run selection is checked whole before any run starts, and
-   `--resume` carries it on.** Today each run is checked as its turn comes, so
+   `--resume` carries it on.** Previously each run was checked as its turn came, so
    `--resume` over seeds 0-2 refuses at the first finished seed, and
    `--resume --until` trains two runs and then fails on the third. Check every
    selected run first; refuse once, naming each address and its reason, before
@@ -365,7 +366,7 @@ schema or remote read changes.
    about `--until`. One refusal owns the wording for new and resumed attempts:
    the changed fields, then `--resume --until CLOCK=TARGET` to train this run
    further, then `--experiment NAME` for a changed config. The resumed-attempt
-   form currently gives no remedy at all.
+   form previously gave no remedy at all.
 3. **`etude train` of a `runs()` file asks only what training here needs.** It
    is refused without `max_hours` and outside a git checkout, though a
    `train`-only file needs neither and nothing is rented. Local training

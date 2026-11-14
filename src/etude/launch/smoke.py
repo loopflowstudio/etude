@@ -113,6 +113,7 @@ def smoke_train(runs: Sequence[RunRequest], folder: Path) -> list[Trained]:
     """
     distinct: dict[str, RunRequest] = {}
     for run in runs:
+        run.job.require_hours()
         distinct.setdefault(job_id(run.job), run)
     store = Database(launcher_file(folder))
     try:

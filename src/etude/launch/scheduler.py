@@ -623,7 +623,7 @@ class Scheduler:
             for record in placement.runs:
                 most = share
                 if most is None:
-                    hours = Decimal(str(record.launch.spec.max_hours))
+                    hours = Decimal(str(record.launch.spec.require_hours()))
                     most = min(price * hours, _limit_usd(record.launch.spec))
                 quoted.append(
                     QuotedMachine(
@@ -1676,7 +1676,7 @@ class Scheduler:
                 now = self._clock()  # the rental's window starts after the upload
                 self._store.check_lock(supply.name)
                 # The window covers the longest run it is given, within their dollars.
-                hours = max(planned.run.launch.spec.max_hours for planned in batch)
+                hours = max(planned.run.launch.spec.require_hours() for planned in batch)
                 cap = sum((planned.cap_usd for planned in batch), Decimal(0))
                 machines = 1
                 first = batch[0].run
@@ -1686,7 +1686,8 @@ class Scheduler:
                     pending = [r for r in waiting if r.cohort == cohort.name]
                     hours = max(
                         hours,
-                        sum(r.launch.spec.max_hours for r in pending) / (machines * supply.slots),
+                        sum(r.launch.spec.require_hours() for r in pending)
+                        / (machines * supply.slots),
                     )
                     cap = sum((_limit_usd(r.launch.spec) for r in pending), Decimal(0))
                     remaining = self._cohort_left(
@@ -2440,7 +2441,7 @@ class Scheduler:
         if target.rent is not None:
             ondemand = self._store.ondemand(target.rent)  # raises if no such on-demand
             longest = self._longest_rental(ondemand)
-            if job.max_hours * 3600 + ondemand.setup_seconds > longest:
+            if job.require_hours() * 3600 + ondemand.setup_seconds > longest:
                 # One rental holds a run from setup to its last hour; none outlasts its grant.
                 raise LauncherError(
                     f"a job on on-demand {target.rent!r} may ask for at most "
@@ -2448,7 +2449,7 @@ class Scheduler:
                     f"grants last {longest / 3600:g} hours, including "
                     f"{ondemand.setup_seconds} setup seconds"
                 )
-        if not job.command.strip() or job.max_hours <= 0:
+        if not job.command.strip() or job.require_hours() <= 0:
             raise LauncherError("a job needs a command and hours")
         if job.max_usd is None and target.rent is not None:
             raise LauncherError(
@@ -2559,7 +2560,9 @@ class Scheduler:
         # previous allocations; fresh work needs no history queries.
         if run.launch.resume_after:
             return self._remaining(run, now)
-        return Budget(seconds=run.launch.spec.max_hours * 3600, usd=_limit_usd(run.launch.spec))
+        return Budget(
+            seconds=run.launch.spec.require_hours() * 3600, usd=_limit_usd(run.launch.spec)
+        )
 
     def _remaining(self, run: RunRecord, now: datetime) -> Budget:
         attempts = self._store.attempts(run=run.id)
@@ -2570,7 +2573,7 @@ class Scheduler:
         )
         dollars = sum((self._attempt_usd(a, now) for a in attempts), Decimal(0))
         return Budget(
-            seconds=max(0, run.launch.spec.max_hours * 3600 - seconds),
+            seconds=max(0, run.launch.spec.require_hours() * 3600 - seconds),
             usd=max(Decimal(0), _limit_usd(run.launch.spec) - dollars),
         )
 

@@ -6,7 +6,7 @@
     pages = Pages(storage).build_each(Path("experiments"))  # every experiment file there
     write(render_index(index(storage, pages, href=lambda stem: f"{stem}.html")), target(storage, "index"))
 
-The file names the experiment, by its stem, and may define `report()`
+The file defaults the experiment to its stem; an explicit name overrides it. It may define `report()`
 (`etude.report.Report`) and `eval(state)` (`etude.experiment`). Without
 `report()` the page is `Report(other_metrics=True)`, drawing every metric its
 runs logged, and says so at its top. The experiment's
@@ -345,7 +345,8 @@ class Pages:
     reflects them.
     """
 
-    def __init__(self, source: Storage | Path | str) -> None:
+    def __init__(self, source: Storage | Path | str, *, experiment: str | None = None) -> None:
+        self.experiment = experiment
         self.storage = as_storage(source)
         here = DirectoryStorage(default_root())
         self._places = list({each.name: each for each in (self.storage, here)}.values())
@@ -381,15 +382,17 @@ class Pages:
 
     def _build(self, file: Path, listings: Sequence[dict[str, str]]) -> Page:
         if not file.is_file():
-            return build(self.storage, file)  # which says why there is no page
+            return build(
+                self.storage, file, experiment=self.experiment
+            )  # which says why there is no page
         runs = tuple(
-            self._versions(place, file.stem, listed)
+            self._versions(place, self.experiment or file.stem, listed)
             for place, listed in zip(self._places, listings, strict=True)
         )
         kept = self._built.get(file)
         if kept is not None and kept[0] == _Inputs(files=_sources(file), runs=runs):
             return kept[1]
-        page = build(self.storage, file)
+        page = build(self.storage, file, experiment=self.experiment)
         # After the build, so the neighbours this run imported are among its inputs.
         self._built[file] = (_Inputs(files=_sources(file), runs=runs), page)
         return page
@@ -470,7 +473,7 @@ def _source_name(storage: Storage) -> str:
     return storage.name
 
 
-def build(source: Storage | Path | str, file: Path) -> Page:
+def build(source: Storage | Path | str, file: Path, *, experiment: str | None = None) -> Page:
     """The page of the experiment `file` names, from the runs under `source`.
 
     The file is run each time, so an edited `report()` shows on the next
@@ -479,7 +482,7 @@ def build(source: Storage | Path | str, file: Path) -> Page:
     experiment's.
     """
     storage = as_storage(source)
-    experiment = file.stem
+    experiment = experiment or file.stem
     names = _run_file(file)
     report, origin, notes = _report(names.get("report"), file)
     flames = tuple(panel.prefix for panel in (*report.perf, *report.ml) if isinstance(panel, Flame))
@@ -1602,9 +1605,10 @@ class Server(ThreadingHTTPServer):
         address: tuple[str, int],
         *,
         refresh: float | None = None,
+        experiment: str | None = None,
     ) -> None:
         super().__init__(address, _Handler)
-        self.pages, self.path, self.refresh = Pages(source), path, refresh
+        self.pages, self.path, self.refresh = Pages(source, experiment=experiment), path, refresh
         # Requests are handled on threads; a page is built by one at a time.
         self._building = threading.Lock()
         self._lock = threading.Lock()

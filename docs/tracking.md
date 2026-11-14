@@ -464,6 +464,7 @@ def report() -> Report:
 
 ```sh
 uv run etude report ppo.py --source r2://bucket/runs --open   # writes ./reports/ppo.html
+uv run etude report ppo.py --experiment wide  # reads wide, writes reports/wide.html
 uv run etude report ppo.py --watch 5 --open   # opt in to checks and page reloads every 5 s
 uv run etude report ppo.py --serve            # refresh on demand, writing nothing
 uv run etude report experiments/ --serve      # every experiment there, with an index at /
@@ -478,6 +479,8 @@ logged metric, and the page says so at its top. Reports read files and never
 launch or rent anything.
 From a directory the page goes to
 `reports/` beside its runs, from a bucket to `./reports`; `--out DIR` chooses.
+For one file, `--experiment NAME` selects a named variant and names its output
+page; it also applies with `--watch` or `--serve`.
 `--serve` has no login and defaults to this computer only
 (`--host 127.0.0.1 --port 8765`). Keep the command running to use Refresh;
 Ctrl-C stops it.

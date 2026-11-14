@@ -436,7 +436,7 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
         LauncherError, match="needs max_hours: the most hours it may hold a machine"
     ):
         # The omission under test.
-        evaluation(progress, experiment="ppo", play=lambda match: {}, checkpoint=weights, repo=None)  # type: ignore[call-arg]
+        evaluation(progress, experiment="ppo", play=lambda match: {}, checkpoint=weights, repo=None)
     league: RoundRobin = RoundRobin(
         name="league", environment=environment("duel"), configs=({},), games=1
     )

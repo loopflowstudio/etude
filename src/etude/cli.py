@@ -325,6 +325,9 @@ def report(
             "experiment file in it, with an index"
         ),
     ],
+    experiment: Annotated[
+        str | None, typer.Option(help="override the file’s experiment name")
+    ] = None,
     source: Annotated[
         str | None,
         typer.Option(
@@ -367,9 +370,11 @@ def report(
     from etude.page import Page, Pages, Server, index, render, render_index, target, write
     from etude.storage import default_root, storage_from_uri
 
+    if experiment is not None and path.is_dir():
+        raise ValueError("--experiment needs one Python file")
     storage = storage_from_uri(source or default_root())
     if serve:
-        server = Server(storage, path, (host, port), refresh=watch)
+        server = Server(storage, path, (host, port), refresh=watch, experiment=experiment)
         address = f"http://{host}:{server.server_port}/"
         print(address, flush=True)
         if open_:
@@ -382,7 +387,8 @@ def report(
             server.server_close()
         return
     shown: object = None
-    pages = Pages(storage)  # a watched page is built again only once its files change
+    # A watched page is built again only once its files change.
+    pages = Pages(storage, experiment=experiment)
     try:
         while True:
             current: Page | dict[Path, Page | str] | None
@@ -397,7 +403,9 @@ def report(
                     current = None  # Watching waits for the experiment's first run.
             if current is not None and current != shown:
                 if isinstance(current, Page):
-                    written = write(render(current, refresh=watch), target(storage, path.stem, out))
+                    written = write(
+                        render(current, refresh=watch), target(storage, current.experiment, out)
+                    )
                 else:
                     if "index" in {file.stem for file in current}:
                         raise EtudeError("experiment_named_index", 409)
