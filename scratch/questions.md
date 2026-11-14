@@ -281,3 +281,21 @@ Standing open choices, unchanged and for the demo: `RunWriter` beside
 `RunAttempt` against the "1a" answer; the eval planning boundary; cleanup
 under upload-only grants with no controller; config on a local `--resume`;
 a second Ctrl-C.
+
+## Concept review, second pass (2026-11-13): no new open choice
+
+Three corrections the design already implies are in `design-train-api.md`
+(second concept review): the docs' local repeat-call promise, `RunData.state`
+-> `outcome`, and what `--name` names.
+
+Evidence added to the standing `RunWriter`/`RunAttempt` choice, not an
+answer. The word people are taught has both meanings at `394aa37`:
+`docs/training.md` says "Calling `train` is one attempt" and "Leaving the
+block records how the attempt ended" (a tracking context: `RunWriter`,
+`RunData.attempts: tuple[RunWriter, ...]`, `AttemptSummary`,
+`outcome.json`), while `docs/launcher.md` says "called again as a new
+RunAttempt" and `max_attempts` counts allocations. For the default loop
+(one `track` per call, one call per allocation) they coincide, which is why
+the docs read fine; they part only in the probe's cases. Whichever of
+(a)/(b)/(c) is taken decides whether `RunData.attempts` and `AttemptSummary`
+are renamed, so they are left as they are until then.
