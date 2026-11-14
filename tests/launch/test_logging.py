@@ -632,7 +632,10 @@ def test_client_chosen_id_freezes_source_before_admission(
     )
     record = b.scheduler.record(identity)
     assert record.id == "my-scientific-id"
-    assert record.source is not None and record.launch_spec.revision == record.source.commit
+    assert (
+        record.launch.source is not None
+        and record.launch_spec.revision == record.launch.source.commit
+    )
     assert record.launch_spec.revision != "HEAD"
 
 

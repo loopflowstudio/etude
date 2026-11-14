@@ -32,7 +32,8 @@ __all__ = ["job_python"]  # fixture shared with typed-job tests
 
 RECIPE = """
 from pydantic import BaseModel
-from etude.train.tracking import Stopped, track
+from etude.stopping import Stopped
+from etude.train.tracking import track
 from etude.train.records import Step
 
 class Config(BaseModel):
@@ -377,7 +378,11 @@ def runs(python: str) -> Job:
         Input(name="parent-checkpoint.pt", key="more-data", sha256="1" * 64, size_bytes=0),
     )
     named = record.model_copy(
-        update={"spec": record.launch_spec.model_copy(update={"inputs": original})}
+        update={
+            "submission": record.launch.model_copy(
+                update={"spec": record.launch_spec.model_copy(update={"inputs": original})}
+            )
+        }
     )
     for ordinal in (None, 1):
         again = continue_from(named, "updates=6", source=tracked, ordinal=ordinal)

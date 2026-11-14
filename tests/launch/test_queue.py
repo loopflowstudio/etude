@@ -114,7 +114,7 @@ def test_cli_queue_records_the_choice(
     )
     ids = [line.split()[0] for line in capsys.readouterr().out.splitlines()]
     assert len(ids) == (2 if cohort else 1)
-    assert all(b.scheduler.record(id).autorun for id in ids)
+    assert all(b.scheduler.record(id).launch.autorun for id in ids)
     assert b.service.creates == 0
     b.scheduler.tick()
     assert b.service.creates == 1
@@ -220,7 +220,7 @@ def test_cli_continue_waits_without_capacity(
     handed = ParentRun.model_validate_json(given.value)
     assert handed.checkpoint is not None
     assert (handed.parent.source_id, authored(handed.checkpoint.at)) == (parent, {"steps": 3})
-    assert str(record.launch_spec.until) == "steps=7" and record.autorun
+    assert str(record.launch_spec.until) == "steps=7" and record.launch.autorun
     assert b.scheduler.read(child).phase == "queued"
 
 

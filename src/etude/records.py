@@ -1,4 +1,4 @@
-"""File contracts every run shares: its declaration, attempts and final state.
+"""File contracts every run shares: its declaration, writers and outcome.
 
 A run declares its clocks once. A clock is a coordinate the run advances: a
 step counts something, a time is a duration (seconds on an author's clocks).
@@ -6,7 +6,8 @@ A run that logs no rows, such as an evaluation, declares none. Wall time is
 always recorded and never declared, and so are Etude's two clocks in hours
 (`BUILT_IN_CLOCKS`), which a training run gives on every row and checkpoint.
 
-These models know nothing about research, launching or providers.
+RunRecord holds the shared identity. Its optional submission belongs to the
+launcher database. Declarations omit it from run.json; providers are not represented here.
 """
 
 from __future__ import annotations
@@ -100,6 +101,23 @@ class Continuation(Record):
     value: float
 
 
+class RunSubmission(Record):
+    """Submission and scheduling facts owned by the launcher database."""
+
+    spec: Job
+    pool: str | None = None
+    rent: str | None = None
+    created_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    version: int = 1
+    autorun: bool = False
+    queued: bool = False
+    resume_after: int = 0
+    params: dict[str, Param] = Field(default_factory=dict)
+    source: SourcePosition | None = None
+    smoke: Smoke = Smoke()
+
+
 class RunRecord(Record):
     """A run's stored identity, optionally with its launcher submission metadata.
 
@@ -122,18 +140,9 @@ class RunRecord(Record):
     config: str | None = Field(default=None, max_length=1024 * 1024)
     continues: Continuation | None = None
     start: str | None = None
-    spec: Job | None = None
-    pool: str | None = None
-    rent: str | None = None
-    created_at: datetime | None = None
-    cancel_requested_at: datetime | None = None
-    version: int = 1
-    autorun: bool = False
-    queued: bool = False
-    resume_after: int = 0
-    params: dict[str, Param] = Field(default_factory=dict)
-    source: SourcePosition | None = None
-    smoke: Smoke = Smoke()
+    submission: RunSubmission | None = Field(
+        default=None, exclude_if=lambda submission: submission is None
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -153,6 +162,11 @@ class RunRecord(Record):
             )
             data["config"] = data.pop("config_json", None)
             data.pop("config_sha256", None)
+        # Stored flat launcher records and default-filled run.json files predate
+        # the submission boundary. Only a real specification establishes one.
+        submitted = {key: data.pop(key) for key in RunSubmission.model_fields if key in data}
+        if submitted.get("spec") is not None:
+            data["submission"] = submitted
         return data
 
     @model_validator(mode="after")
@@ -164,7 +178,7 @@ class RunRecord(Record):
             raise ValueError("clock_name_reserved")
         if self.continues is not None and self.continues.clock not in (*names, *BUILT_IN_NAMES):
             raise ValueError("continuation_clock_undeclared")
-        if self.spec is not None and self.config is not None:
+        if self.submission is not None and self.config is not None:
             raise ValueError("launched_config_belongs_to_spec")
         return self
 
@@ -178,7 +192,7 @@ class RunRecord(Record):
 
     @property
     def config_json(self) -> str | None:
-        return self.spec.config if self.spec is not None else self.config
+        return self.submission.spec.config if self.submission is not None else self.config
 
     @property
     def config_sha256(self) -> str | None:
@@ -188,16 +202,18 @@ class RunRecord(Record):
     @property
     def launch_spec(self) -> Job:
         """The submitted execution; standalone runs have no launcher specification."""
-        if self.spec is None:
+        return self.launch.spec
+
+    @property
+    def launch(self) -> RunSubmission:
+        """Required launcher facts; standalone declarations have none."""
+        if self.submission is None:
             raise ValueError(f"run {self.id!r} has no launcher specification")
-        return self.spec
+        return self.submission
 
     @property
     def name(self) -> str:
-        if self.spec is None:
-            return self.source_key.source_id
-        parts = [self.spec.name] if self.spec.name else []
-        return "-".join(parts + ([] if self.seed is None else [f"seed{self.seed}"])) or self.id
+        return self.source_key.source_id
 
 
 class RunCounters(Record):
@@ -209,7 +225,7 @@ class RunCounters(Record):
     incomplete: Count = 0
 
 
-class RunState(Record):
+class RunOutcome(Record):
     """`outcome.json`: how a tracking attempt ended, including a planned stop."""
 
     state: Literal["finished", "failed", "stopped"]

@@ -58,83 +58,14 @@ bucket until then, against "ideally avoid remote extra storage". The docs
 say so. Question: is that acceptable for upload-only S3, or should such a
 launch warn, or deliver saves less often?
 
-## Train API docs (2026-11-13): open choices and assumptions
+## Train API implementation choices
 
-Written while drafting `docs/training.md` from `design-train-api.md`. Nothing
-here was decided by a person; each is the spelling the docs currently show.
-The design's own Open list (name `track`, `continue` as child run, games in
-flight, the public example, save cadence) is unchanged and not repeated.
-
-Open product choices the design does not spell:
-
-1. **Class names for players.** Reversible implementation choice: the existing
-   `Player` union already covers checkpoint and code seats, so keep it and
-   `Code`; rename the checkpoint case `CheckpointPlayer`. `Inference.player`
-   and `CheckpointRecord.player` are the taught constructors. Released
-   `Model`, `Checkpoint` and `.model(...)` spellings warn, removed in 0.5.
-2. **The one checkpoint reference type.** Chosen here: `CheckpointRef` in
-   `etude.checkpoints`, with an encoded string key. `checkpoint_id` builds
-   it from run/name or an outside address. Historical structured keys still
-   decode; pinned match/seating hashes are unchanged. `CheckpointKey` is a
-   deprecated constructor alias, not another record.
-3. **How playing code receives a folder checkpoint.** Docs take the smallest
-   extension: `player.checkpoint.artifact.uri` names the folder, which holds
-   `checkpoint.json`. Alternative: a `path` accessor on the reference.
-4. **`etude launch job.py --resume RUN` limits.** Docs say the job's limits as
-   the file now states them bound the whole run, earlier attempts included, so
-   raising them in the file is how a run that ran out gets more. Alternative:
-   limits fixed at first launch, with flags to add.
-
-5. **How a launch names its experiment.** The design says "Launch commands
-   take the name as an argument" with no spelling. Docs show `--experiment
-   NAME` on `etude launch` and `etude run`, and still say an
-   `eval(state)`/`report()` file requires its own stem.
-6. **A finished run taken further.** Design Open 2 records "Both":
-   `--resume RUN --until ...` extends the same run, finished or not. Docs
-   say a finished run becomes unfinished until the new target, and that
-   `--resume` on a finished run with no later target is refused. Whether its
-   record reads `finished` in between is not stated anywhere.
-
-Checkpoint implementation choices (2026-11-13, `etude/checkpoints.py`):
-folder artifacts carry a `members` map of relative files to `cache.Content`;
-the folder digest hashes that map's canonical JSON. Each member is an
-ordinary verified `Input`; no folder archive or extra remote object. Exports
-must be self-contained (no symlinks, dot paths or `.open`/`.partial` files).
-
-Assumptions taken (reversible, simpler option):
-
-- Run id is `NAME-seed-N` (`baseline-seed-7`, as the design writes it; the
-  launcher's `RunRecord.name` writes `seed7` today). An unnamed job is named
-  for its file stem: `etude run train.py` starts `train-seed-0`. `--name`
-  names the job part; the id still carries the seed.
-- `etude run FILE` calls the function named `train` in FILE, with its config
-  type's defaults; `--config` is a JSON object of changed fields. `--seconds N`
-  is a deadline: the run stops saved and exits 75.
-- Storage layout is `PREFIX/EXPERIMENT/RUN/` (design: `<experiment>/<run>/`,
-  ids unique within an experiment). Launcher docs changed to match; older flat
-  `PREFIX/RUN/` folders stay readable. This moves launcher keys and grants.
-- Checkpoints from named objects live in `out/checkpoints/CLOCK-VALUE/`
-  (eight-digit zero padding, as the design shows). A single file from outside
-  `out` is still copied to `RUN/checkpoints/`. A second different checkpoint
-  at one position is `CLOCK-VALUE.ordinal-N/`.
-- `run.save()` is due five minutes after the last save (design: wall time, no
-  number); `run.steps(..., every=25)` switches to a count.
-- A checkpoint outside or after `run.steps` is placed at the stepped clock's
-  current value and the latest value given for every other clock.
-- `run.resume(extra=model)` returns that same object, loaded; Etude saves it
-  as it stands, so authors mutate it in place.
-- `run.checkpoints()` items expose `at` and `path` (folder or file here).
-- `training(..., start=CHECKPOINT)` takes a checkpoint from
-  `observe(source, experiment).run(RUN).final`; the loop reads
-  `run.input("start")`. `seeds` is a launch option on `Job`, outside job
-  identity; `runs()` returns `Job` or `list[Job]`; `job.runs(...)` and
-  `RunRequest` remain for hand-built launches.
-- Deprecated spellings (`track(seed=)`, `local_launch`,
-  `run.latest_checkpoint()`) warn for one release. State files an older loop
-  kept in `run.out` are not read by `run.resume`.
-
-Not documented: EXP-37's remaining points, a separate Task (`exp-56.md`,
-Folded in).
+Earlier doc-drafting choices and built implementation assumptions are retained
+at `18537b0:scratch/questions.md` (Train API docs). The accepted design and
+current user docs now describe those APIs. Still open: whether local resume
+uses current or stored config defaults, upload-only cleanup without a controller,
+and the second Ctrl-C behaviour (below). The default public example and save
+cadence choices remain in the design's Open list.
 
 ## Merge of main at 66ffb28 (2026-11-13)
 
@@ -178,9 +109,9 @@ behaviour for each.
    never asks `run.steps`/`run.stopping()`, cannot be interrupted from the
    keyboard. Question: should a second Ctrl-C interrupt at once (the attempt
    then ends `failed`, without a save)?
-3. **`--json` key.** The object's key is `state` (`finished`/`stopped`), the
-   field name inside `outcome.json`; the page said "outcome" before. Kept
-   `state`. A failed run prints no object.
+3. **`--json` key.** Superseded by concept review: the new local command
+   prints `outcome`; the stored field inside `outcome.json` stays `state`.
+   A failed run prints no object.
 
 ## Record unification counterexample (2026-11-13, implement)
 
@@ -333,3 +264,20 @@ The latter fits the requested author-owned function better, but changes the
 league's pre-launch pending-match/gap behavior and needs a runtime context with
 selective input delivery. No unused runtime/context implementation is added.
 The existing live EvalRun/shared Run cut can be checked independently.
+
+## Concept review (2026-11-13): one new open name
+
+`etude.job` (new on this branch: `Job`, `RunRequest`, `Input`, `Until`,
+`Runtime`) sits beside released `etude.jobs` (`training`, `evaluation`,
+`continue_from`). A job file imports from both; the docs do so seven times.
+They differ by one letter, against "every word in a path ... should be
+different from its neighbours". Not settled here because it is a public
+import path. Options: (a) keep both; (b) move the constructors' types and
+the constructors into one module, `etude.jobs` re-exporting until 0.5;
+(c) another name for the shared types' module. Built: (a). Does not hold
+the implement direction in `design-train-api.md`.
+
+Standing open choices, unchanged and for the demo: `RunWriter` beside
+`RunAttempt` against the "1a" answer; the eval planning boundary; cleanup
+under upload-only grants with no controller; config on a local `--resume`;
+a second Ctrl-C.

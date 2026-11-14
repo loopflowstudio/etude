@@ -83,7 +83,7 @@ def test_a_job_file_launches_a_cohort_and_each_verb_reads_it_back(
     )
     ids = [line.split()[0] for line in launched]
     names = [line.split()[1] for line in launched]
-    assert names == ["small-seed1", "small-seed2", "large-seed1", "large-seed2"]
+    assert names == [identity.rsplit("/", 1)[-1] for identity in ids]
     assert "queued (cohort runs 1 at a time)" in launched[1]
 
     # Reproduce the race: a quick first run can finish before the next command.
@@ -322,7 +322,7 @@ def test_launch_makes_machines_that_start_themselves(
     )
     ids = [line.split()[0] for line in lines]
     assert len(ids) == (2 if cohort else 1)
-    assert all(b.scheduler.record(id).autorun is True for id in ids)
+    assert all(b.scheduler.record(id).launch.autorun is True for id in ids)
     assert all(held.packet.autorun is True for held in b.service.sessions.values())
 
 
@@ -436,14 +436,16 @@ def test_a_job_file_takes_parameters_and_records_them_on_each_run(
     sent = run(
         capsys, "queue", str(path), "--hidden", "512", "--seeds", "2", "--fast", "--cohort", "big"
     )
-    assert [line.split()[1] for line in sent] == ["h512-seed0", "h512-seed1"]
+    assert [line.split()[1] for line in sent] == [
+        line.split()[0].rsplit("/", 1)[-1] for line in sent
+    ]
     records = [default().record(line.split()[0]) for line in sent]
     expected = {"hidden": 512, "seeds": 2, "lr": 0.1, "fast": True, "tag": "x"}
-    assert [record.params for record in records] == [expected, expected]
+    assert [record.launch.params for record in records] == [expected, expected]
     # Identity comes from what runs, not from the arguments that led there.
     again = run(capsys, "queue", str(path), "--hidden", "512", "--fast", "--tag", "x")[0].split()[0]
     assert default().record(again).job == records[0].job
-    assert default().record(again).params["seeds"] == 1
+    assert default().record(again).launch.params["seeds"] == 1
 
     for wrong in (("--width", "3"), ("hidden=512",), ("--hidden", "big")):
         try:
@@ -473,7 +475,7 @@ def test_job_help_required_flags_mixed_order_and_collision(
     assert not (tmp_path / "home").exists()
     assert main(["queue", str(path), "--width", "32", "--pool", "local", "--fast"]) == 0
     id = capsys.readouterr().out.split()[0]
-    assert default().record(id).params == {"width": 32, "fast": True}
+    assert default().record(id).launch.params == {"width": 32, "fast": True}
     assert main(["queue", str(path), "--", "--width", "64"]) == 0
     path.write_text("def runs(pool: str): return None\n")
     assert main(["queue", str(path), "--help"]) == 1

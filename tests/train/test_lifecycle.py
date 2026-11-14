@@ -11,11 +11,12 @@ from etude.carriage import put_back, restore_set
 from etude.experiment import observe
 from etude.out import OutFile, OutFiles
 from etude.run import sync
+from etude.stopping import Stopped
 from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.records import Step, Time
 from etude.train.report import training
-from etude.train.tracking import Stopped, local_launch, track
+from etude.train.tracking import local_launch, track
 from tests.experiments import authored
 from tests.run.storage import MeasuredStorage
 

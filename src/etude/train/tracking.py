@@ -1339,7 +1339,6 @@ def seal_runs(directory: Path | str) -> None:
 __all__ = [
     "EtudeWarning",
     "TrainingRun",
-    "Stopped",
     "local_launch",
     "seal_runs",
     "track",

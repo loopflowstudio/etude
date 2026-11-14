@@ -449,7 +449,9 @@ def continue_from(
             "config": text,
         }
     )
-    return RunRequest(job=job, seed=parent.seed, params=dict(parent.params), source=parent.source)
+    return RunRequest(
+        job=job, seed=parent.seed, params=dict(parent.launch.params), source=parent.launch.source
+    )
 
 
 def _parent_out(storage: Storage, folders: Sequence[str], keys: Sequence[str]) -> OutFiles | None:

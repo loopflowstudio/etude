@@ -87,9 +87,9 @@ def test_quote_shows_runs_sharing_one_rental(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=2, slots=2)
     quote = b.scheduler.quote(JOB.runs(1, 2, 3), rent="l4", cohort="trial", parallel=2)
     assert [(q.run, q.alongside) for q in quote.machines] == [
-        ("seed1", ("seed2",)),
-        ("seed2", ("seed1",)),
-        ("seed3", ()),
+        ("seed-1", ("seed-2",)),
+        ("seed-2", ("seed-1",)),
+        ("seed-3", ()),
     ]
     assert {q.slots for q in quote.machines} == {2}
     assert quote.machines[0].max_usd == quote.machines[1].max_usd

@@ -31,6 +31,7 @@ from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Observation
 from etude.launch.ssh import Unreachable
 from etude.launch.storage.disk import DirectoryJournal
+from etude.records import RunRecord
 from etude.storage_timeout import StorageUnavailable
 from etude.train.records import Step
 from etude.train.tracking import TrainingRun as TrackedRun
@@ -351,7 +352,10 @@ def test_supplies_are_stored_and_a_run_names_where_it_may_go(tmp_path: Path) -> 
         b.scheduler.queue(job(), rent="shed")
     one = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
-    assert (b.scheduler.record(one).pool, b.scheduler.record(one).rent) == (None, "l4")
+    assert (b.scheduler.record(one).launch.pool, b.scheduler.record(one).launch.rent) == (
+        None,
+        "l4",
+    )
     held = b.store.session(b.scheduler.attempts(one)[0].session)
     rented = b.store.machine(held.machine)
     assert (held.supply, rented.ondemand, rented.pool, rented.kind, rented.provider_id) == (
@@ -469,8 +473,8 @@ def test_quote_prints_planned_first_wave_costs_and_rents_nothing(
     assert code == 0
     assert counting.snapshot().provider == 1  # one price; nothing created
     assert capsys.readouterr().out.splitlines() == [
-        "job-seed1  machine mini  planned rental cost $0.00",
-        "job-seed2  rent NVIDIA L4 with at least 6 vCPUs, 48 GB at $0.59/hour  planned rental cost $0.88",
+        "job-seed-1  machine mini  planned rental cost $0.00",
+        "job-seed-2  rent NVIDIA L4 with at least 6 vCPUs, 48 GB at $0.59/hour  planned rental cost $0.88",
         "planned first-wave rental cost: $0.88; nothing rented",
         "job/cohort rental budget: $6.00",
         "Rental costs assume deletion on time. Provider delays can exceed the budget; "
@@ -545,7 +549,7 @@ def test_a_job_is_what_decides_the_result_not_its_name_or_limits(tmp_path: Path)
     assert same.job == also.job != different.job
     assert same.job is not None
     assert [r.seed for r in b.store.job_runs(same.job)] == [1, 2]
-    assert (also.launch_spec.max_usd, also.name) == (Decimal(9), "small again-seed2")
+    assert (also.launch_spec.max_usd, also.name) == (Decimal(9), also.id)
     assert same.launch_spec.max_usd == Decimal(5)
 
 
@@ -659,10 +663,13 @@ def test_the_default_target_is_persistent_and_off_default_pool_requires_one(
     b.scheduler.set_default("shed", rent="l4")
     one = b.scheduler.queue(job())
     b.scheduler.tick()
-    assert (b.scheduler.record(one).pool, b.scheduler.record(one).rent) == ("shed", "l4")
+    assert (b.scheduler.record(one).launch.pool, b.scheduler.record(one).launch.rent) == (
+        "shed",
+        "l4",
+    )
     assert Database(launcher_file(tmp_path)).default_target() == Target(pool="shed", rent="l4")
     b.scheduler.turn_pool("shed", off=True)
-    assert b.scheduler.record(b.scheduler.queue(job())).pool is None  # rents only
+    assert b.scheduler.record(b.scheduler.queue(job())).launch.pool is None  # rents only
     b.scheduler.set_default("shed")
     with pytest.raises(LauncherError, match="name a pool"):
         b.scheduler.queue(job())
@@ -972,3 +979,35 @@ def test_a_read_shows_a_running_jobs_output_and_a_pass_fetches_it_only_as_it_gro
     _reporting(b, log_bytes=200)
     b.run(1)
     assert fetched == 2
+
+
+def test_assigned_run_name_agrees_with_quote_and_stored_record(tmp_path: Path) -> None:
+    b = bench(tmp_path)
+    spec = job(name="baseline", experiment="pilot", config='{ "lr": 0.1 }')
+    request = RunRequest(job=spec, seed=7, id="baseline-seed-7")
+    quote = b.scheduler.quote([request], rent="l4")
+    assert [machine.run for machine in quote.machines] == ["baseline-seed-7"]
+    identity = b.scheduler.queue(request, rent="l4")
+    record = b.scheduler.record(identity)
+    assert record.name == "baseline-seed-7"
+    assert record.config_json == '{ "lr": 0.1 }'
+    assert record.launch.rent == "l4"
+    assert RunRecord.model_validate_json(record.model_dump_json()) == record
+    # SQLite's flat submission columns also describe historical stored records.
+    historical = {**record.model_dump(exclude={"submission"}), **record.launch.model_dump()}
+    assert RunRecord.model_validate(historical) == record
+    assert b.service.creates == 0
+
+
+def test_unassigned_hand_built_requests_have_seeded_quote_labels_and_opaque_ids(
+    tmp_path: Path,
+) -> None:
+    b = bench(tmp_path)
+    spec = job(name="baseline")
+    quote = b.scheduler.quote([RunRequest(job=spec, seed=7)], rent="l4")
+    assert [machine.run for machine in quote.machines] == ["baseline-seed-7"]
+    identity = b.scheduler.queue(RunRequest(job=spec, seed=7), rent="l4")
+    assert b.scheduler.record(identity).name == identity
+    unnamed = b.scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
+    assert b.scheduler.record(unnamed).name == unnamed
+    assert b.service.creates == 0

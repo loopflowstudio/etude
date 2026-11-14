@@ -58,7 +58,14 @@ def test_local_stop_resume_and_finished_refusals_preserve_one_run(
         )
     )
     args = ["run", str(file), "--seed", "7"]
-    assert main(args) == 75
+    assert main([*args, "--json"]) == 75
+    stopped = capsys.readouterr()
+    assert "recipe progress" in stopped.err
+    assert json.loads(stopped.out) == {
+        "run": "train-seed-7",
+        "experiment": "train",
+        "outcome": "stopped",
+    }
     base = tmp_path / "home/track/train"
     root = base / "train-seed-7"
     assert not (root / "out/phase-two").exists()
@@ -72,7 +79,7 @@ def test_local_stop_resume_and_finished_refusals_preserve_one_run(
     assert json.loads(output.out) == {
         "run": "train-seed-7",
         "experiment": "train",
-        "state": "finished",
+        "outcome": "finished",
     }
     assert (root / "out/phase-two").read_text() == "12"
     completed = read(DirectoryStorage(base), "train", "train-seed-7")

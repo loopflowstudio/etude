@@ -284,7 +284,7 @@ def checkout(run: RunRecord, destination: Path) -> Path:
     """Fetch git objects into a new checkout, never overwrite an existing directory."""
     if run.launch_spec.repo is None or run.launch_spec.revision is None:
         raise LauncherError(f"run {run.id} has no source repository")
-    origin = run.source.origin if run.source else _origin(run.launch_spec.repo)
+    origin = run.launch.source.origin if run.launch.source else _origin(run.launch_spec.repo)
     address = origin or run.launch_spec.repo
     if destination.exists():
         raise LauncherError("source destination already exists; choose a new directory")
@@ -307,10 +307,10 @@ def contains(run: RunRecord, revision: str) -> bool:
     if Path(repo).is_dir():
         ancestor = resolve(repo, revision)
         return _ancestor(repo, ancestor, run.launch_spec.revision)
-    if run.source is None or run.source.origin is None:
+    if run.launch.source is None or run.launch.source.origin is None:
         raise LauncherError(f"source history for local-only run {run.id} is unavailable")
-    with _history(run.source.origin) as history:
-        _git(history, "fetch", "--quiet", "--", run.source.origin, run.launch_spec.revision)
+    with _history(run.launch.source.origin) as history:
+        _git(history, "fetch", "--quiet", "--", run.launch.source.origin, run.launch_spec.revision)
         return _ancestor(history, resolve(history, revision), run.launch_spec.revision)
 
 

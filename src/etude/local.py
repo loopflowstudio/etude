@@ -120,7 +120,7 @@ def run(
                     {
                         "run": identity,
                         "experiment": label,
-                        "state": "stopped" if result else "finished",
+                        "outcome": "stopped" if result else "finished",
                     }
                 )
             )

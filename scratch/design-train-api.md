@@ -85,7 +85,7 @@ The sentence the nouns make:
 
 | Thing | Name | Replaces |
 | --- | --- | --- |
-| what a loop holds in `train` | `Run` | `etude.train.run.Run` (kept) |
+| what a loop holds in `train` | `TrainingRun(Run)`, from `track` in `etude.train.tracking` | `etude.train.run.Run` |
 | a job and a seed to launch | `RunRequest`, never named by authors | `etude.launch.records.Run` |
 | the stored run | `RunRecord`, one class | `RunRecord`, `RunDeclaration`, `RunFile`, `TrainingRun` |
 | one machine allocation of a run | `RunAttempt` | `RunAttempt` (launcher, kept) |
@@ -94,7 +94,7 @@ The sentence the nouns make:
 | a checkpoint and the code that plays it, or code alone | player | `Model`, `Code` |
 | how a run attempt ended | `outcome.json` | `state.json` at the run's root |
 | what a run keeps to carry on | state: `out/state/state.json` | (new) |
-| the tracking internals package | `etude.tracking` | `etude.run` |
+| what training and evaluation runs share | `etude.run` (`Run`, declaration, delivery, listing) | `etude.tracking`, proposed below and withdrawn |
 | groups a user sees | experiment (the label) and job | also cohort and report "line" |
 
 - Report "line" becomes job. Cohort stays a launch option for shared limits
@@ -244,9 +244,10 @@ Names (Jack Heart, 2026-11-13: "maybe Run and etude.run want ot change", then
 a job file declares, a job and a seed to run it with, is a `RunRequest`
 (today's `etude.launch.records.Run`). The internal package `etude.run`
 (declarations, delivery, storage) is renamed so it is not a second `run`
-module. It becomes `etude.tracking` (Jack Heart: "or etude.track?" then
-"etude.tracking also fine iether way"), which keeps the package name apart
-from the `track` function.
+module. It was to become `etude.tracking` (Jack Heart: "or etude.track?" then
+"etude.tracking also fine iether way"). His later layout supersedes that:
+"run should be top level not in training", with `TrainingRun` and `EvalRun`
+as subclasses (`questions.md`, Package layout). Built that way.
 
 The author never has to name `RunRequest` (Jack Heart: "still in favor of
 not needing to know its called a RunRquest"). A job file returns jobs, and
@@ -337,6 +338,30 @@ supply the experiment name to the [Etude] SDK launcher". So the launcher is
 the authority for a run's experiment: a name given at launch wins, the file's
 stem is only the default when none is given, and training code never needs to
 name its experiment. Launch commands take the name as an argument.
+
+## Record corrections (concept review, 2026-11-13): built
+
+1. **`run.json` holds only declared facts.** `RunRecord` has an optional
+   `RunSubmission` for specification and scheduling facts, absent from new
+   standalone and worker declarations. The launcher database owns those facts;
+   controller replies carry the submission. Historical nested declarations,
+   default-filled files and flat launcher records still decode. Schema stays 19.
+2. **A run has one name.** `RunRecord.name` is the id's run part, including
+   its `-seed-N` spelling. Quotes use that same name when assigned; only
+   hand-built requests with no id get a derived label. Unlabelled command
+   jobs keep opaque references.
+3. **Outcome and state are different words.** `RunOutcome` replaces
+   `RunState`. The stored `outcome.json` field stays `state`; the new
+   `etude run --json` command prints `outcome`.
+4. **Imports name the defining module.** Training teaches `Stopped` from
+   `etude.stopping`; tracking no longer exports it. Deprecated
+   `etude.train.run` keeps its alias until 0.5.
+
+Delete — do not maintain: the flat launcher fields on `RunRecord`, its
+second derived run name, `RunState`, and tracking's public `Stopped` export.
+Keep historical decoding, remote controller record replies, planned-stop
+retries, row replacement, continuation and cumulative limits. Eval planner
+changes remain blocked on the planning boundary in `questions.md`.
 
 ## Manabot (MTG-329)
 

@@ -113,7 +113,7 @@ from etude.eval.records import (
 )
 from etude.eval.run import ETUDE_TABLES
 from etude.identity import SAFE_NAME
-from etude.records import Digest, Record, RunState
+from etude.records import Digest, Record, RunOutcome
 from etude.run import as_storage, declared, run_folders, under
 from etude.storage import DirectoryStorage, Storage, default_root
 
@@ -359,7 +359,7 @@ def _ended(
     Read when it first arrives and again whenever the run delivers new files:
     a resumed run seals new blocks before it writes its end again.
     """
-    ended = RunState.model_validate_json(storage.get(place + name))
+    ended = RunOutcome.model_validate_json(storage.get(place + name))
     db.execute("update kept.runs set state = ? where run = ?", [ended.state, run])
 
 

@@ -18,9 +18,9 @@ def show_runs(scheduler: Scheduler, ids: Sequence[str]) -> None:
         record = scheduler.record(run)
         print(run, record.name, str(status) + where, sep="  ")
         if record.launch_spec.repo is not None:
-            print("  source: " + line(record.source, record.launch_spec.revision or "HEAD"))
-        if record.smoke.outcome != "not_smoked":
-            print(f"  smoke: {record.smoke}")
+            print("  source: " + line(record.launch.source, record.launch_spec.revision or "HEAD"))
+        if record.launch.smoke.outcome != "not_smoked":
+            print(f"  smoke: {record.launch.smoke}")
 
 
 def resolve_runs(

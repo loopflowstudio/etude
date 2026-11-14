@@ -160,3 +160,78 @@ def test_a_run_json_in_out_is_carried_as_data_and_never_discovered_as_a_run(tmp_
     assert sync(source, storages=[target]) == {}
     assert runs(source) == runs(target) == [("real", "r")]
     assert target.storage.get("real/r/out/model/run.json").decode() == from_json
+
+
+@pytest.mark.parametrize("launched", [False, True])
+def test_new_run_json_contains_only_declared_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launched: bool
+) -> None:
+    if launched:
+        for key, value in {
+            "ETUDE_RUN": "baseline-seed-7",
+            "ETUDE_EXPERIMENT": "pilot",
+            "ETUDE_ATTEMPT": "allocation-1",
+            "ETUDE_OUT": str(tmp_path / "pilot/baseline-seed-7/out"),
+            "ETUDE_JOB": "digest",
+            "ETUDE_SEED": "7",
+        }.items():
+            monkeypatch.setenv(key, value)
+    with track(
+        experiment="pilot",
+        run="baseline-seed-7",
+        job="digest",
+        seed=7,
+        clocks=[Step("updates", "optimizer updates")],
+        config='{ "lr": 0.1 }',
+        directory=tmp_path,
+    ) as run:
+        document = json.loads((run.out.parent / "run.json").read_text())
+    assert set(document) == {
+        "schema_version",
+        "id",
+        "experiment",
+        "namespace",
+        "source_kind",
+        "clocks",
+        "job",
+        "job_name",
+        "seed",
+        "cohort",
+        "kind",
+        "config",
+        "continues",
+        "start",
+    }
+    assert document["id"] == "pilot/baseline-seed-7"
+    assert document["config"] == '{ "lr": 0.1 }'
+    record = RunRecord.model_validate(document)
+    assert record.submission is None
+    assert record.name == "baseline-seed-7"
+
+
+def test_default_filled_stored_run_json_still_decodes() -> None:
+    record = RunRecord.model_validate_json(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "id": "pilot/r",
+                "experiment": "pilot",
+                "config": '{ "lr": 0.1 }',
+                "spec": None,
+                "pool": None,
+                "rent": None,
+                "created_at": None,
+                "cancel_requested_at": None,
+                "version": 1,
+                "autorun": False,
+                "queued": False,
+                "resume_after": 0,
+                "params": {},
+                "source": None,
+                "smoke": {},
+            }
+        )
+    )
+    assert record.config_json == '{ "lr": 0.1 }'
+    assert record.submission is None
+    assert record.name == "r"

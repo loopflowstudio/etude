@@ -645,27 +645,27 @@ class Database:
                 else set()
             )
             for run in runs:
-                if run.created_at is None:
+                if run.launch.created_at is None:
                     raise LauncherError(f"run {run.id!r} has no submission timestamp")
                 if run.id in resuming:
                     previous = self.attempts(run=run.id)
-                    if len(previous) != run.resume_after or any(
+                    if len(previous) != run.launch.resume_after or any(
                         a.outcome is None for a in previous
                     ):
                         raise Stale(f"run {run.id!r} still has an allocated attempt")
                     self._change(
                         "runs",
                         run.id,
-                        run.version,
+                        run.launch.version,
                         job=run.job,
                         spec=run.launch_spec.model_dump_json(),
-                        source=run.source.model_dump_json() if run.source else None,
-                        pool=run.pool,
-                        rent=run.rent,
+                        source=run.launch.source.model_dump_json() if run.launch.source else None,
+                        pool=run.launch.pool,
+                        rent=run.launch.rent,
                         cancel_requested_at=None,
-                        resume_after=run.resume_after,
-                        params=json.dumps(run.params),
-                        smoke=run.smoke.model_dump_json(),
+                        resume_after=run.launch.resume_after,
+                        params=json.dumps(run.launch.params),
+                        smoke=run.launch.smoke.model_dump_json(),
                     )
                     continue
                 self._db.execute(
@@ -677,15 +677,15 @@ class Database:
                         run.job,
                         run.launch_spec.model_dump_json(),
                         run.seed,
-                        run.pool,
-                        run.rent,
+                        run.launch.pool,
+                        run.launch.rent,
                         run.cohort,
-                        run.created_at.isoformat(),
-                        int(run.autorun),
-                        int(run.queued),
-                        json.dumps(run.params),
-                        run.source.model_dump_json() if run.source else None,
-                        run.smoke.model_dump_json(),
+                        run.launch.created_at.isoformat(),
+                        int(run.launch.autorun),
+                        int(run.launch.queued),
+                        json.dumps(run.launch.params),
+                        run.launch.source.model_dump_json() if run.launch.source else None,
+                        run.launch.smoke.model_dump_json(),
                     ),
                 )
 
@@ -694,7 +694,7 @@ class Database:
                 self.save_launch(evidence.model_copy(update={"state": "admitted"}))
 
     def cancel(self, run: RunRecord, at: datetime) -> None:
-        self._change("runs", run.id, run.version, cancel_requested_at=at.isoformat())
+        self._change("runs", run.id, run.launch.version, cancel_requested_at=at.isoformat())
 
     def run(self, id: str) -> RunRecord:
         row = self._db.execute(f"{_RUNS} WHERE r.id = ?", (id,)).fetchone()

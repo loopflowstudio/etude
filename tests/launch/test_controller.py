@@ -129,7 +129,7 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     assert not launcher_file(client).exists()
     assert len(list((remote / "sources").glob("*.tar"))) == 1
     assert [pool.name for pool in _open(remote).pools()] == ["controller"]
-    assert _open(remote).record(ids[0]).pool == "controller"
+    assert _open(remote).record(ids[0]).launch.pool == "controller"
     frozen = _open(remote).record(ids[0]).launch_spec
     assert frozen.repo == str(repo) and frozen.revision != "HEAD"
     # Continuation works without the client's repository: it uses the retained archive.
@@ -243,7 +243,7 @@ def test_remote_queue_preserves_choice_without_local_database(
     ids = [line.split()[0] for line in result.stdout.splitlines()]
     assert len(ids) == 2
     scheduler = _open(remote)
-    assert all(scheduler.record(id).autorun for id in ids)
+    assert all(scheduler.record(id).launch.autorun for id in ids)
     assert all(scheduler.read(id).phase == "queued" for id in ids)
     assert not launcher_file(client).exists()
 
@@ -350,8 +350,8 @@ def test_controller_keeps_source_history_and_checks_out_on_client(
     assert sent.returncode == 0, sent.stderr
     id = sent.stdout.split()[0]
     record = _open(remote).record(id)
-    assert record.source is not None and record.source.snapshot
-    assert record.source.origin == str(origin)
+    assert record.launch.source is not None and record.launch.source.snapshot
+    assert record.launch.source.origin == str(origin)
     assert git(origin, "rev-parse", f"refs/etude/runs/{id}") == record.launch_spec.revision
     assert "uncommitted changes" in sent.stdout
     repo.rename(repo.with_name("unavailable"))

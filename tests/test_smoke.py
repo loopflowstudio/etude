@@ -102,8 +102,8 @@ def test_a_passing_smoke_queues_and_its_runs_record_it(
     ids = _ids(out)
     assert len(ids) == 2
     record = default().record(ids[0])
-    assert record.smoke.outcome == "passed"
-    assert [step.step for step in record.smoke.steps] == ["train", "eval", "report"]
+    assert record.launch.smoke.outcome == "passed"
+    assert [step.step for step in record.launch.smoke.steps] == ["train", "eval", "report"]
     assert main(["status", ids[0]]) == 0
     assert "  smoke: passed in " in capsys.readouterr().out
     # Nothing the smoke made is in this computer's runs.
@@ -146,7 +146,7 @@ def test_a_job_without_a_smoke_form_is_reported_and_queues_as_before(
     said = capsys.readouterr()
     assert "smoke train ppo: not smoked (no smoke form)" in said.err
     (id,) = _ids(said.out)
-    assert default().record(id).smoke.outcome == "not_smoked"
+    assert default().record(id).launch.smoke.outcome == "not_smoked"
 
 
 def test_a_job_without_a_smoke_form_beside_one_with_it_is_not_recorded_passed(
@@ -158,17 +158,17 @@ def test_a_job_without_a_smoke_form_beside_one_with_it_is_not_recorded_passed(
     assert "smoke train plain: not smoked (no smoke form)" in said.err
     ppo, plain = (default().record(id) for id in _ids(said.out))
     assert (ppo.launch_spec.name, plain.launch_spec.name) == ("ppo", "plain")
-    assert ppo.smoke.outcome == "passed"
-    assert [(s.step, s.name) for s in ppo.smoke.steps] == [
+    assert ppo.launch.smoke.outcome == "passed"
+    assert [(s.step, s.name) for s in ppo.launch.smoke.steps] == [
         ("train", "ppo"),
         ("eval", "ladder"),
         ("report", "report"),
     ]
-    assert plain.smoke.outcome == "not_smoked"
-    assert [(s.step, s.name) for s in plain.smoke.steps][0] == ("train", "plain")
+    assert plain.launch.smoke.outcome == "not_smoked"
+    assert [(s.step, s.name) for s in plain.launch.smoke.steps][0] == ("train", "plain")
     assert main(["status", plain.id]) == 0
     assert "passed" not in capsys.readouterr().out
-    assert str(plain.smoke) == "not smoked (train: no smoke form)"
+    assert str(plain.launch.smoke) == "not smoked (train: no smoke form)"
 
 
 def test_a_tiny_job_that_saves_no_checkpoint_leaves_eval_not_smoked(
@@ -180,7 +180,7 @@ def test_a_tiny_job_that_saves_no_checkpoint_leaves_eval_not_smoked(
     assert "smoke train ppo: passed in" in said.err and "(0 checkpoints)" in said.err
     assert "smoke eval: not smoked (no checkpoints)" in said.err
     (id,) = _ids(said.out)
-    smoke = default().record(id).smoke
+    smoke = default().record(id).launch.smoke
     assert smoke.outcome == "not_smoked"
     assert str(smoke) == "not smoked (eval: no checkpoints)"
 
@@ -193,7 +193,7 @@ def test_without_smoke_a_broken_tiny_job_queues_unsmoked(
     said = capsys.readouterr()
     assert "smoke" not in said.err
     (id,) = _ids(said.out)
-    assert default().record(id).smoke.outcome == "not_smoked"
+    assert default().record(id).launch.smoke.outcome == "not_smoked"
     assert main(["status", id]) == 0
     assert "smoke:" not in capsys.readouterr().out
 
@@ -261,7 +261,7 @@ def test_a_launched_eval_run_records_its_smoke(
     assert main(["eval", str(file), "--source", str(source), "--pool", "local", *flags]) == 0
     assert ", launched " in capsys.readouterr().out
     (launched,) = default().runs(done=True)
-    smoke = default().record(launched.id).smoke
+    smoke = default().record(launched.id).launch.smoke
     assert smoke.outcome == outcome
     assert [step.step for step in smoke.steps] == (["eval", "report"] if flags else [])
 
@@ -272,7 +272,7 @@ def test_the_python_client_smokes_when_asked(tmp_path: Path) -> None:
         queue_cohort("refused", broken.runs(1, 2), "local", smoke=True)
     assert default().runs(done=True) == ()
     (plain,) = queue_cohort("plain", broken.runs(1), "local")
-    assert default().record(plain).smoke.outcome == "not_smoked"
+    assert default().record(plain).launch.smoke.outcome == "not_smoked"
     fine = broken.model_copy(update={"smoke": SmokeForm(command="true")})
     (smoked,) = queue_cohort("kept", fine.runs(1), "local", smoke=True)
-    assert default().record(smoked).smoke.outcome == "passed"
+    assert default().record(smoked).launch.smoke.outcome == "passed"

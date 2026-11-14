@@ -76,7 +76,7 @@ def test_position_snapshot_publication_and_checkout(repository: tuple[Path, Path
     first = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
     second = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
     run = scheduler.record(first)
-    position = run.source
+    position = run.launch.source
     assert position is not None
     assert position.commit == scheduler.record(second).launch_spec.revision
     assert position.base_commit == head and position.base_subject == "Base training"
@@ -98,7 +98,7 @@ def test_position_snapshot_publication_and_checkout(repository: tuple[Path, Path
     with pytest.raises(LauncherError, match="already exists"):
         checkout(run, recovered)
     assert contains(run, head)
-    assert _open(repo.parent / "launcher").record(first).source == position
+    assert _open(repo.parent / "launcher").record(first).launch.source == position
 
 
 def test_explicit_revision_and_failed_push(repository: tuple[Path, Path]) -> None:
@@ -111,7 +111,11 @@ def test_explicit_revision_and_failed_push(repository: tuple[Path, Path]) -> Non
         Job(command="true", max_hours=1, repo=str(repo), revision="HEAD"), "waiting"
     )
     run = scheduler.record(id)
-    assert run.launch_spec.revision == head and run.source is not None and not run.source.snapshot
+    assert (
+        run.launch_spec.revision == head
+        and run.launch.source is not None
+        and not run.launch.source.snapshot
+    )
     assert not git(origin, "for-each-ref", "refs/etude/runs")
     hook = origin / "hooks/pre-receive"
     hook.write_text("#!/bin/sh\nexit 1\n")
@@ -131,7 +135,7 @@ def test_local_only_snapshot(
     scheduler.add_pool(Pool(name="waiting"))
     id = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
     record = scheduler.record(id)
-    assert record.source is not None and record.source.origin is None
+    assert record.launch.source is not None and record.launch.source.origin is None
     assert git(repo, "rev-parse", f"refs/etude/runs/{id}") == record.launch_spec.revision
     assert main(["status", id]) == 0
     assert "local-only" in capsys.readouterr().out

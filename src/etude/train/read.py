@@ -41,8 +41,8 @@ from etude.records import (
     RUNNING_HOURS,
     Clock,
     Record,
+    RunOutcome,
     RunRecord,
-    RunState,
     RunWriter,
 )
 from etude.run import as_storage, located_runs, run_folders, under
@@ -94,7 +94,7 @@ class RunData(Arrays):
     experiment: str
     name: str
     file: RunRecord | None
-    state: RunState | None
+    state: RunOutcome | None
     # In ordinal order, one per ordinal: a later attempt continues its run's ordinals.
     checkpoints: tuple[CheckpointRecord, ...]
     # Every process that wrote to this run, in start order.
@@ -964,7 +964,7 @@ def _read(
     left = (records.folder_of[attempt.writer] for attempt in reversed(attempts))
     latest = next((folder for folder in left if folder in ended), None)
     state = latest or (next(reversed(ended)) if ended else None)
-    run_state = RunState.model_validate_json(storage.get(state + ended[state])) if state else None
+    run_state = RunOutcome.model_validate_json(storage.get(state + ended[state])) if state else None
     if run_state is not None and attempts:
         # A completion belongs to one writer, not every later resume. Older
         # evidence without attribution is conclusive only for a single attempt.

@@ -76,8 +76,21 @@ a Benchmark constructed inside arbitrary author code is unavailable to the
 current pre-launch match planner. Dependent eval API deletion stops until
 that boundary is designed; the current run/record/scope cut remains checkable.
 
-
 Initial run/record/scope acceptance checks pass.
+
+The four record/API corrections in `design-train-api.md` are built:
+optional launcher submission metadata, one run name, `RunOutcome`, and
+`Stopped` taught from `etude.stopping`. New standalone and worker run.json
+serialization, historical decoding and launcher/controller round trips have
+focused coverage. Gate still owns the affected suites and full acceptance.
+
+Correction checks: focused `uv run pytest` filters pass for new declarations,
+historical records/outcomes, assigned/opaque names, quotes, local/remote resume,
+continuation and `Stopped`; `uv run mypy` (174 files), `uv run ruff check .`,
+`uv run ruff format --check .` and `git diff --check` pass. The stale `seed3`
+quote expectation was corrected to `seed-3` and its focused test passes.
+No queries or schema changed; the existing quote provider-count pin passes.
+
 
 Checks: full suite **877 passed, 6 skipped (optional PyTorch), 3 deselected**
 before the compress cut: no live `Run.source_key`/`namespace` plumbing (stored

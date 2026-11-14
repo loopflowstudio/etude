@@ -600,7 +600,7 @@ def continue_run(
             for parent in parents
         ]
     if first.cohort != run:
-        ids = [scheduler.queue(again[0], first.pool, rent=first.rent)]
+        ids = [scheduler.queue(again[0], first.launch.pool, rent=first.launch.rent)]
     elif cohort is None:
         raise LauncherError("continuing a cohort needs --cohort with the new cohort's name")
     else:
@@ -609,8 +609,8 @@ def continue_run(
             scheduler.queue_cohort(
                 cohort,
                 again,
-                first.pool,
-                rent=first.rent,
+                first.launch.pool,
+                rent=first.launch.rent,
                 parallel=old.parallel,
                 max_usd=Decimal(max_usd) if max_usd else old.max_usd,
             )

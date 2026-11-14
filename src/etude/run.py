@@ -44,8 +44,8 @@ from etude.records import (
     Continuation,
     Record,
     RunCounters,
+    RunOutcome,
     RunRecord,
-    RunState,
 )
 from etude.storage import DirectoryStorage, Storage, run_directory, run_prefix, storage_from_uri
 
@@ -86,7 +86,7 @@ class Run:
     ) -> None:
         DirectoryStorage(self.files.root).put(
             "outcome.json",
-            RunState(state=state, counters=counters, writer=writer).model_dump_json().encode(),
+            RunOutcome(state=state, counters=counters, writer=writer).model_dump_json().encode(),
         )
 
 

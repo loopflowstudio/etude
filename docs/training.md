@@ -586,7 +586,7 @@ directory that happens to exist.
 etude run train.py --config '{"lr": 0.001}' --seed 7 --name wide --until updates=2000
 etude run train.py --seconds 600        # stop after ten minutes: saved, exit 75
 etude run train.py --config '{"lr": 0.001}' --resume wide-seed-7
-etude run train.py --json               # {"run": "train-seed-0", "experiment": "train", "state": "finished"}
+etude run train.py --json               # {"run": "train-seed-0", "experiment": "train", "outcome": "finished"}
 etude smoke job.py                      # the smoke config, here, spending nothing
 ```
 
@@ -594,7 +594,7 @@ etude smoke job.py                      # the smoke config, here, spending nothi
   config's defaults, changed by `--config`, a JSON object checked against the
   config type. It needs no provider key and no network. It exits 0 when the
   run finished, 75 when it stopped with its state saved, and otherwise
-  nonzero. With `--json` the last line of output is one object whose `state`
+  nonzero. With `--json` the last line of output is one object whose `outcome`
   is `finished` or `stopped`, and anything `train` prints goes to standard
   error; a failed run prints no object.
 - **Ctrl-C asks the run to stop**, as `--seconds` and a `kill` (SIGTERM) do:
@@ -631,7 +631,8 @@ A run's hours, dollars and attempts span every attempt, whoever asked for it
 not count on one clock uses them directly:
 
 ```python
-from etude.train.tracking import Stopped, track
+from etude.stopping import Stopped
+from etude.train.tracking import track
 
 
 def train(config: SearchConfig) -> None:
