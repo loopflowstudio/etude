@@ -343,9 +343,11 @@ def runs(python: str) -> Job:
     record = scheduler.record(parent)
     config = continued_config(record, '{"rate":0.25}')
     assert json.loads(config.model_dump_json()) == {"updates": 2, "rate": 0.25}
-    with pytest.raises(LauncherError, match="unknown continuation config fields"):
+    with pytest.raises(LauncherError, match="unknown config fields: typo"):
         continued_config(record, '{"typo":4}')
-    with pytest.raises(LauncherError, match="invalid continuation config"):
+    with pytest.raises(
+        LauncherError, match="invalid config:\nupdates: Input should be a valid integer"
+    ):
         continued_config(record, '{"updates":"no"}')
     for changes in ("[]", '{"updates":', "", "rate=0.25"):
         with pytest.raises(LauncherError, match="expected a JSON object"):

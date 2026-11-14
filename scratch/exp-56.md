@@ -74,39 +74,26 @@ at submission, before match/input planning. `evaluating` opens the live run;
 seats in authored jobs use the existing planner's lines and selected inputs;
 the low-level opener retains explicit `lines=` (demo detail in questions.md).
 
-Initial run/record/scope acceptance and the first three review corrections
-are built. Exact focused check receipts and earlier API corrections remain at
-`6f70baa:scratch/exp-56.md`; they do not replace gate's full acceptance.
+Reviews one through six and compress are built. Their exact directions and
+focused receipts are retained at `297abf7:scratch/exp-56.md`; full acceptance
+remains gate's. Sixth-review changes give checkpoints a default source and
+empty-selection remedy, qualify continue ids, explain missing launcher runs,
+and name the current evaluation calls. No schema, query or provider-count
+change. PR #103 stays draft.
 
-Fourth-review corrections (refusal remedies, local-versus-launched docs, stored
-layout) are built; receipt at `416847a:scratch/exp-56.md`. Local
-listing/branching, direct calls and id/name choices remain in `questions.md`.
+Seventh-review corrections are built: evaluation(checkpoint=) accepts a
+CheckpointRecord and delivers its members while preserving its key; released
+single-file Input still works. Local run/new/resume and continue share JSON
+change validation; omitted resume config still reads the stored model.
+Finished-run refusals include actual clock positions. README and training,
+launcher and evaluation docs match. No schema, SQL or new remote reads.
 
-Fifth-review corrections and their 200-test receipt are retained at
-`06ff0f6:scratch/exp-56.md`. Checkpoint paths, collection configs and Hanabi
-folder/seed corrections are built; no schema or query changes.
-
-Sixth-review corrections are built: checkpoints defaults to default_root()
-and explains empty selections; missing launcher runs name local read/retry
-remedies; continue help qualifies bare ids; evaluation docs name current calls.
-No schema, query, stored-format or provider-count change. Gate owns full
-acceptance; PR #103 stays draft.
-
-Compress reworded the missing-run refusal ("the launcher has no run ...")
-and cut the new tests to one case per behavior; docs unchanged by it.
-Check: `uv run pytest tests/train/test_cli.py tests/launch/test_cli.py` —
-28 passed; ruff check and format --check pass; mypy passes on the 4 files.
-Maintainer review: one default and refusal wording only; existing listings,
-queries, reads and exit statuses retained. The refusal lives in
-`launch.database.Database.run`, so `status`, `cancel` and `logs` given an
-unknown id show the same remedy. Rechecked at `b2c0e17`: same 28 passed,
-ruff/format/mypy clean.
-
-Seventh-review corrections are the next implement direction (design,
-Corrections from the seventh concept review): `evaluation(checkpoint=)`
-takes a `CheckpointRecord` like `start=`, with the three docs; one JSON
-config validator for `etude run` and `etude continue`; the finished-run
-refusal says where the run stands. No launcher schema change.
+Compress: `_resumed` computes the reached positions once; `_hold` and
+`evaluation` share `_BENCHMARK_CHECKPOINT`; the test `play` reads weights
+through one helper. Check: `uv run pytest tests/test_jobs.py
+tests/train/test_local.py tests/test_continuation_out.py` — 61 passed; mypy
+clean on jobs/local/call and tests/test_jobs.py; ruff check, format and
+`git diff --check` pass. Gate owns full acceptance. PR #103 remains draft.
 
 Hanabi command receipt and temporary report location are retained at
 `06ff0f6:scratch/exp-56.md`; durable stop/resume evidence is in demo.md.

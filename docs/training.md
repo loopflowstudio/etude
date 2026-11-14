@@ -606,8 +606,10 @@ etude smoke job.py                      # the smoke config, here, spending nothi
 
 - **`etude run FILE`** calls the file's `train` on this computer with its
   config's defaults, changed by `--config`, a JSON object checked against the
-  config type. It needs no provider key and no network. It exits 0 when the
-  run finished, 75 when it stopped with its state saved, and otherwise
+  config type. Unknown top-level fields are refused by name unless your model
+  allows extras. Validation problems print one line per field, such as
+  `lr: Input should be greater than 0`. It needs no provider key and no network.
+  It exits 0 when the run finished, 75 when it stopped with its state saved, and otherwise
   nonzero. With `--json` the last line of output is one object whose `outcome`
   is `finished` or `stopped`, and anything `train` prints goes to standard
   error; a failed run prints no object.
@@ -628,7 +630,8 @@ etude smoke job.py                      # the smoke config, here, spending nothi
   also works on a finished run, which becomes unfinished again until it
   reaches the new target. Its rows, checkpoints and id go on as one run.
 - **What `--resume` refuses**: a config or seed that no longer matches, and a
-  finished run given no later target, which has nothing left to do. A refused
+  finished run given no later target, which has nothing left to do. The refusal
+  says where it finished, such as `finished at updates=200`. A refused
   or interrupted attempt changes nothing already recorded: a finished run
   stays finished.
 - **A taken id is refused** before `train` is called, and under a launch

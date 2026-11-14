@@ -89,7 +89,10 @@ def test_local_stop_resume_and_finished_refusals_preserve_one_run(
     assert main(args) == 1
     assert "run_name_taken" in capsys.readouterr().err
     assert main(["run", str(file), "--resume", "train-seed-7"]) == 1
-    assert "run_already_finished" in capsys.readouterr().err
+    assert "finished at updates=4" in capsys.readouterr().err
+    for target in ("updates=3", "updates=4"):
+        assert main(["run", str(file), "--resume", "train-seed-7", "--until", target]) == 1
+        assert "finished at updates=4" in capsys.readouterr().err
     assert main(["run", str(file), "--resume", "train-seed-7", "--config", '{"lr":0.2}']) == 1
     assert "lr was 0.1, is 0.2" in capsys.readouterr().err
     assert main(["run", str(file), "--resume", "train-seed-7", "--seed", "8"]) == 1
@@ -99,6 +102,65 @@ def test_local_stop_resume_and_finished_refusals_preserve_one_run(
     assert main(["run", str(file), "--resume", "train-seed-7", "--until", "updates=6"]) == 0
     extended = read(DirectoryStorage(base), "train", "train-seed-7")
     assert extended.points("games", "updates").y.tolist() == [3, 6, 9, 12, 15, 18]
+
+
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize(
+    ("changes", "problems"),
+    [
+        ('{"lrr":1,"updatess":2}', ["unknown config fields: lrr, updatess"]),
+        ('{"lr":0,"updates":"no"}', ["lr: Input should be greater than 0", "updates: "]),
+        ("[]", ["expected a JSON object"]),
+        ('{"lr":', ["expected a JSON object"]),
+    ],
+)
+def test_local_config_refusals_name_fields_before_calling_the_recipe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    resume: bool,
+    changes: str,
+    problems: list[str],
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    file = tmp_path / "train.py"
+    file.write_text(
+        RECIPE.replace("import BaseModel", "import BaseModel, Field").replace(
+            "lr: float = 0.1", "lr: float = Field(default=0.1, gt=0)"
+        )
+    )
+    root = tmp_path / "home/track/train/train-seed-0"
+    outcome = None
+    args = ["run", str(file)]
+    if resume:
+        assert main(args) == 75
+        outcome = (root / "outcome.json").read_bytes()
+        args += ["--resume", "train-seed-0"]
+    capsys.readouterr()
+    assert main([*args, "--config", changes]) == 1
+    error = capsys.readouterr().err
+    assert all(problem in error for problem in problems)
+    assert "https://errors.pydantic.dev" not in error
+    if resume:
+        assert (root / "outcome.json").read_bytes() == outcome
+        assert len(read(tmp_path / "home/track", "train", "train-seed-0").writers) == 1
+    else:
+        assert not root.exists()
+
+
+def test_local_config_keeps_explicitly_allowed_extras(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    file = tmp_path / "train.py"
+    file.write_text(
+        RECIPE.replace("class Config(BaseModel):", 'class Config(BaseModel, extra="allow"):')
+    )
+    assert main(["run", str(file), "--config", '{"custom":7}']) == 75
+    assert main(["run", str(file), "--resume", "train-seed-0"]) == 0
+    data = read(tmp_path / "home/track", "train", "train-seed-0")
+    assert data.file is not None and data.file.config_json is not None
+    assert json.loads(data.file.config_json)["custom"] == 7
 
 
 def test_local_resume_resolves_qualified_and_explicit_experiments(

@@ -40,10 +40,10 @@ from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Required, TypedDict, Unpack, cast
 
-from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
+from pydantic import BaseModel, Field, JsonValue, ValidationError
 
 from etude.cache import Content
-from etude.call import Function, config_type
+from etude.call import Function, changed_config, config_type
 from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, checkpoint_key
 from etude.checkpoints import CheckpointRecord, CheckpointRef, checkpoint_id
 from etude.errors import EtudeError, LauncherError
@@ -137,6 +137,10 @@ def training[C: BaseModel](
     return job.model_copy(update={"smoke": SmokeForm(config=_config_text(train, smoke))})
 
 
+# The job input that carries a benchmark's `CheckpointRecord`, before a member's suffix.
+_BENCHMARK_CHECKPOINT = "checkpoint"
+
+
 class Evaluation(Record):
     """An evaluation job's config: what `_hold` holds, with what, on the machine."""
 
@@ -144,8 +148,8 @@ class Evaluation(Record):
     # None in a job an experiment's eval returns: `etude eval` names it for the file.
     experiment: str | None
     play: Function
-    # A benchmark's checkpoint, as the job's input of that name.
-    checkpoint: Input | None = None
+    # A benchmark's checkpoint; released single-file inputs remain readable.
+    checkpoint: CheckpointRecord | Input | None = None
     # Checkpoints an experiment's eval chose to hold the benchmark for.
     checkpoints: tuple[CheckpointRecord, ...] = ()
     # A round robin's entrants.
@@ -165,7 +169,7 @@ def evaluation[C: BaseModel, M: BaseModel | Mapping[str, JsonValue]](
     play: Callable[[Match[M]], Tables | Result],
     config: C | None = None,
     experiment: str | None = None,
-    checkpoint: Input | None = None,
+    checkpoint: CheckpointRecord | Input | None = None,
     checkpoints: Sequence[CheckpointRecord] = (),
     enter: Sequence[Player] = (),
     workers: int = 1,
@@ -177,8 +181,9 @@ def evaluation[C: BaseModel, M: BaseModel | Mapping[str, JsonValue]](
     takes one annotated Pydantic config and returns its tournament without I/O;
     it is called here, before pending-match and checkpoint-input planning.
 
-    A benchmark is held for `checkpoint`, which reaches the machine as the
-    job's input and fills every inference seat; a round robin plays every pair
+    A benchmark is held for a `CheckpointRecord` (or a released single-file
+    `Input`), whose verified members reach the machine as inputs and fill every
+    inference seat; a round robin plays every pair
     of `enter`. Each inference seat's config is in its seating
     (`etude.eval.records.Inference`), so the tournament is the whole of what is
     evaluated. The eval run is the launched run, so `etude logs` and `status`
@@ -214,7 +219,12 @@ def evaluation[C: BaseModel, M: BaseModel | Mapping[str, JsonValue]](
     if experiment is None and (checkpoint is not None or isinstance(tournament, RoundRobin)):
         raise LauncherError(f"name the experiment {tournament.name}'s eval run belongs to")
     if checkpoint is not None:
-        options["inputs"] = (*options.get("inputs", ()), checkpoint)
+        inputs = (
+            checkpoint_inputs_for(checkpoint, _BENCHMARK_CHECKPOINT)
+            if isinstance(checkpoint, CheckpointRecord)
+            else (checkpoint,)
+        )
+        options["inputs"] = (*options.get("inputs", ()), *inputs)
     spec = Evaluation(
         tournament=tournament,
         experiment=experiment,
@@ -527,24 +537,10 @@ def _job_function(job: Job) -> Callable[..., object]:
 def continued_config(parent: RunRecord, changes: str) -> BaseModel:
     """Validate a JSON object of changes against the parent's typed config."""
     kind = config_type(_job_function(parent.launch.spec))
-    values = kind.model_validate_json(parent.launch.spec.config or "{}").model_dump(mode="json")
     try:
-        fields = TypeAdapter(dict[str, JsonValue]).validate_json(changes)
-    except ValidationError:
-        raise LauncherError(
-            'invalid continuation config: expected a JSON object, such as {"rate":0.001}'
-        ) from None
-    unknown = fields.keys() - kind.model_fields.keys()
-    if unknown:
-        raise LauncherError(f"unknown continuation config fields: {', '.join(sorted(unknown))}")
-    try:
-        return kind.model_validate({**values, **fields})
-    except ValidationError as error:
-        problems = "; ".join(
-            f"{'.'.join(str(part) for part in problem['loc'])}: {problem['msg']}"
-            for problem in error.errors()
-        )
-        raise LauncherError(f"invalid continuation config: {problems}") from None
+        return changed_config(kind, changes, stored=parent.launch.spec.config or "{}")
+    except ValueError as error:
+        raise LauncherError(str(error)) from None
 
 
 def _hold(evaluation: Evaluation) -> None:
@@ -558,8 +554,14 @@ def _hold(evaluation: Evaluation) -> None:
     if (evaluation.checkpoint is not None or evaluation.files) and not folder:
         raise SystemExit("etude: an evaluation job's checkpoints arrive as inputs")
     checkpoint = None
-    if evaluation.checkpoint is not None:
-        given = evaluation.checkpoint
+    given = evaluation.checkpoint
+    if isinstance(given, CheckpointRecord):
+        # The record keeps its own key; only its bytes moved, to this input.
+        uri = (Path(str(folder)) / _BENCHMARK_CHECKPOINT).as_uri()
+        checkpoint = given.ref.model_copy(
+            update={"artifact": given.artifact.model_copy(update={"uri": uri})}
+        )
+    elif given is not None:
         # A training run's file is keyed by its run and name; any other, by where it lies.
         key = (
             checkpoint_id(

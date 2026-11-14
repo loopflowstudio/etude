@@ -74,8 +74,10 @@ job holds a tournament ([evaluation](docs/evaluation.md)) for one checkpoint
 the same way, with your `play`:
 
 ```python
+from etude.experiment import observe
 from etude.jobs import evaluation
 
+weights = observe("s3://my-bucket/runs", "ppo").run("ppo-seed-0").final
 evaluation(
     progress, experiment="ppo", play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1)
 )

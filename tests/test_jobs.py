@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 import subprocess
 import sys
 import sysconfig
@@ -12,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from etude.cache import Content
+from etude.checkpoints import CheckpointRecord
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.eval.match import environment
@@ -20,6 +23,7 @@ from etude.eval.records import Benchmark, Code, RoundRobin
 from etude.jobs import JobOptions, evaluation, training
 from etude.launch.job_file import read_job_file
 from etude.launch.smoke import tiny
+from etude.records import ArtifactRef
 from etude.spec import Input, Job, Runtime, SmokeForm, Until, job_id
 from etude.train.read import read
 from tests.experiments import authored
@@ -56,16 +60,24 @@ def runs(python: str) -> Job:
 """
 
 PLAY = """
+import json
+from pathlib import Path
+
 from etude.eval.match import Tables
 from etude.eval.records import Match, CheckpointPlayer
 
 
+def weights(checkpoint: Path) -> bytes:
+    if checkpoint.is_dir():
+        files = json.loads((checkpoint / "checkpoint.json").read_text())["files"]
+        checkpoint = checkpoint / files["policy"]
+    return checkpoint.read_bytes()
+
+
 def play(match: Match) -> Tables:
-    # A model's checkpoint file is on this machine; the row says how big it is.
+    # A model's checkpoint is on this machine; the row says how big its weights are.
     sizes = [
-        len(seated.checkpoint.path.read_bytes())
-        if isinstance(seated, CheckpointPlayer)
-        else 0
+        len(weights(seated.checkpoint.path)) if isinstance(seated, CheckpointPlayer) else 0
         for seated in match.players
     ]
     return {"plays": [{"game": 0, "seat": seat, "bytes": size} for seat, size in enumerate(sizes)]}
@@ -300,13 +312,14 @@ def test_typed_jobs_take_every_job_field_but_what_they_derive() -> None:
     assert set(JobOptions.__annotations__) == set(Job.model_fields) - derived
 
 
+@pytest.mark.parametrize("form", ["input", "file", "folder"])
 def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
-    tmp_path: Path, job_python: str, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, job_python: str, monkeypatch: pytest.MonkeyPatch, form: str
 ) -> None:
     repo = checkout(
         tmp_path / "arena",
         {
-            "arena_duel.py": """from pydantic import BaseModel
+            f"arena_duel_{form}.py": """from pydantic import BaseModel
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, Code, Inference, Seating
 """
@@ -323,16 +336,45 @@ def arena(config: ArenaConfig) -> Benchmark:
         },
     )
     monkeypatch.syspath_prepend(str(repo))
-    duel = importlib.import_module("arena_duel")
+    duel = importlib.import_module(f"arena_duel_{form}")
     c = cloud(tmp_path)
     weights = b"weights at updates 100\n"
-    c.storage.objects["etude/t/ppo-1/checkpoints/updates-100"] = weights
-    given = Input(
+    key = "etude/t/ppo-1/checkpoints/updates-100"
+    members = (
+        {
+            "checkpoint.json": json.dumps({"files": {"policy": "policy.pt"}}).encode(),
+            "policy.pt": weights,
+        }
+        if form == "folder"
+        else {"": weights}
+    )
+    for name, body in members.items():
+        c.storage.objects[key + ("/" + name if name else "")] = body
+    legacy = Input(
         name="updates-100",
-        key="etude/t/ppo-1/checkpoints/updates-100",
+        key="checkpoints/updates-100",
         sha256=hashlib.sha256(weights).hexdigest(),
         size_bytes=len(weights),
+        run="ppo-1",
     )
+    record = CheckpointRecord(
+        run="ppo-1",
+        ordinal=1,
+        at={"updates": 100},
+        file="checkpoints/updates-100",
+        artifact=ArtifactRef(
+            uri="s3://bucket/" + key,
+            sha256=legacy.sha256,
+            size_bytes=legacy.size_bytes,
+            members={
+                name: Content(sha256=hashlib.sha256(body).hexdigest(), size_bytes=len(body))
+                for name, body in members.items()
+            }
+            if form == "folder"
+            else {},
+        ),
+    )
+    given = legacy if form == "input" else record
     job = evaluation(
         duel.arena,
         config=duel.ArenaConfig(),
@@ -344,12 +386,16 @@ def arena(config: ArenaConfig) -> Benchmark:
         max_attempts=1,
         runtime=Runtime(python=job_python),
     )
+    assert len(job.inputs) == len(members)
+    assert {each.key for each in job.inputs} == {
+        "checkpoints/updates-100" + ("/" + name if name else "") for name in members
+    }
     run = c.scheduler.launch(job, rent="l4")
     (status,) = c.scheduler.wait(run, every=0.05, timeout=60)
     assert status.outcome == "succeeded", job_text(c.scheduler.logs(refresh=True, run=run))
     assert c.provider.creates == 1
-    reads = [k for m, k in c.storage.asked if m == "GET" and k.startswith(given.key)]
-    assert len(reads) == 1  # the checkpoint reached the machine once, as the job's input
+    reads = [k for m, k in c.storage.asked if m == "GET" and k.startswith(key)]
+    assert len(reads) == len(members)  # each member arrives once; playing reads local files
 
     # The eval run is the launched run, delivered to the bucket like any other.
     folder = f"etude/t/{run}/"
@@ -359,6 +405,9 @@ def arena(config: ArenaConfig) -> Benchmark:
             (delivered / run / key.removeprefix(folder)).parent.mkdir(parents=True, exist_ok=True)
             (delivered / run / key.removeprefix(folder)).write_bytes(body)
     db = statsdb("ppo", delivered)
+    assert db.sql("select distinct checkpoint from players where kind = 'model'").fetchall() == [
+        (record.key,)
+    ]
     assert (
         db.sql(
             "select a.name, p.bytes from plays p join seats s using (run, match, seat)"

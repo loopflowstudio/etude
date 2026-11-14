@@ -24,7 +24,7 @@ from typing import cast
 
 from pydantic import BaseModel
 
-from etude.call import config_type
+from etude.call import changed_config, config_type
 from etude.errors import EtudeError
 from etude.identity import run_address
 from etude.run import RunFiles, validate_resume
@@ -67,6 +67,7 @@ def run(
         train = cast(Callable[[BaseModel], object], found)
         label = experiment or file.stem
         base = default_root()
+        stored_config: str | None = None
         if resume is not None:
             if experiment is None:  # EXPERIMENT/RUN names its own experiment
                 label = resume.rpartition("/")[0] or label
@@ -75,11 +76,16 @@ def run(
                 stored = RunFiles(run_directory(base, label, identity)[1]).run_file()
                 if stored is None:
                     raise EtudeError("run_not_found", 404, detail=run_address(resume, label))
-                config = stored.config_json
-        settings = config_type(train).model_validate_json(config if config is not None else "{}")
+                stored_config = stored.config_json
+        kind = config_type(train)
+        settings = (
+            kind.model_validate_json(stored_config)
+            if stored_config is not None
+            else changed_config(kind, config if config is not None else "{}")
+        )
         # Validate the actual JSON that another machine would receive.
         text = settings.model_dump_json(round_trip=True)
-        settings = config_type(train).model_validate_json(text)
+        settings = kind.model_validate_json(text)
         if resume is not None:
             seed, until = _resumed(base, label, identity, config=text, seed=seed, until=until)
         else:
@@ -168,8 +174,15 @@ def _resumed(
             *(item.at for item in saved_states(root / "out")),
             *(item.at for item in data.checkpoints),
         ]
-        if until is None or until.value <= max(at.get(until.clock, 0) for at in positions):
-            raise EtudeError("run_already_finished", detail="give --until with a later target")
+        reached = {
+            clock.name: max(at.get(clock.name, 0) for at in positions) for clock in prior.clocks
+        }
+        if until is None or until.value <= reached[until.clock]:
+            position = ", ".join(f"{clock}={value:g}" for clock, value in reached.items())
+            raise EtudeError(
+                "run_already_finished",
+                detail=f"finished at {position}; give --until with a later target",
+            )
     return seed, until
 
 

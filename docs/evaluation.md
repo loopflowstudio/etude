@@ -507,20 +507,15 @@ def arena(config: ArenaConfig) -> Benchmark:
 # eval.py
 from decimal import Decimal
 
+from etude.experiment import observe
 from etude.jobs import evaluation
-from etude.spec import Input, Job
+from etude.spec import Job
 
 from arena import ArenaConfig, arena, play  # arena(config) -> Benchmark; play(match) -> Tables
 
 
-def runs(checkpoint: str, sha256: str, size_bytes: int) -> Job:
-    weights = Input(
-        name=checkpoint,
-        key=f"etude/launch/ppo/ppo-1/out/checkpoints/{checkpoint}",  # PREFIX/EXPERIMENT/RUN/out/checkpoints/NAME
-        sha256=sha256,
-        size_bytes=size_bytes,
-        run="ppo-1",  # the checkpoint's key: its run, and the file's name
-    )
+def runs() -> Job:
+    weights = observe("s3://my-bucket/runs", "ppo").run("ppo-seed-0").final
     return evaluation(
         arena,
         config=ArenaConfig(),
@@ -534,7 +529,7 @@ def runs(checkpoint: str, sha256: str, size_bytes: int) -> Job:
 ```
 
 ```sh
-etude launch eval.py --rent cpu8 --checkpoint updates-00000500 --sha256 … --size-bytes 1048576
+etude launch eval.py --rent cpu8
 ```
 
 Write `arena(config: ArenaConfig) -> Benchmark | RoundRobin` as a pure
@@ -545,9 +540,10 @@ the tournament before choosing pending matches and checkpoint inputs. A
 ready-made tournament also works as `evaluation(progress, play=play, ...)`.
 
 On the machine Etude opens `evaluating(tournament)` and calls `run.play(play)`,
-with `play` imported by name from your checkout and the checkpoint as a job input,
-verified by digest. The input's run and file name are the checkpoint's key,
-and its folder or file is each player's `checkpoint.path`, which `play` opens. A
+with `play` imported by name from your checkout and every checkpoint member
+delivered as an input verified by digest. The record keeps its checkpoint key,
+and its delivered folder or file is each player's `checkpoint.path`, which `play`
+opens. A single-file `Input` is also accepted. A
 round robin takes `enter=` players instead. The eval run is the launched run, so its tables reach the
 machine's storage with the run's other files and `statsdb` finds them there.
 Holding nothing new (batch) is refused: a launched job reads no other eval

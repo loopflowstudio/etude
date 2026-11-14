@@ -328,87 +328,32 @@ by a person; headless checks prepare it without inventing reactions.
 
 ## Built review corrections (2026-11-13)
 
-The first three review passes are built: declaration-only `RunRecord` with
-optional `RunSubmission`; one run name; `RunOutcome` and `RunData.outcome`;
-`Stopped` from `etude.stopping`; local exit 75 followed by explicit resume;
-`--name` names the job; qualified local resume and actionable refusal hints;
-launched-only continuation with required `--run` and `--until`. Historical
-outcome files and warning aliases until 0.5 remain readable.
+Reviews one through six are built; exact directions and deletion lists remain
+at `297abf7:scratch/design-train-api.md`. They preserve historical outcomes,
+records and warning aliases until 0.5. The accepted surface is the current
+user docs; gate owns full acceptance. No extra schema, query or provider-count
+change belongs to these corrections.
 
-Detailed direction, evidence and deletion lists are retained at
-`6f70baa:scratch/design-train-api.md` (first through third concept reviews).
-No schema, query or provider-count changes in those corrections.
+## Corrections from the seventh concept review (2026-11-13): built
 
-## Fourth concept review (2026-11-13): built
+Walked at `c8310bc` in a fresh ETUDE_HOME; evidence is in `questions.md`
+(Seventh concept review), the full direction at
+`297abf7:scratch/design-train-api.md`.
 
-Refusal remedy for a direct `train` call, local-versus-launched reader words
-and the stored layout's checkpoint records and qualified id. Full text at
-`cb0e1fd:scratch/design-train-api.md`.
-
-## Fifth concept review (2026-11-13): built
-
-Full evidence and direction: `06ff0f6:scratch/design-train-api.md` (fifth
-concept review). Built: CheckpointRef owns path decoding, playing consumers
-use checkpoint.path, Seating/RoundRobin expose configs while preserving
-historical conditions JSON and released warning aliases, Hanabi uses Deal.deal
-and default_root(). Delete the duplicate decoder, hand parses and unreleased
-singular collection config keyword. Keys, seeds and stored bytes stay stable;
-the configs spelling remains a worker choice to show at demo.
-
-## Sixth concept review (2026-11-13): built
-
-`etude checkpoints` defaults to where runs are written here; a missing
-launcher run names the local remedies; evaluation docs name the current
-calls. "Hold" stays as prose (assumption, `questions.md`). Full text at
-`c8310bc:scratch/design-train-api.md`.
-
-## Corrections from the seventh concept review (2026-11-13): to build
-
-Walked at `c8310bc` in a fresh ETUDE_HOME: new, `--seconds` stop (exit 75),
-resume, finished-run and taken-name refusals, a mistyped `--until` clock
-(refused, nothing left on disk), a `train` that raised and was resumed after
-the fix. All as documented. Evidence for the three below is in
-`questions.md` (Seventh concept review).
-
-1. **A one-checkpoint evaluation job cannot be given the checkpoint the
-   taught loop writes.** `run.checkpoint(policy=model)` writes a folder.
-   `training(start=)` and `evaluation(checkpoints=)` take its
-   `CheckpointRecord` and deliver each member verified. `evaluation(
-   checkpoint=)` alone takes a hand-built `Input`: one key, one SHA256, one
-   length. README, `docs/launcher.md` (Typed jobs) and `docs/evaluation.md`
-   (eval.py) teach typing `updates-00000500` with `--sha256 … --size-bytes`
-   for it, which names a folder. Pointing the `Input` at `policy.pt` inside
-   would hand `play` a file where `checkpoint.path` is documented as the
-   folder, under a key that is not the checkpoint's. Build:
-   `evaluation(..., checkpoint=)` accepts a `CheckpointRecord`, expanded by
-   the same `checkpoint_inputs_for` as `start=`; on the machine the player's
+1. `evaluation(checkpoint=)` accepts a `CheckpointRecord`, expanded by the
+   same `checkpoint_inputs_for` as `start=`. On the machine the player's
    checkpoint keeps the record's own key and its `path` is the delivered
-   folder or file. The three docs get the record the way Starting from
-   another run does (`observe(SOURCE, "ppo").run("ppo-seed-0").final`), with
-   no digest or length typed by a person. A released `Input` is still
-   accepted for a single file, unchanged and unwarned. Eval rows for the
-   same checkpoint must carry the same key whichever way it was given.
-   Counting test: the job's inputs are exactly the record's members; no
-   read is added on the machine. No launcher schema change (the spec is
-   JSON text).
-2. **`etude run --config` drops a field the config does not have.**
-   `--config '{"lrr":1}'` starts a run with the default `lr`, stores the
-   default config and exits 0; `etude continue --config` refuses the same
-   mistake (`unknown continuation config fields`). The training page calls
-   `--config` "checked against the config type". Build: one function owns
-   "JSON changes over a config type" for `etude run` (new and `--resume`)
-   and `etude continue`: unknown top-level fields are refused by name unless
-   the author's model allows extras, and problems print as one line per
-   field (`lr: Input should be greater than 0`), not Pydantic's block with
-   its URL. Stored configs are read as before; this checks only what a
-   person typed.
-3. **`run_already_finished: give --until with a later target` is the answer
-   to a `--until` that was given** but is not past where the run stands. Say
-   where it stands (`finished at updates=200`). Text only.
-
-Delete — do not maintain: the hand-built folder `Input` and
-`--checkpoint/--sha256/--size-bytes` spellings in the three docs; the second
-JSON-config validator and its separate wording.
+   folder or file, so eval rows carry the same key whichever way it was
+   given. A released single-file `Input` is still accepted, unwarned. Docs
+   read the record with `observe(SOURCE, "ppo").run("ppo-seed-0").final`.
+   The job's inputs are exactly the record's members; no launcher schema
+   change.
+2. `etude.call.changed_config` owns "JSON changes over a config type" for
+   `etude run` (new and `--resume`) and `etude continue`: unknown top-level
+   fields are refused by name unless the model allows extras; problems
+   print one line per field. Stored configs are read as before.
+3. A finished run's refusal says where it stands (`finished at
+   updates=200`).
 
 ## Manabot (MTG-329)
 

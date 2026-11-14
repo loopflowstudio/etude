@@ -211,16 +211,11 @@ temporary keys are kept in the courier's memory and never written to disk.
 ```python
 from decimal import Decimal
 
+from etude.experiment import observe
 from etude.jobs import evaluation, training
-from etude.spec import Input
 
 job = training(train, config=TrainConfig(lr=1e-3), max_hours=6, max_usd=Decimal(30))
-weights = Input(
-    name="updates-00000500",
-    key="etude/launch/EXPERIMENT/RUN/out/checkpoints/updates-00000500",
-    sha256="…",
-    size_bytes=1048576,
-)
+weights = observe("s3://my-bucket/runs", "ppo").run("ppo-seed-0").final
 check = evaluation(
     progress, experiment="ppo", play=play, checkpoint=weights, max_hours=0.5, max_usd=Decimal(1)
 )
@@ -258,10 +253,12 @@ imports nothing else of Etude before the function's own module.
   import its module. When it imports training libraries at its top, launch
   from the project's environment: `uv run etude launch job.py`.
 - **An evaluation** holds a [tournament](evaluation.md#tournaments) as one eval
-  run, which is the launched run. A benchmark's `checkpoint` is an `Input`: it
-  reaches the machine verified by digest and fills every inference seat, where
+  run, which is the launched run. A benchmark's `checkpoint` is a
+  `CheckpointRecord`, read from its training run as above. Each member reaches
+  the machine verified by digest; the checkpoint fills every inference seat, where
   `play` finds the folder or file at the player's `checkpoint.path`. A round robin
-  takes `enter=` players. Holding nothing new (batch) is refused, since a launched job reads no
+  takes `enter=` players. A single-file `Input` is also accepted.
+  Holding nothing new (batch) is refused, since a launched job reads no
   other eval run. `workers=` plays matches in parallel processes. The job's
   environment needs `etude-sdk[eval]`.
 - **Commands are for work that is not Python**:
@@ -1259,9 +1256,10 @@ job = training(
 )
 ```
 
-An evaluation job's `checkpoint` is an input like this one. So is a training
-job's `start=`, another run's checkpoint read as `run.input("start")`: a
-checkpoint folder arrives whole, verified against the digest in its record,
+An evaluation job's `checkpoint=` and a training job's `start=` accept another
+run's `CheckpointRecord` (see [Typed jobs](#typed-jobs)). The latter is read
+as `run.input("start")`: a checkpoint folder arrives whole, each member verified
+against its digest in the record,
 and the run records the checkpoint it started from
 ([Training](training.md#starting-from-another-run)).
 
@@ -1398,8 +1396,10 @@ run, and its config stays unchanged. In Python,
 
 To change other recipe settings too, a typed job accepts `--config
 '{"rate":0.001}'`, a JSON object validated against the job's config type before
-anything is queued. Only those config fields change. Python callers pass their
-complete validated model with `continue_from(..., config=changed_config)`.
+anything is queued. Unknown top-level fields are refused by name unless the
+author's model allows extras; validation problems print one line per field.
+Only those config fields change. Python callers pass their
+complete validated model with `continue_from(..., config=changed)`.
 The launch target stays separate from config fields and takes precedence for
 its clock; Etude does not infer a config field from a clock name.
 

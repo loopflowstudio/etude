@@ -82,26 +82,12 @@ launch; train and eval do not import each other. Public warning aliases end
 in 0.5. Unlabelled command jobs retain flat addresses; historical flat run
 folders remain selected only by a matching declaration.
 
-## Eval consistency history
+## Earlier review history
 
-Jack Heart: "probably worth looking at whether there are any changes to the
-eval API we want to make to make it match the changes to the training API. We
-don't need to do a full redo here but we should try to make it consistent
-where there's no reason not to"; "Can we get the best of both worlds where we
-make it match training but we also make it easy to use our Matchup APIs?".
-
-The earlier author-owned execution sketch and the pre-launch input-planning
-counterexample are retained at `416847a:scratch/questions.md` (Eval API and
-planning boundary). The later pure tournament reply below supersedes that
-sketch: submission must see the tournament before planning inputs, since the
-worker has upload-only grants and cannot fetch arbitrary checkpoints.
-
-## Earlier review evidence
-
-The local branching/listing, direct-call and id/name probes and prior module
-naming choices are retained at `416847a:scratch/questions.md` (concept reviews
-one through four). Those observations remain true; the decisions below choose
-what to ship rather than adding more local-launcher integration in this cut.
+Eval consistency requests, the superseded author-owned execution sketch and
+review-one-through-four probes remain at `297abf7:scratch/questions.md`.
+The pure tournament boundary below supersedes that sketch; local branching,
+listing and direct-call choices remain as recorded under Decisions through demo.
 
 ## RunAttempt and writers (2026-11-13)
 
@@ -195,18 +181,10 @@ Choices made here:
 - Keep opener `evaluating`, five-minute default saves (or every= steps), and
   coin as the smallest introductory example. Hanabi is the optional demo.
 
-Match config is built end to end: Match[AuthorModel], generic Seating and
-RoundRobin, configs collection keyword and callback validation in each worker. Python
-models survive author construction; records keep JSON under the released
-`conditions` spelling and match keys/seeds remain equal. Old keyword/property
-warn until 0.5. statsdb exposes matches.config; its unreleased schema cut stays
-14 over released 13, with no new query shape or I/O. `typing-extensions` provides
-Python 3.12's generic default support; it was already required by Pydantic.
-
-A single-file example exposed an existing refusal: runpy-loaded top-level play
-was treated as unimportable. The job builder now names that function from the
-file's real path; nested functions remain unimportable. Its old exclusive
-refusal test is replaced by the import-path result test.
+Typed match config and CLI-file imports are built. The detailed cut and
+controlled receipts remain at `297abf7:scratch/questions.md`. Historical
+conditions JSON and match keys/seeds survive; warning aliases end in 0.5.
+statsdb remains schema 14 over released 13, with no new I/O or query shape.
 
 Outside evidence: OpenSpiel 2.0.2's CPython 3.12 bindings installed and imported
 on macOS arm64 and Linux amd64 (uv's Python 3.12 Debian container). PyPI wheel
