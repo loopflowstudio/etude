@@ -71,9 +71,13 @@ _LEDGER = """CREATE TABLE migrations(
 
 
 class Predecessor(Record):
-    """A pre-ledger schema, its released file names and the etude that reads it."""
+    """A pre-ledger schema, the etude that reads it and the files a take-over may copy.
 
-    files: tuple[str, ...] = ()
+    `files` maps each released name to its own reader: 0.3.1 wrote schema 17 to
+    `launcher.db`, 0.3.2 to `launcher-17.db`.
+    """
+
+    files: dict[str, str] = {}
     migrations: tuple[str, ...] = ()
     etude: str
 
@@ -81,12 +85,14 @@ class Predecessor(Record):
 # Newest first: selection, ledger seeding and older-file notices share these facts.
 _PREDECESSORS = {
     19: Predecessor(
-        files=("launcher-19.db",),
+        files={"launcher-19.db": "0.4.0"},
         migrations=("baseline", "run_resume_and_writers"),
         etude="0.4.0",
     ),
     17: Predecessor(
-        files=("launcher-17.db", "launcher.db"), migrations=("baseline",), etude="0.3.2"
+        files={"launcher-17.db": "0.3.2", "launcher.db": "0.3.1"},
+        migrations=("baseline",),
+        etude="0.3.2",
     ),
     15: Predecessor(etude="0.3.0"),
     14: Predecessor(etude="0.2.16"),
@@ -1544,7 +1550,8 @@ def _older_files(home: Path, source: Path | None) -> str:
         finally:
             reader.close()
         matching = _PREDECESSORS.get(schema)
-        suffix = f", use etude {matching.etude} for it" if matching else ""
+        reader_etude = matching.files.get(path.name, matching.etude) if matching else None
+        suffix = f", use etude {reader_etude} for it" if reader_etude else ""
         messages.append(f"{path.name} (schema {schema}) is not read{suffix}")
     return "; ".join(messages)
 

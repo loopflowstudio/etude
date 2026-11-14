@@ -120,6 +120,7 @@ def test_takes_over_newest_and_names_others_once(
     _released(tmp_path, "0.4.0")
     with sqlite3.connect(tmp_path / "launcher-19.db") as db:
         db.execute("INSERT INTO settings(name,value) VALUES ('marker','newest')")
+    _released(tmp_path, "0.3.2", "launcher.db")
     os.utime(tmp_path / "launcher-19.db", (0, 0))
     store = open_home(tmp_path)
     assert (
@@ -128,7 +129,9 @@ def test_takes_over_newest_and_names_others_once(
     )
     store.close()
     said = capsys.readouterr().err
-    assert "took over launcher-19.db" in said and "launcher-17.db (schema 17) is not read" in said
+    assert "took over launcher-19.db" in said
+    assert "launcher-17.db (schema 17) is not read, use etude 0.3.2 for it" in said
+    assert "launcher.db (schema 17) is not read, use etude 0.3.1 for it" in said
     open_home(tmp_path).close()
     assert capsys.readouterr().err == ""
 
