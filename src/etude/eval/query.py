@@ -8,7 +8,7 @@ beside Etude's own tables:
 |---|---|
 | `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament, state (`finished` or `failed` from its `outcome.json`; null while it has not ended, so its results are partial) |
 | `players` | player (its key, encoded), name (the latest its seats give), names (every one, the latest first), kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, seated_at, lines, and `config.KEY` per scalar config key |
-| `matches` | run, match, config, games, seed, state, error, wall_ms, execution (result provenance), newest (of the match's done records in its environment, 1 for the latest recorded, the one that counts; null for a failure) |
+| `matches` | run, match, config, games, seed, state, retry, error, wall_ms, execution (result provenance), newest (of the match's done records in its environment, 1 for the latest recorded, the one that counts; null for a failure) |
 | `seats` | run, match, seat, player, name (what the record calls it), the version that played: commit, source (digest), at (where its checkpoint stood, or null) and line (the learner it belongs to, or null) |
 | `groups` | run, match, group, seat |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
@@ -133,7 +133,7 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 14
+SCHEMA = 15
 
 # How a match's records order, newest first: by when each was recorded, then by run name.
 # `matches.newest` ranks done records so; `etude.eval.tournament.played` orders runs alike.
@@ -242,9 +242,12 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     db.execute("create table blobs (run VARCHAR, match VARCHAR, sha256 VARCHAR, size_bytes BIGINT)")
     db.execute(
         "create table matches (run VARCHAR, match VARCHAR, config JSON, games BIGINT,"
-        " seed BIGINT, state VARCHAR, error VARCHAR, wall_ms BIGINT, execution JSON,"
+        " seed BIGINT, state VARCHAR, retry BOOLEAN, error VARCHAR, wall_ms BIGINT, execution JSON,"
         " newest BIGINT)"
     )
+    # DuckDB keeps deleted unique keys until commit; reconciliation deletes and
+    # inserts in one transaction.
+    db.execute("create index matches_identity on matches(run, match)")
     db.execute(
         "create table seats (run VARCHAR, match VARCHAR, seat BIGINT, player VARCHAR,"
         ' name VARCHAR, commit VARCHAR, source VARCHAR, "at" JSON, line VARCHAR)'
@@ -505,24 +508,25 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
     """Hold the block's standing record of each match (`outcomes`), unless one held is done.
 
     So across the run's blocks, in the order they are read, a done record
-    replaces a failure and the first done one stays, as `outcomes` keeps them.
+    replaces a failure and the first done one stays; newer failures update the retry decision.
     """
     records = list(outcomes(block.matches).values())
     stage(
         db,
         "_arrived_matches",
         {"record": "BIGINT", "match": "VARCHAR", "config": "VARCHAR", "games": "BIGINT",
-         "seed": "BIGINT", "state": "VARCHAR", "error": "VARCHAR", "wall_ms": "BIGINT",
+         "seed": "BIGINT", "state": "VARCHAR", "retry": "BOOLEAN", "error": "VARCHAR", "wall_ms": "BIGINT",
          "execution": "VARCHAR"},
         [[index, record.match.key, json.dumps(as_config(record.match.config)), record.match.games,
-          record.match.seed, record.state, record.error, record.wall_ms,
+          record.match.seed, record.state, record.retry, record.error, record.wall_ms,
           json.dumps(record.execution)]
          for index, record in enumerate(records)],
     )  # fmt: skip
     db.execute(
         "create or replace temp table _taken as select a.* from _arrived_matches a"
         " left join matches m on m.run = ? and m.match = a.match"
-        " where m.match is null or (m.state <> 'done' and a.state = 'done')",
+        " where m.match is null or (m.state <> 'done' and a.state = 'done')"
+        " or (m.state = 'failed' and a.state = 'failed' and a.wall_ms > m.wall_ms)",
         [run],
     )
     for table in ("matches", "seats", '"groups"', "blobs"):
@@ -531,7 +535,7 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
         )
     # `newest` is ranked once everything has arrived (`_summaries`).
     db.execute(
-        "insert into matches select ?, match, config, games, seed, state, error, wall_ms,"
+        "insert into matches select ?, match, config, games, seed, state, retry, error, wall_ms,"
         " execution, null from _taken order by record",
         [run],
     )

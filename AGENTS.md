@@ -232,7 +232,10 @@ another machine comes with a counting test.
 
 Experiment declarations import `TrainingJob`, `EvalJob` and `ExperimentState`
 from `etude.jobs`, where they are defined. `etude.experiment` reads state; the
-worker startup path must not import either module.
+worker startup path must not import either module. Resolve an authored callable's
+source through `inspect.unwrap` before locating its file: a `contextmanager`
+decorator is implemented in `contextlib`, while its wrapped `serve` belongs
+to the experiment module.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any

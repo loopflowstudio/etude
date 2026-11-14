@@ -451,10 +451,10 @@ with evaluating(
   not refused: where a later revision of an experiment file defines a
   tournament otherwise than its eval runs were held with, `etude report`
   draws what they recorded and says so.
-- **Run names.** Under `etude launch` the eval run is the launched run
-  (`ETUDE_RUN`), so `etude logs` and `status` lead to it and a retry resumes
-  it, finding the same checkpoint (by its key) wherever the retry put it.
-  Elsewhere it is named for the tournament and what is given.
+- **Run names.** An eval run is named for the tournament and what is given,
+  or, played by an [evaluation job](#evaluation-jobs), for the tournament and
+  its matches, so a retry reopens and resumes it, finding the same checkpoint
+  (by its key) wherever the retry put it.
 - **Splitting.** `share=Share(index=k, count=n)` plays part k (from 0) of
   n disjoint parts, for n machines: contiguous runs of the scheduled matches
   in play order, so parts differ by at most one match and each seats only
@@ -536,13 +536,167 @@ On the machine Etude opens `evaluating(tournament)` and calls `run.play(play)`,
 with `play` imported by name from your checkout and every checkpoint member
 delivered as an input verified by digest. The record keeps its checkpoint key,
 and its delivered folder or file is each player's `checkpoint.path`, which `play`
-opens. A single-file `Input` is also accepted. The eval run is the launched
-run, so its tables reach the
-machine's storage with the run's other files and `statsdb` finds them there.
-A launched eval run reads no other eval run: the pass that launched it decided
-which matches are new and gave it exactly those ([Experiments](#experiments)).
-The job's environment needs `etude-sdk[eval]`; the rest is as for any
-[typed job](launcher.md#typed-jobs).
+opens. A single-file `Input` is also accepted. The job's environment needs
+`etude-sdk[eval]`; the rest is as for any [typed job](launcher.md#typed-jobs).
+
+Compatible eval jobs naming the same server, or no server, share a launched
+run ([Experiments](#experiments)). Its tournaments play concurrently on one
+pool, bounded by the largest declared `workers` and each member's own limit.
+Each writes its own eval run below the launched run's folder
+(`capacity/evals-1a2b3c4d5e6f/capacity/ladder-3c4d5e6f7a8b/`). Their tables
+reach the machine's storage with the run's other files and `statsdb` finds
+them there, by tournament and match as before. A launched run reads no other
+eval run: the pass that launched it decided which matches are new and gave it
+exactly those.
+
+### Inference servers
+
+```python
+# arena.py
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+from pydantic import BaseModel
+
+from etude.jobs import InferenceServer
+from arena_game import Endpoint
+
+
+class ServeConfig(BaseModel):
+    max_batch: int = 64
+    device: str = "cuda"
+
+
+@contextmanager
+def serve(config: ServeConfig) -> Iterator[Endpoint]:
+    child = start_serving(config)  # your code: the one process that loads weights
+    try:
+        yield Endpoint(address=child.address)  # yours too: how a game reaches it
+    finally:
+        child.stop()
+
+
+net = InferenceServer(name="net", serve=serve, config=ServeConfig(max_batch=64))
+```
+
+```python
+# arena_game.py: importing a game must not import its model-serving code
+from pydantic import BaseModel
+
+from etude.eval.records import Match
+from etude.eval.result import Tables
+
+
+class Endpoint(BaseModel):
+    address: str
+
+
+def play(match: Match, inference: Endpoint) -> Tables:
+    # ask the server for each move, naming each player's checkpoint.path
+    ...
+```
+
+```python
+# capacity.py, the experiment file under Experiments below, its two jobs naming the server
+from arena import net
+from arena_game import play
+
+
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    ...
+    return [
+        EvalJob(
+            play=play, tournament=ladder, checkpoints=rated, server=net, workers=8, max_hours=1
+        ),
+        EvalJob(
+            play=play,
+            tournament=against_small,
+            checkpoints=large,
+            server=net,
+            workers=8,
+            max_hours=1,
+        ),
+    ]
+```
+
+```text
+$ etude eval capacity.py --source s3://bucket/etude/launch
+capacity: state from s3://bucket/etude/launch: 6 training runs, 2 eval runs
+etude: server net: started for ladder, against small
+etude: server net: stopped
+eval ladder: 48 new, 0 running, 0 failed, 48 played
+eval against small: 24 new, 0 running, 0 failed, 24 played
+```
+
+Without a server every game process loads its own weights. An
+`InferenceServer` is one process, started once, that the games of every eval
+job naming it send their moves to: Etude enters `serve(config)` before the
+first game, gives what it yields to every `play(match, inference)`, and
+leaves it after the last game, wherever the games are played: `etude eval`
+here, a smoke, or a launched run on its machine.
+
+Naming a server is optional. An `EvalJob` with no `server` calls
+`play(match)`, which does all the playing itself, as above; one run may hold
+jobs of both kinds.
+
+- **A server is a name, a `serve` function and its config.** `serve` takes
+  one Pydantic config and returns a context manager; like `play`, it is
+  imported by name, so define it at the top of a module. Everything about
+  serving is yours, in `serve` and its config: how requests are batched,
+  which device, how models are loaded and kept. `EvalJob`, the experiment and
+  the launch command have no setting for any of it, and Etude never speaks to
+  the server.
+- **The handle is whatever `serve` yields.** Etude passes it to `play`
+  unread, into each worker process, so it must pickle: an address and a key,
+  not a socket. A handle that does not is refused before the first game,
+  naming the server.
+- **Same machine.** The server runs beside the games it serves, so `play`
+  can name a checkpoint to it by the player's `checkpoint.path`. A server has
+  no setting for where it runs.
+- **Shared by name.** Eval jobs of one run that name the same server share
+  one process. Two different definitions under one name are refused
+  (`inference_server_conflict`): give the other a new name. Define the server
+  in a module so several experiment files can import it.
+- **Zero or one server per job.** One `serve` can host several models and
+  route requests by checkpoint key. Jobs naming different servers run in
+  separate groups; jobs without a server remain supported.
+- **`play` takes what the job names.** `play(match)` with `server=`, or a
+  second parameter without one, is refused where the job is written.
+- **Started only when needed.** A run enters only the servers its new
+  matches' jobs name, each once, and none when there is nothing to play.
+  Each launched run starts its own: a second eval run placed later on the
+  same machine does not reuse the first's.
+- **Stopped whatever happens.** Etude leaves `serve` after the last game,
+  after a failure, and when the run is stopped or cancelled (SIGTERM), so
+  `serve` must stop its process in its `finally`.
+- **Failures.** If `serve` raises before yielding, no game is played. Its unfinished
+  matches are failed with `retry=True`, and the run fails. If the server
+  adapter raises `RetryRequested`, its unfinished matches are failed with
+  `retry=True` and remain eligible for the next pass.
+  A serving context must raise `RetryRequested` when its child exits unexpectedly,
+  including on context exit; Etude does not inspect an opaque handle's protocol.
+  An author can raise `etude.errors.RetryRequested` for other infrastructure
+  refusals. An ordinary exception from `play` is failed with `retry=False`;
+  only `RetryRequested` opts into automatic retry. Rows saying a game was
+  invalid remain rows: the author must raise instead of returning them.
+  Ordinary game errors still fail that match
+  ([Experiments](#experiments)).
+- **Local resources.** `ETUDE_SCRATCH_DIR` and `TMPDIR` point to temporary
+  scratch (`/dev/shm` when available); thread-pool environment variables divide
+  the CPUs allowed by affinity and container quotas among the group's workers.
+  `ETUDE_RECEIPTS_DIR` retains serving receipts below the launched run's
+  `artifacts/inference/`. A serve can host models admitted by `play` at match
+  time: checkpoints are inputs, and need not be known when `serve` starts.
+- **Light game modules.** A game process imports the module defining `play`,
+  rather than the experiment file unless `play` is defined there. Keep play
+  and its address types in a small module, as `arena_game.py` above. Etude
+  records startup import counts and reports once per group if they include
+  `torch`, `jax` or `tensorflow`, or exceed 256 modules. The warning names
+  the importer and the fix; import receipts are retained with the run.
+- **Results do not depend on it.** A match is its seats, config and game
+  count, whoever served it: changing a server's config, or adding or removing
+  the server, plays no delivered match again. Return what served a game in
+  `Result(execution=...)` to keep it with the result.
 
 ## Experiments
 
@@ -636,8 +790,8 @@ capacity: state from s3://bucket/etude/launch: 6 training runs, 2 eval runs
 capacity/small@0  finished
 capacity/large@0  running
 ...
-eval ladder: 48 new, 120 running, 0 failed, running capacity/ladder-1a2b3c4d5e6f
-eval against small: 0 new, 0 running, 0 failed
+eval ladder: 48 new, 120 running, 0 failed, running capacity/evals-1a2b3c4d5e6f
+eval against small: 24 new, 0 running, 0 failed, running capacity/evals-1a2b3c4d5e6f
 ```
 
 The commands divide by who does the work:
@@ -659,12 +813,12 @@ smoke form on this computer first, one game per match against tiny
 checkpoints. `etude launch --smoke` and `etude queue --smoke` do so
 before they spend ([Smoke before you spend](launcher.md#smoke-before-you-spend)).
 
-`etude queue` records eval runs even when the selected pool or on-demand is
-busy. Queued matches stay in flight, so later passes do not submit them again.
-The scheduler starts them when a machine has room, with no later pass: keep
-`etude server run` or `etude wait` running so its loop does. A queued run
-that fails stops a later pass that wants its matches, as a launched one
-does, unless `--retry-failed`.
+`etude queue` records the eval run a pass hands down even when the selected
+pool or on-demand is busy. Queued matches stay in flight, so later passes do
+not submit them again. The scheduler starts them when a machine has room,
+with no later pass: keep `etude server run` or `etude wait` running so its
+loop does. A queued run that fails stops a later pass that wants its
+matches, as a launched one does, unless `--retry-failed`.
 
 - **Where state is read.** `--source` when given. Otherwise where the work is
   delivered: this computer's runs directory for `etude eval`, `etude train`
@@ -707,12 +861,46 @@ does, unless `--retry-failed`.
   for, the seatings it gave for the checkpoints it gave, that no eval run of
   the experiment in its environment delivered. `etude eval` plays them here
   and delivers them to the source. `etude launch` and `etude queue` submit
-  one eval run per tournament to play exactly those, with each checkpoint
-  they seat as an input from its training run's folder.
+  one eval run to play exactly those, with each checkpoint they seat as an
+  input from its training run's folder.
+- **One run for the pass.** The new matches of compatible eval jobs naming the same server go to one
+  machine as one run, `capacity/evals-1a2b3c4d5e6f`, so a pass with a few
+  matches for each of several tournaments rents once, and the jobs share
+  their [inference servers](#inference-servers). Every tournament's line
+  names that run. The run's `max_hours` and `max_usd` are the sums of its
+  jobs', giving the concurrent tournaments a conservative combined allowance.
+  Jobs that
+  could not run together get a run each: those that differ in checkout or
+  revision, `runtime`, `prepare`, `setup`, `cleanup`, environment variables,
+  stop or cleanup allowance, or `max_attempts`.
+- **Waiting for useful machine time.** `etude eval` always plays.
+  `etude launch` and `etude queue` hand a group down when a machine that
+  already exists has room after this pass's training runs, when its estimated
+  work reaches `--min-eval-hours H` (default: 2 hours), or when no training
+  run of the experiment is queued or running.
+
+  The estimate uses this tournament's recorded seconds per game, multiplied
+  by its new games and divided by the available callers. The estimate also
+  respects each tournament's own worker limit and the number of pending matches. All tournaments in a
+  group share one pool with the largest declared `workers`, rather than the
+  sum. With no timing history for any member, there is no estimate and the
+  pass hands it down so a new tournament can establish its pace. This is a
+  work estimate, not a price quote or a guarantee across different hardware.
+
+  Otherwise each tournament says what waits:
+
+  ```text
+  eval ladder: 12 new, 0 running, 0 failed, waiting: 24 eval matches, estimated 0.75 machine hours below --min-eval-hours 2; no machine has room and training is running
+  eval against small: 12 new, 0 running, 0 failed, waiting: 24 eval matches, estimated 0.75 machine hours below --min-eval-hours 2; no machine has room and training is running
+  ```
+
+  Waiting matches are not queued: a later pass finds them new again.
+  `--watch` makes those passes; `--quote` prints the same decision without
+  submitting. `--min-eval-hours 0` admits any amount of work.
 - **Not twice.** A pass decides from two places only: the state, and the
   launcher's own records of the experiment's runs, the ones `etude runs` and
   `etude status` show. A launched eval run is named for its matches
-  (`capacity/ladder-1a2b3c4d5e6f`) and its record carries them, so a later
+  (`capacity/evals-1a2b3c4d5e6f`) and its record carries them, so a later
   pass neither launches it again nor plays its matches while it is queued or
   running. Nothing else remembers a pass: there is no file to lose or repair.
   A pass leaves a failed run's undelivered matches alone, hands down
@@ -720,17 +908,18 @@ does, unless `--retry-failed`.
   stopping with `launched_pass_failed`. A watch ends there; look, then
   `--retry-failed`. What the failed run delivered is kept. `--quote` shows
   the held run and retry flag without failing.
-- **While it runs.** `etude status RUN` gives the matches played, the recent
-  pace and the time left; `etude logs --run RUN` the job's recent output.
-  Sealed blocks reach storage every few minutes, so `etude report` and
+- **While it runs.** `etude status RUN` gives the matches played, over all
+  of the run's tournaments, the recent pace and the time left;
+  `etude logs --run RUN` the job's recent output.
+  Each completed match is sealed and offered to storage immediately, so `etude report` and
   `statsdb` read what a running pass has played and mark it partial (the
   report says so; `statsdb`'s `runs.state` is null until the run ends). A
   killed pass keeps every block it delivered and stays partial.
 - **Failures.** A match that raised, was refused or stored no rows is
   failed, never played: `etude status RUN` counts it (`12/80 matches (1
-  failed)`), its run ends failed, and every later pass counts it (`ladder: 0
-  new, 1 failed`) and does not play it again, so a result is never quietly
-  replaced. `--retry-failed` plays the failed matches again. A match an
+  failed)`), its tournament stops there, and every later pass counts it
+  (`ladder: 0 new, 1 failed`) and does not play it again, so a result is
+  never quietly replaced. The other tournaments keep playing; the run then ends failed. `--retry-failed` plays the failed matches again. A match an
   older run stored as done with no rows counts as failed too, so its games
   are asked for again rather than silently missing.
 - **Without playing.** `etude.eval.tournament.played` answers what a pass

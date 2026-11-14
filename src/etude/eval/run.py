@@ -7,7 +7,6 @@ what play completed. Tournament scheduling lives in eval.tournament.
 
 from __future__ import annotations
 
-import inspect
 import multiprocessing
 import os
 import secrets
@@ -16,21 +15,22 @@ import socket
 import sys
 import threading
 import time
-import typing
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from functools import lru_cache
+from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from types import FrameType
-from typing import TYPE_CHECKING, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Literal, NoReturn
 
 from pydantic import BaseModel, JsonValue
 
-from etude.errors import EtudeError
+from etude.call import Function
+from etude.errors import EtudeError, RetryRequested
 from etude.eval.block import (
     Block,
     Staging,
@@ -40,13 +40,13 @@ from etude.eval.block import (
     seal_abandoned,
     stage,
 )
+from etude.eval.game import Execution, Imports, initialize_game, play_match
 from etude.eval.records import (
     ADDED,
     COLUMN_TYPES,
     IDENTIFIER,
     NO_ROWS,
     ColumnType,
-    Config,
     Environment,
     Match,
     MatchRecord,
@@ -54,8 +54,12 @@ from etude.eval.records import (
     as_config,
     outcomes,
 )
+from etude.eval.result import EvalResult as EvalResult
+from etude.eval.result import Result as Result
+from etude.eval.result import Row
+from etude.eval.result import Tables as Tables
 from etude.eval.schedule import ordered
-from etude.records import Record, RunCounters, RunWriter, Tally
+from etude.records import RunCounters, RunWriter, Tally
 from etude.run import Run, StorageDestination, declare, destinations, report_progress
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage, Storage, run_prefix
@@ -78,25 +82,6 @@ ETUDE_TABLES = (
 # The seat's name before etude-sdk 0.2.7. Refused in rows, so a stored table with
 # a `player` column is an older one (`etude.eval.query` reads it as such).
 OLD_SEAT = "player"
-
-type Value = bool | int | float | str | None
-type Row = Mapping[str, Value]
-type Tables = Mapping[str, Sequence[Row]]
-
-
-@dataclass(frozen=True)
-class Result:
-    """What `play` returns with tables, optional blobs and execution provenance.
-
-    Rows name a blob by its SHA256 (`hashlib.sha256(blob).hexdigest()`);
-    `etude.eval.query.read_blobs` gives its bytes back.
-    `execution` records the actual device and runtime settings. It changes
-    neither the requested match nor whether its games have already been played.
-    """
-
-    tables: Tables = field(default_factory=dict)
-    blobs: Sequence[bytes] = ()
-    execution: Config = field(default_factory=dict)
 
 
 class EvalRun(Run):
@@ -132,6 +117,7 @@ class EvalRun(Run):
             commit=os.environ.get("ETUDE_COMMIT"),
         )
         self.failed = 0  # `fail` is also how `store` refuses a match
+        self._failed: set[str] = set()
         self.db: duckdb.DuckDBPyConnection = duckdb.connect()
         try:
             seal_abandoned(root, self.db)
@@ -157,42 +143,21 @@ class EvalRun(Run):
         self, play: Callable[[Match[C]], Tables | Result]
     ) -> EvalResult:
         """Play the selected matches once, skipping this run's durable results on resume."""
-        pending = [match for match in self.matches if match.key not in self.done]
-        skipped = len(self.matches) - len(pending)
-        played = 0
-        report = self._report
+        results = play_together((Playing(run=self, play=play),))
+        result = results[0]
+        if isinstance(result, EtudeError):
+            raise result
+        return result
 
-        def pending_matches() -> Iterator[Match]:
-            for match in pending:
-                if self.should_stop:
-                    raise Stopped()
-                yield match
-
-        started = time.monotonic()
-        try:
-            with _terminable():
-                for scheduled, outcome in _played(pending_matches(), play, self.workers):
-                    if isinstance(outcome, BaseException):
-                        self.fail(scheduled, outcome)
-                    self.store(scheduled, outcome)
-                    self.done.add(scheduled.key)
-                    played += 1
-                    report.played()
-                    print(
-                        f"etude: {self.name}: {played}/{len(pending)} matches played, "
-                        f"{time.monotonic() - started:.0f}s elapsed",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-        finally:
-            report.write(failed=self.failed)
-        return EvalResult(
-            experiment=self.experiment,
-            name=self.name,
-            environment=self.environment,
-            played=played,
-            skipped=skipped,
-        )
+    def _store_played(self, scheduled: Match, outcome: Execution | BaseException) -> None:
+        if isinstance(outcome, RetryRequested):
+            raise outcome
+        if isinstance(outcome, BaseException):
+            self.fail(scheduled, outcome)
+        self.store(scheduled, outcome.result, seconds=outcome.seconds)
+        self.done.add(scheduled.key)
+        self._report.played()
+        self._seal()
 
     def _stored(self) -> dict[str, MatchRecord]:
         """Each match's standing record (`outcomes`) of the blocks here and at every destination.
@@ -214,8 +179,25 @@ class EvalRun(Run):
                 found += block.matches
         return outcomes(found)
 
+    def fail_pending(self, error: RetryRequested) -> None:
+        """Mark unfinished matches failed with retry=True before the run fails."""
+        for match in self.matches:
+            if match.key not in self.done and match.key not in self._failed:
+                self.failed += 1
+                self.staging.stage(
+                    MatchRecord(
+                        match=match,
+                        state="failed",
+                        retry=True,
+                        error=str(error)[:2000],
+                        wall_ms=_now_ms(),
+                    )
+                )
+        self._seal()
+
     def fail(self, scheduled: Match, error: BaseException) -> NoReturn:
         detail = f"{type(error).__name__}: {error}"[:2000]
+        self._failed.add(scheduled.key)
         self.failed += 1
         self.staging.stage(
             MatchRecord(match=scheduled, state="failed", error=detail, wall_ms=_now_ms())
@@ -223,7 +205,9 @@ class EvalRun(Run):
         self._seal()
         raise EtudeError("match_failed", 500) from error
 
-    def store(self, scheduled: Match, outcome: Tables | Result) -> None:
+    def store(
+        self, scheduled: Match, outcome: Tables | Result, *, seconds: float | None = None
+    ) -> None:
         """Check every table, then stage them, the blobs and the match's record; nothing on refusal."""
         result = outcome if isinstance(outcome, Result) else Result(tables=outcome)
         try:
@@ -263,6 +247,7 @@ class EvalRun(Run):
             wall_ms=_now_ms(),
             blobs=digests,
             execution=execution,
+            seconds=seconds,
         )
         self.staging.stage(record, result.blobs)
         if self.staging.due():
@@ -287,7 +272,8 @@ class EvalRun(Run):
         """Seal what is staged into a block and offer it to every destination."""
         with self.files.lock:
             self.staging.seal(self.db)
-        self.ship()
+        if not self.ship():
+            raise RetryRequested("evaluation delivery failed; results remain in the local run")
 
     def finish(self, state: Literal["finished", "failed", "stopped"]) -> None:
         with self.files.lock:
@@ -296,11 +282,13 @@ class EvalRun(Run):
         self._write_outcome(state, counters=RunCounters(), writer=self.id)
         self.db.close()
         if not self.ship():
+            self._write_outcome("failed", counters=RunCounters(), writer=self.id)
             print(
                 f"etude: not delivered: {self.problems}. Files are in {self.files.root}; "
                 "deliver them with `etude sync`.",
                 file=sys.stderr,
             )
+            raise RetryRequested("evaluation delivery failed; results remain in the local run")
 
 
 def _now_ms() -> int:
@@ -386,6 +374,7 @@ class _Report:
     def __init__(self, *, total: int, done: int, writer: RunWriter) -> None:
         self.writer = writer
         self.total, self.done = total, done
+        self.failed = 0
         self.outputs = os.environ.get("ETUDE_OUTPUT_DIR")
         self.recent: deque[float] = deque(maxlen=_PACE_MATCHES)
         self.written = time.monotonic()
@@ -398,7 +387,7 @@ class _Report:
         if now - self.written >= _REPORT_SECONDS:
             self.write()
 
-    def write(self, *, failed: int = 0) -> None:
+    def write(self) -> None:
         if self.outputs is None:
             return
         elapsed = self.recent[-1] - self.recent[0] if self.recent else 0.0
@@ -406,14 +395,14 @@ class _Report:
             unit="matches",
             done=self.done,
             total=self.total,
-            failed=failed,
+            failed=self.failed,
             per_hour=(len(self.recent) - 1) / elapsed * 3600 if elapsed > 0 else None,
         )
         report_progress(writer=self.writer, clocks={}, tally=tally)
         self.written = time.monotonic()
 
 
-class Terminated(Exception):
+class Terminated(RetryRequested):
     """SIGTERM reached an eval run: what is staged is sealed before it ends."""
 
 
@@ -425,7 +414,7 @@ def _terminable() -> Iterator[None]:
         return
 
     def terminated(signum: int, frame: FrameType | None) -> NoReturn:
-        raise Terminated()
+        raise Terminated("evaluation received SIGTERM")
 
     before = signal.signal(signal.SIGTERM, terminated)
     try:
@@ -434,54 +423,180 @@ def _terminable() -> Iterator[None]:
         signal.signal(signal.SIGTERM, before)
 
 
-def _played[C: BaseModel | Mapping[str, JsonValue]](
-    pending: Iterator[Match], play: Callable[[Match[C]], Tables | Result], workers: int
-) -> Iterator[tuple[Match, Tables | Result | BaseException]]:
-    """Each match with its tables or what it raised, in the order they finish.
+@dataclass
+class Playing:
+    """A live tournament and the function and handle its workers call."""
 
-    Matches start in `etude.eval.schedule` order, at most `workers` at once, so
-    the order they start in is the order an author's runtime loads checkpoints in.
+    run: EvalRun
+    play: Callable[..., Tables | Result]
+    arguments: tuple[object, ...] = ()
+    pending: deque[Match] = field(init=False)
+    skipped: int = field(init=False)
+    played: int = 0
+    failure: EtudeError | None = None
+    active: int = 0
+
+    def __post_init__(self) -> None:
+        self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
+        self.skipped = len(self.run.matches) - len(self.pending)
+
+
+def play_together(plays: Sequence[Playing]) -> tuple[EvalResult | EtudeError, ...]:
+    """Play tournaments concurrently on one pool, stopping only the member that fails.
+
+    Each tournament contributes at most its own workers. Storage and reporting
+    stay on the invoking thread; only the author's play crosses into a child.
     """
-    if workers == 1:
-        for scheduled in pending:
-            try:
-                yield scheduled, _play(play, scheduled)
-            except Exception as error:  # noqa: BLE001 - recorded with the match, then raised
-                yield scheduled, error
-        return
-    # Fresh processes everywhere, so an eval run behaves alike on Linux and macOS.
-    context = multiprocessing.get_context("spawn")
-    with ProcessPoolExecutor(workers, mp_context=context) as pool:
-        running: dict[Future[Tables | Result], Match] = {}
+    started = time.monotonic()
+    order = deque(plays)
+    stopping = False
+    warned_imports = False
+    reported_imports: set[int] = set()
 
-        def start() -> None:
-            scheduled = next(pending, None)
-            if scheduled is not None:
-                running[pool.submit(_play, play, scheduled)] = scheduled
-
-        for _ in range(workers):
-            start()
+    def accept(each: Playing, match: Match, outcome: Execution | BaseException) -> None:
+        nonlocal warned_imports
+        imports: Imports | None = outcome.imports if isinstance(outcome, Execution) else None
+        if imports is None:
+            # Validate metadata once at the exception transport boundary.
+            raw: object = getattr(outcome, "_etude_imports", None)
+            if isinstance(raw, str):
+                imports = Imports.model_validate_json(raw)
+        if imports is not None and imports.pid not in reported_imports:
+            reported_imports.add(imports.pid)
+            if receipts := os.environ.get("ETUDE_RECEIPTS_DIR"):
+                try:
+                    DirectoryStorage(Path(receipts)).put(
+                        f"game-imports-{imports.pid}.json", imports.model_dump_json().encode()
+                    )
+                except OSError as error:
+                    raise RetryRequested("game import receipt could not be retained") from error
+        if imports is not None and imports.warning and not warned_imports:
+            print(imports.warning, file=sys.stderr, flush=True)
+            warned_imports = True
         try:
-            while running:
-                finished, _ = wait(running, return_when=FIRST_COMPLETED)
-                for future in finished:
-                    raised = future.exception()
-                    yield running.pop(future), raised if raised is not None else future.result()
-                    # Started only once the last is stored: a failure stops the run.
-                    start()
-        finally:
-            pool.shutdown(cancel_futures=True)
+            each.run._store_played(match, outcome)
+        except EtudeError as error:
+            if error.code != "match_failed":
+                raise
+            each.failure = error
+            each.pending.clear()
+        else:
+            each.played += 1
+            print(
+                f"etude: {each.run.name}: {each.played}/{len(each.run.matches) - each.skipped} matches played, "
+                f"{time.monotonic() - started:.0f}s elapsed",
+                file=sys.stderr,
+                flush=True,
+            )
 
+    def next_match(each: Playing) -> Match | None:
+        nonlocal stopping
+        if not each.pending:
+            return None
+        if stopping or each.run.should_stop:
+            stopping = True
+            return None
+        return each.pending.popleft() if each.pending else None
 
-class EvalResult(Record):
-    """What one `EvalRun.play` did."""
+    workers = min(
+        max((each.run.workers for each in plays), default=0),
+        sum(len(each.pending) for each in plays),
+    )
+    try:
+        with _terminable():
+            if workers > 0:
+                context = multiprocessing.get_context("spawn")
+                pool = ProcessPoolExecutor(workers, mp_context=context, initializer=initialize_game)
+                running: dict[Future[Execution], tuple[Playing, Match]] = {}
 
-    experiment: str
-    name: str
-    environment: Environment
-    played: int
-    # Matches already stored by an earlier attempt.
-    skipped: int
+                def start() -> None:
+                    for _ in range(len(order)):
+                        each = order.popleft()
+                        order.append(each)
+                        if each.active >= each.run.workers or each.failure is not None:
+                            continue
+                        match = next_match(each)
+                        if match is not None:
+                            each.active += 1
+                            running[
+                                pool.submit(
+                                    play_match,
+                                    Function(
+                                        module=each.play.__module__, name=each.play.__qualname__
+                                    ),
+                                    match,
+                                    each.arguments,
+                                )
+                            ] = (
+                                each,
+                                match,
+                            )
+                            return
+
+                try:
+                    for _ in range(workers):
+                        start()
+                    while running:
+                        deadline = os.environ.get("ETUDE_DEADLINE")
+                        allowance = (
+                            None
+                            if not deadline
+                            else max(
+                                0.0,
+                                datetime.fromisoformat(deadline).timestamp()
+                                - time.time()
+                                - max(each.run._slowest for each in plays),
+                            )
+                        )
+                        finished, _ = wait(running, timeout=allowance, return_when=FIRST_COMPLETED)
+                        if not finished:
+                            raise RetryRequested(
+                                "evaluation deadline reached before a match completed"
+                            )
+                        for future in finished:
+                            each, match = running.pop(future)
+                            each.active -= 1
+                            if each.failure is not None:
+                                start()
+                                continue
+                            raised = future.exception()
+                            if isinstance(raised, BrokenProcessPool):
+                                raise RetryRequested(
+                                    "game process exited before returning its match"
+                                ) from raised
+                            accept(each, match, raised if raised is not None else future.result())
+                            start()
+                finally:
+                    # Python 3.12 has no public terminate_workers. Reap children on
+                    # cancellation before server contexts leave and drop their handles.
+                    if sys.exc_info()[0] is not None:
+                        processes = pool._processes  # Python 3.12 executor-owned children.
+                        for process in processes.values():
+                            process.terminate()
+                    pool.shutdown(wait=True, cancel_futures=True)
+            if stopping:
+                raise RetryRequested("evaluation stopped before its execution deadline")
+    except RetryRequested as error:
+        for each in plays:
+            each.run.fail_pending(error)
+        raise
+    finally:
+        for each in plays:
+            each.run._report.failed += each.run.failed
+        for each in plays:
+            each.run._report.write()
+    return tuple(
+        each.failure
+        if each.failure is not None
+        else EvalResult(
+            experiment=each.run.experiment,
+            name=each.run.name,
+            environment=each.run.environment,
+            played=each.played,
+            skipped=each.skipped,
+        )
+        for each in plays
+    )
 
 
 @contextmanager
@@ -541,24 +656,3 @@ def _evaluating_matches(
         raise
     else:
         writer.finish("finished")
-
-
-@lru_cache(maxsize=128)
-def _match_type(play: Callable[..., object]) -> type[Match]:
-    parameters = list(inspect.signature(play).parameters.values())
-    if len(parameters) != 1:
-        raise TypeError("play must take exactly one Match parameter")
-    kind = typing.get_type_hints(play).get(parameters[0].name, Match)
-    if not isinstance(kind, type) or not issubclass(kind, Match):
-        raise TypeError("play's parameter must be annotated with Match[YourConfig]")
-    return kind
-
-
-def _play[C: BaseModel | Mapping[str, JsonValue]](
-    play: Callable[[Match[C]], Tables | Result], match: Match
-) -> Tables | Result:
-    kind = _match_type(play)
-    # The author's generic annotation is the validation boundary, just as the
-    # config parameter is for etude.call. Stored matches retain portable JSON.
-    checked = kind.model_validate_json(match.model_dump_json()) if kind is not Match else match
-    return play(cast(Match[C], checked))

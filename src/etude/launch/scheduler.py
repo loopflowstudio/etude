@@ -521,6 +521,52 @@ class Scheduler:
         given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
         return self._submit(expand_runs(given), self._target(pool, rent), queued=False)
 
+    def room(
+        self,
+        runs: Sequence[RunRequest],
+        pool: str | None = None,
+        *,
+        rent: str | None = None,
+    ) -> tuple[str, ...]:
+        """Read which runs fit existing machines after queued work; never ask a provider."""
+        if not runs:
+            return ()
+        target = self._target(pool, rent)
+        queued = {
+            r.id: r
+            for supply in (target.pool, target.rent)
+            if supply is not None
+            for r in self._store.waiting(supply)
+        }
+        records = sorted(
+            queued.values(),
+            key=lambda record: record.launch.created_at or datetime.min.replace(tzinfo=UTC),
+        )
+        proposed: set[str] = set()
+        for index, run in enumerate(runs):
+            identity = run.id or f"room-{index}"
+            proposed.add(identity)
+            records.append(
+                RunRecord(
+                    id=identity,
+                    experiment=run.job.experiment or "",
+                    job="",
+                    submission=RunSubmission(
+                        spec=run.job.plain(),
+                        pool=target.pool,
+                        rent=target.rent,
+                        created_at=self._clock(),
+                    ),
+                    seed=run.seed,
+                )
+            )
+        return tuple(
+            record.id
+            for placement in self._capacity(records, renting=False)
+            for record in placement.runs
+            if record.id in proposed
+        )
+
     def quote(
         self,
         runs: Sequence[RunRequest],
@@ -920,6 +966,8 @@ class Scheduler:
     def _capacity(
         self,
         records: Sequence[RunRecord],
+        *,
+        renting: bool = True,
     ) -> list[Placement]:
         """Choose the first wave, checking all limits before spending.
 
@@ -929,22 +977,14 @@ class Scheduler:
         Runs left over wait in the queue. Nothing is claimed here.
         """
         placements: list[Placement] = []
-        target = Target(pool=records[0].launch.pool, rent=records[0].launch.rent)
-        pool = None if target.pool is None else self._store.pool(target.pool)
-        ondemand = None if target.rent is None else self._store.ondemand(target.rent)
-        label = " or ".join(name for name in (target.pool, target.rent) if name is not None)
         now = self._clock()
         budgets = {r.id: self._admission_budget(r, now) for r in records}
         used: set[str] = set()
         made = 0
-        if pool is not None and pool.off:
-            raise LauncherError(f"pool {pool.name!r} is turned off")
-        opened = [
-            each
-            for supply in (pool, ondemand)
-            if supply is not None
-            for each in self._open_sessions(supply, now)
-        ]
+        opened_by_supply: dict[str, list[tuple[Session, int]]] = {}
+        pools: dict[str, Pool] = {}
+        ondemands: dict[str, OnDemand] = {}
+        label = ""
 
         def fits(session: Session | None, run: RunRecord) -> bool:
             """Whether `run`'s hours fit in what is left of `session`'s rental, if any."""
@@ -953,7 +993,7 @@ class Scheduler:
                 rental is None or (rental.deadline - now).total_seconds() >= budgets[run.id].seconds
             )
 
-        def cost(placement: Placement, run: RunRecord) -> Decimal:
+        def cost(placement: Placement, run: RunRecord, ondemand: OnDemand | None) -> Decimal:
             hours = Decimal(str(budgets[run.id].seconds)) / 3600
             if placement.machine is None and ondemand is not None:
                 hours += Decimal(ondemand.setup_seconds) / 3600
@@ -962,12 +1002,32 @@ class Scheduler:
 
         reason = "no free machine"
         for run in records:
+            target = Target(pool=run.launch.pool, rent=run.launch.rent)
+            if target.pool is not None and target.pool not in pools:
+                pools[target.pool] = self._store.pool(target.pool)
+            if target.rent is not None and target.rent not in ondemands:
+                ondemands[target.rent] = self._store.ondemand(target.rent)
+            pool = pools.get(target.pool) if target.pool is not None else None
+            ondemand = ondemands.get(target.rent) if target.rent is not None else None
+            label = " or ".join(name for name in (target.pool, target.rent) if name is not None)
+            if pool is not None and pool.off:
+                if renting:
+                    raise LauncherError(f"pool {pool.name!r} is turned off")
+                continue
+            opened = []
+            for supply in (pool, ondemand):
+                if supply is not None:
+                    if supply.name not in opened_by_supply:
+                        opened_by_supply[supply.name] = self._open_sessions(supply, now)
+                    opened.extend(opened_by_supply[supply.name])
             reason = "no free machine"
             joined = next(
                 (
                     index
                     for index, chosen in enumerate(placements)
-                    if len(chosen.runs) < chosen.free and fits(chosen.session, run)
+                    if chosen.supply in (target.pool, target.rent)
+                    and len(chosen.runs) < chosen.free
+                    and fits(chosen.session, run)
                 ),
                 None,
             )
@@ -1005,7 +1065,7 @@ class Scheduler:
                             machine=owned,
                             price=Decimal(0),
                         )
-                if held is None and ondemand is not None:
+                if held is None and ondemand is not None and renting:
                     offer = self._rentable(ondemand, additional=made)
                     reason = self._trouble.get(ondemand.name, reason)
                     if offer is not None:
@@ -1020,7 +1080,7 @@ class Scheduler:
                         )
             if held is not None:
                 # A run is admitted only if its dollars would cover it alone on this machine.
-                if cost(held, run) > budgets[run.id].usd:
+                if cost(held, run, ondemand) > budgets[run.id].usd:
                     reason = "job dollars do not cover the hours"
                     if held.session is not None:
                         used.discard(held.session.id)
@@ -1036,7 +1096,7 @@ class Scheduler:
                 placements.append(held)
             else:
                 placements[joined] = held
-        if not placements:
+        if not placements and renting:
             raise LauncherError(f"cannot launch on {label}: {reason}; etude queue would wait")
         return placements
 

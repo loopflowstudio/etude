@@ -813,18 +813,18 @@ def _wanted(want: Callable[..., object], state: ExperimentState) -> list[Tournam
     # and its evaluation jobs are built on etude.eval.
     from etude.declarations import asked  # noqa: PLC0415
     from etude.eval.records import Tournament  # noqa: PLC0415
-    from etude.jobs import evaluation_spec  # noqa: PLC0415
+    from etude.jobs import evaluation_group  # noqa: PLC0415
 
     wanted = []
     for job in asked(want, state):
-        spec = evaluation_spec(job)
-        wanted.append(
-            Tournament(
-                definition=spec.tournament,
-                checkpoints=tuple(each.ref for each in spec.checkpoints),
-                entrants=spec.entrants,
+        for spec in evaluation_group(job).evaluations:
+            wanted.append(
+                Tournament(
+                    definition=spec.tournament,
+                    checkpoints=tuple(each.ref for each in spec.checkpoints),
+                    entrants=spec.entrants,
+                )
             )
-        )
     return wanted
 
 

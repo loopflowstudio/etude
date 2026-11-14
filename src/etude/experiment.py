@@ -7,7 +7,6 @@ Author-facing types are defined in `etude.jobs`.
 
 from __future__ import annotations
 
-import json
 import warnings
 from collections.abc import Sequence
 from decimal import Decimal
@@ -16,7 +15,7 @@ from typing import Literal
 
 import etude.jobs as jobs
 from etude.checkpoints import CheckpointRecord
-from etude.eval.records import Match
+from etude.errors import EtudeError
 from etude.launch import client
 from etude.launch.records import Standing
 from etude.storage import Storage
@@ -115,13 +114,19 @@ def state_of(
             if status.phase in {"queued", "renting"}
             else "failed"
             if status.done and status.outcome != "succeeded"
+            else "finished"
+            if status.done
             else "running"
         )
         # Evaluation matches are part of the executable job's public config.
-        text = record.launch.spec.config
-        config = json.loads(text) if text else {}
-        if "tournament" in config and "matches" in config:
-            matches = tuple(Match.model_validate(m).key for m in config.get("matches") or ())
+        try:
+            group = jobs.evaluation_group(record.launch.spec)
+        except EtudeError as error:
+            if error.code != "not_an_evaluation_job":
+                raise
+            group = None
+        if group is not None:
+            matches = tuple(m.key for spec in group.evaluations for m in spec.matches or ())
             prior = next(
                 (r for r in eval_runs if r.name == record.id.removeprefix(experiment + "/")), None
             )

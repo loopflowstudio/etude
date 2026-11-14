@@ -446,11 +446,15 @@ class MatchRecord(Record):
 
     match: Match
     state: Literal["done", "failed"]
+    # Infrastructure failures remain eligible; ordinary game errors require an explicit retry.
+    retry: bool = False
     error: str | None = None
     # Each table's column types in this match's write; a resume holds later writes to them.
     columns: dict[Name, dict[Name, ColumnType]] = {}
     # When it was recorded: of two runs holding one match, a tournament takes the later.
     wall_ms: int = Field(ge=0)
+    # Wall time inside play, excluding result sealing and delivery; older records lack it.
+    seconds: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     # The SHA256 of each blob the match kept, which its rows may name.
     blobs: tuple[Digest, ...] = ()
     # Actual execution setup, supplied with the result; never part of a match's identity.
@@ -468,13 +472,17 @@ def outcomes(records: Iterable[MatchRecord]) -> dict[Digest, MatchRecord]:
     """Each match's record that stands among `records`, by match key, in the order given.
 
     A done record replaces a failed one; of several done, the first stands, and
-    of failed ones alone, the first. `etude.eval.query.statsdb` keeps the same
+    of failures, the latest retry decision stands. `etude.eval.query.statsdb` keeps the same
     rule across the blocks of a run, in the order it reads them.
     """
     found: dict[Digest, MatchRecord] = {}
     for record in records:
         held = found.get(record.match.key)
-        if held is None or (held.state != "done" and record.state == "done"):
+        if (
+            held is None
+            or (held.state != "done" and record.state == "done")
+            or (held.state == record.state == "failed" and record.wall_ms > held.wall_ms)
+        ):
             found[record.match.key] = record
     return found
 

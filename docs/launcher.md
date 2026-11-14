@@ -20,6 +20,7 @@ before renting from R. A run that cannot start yet waits.
 | Command | Meaning |
 | --- | --- |
 | `etude queue FILE.py [--pool P] [--rent R]` | Add the file's training and eval runs that have not been run. They start when a machine is free or can be rented; lack of capacity leaves them waiting. |
+| `etude launch FILE.py ... --min-eval-hours H` | Also on `queue`. Rent when estimated eval work reaches H machine hours (default 2), without waiting for training to end ([One pass over the file](#one-pass-over-the-file)). |
 | `etude launch FILE.py [--pool P] [--rent R]` | The same runs, with machines now: place as many as free slots, owned machines and new rentals allow, and queue the rest. It fails, recording no runs, only when none can be placed. |
 | `etude launch FILE.py ... --quote` | Print what the pass decided for every declared run and tournament, the machines the first wave would take and their planned rental costs. Submits and rents nothing. |
 | `etude train FILE.py`, `etude eval FILE.py` | Do the file's training, or play its evals, on this computer, without the launcher. |
@@ -233,7 +234,7 @@ experiment file declares:
 | | Calls | With | Named by | Varies by |
 | --- | --- | --- | --- | --- |
 | `TrainingJob` | one training function, `train(config)` | one config | `name=`, required | seed: each seed is one run |
-| `EvalJob` | one play function, `play(match)` | one tournament and the checkpoints to play it for | its tournament | match: checkpoint, seating and config |
+| `EvalJob` | one play function, `play(match)`, or `play(match, inference)` when it names a server | one tournament and the checkpoints to play it for | its tournament | match: checkpoint, seating and config |
 
 A job says what to run and its limits. Which machine runs it, and how many
 runs share one, belong to the launch command and its pools and on-demands
@@ -280,7 +281,9 @@ imports nothing else of Etude before the function's own module.
   import its module. When it imports training libraries at its top, launch
   from the project's environment: `uv run etude launch job.py`.
 - **An eval job** holds a [tournament](evaluation.md#tournaments) as one eval
-  run, which is the launched run. A benchmark's `checkpoints` are
+  run. A pass launches the eval jobs of an experiment file together, as one
+  run on one machine, and those that name an `InferenceServer` share it
+  there ([Inference servers](evaluation.md#inference-servers)). A benchmark's `checkpoints` are
   `CheckpointRecord`s, read from the experiment's state
   ([Evaluation jobs](evaluation.md#evaluation-jobs)). Each member reaches
   the machine verified by digest; the checkpoint fills every inference seat, where
@@ -317,13 +320,19 @@ two: state from /home/me/.etude/track: 2 training runs, 0 eval runs; $0.00 of $2
 two/base@0  finished
 two/base@1  finished
 two/fine@0  new, running
-eval ladder: 4 new, 0 running, 0 failed, queued two/ladder-1a2b3c4d5e6f
+eval ladder: 4 new, 0 running, 0 failed, waiting: 4 eval matches, estimated 0.25 machine hours below --min-eval-hours 2; no machine has room and training is running
+$ etude launch two.py --max-usd 20         # after fine finished
+two: state from /home/me/.etude/track: 3 training runs, 0 eval runs; $0.00 of $20.00 committed
+two/base@0  finished
+two/base@1  finished
+two/fine@0  finished
+eval ladder: 6 new, 0 running, 0 failed, running two/evals-1a2b3c4d5e6f
 $ etude launch two.py --max-usd 20         # again, straight away
 two: state from /home/me/.etude/track: 3 training runs, 1 eval run; $0.00 of $20.00 committed
 two/base@0  finished
 two/base@1  finished
-two/fine@0  running
-eval ladder: 0 new, 4 running, 0 failed
+two/fine@0  finished
+eval ladder: 0 new, 6 running, 0 failed
 ```
 
 Each declaration returns every job that should have been run, or can be run,
@@ -359,11 +368,23 @@ Three levels do the work, each built only on the one below it:
   `new, queued` when it waits for room (always, under `etude queue`), or
   `new, not queued` with the limit that held it back. A tournament's line
   counts its matches that are new, in flight and failed, and names the eval
-  run handed down for the new ones.
+  run handed down for the new ones, or says that they wait and why.
+- **Eval jobs go down as one run.** Compatible jobs naming the same server,
+  or no server, share a run, `two/evals-1a2b3c4d5e6f`, on one machine. Its `max_hours` and `max_usd` are the
+  sums of its jobs'.
+- **Eval work waits for enough of it.** The eval run is handed down when a
+  machine that already exists has room after this pass's training runs, when
+  its estimated new work reaches `--min-eval-hours H` (default 2 hours), or
+  when no training run of the experiment is queued or running. Above, `two/fine@0` took the one slot
+  and the estimated quarter hour of evals waits for more
+  checkpoints; once it has finished, all six go as one run. The
+  flag defaults to 2 machine hours. With no timing history it hands the run
+  down immediately; the waiting example assumes earlier evals recorded a pace.
+  Waiting matches are not recorded: a later pass finds them new again ([Experiments](evaluation.md#experiments)).
 - **A queued run needs no later pass.** The scheduler starts it as soon as a
   machine has room: when `two/base@0` leaves the one slot above, `two/base@1`
-  starts. A later pass is needed only for work that does not exist yet, such
-  as `two/fine`.
+  starts. A later pass is needed for work that does not exist yet, such
+  as `two/fine`, and for eval matches a pass left waiting.
 - **Room is the machines'.** How many runs go at once is what the pool and
   on-demand allow: a pool's machines, an on-demand's `--max` machines, and
   `--slots` runs on each
@@ -402,7 +423,7 @@ Three levels do the work, each built only on the one below it:
   read, so runs already stored by another launcher are left alone.
 - **`--quote`** prints the same lines with `new, would launch`, then the
   machines and planned rental costs for what the pass would hand down, and
-  submits nothing.
+  submits nothing. Eval matches that would wait say so, as in a real pass.
 - **`--job`, `--seed`, `--resume` and `--until` name training work**, so a
   command that gives one skips the eval stage.
 - **An experiment's runs are selected by name.** `etude status --experiment
@@ -467,7 +488,11 @@ thing, only small, in order:
    so a job with three seeds is smoked once.
 2. **Evaluate.** `eval_jobs(state)` is called on the smoke's runs and checkpoints.
    Each match it calls for plays one game here, under every condition, so a
-   game that breaks under only one deal is still caught.
+   game that breaks under only one deal is still caught. The jobs are held
+   together as a pass would launch them, and each
+   [inference server](evaluation.md#inference-servers) they name is started
+   here, once, so a `serve` that cannot start, or a `play` that cannot reach
+   it, fails the smoke before anything is rented.
 3. **Report.** `report()` (or the default `Report()`) is drawn from those tiny
    results.
 
@@ -861,6 +886,12 @@ alone, so a run never outspends its `max_usd`. `status` says `shared by K runs`
 when K ran together, and `--quote` lists each run's machine, its slots and the
 runs placed with it, splitting a new rental's planned cost among them.
 
+A pass's eval jobs are one run and take one slot, whatever their number. A
+free slot on a machine training has rented is room for them, so with
+`--slots 2` evals start beside training without another rental. Each eval
+run starts its own inference server: two eval runs sharing a machine do not
+share one.
+
 ## The worker and its bucket
 
 The worker is the one command a machine runs, whether started locally, over
@@ -1083,6 +1114,7 @@ defines it, by its full path, and relative imports are a lint error:
 | Import | What it is |
 | --- | --- |
 | `from etude.jobs import TrainingJob, EvalJob` | typed jobs: Etude decides the command |
+| `from etude.jobs import InferenceServer` | a serving process eval jobs name, started once per eval run |
 | `from etude.jobs import ExperimentState` | what an experiment's runs have stored, as declarations are given it |
 | `from etude.spec import Job, RunRequest` | a command job, and one run of any job |
 | `from etude.launch.client import queue, launch, status, wait, ...` | the calls a script makes; they go to the server when one is set |
@@ -1565,7 +1597,8 @@ output directory; `etude status` shows it:
 ```
 
 A job that counts its work adds a `tally`, and `status` gives the fraction, the
-recent pace and the time left. An eval run reports one by itself:
+recent pace and the time left. An eval run reports one by itself, counting
+the matches of every tournament it plays:
 
 ```json
 {"tally":{"unit":"matches","done":412,"total":1800,"failed":0,"per_hour":940.0}}

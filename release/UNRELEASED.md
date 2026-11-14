@@ -107,3 +107,89 @@ experiment; cohorts, which sat between, are removed.
 Unchanged: `Job.runs(...)`, `ExperimentState.runs`, the `etude runs` command,
 `report()`, `play(match)`, typed flags on `training_jobs`, a job's command and
 identity, and everything already stored.
+
+## Eval jobs share one run and one inference server
+
+```python
+from etude.jobs import EvalJob, ExperimentState, InferenceServer
+
+net = InferenceServer(name="net", serve=serve, config=ServeConfig(max_batch=64))
+
+
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    ...
+    return [
+        EvalJob(
+            play=play, tournament=ladder, checkpoints=rated, server=net, workers=8, max_hours=1
+        ),
+        EvalJob(
+            play=play, tournament=gauntlet, checkpoints=large, server=net, workers=8, max_hours=1
+        ),
+    ]
+
+
+def play(match: Match[Deal], inference: Endpoint) -> Tables: ...
+```
+
+```text
+$ etude launch capacity.py --rent l4
+...
+eval ladder: 48 new, 0 running, 0 failed, running capacity/evals-1a2b3c4d5e6f
+eval gauntlet: 24 new, 0 running, 0 failed, running capacity/evals-1a2b3c4d5e6f
+```
+
+A pass hands down compatible eval jobs sharing a server (or no server) as
+one run on one machine, instead of one run per tournament. An eval job may name an
+`InferenceServer`: a name, a `serve(config)` context manager and its config.
+Etude enters `serve` once before the run's first game, gives what it yields
+to every `play(match, inference)`, and leaves it after the last game, on
+failure and on SIGTERM. Batching, devices and model loading belong to `serve`
+and its config and to nothing else. A job names zero or one server; one
+server can host several models. Jobs naming different servers form separate
+groups. Tournaments in a group play concurrently so requests can batch
+together. An eval job that names no server calls `play(match)` as before
+([Inference servers](../docs/evaluation.md#inference-servers)).
+
+`etude launch` and `etude queue` no longer rent for every few new matches.
+The eval run is handed down when a machine that already exists has room, when
+estimated new work reaches `--min-eval-hours H` (default: 2 hours), or when
+no training run of the experiment is queued or running. Otherwise each tournament's line says how
+many matches wait and why, and a later pass finds them again
+([Experiments](../docs/evaluation.md#experiments)).
+
+### Upgrade
+
+- **Existing results remain readable and are not replayed.** Results stay keyed
+  by tournament and match; eval runs already stored, queued or running are
+  read as before.
+- **A launched eval run is `EXPERIMENT/evals-DIGEST`**, not
+  `EXPERIMENT/TOURNAMENT-DIGEST`, and every tournament it plays prints that
+  one name. Each tournament's tables are in its own eval run below that
+  folder; `statsdb` and reports find them without change.
+- **Evals may now wait while training runs.** A command that used to rent
+  for evals at once prints `waiting: ...` instead when no machine has room.
+  With no recorded match durations the pass rents immediately.
+  Pass `--min-eval-hours 0` to admit any estimated work, or use
+  `--watch` so the pass after training ends launches them.
+- **A run's limits are its jobs' summed.** The eval run's `max_hours` and
+  `max_usd` are the totals of the eval jobs it plays, and `--max-usd` admits
+  it as one run.
+- **A failed match stops its tournament.** The other tournaments keep
+  playing, and the run ends failed.
+- **`etude.jobs.with_matches` is removed.** The pass builds the run itself.
+
+The shared worker pool uses the largest `workers` declared by its members,
+so adding another eval job does not multiply serving concurrency. Match
+records now retain execution seconds for later machine-time estimates.
+`etude.errors.RetryRequested` means an infrastructure refusal, rather than a
+player failure: the run fails and unfinished matches remain new on the next
+pass. Serving adapters use it for infrastructure failures. Completed matches are
+sealed and offered to storage individually. Container CPU quotas set thread
+budgets, `ETUDE_SCRATCH_DIR` supplies temporary fast scratch, and
+`ETUDE_RECEIPTS_DIR` retains server receipts with the run.
+
+`matches.retry` distinguishes retryable infrastructure failures from ordinary
+game errors without adding another status. Older match records default it to
+false. The derived statsdb cache rebuilds from schema 14 to 15 automatically.
+Game processes load play's defining module and retain startup import counts;
+heavy imports produce one warning per group naming their importer.

@@ -68,7 +68,8 @@ from etude.eval.records import (
     folder_name,
     outcomes,
 )
-from etude.eval.run import ETUDE_TABLES, EvalResult, EvalRun, Result, Tables, _evaluating_matches
+from etude.eval.result import EvalResult, Result, Tables
+from etude.eval.run import ETUDE_TABLES, EvalRun, _evaluating_matches
 from etude.eval.schedule import ordered
 from etude.records import Digest, Record, RunRecord
 from etude.run import declare, run_folders, under
@@ -234,6 +235,8 @@ class Played(Record):
     failed: tuple[Match, ...]
     # Never attempted.
     new: tuple[Match, ...]
+    # Failed matches carrying retry=True, also included in new.
+    retry: tuple[Match, ...] = ()
 
 
 def played(
@@ -335,6 +338,29 @@ class StoredRuns:
                     folders.append(_Folder(place, run, folder, names, None, given.identity))
         return cls(experiment, folders)
 
+    def estimate_seconds(
+        self, tournament: Benchmark | RoundRobin, matches: Sequence[Match]
+    ) -> float | None:
+        """Estimated worker time from this tournament's delivered seconds per game.
+
+        Legacy matches without timing are no estimate. The pass divides worker
+        time by the group's caller count to estimate its machine window.
+        """
+        history = {
+            record.match.key: record
+            for folder in self._folders
+            if folder.held is not None
+            and folder.held.tournament.name == tournament.name
+            and folder.held.tournament.environment.identity == tournament.environment.identity
+            for record in self.records(folder)
+            if record.state == "done" and record.seconds is not None
+        }
+        if not history:
+            return None
+        seconds = sum(record.seconds or 0 for record in history.values())
+        games = sum(record.match.games for record in history.values())
+        return seconds / games * sum(match.games for match in matches)
+
     def tournaments(self) -> dict[str, list[TournamentRun]]:
         """What each eval run held for a tournament added, by tournament, in run order."""
         found: dict[str, dict[str, TournamentRun]] = {}
@@ -419,7 +445,7 @@ def _called(
     it is not the checkpoint's. `wanted_only` calls for what `added` defines
     alone, still refusing a definition the stored eval runs conflict with.
     """
-    stored = _Stored(held=(), delivered={}, failed=set())
+    stored = _Stored(held=(), delivered={}, failed={})
     if runs is not None:
         stored = _stored(added.tournament, runs)
     tournament = assemble([*stored.held, added])
@@ -442,10 +468,11 @@ def _called(
             if key in stored.delivered
         ),
         failed=tuple(matches[key] for key in ordered_keys if key in stored.failed),
+        retry=tuple(matches[key] for key in ordered_keys if stored.failed.get(key, False)),
         new=tuple(
             matches[key]
             for key in ordered_keys
-            if key not in stored.delivered and key not in stored.failed
+            if key not in stored.delivered and (key not in stored.failed or stored.failed[key])
         ),
     )
     return _Called(
@@ -497,7 +524,7 @@ class _Stored:
     # ranks `matches.newest`.
     delivered: dict[Digest, str]
     # Each match that failed there, with no done record anywhere.
-    failed: set[Digest]
+    failed: dict[Digest, bool]
 
 
 def _stored(tournament: Benchmark | RoundRobin, runs: StoredRuns) -> _Stored:
@@ -518,17 +545,19 @@ def _stored(tournament: Benchmark | RoundRobin, runs: StoredRuns) -> _Stored:
         if alike:
             records.setdefault(each.run, []).extend(runs.records(each))
     newest: dict[Digest, tuple[int, str]] = {}
-    failed: set[Digest] = set()
+    failures: dict[Digest, tuple[int, str, bool]] = {}
     for run, held_records in records.items():
         for key, record in outcomes(held_records).items():
             if record.state == "failed":
-                failed.add(key)
+                previous = failures.get(key)
+                if previous is None or (record.wall_ms, run) > previous[:2]:
+                    failures[key] = (record.wall_ms, run, record.retry)
             elif (record.wall_ms, run) > newest.get(key, (-1, "")):
                 newest[key] = (record.wall_ms, run)
     return _Stored(
         held=tuple(held[run] for run in sorted(held)),
         delivered={key: run for key, (_, run) in newest.items()},
-        failed=failed - newest.keys(),
+        failed={key: retry for key, (_, _, retry) in failures.items() if key not in newest},
     )
 
 

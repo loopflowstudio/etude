@@ -22,7 +22,7 @@ from etude.errors import EtudeError, LauncherError
 from etude.experiment import observe
 from etude.experiment_file import refuse_renamed
 from etude.identity import run_address
-from etude.jobs import EvalJob, ExperimentState, TrainingJob, evaluation_spec
+from etude.jobs import EvalJob, ExperimentState, TrainingJob, evaluation_group
 from etude.spec import Job, RunRequest, expand_runs
 from etude.storage import default_root
 
@@ -148,7 +148,7 @@ def read_training_jobs(
             continue
         if isinstance(each, RunRequest) and " -m etude.call " in each.job.command:
             try:
-                evaluation_spec(each.job)
+                evaluation_group(each.job)
             except EtudeError:
                 continue
         raise LauncherError(
@@ -263,7 +263,7 @@ def asked(function: EvalFunction, state: ExperimentState) -> list[Job]:
             jobs.append(each.plain())
         elif isinstance(each, RunRequest):
             try:
-                evaluation_spec(each.job)
+                evaluation_group(each.job)
             except EtudeError:
                 raise LauncherError("eval_jobs() must return EvalJob or its RunRequest") from None
             jobs.append(each.job)

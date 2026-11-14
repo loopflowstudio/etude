@@ -1,6 +1,6 @@
 """The author-facing experiment model: typed jobs and the state declarations read.
 
-`TrainingJob`, `EvalJob` and `ExperimentState` are defined here. Typed jobs
+`TrainingJob`, `EvalJob`, `InferenceServer` and `ExperimentState` are defined here. Typed jobs
 lower to `spec.Job` for storage, transport and identity, deriving their command
 and JSON config afresh after a copy. State is observed, never stored.
 The worker calls `_hold` only when executing an evaluation; worker startup
@@ -11,25 +11,27 @@ from __future__ import annotations
 
 import inspect
 import os
+import pickle
 import runpy
 import shlex
 import sys
 import tomllib
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Literal, TypedDict, cast
 
-from pydantic import BaseModel, Field, JsonValue, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from etude.cache import Content
 from etude.call import Function, changed_config, config_type
 from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, checkpoint_key
 from etude.checkpoints import CheckpointId, CheckpointRecord, CheckpointRef, checkpoint_id
-from etude.errors import EtudeError, LauncherError
-from etude.eval.match import EvalResult
+from etude.errors import EtudeError, LauncherError, RetryRequested
+from etude.eval.game import _match_type
 from etude.eval.records import (
     Benchmark,
     CheckpointPlayer,
@@ -38,8 +40,17 @@ from etude.eval.records import (
     Player,
     RoundRobin,
     digest,
+    folder_name,
 )
-from etude.eval.run import Result, Tables
+from etude.eval.resources import resources
+from etude.eval.result import EvalResult, Result, Tables
+from etude.eval.run import (
+    EvalRun,
+    Playing,
+    Terminated,
+    _terminable,
+    play_together,
+)
 from etude.eval.tournament import evaluating
 from etude.identity import run_address
 from etude.out import MEMBERSHIP, OutFile, OutFiles
@@ -56,7 +67,7 @@ from etude.spec import (
     Variable,
     number,
 )
-from etude.storage import Storage
+from etude.storage import Storage, default_root
 from etude.train.read import read
 from etude.train.records import ParentRun
 
@@ -219,6 +230,35 @@ class JobOptions(TypedDict, total=False):
 _BENCHMARK_CHECKPOINT = "checkpoint"
 
 
+class Server(Record):
+    """A named serving context, imported and configured on the job's machine."""
+
+    name: str = Field(min_length=1)
+    serve: Function
+    config: str
+
+
+class InferenceServer(BaseModel):
+    """A serving context shared by the evaluation jobs that name it."""
+
+    model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
+    name: str = Field(min_length=1)
+    serve: Callable[..., AbstractContextManager[object]]
+    config: BaseModel
+
+    @model_validator(mode="after")
+    def _validate_server(self) -> InferenceServer:
+        _config_text(self.serve, self.config)
+        return self
+
+    def plain(self, repo: Path | None) -> Server:
+        return Server(
+            name=self.name,
+            serve=_function(self.serve, repo),
+            config=_config_text(self.serve, self.config),
+        )
+
+
 class Evaluation(Record):
     """An evaluation job's config: what `_hold` holds, with what, on the machine."""
 
@@ -227,7 +267,7 @@ class Evaluation(Record):
     experiment: str | None
     play: Function
     # A benchmark's checkpoint; released single-file inputs remain readable.
-    checkpoint: CheckpointRecord | Input | None = None
+    checkpoint: CheckpointRecord | CheckpointRef | Input | None = None
     # Checkpoints an experiment's eval chose to hold the benchmark for.
     checkpoints: tuple[CheckpointRecord, ...] = ()
     # A round robin's entrants.
@@ -239,6 +279,21 @@ class Evaluation(Record):
     files: dict[str, str] = {}
     # The experiment's training lines that pass saw, where relative seats find checkpoints.
     lines: tuple[Line, ...] = ()
+    server: Server | None = None
+
+
+class EvalGroup(Record):
+    """The tournaments one run plays, in declaration order."""
+
+    evaluations: tuple[Evaluation, ...]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _retained(cls, value: object) -> object:
+        # Released launcher records stored one Evaluation, including queued work.
+        if isinstance(value, dict) and "tournament" in value:
+            return {"evaluations": (value,)}
+        return value
 
 
 class TrainingJob[C: BaseModel](Job):
@@ -284,16 +339,17 @@ class TrainingJob[C: BaseModel](Job):
         return job
 
 
-class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
+class EvalJob(Job):
     """A play function, a tournament and the checkpoints or entrants it seats."""
 
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
-    play: Callable[[Match[M]], Tables | Result] = Field(exclude=True)
+    play: Callable[..., Tables | Result] = Field(exclude=True)
     tournament: Benchmark | RoundRobin = Field(exclude=True)
     checkpoint: CheckpointRecord | Input | None = Field(default=None, exclude=True)
     checkpoints: Sequence[CheckpointRecord] = Field(default=(), exclude=True)
     enter: Sequence[Player] = Field(default=(), exclude=True)
     workers: int = Field(default=1, ge=1, exclude=True)
+    server: InferenceServer | None = Field(default=None, exclude=True)
     command: str = ""
 
     @field_validator("tournament", mode="before")
@@ -306,7 +362,7 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
         return value
 
     @model_validator(mode="after")
-    def _validate_evaluation(self) -> EvalJob[M]:
+    def _validate_evaluation(self) -> EvalJob:
         if self.name and self.name != self.tournament.name:
             raise LauncherError("an EvalJob is named by its tournament")
         object.__setattr__(self, "name", self.tournament.name)
@@ -336,6 +392,11 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
                 else (self.checkpoint,)
             )
             options["inputs"] = (*self.inputs, *inputs)
+        try:
+            _match_type(self.play, int(self.server is not None))
+        except TypeError as error:
+            raise LauncherError(str(error)) from None
+        repo = _repo(self.play, options)
         spec = Evaluation(
             tournament=self.tournament,
             experiment=self.experiment,
@@ -344,8 +405,15 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
             checkpoints=tuple(self.checkpoints),
             entrants=tuple(self.enter),
             workers=self.workers,
+            server=None if self.server is None else self.server.plain(repo),
         )
-        return _job(_hold, spec, origin=self.play, options=options, experiment=self.experiment)
+        return _job(
+            _hold,
+            EvalGroup(evaluations=(spec,)),
+            origin=self.play,
+            options=options,
+            experiment=self.experiment,
+        )
 
 
 def _options(job: Job) -> JobOptions:
@@ -360,90 +428,235 @@ def _options(job: Job) -> JobOptions:
     )
 
 
-def evaluation_spec(job: Job) -> Evaluation:
-    """What an evaluation job holds; raises `EtudeError` for any other job.
-
-    An evaluation job is one whose command calls `_hold` (`_called`).
-    """
+def evaluation_group(job: Job) -> EvalGroup:
+    """Read an eval command, including retained single-tournament launcher records."""
     job = job.plain()
     if job.config is None or _called(_function(_hold, None)) not in job.command:
         raise EtudeError("not_an_evaluation_job", 422)
-    return Evaluation.model_validate_json(job.config)
+    return EvalGroup.model_validate_json(job.config)
 
 
 def with_experiment(job: Job, experiment: str) -> Job:
-    """The evaluation job an experiment's `eval_jobs(state)` returned, as one of `experiment`.
-
-    Raises `EtudeError("eval_job_of_another_experiment")` for a job naming
-    another experiment, and `EtudeError("not_an_evaluation_job")` for one that
-    is not an evaluation.
-    """
     job = job.plain()
-    spec = evaluation_spec(job)
-    if spec.experiment not in (None, experiment):
-        raise EtudeError("eval_job_of_another_experiment", 422) from ValueError(spec.experiment)
-    spec = spec.model_copy(update={"experiment": experiment})
-    return job.model_copy(update={"config": spec.model_dump_json(), "experiment": experiment})
+    group = evaluation_group(job)
+    for spec in group.evaluations:
+        if spec.experiment not in (None, experiment):
+            raise EtudeError("eval_job_of_another_experiment", 422) from ValueError(spec.experiment)
+    group = EvalGroup(
+        evaluations=tuple(
+            spec.model_copy(update={"experiment": experiment}) for spec in group.evaluations
+        )
+    )
+    return job.model_copy(update={"config": group.model_dump_json(), "experiment": experiment})
 
 
-def hold_evaluation(
-    spec: Evaluation,
+def _group_key(job: Job, spec: Evaluation) -> str:
+    """Launch compatibility, independent of scientific match identity and job limits."""
+    shared = {
+        "repo",
+        "revision",
+        "runtime",
+        "prepare",
+        "setup",
+        "cleanup",
+        "environment",
+        "stop_seconds",
+        "cleanup_seconds",
+        "max_attempts",
+    }
+    return job.model_dump_json(include=shared) + (
+        spec.server.model_dump_json() if spec.server else ""
+    )
+
+
+def _servers(evaluations: Sequence[Evaluation]) -> dict[str, Server]:
+    """One definition owns each server name across an experiment pass."""
+    found: dict[str, Server] = {}
+    for spec in evaluations:
+        server = spec.server
+        if server is not None:
+            if server.name in found and found[server.name] != server:
+                raise EtudeError("inference_server_conflict", 422, detail=server.name)
+            found[server.name] = server
+    return found
+
+
+def hold_group(
+    group: EvalGroup,
     *,
     checkout: str | None = None,
-    checkpoint: CheckpointRef | None = None,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
-) -> EvalResult:
-    """Hold what an evaluation job's config describes (`etude.eval.tournament.hold`).
+) -> tuple[EvalResult, ...]:
+    """Enter needed servers once, play every tournament, then raise any match failure.
 
-    `play` is imported from `checkout`, the job's source, or the working
-    directory as on the job's machine. `checkpoint` is a benchmark's one
-    checkpoint where it lies here. Raises `EtudeError("evaluation_names_no_experiment")`
-    for a config whose experiment is not yet named (`with_experiment`).
+    Each member owns its stored run and failure outcome. The outer SIGTERM
+    scope includes server startup and shutdown as well as games.
     """
-    if spec.experiment is None:
-        raise EtudeError("evaluation_names_no_experiment", 422)
-    # Loaded by import path: the function `evaluation` was given, typed there.
-    play = cast(Callable[[Match], Tables | Result], spec.play.load(checkout))
-    with evaluating(
-        spec.tournament,
-        experiment=spec.experiment,
-        checkpoint=checkpoint,
-        checkpoints=tuple(each.ref for each in spec.checkpoints),
-        enter=spec.entrants,
-        matches=spec.matches,
-        workers=spec.workers,
-        directory=directory,
-        storages=storages,
-        lines=spec.lines,
-        resume=True,
-    ) as active:
-        return active.play(play)
-
-
-def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> Job:
-    """The job playing exactly `matches`, with each checkpoint they seat as an input.
-
-    A checkpoint is a file of the training run that saved it, so the launcher
-    fetches it from that run's bucket folder or relays it from its last
-    machine, verified by digest.
-    """
-    job = job.plain()
-    spec = evaluation_spec(job)
-    saved = checkpoint_inputs(matches, state, spec.checkpoints)
-    # One input per checkpoint key, even where two keys hold the same bytes.
-    files = {
-        key: f"checkpoint-{digest(key)[:16]}{PurePosixPath(checkpoint_file_name(each.artifact.uri)).suffix}"
-        for key, each in saved.items()
-    }
-    inputs = tuple(
-        given
-        for key, each in sorted(saved.items())
-        for given in checkpoint_inputs_for(each, files[key])
+    results: list[EvalResult] = []
+    failures: list[EtudeError] = []
+    definitions = _servers(group.evaluations)
+    # A launched attempt's courier collects only below its assigned track folder.
+    launched = os.environ.get("ETUDE_RUN_ADDRESS") or os.environ.get("ETUDE_RUN")
+    base = Path(directory) if directory is not None else default_root()
+    if launched is not None:
+        base = base / launched
+    receipts = (
+        base / "artifacts" / "inference"
+        if launched
+        else base / (group.evaluations[0].experiment or "eval") / "artifacts" / "inference"
+        if group.evaluations
+        else base / "artifacts" / "inference"
     )
-    spec = spec.model_copy(update={"matches": tuple(matches), "files": files, "lines": state.lines})
-    return job.model_copy(
-        update={"config": spec.model_dump_json(), "inputs": (*job.inputs, *inputs)}
+    workers = max((spec.workers for spec in group.evaluations), default=1)
+    with _terminable(), resources(workers, receipts), ExitStack() as lifetime:
+        opened: list[tuple[Evaluation, EvalRun, ExitStack]] = []
+        for spec in group.evaluations:
+            if spec.experiment is None:
+                raise EtudeError("evaluation_names_no_experiment", 422)
+            member = lifetime.enter_context(ExitStack())
+            # The match digest survives relocation: checkpoint paths are transport only.
+            identity = (
+                digest(sorted(m.key for m in spec.matches))
+                if spec.matches is not None
+                else digest(
+                    spec.model_dump(mode="json", exclude={"server", "play", "workers", "files"})
+                )
+            )
+            active = member.enter_context(
+                evaluating(
+                    spec.tournament,
+                    experiment=spec.experiment,
+                    checkpoint=spec.checkpoint.ref
+                    if isinstance(spec.checkpoint, CheckpointRecord)
+                    else spec.checkpoint
+                    if isinstance(spec.checkpoint, CheckpointRef)
+                    else None,
+                    checkpoints=tuple(each.ref for each in spec.checkpoints),
+                    enter=spec.entrants,
+                    matches=spec.matches,
+                    workers=spec.workers,
+                    run=f"{spec.experiment}/{folder_name(spec.tournament.name)}-{identity[:12]}",
+                    directory=base,
+                    storages=storages,
+                    lines=spec.lines,
+                    resume=True,
+                )
+            )
+            opened.append((spec, active, member))
+        if not opened:
+            return ()
+        report = opened[0][1]._report
+        report.total = sum(len(active.matches) for _, active, _ in opened)
+        report.done = sum(active._report.done for _, active, _ in opened)
+        for _, active, _ in opened:
+            active._report = report
+        report.write()
+        needed: dict[str, list[str]] = {}
+        for spec, active, _ in opened:
+            if any(m.key not in active.done for m in active.matches):
+                for server in (spec.server,) if spec.server is not None else ():
+                    needed.setdefault(server.name, []).append(spec.tournament.name)
+        handles: dict[str, object] = {}
+        for name, tournaments in needed.items():
+            definition = definitions[name]
+            try:
+                serve = definition.serve.load(checkout)
+                context = cast(
+                    AbstractContextManager[object],
+                    serve(config_type(serve).model_validate_json(definition.config)),
+                )
+                handle = lifetime.enter_context(_serving(context, name, tournaments))
+            except Terminated as error:
+                for _, active, _ in opened:
+                    active.fail_pending(error)
+                raise
+            except Exception as error:
+                refusal = RetryRequested(f"server {name} could not start: {error}")
+                for _, active, _ in opened:
+                    active.fail_pending(refusal)
+                raise refusal from error
+            try:
+                pickle.dumps(handle)
+            except Exception as error:
+                refusal = RetryRequested(f"inference_handle_not_picklable: {name}")
+                for _, active, _ in opened:
+                    active.fail_pending(refusal)
+                raise refusal from error
+            handles[name] = handle
+        plays = []
+        for spec, active, _ in opened:
+            play = cast(Callable[..., Tables | Result], spec.play.load(checkout))
+            arguments: tuple[object, ...] = ()
+            if spec.server is not None:
+                arguments = (handles.get(spec.server.name),)
+            plays.append(Playing(run=active, play=play, arguments=arguments))
+        outcomes = play_together(plays)
+        for (_, _, member), outcome in zip(opened, outcomes, strict=True):
+            if isinstance(outcome, EtudeError):
+                member.__exit__(type(outcome), outcome, outcome.__traceback__)
+                failures.append(outcome)
+            else:
+                member.close()
+                results.append(outcome)
+        if failures:
+            raise failures[0]
+    return tuple(results)
+
+
+@contextmanager
+def _serving(
+    context: AbstractContextManager[object], name: str, tournaments: Sequence[str]
+) -> Iterator[object]:
+    entered = False
+    try:
+        with context as handle:
+            entered = True
+            print(
+                f"etude: server {name}: started for {', '.join(tournaments)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            yield handle
+    finally:
+        if entered:
+            print(f"etude: server {name}: stopped", file=sys.stderr, flush=True)
+
+
+def group_evaluations(
+    jobs: Sequence[Job], evaluations: Sequence[Evaluation], state: ExperimentState
+) -> Job:
+    """One compatible machine job, with checkpoint inputs deduplicated by key."""
+    first = jobs[0].plain()
+    inputs: dict[str, Input] = {}
+    for job in jobs:
+        for given in job.inputs:
+            if given.name in inputs and inputs[given.name] != given:
+                raise EtudeError("eval_input_conflict", 422, detail=given.name)
+            inputs[given.name] = given
+    members: list[Evaluation] = []
+    for spec in evaluations:
+        saved = checkpoint_inputs(spec.matches or (), state, spec.checkpoints)
+        files = {
+            key: f"checkpoint-{digest(key)[:16]}{PurePosixPath(checkpoint_file_name(each.artifact.uri)).suffix}"
+            for key, each in saved.items()
+        }
+        for key, each in sorted(saved.items()):
+            for given in checkpoint_inputs_for(each, files[key]):
+                if given.name in inputs and inputs[given.name] != given:
+                    raise EtudeError("eval_input_conflict", 422, detail=given.name)
+                inputs[given.name] = given
+        members.append(spec.model_copy(update={"files": files, "lines": state.lines}))
+    return first.model_copy(
+        update={
+            "name": "evals",
+            "config": EvalGroup(evaluations=tuple(members)).model_dump_json(),
+            "inputs": tuple(inputs.values()),
+            "max_hours": sum(job.require_hours() for job in jobs),
+            "max_usd": None
+            if any(job.max_usd is None for job in jobs)
+            else sum((job.max_usd or Decimal(0) for job in jobs), Decimal(0)),
+        }
     )
 
 
@@ -709,11 +922,12 @@ def continued_config(parent: RunRecord, changes: str) -> BaseModel:
         raise LauncherError(str(error)) from None
 
 
-def _hold(evaluation: Evaluation) -> None:
-    """On the machine: hold the tournament, with the checkpoint inputs in their seats.
+def _hold(group: EvalGroup) -> None:
+    """On the machine, relocate inputs and hold all tournaments below its track folder."""
+    hold_group(EvalGroup(evaluations=tuple(_received(spec) for spec in group.evaluations)))
 
-    Eval job commands name it as `etude.jobs:_hold`, so its name and module stay.
-    """
+
+def _received(evaluation: Evaluation) -> Evaluation:
     if evaluation.experiment is None or (evaluation.checkpoints and evaluation.matches is None):
         raise SystemExit("etude: an experiment's evaluation job is launched by `etude eval`")
     folder = os.environ.get("ETUDE_INPUTS_DIR")
@@ -727,7 +941,7 @@ def _hold(evaluation: Evaluation) -> None:
         checkpoint = given.ref.model_copy(
             update={"artifact": given.artifact.model_copy(update={"uri": uri})}
         )
-    elif given is not None:
+    elif isinstance(given, Input):
         # A training run's file is keyed by its run and name; any other, by where it lies.
         key = (
             checkpoint_id(
@@ -743,11 +957,13 @@ def _hold(evaluation: Evaluation) -> None:
             size_bytes=given.size_bytes,
         )
         checkpoint = CheckpointRef(key=key, artifact=artifact)
+    if checkpoint is not None:
+        evaluation = evaluation.model_copy(update={"checkpoint": checkpoint})
     if evaluation.matches is not None:
         here = {key: (Path(str(folder)) / name).as_uri() for key, name in evaluation.files.items()}
         matches = tuple(_relocated(match, here) for match in evaluation.matches)
         evaluation = evaluation.model_copy(update={"matches": matches})
-    hold_evaluation(evaluation, checkpoint=checkpoint)
+    return evaluation
 
 
 def _relocated(match: Match, here: Mapping[str, str]) -> Match:
@@ -870,7 +1086,7 @@ def _repo(origin: Callable[..., object], options: JobOptions) -> Path | None:
     if "repo" in options:
         given = options["repo"]
         return None if given is None else Path(given).resolve()
-    file = Path(inspect.getfile(origin)).resolve()
+    file = Path(inspect.getfile(inspect.unwrap(origin))).resolve()
     for folder in file.parents:
         if (folder / ".git").exists():
             return folder
@@ -891,7 +1107,7 @@ def _function(function: Callable[..., object], repo: Path | None) -> Function:
     if module == "<run_path>" and "<" not in name:
         # CLI files are executed by runpy. Their top-level functions are still
         # importable from the source checkout under the actual file's name.
-        where = Path(inspect.getfile(function)).resolve()
+        where = Path(inspect.getfile(inspect.unwrap(function))).resolve()
         if repo is not None and where.is_relative_to(repo) and where.stem.isidentifier():
             return Function(
                 module=where.stem,

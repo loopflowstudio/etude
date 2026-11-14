@@ -18,10 +18,10 @@ from etude.eval.records import (
     Rollup,
     as_config,
 )
+from etude.eval.result import EvalResult as EvalResult
+from etude.eval.result import Result as Result
+from etude.eval.result import Tables as Tables
 from etude.eval.run import ETUDE_TABLES as ETUDE_TABLES
-from etude.eval.run import EvalResult as EvalResult
-from etude.eval.run import Result as Result
-from etude.eval.run import Tables as Tables
 from etude.eval.run import _evaluating_matches
 from etude.eval.source import digest_files
 from etude.storage import Storage

@@ -12,3 +12,7 @@ class EtudeError(Exception):
 
 class LauncherError(Exception):
     """The request cannot be carried out as asked."""
+
+
+class RetryRequested(Exception):
+    """Fail this evaluation and leave unfinished matches eligible for the next pass."""

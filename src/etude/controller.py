@@ -4,6 +4,7 @@
 new runs. The scheduler's public records are the only memory of a hand-down.
 """
 
+import math
 from collections.abc import Sequence
 from decimal import Decimal
 from pathlib import Path
@@ -13,21 +14,26 @@ from typing import Literal
 from etude.cache import Artifact, ContentMismatch, Corrupt
 from etude.declarations import Experiment, asked, read_training_jobs, select_runs
 from etude.errors import EtudeError, LauncherError
-from etude.eval.records import Match, digest, folder_name
+from etude.eval.records import digest
+from etude.eval.result import EvalResult
 from etude.eval.tournament import StoredRuns, played
 from etude.experiment import observe
 from etude.jobs import (
+    EvalGroup,
     Evaluation,
     ExperimentState,
+    _group_key,
     _relocated,
+    _servers,
     checkpoint_inputs,
     checkpoint_inputs_for,
-    evaluation_spec,
-    hold_evaluation,
+    evaluation_group,
+    group_evaluations,
+    hold_group,
     with_experiment,
-    with_matches,
 )
 from etude.launch import client
+from etude.launch.commands import DEFAULT_MIN_EVAL_HOURS
 from etude.launch.listing import show_quote
 from etude.launch.server import selected
 from etude.records import Record
@@ -43,7 +49,7 @@ class TournamentDecision(Record):
     failed: int = 0
     played: int = 0
     launched: str | None = None
-    state: Literal["queued", "running", "would launch", "not queued"] | None = None
+    state: Literal["queued", "running", "would launch", "not queued", "waiting"] | None = None
     reason: str | None = None
     stopped: tuple[str, ...] = ()
 
@@ -107,6 +113,7 @@ def advance(
     rent: str | None = None,
     directory: Path | str | None = None,
     retry_failed: bool = False,
+    min_eval_hours: float = DEFAULT_MIN_EVAL_HOURS,
     smoke: Smoke = Smoke(),
     mode: Literal["local", "launch", "queue"] = "local",
     max_usd: Decimal | None = None,
@@ -121,6 +128,8 @@ def advance(
     """One pass. Existing addresses stay put; explicit retries preserve delivered matches."""
     if max_usd is not None and (not max_usd.is_finite() or max_usd < 0):
         raise LauncherError("--max-usd must be a finite, nonnegative dollar limit")
+    if not math.isfinite(min_eval_hours) or min_eval_hours < 0:
+        raise LauncherError("--min-eval-hours must be finite and nonnegative")
     listed = source.keys("")
     state = observe(source, experiment.name, keys=listed)
     committed = state.committed_usd
@@ -191,6 +200,7 @@ def advance(
         if evaluate and experiment.eval is not None
         else []
     )
+    _servers(tuple(spec for job in jobs for spec in evaluation_group(job).evaluations))
     if smoke_file_first and callable(experiment.training) and not quote:
         assert experiment.file is not None
         before = smoke_file(experiment.file, requests)
@@ -211,8 +221,11 @@ def advance(
         before = smoke_file(experiment.file, steps=("eval", "report"), source=source)
         smoke = Smoke(steps=before.rest)
     stored = StoredRuns.read(experiment.name, source, keys=listed) if jobs else None
+    pending_jobs: list[Job] = []
+    pending_specs: list[Evaluation] = []
+    pending_decisions: list[int] = []
     for executable in jobs:
-        spec = evaluation_spec(executable)
+        spec = evaluation_group(executable).evaluations[0]
         found = played(
             spec.tournament,
             experiment=experiment.name,
@@ -221,7 +234,9 @@ def advance(
             runs=stored,
             lines=state.lines,
         )
-        new_matches = [*found.new, *(found.failed if retry_failed else ())]
+        new_matches = list(
+            {m.key: m for m in (*found.new, *(found.failed if retry_failed else ()))}.values()
+        )
         pending = [match for match in new_matches if match.key not in running]
         done = TournamentDecision(
             tournament=spec.tournament.name,
@@ -229,38 +244,87 @@ def advance(
             running=len(new_matches) - len(pending),
             failed=0 if retry_failed else len(found.failed),
         )
-        stopped = {failed[m.key] for m in pending if m.key in failed}
+        retryable = {m.key for m in found.retry}
+        stopped = {failed[m.key] for m in pending if m.key in failed and m.key not in retryable}
         if stopped and not retry_failed:
             stopped_runs.update(stopped)
             done = done.model_copy(update={"stopped": tuple(sorted(stopped))})
-            pending = [match for match in pending if match.key not in failed]
+            pending = [
+                match for match in pending if match.key not in failed or match.key in retryable
+            ]
         if pending:
-            if mode == "local":
-                count = _play_here(spec, executable, pending, state, source, directory)
-                done = done.model_copy(update={"played": count})
-                running.update(m.key for m in pending)
-            else:
-                executable = with_matches(executable, pending, state)
-                if _fits(executable, committed, max_usd):
-                    stem = f"{experiment.name}/{folder_name(spec.tournament.name)}-{digest(sorted(m.key for m in pending))[:12]}"
-                    identity = stem
-                    number = 2
-                    while identity in taken:
-                        identity = f"{stem}-{number}"
-                        number += 1
-                    planned.append(RunRequest(id=identity, job=executable, smoke=smoke))
-                    done = done.model_copy(update={"launched": identity})
-                    running.update(m.key for m in pending)
-                    taken.add(identity)
-                    committed += executable.max_usd or Decimal(0)
-                else:
-                    done = done.model_copy(
-                        update={
-                            "state": "not queued",
-                            "reason": f"--max-usd {max_usd} (${committed:.2f} committed)",
-                        }
-                    )
+            pending_jobs.append(executable)
+            pending_specs.append(
+                spec.model_copy(update={"matches": tuple(pending), "lines": state.lines})
+            )
+            pending_decisions.append(len(decisions))
+            running.update(m.key for m in pending)
         decisions.append(done)
+    groups: dict[str, list[int]] = {}
+    for index, executable in enumerate(pending_jobs):
+        groups.setdefault(_group_key(executable, pending_specs[index]), []).append(index)
+    training_active = bool(new) or any(r.state in {"queued", "running"} for r in state.runs)
+    for indices in groups.values():
+        members = [pending_specs[i] for i in indices]
+        executables = [pending_jobs[i] for i in indices]
+        if mode == "local":
+            held = _play_here(members, executables[0], state, source, directory)
+            for index, result in zip(indices, held, strict=True):
+                n = pending_decisions[index]
+                decisions[n] = decisions[n].model_copy(update={"played": result.played})
+            continue
+        executable = group_evaluations(executables, members, state)
+        keys = sorted(m.key for spec in members for m in spec.matches or ())
+        stem = f"{experiment.name}/evals-{digest(keys)[:12]}"
+        identity = stem
+        number = 2
+        while identity in taken:
+            identity = f"{stem}-{number}"
+            number += 1
+        request = RunRequest(id=identity, job=executable, smoke=smoke)
+        estimates = (
+            [stored.estimate_seconds(spec.tournament, spec.matches or ()) for spec in members]
+            if stored
+            else []
+        )
+        hours = None
+        if estimates and all(seconds is not None for seconds in estimates):
+            workers = min(max(spec.workers for spec in members), len(keys))
+            # Both shared capacity and each tournament's own caller limit constrain time.
+            hours = (
+                max(
+                    sum(seconds or 0 for seconds in estimates) / workers,
+                    max(
+                        (seconds or 0) / min(spec.workers, len(spec.matches or ()))
+                        for spec, seconds in zip(members, estimates, strict=True)
+                    ),
+                )
+                / 3600
+            )
+        changes: dict[str, object]
+        if not _fits(executable, committed, max_usd):
+            changes = {
+                "state": "not queued",
+                "reason": f"--max-usd {max_usd} (${committed:.2f} committed)",
+            }
+        elif (
+            training_active
+            and hours is not None
+            and hours < min_eval_hours
+            and identity not in client.room([*planned, request], pool, rent=rent)
+        ):
+            changes = {
+                "state": "waiting",
+                "reason": f"{len(keys)} eval matches, estimated {hours:.2f} machine hours below --min-eval-hours {min_eval_hours:g}; no machine has room and training is running",
+            }
+        else:
+            planned.append(request)
+            taken.add(identity)
+            committed += executable.max_usd or Decimal(0)
+            changes = {"launched": identity}
+        for index in indices:
+            n = pending_decisions[index]
+            decisions[n] = decisions[n].model_copy(update=changes)
     if planned:
         if quote:
             for request in new:
@@ -300,15 +364,18 @@ def advance(
 
 
 def _play_here(
-    spec: Evaluation,
+    specs: Sequence[Evaluation],
     executable: Job,
-    pending: Sequence[Match],
     state: ExperimentState,
     source: Storage,
     directory: Path | str | None,
-) -> int:
+) -> tuple[EvalResult, ...]:
     """Play with the same verified artifacts a launched run receives as inputs."""
-    saved = checkpoint_inputs(pending, state, spec.checkpoints)
+    saved = {
+        key: value
+        for spec in specs
+        for key, value in checkpoint_inputs(spec.matches or (), state, spec.checkpoints).items()
+    }
     with TemporaryDirectory(prefix="etude-eval-") as folder:
         here: dict[str, str] = {}
         for key, checkpoint in saved.items():
@@ -325,18 +392,22 @@ def _play_here(
                 except (ContentMismatch, Corrupt):
                     raise EtudeError("checkpoint_content_mismatch", 409, detail=key) from None
             here[key] = (Path(folder) / name).as_uri()
-        held = hold_evaluation(
-            spec.model_copy(
-                update={
-                    "matches": tuple(_relocated(m, here) for m in pending),
-                    "lines": state.lines,
-                }
+        return hold_group(
+            EvalGroup(
+                evaluations=tuple(
+                    spec.model_copy(
+                        update={
+                            "matches": tuple(_relocated(m, here) for m in spec.matches or ()),
+                            "lines": state.lines,
+                        }
+                    )
+                    for spec in specs
+                )
             ),
             checkout=executable.repo,
             directory=directory,
             storages=[source],
         )
-        return held.played
 
 
 def _show_tournament(done: TournamentDecision) -> None:

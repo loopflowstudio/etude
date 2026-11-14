@@ -17,7 +17,7 @@ import typer
 
 from etude.errors import EtudeError, LauncherError
 from etude.launch import cli as launch_cli
-from etude.launch.commands import Kind, kind
+from etude.launch.commands import DEFAULT_MIN_EVAL_HOURS, Kind, kind
 from etude.train.cli import checkpoints, sync
 
 app = launch_cli.app
@@ -88,6 +88,7 @@ def _submit(
     source: str | None = None,
     watch: float | None = None,
     retry_failed: bool = False,
+    min_eval_hours: float = DEFAULT_MIN_EVAL_HOURS,
 ) -> None:
     if help:
         print(ctx.get_help())
@@ -134,6 +135,7 @@ def _submit(
                 resume=resume,
                 until=None if until is None else Until.parse(until),
                 retry_failed=retry_failed,
+                min_eval_hours=min_eval_hours,
             )
             if watch is None:
                 break
@@ -191,6 +193,12 @@ def launch(
         str | None, typer.Option(help="experiment commitment limit in dollars")
     ] = None,
     source: Annotated[str | None, typer.Option(help="where experiment runs are delivered")] = None,
+    min_eval_hours: Annotated[
+        float,
+        typer.Option(
+            min=0, help="rent for this many estimated machine hours of evals while training runs"
+        ),
+    ] = DEFAULT_MIN_EVAL_HOURS,
     retry_failed: Annotated[bool, typer.Option(help="retry failed eval matches")] = False,
     watch: Annotated[float | None, typer.Option(min=1, help="pass again every SECONDS")] = None,
 ) -> None:
@@ -212,6 +220,7 @@ def launch(
         until=until,
         source=source,
         retry_failed=retry_failed,
+        min_eval_hours=min_eval_hours,
         watch=watch,
     )
 
@@ -235,6 +244,12 @@ def queue(
         str | None, typer.Option(help="experiment commitment limit in dollars")
     ] = None,
     source: Annotated[str | None, typer.Option(help="where experiment runs are delivered")] = None,
+    min_eval_hours: Annotated[
+        float,
+        typer.Option(
+            min=0, help="rent for this many estimated machine hours of evals while training runs"
+        ),
+    ] = DEFAULT_MIN_EVAL_HOURS,
     retry_failed: Annotated[bool, typer.Option(help="retry failed eval matches")] = False,
 ) -> None:
     """Add a file's runs to the queue. They start when a machine has room or can be rented."""
@@ -252,6 +267,7 @@ def queue(
         smoke=smoke,
         source=source,
         retry_failed=retry_failed,
+        min_eval_hours=min_eval_hours,
     )
 
 

@@ -86,12 +86,14 @@ def test_matches_in_two_workers_resumes_from_storage_without_replaying(
     progress = [line for line in capsys.readouterr().err.splitlines() if "matches played" in line]
     assert len(progress) == 24
     assert progress[-1].startswith("etude: league-1: 24/24 matches played, ")
-    # One block: each table merged into one file, then the index; nothing per match.
-    (index,) = (key for key in bucket.keys("league/league-1/blocks/") if key.endswith("block.json"))
-    folder = index.removesuffix("block.json")
-    assert sorted(bucket.keys(folder)) == [
-        folder + name for name in ("block.json", "games.parquet", "plays.parquet")
-    ]
+    # Every completed match is sealed and available before the run ends.
+    indices = [key for key in bucket.keys("league/league-1/blocks/") if key.endswith("block.json")]
+    assert len(indices) == 24
+    for index in indices:
+        folder = index.removesuffix("block.json")
+        assert sorted(bucket.keys(folder)) == [
+            folder + name for name in ("block.json", "games.parquet", "plays.parquet")
+        ]
 
     shutil.rmtree(tmp_path / "local")
     measured = MeasuredStorage(bucket)
@@ -100,8 +102,8 @@ def test_matches_in_two_workers_resumes_from_storage_without_replaying(
         run="league-1", directory=tmp_path / "local", storages=[measured],
     )  # fmt: skip
     assert (again.played, again.skipped) == (0, 24)
-    # One listing of the run and one read of its block's index.
-    assert (measured.listings, measured.requests) == (1, 1)
+    # One listing and one index read for each completed match.
+    assert (measured.listings, measured.requests) == (1, 24)
 
     db = statsdb("league", bucket)
     assert db.sql("select count(*) from plays").fetchone() == (24 * 4 * 2,)

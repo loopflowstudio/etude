@@ -13,7 +13,7 @@ from etude.errors import LauncherError
 from etude.eval.match import environment
 from etude.eval.records import Benchmark
 from etude.experiment import observe
-from etude.jobs import EvalJob, Evaluation, ExperimentState, TrainingJob
+from etude.jobs import EvalGroup, EvalJob, Evaluation, ExperimentState, TrainingJob
 from etude.launch import client
 from etude.launch.records import Pool
 from etude.records import RunRecord
@@ -194,7 +194,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         assert main(["launch", str(file)]) == 0
         second = capsys.readouterr().out
         assert "two/fine@0  new, running" in second
-        assert "queued two/ladder-" in second
+        assert "queued two/evals-" in second
         scheduler.wait(every=0.05, timeout=30)
         assert all(scheduler.read(r.id).outcome == "succeeded" for r in scheduler.runs(done=True))
         assert main(["launch", str(file)]) == 0
@@ -228,7 +228,7 @@ def test_eval_job_lowering_preserves_the_executable_record() -> None:
     plain = Job(
         name="ladder",
         command="uv run python -m etude.call --function etude.jobs:_hold",
-        config=config.model_dump_json(),
+        config=EvalGroup(evaluations=(config,)).model_dump_json(),
         repo=None,
         experiment="two",
         max_hours=1,
@@ -300,7 +300,16 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     source = DirectoryStorage(tmp_path / "source")
     measured = MeasuredStorage(source)
     monkeypatch.setattr("etude.storage.storage_from_uri", lambda uri: measured)
-    args = ["queue", str(file), "--pool", "waiting", "--source", str(source.root)]
+    args = [
+        "queue",
+        str(file),
+        "--pool",
+        "waiting",
+        "--source",
+        str(source.root),
+        "--min-eval-hours",
+        "0",
+    ]
     assert main(args) == 0
     (held,) = b.scheduler.runs()
     b.scheduler.cancel(held.id)
@@ -314,7 +323,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     first = capsys.readouterr()
     assert "two/fine@0  new, queued" in first.out
     assert f"failed runs {held.id} (--retry-failed" in first.out
-    assert "eval free:" in first.out and ", queued two/free-" in first.out
+    assert "eval free:" in first.out and ", queued two/evals-" in first.out
     assert "launched_pass_failed" in first.err
     assert len(b.scheduler.runs(done=True)) == 3
     measured.listings = 0
