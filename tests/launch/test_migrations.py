@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import shutil
 import sqlite3
 import subprocess
 import zipfile
@@ -50,10 +51,6 @@ def _migration(sql: str, *, name: str = "extra", floor: str | None = "0.4.0") ->
     )
 
 
-def _ready(home: Path) -> None:
-    upgrade(home, development=True)
-
-
 def test_inspect_and_open_missing_leave_home_absent(tmp_path: Path) -> None:
     home = tmp_path / "absent"
     state = inspect(home)
@@ -61,6 +58,106 @@ def test_inspect_and_open_missing_leave_home_absent(tmp_path: Path) -> None:
     with pytest.raises(LauncherError, match="database upgrade"):
         open_home(home)
     assert not home.exists()
+
+
+@pytest.mark.parametrize("journal", ["checkpointed", "live", "orphan"])
+def test_inspection_leaves_files_unchanged_and_reads_wal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    journal: str,
+) -> None:
+    home = tmp_path / "home"
+    upgrade(home, development=True)
+    path = launcher_file(home)
+    with closing(sqlite3.connect(path)) as writer:
+        if journal != "checkpointed":
+            writer.execute("UPDATE migrations SET sha256='changed' WHERE name='run_names'")
+            writer.commit()
+        if journal == "orphan":
+            home = tmp_path / "orphan"
+            home.mkdir()
+            for source in (path, path.with_name(path.name + "-wal")):
+                shutil.copyfile(source, home / source.name)
+        before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in home.iterdir() if p.is_file()}
+        state = inspect(home)
+        assert state.applied == tuple(m.name for m in migrations())
+        assert state.problem == (
+            None if journal == "checkpointed" else "applied migration content differs: run_names"
+        )
+        monkeypatch.setenv("ETUDE_HOME", str(home))
+        assert main(["database", "status"]) == 0
+        assert (state.problem or "compatible") in capsys.readouterr().out
+        assert {
+            p: (p.read_bytes(), p.stat().st_mtime_ns) for p in home.iterdir() if p.is_file()
+        } == before
+
+
+@pytest.mark.parametrize("timeout", [None, "0"])
+def test_refused_upgrade_does_not_announce_consolidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    timeout: str | None,
+) -> None:
+    with closing(sqlite3.connect(tmp_path / "launcher.db")) as old:
+        old.executescript((FIXTURES / "launcher-0.3.2.sql").read_text())
+    monkeypatch.setattr(database, "_merged", lambda: {})
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    arguments = ["database", "upgrade"]
+    if timeout is not None:
+        arguments.extend(["--timeout", timeout])
+    assert main(arguments) == 1
+    output = capsys.readouterr()
+    assert "consolidating" not in output.out
+    assert ("unmerged" if timeout is None else "timeout") in output.err
+    assert not (tmp_path / "recovery").exists()
+
+
+def test_inspection_refuses_evidence_changed_during_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upgrade(tmp_path, development=True)
+    path = launcher_file(tmp_path)
+    read_only = database._read_only
+    with closing(sqlite3.connect(path)) as writer:
+        writer.execute("UPDATE migrations SET sha256='first' WHERE name='run_names'")
+        writer.commit()
+
+        def read_changed(copy: Path, timeout: float = 5) -> sqlite3.Connection:
+            writer.execute("UPDATE migrations SET sha256='second' WHERE name='run_names'")
+            writer.commit()
+            return read_only(copy, timeout)
+
+        monkeypatch.setattr(database, "_read_only", read_changed)
+        with pytest.raises(LauncherError, match="changed during inspection"):
+            inspect(tmp_path)
+
+
+def test_abandoned_snapshots_are_marked_without_discarding_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with closing(sqlite3.connect(tmp_path / "launcher.db")) as old:
+        old.executescript((FIXTURES / "launcher-0.3.2.sql").read_text())
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in migrations()})
+
+    def interrupted(record: Path, takeover: database.Takeover) -> None:
+        raise OSError("before publication intent")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(database, "_write_takeover", interrupted)
+        with pytest.raises(OSError, match="before publication intent"):
+            upgrade(tmp_path)
+    abandoned = next((tmp_path / "recovery").glob("consolidation-*"))
+    assert (abandoned / "abandoned").is_file()
+    before = {p: p.read_bytes() for p in abandoned.iterdir() if p.is_file()}
+    # Model a killed run that never reached exception cleanup.
+    (abandoned / "abandoned").unlink()
+    result = upgrade(tmp_path)
+    assert all(p.read_bytes() == data for p, data in before.items())
+    completed = result.backups[0].parent
+    assert (completed / "takeover.json").is_file()
+    assert not (completed / "abandoned").exists()
 
 
 def test_explicit_initialization_and_idempotent_upgrade(tmp_path: Path) -> None:
@@ -93,7 +190,7 @@ def test_cli_uses_python_outcome_locally(
 def test_open_pending_migration_changes_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _ready(tmp_path)
+    upgrade(tmp_path, development=True)
     path = launcher_file(tmp_path)
     before = path.read_bytes()
     known = migrations()
@@ -119,7 +216,7 @@ def test_ordinary_opens_refuse_stray_histories_without_changing_files(
     canonical: bool,
 ) -> None:
     if canonical:
-        _ready(tmp_path)
+        upgrade(tmp_path, development=True)
     legacy = tmp_path / name
     legacy.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(legacy)) as old:
@@ -146,7 +243,7 @@ def test_ordinary_opens_refuse_stray_histories_without_changing_files(
 def test_unmerged_upgrade_refuses_operational_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _ready(tmp_path)
+    upgrade(tmp_path, development=True)
     known = migrations()
     monkeypatch.setattr(
         database,
@@ -165,7 +262,7 @@ def test_unmerged_upgrade_refuses_operational_state(
 def test_compatible_branch_uses_same_canonical_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _ready(tmp_path)
+    upgrade(tmp_path, development=True)
     known = migrations()
     monkeypatch.setattr(database, "migrations", lambda: known[:-1])
     with_open = open_home(tmp_path)
@@ -181,7 +278,7 @@ def test_compatible_branch_uses_same_canonical_file(
 def test_additive_upgrade_preserves_open_writer_and_backup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _ready(tmp_path)
+    upgrade(tmp_path, development=True)
     older = open_home(tmp_path)
     known = migrations()
     change = _migration("ALTER TABLE pools ADD COLUMN note TEXT;")
@@ -200,7 +297,7 @@ def test_additive_upgrade_preserves_open_writer_and_backup(
 def test_breaking_upgrade_fences_stale_writer_and_refuses_reader(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _ready(tmp_path)
+    upgrade(tmp_path, development=True)
     older = open_home(tmp_path)
     known = migrations()
     change = _migration("CREATE TABLE future(value TEXT);", floor="0.5.0")
@@ -228,7 +325,7 @@ def test_breaking_upgrade_fences_stale_writer_and_refuses_reader(
 def test_failed_upgrade_preserves_schema_and_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sql: str
 ) -> None:
-    _ready(tmp_path)
+    upgrade(tmp_path, development=True)
     known = migrations()
     change = _migration(sql).model_copy(update={"expansion": "run_names", "exports": ("runs",)})
     monkeypatch.setattr(database, "migrations", lambda: (*known, change))
@@ -408,7 +505,7 @@ def test_old_receipts_and_retired_job_identity_survive(
 def test_upgrade_allowance_covers_write_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _ready(tmp_path)
+    upgrade(tmp_path, development=True)
     known = migrations()
     change = _migration("CREATE TABLE extra(value TEXT);")
     monkeypatch.setattr(database, "migrations", lambda: (*known, change))
@@ -426,7 +523,7 @@ def test_upgrade_allowance_covers_write_lock(
 def test_contraction_exports_original_facts_before_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _ready(tmp_path)
+    upgrade(tmp_path, development=True)
     store = open_home(tmp_path)
     store._db.execute(
         "INSERT INTO cohorts(name,parallel,created_at) VALUES ('retired',3,'2026-11-14T00:00:00Z')"
@@ -473,7 +570,7 @@ def test_scheduler_fence_stops_before_provider_actions(tmp_path: Path) -> None:
 def test_read_open_uses_two_queries_without_write_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _ready(tmp_path)
+    upgrade(tmp_path, development=True)
     connect = sqlite3.connect
     statements: list[str] = []
 
@@ -559,7 +656,7 @@ def test_handover_without_usable_program_exits_with_restart_instruction(
 def test_canonical_and_legacy_histories_join_one_queue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _ready(tmp_path)
+    upgrade(tmp_path, development=True)
     current = open_home(tmp_path)
     current.add_pool(Pool(name="current"))
     current.close()
@@ -587,7 +684,7 @@ def test_interrupted_takeover_resumes_all_histories(
     interruption: str,
 ) -> None:
     if canonical:
-        _ready(tmp_path)
+        upgrade(tmp_path, development=True)
         with closing(open_home(tmp_path)) as current:
             current.add_pool(Pool(name="current"))
     for name in ("launcher-17.db", "launcher.db"):
@@ -618,6 +715,7 @@ def test_interrupted_takeover_resumes_all_histories(
             upgrade(tmp_path)
     state = inspect(tmp_path)
     assert state.takeover and state.takeover.is_file()
+    assert not list((tmp_path / "recovery").glob("*/abandoned"))
     assert state.problem and "unfinished launcher takeover" in state.problem
     assert database.has_launcher(tmp_path)
     with pytest.raises(LauncherError, match="unfinished launcher takeover"):

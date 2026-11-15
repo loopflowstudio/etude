@@ -1087,7 +1087,11 @@ library opens never initialize, migrate or select a different database. All
 compatible clients and experiments share `$ETUDE_HOME/launcher.sqlite` (default
 `~/.etude`). Workers and their deadline guardians keep running during an upgrade.
 
-`database status` reads local schema evidence without credentials or network.
+`database status` reads local schema evidence without credentials, network or
+changes to the launcher home. With uncheckpointed WAL data, inspection copies
+the database and WAL into a temporary directory, reads their committed state,
+then removes the copy. This needs temporary space for both files. If the source
+changes during inspection, it refuses the mixed evidence; rerun status.
 `database upgrade [--timeout SECONDS]` is an explicit local wait; its default
 allowance is unlimited. Python uses the same implementation:
 
@@ -1113,7 +1117,11 @@ opens refuse. Keep scheduling stopped and rerun `etude database upgrade` with a
 merged build. It verifies the recorded files and completes the same publication.
 Changed or missing evidence requires reconciliation against the named record;
 all files remain available. Never run a recovery copy. The completed record stays
-beside the recovery snapshots.
+beside the recovery snapshots as `takeover.json`. Failed attempts before publication
+intent retain their snapshots with an `abandoned` marker. After a killed process,
+the next authorized upgrade marks those abandoned folders under its upgrade lock;
+folders with pending intent or completed takeovers are never marked abandoned.
+Snapshots without either record or marker have not completed publication.
 
 A backup restores database facts, not provider state: stop scheduling
 and reconcile live machines and attempts before restoring or resuming any queue.

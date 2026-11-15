@@ -24,7 +24,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import cache, partial
@@ -390,7 +390,7 @@ class Database:
         _refuse_takeover(path.parent)
         if legacy := _sources(path.parent):
             raise LauncherError(
-                f"{path.parent} holds {len(legacy)} legacy launcher histories: "
+                f"{path.parent} holds legacy launcher histories: "
                 f"{', '.join(map(str, legacy))}; "
                 "stop old local scheduling clients, then run etude database upgrade"
             )
@@ -1283,21 +1283,55 @@ def _read_only(path: Path, timeout: float = 5) -> sqlite3.Connection:
     return sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=timeout)
 
 
+@contextmanager
+def _inspection(path: Path) -> Iterator[sqlite3.Connection]:
+    """Read stable evidence without letting SQLite create or update source sidecars."""
+    path = path.resolve()
+    revision = _signature(path)
+    wal = path.with_name(path.name + "-wal")
+    # Immutable reads ignore WAL. Copy a WAL-backed database privately instead;
+    # SQLite rebuilds its shared-memory index there, including committed WAL rows.
+    # Check identities after reading too: copies must not mix checkpoint generations.
+    try:
+        with ExitStack() as stack:
+            if wal.exists() and wal.stat().st_size:
+                temporary = stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix="etude-inspect-")
+                )
+                target = Path(temporary) / path.name
+                for source in (path, wal):
+                    with (
+                        source.open("rb") as reader,
+                        (target.parent / source.name).open("wb") as writer,
+                    ):
+                        while chunk := reader.read(1024 * 1024):
+                            remaining()
+                            writer.write(chunk)
+                connection = _read_only(target, timeout=0)
+            else:
+                connection = sqlite3.connect(
+                    path.as_uri() + "?mode=ro&immutable=1", uri=True, timeout=0
+                )
+            with closing(connection) as db:
+                yield db
+    finally:
+        if not path.exists() or _signature(path) != revision:
+            raise LauncherError(
+                "launcher database changed during inspection; rerun database status"
+            )
+
+
 def _snapshot(source: Path, target: Path, timeout: float) -> None:
     """Read a consistent WAL snapshot without modifying the source's records."""
-    reader = _read_only(source, timeout)
-    target.touch(mode=0o600, exist_ok=False)
-    writer = sqlite3.connect(target, timeout=0)
-    try:
+    with closing(_read_only(source, timeout)) as reader:
+        target.touch(mode=0o600, exist_ok=False)
+        with closing(sqlite3.connect(target, timeout=0)) as writer:
 
-        def progress(status: int, left: int, total: int) -> None:
-            remaining()
+            def progress(status: int, left: int, total: int) -> None:
+                remaining()
 
-        reader.backup(writer, pages=256, progress=progress, sleep=0.01)
-        writer.execute("PRAGMA journal_mode=DELETE")
-    finally:
-        writer.close()
-        reader.close()
+            reader.backup(writer, pages=256, progress=progress, sleep=0.01)
+            writer.execute("PRAGMA journal_mode=DELETE")
 
 
 def _invalid_records(db: sqlite3.Connection) -> list[str]:
@@ -1401,9 +1435,8 @@ def inspect(home: Path) -> Schema:
     applied: tuple[str, ...] = ()
     problem: str | None = None
     if path.exists():
-        db = _read_only(path)
-        db.row_factory = sqlite3.Row
-        try:
+        with _inspection(path) as db:
+            db.row_factory = sqlite3.Row
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='migrations'").fetchone():
                 rows = db.execute(
                     "SELECT name,sha256,floor FROM migrations ORDER BY rowid"
@@ -1419,8 +1452,6 @@ def inspect(home: Path) -> Schema:
                     problem = "applied migration content differs: " + ", ".join(changed)
             else:
                 problem = "canonical file has no migration ledger"
-        finally:
-            db.close()
     pending = tuple(m.name for m in migrations() if m.name not in applied)
     return Schema(path=path, sources=sources, applied=applied, pending=pending, problem=problem)
 
@@ -1623,30 +1654,28 @@ def _normalize_history(db: sqlite3.Connection, path: Path) -> tuple[str, ...] | 
     return _PREDECESSORS[schema]
 
 
-def _merge_history(
-    target: sqlite3.Connection, source: sqlite3.Connection, path: Path, converted: Path
-) -> None:
+def _merge_history(target: sqlite3.Connection, path: Path, converted: Path) -> None:
     """Merge each table in bulk through its identity index, preserving distinct facts."""
     alias = f"history{len(target.execute('PRAGMA database_list').fetchall())}"
     target.execute(f"ATTACH DATABASE ? AS {alias}", (converted.resolve().as_uri() + "?mode=ro",))
     tables = [
         r[0]
-        for r in source.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('migrations','locks')"
+        for r in target.execute(
+            f"SELECT name FROM {alias}.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('migrations','locks')"
         )
     ]
     for table in tables:
         remaining()
         shape = {
             row["name"]: row
-            for row in source.execute(f"PRAGMA table_info({_quote(table)})")
+            for row in target.execute(f"PRAGMA {alias}.table_info({_quote(table)})")
             if row["name"] != "seq"
         }
         columns = list(shape)
         target_columns = {r[1] for r in target.execute(f"PRAGMA main.table_info({_quote(table)})")}
         if not target_columns:
-            sql = source.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            sql = target.execute(
+                f"SELECT sql FROM {alias}.sqlite_master WHERE type='table' AND name=?", (table,)
             ).fetchone()[0]
             target.execute(sql)
             target_columns = set(columns)
@@ -1913,7 +1942,7 @@ def _takeover(home: Path, state: Schema) -> Upgrade:
                         continue
                     _apply(old, applied, state.path, exports)
                     old.execute("COMMIT")
-                    _merge_history(db, old, source, converted)
+                _merge_history(db, source, converted)
             if problems := _invalid_records(db):
                 raise LauncherError("consolidated rows do not validate:\n" + "\n".join(problems))
             if db.execute("PRAGMA foreign_key_check").fetchone():
@@ -2001,6 +2030,23 @@ def _remove_abandoned_staging(home: Path) -> None:
             shutil.rmtree(staging)
 
 
+def _mark_abandoned_recovery(home: Path) -> None:
+    """Under the upgrade lock, retain and label snapshots with no publication owner."""
+    record = _takeover_path(home)
+    active = (
+        Takeover.model_validate_json(record.read_text()).target.path.parent
+        if record.exists()
+        else None
+    )
+    for recovery in (home / "recovery").glob("consolidation-*"):
+        if recovery != active and not (recovery / "takeover.json").exists():
+            marker = recovery / "abandoned"
+            if not marker.exists():
+                marker.touch(mode=0o600)
+                _sync(marker)
+                _sync_directory(recovery)
+
+
 def upgrade(home: Path, *, timeout: float | None = None, development: bool = False) -> Upgrade:
     """Explicitly initialize or advance local state; never schedule or contact a worker.
 
@@ -2019,6 +2065,7 @@ def upgrade(home: Path, *, timeout: float | None = None, development: bool = Fal
         home.mkdir(parents=True, exist_ok=True)
         with _upgrade_lock(home):
             _remove_abandoned_staging(home)
+            _mark_abandoned_recovery(home)
             state = inspect(home)
             _authorize_upgrade(state, development, from_catalog)
             if state.takeover is not None:
@@ -2026,7 +2073,10 @@ def upgrade(home: Path, *, timeout: float | None = None, development: bool = Fal
             if not state.pending and not state.sources:
                 return Upgrade(path=state.path, sources=(), backups=(), applied=(), floor=None)
             if state.sources:
-                return _takeover(home, state)
+                try:
+                    return _takeover(home, state)
+                finally:
+                    _mark_abandoned_recovery(home)
             backups: tuple[Path, ...] = ()
             exports: list[Path] = []
             path = state.path
