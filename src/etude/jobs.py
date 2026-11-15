@@ -45,7 +45,7 @@ from etude.eval.records import (
 )
 from etude.eval.run import Result, Tables
 from etude.eval.tournament import evaluating
-from etude.identity import _stored_owner
+from etude.identity import stored_owner
 from etude.out import MEMBERSHIP, OutFile, OutFiles, OutMember
 from etude.records import ArtifactRef, Record, RunRecord, SourceKey
 from etude.run import as_storage, located_runs
@@ -564,7 +564,7 @@ def checkpoint_inputs_for(
     else:
         files = {"": Content(sha256=artifact.sha256, size_bytes=artifact.size_bytes)}
     owner = (
-        _stored_owner(checkpoint.run, checkpoint.experiment, checkpoint.folder)
+        stored_owner(checkpoint.run, checkpoint.experiment, checkpoint.folder)
         if isinstance(checkpoint, CheckpointRecord) and checkpoint.run
         else None
     )

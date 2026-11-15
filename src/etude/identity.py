@@ -63,7 +63,7 @@ def run_address(run: str, experiment: str | None) -> str:
     return prefix + name
 
 
-def _stored_owner(run: str, experiment: str | None, folder: str | None) -> str:
+def stored_owner(run: str, experiment: str | None, folder: str | None) -> str:
     """The producer address, preserving the spelling of its stored folder."""
     owner = run_address(run, experiment)
     if folder is not None:

@@ -37,7 +37,7 @@ from etude.block_file import BlockFile, parse, select
 from etude.carriage import checkpoint_key
 from etude.checkpoints import CheckpointRecord
 from etude.errors import EtudeError
-from etude.identity import _stored_owner
+from etude.identity import stored_owner
 from etude.out import MEMBERSHIP, OutFiles, OutMember
 from etude.records import (
     HOURS_SINCE_START,
@@ -1035,7 +1035,7 @@ def _read_out(
         if (folder, MEMBERSHIP) not in present:
             continue
         membership = OutFiles.model_validate_json(storage.get(folder + MEMBERSHIP))
-        owner = _stored_owner(run, experiment, folder.rstrip("/"))
+        owner = stored_owner(run, experiment, folder.rstrip("/"))
         return tuple(
             OutMember(
                 run=owner,
