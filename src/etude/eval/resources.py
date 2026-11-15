@@ -8,10 +8,10 @@ Observations are kept in the run's durable artifact folder by the group owner.
 import os
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 THREAD_VARIABLES = (
     "OMP_NUM_THREADS",
@@ -98,13 +98,17 @@ def resources(artifacts: Path) -> Iterator[None]:
     artifacts.mkdir(parents=True, exist_ok=True)
     fast = Path("/dev/shm")
     directory = fast if fast.is_dir() and os.access(fast, os.W_OK) else None
-    with TemporaryDirectory(prefix="etude-eval-", dir=directory) as scratch:
+    previous_tempdir = tempfile.tempdir
+    with tempfile.TemporaryDirectory(prefix="etude-eval-", dir=directory) as scratch:
         values = {name: "1" for name in THREAD_VARIABLES}
         values.update(
             TMPDIR=scratch, ETUDE_SCRATCH_DIR=scratch, ETUDE_AGENTS_DIR=str(artifacts.resolve())
         )
         previous = {name: os.environ.get(name) for name in values}
         os.environ.update(values)
+        # tempfile caches TMPDIR on first use, including calls made by libraries.
+        # Keep that cache within the same lifetime as the scratch environment.
+        tempfile.tempdir = None
         try:
             yield
         finally:
@@ -113,3 +117,4 @@ def resources(artifacts: Path) -> Iterator[None]:
                     os.environ.pop(name, None)
                 else:
                     os.environ[name] = value
+            tempfile.tempdir = previous_tempdir

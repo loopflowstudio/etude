@@ -98,6 +98,8 @@ short execution window used to test partial-output retention.
 Server fixtures call the CLI entry point in process and pass its explicit
 startup allowance: the installer must own its deadline and child cleanup, rather
 than an outer test timeout killing the client while installation continues.
+Scopes that change `TMPDIR` must restore `tempfile.tempdir` with the environment:
+Python caches its first temporary directory, which may be deleted on scope exit.
 
 Commit messages say what changed and why in a sentence to a paragraph, not a
 list of edits. Never add Co-Authored-By or other AI attribution footers.

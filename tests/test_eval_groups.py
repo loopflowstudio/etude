@@ -6,8 +6,10 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import Future, wait
+from contextlib import nullcontext
 from decimal import Decimal
 from multiprocessing import active_children, get_context
 from multiprocessing.connection import Connection
@@ -28,7 +30,7 @@ from etude.eval.game import Execution, _performance
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Code, Config, Held, Match, RoundRobin
-from etude.eval.resources import active_games, available_cpus, memory_bytes
+from etude.eval.resources import active_games, available_cpus, memory_bytes, resources
 from etude.eval.result import Tables
 from etude.eval.run import Terminated
 from etude.eval.tournament import evaluating, played
@@ -457,6 +459,26 @@ def test_active_games_respects_cpu_and_declared_memory(monkeypatch: pytest.Monke
     assert active_games(20, agents=True, memory_gb=1.5) == 2
     assert active_games(1, agents=True) == 1
     assert active_games(0, agents=True) == 0
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("failed", [False, True])
+def test_temporary_files_work_after_game_scratch_is_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cached: bool, failed: bool
+) -> None:
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path) if cached else None)
+    with pytest.raises(RuntimeError, match="game failed") if failed else nullcontext():
+        with resources(tmp_path / "artifacts"):
+            scratch = Path(os.environ["ETUDE_SCRATCH_DIR"])
+            with tempfile.TemporaryDirectory() as during:
+                assert Path(during).parent == scratch
+            if failed:
+                raise RuntimeError("game failed")
+    assert not scratch.exists()
+    with tempfile.TemporaryDirectory() as after:
+        assert Path(after).parent == tmp_path
+        assert Path(after).is_dir()
 
 
 @pytest.mark.parametrize(("memory_gb", "concurrent"), [(None, 3), (1.75, 1)])
