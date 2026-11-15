@@ -523,20 +523,19 @@ def play_together(
 
     def accept(each: Playing, match: Match, outcome: Execution | BaseException) -> None:
         nonlocal warned_imports
-        imports: Imports | None = outcome.imports if isinstance(outcome, Execution) else None
-        if imports is None:
+        imports: Imports | None
+        performance: Performance | None
+        if isinstance(outcome, Execution):
+            imports, performance = outcome.imports, outcome.performance
+        else:
             # Validate metadata once at the exception transport boundary.
             raw: object = getattr(outcome, "_etude_imports", None)
-            if isinstance(raw, str):
-                imports = Imports.model_validate_json(raw)
+            imports = Imports.model_validate_json(raw) if isinstance(raw, str) else None
+            raw = getattr(outcome, "_etude_performance", None)
+            performance = Performance.model_validate_json(raw) if isinstance(raw, str) else None
         if imports is not None and imports.pid not in reported_imports:
             reported_imports.add(imports.pid)
             _retain(f"game-imports-{imports.pid}.json", imports, each.run.files.root)
-        performance = outcome.performance if isinstance(outcome, Execution) else None
-        if performance is None and isinstance(
-            raw_performance := getattr(outcome, "_etude_performance", None), str
-        ):
-            performance = Performance.model_validate_json(raw_performance)
         if performance is not None:
             # The run writer distinguishes retries and tournaments with identical matches.
             _retain(f"protocol-{each.run.id}-{match.key}.json", performance, each.run.files.root)

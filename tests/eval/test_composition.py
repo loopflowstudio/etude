@@ -29,7 +29,7 @@ from etude.eval.records import (
     relocate_player,
 )
 from etude.eval.tournament import evaluating, played, scores
-from etude.jobs import Agents, ExperimentState, _relocated, checkpoint_inputs, hold_group
+from etude.jobs import Agents, ExperimentState, checkpoint_inputs, hold_group
 from etude.page import _players
 from etude.records import ArtifactRef
 from examples.agent_game import Shift, build, checkpoint
@@ -353,7 +353,10 @@ def test_checkpoint_inputs_deduplicate_and_relocate_every_tree_leaf() -> None:
     match = Match(players=(small, tree))
     inputs = checkpoint_inputs((match,), ExperimentState(experiment="trees"))
     assert set(inputs) == {"small", "belief"}
-    moved = _relocated(match, {key: f"file:///inputs/{key}" for key in inputs})
+    spec = group(job("relocate", None)).evaluations[0].model_copy(update={"matches": (match,)})
+    relocated = spec.relocate({key: f"file:///inputs/{key}" for key in inputs})
+    assert relocated.matches is not None
+    [moved] = relocated.matches
     assert moved.key == match.key
     assert [ref.artifact.uri for p in moved.players for ref in player_checkpoints(p)] == [
         "file:///inputs/small",

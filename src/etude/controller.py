@@ -33,7 +33,6 @@ from etude.jobs import (
     ExperimentState,
     TrainingRunSummary,
     _group_key,
-    _relocated,
     evaluation_group,
     fetch_checkpoints,
     group_evaluations,
@@ -422,16 +421,7 @@ def _play_here(
             Path(folder),
         )
         return hold_group(
-            EvalGroup(
-                evaluations=tuple(
-                    spec.model_copy(
-                        update={
-                            "matches": tuple(_relocated(m, here) for m in spec.matches or ()),
-                        }
-                    )
-                    for spec in specs
-                )
-            ),
+            EvalGroup(evaluations=tuple(spec.relocate(here) for spec in specs)),
             checkout=executable.repo,
             directory=directory,
             storages=[source],

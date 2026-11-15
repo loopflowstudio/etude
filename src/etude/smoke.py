@@ -39,7 +39,6 @@ from etude.jobs import (
     EvalGroup,
     Evaluation,
     _group_key,
-    _relocated,
     evaluation_group,
     fetch_checkpoints,
     hold_group,
@@ -203,18 +202,7 @@ def _evaluate(
                 "eval",
                 name,
                 lambda: hold_group(
-                    EvalGroup(
-                        evaluations=tuple(
-                            spec.model_copy(
-                                update={
-                                    "matches": tuple(
-                                        _relocated(m, files) for m in spec.matches or ()
-                                    )
-                                }
-                            )
-                            for spec in tiny
-                        )
-                    ),
+                    EvalGroup(evaluations=tuple(spec.relocate(files) for spec in tiny)),
                     checkout=batch[0].repo,
                     storages=[store],
                 ),

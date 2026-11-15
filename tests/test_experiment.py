@@ -48,13 +48,12 @@ from tests.eval.games import (
     play_failing_deal_one,
     play_interrupted_deal_one,
 )
-from tests.eval.stored import stored_inference
 from tests.experiments import authored
 from tests.run.storage import MeasuredStorage
 
 WORLD = environment("duel", config={"world": "w6"})
 DEALS = tuple({"deal": deal} for deal in range(2))
-DIRECT = stored_inference(config={"search": 0})
+HELD = Held()
 
 
 def _store_out_members(storage: DirectoryStorage, folder: str) -> OutFiles:
@@ -207,7 +206,7 @@ def design(tmp_path: Path) -> Experiment:
         rated = run.checkpoints.every(2)
         pairs = [
             Seating(name=f"{new.name} vs {old.name}", tags=("consecutive",),
-                    players=(new.player(DIRECT), old.player(DIRECT)), configs=DEALS, games=2)
+                    players=(new.player(HELD), old.player(HELD)), configs=DEALS, games=2)
             for old, new in zip(rated, rated[1:])
         ]  # fmt: skip
         if run.final is not None and run.checkpoints:
@@ -215,12 +214,12 @@ def design(tmp_path: Path) -> Experiment:
             pairs.append(
                 Seating(
                     name="final vs first",
-                    players=(run.final.player(DIRECT), first.player(DIRECT)),
+                    players=(run.final.player(HELD), first.player(HELD)),
                     configs=DEALS,
                     games=2,
                 )  # fmt: skip
             )
-        anchors = Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS,
+        anchors = Seating(name="vs heuristic", players=(HELD, anchor), configs=DEALS,
                           games=2)  # fmt: skip
         return EvalJob(
             tournament=arena(ArenaConfig(seatings=(anchors, *pairs))),
@@ -271,7 +270,7 @@ def test_each_pass_plays_what_the_checkpoints_saved_so_far_call_for(tmp_path: Pa
     anchor = heuristic(tmp_path)
 
     def post_hoc(state: ExperimentState) -> Job:
-        every = Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS, games=2)
+        every = Seating(name="vs heuristic", players=(HELD, anchor), configs=DEALS, games=2)
         sweep = Benchmark(name="sweep", environment=WORLD, seatings=(every,))
         return EvalJob(tournament=sweep, play=play, checkpoints=state.run("ppo-1").checkpoints,
                           max_hours=0.1)  # fmt: skip
@@ -292,8 +291,8 @@ def test_a_pass_plays_only_what_eval_returns_now(tmp_path: Path) -> None:
         name="greedy", source=[tmp_path / "players" / "heuristic.py"], config={"strength": 4}
     )
     both = (
-        Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS, games=2),
-        Seating(name="vs greedy", players=(DIRECT, greedy), configs=DEALS, games=2),
+        Seating(name="vs heuristic", players=(HELD, anchor), configs=DEALS, games=2),
+        Seating(name="vs greedy", players=(HELD, greedy), configs=DEALS, games=2),
     )
 
     def design(seatings: tuple[Seating, ...]) -> Experiment:
@@ -323,7 +322,7 @@ def test_a_failed_match_is_counted_and_not_replayed_unless_asked(
     anchor = heuristic(tmp_path)
 
     def eval_(state: ExperimentState) -> Job:
-        vs = Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS, games=2)
+        vs = Seating(name="vs heuristic", players=(HELD, anchor), configs=DEALS, games=2)
         ladder = Benchmark(name="ladder", environment=WORLD, seatings=(vs,))
         return EvalJob(tournament=ladder, play=play_failing_deal_one,
                           checkpoints=state.run("ppo-1").checkpoints, max_hours=0.1)  # fmt: skip
@@ -350,7 +349,7 @@ def test_a_retryable_failure_is_replayed_by_the_next_pass_and_not_counted_failed
     games = {"play": play_interrupted_deal_one}
 
     def eval_(state: ExperimentState) -> Job:
-        vs = Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS, games=2)
+        vs = Seating(name="vs heuristic", players=(HELD, anchor), configs=DEALS, games=2)
         ladder = Benchmark(name="ladder", environment=WORLD, seatings=(vs,))
         return EvalJob(tournament=ladder, play=games["play"], checkpoints=state.run("ppo-1").checkpoints,
                           max_hours=0.1)  # fmt: skip
@@ -378,7 +377,7 @@ def test_a_pass_whose_matches_all_return_no_rows_fails_and_a_retry_replays_them(
     games = {"play": play_catching_errors}
 
     def eval_(state: ExperimentState) -> Job:
-        vs = Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS, games=2)
+        vs = Seating(name="vs heuristic", players=(HELD, anchor), configs=DEALS, games=2)
         ladder = Benchmark(name="ladder", environment=WORLD, seatings=(vs,))
         return EvalJob(tournament=ladder, play=games["play"], checkpoints=state.run("ppo-1").checkpoints,
                           max_hours=0.1)  # fmt: skip
@@ -412,7 +411,7 @@ def test_a_pass_whose_matches_all_return_no_rows_fails_and_a_retry_replays_them(
 
 def test_an_eval_job_belongs_to_the_experiment_of_its_file(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
-    anchors = Seating(name="vs heuristic", players=(DIRECT, heuristic(tmp_path)), configs=DEALS,
+    anchors = Seating(name="vs heuristic", players=(HELD, heuristic(tmp_path)), configs=DEALS,
                       games=2)  # fmt: skip
     progress = Benchmark(name="ladder", environment=WORLD, seatings=(anchors,))
 
@@ -614,7 +613,7 @@ def test_queued_passes_retain_every_job_while_capacity_is_unavailable(
     benchmark = Benchmark(
         name="queued",
         environment=WORLD,
-        seatings=(Seating(name="anchor", players=(DIRECT, anchor), configs=DEALS, games=2),),
+        seatings=(Seating(name="anchor", players=(HELD, anchor), configs=DEALS, games=2),),
     )
 
     def choose(state: ExperimentState) -> list[Job]:
@@ -727,13 +726,12 @@ def test_a_finished_run_without_checkpoints_has_no_final(tmp_path: Path) -> None
 
 CAPACITY = """
 from etude.eval.match import environment
-from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import Aligned, Benchmark, Fraction, Seating
+from etude.eval.records import Aligned, Benchmark, Fraction, Held, Seating
 from etude.jobs import EvalJob
 from etude.report import Curve, Matches, Report, Score
 from tests.eval.games import play
 
-DIRECT = stored_inference(config={"search": 0})
+HELD = Held()
 DEALS = ({"deal": 0},)
 
 
@@ -741,13 +739,13 @@ def eval_jobs(state):
     seatings = (
         Seating(
             name="half-training",
-            players=(DIRECT, stored_relative(Fraction(clock="updates", value=0.5), DIRECT)),
+            players=(HELD, Fraction(clock="updates", value=0.5)),
             configs=DEALS,
             games=2,
         ),
         Seating(
             name="large vs small",
-            players=(DIRECT, stored_relative(Aligned(clock="updates", job="small"), DIRECT)),
+            players=(HELD, Aligned(clock="updates", job="small")),
             configs=DEALS,
             games=2,
         ),

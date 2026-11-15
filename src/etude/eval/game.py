@@ -144,7 +144,7 @@ class Execution:
     result: Tables | Result
     seconds: float
     imports: Imports
-    performance: Performance | None = None
+    performance: Performance
 
 
 @lru_cache(maxsize=128)

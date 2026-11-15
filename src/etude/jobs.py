@@ -412,6 +412,21 @@ class Evaluation(Record):
         """The checkpoints as this experiment's evaluation seats them (`seen_from`)."""
         return tuple(seen_from(each.ref, self.experiment) for each in self.checkpoints)
 
+    def relocate(self, files: Mapping[str, str]) -> Evaluation:
+        """Locate scheduled checkpoint leaves without changing match identity."""
+        if self.matches is None:
+            return self
+        return self.model_copy(
+            update={
+                "matches": tuple(
+                    match.model_copy(
+                        update={"players": tuple(relocate_player(p, files) for p in match.players)}
+                    )
+                    for match in self.matches
+                )
+            }
+        )
+
 
 class EvalGroup(Record):
     """The tournaments one run plays, in declaration order."""
@@ -734,11 +749,10 @@ def hold_group(
             for spec, active, _ in opened
             if any(m.key not in active.done for m in active.matches)
         ]
-        loaders = {spec.agents.model_dump_json() for spec, _ in pending if spec.agents}
-        if len(loaders) > 1 or loaders and any(spec.agents is None for spec, _ in pending):
+        definition = pending[0][0].agents if pending else None
+        if any(spec.agents != definition for spec, _ in pending):
             raise EtudeError("incompatible_eval_agents", 422)
         agent_process: AgentProcess | None = None
-        definition = next((spec.agents for spec, _ in pending if spec.agents), None)
         cpus = divide_cpus(
             sum(len(active.matches) - len(active.done) for _, active in pending),
             agents=definition is not None,
@@ -1124,16 +1138,8 @@ def _received(evaluation: Evaluation) -> Evaluation:
         evaluation = evaluation.model_copy(update={"checkpoint": checkpoint})
     if evaluation.matches is not None:
         here = {key: (Path(str(folder)) / name).as_uri() for key, name in evaluation.files.items()}
-        matches = tuple(_relocated(match, here) for match in evaluation.matches)
-        evaluation = evaluation.model_copy(update={"matches": matches})
+        evaluation = evaluation.relocate(here)
     return evaluation
-
-
-def _relocated(match: Match, here: Mapping[str, str]) -> Match:
-    """The match with each model's checkpoint file where it lies on this machine."""
-    return match.model_copy(
-        update={"players": tuple(relocate_player(p, here) for p in match.players)}
-    )
 
 
 def _require_hours(options: JobOptions) -> None:

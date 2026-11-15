@@ -139,6 +139,8 @@ an explicit match list; `run.play(play)` plays its unstored matches.
 Outside a launch, give `experiment=`. `run.should_stop` checks
 stop requests between matches; a planned stop seals completed tables and
 raises `Stopped`. `hold` and `evaluate` are warning wrappers until 0.5.
+Games play in fresh `multiprocessing` spawn processes, which import the calling
+script again: a script keeps `run.play` under `if __name__ == "__main__":`.
 
 ```python
 from etude.eval.tournament import evaluating

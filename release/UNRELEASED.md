@@ -174,6 +174,9 @@ many matches wait and why, and a later pass finds them again
   games; on a visible NVIDIA GPU, games fill the declared batch, bounded by
   pending work and memory. The deprecated `evaluate(workers=)` accepts and
   ignores it until 0.5. Eval jobs already queued with `workers` still run.
+- **Guard Python scripts that play.** `evaluating(...)` without `workers=`
+  played in its own process; its games now play in fresh processes, which
+  import the script again. Put `run.play` under `if __name__ == "__main__":`.
 - **Existing results remain readable and are not replayed.** Results stay keyed
   by tournament and match; eval runs already stored, queued or running are
   read as before. Declaring, changing or removing `agents` replays nothing.

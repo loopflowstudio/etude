@@ -497,6 +497,14 @@ writes add `BEGIN IMMEDIATE`, `PRAGMA user_version` and `COMMIT`.
    `uv run etude database upgrade --development`, `uv run etude launch FILE`,
    `etude wait --experiment E`, `etude logs --run E/evals-…`. Results land under
    `ETUDE_HOME/track`.
-6. Returning user: `main` lacks `Held`, `Agents` and `etude.eval.result`; use `Code`
+6. Protocol intervals: each match leaves `protocol-WRITER-MATCH.json` under
+   `ETUDE_HOME/track/E/artifacts/agents/` (`etude eval`), the launched run's
+   `artifacts/agents/`, or a standalone run's own `artifacts/agents/` (also shipped to its
+   storage). Sort `started_monotonic`/`finished_monotonic` endpoints and count
+   starts minus finishes; the peak should equal the "N games at a time" line. A standalone
+   script is `from etude.eval.tournament import evaluating`, with `Code(name=...)`
+   players, `DirectoryStorage` and `PYTHONPATH=LAB`; it needs an `if __name__ ==
+   "__main__":` guard (games spawn and re-import it; `main` played in process).
+7. Returning user: `main` lacks `Held`, `Agents` and `etude.eval.result`; use `Code`
    players and a `play` without annotations, play on a `git worktree add --detach … main`
    checkout, then here.
