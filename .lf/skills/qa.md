@@ -400,8 +400,10 @@ Launched grouping without renting: put the same lab files in a uv lab (as in
 "launching an experiment file on this computer"), `etude database upgrade
 --development`, `etude launch two.py`; every tournament should report the same
 `running two/evals-*` run. `etude wait --experiment two` drives the local pool;
-`etude logs --run two/evals-*` shows the one `agents:` process. `QA_*` knobs do
-not reach the launched worker, so drive failures through `etude eval`.
+`etude logs --run two/evals-*` shows one allocation: on CPU, `agents: CPU inference
+in N game processes` (each game loads its forwards directly); on visible NVIDIA
+hardware, one shared `agents: started ...` process. `QA_*` knobs do not reach the
+launched worker, so drive failures through `etude eval`.
 
 Retain the startup game count and inference thread count with protocol comparison
 results. On NVIDIA hardware, verify batch-sized game capacity with pending and
@@ -412,10 +414,11 @@ multiple checkpoint leaves, partial-batch drain, loader failure propagation and
 fresh-host resume. Keep per-decision and whole-arm metrics separate; CPU results
 do not select GPU placement, or conversely.
 Controlled CPU/memory checks cover one CPU, fewer pending games than
-CPUs, memory-limited games, agentless games and multiple tournaments; verify
-one shared allocation reaches dispatch and the loading module. Keep scalar
-Torch threads at one; grouped Torch loading honors `OMP_NUM_THREADS` before
-model execution. Use the unchanged frozen panel, retain its whole-arm timer
+CPUs, memory-limited games, agentless games, code-only builds and multiple
+tournaments; verify one allocation reaches dispatch. CPU games import the
+loader and keep one thread each; only the shared GPU path keeps model loading
+out of game imports and sets shared inference threads. Code-only builds start
+no loading process and run no hardware probe. Use the unchanged frozen panel, retain its whole-arm timer
 before querying reports, and compare complete action sequences.
 
 ## Etude: explicit launcher upgrades
