@@ -396,6 +396,13 @@ in one tool call can exceed its timeout on a busy Mac. Judge a suspected hang fr
 timestamps under `ETUDE_HOME/track/NAME/artifacts/agents/` and the run's `blocks/`,
 not from `ps` elapsed times.
 
+Launched grouping without renting: put the same lab files in a uv lab (as in
+"launching an experiment file on this computer"), `etude database upgrade
+--development`, `etude launch two.py`; every tournament should report the same
+`running two/evals-*` run. `etude wait --experiment two` drives the local pool;
+`etude logs --run two/evals-*` shows the one `agents:` process. `QA_*` knobs do
+not reach the launched worker, so drive failures through `etude eval`.
+
 Retain the startup game count and inference thread count with protocol comparison
 results. Controlled CPU/memory checks cover one CPU, fewer pending games than
 CPUs, memory-limited games, agentless games and multiple tournaments; verify
