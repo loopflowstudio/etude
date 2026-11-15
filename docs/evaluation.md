@@ -725,8 +725,8 @@ does, unless `--retry-failed`.
   `Checkpoints` is a tuple, so a slice works too; `every(n)`, `at(clock,
   *values)` and `tagged(tag)` choose by ordinal, clock value or tag, and
   `final` is the last checkpoint once a run has finished.
-  `state.policy(PolicyKey(job="small"))` is one policy's line, with its
-  checkpoints in the order they were saved ([Policies](#policies)).
+  `state.policy(PolicyKey(job="small"))` is one policy, with its complete
+  `key` and its checkpoints in the order they were saved ([Policies](#policies)).
 - **What `eval_jobs` returns.** Every evaluation job the experiment should
   have run or can run by now, each holding a benchmark for the checkpoints it
   chose: the whole list on every call, not only what is new. The pass works
@@ -833,6 +833,8 @@ from arena import deals, direct, play, world
 
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    if not state.runs:
+        return []
     frontier = Benchmark(
         name="frontier",
         environment=world,
@@ -879,14 +881,18 @@ PolicyKey(experiment="tla-frontier", job="small")  # the same policy, by the def
   [Tournaments](#tournaments)). Above, `tla-frontier`'s `small` has seeds 0
   and 1, so each point's 8 games per deal are 4 against each. Give the seat
   `seed=` or `policy=` to meet one.
-- **`state.policy(key)` is the policy's line**: its complete key
-  (`line.policy`, every part filled) and its `checkpoints`, a `Checkpoints`
+- **`state.policy(key)` is a policy**: its complete `key` (every part
+  filled) and its `checkpoints`, a `Checkpoints`
   of records supporting `every`, `at`, `tagged` and `last`. Give those records
   to `EvalJob(checkpoints=...)`. Held records must name their experiment;
   unlabelled runs are refused. `state` is this
   file's experiment; for another's, `observe(source,
   "tla-frontier").policy(PolicyKey(job="small"))`. `job` is the name a seat's
   `job=` takes: the launch name, or the full name with its config digest.
+  A policy with no run yet raises `policy_not_found`. For a fresh experiment,
+  return `[]` from `eval_jobs` until `state.runs` exists, as above: a launch
+  evaluates the file before submitting its first training jobs. A queued run
+  has a policy with no checkpoints yet, so it schedules no matches.
 - **A default that would have to choose refuses.** With several training
   jobs and none named, or several roles and none named, the key is refused
   with an error listing them. So is a job, seed or role the experiment does
@@ -907,7 +913,9 @@ PolicyKey(experiment="tla-frontier", job="small")  # the same policy, by the def
   played again here.
 - **Runs of two experiments never collide.** `tla-frontier/small@0` and
   `rival/small@0` are different policies with different keys, seated in one
-  tournament like any other two.
+  tournament like any other two. `rival`'s report draws the other
+  experiment's checkpoints on their own lines, `tla-frontier/small@0` and
+  `tla-frontier/small@1`, beside its own `small@0`.
 - **Results stored before experiments were part of the key still count.**
   An eval run that recorded `small@0/checkpoints/updates-00000500` is read
   as its own experiment's run, the only kind such an eval could seat, so an

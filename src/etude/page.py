@@ -772,7 +772,7 @@ def _held_tournaments(
     """
     # The optional `eval` extra, imported where it is used (`_read_evals`).
     from etude.eval.records import TournamentRun, assemble  # noqa: PLC0415
-    from etude.eval.tournament import StoredRuns, played  # noqa: PLC0415
+    from etude.eval.tournament import played, stored_runs  # noqa: PLC0415
     from etude.experiment import read_tournament_lines  # noqa: PLC0415 - optional eval dependency
 
     wanted: dict[str, Tournament] = {}
@@ -783,12 +783,7 @@ def _held_tournaments(
     # Read once for every tournament drawn: a page plays nothing, so nothing changes meanwhile.
     keys = storage.keys("") if keys is None else keys
     declarations = located_runs(storage, keys) if declarations is None else declarations
-    runs = StoredRuns.read(experiment, storage, keys=keys, declarations=declarations)
-    local = DirectoryStorage(default_root())
-    if local.name != storage.name:
-        runs = StoredRuns(
-            experiment, [*StoredRuns.read(experiment, local).folders(), *runs.folders()]
-        )
+    runs = stored_runs(experiment, storages=[storage], keys=keys, declarations=declarations)
     for name, held in runs.tournaments().items():
         try:
             recorded = assemble(held)
@@ -854,7 +849,7 @@ def _wanted(want: Callable[..., object], state: ExperimentState) -> list[Tournam
         wanted.append(
             Tournament(
                 definition=spec.tournament,
-                checkpoints=tuple(each.ref for each in spec.checkpoints),
+                checkpoints=spec.held,
                 entrants=spec.entrants,
             )
         )

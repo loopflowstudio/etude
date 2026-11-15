@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from etude.call import Function
-from etude.checkpoints import CheckpointRecord
+from etude.checkpoints import CheckpointRecord, PolicyKey
 from etude.cli import main
 from etude.controller import advance
 from etude.declarations import read_experiment
@@ -19,6 +19,7 @@ from etude.experiment import observe
 from etude.jobs import EvalJob, Evaluation, ExperimentState, TrainingJob, with_experiment
 from etude.launch import client
 from etude.launch.records import Pool
+from etude.page import build
 from etude.records import ArtifactRef, RunRecord
 from etude.spec import Job, RunRequest, job_id
 from etude.storage import DirectoryStorage, default_root
@@ -663,6 +664,63 @@ def training_jobs() -> list[TrainingJob]:
     assert run.state == "finished"
 
 
+def test_policy_key_fresh_experiment_submits_training_then_evaluates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    b = bench(tmp_path)
+    b.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    source = DirectoryStorage(tmp_path / "source")
+    with pytest.raises(EtudeError, match="policy_not_found"):
+        observe(source, "fresh_policy").policy(PolicyKey())
+    file = tmp_path / "fresh_policy.py"
+    file.write_text("""
+from etude.checkpoints import PolicyKey
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.jobs import EvalJob, ExperimentState, TrainingJob
+from tests.eval.games import play
+from tests.launch.tasks import Command, train_command
+
+def training_jobs(state: ExperimentState) -> list[TrainingJob]:
+    return [TrainingJob(name="small", train=train_command, config=Command(command="true"),
+                        repo=None, max_hours=1)]
+
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    if not state.runs:
+        return []
+    tournament = Benchmark(name="progress", environment=environment("duel"), seatings=(
+        Seating(name="vs fixed", players=(Inference(config={"strength": 1}),
+                Code(name="fixed", config={"strength": 0})), configs=({},), games=1),))
+    mine = state.policy(PolicyKey()).checkpoints
+    return [EvalJob(tournament=tournament, checkpoints=mine, play=play, repo=None, max_hours=1)]
+""")
+    definition = read_experiment(file)
+    assert advance(definition, source=source, pool="waiting", mode="queue") == []
+    assert [run.id for run in b.scheduler.runs()] == ["fresh_policy/small@0"]
+    # A queued run exists before its first checkpoint; another pass stays safe.
+    queued = advance(definition, source=source, pool="waiting", mode="queue")
+    assert [(decision.new, decision.running) for decision in queued] == [(0, 0)]
+    assert len(b.scheduler.runs()) == 1
+    with track(
+        experiment="fresh_policy",
+        run="small@0",
+        job="small",
+        seed=0,
+        directory=source.root,
+        clocks=["updates"],
+        strict=True,
+    ) as run:
+        path = run.out / "weights.pt"
+        path.write_bytes(b"first checkpoint")
+        run.checkpoint(path, updates=1)
+    decisions = advance(definition, source=source, directory=tmp_path / "evals")
+    assert [(decision.new, decision.played) for decision in decisions] == [(1, 1)]
+    stored = StoredRuns.read("fresh_policy", source)
+    assert sum(len(stored.records(folder)) for folder in stored.folders()) == 1
+
+
 def test_policy_key_cross_experiment_seats_split_seeds_and_do_not_replay(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -719,6 +777,12 @@ def eval_jobs(state):
     # The second pass reads delivery under experiment-qualified identities.
     advance(read_experiment(file), source=source, directory=tmp_path / "evals")
     assert "eval frontier: nothing to play" in capsys.readouterr().out
+    # The report keeps tla-frontier's runs apart from rival's own run of the same name.
+    assert {(player.run, player.line) for player in build(source.root, file).players} == {
+        ("small@0", "small@0"),
+        (None, "tla-frontier/small@0"),
+        (None, "tla-frontier/small@1"),
+    }
 
 
 def test_policy_key_refuses_held_run_without_experiment(tmp_path: Path) -> None:

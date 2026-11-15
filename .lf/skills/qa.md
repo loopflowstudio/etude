@@ -128,11 +128,25 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    and launch with `executablePath` set to the cached
    `~/Library/Caches/ms-playwright/chromium_headless_shell-*/…/chrome-headless-shell`.
    Click `getByRole("button", {name: "Refresh"})` and read `document.body.innerText`.
+   `page.on("pageerror")` and `page.on("console")` show script errors; a blank chart with data
+   in the page JSON is otherwise silent.
    Gap reasons and point values are only in hover text: `page.mouse.move(x, y - scrollY)` on a
    point in a full-page screenshot, then read `innerText` of `.u-legend` and `[class*=tip]`.
    A seating curve's per-checkpoint data is the page JSON's `points`: `selection` indexes
    `selections`; `at` gives its position, `value` its score, and `gap` (an eval `Gap`; its `missing` is `not_yet` or `never`) why it has none.
-13. The stats database under `ETUDE_HOME/statsdb` rebuilds its derived tables (`players`,
+13. Cross-experiment seats (`Final(experiment=...)`, `PolicyKey`): write each experiment's
+   runs with `track(experiment=E, run="small@0", job="small", seed=0, ...)` into one source;
+   two experiments may share a run name. Hold another experiment's checkpoints with
+   `observe(SOURCE, OTHER).policy(PolicyKey(...)).checkpoints`. An experiment with no runs of
+   its own still evaluates ("Evaluation only"). To replay an eval from scratch, delete both
+   `RUNS/E/NAME.*` and `ETUDE_HOME/track/E/NAME.*`: with only the source copy gone, the pass
+   resumes the finished local run and re-ships just `outcome.json`, and the page shows
+   nothing recorded. `etude.page.build` takes `Path`s. The page's legend and
+   `players[].line` show whether foreign checkpoints sit on their own lines. Returning-user
+   check: same file and runs evaluated on a `main` worktree, then `etude eval` here must
+   print `nothing to play`, and hashing `(subject, opponent, value, rows, matches)` over
+   `build(...).cells` must match.
+14. The stats database under `ETUDE_HOME/statsdb` rebuilds its derived tables (`players`,
    `schedule`) only when new data arrives or its `SCHEMA` changes, so after editing
    `etude/eval/query.py` delete that folder before judging the page.
 

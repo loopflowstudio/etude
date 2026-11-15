@@ -21,6 +21,7 @@ from etude.declarations import (
 )
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import (
+    Line,
     Match,
     TournamentRun,
     digest,
@@ -192,7 +193,7 @@ def advance(
         [
             TournamentRun(
                 tournament=(spec := evaluation_spec(job)).tournament,
-                checkpoints=tuple(c.ref for c in spec.checkpoints),
+                checkpoints=spec.held,
             )
             for job in jobs
         ],
@@ -232,7 +233,7 @@ def advance(
         found = played(
             spec.tournament,
             experiment=experiment.name,
-            checkpoints=tuple(each.ref for each in spec.checkpoints),
+            checkpoints=spec.held,
             enter=spec.entrants,
             runs=stored,
             lines=policy_lines,
@@ -253,18 +254,11 @@ def advance(
             pending = [match for match in pending if match.key not in failed]
         if pending and mode == "local":
             done.played = _play_here(
-                spec.model_copy(update={"lines": tuple(policy_lines)}),
-                executable,
-                pending,
-                state,
-                source,
-                directory,
+                spec, executable, pending, state, policy_lines, source, directory
             )
             running.update(m.key for m in pending)
         elif pending:
-            executable = with_matches(executable, pending, state)
-            expanded = evaluation_spec(executable).model_copy(update={"lines": tuple(policy_lines)})
-            executable = executable.model_copy(update={"config": expanded.model_dump_json()})
+            executable = with_matches(executable, pending, state, policy_lines)
             if _fits(executable, committed, max_usd):
                 stem = f"{experiment.name}/{folder_name(spec.tournament.name)}-{digest(sorted(m.key for m in pending))[:12]}"
                 done.launched = stem
@@ -313,6 +307,7 @@ def _play_here(
     executable: Job,
     pending: Sequence[Match],
     state: ExperimentState,
+    lines: tuple[Line, ...],
     source: Storage,
     directory: Path | str | None,
 ) -> int:
@@ -320,12 +315,7 @@ def _play_here(
     with TemporaryDirectory(prefix="etude-eval-") as folder:
         here = fetch_checkpoints(pending, state, spec.checkpoints, Path(folder))
         held = hold_evaluation(
-            spec.model_copy(
-                update={
-                    "matches": tuple(pending),
-                    "lines": spec.lines or state.lines,
-                }
-            ),
+            spec.model_copy(update={"matches": tuple(pending), "lines": lines}),
             files=here,
             checkout=executable.repo,
             directory=directory,

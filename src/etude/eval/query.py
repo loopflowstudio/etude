@@ -72,6 +72,7 @@ import threading
 import warnings
 from collections import defaultdict
 from collections.abc import Container, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -476,50 +477,58 @@ def _block(
 ) -> None:
     """Take in block `name`: its match records, where its blobs lie, then its tables and rollups."""
     original = read(storage, place, name)
-    block = _qualify_block(db, experiment, original)
+    # Kept as stored: `_sum_missing` reads its tables' own match keys again.
     held = original.model_dump_json(
         exclude={"blobs": True, "replaces": True, "matches": {"__all__": {"blobs"}}}
     )
     db.execute("insert into kept.blocks values (?, ?, ?)", [run, name, held])
-    pack = place + file_key(name, EVAL_BLOCK_PACK)
-    _put(
-        db,
-        "kept.blobs",
-        {"run": "VARCHAR", "sha256": "VARCHAR", "pack": "VARCHAR", "start": "BIGINT",
-         "size_bytes": "BIGINT"},
-        [[run, digest, pack, span.offset, span.size_bytes] for digest, span in block.blobs.items()],
-    )  # fmt: skip
-    _matches(db, run, block)
-    # A converted run's files that no match named.
-    named = {digest for record in block.matches for digest in record.blobs}
-    stage(
-        db,
-        "_unnamed_blobs",
-        {"sha256": "VARCHAR", "size_bytes": "BIGINT"},
-        [[digest, span.size_bytes] for digest, span in block.blobs.items() if digest not in named],
-    )
-    db.execute(
-        "insert into blobs select ?, null, a.sha256, a.size_bytes from _unnamed_blobs a"
-        " anti join blobs b on b.run = ? and b.match is null and b.sha256 = a.sha256",
-        [run, run],
-    )
-    db.execute("drop table _unnamed_blobs")
-    _put(db, "kept.replaced", {"run": "VARCHAR", "name": "VARCHAR"},
-         [[run, each] for each in block.replaces])  # fmt: skip
-    for table in block.tables:
-        file = file_key(name, f"{table}.parquet")
-        _table(db, run, table, name, _local(storage, place + file, copies / run / file))
-    for rollup in block.summed:
-        file = file_key(name, f"{rollup.name}.parquet")
-        _rollup(db, run, rollup, name, _local(storage, place + file, copies / run / file))
-    _put(db, "kept.summed", {"name": "VARCHAR", "run": "VARCHAR", "block": "VARCHAR"},
-         [[rollup.name, run, name] for rollup in block.summed])  # fmt: skip
-    db.execute("drop table _qualified_matches")
-    db.execute("drop table _qualified_players")
+    with _qualified(db, experiment, original) as block:
+        pack = place + file_key(name, EVAL_BLOCK_PACK)
+        _put(
+            db,
+            "kept.blobs",
+            {"run": "VARCHAR", "sha256": "VARCHAR", "pack": "VARCHAR", "start": "BIGINT",
+             "size_bytes": "BIGINT"},
+            [[run, digest, pack, span.offset, span.size_bytes] for digest, span in block.blobs.items()],
+        )  # fmt: skip
+        _matches(db, run, block)
+        # A converted run's files that no match named.
+        named = {digest for record in block.matches for digest in record.blobs}
+        stage(
+            db,
+            "_unnamed_blobs",
+            {"sha256": "VARCHAR", "size_bytes": "BIGINT"},
+            [
+                [digest, span.size_bytes]
+                for digest, span in block.blobs.items()
+                if digest not in named
+            ],
+        )
+        db.execute(
+            "insert into blobs select ?, null, a.sha256, a.size_bytes from _unnamed_blobs a"
+            " anti join blobs b on b.run = ? and b.match is null and b.sha256 = a.sha256",
+            [run, run],
+        )
+        db.execute("drop table _unnamed_blobs")
+        _put(db, "kept.replaced", {"run": "VARCHAR", "name": "VARCHAR"},
+             [[run, each] for each in block.replaces])  # fmt: skip
+        for table in block.tables:
+            file = file_key(name, f"{table}.parquet")
+            _table(db, run, table, name, _local(storage, place + file, copies / run / file))
+        for rollup in block.summed:
+            file = file_key(name, f"{rollup.name}.parquet")
+            _rollup(db, run, rollup, name, _local(storage, place + file, copies / run / file))
+        _put(db, "kept.summed", {"name": "VARCHAR", "run": "VARCHAR", "block": "VARCHAR"},
+             [[rollup.name, run, name] for rollup in block.summed])  # fmt: skip
 
 
-def _qualify_block(db: duckdb.DuckDBPyConnection, experiment: str, original: Block) -> Block:
-    """Qualify released records once and stage their identity translation for table intake."""
+@contextmanager
+def _qualified(db: duckdb.DuckDBPyConnection, experiment: str, original: Block) -> Iterator[Block]:
+    """The block with released identities qualified by `experiment`.
+
+    Within, `_table` and `_rollup` translate the block's rows alike, from the
+    staged `_qualified_matches` and `_qualified_players`.
+    """
     block = Block.model_validate(original.model_dump(), context={"experiment": experiment})
     matches = {
         a.match.key: b.match.key for a, b in zip(original.matches, block.matches, strict=True)
@@ -541,7 +550,9 @@ def _qualify_block(db: duckdb.DuckDBPyConnection, experiment: str, original: Blo
         {"stored": "VARCHAR", "qualified": "VARCHAR"},
         [[a, b] for a, b in players.items() if a != b],
     )
-    return block
+    yield block
+    db.execute("drop table _qualified_matches")
+    db.execute("drop table _qualified_players")
 
 
 def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
@@ -658,8 +669,6 @@ def _canonical(value: object) -> str:
 
 def _qualify_arrived(db: duckdb.DuckDBPyConnection, *, players: bool = False) -> None:
     """Translate released table identities with the block's own match and player records."""
-    if not _exists(db, "main", "_qualified_matches"):
-        return
     if not db.execute("select 1 from _qualified_matches limit 1").fetchone():
         return
     columns = {column: kind for column, kind, *_ in db.execute("describe _arrived").fetchall()}
@@ -851,10 +860,8 @@ def _sum_missing(
         target = copies / run / "summed" / name / f"{rollup.name}.parquet"
         target.parent.mkdir(parents=True, exist_ok=True)
         if partial_totals(db, rollup, tables, [record.match for record in block.matches], target):
-            _qualify_block(db, experiment, block)
-            _rollup(db, run, rollup, name, target)
-            db.execute("drop table _qualified_matches")
-            db.execute("drop table _qualified_players")
+            with _qualified(db, experiment, block):
+                _rollup(db, run, rollup, name, target)
     _put(db, "kept.summed", {"name": "VARCHAR", "run": "VARCHAR", "block": "VARCHAR"}, summed)
 
 

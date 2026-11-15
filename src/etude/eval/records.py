@@ -658,8 +658,18 @@ def select_policy(lines: Sequence[Line], key: PolicyKey, *, experiment: str) -> 
         candidates, experiment=experiment, job=key.job, seed=seed, role=key.role
     )
     if len(found) != 1:
+        given = ", ".join(f"{k}={v!r}" for k, v in key.model_dump(exclude_none=True).items())
+        have = sorted(
+            {
+                f"{line.job}@{line.seed}" + ("" if line.role == "policy" else f" ({line.role})")
+                for line in lines
+                if (line.experiment or experiment) == experiment
+            }
+        )
         raise EtudeError(
-            "policy_not_found" if not found else "ambiguous_policy", 422, detail=str(key)
+            "policy_not_found" if not found else "ambiguous_policy",
+            422,
+            detail=f"PolicyKey({given}) in {experiment}; it has {', '.join(have) or 'no runs'}",
         )
     return found[0]
 
@@ -674,20 +684,12 @@ def select_seat_lines(
 ) -> tuple[Line, ...]:
     """Select a seat's policies, retaining every seed unless one is named."""
     candidates = _select_jobs(lines, experiment=experiment, job=job)
-    for part, given in (("seed", seed), ("role", role)):
-        if part == "seed" and given is None:
-            continue
-        values = {getattr(line, part) for line in candidates}
-        if given is None:
-            if len(values) > 1:
-                raise EtudeError(
-                    "ambiguous_policy",
-                    422,
-                    detail=f"choose {part} from {sorted(str(v) for v in values)}",
-                )
-            if values:
-                given = next(iter(values))
-        candidates = [line for line in candidates if getattr(line, part) == given]
+    if seed is not None:
+        candidates = [line for line in candidates if line.seed == seed]
+    if role is not None:
+        candidates = [line for line in candidates if line.role == role]
+    elif len(roles := {line.role for line in candidates}) > 1:
+        raise EtudeError("ambiguous_policy", 422, detail=f"choose role from {sorted(roles)}")
     return tuple(candidates)
 
 
@@ -888,12 +890,9 @@ class Seating(Record, Generic[_SeatingConfig]):
             if line.name == checkpoint.line
             and (checkpoint.policy is None or line.policy == checkpoint.policy)
         ]
+        # By key first: another experiment's checkpoint names its experiment in its line.
         held = next(
-            (
-                line
-                for line in candidates
-                if any(ref.key == checkpoint.key for ref in line.checkpoints)
-            ),
+            (line for line in lines if any(ref.key == checkpoint.key for ref in line.checkpoints)),
             candidates[0] if len(candidates) == 1 else None,
         )
         ordered = sorted(lines, key=lambda line: line.order)

@@ -996,9 +996,11 @@ def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
         "Tournament ladder is drawn as its eval runs recorded it:"
         " eval_jobs(state) now defines it otherwise (tournament_conflict)."
     ]
-    # What the report path lists and reads for one training run and one eval run, pinned;
-    # the eval run's tables come from the cache the first build filled.
-    assert (storage.listings, storage.requests) == (3, 10)
+    # What the report path lists and reads for one training run and one eval run, pinned:
+    # its eval runs share the page's one discovery, so each file is read once. The eval
+    # run's tables come from the cache the first build filled.
+    assert (storage.listings, storage.requests) == (2, 9)
+    assert len(storage.got) == len(set(storage.got))
     # Scheduling new games still needs the definition to agree.
     with pytest.raises(EtudeError, match="tournament_conflict"):
         advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)

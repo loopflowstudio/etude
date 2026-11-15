@@ -165,15 +165,15 @@ def test_policy_key_defaults_and_roles_keep_separate_checkpoint_lines(tmp_path: 
     state = observe(tmp_path, "league")
     with pytest.raises(EtudeError, match="ambiguous_policy.*"):
         state.policy(PolicyKey())
-    line = state.policy(PolicyKey(role="exploiter"))
-    assert line.policy == PolicyKey(experiment="league", job="small", seed=0, role="exploiter")
-    assert isinstance(line.checkpoints, Checkpoints)
-    assert isinstance(line.checkpoints.last, CheckpointRecord)
-    assert line.checkpoints.at("updates", 100).every(1) == line.checkpoints
-    assert line.checkpoints.tagged("missing") == ()
-    assert len(line.checkpoints) == 1
-    assert "exploiter.updates-00000100" in line.checkpoints[0].key
-    assert line.checkpoints[0].policy == line.policy
+    policy = state.policy(PolicyKey(role="exploiter"))
+    assert policy.key == PolicyKey(experiment="league", job="small", seed=0, role="exploiter")
+    assert isinstance(policy.checkpoints, Checkpoints)
+    assert isinstance(policy.checkpoints.last, CheckpointRecord)
+    assert policy.checkpoints.at("updates", 100).every(1) == policy.checkpoints
+    assert policy.checkpoints.tagged("missing") == ()
+    assert len(policy.checkpoints) == 1
+    assert "exploiter.updates-00000100" in policy.checkpoints[0].key
+    assert policy.checkpoints[0].policy == policy.key
     with pytest.raises(EtudeError, match="policy_not_found"):
         state.policy(PolicyKey(job="missing"))
     with pytest.raises(EtudeError, match="observe"):
@@ -194,7 +194,7 @@ def test_policy_key_defaults_choose_lowest_seed_and_list_ambiguous_jobs(tmp_path
             path = run.out / "weights.pt"
             path.write_bytes(b"weights")
             run.checkpoint(path, updates=1)
-    assert observe(tmp_path, "defaults").policy(PolicyKey()).policy == PolicyKey(
+    assert observe(tmp_path, "defaults").policy(PolicyKey()).key == PolicyKey(
         experiment="defaults", job="small", seed=0, role="policy"
     )
     with track(
@@ -256,4 +256,4 @@ def test_policy_key_checkpoint_choosers_follow_continuation_save_order(tmp_path:
     assert [c.run for c in policy.checkpoints] == ["z-parent", "a-child"]
     assert policy.checkpoints.last is not None and policy.checkpoints.last.run == "a-child"
     assert policy.checkpoints.tagged("chosen").at("updates", 2) == policy.checkpoints[1:]
-    assert all(c.policy == policy.policy for c in policy.checkpoints)
+    assert all(c.policy == policy.key for c in policy.checkpoints)

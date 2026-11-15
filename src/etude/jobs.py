@@ -33,6 +33,9 @@ from etude.checkpoints import (
     CheckpointRef,
     PolicyKey,
     checkpoint_id,
+    in_role,
+    qualified,
+    seen_from,
 )
 from etude.errors import EtudeError, LauncherError
 from etude.eval.match import EvalResult
@@ -129,7 +132,7 @@ class EvalRunSummary:
 class Policy:
     """One resolved policy and its published checkpoints in save order."""
 
-    policy: PolicyKey
+    key: PolicyKey
     checkpoints: Checkpoints
 
 
@@ -159,7 +162,7 @@ class ExperimentState:
         line = select_policy(self.lines, key, experiment=self.experiment)
         keys = {checkpoint.key for checkpoint in line.checkpoints}
         return Policy(
-            policy=line.policy,
+            key=line.policy,
             checkpoints=Checkpoints(
                 checkpoint
                 for run in self.runs
@@ -182,7 +185,7 @@ class ExperimentState:
             for role in sorted(roles):
                 made.append(
                     Line(
-                        name=name + ("/roles/" + role if role != "policy" else ""),
+                        name=in_role(name, role),
                         experiment=self.experiment,
                         role=role,
                         seed=first.seed,
@@ -306,6 +309,11 @@ class Evaluation(Record):
     files: dict[str, str] = {}
     # The experiment's training lines that pass saw, where relative seats find checkpoints.
     lines: tuple[Line, ...] = ()
+
+    @property
+    def held(self) -> tuple[CheckpointRef, ...]:
+        """The checkpoints as this experiment's evaluation seats them (`seen_from`)."""
+        return tuple(seen_from(each.ref, self.experiment) for each in self.checkpoints)
 
 
 class TrainingJob[C: BaseModel](Job):
@@ -437,7 +445,7 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
             [
                 TournamentRun(
                     tournament=self.tournament,
-                    checkpoints=tuple(c.ref for c in spec.checkpoints),
+                    checkpoints=spec.held,
                     entrants=spec.entrants,
                 )
             ]
@@ -509,29 +517,24 @@ def hold_evaluation(
     checkpoint where it lies here. Raises `EtudeError("evaluation_names_no_experiment")`
     for a config whose experiment is not yet named (`with_experiment`).
     """
-    if spec.experiment is None:
+    experiment = spec.experiment
+    if experiment is None:
         raise EtudeError("evaluation_names_no_experiment", 422)
     if spec.matches is not None:
         spec = spec.model_copy(
             update={"matches": tuple(_relocated(m, files) for m in spec.matches)}
         )
-    checkpoints = tuple(each.ref for each in spec.checkpoints)
+    checkpoints = spec.held
     if spec.matches is not None:
         # A queued job may predate experiment-qualified identity. Its explicit
         # matches own the spelling used by that worker and its earlier blocks.
-        references = {
-            player.checkpoint.key: player.checkpoint
+        seated = {
+            qualified(player.checkpoint.key, experiment): player.checkpoint
             for match in spec.matches
             for player in match.players
             if isinstance(player, CheckpointPlayer)
+            and qualified(player.checkpoint.key, experiment) != player.checkpoint.key
         }
-        seated: dict[str, CheckpointRef] = {}
-        for ref in references.values():
-            qualified = CheckpointRef.model_validate(
-                ref.model_dump(), context={"experiment": spec.experiment}
-            )
-            if qualified.key != ref.key:
-                seated[qualified.key] = ref
         if seated:
             checkpoints = tuple(
                 seated.get(ref.key, ref).model_copy(update={"artifact": ref.artifact})
@@ -545,7 +548,7 @@ def hold_evaluation(
     play = cast(Callable[[Match], Tables | Result], spec.play.load(checkout))
     with evaluating(
         spec.tournament,
-        experiment=spec.experiment,
+        experiment=experiment,
         checkpoint=checkpoint,
         checkpoints=checkpoints,
         enter=spec.entrants,
@@ -559,8 +562,10 @@ def hold_evaluation(
         return active.play(play)
 
 
-def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> Job:
-    """The job playing exactly `matches`, with each checkpoint they seat as an input.
+def with_matches(
+    job: Job, matches: Sequence[Match], state: ExperimentState, lines: Sequence[Line]
+) -> Job:
+    """The job playing exactly `matches` among `lines`, with each checkpoint they seat as an input.
 
     A checkpoint is a file of the training run that saved it, so the launcher
     fetches it from that run's bucket folder or relays it from its last
@@ -579,7 +584,9 @@ def with_matches(job: Job, matches: Sequence[Match], state: ExperimentState) -> 
         for key, each in sorted(saved.items())
         for given in checkpoint_inputs_for(each, files[key])
     )
-    spec = spec.model_copy(update={"matches": tuple(matches), "files": files, "lines": state.lines})
+    spec = spec.model_copy(
+        update={"matches": tuple(matches), "files": files, "lines": tuple(lines)}
+    )
     return job.model_copy(
         update={"config": spec.model_dump_json(), "inputs": (*job.inputs, *inputs)}
     )

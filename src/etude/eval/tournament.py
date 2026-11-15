@@ -380,14 +380,30 @@ class StoredRuns:
 
 
 def stored_runs(
-    experiment: str, *, directory: Path | str | None = None, storages: Sequence[Storage] = ()
+    experiment: str,
+    *,
+    directory: Path | str | None = None,
+    storages: Sequence[Storage] = (),
+    keys: Sequence[str] | None = None,
+    declarations: Sequence[LocatedRun] | None = None,
 ) -> StoredRuns:
-    """The experiment's eval runs in this computer's eval folder and `storages`."""
+    """The experiment's eval runs in this computer's eval folder and `storages`.
+
+    `keys` and `declarations` are one storage's existing listing, so they
+    need exactly one entry in `storages`; that storage is not listed again.
+    """
+    if (keys is not None or declarations is not None) and len(storages) != 1:
+        raise EtudeError("listing_needs_one_storage", 422)
     base = Path(directory) if directory is not None else default_root()
+    places = {each.name: each for each in [DirectoryStorage(base), *storages]}
     folders = [
         folder
-        for place in {each.name: each for each in [DirectoryStorage(base), *storages]}.values()
-        for folder in StoredRuns.read(experiment, place).folders()
+        for place in places.values()
+        for folder in (
+            StoredRuns.read(experiment, place, keys=keys, declarations=declarations)
+            if storages and place is storages[0]
+            else StoredRuns.read(experiment, place)
+        ).folders()
     ]
     return StoredRuns(experiment, folders)
 

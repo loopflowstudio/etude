@@ -41,8 +41,30 @@ def checkpoint_id(
     key = name if name.startswith("out/") else "checkpoints/" + name
     if not role or "/" in role or not within(role):
         raise ValueError("checkpoint role must be a portable name")
-    policy = run + ("/roles/" + role if role != "policy" else "")
-    return (experiment + "/" if experiment else "") + policy + "/" + key
+    return (experiment + "/" if experiment else "") + in_role(run, role) + "/" + key
+
+
+def in_role(run: str, role: str) -> str:
+    """A run or line name as a role's: itself for the default role, `policy`."""
+    return run if role == "policy" else f"{run}/roles/{role}"
+
+
+def seen_from(ref: CheckpointRef, experiment: str | None) -> CheckpointRef:
+    """`ref` as an evaluation of `experiment` seats it: another experiment's checkpoint
+    names that experiment in its line, so a report never joins it to a learner of this one.
+    The owner is the ref's `policy`; a ref without one is unchanged."""
+    owner = ref.policy.experiment if ref.policy is not None else None
+    if ref.line is None or not owner or not experiment or owner == experiment:
+        return ref
+    return ref.model_copy(update={"line": f"{owner}/{ref.line}"})
+
+
+def qualified(key: str, experiment: str) -> str:
+    """A released run key (`RUN/checkpoints/NAME` or `RUN/out/...`) of `experiment`'s eval
+    run, spelled with that experiment; any other key unchanged."""
+    parts = key.split("/", 2)
+    released = len(parts) == 3 and parts[1] in ("checkpoints", "out")
+    return f"{experiment}/{key}" if experiment and released else key
 
 
 def _identity(value: object, info: ValidationInfo) -> object:
@@ -56,11 +78,8 @@ def _identity(value: object, info: ValidationInfo) -> object:
         value = checkpoint_id(
             experiment="", run=fields["run"], name=fields["name"], address=fields["address"]
         )
-    if isinstance(value, str) and info.context:
-        experiment = info.context.get("experiment")
-        parts = value.split("/", 2)
-        if experiment and len(parts) == 3 and parts[1] in ("checkpoints", "out"):
-            return str(experiment) + "/" + value
+    if isinstance(value, str) and info.context and info.context.get("experiment"):
+        return qualified(value, str(info.context["experiment"]))
     return value
 
 
@@ -166,7 +185,7 @@ class CheckpointRecord(Record):
             key=self.key,
             artifact=self.artifact,
             at=self.at,
-            line=(self.line or self.run) + ("/roles/" + self.role if self.role != "policy" else ""),
+            line=in_role(self.line or self.run, self.role),
             policy=self.policy,
         )
 

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Literal
 
 import etude.jobs as jobs
-from etude.checkpoints import CheckpointRecord, PolicyKey
+from etude.checkpoints import CheckpointRecord, PolicyKey, seen_from
 from etude.eval.records import Benchmark, Line, Match, TournamentRun
 from etude.launch import client
 from etude.launch.records import Standing
@@ -73,7 +73,16 @@ def read_tournament_lines(
         keys = source.keys("") if keys is None else keys
         declarations = located_runs(source, keys) if declarations is None else declarations
         for name in sorted(others):
-            found.extend(observe(source, name, keys=keys, declarations=declarations).lines)
+            found.extend(
+                line.model_copy(
+                    update={
+                        "checkpoints": tuple(
+                            seen_from(ref, state.experiment) for ref in line.checkpoints
+                        )
+                    }
+                )
+                for line in observe(source, name, keys=keys, declarations=declarations).lines
+            )
     return tuple(found)
 
 

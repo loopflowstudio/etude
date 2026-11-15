@@ -705,7 +705,7 @@ def test_two_keys_holding_the_same_bytes_are_two_models_each_played(tmp_path: Pa
         .sql("select distinct checkpoint from schedule order by checkpoint")
         .fetchall()
     )
-    assert found == [("ppo-1/checkpoints/updates-100.pt",), ("ppo-2/checkpoints/updates-100.pt",)]
+    assert found == [(each.key,) for each in starts]
 
 
 def test_a_new_version_of_a_players_code_reuses_what_an_older_one_played(tmp_path: Path) -> None:
