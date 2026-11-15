@@ -314,28 +314,3 @@ single-file checkpoints hide nested input names (`start/checkpoint.json`).
   at it, train `runs()` files (compact `ppo@0`, `solo`) and `etude queue` (makes
   `launcher-19.db`). Repoint the pyproject at this checkout, `uv lock`, rename per
   `release/UNRELEASED.md`, and check stored runs read `finished`.
-
-## Driving Etude
-
-Use an isolated `ETUDE_HOME` under `/tmp`; never the real `~/.etude`. The
-experiment is a separate git repository that is a uv project (`tool.uv.package
-= false`) depending on `etude-sdk[s3]`. To test this checkout, build a wheel
-into that project (`uv build --wheel --offline --out-dir PROJECT/wheels`),
-delete the `.gitignore` uv writes beside it, point `[tool.uv.sources]` at the
-wheel and commit it: the frozen source holds only tracked files. After a
-rebuild, delete `uv.lock` and relock, or uv refuses the changed hash.
-
-- **This computer**: `uv run etude launch job.py` uses the built-in `local`
-  pool. Runs land in `ETUDE_HOME/track` with no `out.json`.
-- **A machine with a bucket, without renting**: run a disposable container
-  (`python:3.12-slim`, `openssh-server`, `git`, uv copied from
-  `ghcr.io/astral-sh/uv`) with a generated key, publish its port on
-  127.0.0.1, and put the alias in a private ssh config. The launcher only
-  runs `ssh` from `PATH` with options from config, so put a shim first in
-  `PATH`: `exec /usr/bin/ssh -F /tmp/.../ssh_config "$@"`. Then
-  `etude storage add r2 --bucket manabot --prefix launch/etude-r2-smoke-DATE
-  --provider r2`, `etude machine add box ALIAS --storage r2` and
-  `etude launch job.py --pool box`. R2 keys come from the secret store,
-  injected into each command. If `docker build` fails on a keychain prompt,
-  set `DOCKER_CONFIG` to a folder holding `{}`.
-- Afterwards delete the smoke prefix's objects and the container.
