@@ -61,7 +61,7 @@ from etude.spec import (
     number,
 )
 from etude.storage import Storage, place_artifact
-from etude.train.read import read
+from etude.train.read import RunData, read
 from etude.train.records import ParentRun
 
 
@@ -109,7 +109,8 @@ class OutMembers(tuple[OutMember, ...]):
         for member in self:
             if member.path == path:
                 return member
-        raise EtudeError("out_file_not_found", 404, detail=path)
+        runs = ", ".join(dict.fromkeys(member.run for member in self)) or "a run with no stored out"
+        raise EtudeError("out_file_not_found", 404, detail=f"{path} is not stored in {runs}")
 
     def inputs(self, under: str) -> tuple[Input, ...]:
         """Give each member at `under/PATH`, preserving its path within out."""
@@ -131,11 +132,12 @@ class TrainingRunSummary:
     checkpoints: Checkpoints
     # The seed it declared, if any.
     seed: int | None = None
-    _read_out: Callable[[], tuple[OutMember, ...]] = field(default=tuple, repr=False, compare=False)
+    # Launcher-only runs have no stored data. Copies keep the same lazy storage read.
+    _data: RunData | None = field(default=None, repr=False, compare=False)
 
     @cached_property
     def out(self) -> OutMembers:
-        return OutMembers(self._read_out())
+        return OutMembers(self._data.out if self._data is not None else ())
 
     @property
     def ended(self) -> bool:

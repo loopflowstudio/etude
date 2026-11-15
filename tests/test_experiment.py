@@ -97,7 +97,7 @@ def test_out_members_are_lazy_listed_and_verified(
     assert all(member.run == owner for member in members)
     assert all(member.uri == storage.uri(folder + "/" + member.key) for member in members)
     assert members.file("model") == members[-1]
-    with pytest.raises(EtudeError, match="out_file_not_found"):
+    with pytest.raises(EtudeError, match=f"out_file_not_found: absent is not stored in {owner}$"):
         members.file("absent")
     packs = members.matching("packs/*.pack")
     assert isinstance(packs[:1], OutMembers)

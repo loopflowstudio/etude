@@ -1505,9 +1505,8 @@ against its digest in the record,
 and the run records the checkpoint it started from
 ([Training](training.md#starting-from-another-run)).
 
-A declaration rarely writes an `Input` by hand. Another run's stored out
-files make them, with the key, digest, length, producer run and locator read
-from that run's `out.json`
+A declaration can make verified inputs from another run's stored out files,
+using its membership and source
 ([Files from another run](training.md#files-from-another-run)):
 
 ```python
