@@ -293,7 +293,7 @@ from etude.spec import Runtime
 from etude.train.tracking import track
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import Held, Benchmark, Seating, Code
+from etude.eval.records import CheckpointSlot, Benchmark, Seating, Code, checkpoint_player
 from tests.eval.games import play
 
 RUNTIME = Runtime(python={command_python!r})
@@ -424,7 +424,7 @@ def test_cli_hands_down_unaffected_work_before_reporting_failed_eval(
 from etude.jobs import TrainingJob, EvalJob, ExperimentState
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import Held, RoundRobin, Code
+from etude.eval.records import CheckpointSlot, RoundRobin, Code, checkpoint_player
 from tests.eval.games import play
 from tests.launch.tasks import Command, train_command
 
@@ -517,7 +517,7 @@ from etude.jobs import EvalJob, ExperimentState
 from etude.spec import Runtime
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import Held, Benchmark, RoundRobin, Seating, Code, CheckpointPlayer, Match
+from etude.eval.records import CheckpointSlot, Benchmark, RoundRobin, Seating, Code, CheckpointPlayer, Match, checkpoint_player
 from etude.eval.run import Tables
 
 
@@ -602,7 +602,7 @@ from etude.checkpoints import CheckpointRef
 from etude.records import ArtifactRef
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import Held, RoundRobin, Code
+from etude.eval.records import CheckpointSlot, RoundRobin, Code, checkpoint_player
 from etude.jobs import EvalJob, ExperimentState
 from tests.eval.games import play
 from hashlib import sha256
@@ -612,7 +612,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         uri={weights.as_uri()!r}, sha256=sha256(b"right bytes").hexdigest(), size_bytes=11))
     return [EvalJob(tournament=RoundRobin(name="ladder", environment=environment("duel"),
                         configs=({{}},), games=1),
-                    enter=(Held().player(checkpoint), Code(name="fixed", source=[__file__])),
+                    enter=(checkpoint_player(checkpoint), Code(name="fixed", source=[__file__])),
                     play=play, repo=None, max_hours=1)]
 """)
     assert main(["eval", str(file), "--source", str(tmp_path / "source")]) == 1
@@ -640,7 +640,7 @@ from etude.experiment import observe
 from etude.jobs import EvalJob
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import Held, Benchmark, RoundRobin, Code, Seating
+from etude.eval.records import CheckpointSlot, Benchmark, RoundRobin, Code, Seating, checkpoint_player
 from tests.eval.stored import stored_inference
 from tests.eval.games import play
 
@@ -651,7 +651,7 @@ def eval_jobs(state):
             seatings=(Seating(name="anchor", players=(stored_inference(), Code(name="fixed")), configs=({{}},), games=1),))
         return EvalJob(tournament=tournament, checkpoints=checkpoints, play=play, max_hours=0.1)
     return EvalJob(tournament=RoundRobin(name="ladder", environment=environment("duel"),
-        configs=({{}},), games=1), enter=tuple(c.player(Held()) for c in checkpoints),
+        configs=({{}},), games=1), enter=tuple(checkpoint_player(c.ref) for c in checkpoints),
         play=play, max_hours=0.1)
 """)
     assert main([command, str(file), "--source", str(source.root)]) == 1
@@ -679,7 +679,7 @@ from etude.experiment import observe
 from etude.jobs import EvalJob
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import Held, RoundRobin, Code
+from etude.eval.records import CheckpointSlot, RoundRobin, Code, checkpoint_player
 from tests.eval.games import play
 
 def eval_jobs(state):
@@ -809,7 +809,7 @@ def test_policy_key_fresh_experiment_submits_training_then_evaluates(
     file.write_text("""
 from etude.checkpoints import PolicyKey
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Seating
+from etude.eval.records import Benchmark, Code, Seating, checkpoint_player
 from tests.eval.stored import stored_inference
 from etude.jobs import EvalJob, ExperimentState, TrainingJob
 from tests.eval.games import play
@@ -864,7 +864,7 @@ def test_policy_key_of_a_job_added_to_a_started_experiment_is_queued(
     jobs = """
 from etude.checkpoints import PolicyKey
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Seating
+from etude.eval.records import Benchmark, Code, Seating, checkpoint_player
 from tests.eval.stored import stored_inference
 from etude.jobs import EvalJob, ExperimentState, TrainingJob
 from tests.eval.games import play
@@ -907,7 +907,7 @@ def test_policy_key_of_a_run_over_budget_says_why_it_is_missing(
     file.write_text("""
 from etude.checkpoints import PolicyKey
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Seating
+from etude.eval.records import Benchmark, Code, Seating, checkpoint_player
 from tests.eval.stored import stored_inference
 from etude.jobs import EvalJob, ExperimentState, TrainingJob
 from tests.eval.games import play
@@ -958,7 +958,7 @@ def test_policy_key_cross_experiment_seats_split_seeds_and_do_not_replay(
     file.write_text("""
 from etude.checkpoints import PolicyKey
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Final, Seating
+from etude.eval.records import Benchmark, Final, Seating, checkpoint_player
 from tests.eval.stored import stored_inference
 from etude.jobs import EvalJob
 from tests.eval.games import play

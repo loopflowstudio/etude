@@ -20,7 +20,15 @@ from etude.controller.declarations import read_experiment
 from etude.errors import EtudeError
 from etude.eval.match import environment, evaluate
 from etude.eval.query import compare, statsdb
-from etude.eval.records import Benchmark, CheckpointPlayer, Code, Held, Match, Player, Seating
+from etude.eval.records import (
+    Benchmark,
+    CheckpointPlayer,
+    Code,
+    Match,
+    Player,
+    Seating,
+    checkpoint_player,
+)
 from etude.eval.run import Result
 from etude.eval.tournament import hold
 from etude.experiment import observe
@@ -37,7 +45,7 @@ from tests.run.storage import CountedClient, MeasuredStorage
 LAB = """
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import (Held,Benchmark, Code, Seating, CheckpointPlayer)
+from etude.eval.records import (CheckpointSlot,Benchmark, Code, Seating, CheckpointPlayer)
 from etude.checkpoints import CheckpointId, CheckpointRef
 from etude.records import ArtifactRef
 from etude.jobs import EvalJob
@@ -295,7 +303,7 @@ def test_a_report_reads_no_checkpoint_bytes(lab: tuple[Path, Path], page: Page) 
 VERSIONED = """
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import Held, Benchmark, Code, Seating
+from etude.eval.records import CheckpointSlot, Benchmark, Code, Seating, checkpoint_player
 from etude.jobs import EvalJob
 from tests.eval.games import play
 
@@ -708,8 +716,8 @@ def test_a_tracked_checkpoint_is_placed_by_its_seat_first_and_its_training_recor
         experiment="seated",
         environment=DUEL,
         matches=[
-            duel(Held().player(bare), HEURISTIC),
-            duel(Held().player(moved), HEURISTIC),
+            duel(checkpoint_player(bare), HEURISTIC),
+            duel(checkpoint_player(moved), HEURISTIC),
         ],
         play=play,
         run="plain",
@@ -785,7 +793,7 @@ def test_a_continued_run_is_one_line_with_the_run_it_continues(
     # Seated with no line, as matches recorded before seats carried one: each checkpoint's
     # line is its training run's, the first run of its chain.
     unlined = [
-        Held().player(CheckpointRef(address=each.key, artifact=each.artifact, at=each.at))
+        checkpoint_player(CheckpointRef(address=each.key, artifact=each.artifact, at=each.at))
         for each in saved
     ]
     evaluate(
@@ -965,7 +973,7 @@ def _attempt(key: str) -> bool:
 REVISED = """
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import Held, Benchmark, Code, Seating
+from etude.eval.records import CheckpointSlot, Benchmark, Code, Seating, checkpoint_player
 from etude.jobs import EvalJob
 from etude.report import Curve, Matches, Report, Score
 from tests.eval.games import play
@@ -1027,7 +1035,7 @@ def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
 SETUPS = """
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import Held, Benchmark, Code, Seating
+from etude.eval.records import CheckpointSlot, Benchmark, Code, Seating, checkpoint_player
 from etude.jobs import EvalJob
 from etude.report import Curve, Matches, Report, Score
 from tests.eval.games import play

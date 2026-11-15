@@ -23,7 +23,14 @@ from etude.errors import EtudeError
 from etude.eval import query
 from etude.eval.match import environment, evaluate
 from etude.eval.query import Estimate, compare, estimate, statsdb
-from etude.eval.records import CheckpointPlayer, Code, Config, Held, Match, Player
+from etude.eval.records import (
+    CheckpointPlayer,
+    Code,
+    Config,
+    Match,
+    Player,
+    checkpoint_player,
+)
 from etude.launch.storage.files import read_result
 from etude.records import ArtifactRef
 from etude.storage import DirectoryStorage, S3Storage
@@ -320,8 +327,8 @@ def test_a_models_inference_code_is_its_version_not_its_key(tmp_path: Path) -> N
 def test_where_a_checkpoint_stood_is_carried_by_its_seat_and_is_not_its_identity() -> None:
     file = ArtifactRef(uri="hf://lab/u600.pt", sha256=sha256(b"a").hexdigest())
     key = file.uri
-    seated = Held().player(CheckpointRef(address=key, artifact=file, at={"updates": 600}))
-    corrected = Held().player(
+    seated = checkpoint_player(CheckpointRef(address=key, artifact=file, at={"updates": 600}))
+    corrected = checkpoint_player(
         CheckpointRef(address=key, artifact=file, at={"updates": 612}, line="seed-2")
     )
     rival = Code(name="rival", source=[__file__])

@@ -513,7 +513,7 @@ class TrainingJob[C: BaseModel](Job):
 
 
 class EvalJob(Job):
-    """A play function, a tournament and the checkpoints or entrants it seats."""
+    """Declare matches through a generator, with their play, loading and machine needs."""
 
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
     play: Callable[..., Tables | Result] = Field(exclude=True)

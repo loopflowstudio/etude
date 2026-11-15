@@ -25,7 +25,6 @@ from etude.eval.records import (
     Final,
     Fraction,
     Gap,
-    Held,
     Line,
     Match,
     Relative,
@@ -36,6 +35,7 @@ from etude.eval.records import (
     Share,
     TournamentRun,
     assemble,
+    checkpoint_player,
 )
 from etude.records import ArtifactRef
 from tests.eval.stored import stored_inference, stored_relative
@@ -424,7 +424,7 @@ def test_checkpoint_paths_decode_local_files_and_refuse_remote_addresses(tmp_pat
         run="learner", ordinal=1, artifact=ArtifactRef(uri=path.as_uri(), sha256=DIGEST), at={}
     )
     assert checkpoint.path == checkpoint.ref.path == path
-    assert Held().player(checkpoint.ref).checkpoint.path.read_bytes() == b"weights"
+    assert checkpoint_player(checkpoint.ref).checkpoint.path.read_bytes() == b"weights"
     for uri in ("s3://bucket/policy.pt", "file://other-machine/policy.pt"):
         remote = CheckpointRecord(
             run="learner", ordinal=1, artifact=ArtifactRef(uri=uri, sha256=DIGEST), at={}

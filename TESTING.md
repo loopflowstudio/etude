@@ -12,7 +12,8 @@ the actual workload. Keep normal test execution focused and bounded; every
 test-owned subprocess must be terminated and reaped on success, failure,
 timeout and cancellation.
 
-See [README.md](README.md#develop) for check commands and
+Run `uv run pytest`, `uv run mypy`, `uv run ruff check .` and
+`uv run ruff format --check .` before pushing. See
 [AGENTS.md](AGENTS.md) for repository conventions.
 
 Run `node --test tests/test_charts.cjs` for headless report chart checks (Node 22).

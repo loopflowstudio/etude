@@ -32,7 +32,7 @@ from etude.eval.batching import _Batches
 from etude.eval.game import Execution, Performance, _performance
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Code, Config, Held, Match, RoundRobin
+from etude.eval.records import Code, Config, Match, RoundRobin, checkpoint_player
 from etude.eval.resources import (
     Cpus,
     _has_gpu,
@@ -745,7 +745,7 @@ def test_batch_size_and_delay_flush_with_a_controlled_clock() -> None:
 
 def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_inputs() -> None:
     players = [
-        Held().player(
+        checkpoint_player(
             CheckpointRef(
                 address=f"{name}/checkpoints/model",
                 artifact=ArtifactRef(uri=f"file:///unused/{name}", sha256="0" * 64, size_bytes=1),
@@ -829,7 +829,7 @@ def test_launched_group_delivers_members_then_the_next_pass_plays_nothing(
         {
             "launched_agents.py": f"""
 from etude.jobs import Agents, EvalJob, ExperimentState
-from etude.eval.records import Code, RoundRobin
+from etude.eval.records import Code, RoundRobin, checkpoint_player
 from etude.eval.match import environment
 from etude.spec import Runtime, Variable
 from tests.eval.arithmetic import load
@@ -877,7 +877,7 @@ def test_game_imports_only_play_module_with_one_send_and_receive_per_decision(
 import sys
 from collections.abc import Sequence
 from etude.eval.agents import Forward
-from etude.eval.records import Match
+from etude.eval.records import Match, checkpoint_player
 from etude.eval.result import Tables
 
 def play(match: Match, agents: Sequence[Forward]) -> Tables:
@@ -900,7 +900,7 @@ from etude.call import Function
 from etude.eval.agents import Answer
 from etude.eval.game import initialize_game, play_match
 from etude.eval.resources import Resources
-from etude.eval.records import Match
+from etude.eval.records import Match, checkpoint_player
 from pathlib import Path
 from tests.eval.arithmetic import checkpoint
 
@@ -1127,7 +1127,7 @@ import sys
 sys.path.insert(0, sys.argv[1])
 from heavy_fixture_game import play
 from etude.eval.match import environment
-from etude.eval.records import Code, RoundRobin
+from etude.eval.records import Code, RoundRobin, checkpoint_player
 from etude.jobs import Agents, EvalGroup, EvalJob, evaluation_group, hold_group, with_experiment
 from tests.eval.arithmetic import load
 from tests.eval.arithmetic import checkpoint

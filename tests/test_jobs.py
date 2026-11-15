@@ -20,7 +20,7 @@ from etude.controller.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, Held, Match, RoundRobin
+from etude.eval.records import Benchmark, Code, Match, RoundRobin, checkpoint_player
 from etude.experiment import observe
 from etude.jobs import EvalJob, JobOptions, TrainingJob, checkpoint_inputs, with_experiment
 from etude.launch.smoke import tiny
@@ -69,7 +69,7 @@ import json
 from pathlib import Path
 
 from etude.eval.match import Tables
-from etude.eval.records import Held, Match, CheckpointPlayer
+from etude.eval.records import CheckpointSlot, Match, CheckpointPlayer, checkpoint_player
 
 
 def weights(checkpoint: Path) -> bytes:
@@ -340,7 +340,7 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
         {
             f"arena_duel_{form}.py": """from pydantic import BaseModel
 from etude.eval.match import environment
-from etude.eval.records import Held, Benchmark, Code, Seating
+from etude.eval.records import CheckpointSlot, Benchmark, Code, Seating, checkpoint_player
 """
             + PLAY
             + """
@@ -349,7 +349,7 @@ class ArenaConfig(BaseModel):
 
 def arena(config: ArenaConfig) -> Benchmark:
     return Benchmark(name="anchors", environment=environment("duel"), seatings=(
-        Seating(name="model vs fixed", players=(Held(), Code(name="fixed")),
+        Seating(name="model vs fixed", players=(CheckpointSlot(), Code(name="fixed")),
                 configs=({"deal": 1}, {"deal": 2}), games=config.games),))
 """
         },
@@ -583,7 +583,7 @@ def test_a_seated_artifact_keeps_its_experiment_when_a_local_run_has_the_same_na
     assert checkpoint is not None
     state = observe(source, "review")
     assert state.checkpoint(checkpoint.key) is None
-    match = Match(players=(checkpoint.player(Held()), Code(name="fixed")), games=1)
+    match = Match(players=(checkpoint_player(checkpoint.ref), Code(name="fixed")), games=1)
     saved = checkpoint_inputs([match], state, [checkpoint] if declared else [])
     assert saved[checkpoint.key].artifact == checkpoint.artifact
 

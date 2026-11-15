@@ -246,7 +246,7 @@ class CheckpointRef(Record):
 
 
 class _Seat[P](Protocol):
-    """A checkpoint seat (`etude.eval.records.Held`); evaluation is not imported here."""
+    """Released configured checkpoint seats; evaluation is not imported here."""
 
     def player(self, checkpoint: CheckpointRef) -> P: ...
 

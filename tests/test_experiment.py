@@ -22,7 +22,7 @@ from etude.controller.local import _place_inputs
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, Held, Seating
+from etude.eval.records import Benchmark, CheckpointSlot, Code, Seating, checkpoint_player
 from etude.eval.tournament import evaluating, scores
 from etude.experiment import observe
 from etude.jobs import (
@@ -53,7 +53,7 @@ from tests.run.storage import MeasuredStorage
 
 WORLD = environment("duel", config={"world": "w6"})
 DEALS = tuple({"deal": deal} for deal in range(2))
-HELD = Held()
+HELD = CheckpointSlot()
 
 
 def _store_out_members(storage: DirectoryStorage, folder: str) -> OutFiles:
@@ -206,7 +206,7 @@ def design(tmp_path: Path) -> Experiment:
         rated = run.checkpoints.every(2)
         pairs = [
             Seating(name=f"{new.name} vs {old.name}", tags=("consecutive",),
-                    players=(new.player(HELD), old.player(HELD)), configs=DEALS, games=2)
+                    players=(checkpoint_player(new.ref), checkpoint_player(old.ref)), configs=DEALS, games=2)
             for old, new in zip(rated, rated[1:])
         ]  # fmt: skip
         if run.final is not None and run.checkpoints:
@@ -214,7 +214,7 @@ def design(tmp_path: Path) -> Experiment:
             pairs.append(
                 Seating(
                     name="final vs first",
-                    players=(run.final.player(HELD), first.player(HELD)),
+                    players=(checkpoint_player(run.final.ref), checkpoint_player(first.ref)),
                     configs=DEALS,
                     games=2,
                 )  # fmt: skip
@@ -656,7 +656,7 @@ def test_a_tracked_checkpoints_seat_says_where_its_run_stood_and_its_line(tmp_pa
     run.finish(timeout=30)
     (saved,) = observe(bucket, "ppo").run("ppo-1").checkpoints
     assert saved.ref.at == saved.at
-    player = saved.player(Held())
+    player = checkpoint_player(saved.ref)
     assert authored(saved.at) == authored(player.checkpoint.at) == {"updates": 100}
     assert saved.ref.line == player.checkpoint.line == "ppo-1"
 
@@ -715,12 +715,12 @@ def test_a_finished_run_without_checkpoints_has_no_final(tmp_path: Path) -> None
 
 CAPACITY = """
 from etude.eval.match import environment
-from etude.eval.records import Aligned, Benchmark, Fraction, Held, Seating
+from etude.eval.records import Aligned, Benchmark, Fraction, CheckpointSlot, Seating, checkpoint_player
 from etude.jobs import EvalJob
 from etude.report import Curve, Matches, Report, Score
 from tests.eval.games import play
 
-HELD = Held()
+HELD = CheckpointSlot()
 DEALS = ({"deal": 0},)
 
 

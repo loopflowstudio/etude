@@ -15,7 +15,7 @@ import pytest
 from etude.cache import Cache
 from etude.cli import main
 from etude.eval.match import environment, evaluate
-from etude.eval.records import Code, Held, Match
+from etude.eval.records import Code, Match, checkpoint_player
 from etude.experiment import observe
 from etude.storage import DirectoryStorage
 from etude.train.read import read
@@ -507,7 +507,7 @@ def test_two_model_cli_recipe_resumes_and_its_checkpoint_can_be_seated(
     checkpoint = observe(base.parent, "tiny").run("tiny").final
     assert checkpoint is not None and checkpoint.at["updates"] == 4
     assert {name: (checkpoint.path / f"{name}.pt").read_bytes() for name in weights} == weights
-    seated = Match(players=(checkpoint.player(Held()), Code(name="opponent")), games=1)
+    seated = Match(players=(checkpoint_player(checkpoint.ref), Code(name="opponent")), games=1)
     played = evaluate(
         experiment="tiny",
         environment=environment("tiny-game"),

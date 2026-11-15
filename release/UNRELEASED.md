@@ -173,7 +173,7 @@ code-only group starts no agent process
 run within `--max-usd`. Existing capacity is reused; a rental target permits
 renting when no machine has room, regardless of training activity or historical
 match duration. Without a rental target, the run waits in the pool's queue
-([Experiments](../docs/evaluation.md#experiments)).
+([Experiments](../docs/evaluation.md)).
 
 ### Upgrade
 
@@ -243,7 +243,7 @@ false. The derived statsdb cache rebuilds from schema 14 or 15 to 16 automatical
 Game processes load play's defining module; for a job using shared inference, heavy
 imports there produce one warning per run naming their importer.
 
-Checkpoint seats now play directly: `Held()` replaces a bare inference seat;
+Checkpoint seats now play directly: `CheckpointSlot()` replaces a bare inference seat;
 relative seats take no `inference=`. Author records wrap seats to describe
 search or other composition. `compose(record)` preserves the wrapper type and
 fields in identity, replacing every leaf with its resolved checkpoint key, and
@@ -282,7 +282,7 @@ with the same `every`, `at`, `tagged` and `last` selectors as a run.
 are refused. Reports resolve other experiments' seats from the same source;
 smoke names those seats as not smoked. A run publishes a second policy with
 `run.checkpoint(..., role="exploiter")`.
-See [Policies](../docs/evaluation.md#policies).
+See [Policies](../docs/evaluation.md#players-and-composition).
 
 A checkpoint's key now includes its experiment:
 `EXPERIMENT/RUN/checkpoints/NAME` (nondefault roles add `/roles/ROLE`
@@ -328,8 +328,7 @@ from etude.launch.client import launch, queue
 
 Experiment declarations keep their defining module, `etude.jobs`. Supported
 modules mark their supported names with `__all__`; names outside those tuples
-are implementation details. Use the [Python import reference](../docs/python.md)
-to find the defining module for each task. Import `Tables` from
+are implementation details. The [author guides](../docs/getting-started.md) show defining-module imports. Import `Tables` from
 `etude.eval.result` rather than through `etude.eval.match` or `etude.eval.run`.
 
 Scripts using moved implementation modules must update their imports directly:
@@ -348,10 +347,26 @@ Scripts using moved implementation modules must update their imports directly:
 There are no forwarding aliases at replaced paths. If an import fails after
 upgrading, update that source import, including module names in your own scripts
 or test fixtures. `Scheduler`, executor and controller helpers remain internal;
-image preparation functions are listed in the supported reference. See
-[launcher ownership](../docs/launcher.md#ownership-and-failure-behavior) for the
+image preparation functions remain supported in `etude.launch.provisioner.images`. See
+[launcher ownership](../docs/dev/launcher.md#ownership-and-failure-behavior) for the
 four boundaries and shared modules.
 
 This reorganization changes Python source paths, not CLI spellings, run
 identities, stored records or database schemas. It requires no data conversion.
 `etude.call` and the job commands retain their entry paths.
+
+## Indexed evaluation matches
+
+Use `Seating(config=..., base_seed=42, games=100)` to generate one match per
+seed index. Seeds depend only on the base and index, shared across players and
+seat orders. Increasing the count preserves completed match keys. Existing
+multi-game/config-panel records remain readable under their original keys; use
+a fresh tournament name when changing those panels to the indexed format.
+
+`CheckpointSlot()` replaces `Held()` for generator placeholders. Use
+`checkpoint_player(ref)` to seat a fixed checkpoint. Composed players retain
+whole-player result identity; checkpoint leaves are loading details.
+
+The [first experiment](../docs/getting-started.md) now runs training, eval and
+reporting from one complete file. Author guides cover usage and limits;
+implementation and persistence references live under `docs/dev/`.
