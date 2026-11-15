@@ -865,6 +865,8 @@ frozen panel, 158 ms per decision under Etude against 160 ms in a raw
   interval.
   Games without `agents=` retain these intervals too, with zero inference
   counters and no latency percentiles.
+  A standalone Python evaluation keeps reports in its own run's
+  `artifacts/agents/` folder.
   Latency p50/p95 are upper bounds from 64 power-of-two microsecond buckets;
   sum `latency_buckets` across match reports before computing a run percentile.
   Do not average match percentiles. Reports include ordinary game failures;
