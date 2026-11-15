@@ -640,10 +640,28 @@ def loop(scheduler: Scheduler, every: float = 1.0) -> None:
 
 
 def _hand_over(program: str | None) -> NoReturn:
-    # Without a recorded program the newer etude was installed in place: run this one again.
-    python = str(Path(program) / ".venv" / "bin" / "python") if program else sys.executable
+    if program is None:
+        raise LauncherError("database upgraded; restart etude server run with the upgraded client")
+    python = Path(program) / ".venv" / "bin" / "python"
+    if not python.is_file():
+        raise LauncherError(
+            "upgrade program unavailable; restart etude server run with the upgraded client"
+        )
+    checked = subprocess.run(
+        [
+            str(python),
+            "-c",
+            "from pathlib import Path; from etude.launch.database import open_home; import sys; open_home(Path(sys.argv[1])).close()",
+            str(home()),
+        ],
+        capture_output=True,
+    )
+    if checked.returncode:
+        raise LauncherError(
+            "installed program cannot open the upgraded database; restart etude server run with a compatible client"
+        )
     print(f"etude was upgraded; the loop continues in {python}", file=sys.stderr, flush=True)
-    os.execv(python, [python, "-m", "etude", "server", "run"])
+    os.execv(str(python), [str(python), "-m", "etude", "server", "run"])
 
 
 def warning(scheduler: Scheduler) -> str | None:

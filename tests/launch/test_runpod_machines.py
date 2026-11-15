@@ -66,6 +66,7 @@ from etude.train.tracking import TrainingRun as TrackedRun
 from etude.train.tracking import track
 from tests.experiments import authored
 from tests.launch.counting import Counting, Counts, job_text
+from tests.launch.fake import open_database
 
 TRAIN = """
 echo "seed $ETUDE_SEED to $ETUDE_UNTIL_VALUE"
@@ -334,7 +335,7 @@ def cloud(
     """
     storage = Storage()
     provider = RunPod(storage, tmp_path / "pod")
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     account = Provider(name="runpod", kind="runpod", registry="reg1", storage="west")
     place = (
         Place(name="west", bucket="journals", prefix="etude/t", provider="r2")
@@ -793,7 +794,7 @@ def test_shared_inputs_are_prepared_once(tmp_path: Path) -> None:
         ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
     ).stdout.strip()
     storage = Storage()
-    counting = Counting(Database(tmp_path / "counting.db"))
+    counting = Counting(open_database(tmp_path / "counting.db"))
     journal = BucketJournal(
         Place(name="west", bucket="journal", prefix="test", provider="s3", region="us-west-2"),
         Bucket(

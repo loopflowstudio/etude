@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 from etude.deadline import limit_time, remaining
-from etude.launch.database import Database
 from etude.launch.records import Output
 from etude.launch.schemas import AttemptRecord, Finished
 from etude.launch.storage.s3 import Grant, PostForm
@@ -22,6 +21,7 @@ from etude.launch.storage.transport import HTTPReply, attribute, emit, observe
 from etude.launch.worker import courier as delivery
 from etude.launch.worker.courier import Courier
 from etude.storage_timeout import StorageUnavailable
+from tests.launch.fake import open_database
 
 
 class _Files:
@@ -150,7 +150,7 @@ def test_transfer_retention_runs_on_the_invoking_database_thread_with_its_deadli
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "cache"))
     files = _Files()
     courier, outputs = _courier(tmp_path, files)
-    with closing(Database(tmp_path / "owner.sqlite")) as database:
+    with closing(open_database(tmp_path / "owner.sqlite")) as database:
         with (
             limit_time(60),
             attribute(session="session", run="study", attempt="a1"),

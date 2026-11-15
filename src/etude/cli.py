@@ -594,6 +594,7 @@ _HERE = (
     "launch",
     "queue",
     "smoke",
+    "database",
     "source",
     "fetch",
     "worker",

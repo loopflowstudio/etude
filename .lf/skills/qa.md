@@ -171,6 +171,9 @@ that loop after code changes. Afterwards remove the container and delete the
 
 ## Etude: launching an experiment file on this computer
 
+Initialize the empty lab launcher with `etude database upgrade --development`
+before its launcher commands. Reads never initialize it.
+
 A lab that runs typed jobs (`TrainingJob(name=..., train=train, config=...)`) is a git repo, outside the
 repo, with an isolated `ETUDE_HOME`:
 
@@ -314,3 +317,14 @@ single-file checkpoints hide nested input names (`start/checkpoint.json`).
   at it, train `runs()` files (compact `ppo@0`, `solo`) and `etude queue` (makes
   `launcher-19.db`). Repoint the pyproject at this checkout, `uv lock`, rename per
   `release/UNRELEASED.md`, and check stored runs read `finished`.
+
+## Etude: explicit launcher upgrades
+
+Use an empty lab `ETUDE_HOME` and explicitly run `etude database upgrade
+--development` before launcher scenarios with unmerged SQL. Ordinary status
+and library opens must leave missing or outdated state unchanged. Real-data
+snapshots are inspection inputs only: never call wait, tick, cancel, rent or
+refresh against them. On this machine consolidate legacy and copy histories
+before retiring their files; never choose authority by schema number or treat
+a quiet WAL as proof of exclusive ownership. Keep remote training and guardians
+running. Recovery requires stopping scheduling and reconciling provider state.

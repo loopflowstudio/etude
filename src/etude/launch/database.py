@@ -4,9 +4,9 @@ Every session, attempt and run row carries a version. A write names the version 
 read and raises Stale if the row has moved, so two processes working the same
 file cannot both take one step. Status and spend are computed, never stored.
 
-open_home selects one launcher.sqlite, taking over a released predecessor or
-isolating unreleased SQL in a copy. Named migrations are applied transactionally;
-their ledger fences writers when a later release raises the reader floor.
+inspect reads local schema evidence; upgrade is the only schema writer. Ordinary
+opens validate the canonical launcher.sqlite without creating or migrating it.
+The migration ledger fences incompatible writers before their next action.
 """
 
 from __future__ import annotations
@@ -15,13 +15,15 @@ import fcntl
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import cache, partial
@@ -29,8 +31,10 @@ from importlib.metadata import version
 from pathlib import Path
 from uuid import uuid4
 
+from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError
 from etude.launch.errors import SchemaAdvanced
+from etude.launch.provenance import frontier
 from etude.launch.records import (
     RETRYABLE,
     Cause,
@@ -62,45 +66,19 @@ Fact = str | int | float | None
 
 # The schema is the packaged migrations, applied in order and recorded in this ledger.
 # PRAGMA user_version counts its rows: one pragma tells a process the file moved on.
-# A NULL floor marks an unreleased migration, which only a copy ever holds.
+# A NULL floor identifies a build rather than a released compatibility floor.
 _FOLDER = Path(__file__).with_name("migrations")
 _LEDGER = """CREATE TABLE migrations(
   name TEXT PRIMARY KEY, sha256 TEXT NOT NULL, applied_at TEXT NOT NULL,
   floor TEXT, program TEXT)"""
 
 
-class Predecessor(Record):
-    """A pre-ledger schema, the etude that reads it and the files a take-over may copy.
-
-    `files` maps each released name to its own reader: 0.3.1 wrote schema 17 to
-    `launcher.db`, 0.3.2 to `launcher-17.db`.
-    """
-
-    files: dict[str, str] = {}
-    migrations: tuple[str, ...] = ()
-    etude: str
-
-
-# Newest first: selection, ledger seeding and older-file notices share these facts.
-_PREDECESSORS = {
-    19: Predecessor(
-        files={"launcher-19.db": "0.4.0"},
-        migrations=("baseline", "run_resume_and_writers"),
-        etude="0.4.0",
-    ),
-    17: Predecessor(
-        files={"launcher-17.db": "0.3.2", "launcher.db": "0.3.1"},
-        migrations=("baseline",),
-        etude="0.3.2",
-    ),
-    15: Predecessor(etude="0.3.0"),
-    14: Predecessor(etude="0.2.16"),
-    13: Predecessor(etude="0.2.15"),
-    11: Predecessor(etude="0.2.14"),
-    10: Predecessor(etude="0.2.6"),
-    8: Predecessor(etude="0.2.0"),
-    2: Predecessor(etude="0.1.2"),
-    1: Predecessor(etude="0.1.1"),
+# Actual supported pre-ledger histories on this machine, plus the shipped 0.4.0
+# schema. Older named recovery snapshots never become operational queues.
+_PREDECESSORS: dict[int, tuple[str, ...]] = {
+    19: ("baseline", "run_resume_and_writers"),
+    17: ("baseline",),
+    13: ("baseline",),
 }
 
 
@@ -123,6 +101,8 @@ class Migration(Record):
     sql: str
     sha256: str
     floor: str | None  # None until a release records it
+    expansion: str | None = None
+    exports: tuple[str, ...] = ()
 
 
 @cache
@@ -165,6 +145,10 @@ def migrations() -> tuple[Migration, ...]:
             sql=sql,
             sha256=digest,
             floor=floors[name].floor if name in floors else None,
+            expansion=_header(sql, "expands"),
+            exports=tuple(
+                n.strip() for n in (_header(sql, "export") or "").split(",") if n.strip()
+            ),
         )
     if missing := sorted(floors.keys() - found.keys()):
         raise LauncherError(f"released migrations are missing: {', '.join(missing)}")
@@ -217,8 +201,8 @@ def _version(text: str) -> tuple[int, ...]:
 def _too_new(rows: Sequence[sqlite3.Row], file: str) -> str | None:
     """Why ledger rows this etude does not know keep it from the file, or None if they are
     all additive changes it can still read and write."""
-    if unreleased := [r["name"] for r in rows if r["floor"] is None]:
-        return f"{file} was migrated by an unreleased etude ({', '.join(unreleased)})"
+    if unreleased := [f"{r['name']}@{r['sha256'][:12]}" for r in rows if r["floor"] is None]:
+        return f"{file} requires a build containing migrations: {', '.join(unreleased)}"
     if not rows:
         return None
     floor = max((r["floor"] for r in rows), key=_version)
@@ -325,7 +309,7 @@ def _body(record: type[Record], row: sqlite3.Row) -> Record:
 
 
 def launcher_file(home: Path) -> Path:
-    """The released launcher file; use open_home to select a development copy."""
+    """The single operational launcher file shared by compatible clients."""
     return home / "launcher.sqlite"
 
 
@@ -403,38 +387,43 @@ def _attempt_from_row(row: sqlite3.Row) -> RunAttempt:
 
 
 class Database:
-    def __init__(self, path: Path, *, timeout: float = 30, backup: bool = True) -> None:
-        """Open local state, migrating it first; timeout bounds SQLite lock contention, in seconds.
+    def __init__(self, path: Path, *, timeout: float = 30) -> None:
+        """Validate existing local state; never create or migrate it.
 
-        A staging snapshot may omit a backup; its source remains the recovery file.
-        Raises LauncherError, changing nothing, for a file a newer etude migrated, a
-        migration edited after it was applied, or rows the current records reject.
+        The finite, overridable lock-contention allowance is in seconds. Schema
+        upgrades have their own caller-owned allowance through upgrade().
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("database timeout must be nonnegative and finite")
         self._locks: dict[str, tuple[str, Callable[[], datetime]]] = {}
         self._path = path
-        self._timeout = timeout
-        self._backup = backup
-        self._notice: str | None = None
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(path, isolation_level=None, timeout=timeout)
+        self._db = (
+            sqlite3.connect(
+                path.resolve().as_uri() + "?mode=rw",
+                uri=True,
+                isolation_level=None,
+                timeout=timeout,
+            )
+            if path.is_file()
+            else self._missing(path)
+        )
         self._db.row_factory = sqlite3.Row
-        self._db.execute("PRAGMA journal_mode = WAL")
-        self.fresh = False  # whether opening created the file's schema
         try:
-            # An up-to-date file is opened without the write lock.
             held = self._applied()
-            if held is not None and len(held[0]) == len(migrations()):
-                self._generation = held[1]
-                return
-            with self._transaction():
-                self._generation = self._migrate()
-            if self._notice is not None:
-                print(self._notice, file=sys.stderr)
+            pending = [m.name for m in migrations() if held is None or m.name not in held[0]]
+            if pending:
+                raise LauncherError(
+                    f"{path} needs etude database upgrade (missing: {', '.join(pending)})"
+                )
+            assert held is not None
+            self._generation = held[1]
         except BaseException:
             self._db.close()
             raise
+
+    @staticmethod
+    def _missing(path: Path) -> sqlite3.Connection:
+        raise LauncherError(f"{path} is not initialized; run etude database upgrade")
 
     def _applied(self) -> tuple[tuple[str, ...], int] | None:
         """The ledger's migrations this etude knows and its row count; None without a ledger.
@@ -460,135 +449,6 @@ class Database:
                 )
         return tuple(r["name"] for r in rows if r["name"] in known), len(rows)
 
-    def _migrate(self) -> int:
-        """Apply what the file lacks and return its generation. Runs inside a write transaction,
-        so a second etude opening the file waits and then finds nothing left to do."""
-        known = {m.name: m for m in migrations()}
-        file = self._path.name
-        held = self._applied()
-        if held is None:
-            made = self._db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
-            schema = int(self._db.execute("PRAGMA user_version").fetchone()[0])
-            if made and (schema not in _PREDECESSORS or not _PREDECESSORS[schema].migrations):
-                raise LauncherError(
-                    f"{self._path} was written by an unreleased etude (schema {schema}); "
-                    "move or delete it to start again"
-                )
-            applied = _PREDECESSORS[schema].migrations if made else ()
-            self.fresh = not made
-        else:
-            applied, rows = held
-        pending = [m for name, m in known.items() if name not in applied]
-        if held is not None:
-            if not pending:
-                return rows
-            if rows > len(applied):
-                # Additive rows from a newer etude are fine alone, but not under older gaps.
-                raise LauncherError(
-                    f"{file} has migrations from a newer etude but lacks "
-                    f"{', '.join(m.name for m in pending)}; upgrade etude"
-                )
-        backup = self._back_up() if held is not None and self._backup else None
-        program = _program(self._path)
-        if held is None:
-            self._db.execute(_LEDGER)
-            for name in applied:  # taken over from a released file's user_version
-                self._ledger(known[name], program)
-        for migration in pending:
-            _check_sqlite(migration)
-            try:
-                for statement in _statements(migration):
-                    self._db.execute(statement)
-            except sqlite3.Error as error:
-                raise LauncherError(
-                    f"launcher: migration {migration.name} failed: {error}"
-                ) from error
-            self._ledger(migration, program)
-        problems = self._invalid_records()
-        if problems:
-            raise LauncherError(
-                f"{file} cannot be migrated; these rows do not validate:\n" + "\n".join(problems)
-            )
-        generation = len(applied) + len(pending)
-        self._db.execute(f"PRAGMA user_version = {generation}")
-        if backup is not None:
-            names = ", ".join(m.name for m in pending)
-            self._notice = (
-                f"launcher: {file}: applied {names} (backup {backup.name}){self._lockout(applied)}"
-            )
-        return generation
-
-    def _lockout(self, applied: Sequence[str]) -> str:
-        """The clause naming who can no longer open the file, when this migration raised its floor."""
-        floors = [m.floor for m in migrations() if m.floor is not None]
-        before = [m.floor for m in migrations() if m.name in applied and m.floor is not None]
-        if not floors:
-            return ""
-        now = max(floors, key=_version)
-        if before and _version(now) <= _version(max(before, key=_version)):
-            return ""
-        return f"; etude < {now} can no longer open it"
-
-    def _ledger(self, migration: Migration, program: str | None) -> None:
-        self._db.execute(
-            "INSERT INTO migrations(name, sha256, applied_at, floor, program) VALUES (?,?,?,?,?)",
-            (
-                migration.name,
-                migration.sha256,
-                datetime.now(UTC).isoformat(),
-                migration.floor,
-                program,
-            ),
-        )
-
-    def _back_up(self) -> Path:
-        """Copy the file as it is before migrating, keeping the two newest copies.
-
-        A second connection reads it: this one holds the write lock, and WAL lets
-        a reader see the last committed state.
-        """
-        target = self._path.with_name(
-            f"{self._path.name}.backup-{datetime.now(UTC):%Y%m%dT%H%M%S%fZ}"
-        )
-        _snapshot(self._path, target, self._timeout)
-        target.chmod(0o600)
-        for old in sorted(self._path.parent.glob(f"{self._path.name}.backup-*"))[:-2]:
-            old.unlink()
-        return target
-
-    def _invalid_records(self) -> list[str]:
-        """Every row that the current records reject, so a migration can be refused whole."""
-        rows: dict[str, tuple[str, Callable[[sqlite3.Row], object]]] = {
-            "pools": ("SELECT * FROM pools", lambda row: Pool.model_validate(dict(row))),
-            "machines": (_MACHINES, _machine_from_row),
-            "runs": (_RUNS, _run_from_row),
-            "sessions": (_SESSIONS, _session_from_row),
-            "rentals": (_RENTALS, lambda row: Rental.model_validate(dict(row))),
-            "attempts": ("SELECT * FROM attempts", _attempt_from_row),
-            "providers": (
-                "SELECT * FROM providers",
-                lambda row: Provider.model_validate(dict(row)),
-            ),
-            "storages": ("SELECT * FROM storages", lambda row: Storage.model_validate(dict(row))),
-        }
-        bodies: dict[str, type[Record]] = {
-            "launches": Launch,
-            "diagnostics": Diagnostic,
-            "log_streams": LogStream,
-            "transfers": Transfer,
-            "ondemands": OnDemand,
-        }
-        for table, record in bodies.items():
-            rows[table] = (f"SELECT * FROM {table}", partial(_body, record))
-        problems: list[str] = []
-        for table, (query, read) in rows.items():
-            for row in self._db.execute(query):
-                try:
-                    read(row)
-                except ValueError as error:
-                    problems.append(f"  {table}: invalid record ({type(error).__name__})")
-        return problems
-
     def check_schema(self) -> None:
         """Raise SchemaAdvanced if another etude raised the file's floor past this one since it
         opened it. Additive migrations by a newer etude are taken in stride."""
@@ -596,11 +456,13 @@ class Database:
         if generation == self._generation:
             return
         rows = self._db.execute(
-            "SELECT name, floor, program FROM migrations WHERE rowid > ? ORDER BY rowid",
+            "SELECT name, sha256, floor, program FROM migrations WHERE rowid > ? ORDER BY rowid",
             (self._generation,),
         ).fetchall()
-        known = {m.name for m in migrations()}
-        if _too_new([r for r in rows if r["name"] not in known], self._path.name):
+        known = {m.name: m.sha256 for m in migrations()}
+        if any(r["name"] in known and r["sha256"] != known[r["name"]] for r in rows) or _too_new(
+            [r for r in rows if r["name"] not in known], self._path.name
+        ):
             raise SchemaAdvanced(rows[-1]["program"] if rows else None)
         self._generation = generation
 
@@ -1444,216 +1306,617 @@ def _schema_number(path: Path) -> int:
 def _snapshot(source: Path, target: Path, timeout: float) -> None:
     """Read a consistent WAL snapshot without modifying the source's records."""
     reader = _read_only(source, timeout)
-    writer = sqlite3.connect(target)
+    target.touch(mode=0o600, exist_ok=False)
+    writer = sqlite3.connect(target, timeout=0)
     try:
-        reader.backup(writer)
+
+        def progress(status: int, left: int, total: int) -> None:
+            remaining()
+
+        reader.backup(writer, pages=256, progress=progress, sleep=0.01)
+        writer.execute("PRAGMA journal_mode=DELETE")
     finally:
         writer.close()
         reader.close()
 
 
-def _predecessor(home: Path) -> Path | None:
-    for expected, predecessor in _PREDECESSORS.items():
-        for name in predecessor.files:
-            path = home / name
-            if not path.exists():
-                continue
-            schema = _schema_number(path)
-            if schema == expected:
-                return path
-            if name != "launcher.db":
-                raise LauncherError(
-                    f"launcher: {name} holds unexpected schema {schema}; open it with its matching etude"
-                )
-    return None
+def _invalid_records(db: sqlite3.Connection) -> list[str]:
+    """Every row that the current records reject, so a migration can be refused whole."""
+    rows: dict[str, tuple[str, Callable[[sqlite3.Row], object]]] = {
+        "pools": ("SELECT * FROM pools", lambda row: Pool.model_validate(dict(row))),
+        "machines": (_MACHINES, _machine_from_row),
+        "runs": (_RUNS, _run_from_row),
+        "sessions": (_SESSIONS, _session_from_row),
+        "rentals": (_RENTALS, lambda row: Rental.model_validate(dict(row))),
+        "attempts": ("SELECT * FROM attempts", _attempt_from_row),
+        "providers": (
+            "SELECT * FROM providers",
+            lambda row: Provider.model_validate(dict(row)),
+        ),
+        "storages": ("SELECT * FROM storages", lambda row: Storage.model_validate(dict(row))),
+    }
+    bodies: dict[str, type[Record]] = {
+        "launches": Launch,
+        "diagnostics": Diagnostic,
+        "log_streams": LogStream,
+        "transfers": Transfer,
+        "ondemands": OnDemand,
+    }
+    for table, record in bodies.items():
+        rows[table] = (f"SELECT * FROM {table}", partial(_body, record))
+    problems: list[str] = []
+    for table, (query, read) in rows.items():
+        invalid = 0
+        for row in db.execute(query):
+            remaining()
+            try:
+                read(row)
+            except ValueError:
+                invalid += 1
+        if invalid:
+            problems.append(f"  {table}: {invalid} invalid records")
+    return problems
 
 
-def _check_source_writes(source: Path) -> None:
-    # Older wait commands schedule without a heartbeat, but every pass writes SQLite.
-    # An empty WAL holds no writes: opening a quiet WAL-mode file, as reading its
-    # schema number just did, creates one. A writer's WAL has frames, and its last
-    # close checkpoints into the main file.
-    modified = source.stat().st_mtime
-    try:
-        wal = source.with_name(source.name + "-wal").stat()
-        if wal.st_size:
-            modified = max(modified, wal.st_mtime)
-    except FileNotFoundError:
-        pass
-    age = time.time() - modified
-    if age < 30:
-        raise LauncherError(
-            f"launcher: an older etude wrote {source.name} {max(0, int(age))}s ago; "
-            "stop its commands (etude wait, etude controller run), then run this again"
+class Schema(Record):
+    """Local schema evidence; inspection never changes records or selects a queue."""
+
+    path: Path
+    sources: tuple[Path, ...]
+    applied: tuple[str, ...]
+    pending: tuple[str, ...]
+    problem: str | None
+
+
+class Upgrade(Record):
+    """The facts published by an explicit upgrade, including recovery locations."""
+
+    path: Path
+    sources: tuple[Path, ...]
+    backups: tuple[Path, ...]
+    applied: tuple[str, ...]
+    floor: str | None
+    exports: tuple[Path, ...] = ()
+    required: tuple[str, ...] = ()
+
+
+def _merged() -> dict[str, str]:
+    raw: object = json.loads(frontier(Path(__file__).resolve().parents[1], timeout=remaining()))
+    if not isinstance(raw, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in raw.items()
+    ):
+        raise LauncherError("invalid packaged migration provenance")
+    result = {str(k): str(v) for k, v in raw.items()}
+    result.update({r.name: r.sha256 for r in released()})
+    return result
+
+
+def _sources(home: Path) -> tuple[Path, ...]:
+    return tuple(
+        sorted(
+            {
+                *home.glob("launcher*.db"),
+                *(home / "copies").glob("*/launcher*.db"),
+                *(home / "copies").glob("*/launcher.sqlite"),
+            }
         )
-
-
-def _older_files(home: Path, source: Path | None) -> str:
-    messages: list[str] = []
-    for path in sorted(home.glob("launcher*.db")):
-        if path == source:
-            messages.append(f"{path.name} is left as it was and is no longer read")
-            continue
-        try:
-            schema = _schema_number(path)
-        except sqlite3.DatabaseError:
-            messages.append(f"{path.name} is not read (cannot inspect its schema)")
-            continue
-        matching = _PREDECESSORS.get(schema)
-        reader_etude = matching.files.get(path.name, matching.etude) if matching else None
-        suffix = f", use etude {reader_etude} for it" if reader_etude else ""
-        messages.append(f"{path.name} (schema {schema}) is not read{suffix}")
-    return "; ".join(messages)
-
-
-def _unreleased() -> list[Migration]:
-    return [m for m in migrations() if m.floor is None]
-
-
-def _working_file(home: Path) -> Path:
-    """The real file, or the copy a build carrying unreleased migrations works on instead.
-
-    The copy is named for those migrations' contents: editing one starts another copy.
-    """
-    real = launcher_file(home)
-    if not (unreleased := _unreleased()):
-        return real
-    joined = "".join(f"{m.name}:{m.sha256}\n" for m in unreleased)
-    return home / "copies" / hashlib.sha256(joined.encode()).hexdigest()[:12] / real.name
-
-
-def has_launcher(home: Path) -> bool:
-    """Whether this build has launcher evidence to read, without creating a home."""
-    return (
-        _working_file(home).exists()
-        or launcher_file(home).exists()
-        or _predecessor(home) is not None
     )
 
 
-def open_home(home: Path, *, timeout: float = 30) -> Database:
-    """Open the home's launcher, taking over a released predecessor or isolating a branch.
+def inspect(home: Path) -> Schema:
+    """Read local catalog membership, without database creation, provider keys or network."""
+    path = launcher_file(home.resolve())
+    sources = _sources(home.resolve())
+    applied: tuple[str, ...] = ()
+    problem: str | None = None
+    if path.exists():
+        db = _read_only(path)
+        db.row_factory = sqlite3.Row
+        try:
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='migrations'").fetchone():
+                rows = db.execute(
+                    "SELECT name,sha256,floor FROM migrations ORDER BY rowid"
+                ).fetchall()
+                applied = tuple(r["name"] for r in rows)
+                known = {m.name: m for m in migrations()}
+                problem = _too_new([r for r in rows if r["name"] not in known], path.name)
+                if changed := [
+                    r["name"]
+                    for r in rows
+                    if r["name"] in known and r["sha256"] != known[r["name"]].sha256
+                ]:
+                    problem = "applied migration content differs: " + ", ".join(changed)
+            else:
+                problem = "canonical file has no migration ledger"
+        finally:
+            db.close()
+    pending = tuple(m.name for m in migrations() if m.name not in applied)
+    return Schema(path=path, sources=sources, applied=applied, pending=pending, problem=problem)
 
-    Creation is serialized across processes. A staged snapshot is fully migrated
-    before publication, so a failed takeover leaves no half-created launcher.
-    """
-    if not math.isfinite(timeout) or timeout < 0:
-        raise ValueError("database timeout must be nonnegative and finite")
-    home = home.resolve()
-    home.mkdir(parents=True, exist_ok=True)
-    real = launcher_file(home)
-    unreleased = _unreleased()
-    target = _working_file(home)
-    if target.exists():
-        return Database(target, timeout=timeout)
-    with (home / ".launcher-open").open("a") as lock:
-        deadline = time.monotonic() + timeout
+
+def has_launcher(home: Path) -> bool:
+    """Whether local launcher evidence exists, including a legacy home needing upgrade."""
+    return launcher_file(home).exists() or bool(_sources(home))
+
+
+def open_home(home: Path, *, timeout: float = 30) -> Database:
+    """Open only the canonical file; missing state requires explicit upgrade."""
+    return Database(launcher_file(home.resolve()), timeout=timeout)
+
+
+@contextmanager
+def _upgrade_lock(home: Path) -> Iterator[None]:
+    with (home / ".launcher-upgrade").open("a") as lock:
         while True:
+            remaining()
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
-                left = deadline - time.monotonic()
-                if left <= 0:
-                    raise LauncherError(
-                        "launcher: another process is opening this home; run this again"
-                    ) from None
-                time.sleep(min(0.05, left))
-        if target.exists():
-            return Database(target, timeout=timeout)
-        source = real if real.exists() else _predecessor(home)
-        if source is not None and not unreleased:
-            _check_source_writes(source)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix=".launcher-", dir=target.parent) as temporary:
-            staging = Path(temporary) / real.name
-            if source is not None:
-                _snapshot(source, staging, timeout)
-            store = Database(staging, timeout=timeout, backup=False)
-            fresh = store.fresh
-            runs = store._db.execute("SELECT count(*) FROM runs").fetchone()[0]
-            sessions = store._db.execute(
-                "SELECT count(*) FROM sessions WHERE ended_at IS NULL"
-            ).fetchone()[0]
-            applied = tuple(
-                r[0] for r in store._db.execute("SELECT name FROM migrations ORDER BY rowid")
-            )
-            store.close()  # checkpoint WAL before publishing the one file
-            staging.chmod(0o600)
-            staging.replace(target)
-        if unreleased:
-            names = ", ".join(m.name for m in unreleased)
-            print(
-                f"launcher: launcher.sqlite is behind this unreleased etude ({names}); using copy {target.parent}/. Runs and rentals made here are not in launcher.sqlite",
-                file=sys.stderr,
-            )
-        elif source is not None:
-            previous = next(p.migrations for p in _PREDECESSORS.values() if source.name in p.files)
-            missing = ", ".join(n for n in applied if n not in previous)
-            suffix = f"; applied {missing}" if missing else ""
-            print(
-                f"launcher: took over {source.name} as launcher.sqlite ({runs} runs, {sessions} open sessions){suffix}",
-                file=sys.stderr,
-            )
-        if not unreleased and (other := _older_files(home, source)):
-            print("launcher: " + other, file=sys.stderr)
-        result = Database(target, timeout=timeout)
-        result.fresh = fresh
-        return result
-
-
-class Copy(Record):
-    """A copy an unreleased etude works on, as seen from outside it."""
-
-    path: str
-    unreleased: tuple[str, ...]  # the migrations that sent its etude to a copy
-    rentals: int  # paid windows not yet ended
-    usd_per_hour: Decimal
-    ends: datetime  # the latest of their deadlines
-
-
-def copies(home: Path, now: datetime) -> tuple[Copy, ...]:
-    """Other copies under `home` holding paid windows that have not ended, read without changing
-    them. The copy this build works on is left out: its runs are already in view. So are
-    rentals a copy was made with, which the real file still holds."""
-    own = _working_file(home)
-    real = launcher_file(home)
-    known: set[str] = set()
-    if real.exists():
-        db = _read_only(real)
+                time.sleep(min(0.05, remaining(0.05) or 0.05))
         try:
-            known = {r[0] for r in db.execute("SELECT machine FROM rentals")}
+            yield
         finally:
-            db.close()
-    found: list[Copy] = []
-    for path in sorted((home / "copies").glob("*/launcher.sqlite")):
-        if path == own:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _floor(migration: Migration) -> str | None:
+    if migration.floor is not None:
+        return migration.floor
+    before = list(migrations())[: list(migrations()).index(migration)]
+    if not additive(migration, before):
+        return None
+    floors = [m.floor for m in before if m.floor is not None]
+    return max(floors, key=_version) if floors else None
+
+
+def _required() -> tuple[str, ...]:
+    return tuple(
+        f"{m.name}@{m.sha256[:12]}" for m in migrations() if m.floor is None and _floor(m) is None
+    )
+
+
+class Snapshot(Record):
+    """Recovery file identity, retained beside the consistent SQLite snapshot."""
+
+    path: Path
+    source: Path
+    generation: int
+    applied: tuple[str, ...]
+    ledger_sha256: str | None
+
+
+def _retain_snapshot(source: Path, target: Path) -> None:
+    _snapshot(source, target, remaining() or 0)
+    db = _read_only(target)
+    try:
+        generation = int(db.execute("PRAGMA user_version").fetchone()[0])
+        rows = (
+            db.execute("SELECT * FROM migrations ORDER BY rowid").fetchall()
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='migrations'").fetchone()
+            else []
+        )
+        identity = Snapshot(
+            path=target,
+            source=source,
+            generation=generation,
+            applied=tuple(r[0] for r in rows),
+            ledger_sha256=hashlib.sha256(
+                json.dumps(rows, separators=(",", ":")).encode()
+            ).hexdigest()
+            if rows
+            else None,
+        )
+    finally:
+        db.close()
+    manifest = target.with_name(target.name + ".json")
+    manifest.write_text(identity.model_dump_json() + "\n")
+    _sync(target)
+    _sync(manifest)
+
+
+class ExportRow(Record):
+    """A superseded SQLite fact, retained before destructive SQL commits."""
+
+    table: str
+    values: dict[str, Fact]
+
+
+def _sync(path: Path) -> None:
+    path.chmod(0o600)
+    with path.open("rb") as file:
+        os.fsync(file.fileno())
+    descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _export(db: sqlite3.Connection, migration: Migration, path: Path) -> Path:
+    before = list(migrations())[: list(migrations()).index(migration)]
+    if migration.expansion not in {m.name for m in before} or not migration.exports:
+        raise LauncherError(
+            f"destructive migration {migration.name} must name its expansion and export tables"
+        )
+    target = path.with_name(
+        f"{path.name}.export-{migration.name}-{datetime.now(UTC):%Y%m%dT%H%M%S%fZ}.jsonl"
+    )
+    with target.open("xb") as file:
+        for table in migration.exports:
+            for row in db.execute(f"SELECT * FROM {_quote(table)}"):
+                remaining()
+                fact = ExportRow(table=table, values=dict(row))
+                file.write((fact.model_dump_json() + "\n").encode())
+    _sync(target)
+    return target
+
+
+def _contracts(migration: Migration) -> bool:
+    if migration.name == "baseline":
+        return False  # The shipped baseline seeds only empty settings.
+    return any(
+        re.match(
+            r"(?:DROP\s+(?:TABLE|VIEW)|ALTER\s+TABLE\s+.+\s+(?:DROP\s+COLUMN|RENAME)|UPDATE|DELETE|REPLACE|INSERT)\b",
+            _code(statement),
+            re.IGNORECASE,
+        )
+        for statement in _statements(migration)
+    )
+
+
+def _apply(
+    db: sqlite3.Connection, applied: tuple[str, ...], path: Path, exports: list[Path]
+) -> tuple[str, ...]:
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE name='migrations'").fetchone():
+        db.execute(_LEDGER)
+    existing = {r[0] for r in db.execute("SELECT name FROM migrations")}
+    changed: list[str] = []
+    for migration in migrations():
+        remaining()
+        if migration.name in existing:
             continue
-        db = _read_only(path)
-        try:
-            names = tuple(
-                r[0] for r in db.execute("SELECT name FROM migrations WHERE floor IS NULL")
+        if migration.name not in applied:
+            if _contracts(migration):
+                exports.append(_export(db, migration, path))
+            _check_sqlite(migration)
+            try:
+                for statement in _statements(migration):
+                    remaining()
+                    db.execute(statement)
+            except sqlite3.Error as error:
+                remaining()
+                raise LauncherError(
+                    f"launcher: migration {migration.name} failed ({type(error).__name__})"
+                ) from None
+            changed.append(migration.name)
+        db.execute(
+            "INSERT INTO migrations(name,sha256,applied_at,floor,program) VALUES (?,?,?,?,?)",
+            (
+                migration.name,
+                migration.sha256,
+                datetime.now(UTC).isoformat(),
+                _floor(migration),
+                _program(path),
+            ),
+        )
+    if problems := _invalid_records(db):
+        raise LauncherError("launcher rows do not validate:\n" + "\n".join(problems))
+    if db.execute("PRAGMA foreign_key_check").fetchone():
+        raise LauncherError("launcher has broken foreign key references")
+    count = db.execute("SELECT count(*) FROM migrations").fetchone()[0]
+    db.execute(f"PRAGMA user_version={count}")
+    return tuple(changed)
+
+
+def _quote(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _normalize_history(db: sqlite3.Connection, path: Path) -> tuple[str, ...] | None:
+    """Expand this machine's old inline schemas; retain superseded columns/tables."""
+    schema = int(db.execute("PRAGMA user_version").fetchone()[0])
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='migrations'").fetchone():
+        # Historical automatic copies had a different baseline. Only the actual
+        # empty schema-6 copy is supported; it owns no allocations or paid work.
+        if schema != 6 or any(
+            db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+            for table in ("runs", "sessions", "rentals", "attempts", "providers", "storages")
+        ):
+            raise LauncherError(
+                f"history {path} has an unsupported migration ledger; retain it for reconciliation"
             )
-            live = [
-                (Decimal(rate), datetime.fromisoformat(deadline))
-                for machine, rate, deadline in db.execute(
-                    """SELECT r.machine, r.usd_per_hour, r.deadline FROM rentals r
-                    JOIN machines m ON m.name = r.machine
-                    WHERE m.deleted_at IS NULL"""
+        return None
+    if schema not in _PREDECESSORS:
+        raise LauncherError(f"history {path} has unsupported schema {schema}")
+    if schema == 13:
+        db.execute("ALTER TABLE runs ADD COLUMN smoke TEXT NOT NULL DEFAULT '{}'")
+        db.execute("ALTER TABLE sessions ADD COLUMN provider_id TEXT")
+        db.execute("UPDATE sessions SET provider_id=receipt")
+    return _PREDECESSORS[schema]
+
+
+def _merge_history(
+    target: sqlite3.Connection, source: sqlite3.Connection, path: Path, converted: Path
+) -> None:
+    """Merge each table in bulk through its identity index, preserving distinct facts."""
+    alias = f"history{len(target.execute('PRAGMA database_list').fetchall())}"
+    target.execute(f"ATTACH DATABASE ? AS {alias}", (converted.resolve().as_uri() + "?mode=ro",))
+    tables = [
+        r[0]
+        for r in source.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('migrations','locks')"
+        )
+    ]
+    for table in tables:
+        remaining()
+        columns = [
+            r[1] for r in source.execute(f"PRAGMA table_info({_quote(table)})") if r[1] != "seq"
+        ]
+        target_columns = {r[1] for r in target.execute(f"PRAGMA main.table_info({_quote(table)})")}
+        if not target_columns:
+            sql = source.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()[0]
+            target.execute(sql)
+            target_columns = set(columns)
+        for column in set(columns) - target_columns:
+            shape = next(
+                r for r in source.execute(f"PRAGMA table_info({_quote(table)})") if r[1] == column
+            )
+            if not re.fullmatch(r"[A-Z ]*", shape[2].upper()):
+                raise LauncherError(f"unsupported historical column {table}.{column}")
+            target.execute(f"ALTER TABLE {_quote(table)} ADD COLUMN {_quote(column)} {shape[2]}")
+        keys = [
+            r[1]
+            for r in source.execute(f"PRAGMA table_info({_quote(table)})")
+            if r[5] and r[1] != "seq"
+        ] or ["id"]
+        match = " AND ".join(f"t.{_quote(k)}=s.{_quote(k)}" for k in keys)
+        difference = " OR ".join(f"t.{_quote(c)} IS NOT s.{_quote(c)}" for c in columns)
+        table_sql = _quote(table)
+        query = (
+            f"SELECT t.*,s.body AS source_body FROM main.{table_sql} t JOIN {alias}.{table_sql} s ON {match} WHERE {difference}"
+            if table == "ondemands"
+            else f"SELECT 1 FROM main.{table_sql} t JOIN {alias}.{table_sql} s ON {match} WHERE {difference} LIMIT 1"
+        )
+        if table == "ondemands":
+            for row in target.execute(query).fetchall():
+                before = OnDemand.model_validate_json(row["body"])
+                other = OnDemand.model_validate_json(row["source_body"])
+                # Two disjoint histories share a named supply whose only change
+                # is its concurrency cap. Keep the safer cap; originals remain
+                # in their recovery snapshots. Never combine paid allocations.
+                if before.model_copy(update={"max_machines": other.max_machines}) != other:
+                    raise LauncherError(f"conflicting on-demand identity from {path}")
+                retained = before.model_copy(
+                    update={"max_machines": min(before.max_machines, other.max_machines)}
                 )
-                if machine not in known
-            ]
+                target.execute(
+                    "UPDATE ondemands SET body=? WHERE name=?",
+                    (retained.model_dump_json(), retained.name),
+                )
+        elif target.execute(query).fetchone():
+            raise LauncherError(
+                f"conflicting historical identity in {table} from {path}; retain sources and reconcile before publication"
+            )
+        selected = ",".join(_quote(c) for c in columns)
+        target.execute(
+            f"INSERT INTO main.{table_sql}({selected}) SELECT {selected} FROM {alias}.{table_sql} s WHERE NOT EXISTS (SELECT 1 FROM main.{table_sql} t WHERE {match})"
+        )
+
+
+def _require_closed(sources: tuple[Path, ...]) -> None:
+    """Reject observed open legacy files; callers must also prevent old clients restarting."""
+    try:
+        result = subprocess.run(
+            [
+                "lsof",
+                "-t",
+                "--",
+                *(
+                    str(p)
+                    for source in sources
+                    for p in (
+                        source,
+                        source.with_name(source.name + "-wal"),
+                        source.with_name(source.name + "-shm"),
+                    )
+                ),
+            ],
+            capture_output=True,
+            timeout=remaining(),
+        )
+    except FileNotFoundError:
+        raise LauncherError("legacy cutover needs lsof to inspect open local clients") from None
+    if result.returncode not in (0, 1):
+        raise LauncherError("could not inspect open legacy clients; no cutover performed")
+    if result.stdout.strip():
+        pids = ",".join(sorted({p for p in result.stdout.decode().split() if p.isdigit()}))
+        raise LauncherError(
+            f"legacy databases are open by local processes {pids}; stop their scheduling commands before upgrade"
+        )
+
+
+def _signature(source: Path) -> str:
+    """Detect intervening filesystem writes; this is evidence, not client exclusion."""
+    parts: list[str] = []
+    for path in (source, source.with_name(source.name + "-wal")):
+        try:
+            state = path.stat()
+        except FileNotFoundError:
+            if path == source:
+                raise
+            continue
+        if path == source or state.st_size:
+            parts.append(f"{path.name}:{state.st_ino}:{state.st_size}:{state.st_mtime_ns}")
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
+def _takeover(home: Path, state: Schema) -> Upgrade:
+    """Validate consistent snapshots together; leave originals intact until cutover."""
+    # A legacy binary cannot honor a new marker. Source closure and retirement
+    # require host-level coordination; this stage must never publish a second queue.
+    sources = (*state.sources, *((state.path,) if state.path.exists() else ()))
+    _require_closed(sources)
+    revisions = {source: _signature(source) for source in sources}
+    recovery = home / "recovery" / f"consolidation-{datetime.now(UTC):%Y%m%dT%H%M%S%fZ}"
+    recovery.mkdir(parents=True, mode=0o700)
+    snapshots: list[Path] = []
+    exports: list[Path] = []
+    with tempfile.TemporaryDirectory(prefix=".launcher-", dir=home) as temporary:
+        stage = Path(temporary) / "launcher.sqlite"
+        if state.path.exists():
+            snapshot = recovery / "canonical-before.sqlite"
+            _retain_snapshot(state.path, snapshot)
+            snapshots.append(snapshot)
+            _snapshot(snapshot, stage, remaining() or 0)
+        db = sqlite3.connect(stage, isolation_level=None, uri=True)
+        db.row_factory = sqlite3.Row
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            _apply(db, state.applied, state.path, exports)
+            for index, source in enumerate(state.sources):
+                snapshot = recovery / f"{index}-{source.name}"
+                _retain_snapshot(source, snapshot)
+                snapshots.append(snapshot)
+                converted = Path(temporary) / f"{index}.sqlite"
+                _snapshot(snapshot, converted, remaining() or 0)
+                with closing(sqlite3.connect(converted, isolation_level=None)) as old:
+                    old.row_factory = sqlite3.Row
+                    old.execute("BEGIN IMMEDIATE")
+                    applied = _normalize_history(old, source)
+                    if applied is None:
+                        old.execute("ROLLBACK")
+                        continue
+                    _apply(old, applied, state.path, exports)
+                    old.execute("COMMIT")
+                    _merge_history(db, old, source, converted)
+            if problems := _invalid_records(db):
+                raise LauncherError("consolidated rows do not validate:\n" + "\n".join(problems))
+            if db.execute("PRAGMA foreign_key_check").fetchone():
+                raise LauncherError("consolidation has broken foreign key references")
+            db.execute("COMMIT")
+            db.execute("PRAGMA main.journal_mode=WAL")
+        except LauncherError as error:
+            raise LauncherError(f"{error}; recovery snapshots: {recovery}") from None
         finally:
             db.close()
-        live = [(rate, deadline) for rate, deadline in live if deadline > now]
-        if live:
-            found.append(
-                Copy(
-                    path=str(path.parent),
-                    unreleased=names,
-                    rentals=len(live),
-                    usd_per_hour=sum((rate for rate, _ in live), Decimal(0)),
-                    ends=max(deadline for _, deadline in live),
-                )
+        # Staging is read-only validation evidence, not an operational home.
+        _snapshot(stage, recovery / "validated.sqlite", remaining() or 0)
+        _require_closed(sources)
+        if any(_signature(source) != revisions[source] for source in sources):
+            raise LauncherError(
+                f"legacy files changed during validation; no cutover performed; recovery snapshots: {recovery}"
             )
-    return tuple(found)
+        # Rename only closed main files; never move live WAL sidecars. Recovery
+        # snapshots above include all committed frames and are never schedulable.
+        for index, source in enumerate(sources):
+            source.replace(recovery / f"{index}-retired-{source.name}")
+        stage.chmod(0o600)
+        stage.replace(state.path)
+        _sync(state.path)
+    floors = [m.floor for m in migrations() if m.floor is not None]
+    return Upgrade(
+        path=state.path,
+        sources=sources,
+        backups=tuple(snapshots),
+        exports=tuple(exports),
+        applied=tuple(m.name for m in migrations()),
+        floor=max(floors, key=_version) if floors and not _required() else None,
+        required=_required(),
+    )
+
+
+def upgrade(home: Path, *, timeout: float | None = None, development: bool = False) -> Upgrade:
+    """Explicitly initialize or advance local state; never schedule or contact a worker.
+
+    Development permits unmerged SQL only in an empty fixture home. Existing
+    operational state requires packaged merged-frontier evidence.
+    """
+    with limit_time(timeout):
+        home = home.resolve()
+        state = inspect(home)
+        if state.problem:
+            raise LauncherError(state.problem)
+        if not state.pending and not state.sources:
+            return Upgrade(path=state.path, sources=(), backups=(), applied=(), floor=None)
+        if development and (state.path.exists() or state.sources):
+            raise LauncherError("development upgrades require an empty fixture home")
+        if not development:
+            from_catalog = _merged()
+            if unproven := [
+                m.name
+                for m in migrations()
+                if (m.name in state.pending or state.sources)
+                and from_catalog.get(m.name) != m.sha256
+            ]:
+                raise LauncherError(
+                    "unmerged or unproven migrations: "
+                    + ", ".join(unproven)
+                    + "; use an empty development fixture or a merged build"
+                )
+        home.mkdir(parents=True, exist_ok=True)
+        with _upgrade_lock(home):
+            state = inspect(home)
+            if state.problem:
+                raise LauncherError(state.problem)
+            if not state.pending and not state.sources:
+                return Upgrade(path=state.path, sources=(), backups=(), applied=(), floor=None)
+            if development and (state.path.exists() or state.sources):
+                raise LauncherError("development upgrades require an empty fixture home")
+            if state.sources:
+                return _takeover(home, state)
+            backups: tuple[Path, ...] = ()
+            exports: list[Path] = []
+            path = state.path
+            with tempfile.TemporaryDirectory(prefix=".launcher-", dir=home) as temporary:
+                # Existing state migrates in place to preserve open compatible clients.
+                target = path if path.exists() else Path(temporary) / path.name
+                db = sqlite3.connect(target, isolation_level=None, timeout=0)
+                db.row_factory = sqlite3.Row
+                try:
+                    db.execute("PRAGMA journal_mode=WAL")
+                    while True:
+                        remaining()
+                        try:
+                            db.execute("BEGIN IMMEDIATE")
+                            break
+                        except sqlite3.OperationalError as error:
+                            if "locked" not in str(error):
+                                raise
+                            time.sleep(min(0.05, remaining(0.05) or 0.05))
+                    if target == path:
+                        backup = path.with_name(
+                            f"{path.name}.backup-{datetime.now(UTC):%Y%m%dT%H%M%S%fZ}"
+                        )
+                        _retain_snapshot(path, backup)
+                        backups = (backup,)
+                    applied = _apply(db, state.applied, path, exports)
+                    if not state.applied:
+                        db.execute("INSERT INTO pools(name) VALUES ('local')")
+                        db.execute(
+                            "INSERT INTO machines(name,kind,pool) VALUES ('local','local','local')"
+                        )
+                    remaining()
+                    db.execute("COMMIT")
+                except (LauncherError, TimeoutError) as error:
+                    raise type(error)(
+                        f"{error}; recovery snapshots: {', '.join(map(str, backups)) or 'none (new home)'}"
+                    ) from None
+                finally:
+                    db.close()
+                if target != path:
+                    target.chmod(0o600)
+                    target.replace(path)
+                    _sync(path)
+            floors = [m.floor for m in migrations() if m.floor is not None]
+            return Upgrade(
+                path=path,
+                sources=(),
+                backups=backups,
+                applied=applied,
+                exports=tuple(exports),
+                floor=max(floors, key=_version) if floors and not _required() else None,
+                required=_required(),
+            )

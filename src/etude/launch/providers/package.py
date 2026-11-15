@@ -7,12 +7,15 @@ import zipfile
 from itertools import chain
 from pathlib import Path
 
+from etude.launch.provenance import frontier
+
 FILES = {
     "__init__.py",
     "errors.py",
     "launch/__init__.py",
     "launch/errors.py",
     "launch/measurement.py",
+    "launch/provenance.py",
     "launch/providers/__init__.py",
     "launch/providers/bootstrap.py",
     "launch/providers/http.py",
@@ -46,6 +49,8 @@ def program_archive(*, guardian: bool = False) -> bytes:
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(paths):
             _write(archive, "etude/" + path.relative_to(root).as_posix(), path.read_bytes())
+        if not guardian:
+            _write(archive, "etude/launch/migrations/merged.json", frontier(root))
         package = root / "_package"
         if not package.exists():
             package = root.parents[1]

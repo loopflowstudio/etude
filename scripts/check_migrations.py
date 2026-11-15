@@ -1,17 +1,11 @@
-"""Fail when a released migration was edited, renamed or deleted, or its record rewritten.
-
-A real launcher.sqlite only ever holds released migrations, and refuses one whose file
-later changed, so a released migration is frozen; add a new one instead. Unreleased
-migrations only reach copies, so they may change until their release. Usage:
-`uv run python scripts/check_migrations.py`; it needs `origin/main` and the release
-tags fetched.
-"""
+"""Freeze merged SQL and released compatibility records against origin/main."""
 
 from __future__ import annotations
 
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 from etude.errors import LauncherError
 from etude.launch.database import migrations, released
@@ -32,6 +26,15 @@ def main() -> int:
         recorded = json.loads(_git("show", f"{ref}:{RELEASED}")) if listed else []
         if current[: len(recorded)] != recorded:
             problems.append(f"{RELEASED} no longer begins with what {ref} recorded")
+    folder = "src/etude/launch/migrations/"
+    for file in (
+        _git("ls-tree", "-r", "--name-only", "origin/main", "--", folder).decode().splitlines()
+    ):
+        if file.endswith(".sql") and (
+            not Path(file).exists()
+            or Path(file).read_bytes() != _git("show", f"origin/main:{file}")
+        ):
+            problems.append(f"merged migration {file} changed; add a forward migration")
     try:
         migrations()
     except LauncherError as error:

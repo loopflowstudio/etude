@@ -8,10 +8,10 @@ import pytest
 from pydantic import ValidationError
 
 from etude.errors import LauncherError
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import launcher_file
 from etude.launch.images import PreparedRuntime, prepare_pytorch, resolve_image
 from etude.launch.records import Image, MachineTemplate
-from tests.launch.fake import bench
+from tests.launch.fake import bench, open_database
 
 DIGEST = "sha256:" + "a" * 64
 
@@ -74,7 +74,7 @@ def test_machine_image_survives_ondemand_changes_and_database_restart(tmp_path: 
     )
     b.scheduler.set_ondemand_image("l4", selected)
     second = b.scheduler.rent("l4", hours=1)
-    restarted = Database(launcher_file(tmp_path))
+    restarted = open_database(launcher_file(tmp_path))
     assert restarted.machine(first).image == original
     assert restarted.machine(second).image == selected
     assert restarted.ondemand("l4").template.image == selected

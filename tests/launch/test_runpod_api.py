@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from etude.errors import LauncherError
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import launcher_file
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.machines import MachineRequest
 from etude.launch.providers.program import boot_source
@@ -23,6 +23,7 @@ from etude.launch.records import Provider as Account
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
 from tests.launch.counting import Counting, Counts
+from tests.launch.fake import open_database
 from tests.launch.test_runpod_machines import Storage
 
 POD = {
@@ -249,7 +250,7 @@ def test_stock_create_counts_package_reuse_without_waiting_for_ssh(tmp_path: Pat
             "POST pods": (200, POD),
         }
     )
-    counting = Counting(Database(launcher_file(tmp_path)))
+    counting = Counting(open_database(launcher_file(tmp_path)))
     bucket = Bucket(
         "journal",
         "us-west-2",
@@ -330,7 +331,7 @@ def test_one_cpu_rental_quotes_creates_and_deletes_with_pinned_provider_calls(
             "DELETE pods/abc123": (200, None),
         }
     )
-    counting = Counting(Database(launcher_file(tmp_path)))
+    counting = Counting(open_database(launcher_file(tmp_path)))
     bucket = Bucket(
         "journal",
         "us-west-2",

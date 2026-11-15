@@ -45,6 +45,7 @@ server_app = _app(
 )
 provider_app = _app(help="Record an account that supplies machines.")
 storage_app = _app(help="Add a place in a bucket for records.")
+database_app = _app(help="Inspect local schema or explicitly upgrade the launcher database.")
 image_app = _app(help="Resolve container images before renting.")
 for name, sub in (
     ("pool", pool_app),
@@ -54,6 +55,7 @@ for name, sub in (
     ("provider", provider_app),
     ("storage", storage_app),
     ("image", image_app),
+    ("database", database_app),
 ):
     app.add_typer(sub, name=name)
 
@@ -91,12 +93,8 @@ def status(
     job: Annotated[str | None, typer.Option(help="select a job")] = None,
 ) -> None:
     """Show where runs stand, as of the server loop's last pass."""
-    from datetime import UTC, datetime
-
     from etude.launch import server
-    from etude.launch.database import copies
     from etude.launch.listing import resolve_runs, show_runs
-    from etude.launch.source import home
 
     scheduler = default()
     selected = resolve_runs(scheduler, runs or [], experiment=experiment, job=job)
@@ -110,12 +108,6 @@ def status(
         return
     show_runs(scheduler, selected)
     server.show_freshness(scheduler)
-    for copy in copies(home(), datetime.now(UTC)):
-        print(
-            f"copy {Path(copy.path).name} ({', '.join(copy.unreleased)}): "
-            f"{copy.rentals} rental{'s' if copy.rentals != 1 else ''}, "
-            f"${copy.usd_per_hour}/h, ends {copy.ends:%Y-%m-%d %H:%M} UTC"
-        )
 
 
 @app.command("runs")
@@ -712,3 +704,53 @@ def usage(
         received = sum(event.received_bytes for event in these)
         reused = sum(event.reused_bytes for event in these)
         print(f"{purpose}: received {received} bytes, reused {reused} bytes")
+
+
+@database_app.command("status")
+@kind(Kind.read)
+def database_status() -> None:
+    """Read this computer's schema; never initialize or migrate it."""
+    from etude.launch.database import inspect
+    from etude.launch.source import home
+
+    state = inspect(home())
+    print(f"database {state.path}")
+    print("applied: " + (", ".join(state.applied) or "none"))
+    print("pending: " + (", ".join(state.pending) or "none"))
+    for source in state.sources:
+        print(f"legacy history: {source}")
+    if state.problem:
+        print(state.problem)
+    elif state.pending or state.sources:
+        print("run etude database upgrade")
+    else:
+        print("compatible")
+
+
+@database_app.command("upgrade")
+@kind(Kind.wait)
+def database_upgrade(
+    timeout: Annotated[
+        float | None, typer.Option(help="total upgrade allowance in seconds")
+    ] = None,
+    development: Annotated[
+        bool, typer.Option(help="unmerged SQL in an empty fixture home only")
+    ] = False,
+) -> None:
+    """Explicitly initialize or upgrade this computer's database without scheduling."""
+    from etude.launch.database import upgrade
+    from etude.launch.source import home
+
+    result = upgrade(home(), timeout=timeout, development=development)
+    print(f"database {result.path}")
+    for source in result.sources:
+        print(f"source: {source}")
+    print("applied: " + (", ".join(result.applied) or "none"))
+    for backup in result.backups:
+        print(f"recovery snapshot: {backup}")
+    for exported in result.exports:
+        print(f"retired facts: {exported}")
+    if result.required:
+        print("requires build containing: " + ", ".join(result.required))
+    if result.floor:
+        print(f"reader floor: etude >= {result.floor}")

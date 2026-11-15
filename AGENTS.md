@@ -245,9 +245,13 @@ its name or id as a plain `str`.
 
 The launcher database changes only through a new SQL file in
 `src/etude/launch/migrations/`, named for what it does and never numbered;
-`docs/launcher.md` ("Writing a migration") shows one. It may change until a
-release records it in `migrations/released.json`, and reaches only copies
-before then; afterwards it never changes (`scripts/check_migrations.py`).
+`docs/launcher.md` ("Writing a migration") shows one. It may change until it merges to main; afterwards it never changes
+(`scripts/check_migrations.py`). Explicit `database upgrade` advances the one
+operational `launcher.sqlite`; ordinary opens never migrate or select copies.
+Unmerged SQL runs only in explicit empty development fixtures. Expand before
+contracting; destructive changes export facts before commit and name their
+preceding expansion. Release metadata records reader floors, and packaged
+merged-frontier evidence authorizes operational upgrades before release.
 Inserts name their columns. Old row shapes are rewritten by a migration, never
 tolerated in Python, and no second schema definition sits beside the SQL
 files. An older etude may keep writing after an additive release, so new

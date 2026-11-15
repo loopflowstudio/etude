@@ -1,72 +1,46 @@
-"""Released launcher facts survive upgrades; incompatible writers stop before effects."""
+"""Explicit schema changes preserve facts; ordinary reads cannot advance state."""
 
 from __future__ import annotations
 
 import hashlib
 import io
-import os
+import json
 import sqlite3
 import subprocess
-import time
 import zipfile
-from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
 import pytest
 
+from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch import database
 from etude.launch.database import (
     Migration,
-    Released,
     additive,
-    copies,
+    inspect,
     launcher_file,
     migrations,
     open_home,
+    upgrade,
 )
 from etude.launch.errors import SchemaAdvanced
 from etude.launch.providers.package import program_archive
 from etude.launch.records import Pool
 from etude.launch.scheduler import Scheduler
 from etude.launch.schemas import Finished
+from etude.launch.server import _hand_over
+from tests.launch.fake import bench
 
 FIXTURES = Path(__file__).with_name("fixtures")
-
-
-@pytest.fixture(autouse=True)
-def _released_schema(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Exercise the upgrade lifecycle as a release; copy behavior is tested separately."""
-    recorded = database.released()
-    pending = [m for m in migrations() if m.floor is None]
-    monkeypatch.setattr(
-        database,
-        "released",
-        lambda: (
-            *recorded,
-            *(Released(name=m.name, sha256=m.sha256, floor="0.4.0") for m in pending),
-        ),
-    )
-    migrations.cache_clear()
-    yield
-    migrations.cache_clear()
-
-
-def _released(home: Path, version: str, name: str | None = None) -> Path:
-    home.mkdir(parents=True, exist_ok=True)
-    path = home / (name or f"launcher-{'17' if version == '0.3.2' else '19'}.db")
-    with sqlite3.connect(path) as db:
-        db.executescript((FIXTURES / f"launcher-{version}.sql").read_text())
-    os.utime(path, (0, 0))  # Released fixture has been quiet long enough for takeover.
-    return path
 
 
 def _migration(sql: str, *, name: str = "extra", floor: str | None = "0.4.0") -> Migration:
     return Migration(
         name=name,
-        after=("run_resume_and_writers",),
+        after=("run_names",),
         breaks=None,
         sql=sql,
         sha256=hashlib.sha256(sql.encode()).hexdigest(),
@@ -74,206 +48,201 @@ def _migration(sql: str, *, name: str = "extra", floor: str | None = "0.4.0") ->
     )
 
 
-def _dump(path: Path) -> tuple[str, ...]:
-    with sqlite3.connect(path) as db:
-        return tuple(db.iterdump())
+def _ready(home: Path) -> None:
+    upgrade(home, development=True)
 
 
-@pytest.mark.parametrize(
-    "version,name", [("0.3.2", None), ("0.4.0", None), ("0.3.2", "launcher.db")]
-)
-def test_takes_over_released_facts(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], version: str, name: str | None
-) -> None:
-    source = _released(tmp_path, version, name)
-    before = source.read_bytes()
+def test_inspect_and_open_missing_leave_home_absent(tmp_path: Path) -> None:
+    home = tmp_path / "absent"
+    state = inspect(home)
+    assert state.applied == () and state.pending
+    with pytest.raises(LauncherError, match="database upgrade"):
+        open_home(home)
+    assert not home.exists()
+
+
+def test_explicit_initialization_and_idempotent_upgrade(tmp_path: Path) -> None:
+    result = upgrade(tmp_path, development=True)
+    assert result.applied == tuple(m.name for m in migrations())
     store = open_home(tmp_path)
-    assert len(store.runs()) == 2
-    assert len(store.sessions()) == 2
-    assert len(store.rentals()) == 1
-    assert (
-        store._db.execute("SELECT name FROM sqlite_master WHERE name='cohorts'").fetchone() is None
-    )
-    assert "cohort" not in {r[1] for r in store._db.execute("PRAGMA table_info(runs)")}
-    scheduler = Scheduler(store, {})
-    phases = {scheduler.read(run.id).phase for run in store.runs()}
-    assert phases == {"running", "queued"}
-    assert all(
-        run.submission is not None and run.submission.resume_after == 0 for run in store.runs()
-    )
-    assert all(
-        attempt.writers == () for run in store.runs() for attempt in store.attempts(run=run.id)
-    )
-    # Cohort ownership is removed; every other original column survives unchanged.
-    with sqlite3.connect(source) as original:
-        tables = [
-            r[0] for r in original.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        ]
-        for table in tables:
-            if table == "cohorts":
-                continue
-            columns = ",".join(
-                '"' + r[1] + '"'
-                for r in original.execute(f'PRAGMA table_info("{table}")')
-                if table != "runs" or r[1] != "cohort"
-            )
-            query = f'SELECT {columns} FROM "{table}" ORDER BY rowid'
-            assert [tuple(row) for row in store._db.execute(query)] == original.execute(
-                query
-            ).fetchall()
+    assert store.pool("local").name == "local"
+    assert store.machine("local").kind == "local"
     store.close()
-    assert source.read_bytes() == before
-    assert "took over " + source.name in capsys.readouterr().err
-    assert not list(tmp_path.glob("*.backup-*"))
-    open_home(tmp_path).close()
-    assert capsys.readouterr().err == ""
+    assert not inspect(tmp_path).pending
+    assert upgrade(tmp_path).applied == ()
+    assert not (tmp_path / "copies").exists()
 
 
-def test_fresh_schema_equals_upgrade(tmp_path: Path) -> None:
-    _released(tmp_path / "old", "0.3.2")
-    old = open_home(tmp_path / "old")
-    fresh = open_home(tmp_path / "fresh")
-    assert database._schema(old._db) == database._schema(fresh._db)
-    assert old.fresh is False
-    assert fresh.fresh is True
-    old.close()
-    fresh.close()
-
-
-def test_takes_over_newest_and_names_others_once(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_cli_uses_python_outcome_locally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    _released(tmp_path, "0.3.2")
-    _released(tmp_path, "0.4.0")
-    with sqlite3.connect(tmp_path / "launcher-19.db") as db:
-        db.execute("INSERT INTO settings(name,value) VALUES ('marker','newest')")
-    _released(tmp_path, "0.3.2", "launcher.db")
-    os.utime(tmp_path / "launcher-19.db", (0, 0))
-    store = open_home(tmp_path)
-    assert (
-        store._db.execute("SELECT value FROM settings WHERE name='marker'").fetchone()[0]
-        == "newest"
-    )
-    store.close()
-    said = capsys.readouterr().err
-    assert "took over launcher-19.db" in said
-    assert "launcher-17.db (schema 17) is not read, use etude 0.3.2 for it" in said
-    assert "launcher.db (schema 17) is not read, use etude 0.3.1 for it" in said
-    open_home(tmp_path).close()
-    assert capsys.readouterr().err == ""
+    home = tmp_path / "cli"
+    monkeypatch.setenv("ETUDE_HOME", str(home))
+    monkeypatch.setenv("ETUDE_SERVER", "unreachable-host")
+    assert main(["database", "status"]) == 0
+    assert "run etude database upgrade" in capsys.readouterr().out
+    assert not home.exists()
+    assert main(["database", "upgrade", "--development"]) == 0
+    output = capsys.readouterr().out
+    assert str(inspect(home).path) in output
+    assert ", ".join(inspect(home).applied) in output
 
 
-@pytest.mark.parametrize("fresh", ["source", "wal"])
-@pytest.mark.parametrize("heartbeat", [None, "stale", "fresh", "malformed"])
-@pytest.mark.parametrize(
-    "version,name", [("0.3.2", None), ("0.4.0", None), ("0.3.2", "launcher.db")]
-)
-def test_takeover_waits_for_source_and_wal_to_be_quiet(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    fresh: str,
-    heartbeat: str | None,
-    version: str,
-    name: str | None,
+def test_open_pending_migration_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    source = _released(tmp_path, version, name)
-    now = datetime(2026, 11, 14, tzinfo=UTC).timestamp()
-    monkeypatch.setattr(time, "time", lambda: now)
-    if heartbeat is not None:
-        value = {
-            "stale": datetime.fromtimestamp(now - 60, UTC).isoformat(),
-            "fresh": datetime.fromtimestamp(now, UTC).isoformat(),
-            "malformed": "unreadable heartbeat",
-        }[heartbeat]
-        (tmp_path / "controller-heartbeat").write_text(value)
-    # Keep a real WAL open, as an older wait command does between scheduling passes.
-    writer = sqlite3.connect(source)
-    try:
-        writer.execute("PRAGMA journal_mode=WAL")
-        writer.execute("INSERT INTO settings(name,value) VALUES ('marker','older wait')")
-        writer.commit()
-        wal = source.with_name(source.name + "-wal")
-        before = source.read_bytes(), wal.read_bytes()
-        for path in (source, wal):
-            os.utime(path, (now - 60, now - 60))
-        changed = source if fresh == "source" else wal
-        os.utime(changed, (now - 2, now - 2))
-        with pytest.raises(
-            LauncherError,
-            match=rf"an older etude wrote {source.name} 2s ago; stop its commands "
-            r"\(etude wait, etude controller run\), then run this again",
-        ):
-            open_home(tmp_path)
-        assert not launcher_file(tmp_path).exists()
-        assert (source.read_bytes(), wal.read_bytes()) == before
-        for path in (source, wal):
-            os.utime(path, (now - 30, now - 30))
-        store = open_home(tmp_path)
-        assert (
-            store._db.execute("SELECT value FROM settings WHERE name='marker'").fetchone()[0]
-            == "older wait"
-        )
-        store.close()
-        assert (source.read_bytes(), wal.read_bytes()) == before
-    finally:
-        writer.close()
-
-
-def test_takes_over_quiet_wal_file_left_by_a_stopped_etude(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # Released etudes write in WAL mode; a stopped one leaves no -wal behind.
-    source = _released(tmp_path, "0.3.2")
-    with sqlite3.connect(source) as db:
-        db.execute("PRAGMA journal_mode=WAL")
-    db.close()
-    assert not source.with_name(source.name + "-wal").exists()
-    os.utime(source, (0, 0))
-    before = source.read_bytes()
-
-    open_home(tmp_path).close()
-
-    assert "took over launcher-17.db" in capsys.readouterr().err
-    assert source.read_bytes() == before
-
-
-def test_unsupported_legacy_stays_with_its_release(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    path = tmp_path / "launcher.db"
-    with sqlite3.connect(path) as db:
-        db.execute("CREATE TABLE evidence(value TEXT)")
-        db.execute("PRAGMA user_version=13")
+    _ready(tmp_path)
+    path = launcher_file(tmp_path)
     before = path.read_bytes()
-    store = open_home(tmp_path)
-    assert store.runs() == ()
-    store.close()
+    known = migrations()
+    monkeypatch.setattr(
+        database, "migrations", lambda: (*known, _migration("CREATE TABLE extra(value TEXT);"))
+    )
+    with pytest.raises(LauncherError, match="database upgrade"):
+        open_home(tmp_path)
     assert path.read_bytes() == before
-    assert "use etude 0.2.15 for it" in capsys.readouterr().err
+    assert not list(tmp_path.glob("*.backup-*"))
+
+
+def test_unmerged_upgrade_refuses_operational_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready(tmp_path)
+    known = migrations()
+    monkeypatch.setattr(
+        database,
+        "migrations",
+        lambda: (*known, _migration("CREATE TABLE extra(value TEXT);", floor=None)),
+    )
+    before = launcher_file(tmp_path).read_bytes()
+    with pytest.raises(LauncherError, match="unmerged or unproven"):
+        upgrade(tmp_path)
+    with pytest.raises(LauncherError, match="empty fixture"):
+        upgrade(tmp_path, development=True)
+    assert launcher_file(tmp_path).read_bytes() == before
+    assert not (tmp_path / "copies").exists()
+
+
+def test_compatible_branch_uses_same_canonical_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready(tmp_path)
+    known = migrations()
+    monkeypatch.setattr(database, "migrations", lambda: known[:-1])
+    with_open = open_home(tmp_path)
+    with_open.add_pool(Pool(name="shared"))
+    with_open.close()
+    monkeypatch.setattr(database, "migrations", lambda: known)
+    store = open_home(tmp_path)
+    assert store.pool("shared").name == "shared"
+    assert store._path == launcher_file(tmp_path)
+    store.close()
+
+
+def test_additive_upgrade_preserves_open_writer_and_backup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready(tmp_path)
+    older = open_home(tmp_path)
+    known = migrations()
+    change = _migration("ALTER TABLE pools ADD COLUMN note TEXT;")
+    monkeypatch.setattr(database, "migrations", lambda: (*known, change))
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in (*known, change)})
+    result = upgrade(tmp_path)
+    assert result.applied == ("extra",) and len(result.backups) == 1
+    monkeypatch.setattr(database, "migrations", lambda: known)
+    older.add_pool(Pool(name="after"))
+    assert older.pool("after").name == "after"
+    older.close()
+    with sqlite3.connect(result.backups[0]) as backup:
+        assert backup.execute("SELECT count(*) FROM migrations").fetchone()[0] == len(known)
+
+
+def test_breaking_upgrade_fences_stale_writer_and_refuses_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready(tmp_path)
+    older = open_home(tmp_path)
+    known = migrations()
+    change = _migration("CREATE TABLE future(value TEXT);", floor="0.5.0")
+    monkeypatch.setattr(database, "migrations", lambda: (*known, change))
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in (*known, change)})
+    monkeypatch.setattr(database, "version", lambda package: "0.5.0")
+    upgrade(tmp_path)
+    monkeypatch.setattr(database, "migrations", lambda: known)
+    monkeypatch.setattr(database, "version", lambda package: "0.4.0")
+    with pytest.raises(LauncherError, match="needs etude >= 0.5.0"):
+        open_home(tmp_path)
+    with pytest.raises(SchemaAdvanced):
+        older.add_pool(Pool(name="forbidden"))
+    assert "forbidden" not in {p.name for p in older.pools()}
+    older.close()
 
 
 @pytest.mark.parametrize(
     "sql",
     [
-        "CREATE TABLE extra(value TEXT);\nSELECT missing FROM nowhere;",
-        "UPDATE runs SET spec='invalid-private-content';",
+        "CREATE TABLE extra(value TEXT); SELECT missing FROM nowhere;",
+        "UPDATE runs SET spec='invalid-private-content'; SELECT missing FROM nowhere;",
     ],
 )
-def test_failing_migration_rolls_back(
+def test_failed_upgrade_preserves_schema_and_recovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, sql: str
 ) -> None:
-    _released(tmp_path, "0.3.2")
-    store = open_home(tmp_path)
-    store.close()
-    path = launcher_file(tmp_path)
-    before = _dump(path)
+    _ready(tmp_path)
     known = migrations()
-    monkeypatch.setattr(database, "migrations", lambda: (*known, _migration(sql)))
-    with pytest.raises((LauncherError, sqlite3.OperationalError)) as error:
-        open_home(tmp_path)
+    change = _migration(sql).model_copy(update={"expansion": "run_names", "exports": ("runs",)})
+    monkeypatch.setattr(database, "migrations", lambda: (*known, change))
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in (*known, change)})
+    with pytest.raises(LauncherError, match="migration extra failed") as error:
+        upgrade(tmp_path)
     assert "invalid-private-content" not in str(error.value)
-    assert _dump(path) == before
-    assert len(list(tmp_path.glob("*.backup-*"))) == 1
+    assert inspect(tmp_path).applied == tuple(m.name for m in known)
+    assert len(list(tmp_path.glob("*.backup-*Z"))) == 1
+
+
+def test_legacy_evidence_never_becomes_empty_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in migrations()})
+    legacy = tmp_path / "launcher.db"
+    with sqlite3.connect(legacy) as db:
+        db.execute("CREATE TABLE evidence(value TEXT)")
+        db.execute("PRAGMA user_version=13")
+    db.close()
+    before = legacy.read_bytes()
+    assert inspect(tmp_path).sources == (legacy,)
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        upgrade(tmp_path)
+    assert legacy.read_bytes() == before
+    assert not launcher_file(tmp_path).exists()
+
+
+def test_development_refuses_copy_history(tmp_path: Path) -> None:
+    copy = tmp_path / "copies" / "previous" / "launcher.db"
+    copy.parent.mkdir(parents=True)
+    with sqlite3.connect(copy) as db:
+        db.execute("CREATE TABLE evidence(value TEXT)")
+    with pytest.raises(LauncherError, match="empty fixture"):
+        upgrade(tmp_path, development=True)
+    assert inspect(tmp_path).sources == (copy,)
+
+
+def test_program_archive_contains_sql_and_frontier() -> None:
+    with zipfile.ZipFile(io.BytesIO(program_archive())) as archive:
+        for migration in migrations():
+            assert (
+                archive.read(f"etude/launch/migrations/{migration.name}.sql").decode()
+                == migration.sql
+            )
+        assert isinstance(json.loads(archive.read("etude/launch/migrations/merged.json")), dict)
+
+
+def test_previous_release_worker_journal_decodes() -> None:
+    finished = Finished.model_validate_json((FIXTURES / "finished-0.4.0.json").read_text())
+    progress = finished.progress("attempt", datetime(2026, 11, 14, tzinfo=UTC))
+    assert progress.outcome == "succeeded" and progress.clocks == {"steps": 1400.0}
+    assert progress.writers == ()
 
 
 @pytest.mark.parametrize(
@@ -299,229 +268,6 @@ def test_declared_json_break_raises_floor() -> None:
     assert not additive(change, migrations())
 
 
-def test_older_reader_and_writer_survive_additive_upgrade(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    older = open_home(tmp_path)
-    known = migrations()
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            database,
-            "migrations",
-            lambda: (*known, _migration("ALTER TABLE pools ADD COLUMN note TEXT;")),
-        )
-        open_home(tmp_path).close()
-    older.add_pool(Pool(name="after"))
-    assert older.pool("after").name == "after"
-    older.close()
-    reader = open_home(tmp_path)
-    assert reader.pool("after").name == "after"
-    reader.close()
-
-
-def test_breaking_upgrade_refuses_reader_and_fences_writer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    older = open_home(tmp_path)
-    known = migrations()
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            database,
-            "migrations",
-            lambda: (*known, _migration("CREATE TABLE future(value TEXT);", floor="0.5.0")),
-        )
-        patch.setattr(database, "version", lambda package: "0.5.0")
-        open_home(tmp_path).close()
-    with pytest.raises(LauncherError, match=r"needs etude >= 0.5.0 \(raised by: extra\)"):
-        open_home(tmp_path)
-    with pytest.raises(SchemaAdvanced, match="etude was upgraded while this ran"):
-        older.add_pool(Pool(name="forbidden"))
-    assert older.pools() == ()
-    older.close()
-
-
-@pytest.mark.parametrize("legacy", [False, True])
-def test_unreleased_build_uses_unchanging_copy(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, legacy: bool
-) -> None:
-    source = _released(tmp_path, "0.3.2") if legacy else launcher_file(tmp_path)
-    if not legacy:
-        open_home(tmp_path).close()
-    before = source.read_bytes()
-    known = migrations()
-    change = _migration("CREATE TABLE extra(value TEXT);", floor=None)
-    monkeypatch.setattr(database, "migrations", lambda: (*known, change))
-    store = open_home(tmp_path)
-    assert store._path.parent.parent == tmp_path / "copies"
-    store.add_pool(Pool(name="branch"))
-    path = store._path
-    store.close()
-    open_home(tmp_path).close()
-    assert source.read_bytes() == before
-    with sqlite3.connect(path) as reader:
-        assert reader.execute("SELECT name FROM pools WHERE name='branch'").fetchone() == (
-            "branch",
-        )
-    assert launcher_file(tmp_path).exists() is not legacy
-
-
-def test_loop_hands_over_before_tick(tmp_path: Path) -> None:
-    successor = tmp_path / "programs" / "successor"
-    executable = successor / ".venv" / "bin" / "python"
-    executable.parent.mkdir(parents=True)
-    executable.write_text("#!/bin/sh\nprintf 'successor active\\n'\n")
-    executable.chmod(0o700)
-    script = """
-import sys
-from pathlib import Path
-from etude.launch import database
-from etude.launch.database import open_home
-from etude.launch.server import loop
-known = tuple(m.model_copy(update={"floor": "0.4.0"}) for m in database.migrations())
-database.migrations = lambda: known
-from etude.launch.scheduler import Scheduler
-store = open_home(Path(sys.argv[1]))
-store._db.execute("INSERT INTO migrations(name,sha256,applied_at,floor,program) VALUES ('future','digest','now','999.0.0',?)", (sys.argv[2],))
-store._db.execute(f"PRAGMA user_version={len(known) + 1}")
-loop(Scheduler(store, {}))
-"""
-    result = subprocess.run(
-        ["uv", "run", "--no-sync", "python", "-c", script, str(tmp_path), str(successor)],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    assert result.returncode == 0
-    assert "successor active" in result.stdout
-    assert "the loop continues in" in result.stderr
-
-
-def test_program_archive_ships_migrations() -> None:
-    with zipfile.ZipFile(io.BytesIO(program_archive())) as archive:
-        for migration in migrations():
-            assert (
-                archive.read(f"etude/launch/migrations/{migration.name}.sql").decode()
-                == migration.sql
-            )
-        assert "etude/launch/migrations/released.json" in archive.namelist()
-
-
-def test_copy_paid_windows_remain_visible(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _released(tmp_path, "0.4.0")
-    open_home(tmp_path).close()
-    known = migrations()
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            database,
-            "migrations",
-            lambda: (*known, _migration("CREATE TABLE extra(value TEXT);", floor=None)),
-        )
-        branch = open_home(tmp_path)
-        path = branch._path
-        assert copies(tmp_path, datetime(2026, 11, 14, tzinfo=UTC)) == ()
-    # The copy was made with the real file's open rental, which the real file still shows.
-    assert copies(tmp_path, datetime(2026, 11, 14, tzinfo=UTC)) == ()
-    branch._db.execute(
-        "INSERT INTO machines(name,kind,ondemand,cost_usd,provider) "
-        "VALUES ('branch-machine','rented','gpu','0','account')"
-    )
-    branch._db.execute(
-        "INSERT INTO rentals(machine,usd_per_hour,cap_usd,deadline,kept,billed_usd) "
-        "VALUES ('branch-machine','0.44','1','2026-11-14T02:00:00+00:00',0,'0')"
-    )
-    branch._db.commit()
-    branch.close()
-    found = copies(tmp_path, datetime(2026, 11, 14, tzinfo=UTC))
-    assert len(found) == 1
-    assert found[0].path == str(path.parent)
-    assert found[0].rentals == 1 and str(found[0].usd_per_hour) == "0.44"
-    assert found[0].unreleased == ("extra",)
-    assert copies(tmp_path, datetime(2026, 11, 15, tzinfo=UTC)) == ()
-
-
-def test_up_to_date_open_takes_no_write_lock_or_backup(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store = open_home(tmp_path)
-    real_connect = sqlite3.connect
-    statements: list[str] = []
-
-    def connect(
-        path: Path,
-        *,
-        isolation_level: Literal["DEFERRED", "EXCLUSIVE", "IMMEDIATE"] | None = None,
-        timeout: float = 5,
-    ) -> sqlite3.Connection:
-        connection = real_connect(path, isolation_level=isolation_level, timeout=timeout)
-        connection.set_trace_callback(statements.append)
-        return connection
-
-    monkeypatch.setattr(sqlite3, "connect", connect)
-    # An existing writer does not block the read-only opening path.
-    store._db.execute("BEGIN IMMEDIATE")
-    other = open_home(tmp_path, timeout=0)
-    assert len(statements) == 3
-    assert not any(sql.startswith(("BEGIN", "INSERT", "UPDATE")) for sql in statements)
-    assert not list(tmp_path.glob("*.backup-*"))
-    other.close()
-    store._db.execute("ROLLBACK")
-    store.close()
-
-
-def test_sqlite_requirement_names_migration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    open_home(tmp_path).close()
-    before = _dump(launcher_file(tmp_path))
-    known = migrations()
-    monkeypatch.setattr(
-        database,
-        "migrations",
-        lambda: (*known, _migration("ALTER TABLE runs DROP COLUMN resume_after;")),
-    )
-    monkeypatch.setattr(sqlite3, "sqlite_version_info", (3, 31, 1))
-    monkeypatch.setattr(sqlite3, "sqlite_version", "3.31.1")
-    with pytest.raises(
-        LauncherError, match="migration extra needs SQLite >= 3.35; this Python has 3.31.1"
-    ):
-        open_home(tmp_path)
-    assert _dump(launcher_file(tmp_path)) == before
-
-
-def test_backups_keep_two_and_restore_previous_schema(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    open_home(tmp_path).close()
-    applied = list(migrations())
-    for index in range(3):
-        applied.append(_migration(f"CREATE TABLE extra{index}(value TEXT);", name=f"extra{index}"))
-        monkeypatch.setattr(database, "migrations", lambda: tuple(applied))
-        open_home(tmp_path).close()
-    backups = sorted(tmp_path.glob("launcher.sqlite.backup-*"))
-    assert len(backups) == 2
-    with sqlite3.connect(backups[-1]) as previous:
-        assert previous.execute("SELECT count(*) FROM migrations").fetchone() == (len(applied) - 1,)
-        assert (
-            previous.execute("SELECT name FROM sqlite_master WHERE name='extra2'").fetchone()
-            is None
-        )
-
-
-def test_released_migration_cannot_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    original = database._FOLDER
-    for file in original.iterdir():
-        (tmp_path / file.name).write_bytes(file.read_bytes())
-    with (tmp_path / "baseline.sql").open("a") as stream:
-        stream.write("-- edited\n")
-    monkeypatch.setattr(database, "_FOLDER", tmp_path)
-    migrations.cache_clear()
-    try:
-        with pytest.raises(LauncherError, match="released migration baseline was edited"):
-            database.migrations()
-    finally:
-        migrations.cache_clear()
-
-
 @pytest.mark.parametrize(
     "sql,reason,floor",
     [
@@ -540,75 +286,204 @@ def test_release_records_floor(
     recorded = database.release("0.5.0")
     assert recorded[-1].floor == floor
     assert recorded[-1].sha256 == change.sha256
-    assert recorded[:-1] == database.released()
+    assert recorded[-1].name == "extra"
 
 
-def test_failing_takeover_publishes_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("version", ["0.3.2", "0.4.0"])
+def test_explicit_takeover_retains_cohort_and_worker_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: str
 ) -> None:
-    source = _released(tmp_path, "0.3.2")
-    before = source.read_bytes()
-    known = migrations()
-    monkeypatch.setattr(
-        database, "migrations", lambda: (*known, _migration("SELECT missing FROM nowhere;"))
-    )
-    with pytest.raises(LauncherError, match="migration extra failed"):
-        open_home(tmp_path)
-    assert not launcher_file(tmp_path).exists()
-    assert source.read_bytes() == before
-    assert not [path for path in tmp_path.glob(".launcher-*") if path.is_dir()]
-
-
-def test_previous_release_worker_journal_decodes() -> None:
-    finished = Finished.model_validate_json((FIXTURES / "finished-0.4.0.json").read_text())
-    progress = finished.progress("attempt", datetime(2026, 11, 14, tzinfo=UTC))
-    assert progress.outcome == "succeeded"
-    assert progress.clocks == {"steps": 1400.0}
-    assert progress.writers == ()
-
-
-def test_editing_unreleased_migration_starts_new_snapshot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    real = open_home(tmp_path)
-    known = migrations()
-    first = _migration("CREATE TABLE extra(value TEXT);", floor=None)
-    monkeypatch.setattr(database, "migrations", lambda: (*known, first))
-    branch = open_home(tmp_path)
-    branch.add_pool(Pool(name="branch"))
-    original_path = branch._path
-    branch.close()
-    real.add_pool(Pool(name="later"))
-    original = open_home(tmp_path)
-    assert {pool.name for pool in original.pools()} == {"branch"}
-    original.close()
-    changed = _migration("CREATE TABLE extra(value TEXT, detail TEXT);", floor=None)
-    monkeypatch.setattr(database, "migrations", lambda: (*known, changed))
-    next_copy = open_home(tmp_path)
-    assert next_copy._path != original_path
-    assert {pool.name for pool in next_copy.pools()} == {"later"}
-    next_copy.close()
-    real.close()
-
-
-def test_remove_cohorts_stays_in_copy_until_release(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = _released(tmp_path, "0.4.0")
-    before = source.read_bytes()
-    recorded = tuple(r for r in database.released() if r.name != "remove_cohorts")
-    monkeypatch.setattr(database, "released", lambda: recorded)
-    migrations.cache_clear()
+    source = tmp_path / "launcher.db"
+    with sqlite3.connect(source) as old:
+        old.executescript((FIXTURES / f"launcher-{version}.sql").read_text())
+    old.close()
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in migrations()})
+    result = upgrade(tmp_path)
+    assert result.sources == (source,) and not source.exists()
     store = open_home(tmp_path)
-    assert store._path.parent.parent == tmp_path / "copies"
-    assert {Scheduler(store, {}).read(run.id).phase for run in store.runs()} == {
-        "running",
-        "queued",
-    }
+    assert len(store.runs()) == 2 and len(store.sessions()) == 2
+    assert len(store.rentals()) == 1
+    assert store._db.execute("SELECT count(*) FROM cohorts").fetchone()[0] == 1
     assert (
-        store._db.execute("SELECT name FROM sqlite_master WHERE name='cohorts'").fetchone() is None
+        store._db.execute("SELECT cohort FROM runs WHERE cohort IS NOT NULL").fetchone()[0]
+        == "sweep"
     )
-    assert "cohort" not in {row[1] for row in store._db.execute("PRAGMA table_info(runs)")}
     store.close()
-    assert not launcher_file(tmp_path).exists()
-    assert source.read_bytes() == before
+    with sqlite3.connect(result.backups[0]) as original:
+        assert original.execute("SELECT count(*) FROM runs").fetchone()[0] == 2
+
+
+def test_shared_inherited_facts_are_imported_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("launcher-17.db", "launcher.db"):
+        with sqlite3.connect(tmp_path / name) as old:
+            old.executescript((FIXTURES / "launcher-0.3.2.sql").read_text())
+        old.close()
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in migrations()})
+    result = upgrade(tmp_path)
+    store = open_home(tmp_path)
+    assert len(store.runs()) == 2 and len(store.rentals()) == 1
+    assert len(result.sources) == 2 and len(result.backups) == 2
+    store.close()
+
+
+def test_old_receipts_and_retired_job_identity_survive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "launcher.db"
+    with sqlite3.connect(source) as old:
+        old.executescript((FIXTURES / "launcher-0.3.2.sql").read_text())
+        old.execute("ALTER TABLE runs DROP COLUMN smoke")
+        old.execute("ALTER TABLE sessions RENAME COLUMN provider_id TO receipt")
+        old.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY,identity TEXT NOT NULL)")
+        old.execute("INSERT INTO jobs(id,identity) VALUES ('retired','{}')")
+        old.execute("PRAGMA user_version=13")
+    old.close()
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in migrations()})
+    upgrade(tmp_path)
+    store = open_home(tmp_path)
+    assert store._db.execute("SELECT identity FROM jobs WHERE id='retired'").fetchone()[0] == "{}"
+    assert all(a == b for a, b in store._db.execute("SELECT receipt,provider_id FROM sessions"))
+    assert all(r.submission is not None and r.submission.smoke is not None for r in store.runs())
+    store.close()
+
+
+def test_upgrade_allowance_covers_write_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready(tmp_path)
+    known = migrations()
+    change = _migration("CREATE TABLE extra(value TEXT);")
+    monkeypatch.setattr(database, "migrations", lambda: (*known, change))
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in (*known, change)})
+    writer = sqlite3.connect(launcher_file(tmp_path), isolation_level=None)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        with pytest.raises(TimeoutError):
+            upgrade(tmp_path, timeout=0.05)
+        assert inspect(tmp_path).applied == tuple(m.name for m in known)
+    finally:
+        writer.close()
+
+
+def test_contraction_exports_original_facts_before_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready(tmp_path)
+    store = open_home(tmp_path)
+    store._db.execute(
+        "INSERT INTO cohorts(name,parallel,created_at) VALUES ('retired',3,'2026-11-14T00:00:00Z')"
+    )
+    known = migrations()
+    change = _migration(
+        "ALTER TABLE runs DROP COLUMN cohort; DROP TABLE cohorts;", floor=None
+    ).model_copy(
+        update={
+            "expansion": "run_names",
+            "exports": ("cohorts", "runs"),
+            "breaks": "cohort writers retired",
+        }
+    )
+    monkeypatch.setattr(database, "migrations", lambda: (*known, change))
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in (*known, change)})
+    result = upgrade(tmp_path)
+    assert len(result.exports) == 1
+    facts = [json.loads(line) for line in result.exports[0].read_text().splitlines()]
+    assert facts[0]["values"]["name"] == "retired" and facts[0]["values"]["parallel"] == 3
+    snapshot = database.Snapshot.model_validate_json(
+        result.backups[0].with_name(result.backups[0].name + ".json").read_text()
+    )
+    assert snapshot.applied == tuple(m.name for m in known) and snapshot.ledger_sha256
+    monkeypatch.setattr(database, "migrations", lambda: known)
+    with pytest.raises(SchemaAdvanced):
+        store.add_pool(Pool(name="stale"))
+    store.close()
+    with pytest.raises(LauncherError, match="extra@"):
+        open_home(tmp_path)
+
+
+def test_scheduler_fence_stops_before_provider_actions(tmp_path: Path) -> None:
+    b = bench(tmp_path)
+    b.store._db.execute(
+        "INSERT INTO migrations(name,sha256,applied_at,floor,program) VALUES ('future','digest','now','999.0.0',NULL)"
+    )
+    b.store._db.execute(f"PRAGMA user_version={len(migrations()) + 1}")
+    with pytest.raises(SchemaAdvanced):
+        Scheduler(b.store, {"runpod": lambda held: b.service}, b.clock).tick()
+    assert sum(b.service.calls.values()) == 0
+
+
+def test_read_open_uses_two_queries_without_write_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready(tmp_path)
+    connect = sqlite3.connect
+    statements: list[str] = []
+
+    def traced(
+        path: str,
+        *,
+        uri: bool = False,
+        isolation_level: Literal["DEFERRED", "EXCLUSIVE", "IMMEDIATE"] | None = None,
+        timeout: float = 5,
+    ) -> sqlite3.Connection:
+        connection = connect(path, uri=uri, isolation_level=isolation_level, timeout=timeout)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(sqlite3, "connect", traced)
+    open_home(tmp_path).close()
+    assert len(statements) == 2
+    assert all(sql.startswith("SELECT") for sql in statements)
+
+
+def test_embedded_main_frontier_upgrades_without_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    known = migrations()
+    change = _migration("CREATE TABLE merged_main(value TEXT);", floor=None)
+    packaged = tmp_path / "package" / "etude"
+    folder = packaged / "launch" / "migrations"
+    folder.mkdir(parents=True)
+    (folder / "merged.json").write_text(json.dumps({m.name: m.sha256 for m in (*known, change)}))
+    monkeypatch.setattr(database, "__file__", str(packaged / "launch" / "database.py"))
+    monkeypatch.setattr(database, "migrations", lambda: (*known, change))
+
+    def no_git(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        raise FileNotFoundError("Git unavailable in installed client")
+
+    monkeypatch.setattr(subprocess, "run", no_git)
+    result = upgrade(tmp_path / "operational")
+    assert "extra" in result.applied
+    assert not inspect(tmp_path / "operational").pending
+    assert not (tmp_path / "operational" / "copies").exists()
+
+
+@pytest.mark.parametrize("program", [None, "/missing/etude-program"])
+def test_handover_without_usable_program_exits_with_restart_instruction(
+    program: str | None,
+) -> None:
+    with pytest.raises(LauncherError, match="restart etude server run"):
+        _hand_over(program)
+
+
+def test_canonical_and_legacy_histories_join_one_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ready(tmp_path)
+    current = open_home(tmp_path)
+    current.add_pool(Pool(name="current"))
+    current.close()
+    legacy = tmp_path / "launcher-17.db"
+    with sqlite3.connect(legacy) as old:
+        old.executescript((FIXTURES / "launcher-0.3.2.sql").read_text())
+    old.close()
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in migrations()})
+    result = upgrade(tmp_path)
+    assert len(result.sources) == 2 and len(result.backups) == 2
+    assert not legacy.exists()
+    combined = open_home(tmp_path)
+    assert combined.pool("current").name == "current"
+    assert len(combined.runs()) == 2 and len(combined.rentals()) == 1
+    combined.close()

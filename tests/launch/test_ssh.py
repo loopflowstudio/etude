@@ -11,7 +11,6 @@ import pytest
 
 from etude.cli import main
 from etude.jobs import continue_from
-from etude.launch.database import Database
 from etude.launch.executor import Executor, local
 from etude.launch.machines import OwnedMachine
 from etude.launch.records import Machine, Pool
@@ -21,6 +20,7 @@ from etude.spec import Job, RunRequest, Until
 from etude.train.records import Step
 from etude.train.tracking import track
 from tests.launch.counting import job_text
+from tests.launch.fake import open_database
 
 
 def test_remote_host_runs_kept_work_logs_outputs_and_stops(
@@ -34,7 +34,7 @@ def test_remote_host_runs_kept_work_logs_outputs_and_stops(
     ssh = SSH("bench", str(tmp_path / "remote"), str(executable), sys.executable)
     journal = SSHJournal(ssh)
     service = Executor(OwnedMachine("bench"), SSHStart(ssh), journal)
-    scheduler = Scheduler(Database(tmp_path / "state.db"), {"ssh": lambda held: service})
+    scheduler = Scheduler(open_database(tmp_path / "state.db"), {"ssh": lambda held: service})
     scheduler.add_machine("bench", "bench")
     (run,) = scheduler.launch(
         Job(
@@ -76,7 +76,7 @@ def test_runs_move_between_local_and_remote_disk_including_kept_work(tmp_path: P
     ssh = SSH("bench", str(tmp_path / "remote"), str(executable), sys.executable)
     remote = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
     here = local(tmp_path / "local")
-    store = Database(tmp_path / "state.db")
+    store = open_database(tmp_path / "state.db")
     scheduler = Scheduler(store, {"ssh": lambda held: remote, "local": lambda held: here})
     scheduler.add_pool(Pool(name="local"))
     store.add_machine(Machine(name="local", pool="local", kind="local"))
@@ -143,7 +143,7 @@ def test_continuation_moves_between_local_and_remote_disk(
     ssh.asks = Counter()
     remote = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
     here = local(tmp_path / "here/sessions")
-    store = Database(tmp_path / "state.db")
+    store = open_database(tmp_path / "state.db")
     scheduler = Scheduler(store, {"ssh": lambda held: remote, "local": lambda held: here})
     scheduler.add_pool(Pool(name="local"))
     store.add_machine(Machine(name="local", pool="local", kind="local"))

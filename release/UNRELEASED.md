@@ -104,15 +104,12 @@ experiment; cohorts, which sat between, are removed.
 - **The SSH controller is the server.** `etude server set HOST`; the setting
   file is `~/.etude/server`, and a selection is set again after upgrading.
   "Controller" now means the pass over an experiment file.
-- **The launcher database follows upgrades** in `launcher.sqlite`, with named
-  migrations. Released builds take over `launcher-19.db` (0.4.0),
-  `launcher-17.db` (0.3.2), or a schema-17 `launcher.db` (0.3.1), leaving the
-  source untouched. Queued and running records follow. Stop older `etude wait`
-  and `etude controller run` commands first, then restart with the new version.
-  Cohort removal raises the reader floor to this release. Builds carrying
-  unreleased migrations use a separate copy; launch real work from a release.
-  See [Upgrading Etude](../docs/launcher.md#upgrading-etude).
-  Stored runs, including a `run.json` that names a cohort, still read.
+- **Launcher upgrades are explicit.** Install the SDK, inspect with `etude database
+  status`, then run `etude database upgrade`. Ordinary reads do not migrate or
+  select copied queues. All compatible clients share `launcher.sqlite`. Stop
+  legacy local scheduling commands before consolidation; workers and guardians
+  keep running. Cohort evidence remains stored. Unmerged SQL requires an empty
+  development fixture. See [Upgrading Etude](../docs/launcher.md#upgrading-etude).
 - **`~/.etude/experiments/launched.json` is gone.** In-flight eval matches
   are read from the launcher's run records; delete the file.
 

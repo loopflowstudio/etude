@@ -1,6 +1,7 @@
 # The launcher
 
 ```sh
+etude database upgrade                              # initialize or explicitly upgrade
 etude pool add lab                                   # machines you own
 etude machine add mini me@mini.local --pool lab      # cost $0, never expires
 etude ondemand add runpod-cpu8 --provider runpod --vcpus 8 --memory-gb 16 \
@@ -1071,162 +1072,81 @@ bucket inboxes; they never need a reachable address for the server.
 
 ## Upgrading Etude
 
-Upgrade while runs are active. The launcher's records follow, and the first
-command afterwards says what it did:
-
-```
-$ uv sync --upgrade-package etude-sdk
-$ etude status
-launcher: took over launcher-17.db as launcher.sqlite (23 runs, 3 open sessions); applied run_resume_and_writers
-launcher: launcher-17.db is left as it was and is no longer read; launcher.db (schema 13) is not read, use etude 0.2.15 for it
-RUN            STATUS
-sweep/base@7   running   updates 1400, ~$0.61
-...
-```
-
-Every provider, storage, pool, run, rental and setting the older etude showed
-is there with the status it had: a run that was running reads `running`, and a
-queued one is still queued. The `launcher:` lines go to standard error, once;
-the next `etude status` prints only the runs.
-
-Runs already on machines are not interrupted. Their workers stay the etude
-that started them, and the upgraded launcher reads the journals a previous
-release's worker writes.
-
-Before upgrading, stop commands of the older etude that are still running on
-this computer or the server (`etude wait`, `etude controller run`). They
-would keep writing to the file they opened, which nothing reads afterwards.
-Start them again with the new etude. Another project on the same `ETUDE_HOME`
-still pinned to etude ≤ 0.4.0 keeps launching into its own file, which the
-upgraded launcher does not show. Starting both can schedule the same queued
-runs or retries twice.
-
-### The file
-
-The records are one SQLite file, `$ETUDE_HOME/launcher.sqlite` (default
-`~/.etude`). Its schema is the named SQL files in `etude/launch/migrations/`,
-and its `migrations` table records which of them it holds. Any command opens
-it the same way:
-
-- **No `launcher.sqlite` yet.** The newest file an earlier etude left is
-  taken over: `launcher-19.db` (0.4.0), else `launcher-17.db` (0.3.2), else a
-  `launcher.db` written by 0.3.1. It is copied, so it needs that much free
-  disk again, and the copy is upgraded. The older file is never changed.
-  With none of them, a new empty file is made.
-- **A `launcher.sqlite` missing migrations.** It is backed up beside itself as
-  `launcher.sqlite.backup-<UTC time>`, keeping the two newest, and then
-  upgraded.
-- **An up-to-date `launcher.sqlite`.** It is opened; nothing is copied or
-  printed.
-
-An upgrade applies the missing migrations and checks every row against the
-current records in one transaction. If anything fails the command exits with
-the reason and the file is exactly as it was.
-
-Files from before 0.3.1 are not taken over. They are named once, with the
-etude that reads them, and stay usable from that version:
-
 ```sh
-uvx --from etude-sdk==0.2.15 etude status
+uv sync --upgrade-package etude-sdk
+etude database status
+# Stop older local etude wait/controller/server commands first.
+etude database upgrade
+etude status
 ```
 
-### When the upgrade refuses
+Package installation and database upgrade are separate actions. Reads and ordinary
+library opens never initialize, migrate or select a different database. All
+compatible clients and experiments share `$ETUDE_HOME/launcher.sqlite` (default
+`~/.etude`). Workers and their deadline guardians keep running during an upgrade.
 
-| Message | Meaning | Do |
-| --- | --- | --- |
-| `launcher: an older etude wrote launcher-17.db 2s ago; stop its commands (etude wait, etude controller run), then run this again` | The file or its WAL was written in the last 30 seconds. Taking it over now could leave two schedulers placing the same queued runs and renting twice. | Stop the older commands, wait until the file has been quiet for 30 seconds, repeat the command, then start them with the new etude. |
-| `launcher.sqlite needs etude >= 0.5.0 (raised by: rental_regions)` | A newer etude upgraded this file past what this one can read. | Upgrade this etude, or restore a backup (below). |
-| `etude was upgraded while this ran; run it again` | This process opened the file before such an upgrade; it writes nothing more. | Run the command again. |
-| `launcher: migration remove_cohorts needs SQLite >= 3.35; this Python has 3.31.1` | The Python on this machine carries an older SQLite. Nothing was changed. | Use a Python with a newer SQLite, on a server through `ETUDE_REMOTE_PYTHON`. |
+`database status` reads local schema evidence without credentials or network.
+`database upgrade [--timeout SECONDS]` is an explicit local wait; its default
+allowance is unlimited. Python uses the same implementation:
 
-### Older and newer etude on one file
+```python
+from pathlib import Path
 
-Each released migration records a reader floor: the oldest etude that can
-still open a file holding it.
+from etude.launch.database import inspect, upgrade
 
-- **Additive migrations keep the floor.** They only add tables, non-unique indexes or
-  columns an older writer can omit. An older etude keeps reading and writing the
-  file, including processes already running.
-- **Any other migration raises the floor to its release.** The upgrade line
-  ends `; etude < 0.5.0 can no longer open it`, and the release notes say the
-  same. An etude below the floor is refused with the message above.
-- **Processes open across such an upgrade write nothing more**, and
-  `etude server run` replaces itself with the newer program's loop, so a
-  supervised loop needs no restart.
-
-Etude 0.4.0 and earlier know nothing of `launcher.sqlite` or of this handover.
-They keep using their own file, and their loops are stopped and started by
-hand as above.
-
-### Going back
-
-- **After a take-over.** The older file is as the older etude left it:
-  install that etude again and it reads its own file. Runs and rentals made
-  since are only in `launcher.sqlite`; each rental still ends at its
-  deadline. To take the older file over afresh, delete `launcher.sqlite`.
-- **After an upgrade of `launcher.sqlite`.** Additive upgrades need nothing:
-  install the older etude. From a release that raised the floor, the backup
-  is the only way back: stop every etude command, move the backup over
-  `launcher.sqlite` and install the older etude. Records written after the
-  backup are lost.
-
-### Unreleased builds use a copy
-
-A migration may still change until a release records it, so an etude carrying
-one that no release has recorded (a branch, or `main` between releases) never
-writes to `launcher.sqlite`:
-
-```
-$ etude status
-launcher: launcher.sqlite is behind this unreleased etude (pool_quota); using copy ~/.etude/copies/3f2a91c04b1e/. Runs and rentals made here are not in launcher.sqlite
+home = Path.home() / ".etude"
+state = inspect(home)
+result = upgrade(home, timeout=None)
 ```
 
-- The copy is taken once for each set of unreleased migrations, from
-  `launcher.sqlite` or, without one, from the file a release would take over.
-  Editing a migration starts a fresh copy.
-- Runs and rentals made in a copy stay there. A released `etude status` lists
-  the copies that still hold paid windows:
+`Schema` names the canonical file, existing sources, applied and pending
+migrations and compatibility problem, if any. `Upgrade` records source snapshots,
+target, applied migrations and reader floor. Existing canonical files are backed
+up before SQL changes; recovery snapshots are retained without automatic pruning.
+First takeover stages and validates before publishing. Failed staging publishes
+nothing. A backup restores database facts, not provider state: stop scheduling
+and reconcile live machines and attempts before restoring or resuming any queue.
+Never restart an old scheduler on a legacy file as ordinary rollback.
 
-  ```
-  copy 3f2a91c04b1e (pool_quota): 1 rental, $0.89/h, ends 2026-11-15 14:20 UTC
-  ```
+Stop pre-migration scheduling clients across every project sharing this home.
+They cannot honor a new writer fence. Thirty seconds without a write is only
+recent activity evidence, never proof that every client stopped. Existing legacy
+and copy histories must be consolidated before their files are archived; a newer
+schema number alone does not select the authoritative history. Unsupported or
+conflicting history refuses takeover instead of exposing an empty launcher.
 
-- A copy includes unfinished runs from its source. Scheduling in both files can
-  place the same queued runs or retries twice; use a separate home for branch
-  experiments while real work is active.
-- Each window still ends at its deadline.
-- A copy is never refreshed. To pick up later changes to the real file,
-  delete the copy.
+### Compatible clients and development
 
-Launch real work from a release. A project pinned to a branch commit that
-adds a migration runs in a copy.
+Additive expansion retains old columns and defaults, so an older compatible
+client can continue using the same file. Breaking upgrades raise the reader
+floor; fresh clients refuse, and stale writers and scheduling passes stop before
+new actions. Requests already in flight can still complete and need reconciliation.
+A managed server hands over only to a validated installed program; otherwise it
+exits with a restart instruction. It never installs code during handover.
+
+Merged migration names and checksums travel in wheels and server archives.
+A merged-main build can explicitly upgrade an operational home before release.
+Unmerged or unproven migrations cannot advance operational state. Test them with
+`etude database upgrade --development` in an explicitly empty fixture home;
+this is never an alternative home for real experiments or inherited work.
+There are no automatically selected copies. Snapshots are validation inputs,
+never independent queues to schedule.
 
 ### Writing a migration
 
-The launcher's schema changes only through a new SQL file in
-`src/etude/launch/migrations/`, named for what it does and never numbered, so
-two branches never contend for a version:
+Add one named SQL file under `src/etude/launch/migrations/` with dependencies:
 
 ```sql
 -- after: run_resume_and_writers
--- breaks: etude 0.4.0 inserts runs.cohort
-ALTER TABLE runs DROP COLUMN cohort;
-DROP TABLE cohorts;
 CREATE INDEX runs_name ON runs(json_extract(spec, '$.name'), seq);
 ```
 
-`-- after:` names the migrations it builds on, including any other that
-touches the same table. `-- breaks:` marks a change older readers cannot take
-even though its schema looks additive, such as a new value in a status column
-or a new shape inside a JSON column, which a schema comparison cannot see.
-Rewrite old rows in the same file: the row check fails an upgrade that leaves
-one the current records cannot decode.
-
-`lf release run` records the release's migrations and their floors in
-`migrations/released.json`
-(`uv run python scripts/release_migrations.py --version X`), computing each
-floor by comparing schemas. From then on the file never changes;
-`uv run python scripts/check_migrations.py` holds that in CI.
+Merged migrations are immutable. `scripts/check_migrations.py` checks main's
+files as well as released checksums. Release metadata adds version names and
+reader floors. A `-- breaks: reason` header declares incompatible stored JSON
+changes even when DDL is additive. Prefer compatible expansion; a destructive
+contraction must name its preceding expansion and durably export superseded
+facts before SQL commits. Preserve shipped worker journal decoding.
 
 ## Safeguards and bills
 
@@ -1265,17 +1185,19 @@ defines it, by its full path, and relative imports are a lint error:
 | `from etude.jobs import ExperimentState` | what an experiment's runs have stored, as declarations are given it |
 | `from etude.spec import Job, RunRequest` | a command job, and one run of any job |
 | `from etude.launch.client import queue, launch, status, wait, ...` | the calls a script makes; they go to the server when one is set |
-| `from etude.launch.database import Database` | the SQLite records in `launcher.sqlite` |
+| `from etude.launch.database import Database` | validate and open existing `launcher.sqlite` records |
+| `from etude.launch.database import inspect, upgrade` | local schema evidence and the explicit upgrade boundary |
 | `from etude.launch.schemas import Packet, Work, Progress` | frozen worker messages |
 | `from etude.launch.executor import Executor` | machine acquisition, startup and journal composition |
 | `from etude.launch.scheduler import Scheduler` | the owner of one database: queueing, admission, matching runs to machines |
 
 Records are frozen Pydantic models, constructed with named fields:
 `Job(command="./simulate", max_hours=2)` and `RunRequest(job=job, seed=1)`.
-Use `model_dump_json()` for JSON and `model_validate_json()` to load it. Imports sit at the top of each module, so every command, including `--help`,
-loads the whole launcher: 33 modules and Pydantic, about 70 ms measured on
-2026-10-13. A test pins the module count. Each remote command imports client dependencies once
-in its installed environment.
+Use `model_dump_json()` for JSON and `model_validate_json()` to load it.
+Entry points import only the selected command. CLI help loads neither Pydantic
+nor the scheduler; workers do not import the scheduler. Tests pin import counts.
+Each remote command imports client dependencies once in its installed environment.
+
 
 ## Launching from Python
 

@@ -43,7 +43,6 @@ from etude.launch.records import (
     LogSnapshot,
     Machine,
     OnDemand,
-    Pool,
     Quote,
     Standing,
     Status,
@@ -135,9 +134,6 @@ def _open(home: Path) -> Scheduler:
         store,
         {"local": lambda machine: here, "ssh": ssh, "runpod": rented, "vast": rented, "lium": lium},
     )
-    if store.fresh:  # this computer is offered once; `etude pool off local` withdraws it
-        scheduler.add_pool(Pool(name="local"))
-        store.add_machine(Machine(name="local", pool="local", kind="local"))
     if os.environ.get("ETUDE_SERVER_LOCAL"):
         store.name_server_pool()
     return scheduler

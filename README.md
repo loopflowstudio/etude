@@ -54,6 +54,7 @@ def train(config: TrainConfig) -> None:
 ```sh
 etude train train.py         # one new run on this computer, without the launcher
 etude smoke job.py           # one tiny update here, spending nothing
+etude database upgrade       # initialize or explicitly upgrade the launcher
 etude launch job.py          # what has not been run: job/base@0, @1 and @2, on this
                              # computer; --smoke smokes first, --pool P for machines you
                              # own, --rent R to rent, or both

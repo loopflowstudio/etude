@@ -22,7 +22,7 @@ from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch import cli, client
 from etude.launch.commands import Kind
-from etude.launch.database import launcher_file
+from etude.launch.database import launcher_file, upgrade
 from etude.launch.executor import Execution
 from etude.launch.measurement import span
 from etude.launch.providers.runpod.http import PodHTTP
@@ -152,7 +152,7 @@ def test_several_run_git_and_database_counts(
         # Client composition includes four modules each for Vast and Lium, the
         # request every provider shares, the storage socket policy it forwards
         # to workers, its smoke of jobs, and shared run-identity validation.
-        (["pools"], 57, ("numpy", "boto3", "etude.launch.worker")),
+        (["pools"], 58, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
             34,  # shared run/job records, out membership and storage socket policy
@@ -182,6 +182,8 @@ def test_command_import_counts(
             cap_usd=Decimal(0),
         )
         (directory / "packet.json").write_text(packet.model_dump_json())
+    if command == ["pools"]:
+        upgrade(tmp_path / "home", development=True)
     args = [value.format(directory=directory) for value in command]
     done = subprocess.run(
         [
