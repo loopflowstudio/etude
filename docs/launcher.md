@@ -1102,11 +1102,20 @@ result = upgrade(home, timeout=None)
 ```
 
 `Schema` names the canonical file, existing sources, applied and pending
-migrations and compatibility problem, if any. `Upgrade` records source snapshots,
-target, applied migrations and reader floor. Existing canonical files are backed
+migrations, compatibility problem and an unfinished takeover record, if any.
+`Upgrade` records source snapshots, target, applied migrations and reader floor. Existing canonical files are backed
 up before SQL changes; recovery snapshots are retained without automatic pruning.
 First takeover stages and validates before publishing. Failed staging publishes
-nothing. A backup restores database facts, not provider state: stop scheduling
+nothing. Before retiring any source, takeover syncs its validated target and a
+publication record at `$ETUDE_HOME/.launcher-takeover.json`. An interruption leaves
+that record visible through `database status` and `Schema.takeover`; ordinary
+opens refuse. Keep scheduling stopped and rerun `etude database upgrade` with a
+merged build. It verifies the recorded files and completes the same publication.
+Changed or missing evidence requires reconciliation against the named record;
+all files remain available. Never run a recovery copy. The completed record stays
+beside the recovery snapshots.
+
+A backup restores database facts, not provider state: stop scheduling
 and reconcile live machines and attempts before restoring or resuming any queue.
 Never restart an old scheduler on a legacy file as ordinary rollback.
 

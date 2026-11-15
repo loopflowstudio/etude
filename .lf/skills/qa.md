@@ -328,3 +328,11 @@ refresh against them. On this machine consolidate legacy and copy histories
 before retiring their files; never choose authority by schema number or treat
 a quiet WAL as proof of exclusive ownership. Keep remote training and guardians
 running. Recovery requires stopping scheduling and reconciling provider state.
+
+Interrupt takeover after each source retirement and canonical replacement, with
+and without an existing canonical input. Status must name the pending recovery
+record and ordinary opens must refuse, even when every legacy source has moved.
+Rerunning explicit upgrade must retain all histories exactly once. Changed or
+missing evidence must refuse with its reconciliation path, preserving files;
+retired inputs must never be interpreted as an empty home. Use controlled file
+operation failures in fixtures, never interrupt an operational cutover for QA.

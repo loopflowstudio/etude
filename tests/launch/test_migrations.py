@@ -8,6 +8,7 @@ import json
 import sqlite3
 import subprocess
 import zipfile
+from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -487,3 +488,128 @@ def test_canonical_and_legacy_histories_join_one_queue(
     assert combined.pool("current").name == "current"
     assert len(combined.runs()) == 2 and len(combined.rentals()) == 1
     combined.close()
+
+
+@pytest.mark.parametrize("canonical", [False, True])
+@pytest.mark.parametrize("interruption", ["first", "second", "last", "publication"])
+def test_interrupted_takeover_resumes_all_histories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    canonical: bool,
+    interruption: str,
+) -> None:
+    if canonical:
+        _ready(tmp_path)
+        with closing(open_home(tmp_path)) as current:
+            current.add_pool(Pool(name="current"))
+    for name in ("launcher-17.db", "launcher.db"):
+        with closing(sqlite3.connect(tmp_path / name)) as old:
+            old.executescript((FIXTURES / "launcher-0.3.2.sql").read_text())
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in migrations()})
+    replace = Path.replace
+    retired = 0
+
+    def interrupted(path: Path, target: Path) -> Path:
+        nonlocal retired
+        result = replace(path, target)
+        if "-retired-" in target.name:
+            retired += 1
+            if (
+                (interruption == "first" and retired == 1)
+                or (interruption == "second" and retired == 2)
+                or (interruption == "last" and retired == (3 if canonical else 2))
+            ):
+                raise OSError("publication interrupted")
+        if interruption == "publication" and target == launcher_file(tmp_path):
+            raise OSError("publication interrupted")
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", interrupted)
+        with pytest.raises(OSError, match="publication interrupted"):
+            upgrade(tmp_path)
+    state = inspect(tmp_path)
+    assert state.takeover and state.takeover.is_file()
+    assert state.problem and "unfinished launcher takeover" in state.problem
+    assert database.has_launcher(tmp_path)
+    with pytest.raises(LauncherError, match="unfinished launcher takeover"):
+        open_home(tmp_path)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    assert main(["database", "status"]) == 0
+    assert "keep scheduling stopped and rerun etude database upgrade" in capsys.readouterr().out
+    with pytest.raises(LauncherError, match="empty fixture"):
+        upgrade(tmp_path, development=True)
+    with monkeypatch.context() as patch:
+        patch.setattr(database, "_merged", lambda: {})
+        with pytest.raises(LauncherError, match="unmerged or unproven"):
+            upgrade(tmp_path)
+    result = upgrade(tmp_path)
+    assert len(result.sources) == (3 if canonical else 2)
+    assert all(p.exists() for p in result.backups)
+    assert not inspect(tmp_path).takeover
+    assert not inspect(tmp_path).sources
+    with closing(open_home(tmp_path)) as combined:
+        assert len(combined.runs()) == 2
+        assert len(combined.rentals()) == 1
+        if canonical:
+            assert combined.pool("current").name == "current"
+    assert upgrade(tmp_path).applied == ()
+    records = list((tmp_path / "recovery").glob("*/takeover.json"))
+    assert len(records) == 1
+    assert database.Takeover.model_validate_json(records[0].read_text()).published
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "source",
+        "target",
+        "snapshot",
+        "new_history",
+        "canonical",
+        "missing_snapshot",
+        "missing_source",
+        "sidecar",
+    ],
+)
+def test_interrupted_takeover_preserves_disagreeing_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: str
+) -> None:
+    source = tmp_path / "launcher.db"
+    with closing(sqlite3.connect(source)) as old:
+        old.executescript((FIXTURES / "launcher-0.3.2.sql").read_text())
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in migrations()})
+    replace = Path.replace
+
+    def interrupted(path: Path, target: Path) -> Path:
+        if "-retired-" in target.name:
+            raise OSError("publication interrupted")
+        return replace(path, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "replace", interrupted)
+        with pytest.raises(OSError):
+            upgrade(tmp_path)
+    state = inspect(tmp_path)
+    assert state.takeover
+    intent = database.Takeover.model_validate_json(state.takeover.read_text())
+    victim = {
+        "source": source,
+        "target": intent.target.path,
+        "snapshot": intent.evidence[0].path,
+        "new_history": tmp_path / "launcher-99.db",
+        "canonical": launcher_file(tmp_path),
+        "missing_snapshot": intent.evidence[0].path,
+        "missing_source": source,
+        "sidecar": source.with_name(source.name + "-wal"),
+    }[changed]
+    if changed.startswith("missing_"):
+        victim.unlink()
+    else:
+        victim.write_bytes(b"changed evidence")
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    with pytest.raises(LauncherError, match="reconcile against recovery record"):
+        upgrade(tmp_path)
+    assert all(p.read_bytes() == body for p, body in before.items())
+    assert inspect(tmp_path).takeover == state.takeover

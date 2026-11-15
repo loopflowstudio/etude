@@ -395,6 +395,7 @@ class Database:
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("database timeout must be nonnegative and finite")
+        _refuse_takeover(path.parent)
         self._locks: dict[str, tuple[str, Callable[[], datetime]]] = {}
         self._path = path
         self._db = (
@@ -1366,6 +1367,7 @@ class Schema(Record):
     applied: tuple[str, ...]
     pending: tuple[str, ...]
     problem: str | None
+    takeover: Path | None = None
 
 
 class Upgrade(Record):
@@ -1407,6 +1409,15 @@ def inspect(home: Path) -> Schema:
     """Read local catalog membership, without database creation, provider keys or network."""
     path = launcher_file(home.resolve())
     sources = _sources(home.resolve())
+    if (record := _takeover_path(home.resolve())).exists():
+        return Schema(
+            path=path,
+            sources=sources,
+            applied=(),
+            pending=(),
+            takeover=record,
+            problem=_takeover_problem(record),
+        )
     applied: tuple[str, ...] = ()
     problem: str | None = None
     if path.exists():
@@ -1436,7 +1447,7 @@ def inspect(home: Path) -> Schema:
 
 def has_launcher(home: Path) -> bool:
     """Whether local launcher evidence exists, including a legacy home needing upgrade."""
-    return launcher_file(home).exists() or bool(_sources(home))
+    return _takeover_path(home).exists() or launcher_file(home).exists() or bool(_sources(home))
 
 
 def open_home(home: Path, *, timeout: float = 30) -> Database:
@@ -1708,6 +1719,8 @@ def _merge_history(
 
 def _require_closed(sources: tuple[Path, ...]) -> None:
     """Reject observed open legacy files; callers must also prevent old clients restarting."""
+    if not sources:
+        return
     try:
         result = subprocess.run(
             [
@@ -1751,6 +1764,149 @@ def _signature(source: Path) -> str:
         if path == source or state.st_size:
             parts.append(f"{path.name}:{state.st_ino}:{state.st_size}:{state.st_mtime_ns}")
     return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
+class Evidence(Record):
+    """Immutable bytes required to finish a local publication."""
+
+    path: Path
+    sha256: str
+
+
+class Retirement(Record):
+    """One original file and its sole recovery destination, including SQLite sidecars."""
+
+    source: Path
+    retired: Path
+    sha256: str
+
+
+class Takeover(Record):
+    """Durable publication intent; progress is reconciled with the named files on retry."""
+
+    result: Upgrade
+    target: Evidence
+    evidence: tuple[Evidence, ...]
+    files: tuple[Retirement, ...]
+    retired: tuple[Path, ...] = ()
+    published: bool = False
+
+
+def _takeover_path(home: Path) -> Path:
+    return home / ".launcher-takeover.json"
+
+
+def _takeover_problem(record: Path) -> str:
+    return (
+        f"unfinished launcher takeover; recovery record: {record}; "
+        "keep scheduling stopped and rerun etude database upgrade"
+    )
+
+
+def _refuse_takeover(home: Path) -> None:
+    if (record := _takeover_path(home)).exists():
+        raise LauncherError(_takeover_problem(record))
+
+
+def _digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            remaining()
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_takeover(record: Path, takeover: Takeover) -> None:
+    temporary = record.with_suffix(".pending")
+    temporary.write_text(takeover.model_dump_json() + "\n")
+    _sync(temporary)
+    temporary.replace(record)
+    _sync_directory(record.parent)
+
+
+def _finish_takeover(home: Path) -> Upgrade:
+    record = _takeover_path(home)
+    takeover = Takeover.model_validate_json(record.read_text())
+
+    def refuse(reason: str) -> None:
+        raise LauncherError(
+            f"{reason}; preserve all files and reconcile against recovery record: {record}"
+        )
+
+    for evidence in (takeover.target, *takeover.evidence):
+        if not evidence.path.is_file() or _digest(evidence.path) != evidence.sha256:
+            refuse(f"takeover evidence differs or is missing: {evidence.path}")
+    # Validate the retained target against this program, including ledger checksums.
+    with closing(Database(takeover.target.path)):
+        pass
+    sources = tuple(item.source for item in takeover.files)
+    if unexpected := set(_sources(home)) - set(sources):
+        refuse("unrecorded launcher histories: " + ", ".join(map(str, sorted(unexpected))))
+    sidecars = {
+        path
+        for source in (*takeover.result.sources, takeover.result.path)
+        for path in (source.with_name(source.name + "-wal"), source.with_name(source.name + "-shm"))
+        if path.exists()
+    }
+    if unexpected_sidecars := sidecars - set(sources):
+        refuse("unrecorded SQLite sidecars: " + ", ".join(map(str, sorted(unexpected_sidecars))))
+    _require_closed(
+        tuple(p for p in (*takeover.result.sources, takeover.result.path) if p.exists())
+    )
+    canonical = takeover.result.path
+    # A rename may have completed before its progress update reached disk.
+    published = (
+        all(item.retired.exists() for item in takeover.files)
+        and canonical.exists()
+        and _digest(canonical) == takeover.target.sha256
+    )
+    for item in takeover.files:
+        original = item.source.exists() and not (published and item.source == canonical)
+        if original == item.retired.exists():
+            refuse(f"expected exactly one original or retired file for {item.source}")
+        actual = item.source if original else item.retired
+        if _digest(actual) != item.sha256:
+            refuse(f"takeover file identity differs: {actual}")
+    if canonical.exists() and not published and canonical not in sources:
+        refuse(f"unexpected canonical database: {canonical}")
+    for item in takeover.files:
+        remaining()
+        if not item.retired.exists():
+            item.source.replace(item.retired)
+        # Sync both directories even when a prior run performed the rename.
+        _sync_directory(item.retired.parent)
+        _sync_directory(item.source.parent)
+        takeover = takeover.model_copy(
+            update={"retired": tuple(f.source for f in takeover.files if f.retired.exists())}
+        )
+        _write_takeover(record, takeover)
+    if not published:
+        publication = takeover.target.path.with_name("publication.sqlite")
+        with takeover.target.path.open("rb") as source, publication.open("wb") as target:
+            while chunk := source.read(1024 * 1024):
+                remaining()
+                target.write(chunk)
+        remaining()
+        _sync(publication)
+        publication.replace(canonical)
+    _sync(canonical)
+    _sync_directory(takeover.target.path.parent)
+    takeover = takeover.model_copy(update={"published": True})
+    _write_takeover(record, takeover)
+    # Retain the completed record with its evidence; removal alone enables opens.
+    record.replace(takeover.target.path.parent / "takeover.json")
+    _sync_directory(takeover.target.path.parent)
+    _sync_directory(home)
+    return takeover.result
 
 
 def _takeover(home: Path, state: Schema) -> Upgrade:
@@ -1802,30 +1958,74 @@ def _takeover(home: Path, state: Schema) -> Upgrade:
             raise LauncherError(f"{error}; recovery snapshots: {recovery}") from None
         finally:
             db.close()
-        # Staging is read-only validation evidence, not an operational home.
-        _snapshot(stage, recovery / "validated.sqlite", remaining() or 0)
+        # Validation bytes and their directory entries outlive temporary cleanup.
+        validated = recovery / "validated.sqlite"
+        _snapshot(stage, validated, remaining() or 0)
+        _sync(validated)
+        _sync_directory(recovery.parent)
+        _sync_directory(home)
         _require_closed(sources)
         if any(_signature(source) != revisions[source] for source in sources):
             raise LauncherError(
                 f"legacy files changed during validation; no cutover performed; recovery snapshots: {recovery}"
             )
-        # Rename only closed main files; never move live WAL sidecars. Recovery
-        # snapshots above include all committed frames and are never schedulable.
-        for index, source in enumerate(sources):
-            source.replace(recovery / f"{index}-retired-{source.name}")
-        stage.chmod(0o600)
-        stage.replace(state.path)
-        _sync(state.path)
-    floors = [m.floor for m in migrations() if m.floor is not None]
-    return Upgrade(
-        path=state.path,
-        sources=sources,
-        backups=tuple(snapshots),
-        exports=tuple(exports),
-        applied=tuple(m.name for m in migrations()),
-        floor=max(floors, key=_version) if floors and not _required() else None,
-        required=_required(),
-    )
+        floors = [m.floor for m in migrations() if m.floor is not None]
+        result = Upgrade(
+            path=state.path,
+            sources=sources,
+            backups=tuple(snapshots),
+            exports=tuple(exports),
+            applied=tuple(m.name for m in migrations()),
+            floor=max(floors, key=_version) if floors and not _required() else None,
+            required=_required(),
+        )
+        files = tuple(
+            Retirement(
+                source=path, retired=recovery / f"{index}-retired-{path.name}", sha256=_digest(path)
+            )
+            for index, source in enumerate(sources)
+            for path in (
+                source,
+                source.with_name(source.name + "-wal"),
+                source.with_name(source.name + "-shm"),
+            )
+            if path.exists()
+        )
+        if any(_signature(source) != revisions[source] for source in sources):
+            raise LauncherError(
+                f"legacy files changed while recording takeover; recovery snapshots: {recovery}"
+            )
+        evidence_paths = (*snapshots, *(p.with_name(p.name + ".json") for p in snapshots), *exports)
+        _write_takeover(
+            _takeover_path(home),
+            Takeover(
+                result=result,
+                target=Evidence(path=validated, sha256=_digest(validated)),
+                evidence=tuple(Evidence(path=p, sha256=_digest(p)) for p in evidence_paths),
+                files=files,
+            ),
+        )
+    return _finish_takeover(home)
+
+
+def _authorize_upgrade(state: Schema, development: bool, catalog: dict[str, str]) -> None:
+    if state.problem and state.takeover is None:
+        raise LauncherError(state.problem)
+    if development:
+        if state.path.exists() or state.sources or state.takeover:
+            raise LauncherError("development upgrades require an empty fixture home")
+        return
+    if unproven := [
+        m.name
+        for m in migrations()
+        if (m.name in state.pending or state.sources or state.takeover)
+        and catalog.get(m.name) != m.sha256
+    ]:
+        raise LauncherError(
+            "unmerged or unproven migrations: "
+            + ", ".join(unproven)
+            + "; use an empty development fixture or a merged build"
+        )
 
 
 def upgrade(home: Path, *, timeout: float | None = None, development: bool = False) -> Upgrade:
@@ -1837,34 +2037,20 @@ def upgrade(home: Path, *, timeout: float | None = None, development: bool = Fal
     with limit_time(timeout):
         home = home.resolve()
         state = inspect(home)
-        if state.problem:
+        if state.problem and state.takeover is None:
             raise LauncherError(state.problem)
-        if not state.pending and not state.sources:
+        if not state.pending and not state.sources and state.takeover is None:
             return Upgrade(path=state.path, sources=(), backups=(), applied=(), floor=None)
-        if development and (state.path.exists() or state.sources):
-            raise LauncherError("development upgrades require an empty fixture home")
-        if not development:
-            from_catalog = _merged()
-            if unproven := [
-                m.name
-                for m in migrations()
-                if (m.name in state.pending or state.sources)
-                and from_catalog.get(m.name) != m.sha256
-            ]:
-                raise LauncherError(
-                    "unmerged or unproven migrations: "
-                    + ", ".join(unproven)
-                    + "; use an empty development fixture or a merged build"
-                )
+        from_catalog = {} if development else _merged()
+        _authorize_upgrade(state, development, from_catalog)
         home.mkdir(parents=True, exist_ok=True)
         with _upgrade_lock(home):
             state = inspect(home)
-            if state.problem:
-                raise LauncherError(state.problem)
+            _authorize_upgrade(state, development, from_catalog)
+            if state.takeover is not None:
+                return _finish_takeover(home)
             if not state.pending and not state.sources:
                 return Upgrade(path=state.path, sources=(), backups=(), applied=(), floor=None)
-            if development and (state.path.exists() or state.sources):
-                raise LauncherError("development upgrades require an empty fixture home")
             if state.sources:
                 return _takeover(home, state)
             backups: tuple[Path, ...] = ()
