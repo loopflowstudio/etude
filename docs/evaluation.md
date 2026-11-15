@@ -690,8 +690,9 @@ one on a GPU, or weights too large to hold in every game process.
 - **Rows and answers are picklable values**: NumPy arrays, numbers, text,
   and tuples, lists and dicts of them. A type from a model library would make
   every game process import that library.
-- **`load` is called once per player**, in the agent process, the first time
-  a game asks for it, with the config the job gave. It is called for every
+- **`load` is called when a player is first used**, in the agent process,
+  with the config the job gave, and again only if that player was dropped
+  for memory (below). It is called for every
   player seated, a `Code` player included. A checkpoint player's folder or
   file is at `player.checkpoint.path`: the agent process runs on the machine
   that plays the games, and has no setting for where it runs. Like `play`,

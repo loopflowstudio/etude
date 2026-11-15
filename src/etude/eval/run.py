@@ -512,7 +512,9 @@ def play_together(
         return each.pending.popleft() if each.pending else None
 
     workers = active_games(
-        sum(len(each.pending) for each in plays), agents=any(each.agents for each in plays)
+        sum(len(each.pending) for each in plays),
+        agents=any(each.agents for each in plays),
+        memory_gb=memory_gb,
     )
     try:
         with _terminable():
