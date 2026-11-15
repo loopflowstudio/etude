@@ -729,6 +729,10 @@ and verifies those bytes as it does a checkpoint's, and the run finds
   The job holds the digests chosen when it was handed down. A file the
   producer replaces before delivery is refused: the attempt ends
   `input_undelivered` and `fit` is never called with different bytes.
+  Once the producer publishes its replacement in `out.json`,
+  `--job belief --seed 0 --resume` keeps the consumer's address and takes
+  the inputs selected by the declaration on that pass, with their current
+  digests; an ordinary pass leaves the failed run alone.
 - **The choice is made once.** A run is its address, so packs stored after
   `belief` was handed down do not train it again. Give a wider selection a
   new job name.
