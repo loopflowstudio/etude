@@ -19,7 +19,7 @@ from etude.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.experiment import observe
 from etude.launch.client import default
-from etude.launch.database import launcher_file
+from etude.launch.database import launcher_file, upgrade
 from etude.launch.schemas import Packet
 from etude.local import train
 from etude.spec import Runtime
@@ -96,6 +96,7 @@ def test_continue_explains_how_to_read_or_change_a_local_run(
     identity: str,
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
     assert main(["continue", "--run", *reference, "--until", "updates=30"]) == 1
     error = capsys.readouterr().err
     assert f"the launcher has no run {identity!r}" in error
@@ -116,6 +117,7 @@ def test_a_job_file_launches_runs_and_each_verb_reads_it_back(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
     for arm in ("small", "large"):
         (tmp_path / f"{arm}.toml").write_text(f"arm = {arm}")
     (tmp_path / "job.py").write_text(JOB_FILE)
@@ -156,6 +158,7 @@ def test_an_experiment_file_launches_runs_of_its_experiment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
     (tmp_path / "train.py").write_text(
         "from etude.train.records import Step\n"
         "from etude.train.tracking import track\n"
@@ -199,13 +202,14 @@ def eval_jobs(state):
         "job = None",
     ],
 )
-def test_invalid_python_file_is_refused_before_opening_the_database(
+def test_invalid_python_file_does_not_submit_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     definition: str,
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
     path = tmp_path / "job.py"
     path.write_text(definition)
     assert main(["launch", str(path)]) == 1
@@ -217,6 +221,7 @@ def test_machines_join_pools_and_this_computer_can_be_turned_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
     assert run(capsys, "pools") == ["local  this computer (default)"]
     assert run(capsys, "machine", "add", "bench", "bench")[-1] == "bench  bench"
     listed = run(capsys, "machine", "add", "second", "second", "--pool", "bench")
@@ -250,6 +255,7 @@ def test_default_target_and_owned_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
     assert run(capsys, "default", "--pool", "local") == ["default: pool local, rent none"]
     assert main(["default"]) == 1
     assert "needs a pool, an on-demand or both" in capsys.readouterr().err
@@ -287,6 +293,7 @@ def test_a_second_bucket_or_place_is_a_second_pool_not_a_second_provider(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
     image = "r/e@sha256:" + "a" * 64
     assert run(capsys, "providers") == []
     assert main(
@@ -496,6 +503,7 @@ def test_a_job_file_takes_parameters_and_records_them_on_each_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
     path = tmp_path / "job.py"
     path.write_text(
         r"""from __future__ import annotations
@@ -551,6 +559,7 @@ def training_jobs(width: int, fast: bool = False):
         and "Train a chosen width" in help
     )
     assert not (tmp_path / "home").exists()
+    upgrade(tmp_path / "home", development=True)
     assert main(["queue", str(path), "--width", "32", "--pool", "local", "--fast"]) == 0
     id = [line for line in capsys.readouterr().out.splitlines() if ": state from " not in line][
         0
@@ -571,6 +580,7 @@ def test_missing_launcher_runs_offer_a_reading_remedy(
     command: str,
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
     arguments = {
         "status": ["coin-seed-0"],
         "logs": ["--run", "coin-seed-0"],
@@ -673,6 +683,7 @@ def training_jobs(width: int = 32) -> list[Job]:
         "sweep/wide@7",
     ]
     assert all(request.params == {"width": 64} for request in requests)
+    upgrade(home, development=True)
     assert main(["queue", str(path), "--width", "64", "--job", "wide", "--seed", "7"]) == 0
     assert "sweep/wide@7  new, queued" in capsys.readouterr().out
     assert default().record("sweep/wide@7").launch.params == {"width": 64}

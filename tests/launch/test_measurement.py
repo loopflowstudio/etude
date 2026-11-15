@@ -22,7 +22,7 @@ from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch import cli, client
 from etude.launch.commands import Kind
-from etude.launch.database import launcher_file
+from etude.launch.database import launcher_file, upgrade
 from etude.launch.executor import Execution
 from etude.launch.measurement import span
 from etude.launch.providers.runpod.http import PodHTTP
@@ -43,14 +43,15 @@ def baseline(count: int) -> dict[str, Counts]:
 
     Status and runs are database-only reads; tick refreshes sessions. These fixed
     coefficients pin known debt, not a target or a model of physical HTTP calls.
-    Each read of a run also reads its machine's attempts once, for how many
+    Schema fencing adds a generation read per write transaction and serializes
+    standalone writes (2026-11-14). Each read of a run also reads its machine's attempts once, for how many
     shared it (2026-11-06). Storage-backed active attempts read their storage
     selection and one indexed delivery timestamp (2026-11-11).
     """
     return {
         "status": Counts(database=49 * count + 1),
         "runs": Counts(database=17 * count + 1),
-        "tick": Counts(provider=2 * count, bucket=count, database=25 * count + 13),
+        "tick": Counts(provider=2 * count, bucket=count, database=31 * count + 21),
     }
 
 
@@ -117,10 +118,10 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
         with pytest.raises(TimeoutError):
             b.scheduler.wait(id, timeout=0)
         wait = counting.snapshot()
-    assert ask == Counts(database=22)  # target: ask records intent without remote effects
+    assert ask == Counts(database=37)  # target: ask records intent without remote effects
     # Creation also reads provider safeguards for affordable time and the reserved budget,
     # and the status it returns reads the machine's attempts for how many shared it.
-    assert wait == Counts(provider=4, bucket=1, database=79)  # known debt: wait advances work
+    assert wait == Counts(provider=4, bucket=1, database=104)  # known debt: wait advances work
 
 
 def test_several_run_git_and_database_counts(
@@ -136,7 +137,7 @@ def test_several_run_git_and_database_counts(
             rent="l4",
         )
         result = counting.snapshot()
-    assert result == Counts(git=57, database=34)  # known debt: 19 git calls per run
+    assert result == Counts(git=57, database=49)  # known debt: 19 git calls per run
 
 
 @pytest.mark.parametrize(
@@ -151,7 +152,7 @@ def test_several_run_git_and_database_counts(
         # Client composition includes four modules each for Vast and Lium, the
         # request every provider shares, the storage socket policy it forwards
         # to workers, its smoke of jobs, and shared run-identity validation.
-        (["pools"], 57, ("numpy", "boto3", "etude.launch.worker")),
+        (["pools"], 58, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
             34,  # shared run/job records, out membership and storage socket policy
@@ -181,6 +182,8 @@ def test_command_import_counts(
             cap_usd=Decimal(0),
         )
         (directory / "packet.json").write_text(packet.model_dump_json())
+    if command == ["pools"]:
+        upgrade(tmp_path / "home", development=True)
     args = [value.format(directory=directory) for value in command]
     done = subprocess.run(
         [
@@ -313,6 +316,8 @@ def test_scale_counts(
 def test_counting_covers_physical_transports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Installed archives carry provenance without consulting the checkout's Git history.
+    monkeypatch.setattr("etude.launch.providers.package.frontier", lambda root: b"{}")
     b = bench(tmp_path)
     counting = Counting(b.store, b.service)
 

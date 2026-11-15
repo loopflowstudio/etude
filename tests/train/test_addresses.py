@@ -8,6 +8,7 @@ import pytest
 from etude.cli import main
 from etude.declarations import read_training_jobs, select_runs
 from etude.jobs import checkpoint_inputs_for
+from etude.launch.database import upgrade
 from etude.records import RunRecord
 from etude.run import RunFiles, declare, run_directories, runs, sync
 from etude.spec import Job, expand_runs
@@ -137,6 +138,7 @@ def test_queue_status_and_logs_use_the_selected_address(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
     file = tmp_path / "sweep.py"
     file.write_text(
         r"""from etude.jobs import TrainingJob
@@ -253,6 +255,7 @@ def test_local_declarations_need_no_hours_or_git_but_submission_and_smoke_do(
     packaged: bool,
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
     file = tmp_path / "sweep.py"
     file.write_text(SELECTION)
     if packaged:

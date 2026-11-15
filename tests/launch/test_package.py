@@ -15,6 +15,7 @@ import pytest
 from pydantic import ValidationError
 
 from etude.launch.client import _open
+from etude.launch.database import upgrade
 from etude.launch.environment import install
 from etude.launch.providers import bootstrap, package
 from etude.launch.providers.package import program_archive
@@ -66,6 +67,7 @@ def test_job_uses_its_own_python_path(tmp_path: Path, monkeypatch: pytest.Monkey
         "PATH", os.pathsep.join([str(Path(sys.executable).parent), str(bin), os.environ["PATH"]])
     )
     monkeypatch.setenv("VIRTUAL_ENV", str(Path(sys.executable).parent.parent))
+    upgrade(tmp_path / "launcher", development=True)
     scheduler = _open(tmp_path / "launcher")
     (id,) = scheduler.launch(Job(command="python", max_hours=0.01))
     assert scheduler.wait(id, every=0.05, timeout=10)[0].outcome == "succeeded"

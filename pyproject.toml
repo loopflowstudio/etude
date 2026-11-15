@@ -72,3 +72,5 @@ ban-relative-imports = "all"
 
 [tool.uv.sources]
 etude-sdk = { workspace = true }
+
+[tool.hatch.build.hooks.custom]

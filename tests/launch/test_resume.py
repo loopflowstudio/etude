@@ -11,6 +11,7 @@ from etude.cli import main
 from etude.errors import LauncherError
 from etude.jobs import TrainingJob
 from etude.launch.client import default
+from etude.launch.database import upgrade
 from etude.spec import RunRequest, Runtime, Until
 from etude.storage import default_root
 from etude.train.read import read
@@ -115,6 +116,7 @@ def test_cli_resume_runs_current_source_over_the_same_saved_state(
     monkeypatch.setattr("tests.launch.tasks.RUNTIME", Runtime(python=command_python))
     # CLI and worker execute the real recipe; the source repository and origin are disposable.
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
     repo = tmp_path / "repo"
     origin = tmp_path / "origin"
     repo.mkdir()

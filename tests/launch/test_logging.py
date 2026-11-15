@@ -21,7 +21,7 @@ import pytest
 
 from etude.errors import LauncherError
 from etude.launch import logging, source
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import launcher_file
 from etude.launch.environment import install
 from etude.launch.errors import LaunchError
 from etude.launch.logging import CLOSED, LIMIT, bound, bounded
@@ -53,7 +53,7 @@ from etude.launch.worker.courier import Courier
 from etude.launch.worker.main import work
 from etude.spec import RunRequest
 from tests.launch.counting import Counting, Counts, job_text
-from tests.launch.fake import bench
+from tests.launch.fake import bench, open_database
 from tests.launch.test_runpod_machines import Storage as MemoryStorage
 from tests.launch.test_scheduler import job
 from tests.launch.test_source import repository  # noqa: F401
@@ -76,7 +76,7 @@ def test_failed_preparation_survives_restart_and_does_not_consume_id(
     assert caught.value.runs == (requested.id,)
     assert b.store.runs() == () and b.service.creates == 0
     b.store.close()
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
     snapshot = scheduler.logs(refresh=True, run="baseline-seed-7")
     assert "source publication refused" in render(snapshot)
@@ -174,7 +174,7 @@ def test_all_attempts_retained_after_cleanup_and_storage_failure(
     assert before.complete
     assert len([s for s in before.streams if s.producer == "job"]) == 2
     b.store.close()
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
 
     def unavailable(*args: object, **kwargs: object) -> LogStream:
@@ -474,7 +474,7 @@ def test_log_reads_and_phases_never_drive_execution(tmp_path: Path) -> None:
     with counting.record():
         b.scheduler.logs(refresh=True, run=run)
         count = counting.snapshot()
-    assert count == Counts(bucket=3, database=17)
+    assert count == Counts(bucket=3, database=26)
     with counting.record():
         assert b.scheduler.diagnostics(run=run)
         assert b.scheduler.start_phases(run)
@@ -585,7 +585,7 @@ def test_diagnostics_use_positions_without_showing_another_attempts_error(
     assert all(error.id != d.id for d in snapshot.diagnostics)
     assert all(not stream.diagnostics for stream in snapshot.streams)
     b.store.close()
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
     after = scheduler.logs(refresh=True, run=first)
     assert "other job" in render(after)
@@ -762,7 +762,7 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
     b.run(1)
     assert b.store.machine(session.machine).deleted_at is not None
     b.store.close()
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
 
     def unavailable(*args: object, **kwargs: object) -> LogStream:
@@ -1062,7 +1062,7 @@ signal.pause()
     assert worker_log() == log.read_bytes()
     # Restart with the earlier open snapshot still cached, then refresh final output.
     b.store.close()
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
     after = scheduler.logs(refresh=True, run=identity)
     worker = next(s for s in after.streams if s.producer == "worker")
@@ -1083,7 +1083,7 @@ signal.pause()
     scheduler.tick()
     assert store.machine(session.machine).deleted_at is not None
     store.close()
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     scheduler = Scheduler(store, {"runpod": lambda held: b.service}, clock=b.clock)
 
     def unavailable(*args: object, **kwargs: object) -> LogStream:

@@ -15,8 +15,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import Database, launcher_file, upgrade
 from etude.launch.logs import snapshot_stream
 from etude.launch.machines import Allocation, Bill, Refused
 from etude.launch.records import (
@@ -303,7 +304,7 @@ def bench(
 ) -> Bench:
     clock = Clock()
     service = FakeService(clock, usd_per_hour)
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     free = FakeService(clock, "0")
     scheduler = Scheduler(
         store,
@@ -319,3 +320,19 @@ def bench(
         OnDemand(name="l4", template=L4, max_machines=max_machines, setup_seconds=0, slots=slots)
     )
     return Bench(clock, service, scheduler, store)
+
+
+def open_database(path: Path) -> Database:
+    """Initialize a controlled empty fixture explicitly; existing files only validate."""
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=path.parent) as temporary:
+            home = Path(temporary)
+            upgrade(home, development=True)
+            store = Database(launcher_file(home))
+            # Most scheduler fixtures declare their own inventory.
+            store._db.execute("DELETE FROM machines WHERE name='local'")
+            store._db.execute("DELETE FROM pools WHERE name='local'")
+            store.close()
+            launcher_file(home).replace(path)
+    return Database(path)

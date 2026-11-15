@@ -17,7 +17,7 @@ import pytest
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch.client import _open
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import Database, launcher_file, upgrade
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Execution, Executor
 from etude.launch.machines import MachineRequest, Refused
@@ -35,6 +35,7 @@ from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker.courier import run as run_courier
 from etude.spec import Job
+from tests.launch.fake import open_database
 from tests.launch.test_runpod_machines import Storage, released, repository, until
 
 NODE = "89044090-3d31-4c5a-a388-0d0a30aef107"
@@ -354,6 +355,7 @@ def test_offline_configuration_and_safeguards(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("LIUM_API_KEY", raising=False)
+    upgrade(tmp_path, development=True)
     scheduler = _open(tmp_path)
     try:
         scheduler.add_storage(
@@ -392,7 +394,7 @@ def _scheduler(store: Database, market: Marketplace, storage: Storage) -> Schedu
 
 def test_public_rental_budget_covers_fallback_timer(tmp_path: Path) -> None:
     market, storage = Marketplace(), Storage()
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     try:
         scheduler = _scheduler(store, market, storage)
         with pytest.raises(LauncherError):
@@ -420,7 +422,7 @@ def test_lium_executes_and_retains_outputs_before_server_deletion(
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "client"))
     market, storage = Marketplace(), Storage()
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     scheduler = _scheduler(store, market, storage)
     environments: list[dict[str, str]] = []
 
@@ -533,6 +535,7 @@ def test_failed_ssh_reply_can_recover_without_renting_again(
 
 def test_lium_cli_configuration_is_offline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    upgrade(tmp_path, development=True)
     monkeypatch.delenv("LIUM_API_KEY", raising=False)
     assert (
         main(
@@ -650,7 +653,7 @@ def test_unacknowledged_timer_still_allows_cleanup_at_startup_deadline(
             return cls.fromtimestamp(clock[0].timestamp(), UTC)
 
     monkeypatch.setattr("etude.launch.providers.lium.machines.datetime", Time)
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     scheduler = _scheduler(store, market, storage)
     monkeypatch.setattr(scheduler, "_clock", lambda: clock[0])
     scheduler.set_startup("5090", 10)

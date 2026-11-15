@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from etude.launch.database import upgrade
+
 
 @pytest.fixture(autouse=True)
 def _etude_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -15,7 +17,9 @@ def _etude_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.Mo
     monkeypatch.setenv(
         "PYTHONPATH", os.pathsep.join(filter(None, (root, os.environ.get("PYTHONPATH"))))
     )
-    monkeypatch.setenv("ETUDE_HOME", str(tmp_path_factory.mktemp("etude-home")))
+    home = tmp_path_factory.mktemp("etude-home")
+    upgrade(home, development=True)
+    monkeypatch.setenv("ETUDE_HOME", str(home))
 
 
 @pytest.fixture(scope="session")

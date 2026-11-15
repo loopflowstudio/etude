@@ -200,6 +200,9 @@ that loop after code changes. Afterwards remove the container and delete the
 
 ## Etude: launching an experiment file on this computer
 
+Initialize the empty lab launcher with `etude database upgrade --development`
+before its launcher commands. Reads never initialize it.
+
 A lab that runs typed jobs (`TrainingJob(name=..., train=train, config=...)`) is a git repo, outside the
 repo, with an isolated `ETUDE_HOME`:
 
@@ -392,3 +395,62 @@ one two-byte checkpoint and forces eviction). Send each pass's output to its own
 in one tool call can exceed its timeout on a busy Mac. Judge a suspected hang from the
 timestamps under `ETUDE_HOME/track/NAME/artifacts/agents/` and the run's `blocks/`,
 not from `ps` elapsed times.
+
+## Etude: explicit launcher upgrades
+
+Use an empty lab `ETUDE_HOME` and explicitly run `etude database upgrade
+--development` before launcher scenarios with unmerged SQL. Ordinary status
+and library opens must leave missing or outdated state unchanged. Real-data
+snapshots are inspection inputs only: never call wait, tick, cancel, rent or
+refresh against them. Keep remote training and guardians running. Recovery
+requires stopping scheduling and reconciling provider state.
+
+Use controlled additive and breaking migrations on the canonical file. Check
+that a compatible open writer keeps working, an incompatible writer stops,
+failed SQL rolls back, and backups and exports preserve the original facts.
+Inspect with a compatible writer holding committed WAL data; status must read
+it without copying the database. Normal SQLite sidecar coordination is allowed.
+Read-only inspection must not change scientific or operational records.
+
+Working route on the installed wheel: `uv build --wheel`, `uv venv --python 3.12`,
+`uv pip install` it, then drive `VENV/bin/etude` with `ETUDE_HOME` per scenario.
+Before merge, non-development `database upgrade` correctly refuses
+(`unmerged or unproven migrations: …`): `merged.json` is `{}` in a branch wheel,
+so upgrading an existing home and the backup/rollback path stay test-only until merge.
+A newer etude's migration, simulated by a fixture, must insert the ledger row
+(`name, sha256, floor, program, applied_at`) **and** set `PRAGMA user_version` to the
+row count, as `_apply` does; without the pragma an open writer's fence never sees it.
+For a returning user, `cp -c` (APFS clone) the retained consolidated snapshot into a
+lab home, and deny the network with
+`sandbox-exec -p '(version 1)(allow default)(deny network-outbound (remote ip))' CMD`.
+Copy a live old file only with `sqlite3 "file:SRC?mode=ro" ".backup DST"`.
+Old QA folders under `/tmp` can hold read-only prepared venvs; use a new folder.
+`etude usage` with no filter reads every transfer (about 135 s on 1.77 M rows); run it once.
+
+## Etude: rehearsing a launcher database upgrade on this machine's data
+
+The one-time conversion of this machine's pre-ledger files is separate from the
+shipped forward-upgrade API. Inventory and snapshot actual files first, using
+SQLite's read-only backup API. Rehearse the conversion in a private temporary
+home without scheduling. Compare distinct facts and allocation identities,
+including runs, sessions, rentals, attempts, cohorts and transfers. Deduplicate
+inherited facts and retain original policy definitions in recovery snapshots.
+Never infer exclusive ownership from a quiet WAL or heartbeat.
+
+Operational conversion requires stopping identified local scheduling clients,
+updating every relevant environment including Manabot, and retiring old active
+filenames to private recovery storage. Workers and guardians continue. Use
+merged code for the final schema, verify the one operational database through
+CLI and library reads across experiments, and never rent as part of validation.
+Do not complete the Task on merge alone.
+
+Before QA, read the PR's CI (`gh pr checks N`, `gh run view RUN --log-failed`).
+A `launcher.sqlite is not initialized` failure can mean a fixture sets its own
+`ETUDE_HOME` or calls `client._open(path)` without `upgrade(path,
+development=True)`. Conftest initializes only its autouse home. `etude smoke`
+initializes its own folder.
+
+When a pinned `Counts(database=N)` moves, compare statements with main. Use a
+temporary trace in `tests/launch/counting.py` to record normalized statements
+in a file named by an environment variable, then remove the trace. Fenced
+writes add `BEGIN IMMEDIATE`, `PRAGMA user_version` and `COMMIT`.

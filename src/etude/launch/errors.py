@@ -13,3 +13,11 @@ class LaunchError(LauncherError):
 
 class ProviderUnavailable(LauncherError):
     """No usable provider answer. This never means the requested thing is absent."""
+
+
+class SchemaAdvanced(LauncherError):
+    """A breaking upgrade fenced this process; program identifies its successor."""
+
+    def __init__(self, program: str | None) -> None:
+        super().__init__("etude was upgraded while this ran; run it again")
+        self.program = program
