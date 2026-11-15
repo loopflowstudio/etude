@@ -100,6 +100,9 @@ startup allowance: the installer must own its deadline and child cleanup, rather
 than an outer test timeout killing the client while installation continues.
 Scopes that change `TMPDIR` must restore `tempfile.tempdir` with the environment:
 Python caches its first temporary directory, which may be deleted on scope exit.
+Eval scratch and thread environments are configured only in dedicated child
+processes; pass their paths explicitly, since concurrent evals share the parent
+environment and tempfile cache.
 
 Commit messages say what changed and why in a sentence to a paragraph, not a
 list of edits. Never add Co-Authored-By or other AI attribution footers.
@@ -272,7 +275,7 @@ its name or id as a plain `str`.
 
 The launcher database changes only through a new SQL file in
 `src/etude/launch/migrations/`, named for what it does and never numbered;
-`docs/dev/launcher.md` ("Writing a migration") shows one. It may change until it merges to main; afterwards it never changes
+`docs/launcher.md` ("Writing a migration") shows one. It may change until it merges to main; afterwards it never changes
 (`scripts/check_migrations.py`). Explicit `database upgrade` advances the one
 operational `launcher.sqlite`; ordinary opens never migrate or select copies.
 Recovery snapshots are never scheduling inputs.
@@ -285,6 +288,3 @@ tolerated in Python, and no second schema definition sits beside the SQL
 files. An older etude may keep writing after an additive release, so new
 columns must read sensibly when empty; journal records a previous release's
 worker writes must still decode, so new fields on them take defaults.
-
-User guides open with their purpose and reader, cover only that subject and link
-to its owner. Keep runtime, storage and launcher internals in `docs/dev/`.

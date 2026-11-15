@@ -56,7 +56,7 @@ from etude.eval.records import (
     outcomes,
     player_checkpoints,
 )
-from etude.eval.resources import Cpus, agent_bytes, divide_cpus, resources, seconds_left
+from etude.eval.resources import Cpus, Resources, agent_bytes, divide_cpus, resources, seconds_left
 from etude.eval.result import EvalResult as EvalResult
 from etude.eval.result import Result as Result
 from etude.eval.result import Row
@@ -159,7 +159,7 @@ class EvalRun(Run):
                 for player in match.players
             )
         )
-        with _terminable(), resources(artifacts), ExitStack() as lifetime:
+        with _terminable(), resources(artifacts) as owned, ExitStack() as lifetime:
             cpus = divide_cpus(
                 sum(match.key not in self.done for match in self.matches),
                 agents=needs_loading,
@@ -167,9 +167,7 @@ class EvalRun(Run):
                 batch_inputs=definition.max_batch if definition else 32,
             )
             process = (
-                lifetime.enter_context(
-                    running_agents(definition, None, artifacts, (self.name,), cpus)
-                )
+                lifetime.enter_context(running_agents(definition, None, owned, (self.name,), cpus))
                 if needs_loading and definition is not None and cpus.games and cpus.threads
                 else None
             )
@@ -188,6 +186,7 @@ class EvalRun(Run):
                         else None,
                     ),
                 ),
+                resources=owned,
                 cpus=cpus,
                 agent_process=process,
             )
@@ -499,10 +498,8 @@ class Playing:
         self.skipped = len(self.run.matches) - len(self.pending)
 
 
-def _retain(name: str, report: Imports | Performance, root: Path) -> None:
+def _retain(name: str, report: Imports | Performance, directory: Path) -> None:
     """Keep reports beside group batches, or under a standalone run's artifacts."""
-    artifacts = os.environ.get("ETUDE_AGENTS_DIR")
-    directory = Path(artifacts) if artifacts else root / "artifacts" / "agents"
     try:
         DirectoryStorage(directory).put(name, report.model_dump_json().encode())
     except OSError as error:
@@ -512,6 +509,7 @@ def _retain(name: str, report: Imports | Performance, root: Path) -> None:
 def play_together(
     plays: Sequence[Playing],
     *,
+    resources: Resources,
     cpus: Cpus | None = None,
     agent_process: AgentProcess | None = None,
 ) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
@@ -583,10 +581,10 @@ def play_together(
             performance = Performance.model_validate_json(raw) if isinstance(raw, str) else None
         if imports is not None and imports.pid not in reported_imports:
             reported_imports.add(imports.pid)
-            _retain(f"game-imports-{imports.pid}.json", imports, each.run.files.root)
+            _retain(f"game-imports-{imports.pid}.json", imports, resources.artifacts)
         if performance is not None:
             # The run writer distinguishes retries and tournaments with identical matches.
-            _retain(f"protocol-{each.run.id}-{match.key}.json", performance, each.run.files.root)
+            _retain(f"protocol-{each.run.id}-{match.key}.json", performance, resources.artifacts)
         if each.agents and imports is not None and imports.warning and not warned_imports:
             print(imports.warning, file=sys.stderr, flush=True)
             warned_imports = True
@@ -638,7 +636,9 @@ def play_together(
         with _terminable():
             if workers > 0:
                 context = multiprocessing.get_context("spawn")
-                pool = ProcessPoolExecutor(workers, mp_context=context, initializer=initialize_game)
+                pool = ProcessPoolExecutor(
+                    workers, mp_context=context, initializer=initialize_game, initargs=(resources,)
+                )
                 running: dict[Future[Execution], tuple[Playing, Match]] = {}
 
                 def start() -> None:

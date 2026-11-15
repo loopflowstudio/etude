@@ -11,10 +11,6 @@ from typing import TypeVar
 F = TypeVar("F", bound=Callable[..., object])
 
 
-# Estimated machine hours that justify an eval allocation while training continues.
-DEFAULT_MIN_EVAL_HOURS = 2.0
-
-
 class Kind(StrEnum):
     read = "read"
     ask = "ask"

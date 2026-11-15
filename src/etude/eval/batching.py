@@ -7,7 +7,6 @@ game processes never import this module.
 
 from __future__ import annotations
 
-import os
 import selectors
 import socket
 import sys
@@ -23,7 +22,6 @@ from etude.call import Function
 from etude.errors import RetryRequested, explain
 from etude.eval.agents import AgentFailure, Answer, Request
 from etude.eval.forwards import Forwards
-from etude.eval.resources import THREAD_VARIABLES
 from etude.records import Record
 
 
@@ -195,12 +193,9 @@ def _run_agents(
     max_batch: int,
     max_delay: float,
     memory: int,
-    threads: int,
     control: Connection,
     artifacts: str,
 ) -> None:
-    for variable in THREAD_VARIABLES:
-        os.environ[variable] = str(threads)
     batches = _Batches(load.load(checkout), max_batch, max_delay, memory)
     peers: list[Connection] = []
     report = Path(artifacts, "batches.json").open("w")

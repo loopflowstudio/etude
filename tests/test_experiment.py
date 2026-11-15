@@ -515,9 +515,7 @@ def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
     training = trainer(bucket, tmp_path)
     save(training, bucket, tmp_path, range(1, 5))
 
-    (first,) = advance(
-        eval_, source=bucket, mode="launch", min_eval_hours=0, rent="cpu8", directory=local
-    )
+    (first,) = advance(eval_, source=bucket, mode="launch", rent="cpu8", directory=local)
     (run,) = launcher.launched
     assert first.launched == run.id and first.new == 3 * len(DEALS)
     # Checkpoints 2 and 4 reach the machine as files of the training run, by digest.
@@ -527,9 +525,7 @@ def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
     assert {i.run for i in run.job.inputs} == {"ppo/ppo-1"}
 
     # While it runs, a pass neither launches it again nor its matches.
-    (again,) = advance(
-        eval_, source=bucket, mode="launch", min_eval_hours=0, rent="cpu8", directory=local
-    )
+    (again,) = advance(eval_, source=bucket, mode="launch", rent="cpu8", directory=local)
     assert (again.new, again.running, again.launched) == (0, 3 * len(DEALS), None)
     assert len(launcher.launched) == 1
 
@@ -552,17 +548,15 @@ def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
     assert any(u.startswith(str(inputs)) for u in uris)
 
     launcher.outcome = "succeeded"
-    (done,) = advance(
-        eval_, source=bucket, mode="launch", min_eval_hours=0, rent="cpu8", directory=local
-    )
+    (done,) = advance(eval_, source=bucket, mode="launch", rent="cpu8", directory=local)
     assert (done.new, done.launched) == (0, None)
 
     # A failed launched pass stops the next one instead of spending again.
     save(training, bucket, tmp_path, range(5, 7))
-    advance(eval_, source=bucket, mode="launch", min_eval_hours=0, rent="cpu8", directory=local)
+    advance(eval_, source=bucket, mode="launch", rent="cpu8", directory=local)
     launcher.outcome = "failed"
     with pytest.raises(EtudeError, match="launched_pass_failed"):
-        advance(eval_, source=bucket, mode="launch", min_eval_hours=0, rent="cpu8", directory=local)
+        advance(eval_, source=bucket, mode="launch", rent="cpu8", directory=local)
 
 
 def test_a_failed_launched_pass_stops_only_a_pass_wanting_its_matches(
@@ -579,19 +573,16 @@ def test_a_failed_launched_pass_stops_only_a_pass_wanting_its_matches(
     training = trainer(bucket, tmp_path)
     save(training, bucket, tmp_path, range(1, 5))
 
-    (first,) = advance(
-        eval_, source=bucket, mode="launch", min_eval_hours=0, rent="cpu8", directory=local
-    )
+    (first,) = advance(eval_, source=bucket, mode="launch", rent="cpu8", directory=local)
     assert first.launched is not None
 
     # Now that pass failed too, and what it was given is still wanted.
     with pytest.raises(EtudeError, match="launched_pass_failed"):
-        advance(eval_, source=bucket, mode="launch", min_eval_hours=0, rent="cpu8", directory=local)
+        advance(eval_, source=bucket, mode="launch", rent="cpu8", directory=local)
     (again,) = advance(
         eval_,
         source=bucket,
         mode="launch",
-        min_eval_hours=0,
         rent="cpu8",
         directory=local,
         retry_failed=True,
@@ -630,7 +621,6 @@ def test_queued_passes_retain_every_job_while_capacity_is_unavailable(
         pool="occupied",
         directory=local,
         mode="queue",
-        min_eval_hours=0,
     )
     assert len(first) == 2 and all(p.launched is not None for p in first)
     assert all(launcher.status(str(run.id)).phase == "queued" for run in launcher.launched)
@@ -640,7 +630,6 @@ def test_queued_passes_retain_every_job_while_capacity_is_unavailable(
         pool="occupied",
         directory=local,
         mode="queue",
-        min_eval_hours=0,
     )
     assert all((p.running, p.launched) == (len(DEALS), None) for p in again)
     assert len(launcher.launched) == 1

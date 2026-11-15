@@ -682,7 +682,7 @@ def hold_group(
         if group.evaluations
         else base / "artifacts" / "agents"
     )
-    with _terminable(), resources(artifacts), ExitStack() as lifetime:
+    with _terminable(), resources(artifacts) as owned, ExitStack() as lifetime:
         opened: list[tuple[Evaluation, EvalRun, ExitStack]] = []
         for spec in group.evaluations:
             if spec.experiment is None:
@@ -777,7 +777,7 @@ def hold_group(
                     running_agents(
                         definition,
                         checkout,
-                        artifacts,
+                        owned,
                         [spec.tournament.name for spec, _ in pending],
                         cpus,
                     )
@@ -797,6 +797,7 @@ def hold_group(
             ]
             outcomes = play_together(
                 plays,
+                resources=owned,
                 cpus=cpus,
                 agent_process=agent_process,
             )

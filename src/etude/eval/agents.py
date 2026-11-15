@@ -8,7 +8,6 @@ This module's game-side imports are standard library only.
 from __future__ import annotations
 
 import multiprocessing
-import os
 import socket
 import sys
 import threading
@@ -19,12 +18,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing.connection import Connection, wait
 from multiprocessing.reduction import ForkingPickler
-from pathlib import Path
 from queue import SimpleQueue
 from typing import TYPE_CHECKING, cast
 
 from etude.errors import RetryRequested, explain
-from etude.eval.resources import Cpus, agent_bytes, seconds_left
+from etude.eval.resources import Cpus, Resources, agent_bytes, seconds_left
 
 if TYPE_CHECKING:
     from etude.call import Function
@@ -175,8 +173,9 @@ def _run(
     memory: int,
     threads: int,
     control: Connection,
-    artifacts: str,
+    resources: Resources,
 ) -> None:
+    resources.configure(threads)
     try:
         # Process entry point: keep durable records and model loading out of game clients.
         from etude.eval.batching import _run_agents  # noqa: PLC0415
@@ -188,9 +187,8 @@ def _run(
             max_batch,
             max_delay,
             memory,
-            threads,
             control,
-            artifacts,
+            str(resources.artifacts),
         )
     except Exception as error:
         print(f"etude: agents: {explain(error)}", file=sys.stderr, flush=True)
@@ -201,13 +199,13 @@ def _run(
 def running_agents(
     definition: AgentLoader,
     checkout: str | None,
-    artifacts: Path,
+    resources: Resources,
     tournaments: Sequence[str],
     cpus: Cpus,
 ) -> Iterator[AgentProcess]:
     if definition.load is None:
         raise ValueError("an agent process needs a checkpoint loader")
-    address = str(Path(os.environ["ETUDE_SCRATCH_DIR"], "agents.sock"))
+    address = str(resources.scratch / "agents.sock")
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe()
     process = context.Process(
@@ -221,7 +219,7 @@ def running_agents(
             agent_bytes(definition.memory_gb),
             cpus.threads,
             child,
-            str(artifacts),
+            resources,
         ),
     )
     process.start()

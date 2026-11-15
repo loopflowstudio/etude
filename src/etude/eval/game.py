@@ -31,7 +31,7 @@ from etude.eval.agents import (
 )
 from etude.eval.composition import build_agents
 from etude.eval.records import Match
-from etude.eval.resources import THREAD_VARIABLES, agent_bytes
+from etude.eval.resources import Resources, agent_bytes
 from etude.eval.result import Result, Tables
 from etude.records import Record
 
@@ -49,11 +49,10 @@ _startup_modules: frozenset[str] | None = None
 _first_importer: str | None = None
 
 
-def initialize_game() -> None:
+def initialize_game(resources: Resources) -> None:
     """Measure imports before the game process unpickles a match or agent address."""
     global _startup_modules
-    for variable in THREAD_VARIABLES:
-        os.environ[variable] = "1"
+    resources.configure(1)
     _startup_modules = frozenset(sys.modules)
     original = builtins.__import__
 

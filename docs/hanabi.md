@@ -1,7 +1,5 @@
 # Train and evaluate a Hanabi team
 
-This guide helps game authors train and evaluate a small cooperative Hanabi player with OpenSpiel and PyTorch.
-
 ```sh
 uv sync --extra train --extra eval --extra hanabi
 .venv/bin/etude train examples/hanabi.py --config '{"updates":20}'

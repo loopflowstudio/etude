@@ -215,11 +215,11 @@ def test_checkpoints_held_on_the_go_then_a_seating_added_in_batch(tmp_path: Path
     with ThreadPoolExecutor(2) as pool:
         played = list(pool.map(on_the_go, checkpoints[1:], later, ["second", "third"]))
     assert played == [per_checkpoint] * 2
-    # A fixed cost whatever the tournament's size: one checkpoint more in it changes nothing.
-    second, third = ((m.listings, m.requests, m.uploads) for m in later)
-    assert second == third
-    # Nothing of the tournament is read: only the run's own matches are listed, to resume.
-    assert (second[0], second[1]) == (1, 0)
+    # Durable delivery costs stay fixed; startup reports vary with processes used.
+    for measured in later:
+        assert (measured.listings, measured.requests) == (1, 0)
+        imports = sum("/artifacts/agents/game-imports-" in key for key in measured.uploaded)
+        assert measured.uploads - imports == 28
     # A retry on another empty machine replays nothing.
     again = MeasuredStorage(bucket)
     assert on_the_go(checkpoints[0], again, "retry") == 0

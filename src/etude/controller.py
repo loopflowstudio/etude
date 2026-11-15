@@ -4,7 +4,6 @@
 new runs. The scheduler's public records are the only memory of a hand-down.
 """
 
-import math
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -22,7 +21,6 @@ from etude.declarations import (
 )
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import TournamentRun, digest
-from etude.eval.resources import available_cpus
 from etude.eval.result import EvalResult
 from etude.eval.tournament import StoredRuns, played
 from etude.experiment import observe, read_tournament_lines
@@ -40,9 +38,7 @@ from etude.jobs import (
     with_experiment,
 )
 from etude.launch import client
-from etude.launch.commands import DEFAULT_MIN_EVAL_HOURS
 from etude.launch.listing import show_quote
-from etude.launch.records import CPU, GPU
 from etude.launch.server import selected
 from etude.run import located_runs
 from etude.smoke import smoke_file
@@ -60,7 +56,7 @@ class TournamentDecision:
     failed: int = 0
     played: int = 0
     launched: str | None = None
-    state: Literal["queued", "running", "would launch", "not queued", "waiting"] | None = None
+    state: Literal["queued", "running", "would launch", "not queued"] | None = None
     reason: str | None = None
     stopped: tuple[str, ...] = ()
 
@@ -121,34 +117,6 @@ def _resumed(
     return request, Decimal(0)
 
 
-def _eval_cpus(pool: str | None, rent: str | None) -> int | None:
-    """Known target capacity, from local records only; unknown targets stay undivided."""
-    if selected():
-        return None
-    scheduler = client.default()
-    if pool is None and rent is None:
-        target = scheduler.default_target()
-        pool, rent = target.pool, target.rent
-    counts: list[int | None] = []
-    if pool is not None:
-        for machine in scheduler.machines(pool):
-            hardware = machine.hardware
-            counts.append(
-                available_cpus()
-                if machine.kind == "local"
-                else hardware.vcpus
-                if isinstance(hardware, CPU)
-                else hardware.min_vcpus
-                if isinstance(hardware, GPU)
-                else None
-            )
-    if rent is not None:
-        counts.append(
-            next((r.template.vcpus for r in scheduler.ondemands() if r.name == rent), None)
-        )
-    return min(c for c in counts if c is not None) if counts and all(c for c in counts) else None
-
-
 def _print_lines(lines: dict[str | None, str]) -> None:
     """Print the training lines in declared order, once, and forget them."""
     for line in lines.values():
@@ -179,7 +147,6 @@ def advance(
     rent: str | None = None,
     directory: Path | str | None = None,
     retry_failed: bool = False,
-    min_eval_hours: float = DEFAULT_MIN_EVAL_HOURS,
     smoke: Smoke = Smoke(),
     mode: Literal["local", "launch", "queue"] = "local",
     max_usd: Decimal | None = None,
@@ -194,8 +161,6 @@ def advance(
     """One pass. Existing addresses stay put; explicit retries preserve delivered matches."""
     if max_usd is not None and (not max_usd.is_finite() or max_usd < 0):
         raise LauncherError("--max-usd must be a finite, nonnegative dollar limit")
-    if not math.isfinite(min_eval_hours) or min_eval_hours < 0:
-        raise LauncherError("--min-eval-hours must be finite and nonnegative")
     listed = source.keys("")
     declarations = located_runs(source, listed)
     state = observe(source, experiment.name, keys=listed, declarations=declarations)
@@ -330,8 +295,6 @@ def advance(
             )
             running.update(m.key for m in pending)
         decisions.append(done)
-    training_active = bool(new) or any(r.state in {"queued", "running"} for r in state.runs)
-    cpu_capacity = _eval_cpus(pool, rent) if mode != "local" and groups else None
     for group in groups.values():
         members = [each.spec for each in group]
         executables = [each.job for each in group]
@@ -349,27 +312,11 @@ def advance(
             identity = f"{stem}-{number}"
             number += 1
         request = RunRequest(id=identity, job=executable, smoke=smoke)
-        estimates = (
-            [stored.estimate_seconds(spec.tournament, spec.matches or ()) for spec in members]
-            if stored
-            else []
-        )
-        hours = None
-        if estimates and all(seconds is not None for seconds in estimates):
-            hours = sum(seconds or 0 for seconds in estimates) / (cpu_capacity or 1) / 3600
-        held_back: Literal["not queued", "waiting"] | None = None
+        held_back: Literal["not queued"] | None = None
         reason: str | None = None
         if not _fits(executable, committed, max_usd):
             held_back = "not queued"
             reason = f"--max-usd {max_usd} (${committed:.2f} committed)"
-        elif (
-            training_active
-            and hours is not None
-            and hours < min_eval_hours
-            and identity not in client.room([*planned, request], pool, rent=rent)
-        ):
-            held_back = "waiting"
-            reason = f"{len(keys)} eval matches, estimated {hours:.2f} machine hours below --min-eval-hours {min_eval_hours:g}; no machine has room and training is running"
         else:
             planned.append(request)
             taken.add(identity)

@@ -374,29 +374,6 @@ class StoredRuns:
                     folders.append(_Folder(place, run, folder, names, None, given.identity))
         return cls(experiment, folders)
 
-    def estimate_seconds(
-        self, tournament: Benchmark | RoundRobin, matches: Sequence[Match]
-    ) -> float | None:
-        """Estimated game time from this tournament's delivered seconds per game.
-
-        Legacy matches without timing are no estimate. The pass divides game
-        time by the target's known CPUs to estimate its machine window.
-        """
-        history = {
-            record.match.key: record
-            for folder in self._folders
-            if folder.held is not None
-            and folder.held.tournament.name == tournament.name
-            and folder.held.tournament.environment.identity == tournament.environment.identity
-            for record in self.records(folder)
-            if record.state == "done" and record.seconds is not None
-        }
-        if not history:
-            return None
-        seconds = sum(record.seconds or 0 for record in history.values())
-        games = sum(record.match.games for record in history.values())
-        return seconds / games * sum(match.games for match in matches)
-
     def tournaments(self) -> dict[str, list[TournamentRun]]:
         """What each eval run held for a tournament added, by tournament, in run order."""
         found: dict[str, dict[str, TournamentRun]] = {}

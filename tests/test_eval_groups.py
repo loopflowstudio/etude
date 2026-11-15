@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from etude.call import Function
 from etude.checkpoints import CheckpointRef
-from etude.controller import _eval_cpus, advance
+from etude.controller import advance
 from etude.declarations import Experiment, read_experiment
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval import resources as eval_resources
@@ -54,7 +54,6 @@ from etude.jobs import (
     with_experiment,
 )
 from etude.launch import client
-from etude.launch.commands import DEFAULT_MIN_EVAL_HOURS
 from etude.launch.records import Pool, Standing, Status
 from etude.records import ArtifactRef, RunRecord, RunSubmission
 from etude.smoke import Step, smoke_file
@@ -146,47 +145,186 @@ def test_a_pass_groups_by_agents_and_keeps_group_limits(
     assert not (tmp_path / "events").exists()
 
 
-def test_estimated_machine_hours_wait_without_remote_calls_then_threshold_queues(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("history", [False, True])
+@pytest.mark.parametrize("budget", ["1", "2"])
+def test_pending_group_queues_during_training_within_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, history: bool, budget: str
 ) -> None:
     b = bench(tmp_path)
     b.scheduler.add_pool(Pool(name="waiting"))
     monkeypatch.setattr(client, "_client", lambda: b.scheduler)
     monkeypatch.setattr(client, "standing", b.scheduler.standing)
     source = DirectoryStorage(tmp_path / "source")
-    training = track(experiment="grouped", run="train@0", directory=source.root)
 
     def declare(state: ExperimentState) -> list[EvalJob]:
         return [job("one", None), job("two", None)]
 
-    # Controlled historical durations: no sleep, resource pressure or artificial work.
-    for name in ("one", "two"):
-        historical = tournament(name)
-        with evaluating(
-            historical,
-            experiment="grouped",
-            enter=(Code(name="earlier"), checkpoint("right")),
-            directory=source.root,
-        ) as active:
-            for match in active.matches:
-                active.store(match, plain(match, []), seconds=1800)
+    if history:
+        # A tiny recorded pace must not postpone new matches during training.
+        for name in ("one", "two"):
+            with evaluating(
+                tournament(name),
+                experiment="grouped",
+                enter=(Code(name="earlier"), checkpoint("right")),
+                directory=source.root,
+            ) as active:
+                for match in active.matches:
+                    active.store(match, plain(match, []), seconds=0.01)
     definition = Experiment(name="grouped", eval=declare)
+    measured = MeasuredStorage(source)
     counts = Counting(b.store, b.service)
-    try:
+    with track(experiment="grouped", run="train@0", directory=source.root):
         with counts.record():
-            decisions = advance(definition, source=source, pool="waiting", mode="queue")
-        assert all(d.state == "waiting" and "2 eval matches" in (d.reason or "") for d in decisions)
-        assert b.scheduler.runs() == ()
+            decisions = advance(
+                definition,
+                source=measured,
+                pool="waiting",
+                rent="l4",
+                mode="queue",
+                max_usd=Decimal(budget),
+            )
+        assert (measured.listings, measured.requests) == (1, 10 if history else 2)
+        assert all(measured.got.count(key) == 1 for key in measured.got)
         observed = counts.snapshot()
         assert observed.provider == observed.bucket == observed.ssh == observed.git == 0
-        assert DEFAULT_MIN_EVAL_HOURS == 2
-        decisions = advance(
-            definition, source=source, pool="waiting", mode="queue", min_eval_hours=0
+        if budget == "1":
+            assert all(
+                d.state == "not queued" and "--max-usd" in (d.reason or "") for d in decisions
+            )
+            assert b.scheduler.runs() == ()
+        else:
+            assert all(d.new == 1 and d.state == "queued" for d in decisions)
+            assert decisions[0].launched == decisions[1].launched
+            assert len(b.scheduler.runs()) == 1
+            again = advance(
+                definition,
+                source=source,
+                pool="waiting",
+                rent="l4",
+                mode="queue",
+                max_usd=Decimal(budget),
+            )
+            assert all(d.new == 0 and d.running == 1 and d.launched is None for d in again)
+            assert len(b.scheduler.runs()) == 1
+
+
+@pytest.mark.parametrize("capacity", ["new", "free", "occupied", "unavailable"])
+def test_pending_group_uses_existing_room_or_one_rental(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capacity: str
+) -> None:
+    b = bench(tmp_path, slots=2 if capacity == "free" else 1)
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    if capacity in {"free", "occupied"}:
+        b.scheduler.launch(
+            RunRequest(
+                id="before", job=Job(command="true", repo=None, max_hours=1, max_usd=Decimal(1))
+            ),
+            rent="l4",
         )
-        assert len(b.scheduler.runs()) == 1
+        assert b.service.creates == 1
+
+    def declare(state: ExperimentState) -> list[EvalJob]:
+        return [job("one", None), job("two", None)]
+
+    source = DirectoryStorage(tmp_path / "source")
+    definition = Experiment(name="grouped", eval=declare)
+    with track(experiment="grouped", run="training", directory=source.root):
+        decisions = advance(
+            definition,
+            source=source,
+            rent="l4",
+            mode="queue" if capacity == "unavailable" else "launch",
+            max_usd=Decimal(2),
+        )
         assert decisions[0].launched == decisions[1].launched
-    finally:
-        training.finish("finished")
+        if capacity == "unavailable":
+            assert b.service.creates == 0
+            b.service.refuse = 1
+            b.scheduler.tick()
+            assert b.scheduler.read(str(decisions[0].launched)).phase == "queued"
+        assert b.service.creates == (2 if capacity == "occupied" else 1)
+        records = b.scheduler.runs()
+        assert len([r for r in records if r.experiment == "grouped"]) == 1
+        creates = b.service.creates
+        again = advance(definition, source=source, rent="l4", mode="queue", max_usd=Decimal(2))
+        assert all(d.new == 0 and d.running == 1 and d.launched is None for d in again)
+        assert b.scheduler.runs() == records
+        assert b.service.creates == creates
+
+
+@pytest.mark.parametrize("transient", [False, True])
+def test_group_admission_skips_deliveries_and_preserves_retry_rules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transient: bool
+) -> None:
+    b = bench(tmp_path)
+    b.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    source = DirectoryStorage(tmp_path / "source")
+    jobs = [
+        job(name, None).model_copy(
+            update={
+                "enter": (
+                    checkpoint("left"),
+                    checkpoint("right"),
+                    checkpoint("third"),
+                )
+            }
+        )
+        for name in ("one", "two")
+    ]
+    failed: set[str] = set()
+    delivered: set[str] = set()
+    for selected in jobs:
+        # Retain a partial delivery, then resume the remaining match and fail it.
+        with evaluating(
+            selected.tournament,
+            experiment="grouped",
+            enter=selected.enter,
+            directory=source.root,
+        ) as active:
+            *successes, last = active.matches
+            for match in successes:
+                active.store(match, plain(match, []), seconds=0.01)
+                delivered.add(match.key)
+            failed.add(last.key)
+        with (
+            pytest.raises(RetryRequested if transient else EtudeError),
+            evaluating(
+                selected.tournament,
+                experiment="grouped",
+                enter=selected.enter,
+                directory=source.root,
+                resume=True,
+            ) as active,
+        ):
+            if transient:
+                error = RetryRequested("fixture interrupted")
+                active.fail_pending(error)
+                raise error
+            active.fail(last, ValueError("fixture ordinary failure"))
+
+    def declare(state: ExperimentState) -> list[EvalJob]:
+        return jobs
+
+    definition = Experiment(name="grouped", eval=declare)
+    decisions = advance(definition, source=source, pool="waiting", mode="queue")
+    if not transient:
+        assert all(d.new == 0 and d.failed == 1 for d in decisions)
+        assert b.scheduler.runs() == ()
+        decisions = advance(
+            definition, source=source, pool="waiting", mode="queue", retry_failed=True
+        )
+    assert all(d.new == 1 and d.state == "queued" for d in decisions)
+    (record,) = b.scheduler.runs()
+    pending = {
+        match.key
+        for spec in evaluation_group(record.launch.spec).evaluations
+        for match in spec.matches or ()
+    }
+    assert pending == failed
+    assert pending.isdisjoint(delivered)
 
 
 def test_room_reads_existing_capacity_after_queued_work_without_remote_calls(
@@ -557,12 +695,16 @@ def test_temporary_files_work_after_game_scratch_is_removed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cached: bool, failed: bool
 ) -> None:
     monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setenv("ETUDE_SCRATCH_DIR", "parent scratch")
+    monkeypatch.setenv("ETUDE_AGENTS_DIR", "parent artifacts")
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path) if cached else None)
     with pytest.raises(RuntimeError, match="game failed") if failed else nullcontext():
-        with resources(tmp_path / "artifacts"):
-            scratch = Path(os.environ["ETUDE_SCRATCH_DIR"])
+        with resources(tmp_path / "artifacts") as owned:
+            scratch = owned.scratch
             with tempfile.TemporaryDirectory() as during:
-                assert Path(during).parent == scratch
+                assert Path(during).parent == tmp_path
+            assert os.environ["ETUDE_SCRATCH_DIR"] == "parent scratch"
+            assert os.environ["ETUDE_AGENTS_DIR"] == "parent artifacts"
             if failed:
                 raise RuntimeError("game failed")
     assert not scratch.exists()
@@ -813,13 +955,15 @@ from tempfile import TemporaryDirectory
 from etude.call import Function
 from etude.eval.agents import Answer
 from etude.eval.game import initialize_game, play_match
+from etude.eval.resources import Resources
 from etude.eval.records import Match
+from pathlib import Path
 from tests.eval.arithmetic import checkpoint
 
-initialize_game()
 
 counts = {"sent": 0, "received": 0}
 with TemporaryDirectory(dir="/tmp", prefix="etude-test-") as scratch, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+    initialize_game(Resources(scratch=Path(scratch), artifacts=Path(scratch)))
     address = scratch + "/a.sock"
     listener.bind(address)
     listener.listen()
@@ -896,26 +1040,6 @@ def test_a_failed_load_is_not_attempted_again_in_the_run() -> None:
     finally:
         parent.close()
         child.close()
-
-
-def test_admission_reads_known_target_cpus_without_provider_calls(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    b = bench(tmp_path)
-    monkeypatch.setattr(client, "default", lambda: b.scheduler)
-    ondemand = next(r for r in b.scheduler.ondemands() if r.name == "l4")
-    b.scheduler.add_ondemand(
-        ondemand.model_copy(
-            update={"name": "cpu8", "template": ondemand.template.model_copy(update={"vcpus": 8})}
-        )
-    )
-    counts = Counting(b.store, b.service)
-    with counts.record():
-        assert _eval_cpus(None, "cpu8") == 8
-    assert counts.snapshot().provider == counts.snapshot().ssh == 0
-    b.scheduler.add_pool(Pool(name="unknown"))
-    b.scheduler.add_machine("cpu", "fixture-host", pool="unknown")
-    assert _eval_cpus("unknown", "cpu8") is None
 
 
 @pytest.mark.parametrize("version", [1, 2])

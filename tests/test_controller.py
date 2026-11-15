@@ -450,8 +450,6 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         "waiting",
         "--source",
         str(source.root),
-        "--min-eval-hours",
-        "0",
     ]
     assert main(args) == 0
     (held,) = b.scheduler.runs()

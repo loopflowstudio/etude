@@ -1,8 +1,8 @@
 """Process environment for game and agent processes.
 
 `divide_cpus` returns game and inference-thread budgets for startup and dispatch.
-`resources` supplies temporary fast scratch and restores the caller's
-environment when the group finishes.
+`resources` owns temporary fast scratch; `Resources.configure` sets child-only
+environment before author imports, leaving the calling process untouched.
 Observations are kept in the run's durable artifact folder by the group owner.
 """
 
@@ -148,29 +148,34 @@ def divide_cpus(
     return Cpus(games=games, threads=max(1, cpus - games) if shared else 0)
 
 
+@dataclass(frozen=True)
+class Resources:
+    """One eval's scratch lifetime and durable observation destination."""
+
+    scratch: Path
+    artifacts: Path
+
+    def configure(self, threads: int) -> None:
+        """Configure a dedicated child before loading author code."""
+        os.environ.update({name: str(threads) for name in THREAD_VARIABLES})
+        os.environ.update(
+            TMPDIR=str(self.scratch),
+            ETUDE_SCRATCH_DIR=str(self.scratch),
+            ETUDE_AGENTS_DIR=str(self.artifacts),
+        )
+        # Libraries using tempfile must share this child's scratch lifetime.
+        tempfile.tempdir = str(self.scratch)
+
+
 @contextmanager
-def resources(artifacts: Path) -> Iterator[None]:
-    """Give game processes one thread each and private temporary scratch."""
+def resources(artifacts: Path) -> Iterator[Resources]:
+    """Own scratch until all game and agent children have exited.
+
+    Parent environment and tempfile defaults are process-wide, so overlapping
+    evals must pass their paths to child initialization instead of changing them.
+    """
     artifacts.mkdir(parents=True, exist_ok=True)
     fast = Path("/dev/shm")
     directory = fast if fast.is_dir() and os.access(fast, os.W_OK) else None
-    previous_tempdir = tempfile.tempdir
     with tempfile.TemporaryDirectory(prefix="etude-eval-", dir=directory) as scratch:
-        values = {name: "1" for name in THREAD_VARIABLES}
-        values.update(
-            TMPDIR=scratch, ETUDE_SCRATCH_DIR=scratch, ETUDE_AGENTS_DIR=str(artifacts.resolve())
-        )
-        previous = {name: os.environ.get(name) for name in values}
-        os.environ.update(values)
-        # tempfile caches TMPDIR on first use, including calls made by libraries.
-        # Keep that cache within the same lifetime as the scratch environment.
-        tempfile.tempdir = None
-        try:
-            yield
-        finally:
-            for name, value in previous.items():
-                if value is None:
-                    os.environ.pop(name, None)
-                else:
-                    os.environ[name] = value
-            tempfile.tempdir = previous_tempdir
+        yield Resources(scratch=Path(scratch), artifacts=artifacts.resolve())

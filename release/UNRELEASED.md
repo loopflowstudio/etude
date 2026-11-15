@@ -111,7 +111,7 @@ experiment; cohorts, which sat between, are removed.
   select copied queues. All compatible clients share `launcher.sqlite`. Workers
   and guardians keep running during upgrades. Cohort evidence remains stored.
   Unmerged SQL requires an empty
-  development fixture. See [Upgrading Etude](../docs/dev/launcher.md#upgrading-etude).
+  development fixture. See [Upgrading Etude](../docs/launcher.md#upgrading-etude).
 - **`~/.etude/experiments/launched.json` is gone.** In-flight eval matches
   are read from the launcher's run records; delete the file.
 
@@ -166,14 +166,13 @@ fields describe greedy/sample choice and temperature. The build hook returns
 any author object; Etude never calls it. Every game uses `play(match, agents)`.
 Code and API players can declare `Agents(build=build)` without a loader; a
 code-only group starts no agent process
-([Agents](../docs/dev/evaluation.md#agents)).
+([Agents](../docs/evaluation.md#agents)).
 
-`etude launch` and `etude queue` no longer rent for every few new matches.
-The eval run is handed down when a machine that already exists has room, when
-estimated new work reaches `--min-eval-hours H` (default: 2 hours), or when
-no training run of the experiment is queued or running. Otherwise each tournament's line says how
-many matches wait and why, and a later pass finds them again
-([Experiments](../docs/dev/evaluation.md#experiments)).
+`etude launch` and `etude queue` submit compatible pending eval matches as one
+run within `--max-usd`. Existing capacity is reused; a rental target permits
+renting when no machine has room, regardless of training activity or historical
+match duration. Without a rental target, the run waits in the pool's queue
+([Experiments](../docs/evaluation.md#experiments)).
 
 ### Upgrade
 
@@ -195,11 +194,11 @@ many matches wait and why, and a later pass finds them again
   `EXPERIMENT/TOURNAMENT-DIGEST`, and every tournament it plays prints that
   one name. Each tournament's tables are in its own eval run below that
   folder; `statsdb` and reports find them without change.
-- **Evals may now wait while training runs.** A command that used to rent
-  for evals at once prints `waiting: ...` instead when no machine has room.
-  With no recorded match durations the pass rents immediately.
-  Pass `--min-eval-hours 0` to admit any estimated work, or use
-  `--watch` so the pass after training ends launches them.
+- **Small eval backlogs can rent immediately.** `--min-eval-hours` is
+  removed from `launch` and `queue`. Pending matches no longer wait for an
+  estimated amount of work or for training to finish. Existing capacity,
+  `--max-usd`, rental limits and retry rules still apply; `queue` continues
+  to record the request and return without renting itself.
 - **A run's limits are its jobs' summed.** The eval run's `max_hours` and
   `max_usd` are the totals of the eval jobs it plays, and `--max-usd` admits
   it as one run.
@@ -282,7 +281,7 @@ with the same `every`, `at`, `tagged` and `last` selectors as a run.
 are refused. Reports resolve other experiments' seats from the same source;
 smoke names those seats as not smoked. A run publishes a second policy with
 `run.checkpoint(..., role="exploiter")`.
-See [Policies](../docs/dev/evaluation.md#policies).
+See [Policies](../docs/evaluation.md#policies).
 
 A checkpoint's key now includes its experiment:
 `EXPERIMENT/RUN/checkpoints/NAME` (nondefault roles add `/roles/ROLE`
