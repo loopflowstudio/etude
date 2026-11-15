@@ -11,7 +11,8 @@ from typing import cast
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
 from etude.call import Function
-from etude.eval.agents import Agent, AgentConnection, _RemoteAgent
+from etude.checkpoints import CheckpointRef
+from etude.eval.agents import Forward
 from etude.eval.records import CheckpointPlayer, Composition, Player, player_checkpoints
 
 _PLAYER: TypeAdapter[Player] = TypeAdapter(Player)
@@ -63,27 +64,26 @@ def _restore(value: object) -> object:
 
 def build_agents(
     players: Sequence[Player],
-    connection: AgentConnection,
-    tournament: str,
-    match: str,
+    bind: Callable[[CheckpointRef, str], Forward] | None,
     build: Function | None,
     checkout: str | None,
-) -> Sequence[Agent]:
+) -> Sequence[object]:
     hook = (
         None
         if build is None
-        else cast(Callable[[object, Mapping[str, Agent]], Agent], build.load(checkout))
+        else cast(Callable[[object, Mapping[str, Forward]], object], build.load(checkout))
     )
-    agents: list[Agent] = []
+    agents: list[object] = []
     for player in players:
-        leaves: dict[str, Agent] = {
-            checkpoint.key: _RemoteAgent(connection, checkpoint, tournament, match, player.key)
+        leaves: dict[str, Forward] = {
+            checkpoint.key: bind(checkpoint, player.key)
             for checkpoint in player_checkpoints(player)
+            if bind is not None
         }
-        if isinstance(player, CheckpointPlayer) and not player.config:
+        if isinstance(player, CheckpointPlayer) and not player.config and bind is not None:
             agents.append(leaves[player.checkpoint.key])
         elif hook is None:
-            raise ValueError("a composed or code player needs Agents(build=)")
+            agents.append(_restore(player))
         else:
             agents.append(hook(_restore(player), leaves))
     return agents

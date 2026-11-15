@@ -9,8 +9,9 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel
 
 from etude.eval.records import (
     Environment,
@@ -39,12 +40,13 @@ def environment(
     return Environment(name=name, files=digest_files(files), config=as_config(config))
 
 
-def evaluate[C: BaseModel | Mapping[str, JsonValue]](
+def evaluate(
     *,
     experiment: str,
     environment: Environment,
     matches: Sequence[Match],
-    play: Callable[[Match[C]], Tables | Result],
+    play: Callable[..., Tables | Result],
+    agents: Agents | None = None,
     workers: int = 1,
     run: str | None = None,
     directory: Path | str | None = None,
@@ -84,7 +86,7 @@ def evaluate[C: BaseModel | Mapping[str, JsonValue]](
         rollups=rollups,
         resume=True,
     ) as active:
-        return active.play(play)
+        return active.play(play, agents=agents)
 
 
 def __getattr__(name: str) -> object:
@@ -97,3 +99,7 @@ def __getattr__(name: str) -> object:
         )
         return EvalResult
     raise AttributeError(name)
+
+
+if TYPE_CHECKING:
+    from etude.jobs import Agents

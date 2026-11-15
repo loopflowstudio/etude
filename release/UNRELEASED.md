@@ -1,5 +1,7 @@
 # Unreleased
 
+These notes help existing Etude users upgrade their experiments to the next release.
+
 ## One experiment-file model
 
 An experiment file declares its work in three functions with fixed names, and
@@ -109,25 +111,28 @@ experiment; cohorts, which sat between, are removed.
   select copied queues. All compatible clients share `launcher.sqlite`. Workers
   and guardians keep running during upgrades. Cohort evidence remains stored.
   Unmerged SQL requires an empty
-  development fixture. See [Upgrading Etude](../docs/launcher.md#upgrading-etude).
+  development fixture. See [Upgrading Etude](../docs/dev/launcher.md#upgrading-etude).
 - **`~/.etude/experiments/launched.json` is gone.** In-flight eval matches
   are read from the launcher's run records; delete the file.
 
 Unchanged: `Job.runs(...)`, `ExperimentState.runs`, the `etude runs` command,
-`report()`, `play(match)`, typed flags on `training_jobs`, a job's command and
+`report()`, typed flags on `training_jobs`, a job's command and
 identity, and everything already stored.
 
 ## Eval jobs share one run, and Etude runs their agents
 
 ```python
 # game.py: imports no model library
-def play(match: Match[Deal], agents: Sequence[Agent]) -> Tables:
+def play(match: Match[Deal], agents: Sequence[Forward]) -> Tables:
     ...
-    [action] = agents[seat].act([row])  # the row carries its own seed
+    [logits] = agents[seat]([observation])
+    action = choose(logits, random)  # game-side randomness seeded from match.seed
 
 
 # models.py: may import Torch
-def load(checkpoint: CheckpointRef) -> Agent: ...  # anything with act(rows)
+def load(
+    checkpoint: CheckpointRef,
+) -> Forward: ...  # deterministic list of inputs -> list of outputs
 
 
 # capacity.py
@@ -152,23 +157,29 @@ machine, instead of one run per tournament, and their tournaments play at
 once.
 
 An eval job may declare `agents=Agents(load=..., build=...)`. You write the
-game, `play(match, agents)`, and how a checkpoint is loaded, `load(checkpoint)`, which returns anything with `act(rows)`. Etude runs the rest: light
-game processes that import only `play`'s module, one agent process that loads
-each checkpoint once, and batches of rows per checkpoint (32 rows or 0.005 seconds
-by default), drawn from every game and tournament in the run. `act` must
-answer each row as if it were alone. An eval job without `agents=` calls
-`play(match)` as before, in the same game processes
-([Agents](../docs/evaluation.md#agents)).
+game, `play(match, agents)`, and how a checkpoint is loaded, `load(checkpoint)`, which returns a deterministic callable forward. Etude runs the rest: light
+game processes and shared checkpoint batching on visible NVIDIA hardware;
+on CPUs each game process caches and calls the same checkpoint forwards directly.
+The forward returns one output per input, in order, independently of batch
+composition. Your game owns sampling, seeded from `match.seed`; player-record
+fields describe greedy/sample choice and temperature. The build hook returns
+any author object; Etude never calls it. Every game uses `play(match, agents)`.
+Code and API players can declare `Agents(build=build)` without a loader; a
+code-only group starts no agent process
+([Agents](../docs/dev/evaluation.md#agents)).
 
 `etude launch` and `etude queue` no longer rent for every few new matches.
 The eval run is handed down when a machine that already exists has room, when
 estimated new work reaches `--min-eval-hours H` (default: 2 hours), or when
 no training run of the experiment is queued or running. Otherwise each tournament's line says how
 many matches wait and why, and a later pass finds them again
-([Experiments](../docs/evaluation.md#experiments)).
+([Experiments](../docs/dev/evaluation.md#experiments)).
 
 ### Upgrade
 
+- **Update every game to `play(match, agents)`.** The one-argument game signature
+  is removed. `build(player, leaves)` returns whatever your game uses;
+  `load(checkpoint)` returns a callable forward, never an action sampler.
 - **Remove `workers=`** from `EvalJob(...)` and `evaluating(...)`; it is
   refused. Etude owns game concurrency: CPU and memory allowances bound CPU
   games; on a visible NVIDIA GPU, games fill the declared batch, bounded by
@@ -204,7 +215,7 @@ many matches wait and why, and a later pass finds them again
   machine failed rather than the game (unfinished at the run's time limit or
   SIGTERM, a failed delivery, an agent process that exited, or code that
   raised `etude.errors.RetryRequested`) is failed with `retry=True`, and the
-  next pass plays it again. An ordinary error from `play`, `load` or `act`
+  next pass plays it again. An ordinary error from `play`, `load` or the forward
   is `retry=False` and waits for `--retry-failed`, as before.
 - **`etude.jobs.with_matches` is removed.** The pass builds the run itself.
 
@@ -213,36 +224,38 @@ Completed matches are sealed and offered to storage individually. Container
 CPU quotas set CPU game capacity and model thread budgets; a visible NVIDIA
 GPU selects batch-sized game capacity instead. The loader selects its device, and
 `ETUDE_SCRATCH_DIR` supplies temporary fast scratch. A run with agents keeps
-which rows shared each batch in `artifacts/agents/batches.json`.
+which inputs shared each batch in `artifacts/agents/batches.json`.
 Per-match protocol reports retain play intervals on the host's monotonic
 clock, including games without agents, so concurrent games and the final
 tail can be reconstructed. Killed games may leave no interval.
-On CPUs, a small model plays faster without `agents=`: with a frozen Manabot
-Small checkpoint on 32 CPUs, one agent process reached at most about half the
-rate of a process per game holding the model. A frozen Large GPU panel favored
-separate game processes with shared inference over threads beside model copies;
-model preparation and active-game counts also differed. Without agents, a game costs what it does in a plain process pool:
-158 ms per decision under Etude against 160 ms in a raw 28-process pool on the
-same frozen panel, with identical trajectories.
+The CPU placement choice follows a frozen 64-game Small-checkpoint comparison
+on one 32-vCPU host. Direct Etude loading took 46.36 s (4,970 games/hour),
+shared loading with 2/4/7 agent processes took 89.00/72.70/66.67 s, and the raw
+pool took 57.07 s. All five arms matched all 10,044 decisions and trajectories.
+Mean inference costs were 66.59 ms/decision direct versus 79.30 for the best
+shared arm. This is one shuffled panel on one host; it does not establish a
+universal CPU model-size crossover. GPU placement retains the earlier fair
+Large-checkpoint results below.
 
 `matches.retry` distinguishes retryable infrastructure failures from ordinary
 game errors without adding another status. Older match records default it to
 false. The derived statsdb cache rebuilds from schema 14 or 15 to 16 automatically.
-Game processes load play's defining module; for a job with agents, heavy
+Game processes load play's defining module; for a job using shared inference, heavy
 imports there produce one warning per run naming their importer.
 
 Checkpoint seats now play directly: `Held()` replaces a bare inference seat;
 relative seats take no `inference=`. Author records wrap seats to describe
 search or other composition. `compose(record)` preserves the wrapper type and
 fields in identity, replacing every leaf with its resolved checkpoint key, and
-names the player by them, such as `game:Shift(over=small, amount=1)`.
+names the player by them, such as `game:Sampled(over=small, temperature=0.5)`.
+The record declares the player and its identity; the built object is what `play` calls.
 Qualified type names distinguish wrappers from different modules. Resuming a
 run accepts relocated checkpoints throughout player trees and relative
 pairings, while still checking their fingerprints and authored settings.
-`Agents(load=load, build=build)` calls `load(checkpoint)` in the agent process
+`Agents(load=load, build=build)` calls `load(checkpoint)` where Etude places inference
 and `build(player, leaves)` in each game. The hook receives the author's tree
-and shared remote checkpoint agents; nested and bare players reuse those
-networks and their batches. `Agents.config` and `Inference` are removed.
+and checkpoint forwards; nested and bare players reuse those
+networks and their batches where shared. `Agents.config` and `Inference` are removed.
 Released inference-configured results retain their keys and stay delivered.
 ## Policies by name
 
@@ -269,7 +282,7 @@ with the same `every`, `at`, `tagged` and `last` selectors as a run.
 are refused. Reports resolve other experiments' seats from the same source;
 smoke names those seats as not smoked. A run publishes a second policy with
 `run.checkpoint(..., role="exploiter")`.
-See [Policies](../docs/evaluation.md#policies).
+See [Policies](../docs/dev/evaluation.md#policies).
 
 A checkpoint's key now includes its experiment:
 `EXPERIMENT/RUN/checkpoints/NAME` (nondefault roles add `/roles/ROLE`

@@ -79,7 +79,7 @@ def weights(checkpoint: Path) -> bytes:
     return checkpoint.read_bytes()
 
 
-def play(match: Match) -> Tables:
+def play(match: Match, agents: list[object]) -> Tables:
     # A model's checkpoint is on this machine; the row says how big its weights are.
     sizes = [
         len(weights(seated.checkpoint.path)) if isinstance(seated, CheckpointPlayer) else 0

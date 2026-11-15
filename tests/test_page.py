@@ -158,7 +158,7 @@ def test_a_folder_holds_the_files_that_define_eval_or_report_and_none_is_run(
     experiment_file(folder, "lab", REPORTED)
     experiment_file(folder / "more", "ladder", "def eval_jobs(state):\n    return []\n")
     # A helper module and an experiment file are no experiments, and are never run to find out.
-    experiment_file(folder, "games", "raise SystemExit('run')\n\ndef play(match): ...\n")
+    experiment_file(folder, "games", "raise SystemExit('run')\n\ndef play(match, agents): ...\n")
     experiment_file(folder, "job", "raise SystemExit('run')\n\ndef train(config): ...\n")
     experiment_file(folder / ".venv", "vendored", REPORTED)
     assert [f.relative_to(folder) for f in experiment_files(folder)] == [

@@ -36,7 +36,7 @@ import json
 import os
 import re
 import warnings
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,6 +82,8 @@ from etude.storage import DirectoryStorage, Storage, default_root
 
 if TYPE_CHECKING:
     import duckdb
+
+    from etude.jobs import Agents
 
 # Every eval run's `etude.eval.records.Environment`.
 _ENVIRONMENT_FILE = "environment.json"
@@ -198,11 +200,12 @@ def evaluating(
         yield active
 
 
-def hold[C: BaseModel | Mapping[str, JsonValue]](
+def hold(
     tournament: Benchmark | RoundRobin,
     *,
     experiment: str,
-    play: Callable[[Match[C]], Tables | Result],
+    play: Callable[..., Tables | Result],
+    agents: Agents | None = None,
     checkpoint: CheckpointRef | None = None,
     checkpoints: Sequence[CheckpointRef] = (),
     enter: Sequence[Player] = (),
@@ -235,7 +238,7 @@ def hold[C: BaseModel | Mapping[str, JsonValue]](
         lines=lines,
         resume=True,
     ) as active:
-        return active.play(play)
+        return active.play(play, agents=agents)
 
 
 class Delivered(Record):

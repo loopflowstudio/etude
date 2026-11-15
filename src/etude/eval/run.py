@@ -21,7 +21,7 @@ from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
@@ -29,11 +29,9 @@ from queue import Empty
 from types import FrameType
 from typing import TYPE_CHECKING, Literal, NoReturn, cast
 
-from pydantic import BaseModel, JsonValue
-
 from etude.call import Function
 from etude.errors import EtudeError, RetryRequested, explain, sanitize
-from etude.eval.agents import AgentProcess
+from etude.eval.agents import AgentFailure, AgentProcess, running_agents
 from etude.eval.block import (
     Block,
     Staging,
@@ -58,7 +56,7 @@ from etude.eval.records import (
     outcomes,
     player_checkpoints,
 )
-from etude.eval.resources import Cpus, divide_cpus, seconds_left
+from etude.eval.resources import Cpus, agent_bytes, divide_cpus, resources, seconds_left
 from etude.eval.result import EvalResult as EvalResult
 from etude.eval.result import Result as Result
 from etude.eval.result import Row
@@ -71,6 +69,8 @@ from etude.storage import DirectoryStorage, Storage, run_prefix
 
 if TYPE_CHECKING:
     import duckdb
+
+    from etude.jobs import Agents
 
 # Etude's own tables, which `etude.eval.query.statsdb` keeps beside the author's.
 ETUDE_TABLES = (
@@ -141,17 +141,60 @@ class EvalRun(Run):
         )
         self._report.write()
 
-    def play[C: BaseModel | Mapping[str, JsonValue]](
-        self, play: Callable[[Match[C]], Tables | Result]
+    def play(
+        self, play: Callable[..., Tables | Result], *, agents: Agents | None = None
     ) -> EvalResult:
-        """Play the selected matches once, skipping this run's durable results on resume."""
+        """Play selected matches with constructed seats, skipping durable results on resume."""
         authored = inspect.unwrap(play)
         function = Function(module=authored.__module__, name=authored.__qualname__)
-        results = play_together((Playing(run=self, play=function),))
-        result = results[0]
-        if isinstance(result, (EtudeError, RetryRequested)):
-            raise result
-        return result
+        definition = agents.plain(None) if agents is not None else None
+        artifacts = self.files.root / "artifacts" / "agents"
+        needs_loading = (
+            definition is not None
+            and definition.load is not None
+            and any(
+                player_checkpoints(player)
+                for match in self.matches
+                if match.key not in self.done
+                for player in match.players
+            )
+        )
+        with _terminable(), resources(artifacts), ExitStack() as lifetime:
+            cpus = divide_cpus(
+                sum(match.key not in self.done for match in self.matches),
+                agents=needs_loading,
+                memory_gb=definition.memory_gb if definition else None,
+                batch_inputs=definition.max_batch if definition else 32,
+            )
+            process = (
+                lifetime.enter_context(
+                    running_agents(definition, None, artifacts, (self.name,), cpus)
+                )
+                if needs_loading and definition is not None and cpus.games and cpus.threads
+                else None
+            )
+            results = play_together(
+                (
+                    Playing(
+                        run=self,
+                        play=function,
+                        agents=process.address if process else None,
+                        build=definition.build if definition else None,
+                        load=definition.load
+                        if definition and needs_loading and not process
+                        else None,
+                        memory=agent_bytes(definition.memory_gb) // max(1, cpus.games)
+                        if definition
+                        else None,
+                    ),
+                ),
+                cpus=cpus,
+                agent_process=process,
+            )
+            result = results[0]
+            if isinstance(result, (EtudeError, RetryRequested)):
+                raise result
+            return result
 
     def _store_played(self, scheduled: Match, outcome: Execution | BaseException) -> None:
         if isinstance(outcome, RetryRequested):
@@ -444,6 +487,8 @@ class Playing:
     tournament: str | None = None
     agents: str | None = None
     build: Function | None = None
+    load: Function | None = None
+    memory: int | None = None
     pending: deque[Match] = field(init=False)
     skipped: int = field(init=False)
     played: int = 0
@@ -484,14 +529,17 @@ def play_together(
     reported_imports: set[int] = set()
     failed_checkpoints: set[str] = set()
 
-    def fail_checkpoints() -> None:
-        if agent_process is None:
-            return
-        while True:
-            try:
-                failure = agent_process.checkpoint_failures.get_nowait()
-            except Empty:
-                return
+    def fail_checkpoints(local_failures: Sequence[AgentFailure] = ()) -> None:
+        failures = list(local_failures)
+        if agent_process is not None:
+            while True:
+                try:
+                    failures.append(agent_process.checkpoint_failures.get_nowait())
+                except Empty:
+                    break
+        for failure in failures:
+            if not failure.loading:
+                continue
             if failure.checkpoint in failed_checkpoints:
                 continue
             failed_checkpoints.add(failure.checkpoint)
@@ -542,6 +590,13 @@ def play_together(
         if each.agents and imports is not None and imports.warning and not warned_imports:
             print(imports.warning, file=sys.stderr, flush=True)
             warned_imports = True
+        if isinstance(outcome, BaseException):
+            local_failures: object = getattr(outcome, "_etude_agent_failures", ())
+            if not isinstance(local_failures, tuple) or not all(
+                isinstance(f, AgentFailure) for f in local_failures
+            ):
+                raise TypeError("invalid local checkpoint failure metadata")
+            fail_checkpoints(cast(tuple[AgentFailure, ...], local_failures))
         fail_checkpoints()
         if match.key in each.run._failed:
             return
@@ -573,6 +628,12 @@ def play_together(
     if cpus is None:
         cpus = divide_cpus(sum(len(each.pending) for each in plays), agents=False)
     workers = cpus.games
+    if workers and any(each.load is not None for each in plays):
+        print(
+            f"etude: agents: CPU inference in {workers} game processes; 1 thread each",
+            file=sys.stderr,
+            flush=True,
+        )
     try:
         with _terminable():
             if workers > 0:
@@ -601,6 +662,8 @@ def play_together(
                                 each.checkout,
                                 each.tournament or each.run.name,
                                 each.build,
+                                each.load,
+                                each.memory,
                             )
                         ] = (each, match)
                         return

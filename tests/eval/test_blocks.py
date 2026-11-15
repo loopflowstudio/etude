@@ -51,8 +51,8 @@ def rows(db: duckdb.DuckDBPyConnection) -> dict[str, list[tuple[object, ...]]]:
     }
 
 
-def recorded(match: Match) -> Result:
-    result = play_with_evidence(match)
+def recorded(match: Match, agents: list[object]) -> Result:
+    result = play_with_evidence(match, [])
     return Result(tables=result.tables, blobs=result.blobs, execution={"device": "cpu"})
 
 
@@ -498,7 +498,7 @@ def test_taking_in_a_block_runs_the_same_statements_however_many_matches_and_blo
             storages=[DirectoryStorage(bucket)],
         ) as active:
             for match in active.matches:
-                active.store(match, play_with_evidence(match))
+                active.store(match, play_with_evidence(match, []))
         with monkeypatch.context() as patched:
             patched.setattr(duckdb, "connect", counted)
             db = statsdb("cards", bucket)

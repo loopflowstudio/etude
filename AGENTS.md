@@ -246,17 +246,21 @@ names; the declaration reader adds the file's directory to the import path.
 Game functions are importable top-level functions, including fixtures: the game
 pool imports their defining module and cannot inherit a parent closure.
 
-Eval vocabulary: an `Agent` is anything with `act(rows)`; `Agents` declares
-`load(checkpoint)` and an optional game-side `build(player, leaves)`. Player
+Eval vocabulary: `load(checkpoint)` returns a deterministic callable from a list
+of inputs to a list of outputs. `Agents` declares it and an optional game-side
+`build(player, leaves)`, whose return value belongs to the author and is never
+called by Etude. Sampling belongs in game code, seeded from `match.seed`. Player
 wrappers are frozen author records; checkpoint leaves share loading and batches.
-The agent process holds checkpoint agents; game processes build wrappers and play; say neither "server", "worker" nor "policy"
+The shared agent process or each CPU game process holds checkpoint forwards;
+game processes build wrappers and play; say neither "server", "worker" nor "policy"
 for any of these ("policy" is reserved for policy keys).
-Etude sets the model-library thread environment before importing the agent
-loading module. Loaders must honor that inference budget when configuring
+Etude sets the model-library thread environment before importing the checkpoint
+loading module. CPU game processes load through the same cache/eviction owner
+as shared GPU inference and report failures to the parent even when play catches them. Loaders must honor that inference budget when configuring
 their library; each game process keeps one thread.
 On visible NVIDIA hardware, active games fill the declared batch, bounded by
 pending matches and host memory. Probe hardware without importing the loader;
-agentless games keep CPU capacity and perform no GPU probe. Hardware capacity
+code-only games keep CPU capacity and perform no GPU probe. Hardware capacity
 does not select the author's model device or promise GPU memory residency.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
@@ -268,7 +272,7 @@ its name or id as a plain `str`.
 
 The launcher database changes only through a new SQL file in
 `src/etude/launch/migrations/`, named for what it does and never numbered;
-`docs/launcher.md` ("Writing a migration") shows one. It may change until it merges to main; afterwards it never changes
+`docs/dev/launcher.md` ("Writing a migration") shows one. It may change until it merges to main; afterwards it never changes
 (`scripts/check_migrations.py`). Explicit `database upgrade` advances the one
 operational `launcher.sqlite`; ordinary opens never migrate or select copies.
 Recovery snapshots are never scheduling inputs.
@@ -281,3 +285,6 @@ tolerated in Python, and no second schema definition sits beside the SQL
 files. An older etude may keep writing after an additive release, so new
 columns must read sensibly when empty; journal records a previous release's
 worker writes must still decode, so new fields on them take defaults.
+
+User guides open with their purpose and reader, cover only that subject and link
+to its owner. Keep runtime, storage and launcher internals in `docs/dev/`.

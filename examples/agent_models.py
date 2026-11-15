@@ -1,18 +1,16 @@
-"""A tiny checkpoint loader; real models may import their framework here."""
-
-from collections.abc import Sequence
+"""A minimal two-action model returning logits; a real loader may import Torch."""
 
 from etude.checkpoints import CheckpointRef
-from etude.eval.agents import Agent
+from etude.eval.agents import Forward
 
 
-class Adder:
-    def __init__(self, bias: int) -> None:
+class Network:
+    def __init__(self, bias: float) -> None:
         self.bias = bias
 
-    def act(self, rows: Sequence[object]) -> Sequence[object]:
-        return [int(str(row)) + self.bias for row in rows]
+    def __call__(self, inputs: list[object]) -> list[object]:
+        return [[0.0, self.bias] for _ in inputs]
 
 
-def load(checkpoint: CheckpointRef) -> Agent:
-    return Adder(int(checkpoint.path.read_text()))
+def load(checkpoint: CheckpointRef) -> Forward:
+    return Network(float(checkpoint.path.read_text()))

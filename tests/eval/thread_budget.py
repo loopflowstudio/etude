@@ -5,13 +5,13 @@ import os
 from pathlib import Path
 
 from etude.checkpoints import CheckpointRef
-from etude.eval.agents import Agent
+from etude.eval.agents import Forward
 from etude.eval.resources import THREAD_VARIABLES
-from examples.agent_models import load
+from tests.eval.arithmetic import load
 
 BUDGET = {name: os.environ.get(name) for name in THREAD_VARIABLES}
 
 
-def load_checkpoint(checkpoint: CheckpointRef) -> Agent:
+def load_checkpoint(checkpoint: CheckpointRef) -> Forward:
     Path(os.environ["ETUDE_AGENTS_DIR"], "threads.json").write_text(json.dumps(BUDGET))
     return load(checkpoint)

@@ -7,17 +7,19 @@ See docs/hanabi.md. The SDK and its offline tests never import OpenSpiel.
 from __future__ import annotations
 
 import random
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 import pyspiel
 import torch
 from pydantic import BaseModel, Field
 
+from etude.checkpoints import CheckpointRef
+from etude.eval.agents import Forward
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, CheckpointPlayer, Code, Held, Match, Seating
 from etude.eval.run import Tables
-from etude.jobs import EvalJob, ExperimentState
+from etude.jobs import Agents, EvalJob, ExperimentState
 from etude.train.tracking import track
 
 
@@ -68,7 +70,7 @@ def _policy(game: pyspiel.Game) -> torch.nn.Linear:
 
 def _episode(
     game: pyspiel.Game,
-    policies: Sequence[torch.nn.Linear | None],
+    policies: Sequence[Callable[[torch.Tensor], torch.Tensor] | None],
     *,
     seed: int,
     learn: bool = False,
@@ -167,21 +169,41 @@ def arena(config: ArenaConfig) -> Benchmark:
     )
 
 
-def play(match: Match[Deal]) -> Tables:
+def load(checkpoint: CheckpointRef) -> Forward:
+    torch.set_num_threads(1)
+    policy = _policy(_game())
+    policy.load_state_dict(
+        torch.load(checkpoint.path / "policy.pt", map_location="cpu", weights_only=True)
+    )
+    policy.eval()
+
+    def forward(inputs: list[object]) -> list[object]:
+        with torch.no_grad():
+            return list(policy(torch.tensor(inputs, dtype=torch.float32)).tolist())
+
+    return forward
+
+
+def build(player: object, leaves: Mapping[str, Forward]) -> Forward | None:
+    if isinstance(player, Code):
+        return None  # The game owns its random teammate.
+    if isinstance(player, CheckpointPlayer):
+        return leaves[player.checkpoint.key]
+    raise TypeError(f"unknown player {type(player).__name__}")
+
+
+class Policy:
+    def __init__(self, forward: Forward) -> None:
+        self.forward = forward
+
+    def __call__(self, observation: torch.Tensor) -> torch.Tensor:
+        return torch.tensor(self.forward([observation.tolist()])[0])
+
+
+def play(match: Match[Deal], agents: Sequence[Forward | None]) -> Tables:
     torch.set_num_threads(1)
     game = _game()
-    policies: list[torch.nn.Linear | None] = []
-    for player in match.players:
-        if isinstance(player, CheckpointPlayer):
-            policy = _policy(game)
-            folder = player.checkpoint.path
-            policy.load_state_dict(
-                torch.load(folder / "policy.pt", map_location="cpu", weights_only=True)
-            )
-            policy.eval()
-            policies.append(policy)
-        else:
-            policies.append(None)
+    policies = [Policy(agent) if agent is not None else None for agent in agents]
     rows: list[dict[str, bool | int | float | str | None]] = []
     with torch.no_grad():
         for game_index in range(match.games):
@@ -203,5 +225,9 @@ def eval_jobs(state: ExperimentState) -> EvalJob:
         c for run in state.runs for c in run.checkpoints if c.ordinal == 1 or c == run.final
     )
     return EvalJob(
-        tournament=arena(ArenaConfig()), play=play, checkpoints=checkpoints, max_hours=0.01
+        tournament=arena(ArenaConfig()),
+        play=play,
+        agents=Agents(load=load, build=build),
+        checkpoints=checkpoints,
+        max_hours=0.01,
     )

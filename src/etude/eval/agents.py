@@ -1,7 +1,7 @@
 """Direct game-to-agent transport and one process owning loaded checkpoints.
 
-Games send picklable rows over a private Unix socket. The agent process groups
-requests by checkpoint and owns loading, eviction and the retained batch report.
+Games send picklable inputs over a private Unix socket. The agent process groups
+requests by checkpoint, using the common forward cache, and retains batch reports.
 This module's game-side imports are standard library only.
 """
 
@@ -13,7 +13,7 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -21,7 +21,7 @@ from multiprocessing.connection import Connection, wait
 from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from queue import SimpleQueue
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
 from etude.errors import RetryRequested, explain
 from etude.eval.resources import Cpus, agent_bytes, seconds_left
@@ -32,16 +32,13 @@ if TYPE_CHECKING:
     from etude.jobs import AgentLoader
 
 
-class Agent(Protocol):
-    """Answer each row as if alone, in order; every stochastic row owns its seed."""
-
-    def act(self, rows: Sequence[object]) -> Sequence[object]: ...
+type Forward = Callable[[list[object]], list[object]]
 
 
 @dataclass(frozen=True)
 class Request:
     checkpoint: CheckpointRef
-    rows: list[object]
+    inputs: list[object]
     tournament: str
     match: str
     player: str
@@ -49,9 +46,16 @@ class Request:
 
 @dataclass(frozen=True)
 class Answer:
-    rows: list[object]
+    outputs: list[object]
     error: str | None = None
     retry: bool = False
+
+    def result(self) -> list[object]:
+        if self.error is not None:
+            if self.retry:
+                raise RetryRequested(self.error)
+            raise RuntimeError(self.error)
+        return self.outputs
 
 
 @dataclass(frozen=True)
@@ -111,20 +115,20 @@ class AgentConnection(Connection):
 
 
 @dataclass(frozen=True)
-class _RemoteAgent:
+class _RemoteForward:
     connection: AgentConnection
     checkpoint: CheckpointRef
     tournament: str
     match: str
     player: str
 
-    def act(self, rows: Sequence[object]) -> Sequence[object]:
-        if not rows:
+    def __call__(self, inputs: list[object]) -> list[object]:
+        if not inputs:
             return []
         started = time.monotonic()
         try:
             self.connection.send(
-                Request(self.checkpoint, list(rows), self.tournament, self.match, self.player)
+                Request(self.checkpoint, list(inputs), self.tournament, self.match, self.player)
             )
             if not self.connection.poll(seconds_left()):
                 raise RetryRequested("agent response exceeded the evaluation deadline")
@@ -133,11 +137,7 @@ class _RemoteAgent:
             raise RetryRequested("agent process exited before answering") from error
         finally:
             self.connection.observe(time.monotonic() - started)
-        if answer.error is not None:
-            if answer.retry:
-                raise RetryRequested(answer.error)
-            raise RuntimeError(answer.error)
-        return answer.rows
+        return answer.result()
 
 
 @contextmanager
@@ -205,6 +205,8 @@ def running_agents(
     tournaments: Sequence[str],
     cpus: Cpus,
 ) -> Iterator[AgentProcess]:
+    if definition.load is None:
+        raise ValueError("an agent process needs a checkpoint loader")
     address = str(Path(os.environ["ETUDE_SCRATCH_DIR"], "agents.sock"))
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe()

@@ -32,8 +32,7 @@ from etude.eval.tournament import evaluating, played, scores
 from etude.jobs import Agents, ExperimentState, checkpoint_inputs, hold_group
 from etude.page import _players
 from etude.records import ArtifactRef
-from examples.agent_game import Shift, build, checkpoint
-from examples.agent_models import load
+from tests.eval.arithmetic import Shift, build, checkpoint, load
 from tests.eval.trees import Ensemble, Tagged
 from tests.test_eval_groups import (
     asks_or_returns,
@@ -43,6 +42,9 @@ from tests.test_eval_groups import (
     plain,
     selective_load,
     selective_retry_load,
+)
+from tests.test_eval_groups import (
+    shared_agents as shared_agents,
 )
 
 
@@ -186,7 +188,7 @@ def test_distinct_players_share_a_checkpoint_batch() -> None:
         assert parent.recv() == Answer(["composed"])
         assert batches.loads == batches.batches == 1
         assert observations[0].checkpoint == "small"
-        assert {row.player for row in observations[0].rows} == {small.key, shifted.key}
+        assert {row.player for row in observations[0].inputs} == {small.key, shifted.key}
     finally:
         parent.close()
         child.close()
@@ -211,16 +213,18 @@ def test_group_builds_nested_players_and_loads_the_shared_leaf_once(
     assert capfd.readouterr().err.count("agents: loaded") == 1
     batches = json.loads((tmp_path / "grouped/artifacts/agents/batches.json").read_text())
     assert {b["checkpoint"] for b in batches} == {"small"}
-    assert {r["player"] for b in batches for r in b["rows"]} == {small.key, shifted.key, deeper.key}
+    assert {r["player"] for b in batches for r in b["inputs"]} == {
+        small.key,
+        shifted.key,
+        deeper.key,
+    }
     db = statsdb("grouped", tmp_path)
     try:
-        assert sorted(db.sql("select name from players").fetchall()) == [
-            (
-                "examples.agent_game:Shift(over=examples.agent_game:Shift(over=small, amount=1), amount=2)",
-            ),
-            ("examples.agent_game:Shift(over=small, amount=1)",),
-            ("small",),
-        ]
+        assert {row[0] for row in db.sql("select name from players").fetchall()} == {
+            "tests.eval.arithmetic:Shift(over=tests.eval.arithmetic:Shift(over=small, amount=1), amount=2)",
+            "tests.eval.arithmetic:Shift(over=small, amount=1)",
+            "small",
+        }
         placements, notes = _players(db, {}, {})
         assert {p.key for p in placements} == {small.key, shifted.key, deeper.key}
         assert all(any(p.name in note for note in notes) for p in placements)
@@ -258,9 +262,15 @@ def test_loader_failure_follows_a_checkpoint_inside_every_player_tree(
         found = played(
             active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path
         )
-        assert len(found.failed) == 5
-        assert len(found.delivered) == 1
-        assert len(found.new) == len(found.retry) == (5 if retry else 0)
+        # A game that returned before the first load failed remains delivered.
+        # Every other match containing the failed leaf must retain that failure.
+        delivered_broken = sum(
+            any(c.key == "broken" for p in result.match.players for c in player_checkpoints(p))
+            for result in found.delivered
+        )
+        assert len(found.failed) + delivered_broken == 5
+        assert len(found.failed) + len(found.delivered) == 6
+        assert len(found.new) == len(found.retry) == (len(found.failed) if retry else 0)
         assert all(
             any(c.key == "broken" for p in m.players for c in player_checkpoints(p))
             for m in found.failed

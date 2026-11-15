@@ -1,6 +1,6 @@
 """The agent process's batching loop and durable batch observations.
 
-`_Batches` owns loaded agents, pending rows and byte-based eviction. `_run_agents`
+`_Batches` owns pending inputs; Forwards owns loading and byte-based eviction. `_run_agents`
 imports the authored loader and records batches as frozen Pydantic records;
 game processes never import this module.
 """
@@ -12,7 +12,6 @@ import selectors
 import socket
 import sys
 import time
-from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
@@ -22,12 +21,13 @@ from typing import cast
 
 from etude.call import Function
 from etude.errors import RetryRequested, explain
-from etude.eval.agents import Agent, AgentFailure, Answer, Request
+from etude.eval.agents import AgentFailure, Answer, Request
+from etude.eval.forwards import Forwards
 from etude.eval.resources import THREAD_VARIABLES
 from etude.records import Record
 
 
-class BatchRow(Record):
+class BatchInput(Record):
     player: str
     tournament: str
     match: str
@@ -35,7 +35,7 @@ class BatchRow(Record):
 
 class Batch(Record):
     checkpoint: str
-    rows: tuple[BatchRow, ...]
+    inputs: tuple[BatchInput, ...]
     forward_seconds: float
     load_seconds: float
     forward_calls: int
@@ -55,10 +55,10 @@ def _responses(answer: Answer, batch: list[_Pending]) -> list[memoryview]:
     responses: list[memoryview] = []
     offset = 0
     for item in batch:
-        size = len(item.request.rows)
+        size = len(item.request.inputs)
         responses.append(
             ForkingPickler.dumps(
-                Answer(answer.rows[offset : offset + size], answer.error, answer.retry)
+                Answer(answer.outputs[offset : offset + size], answer.error, answer.retry)
             )
         )
         offset += size
@@ -75,16 +75,16 @@ class _Batches:
         max_delay: float,
         memory: int,
     ) -> None:
-        self.load = load
+        self.forwards = Forwards(load, memory)
         self.max_batch = max_batch
         self.max_delay = max_delay
-        self.memory = memory
         self.pending: dict[str, list[_Pending]] = {}
-        self.loaded: OrderedDict[str, tuple[Agent, int]] = OrderedDict()
-        self.failed: dict[str, Answer] = {}
         self.batches = 0
-        self.loads = 0
-        self.rows = 0
+        self.inputs = 0
+
+    @property
+    def loads(self) -> int:
+        return self.forwards.loads
 
     def add(
         self, connection: Connection, request: Request, now: float, receive_seconds: float = 0.0
@@ -102,14 +102,14 @@ class _Batches:
         observations: list[Batch] = []
         for key, items in list(self.pending.items()):
             if (
-                sum(len(p.request.rows) for p in items) < self.max_batch
+                sum(len(p.request.inputs) for p in items) < self.max_batch
                 and now < items[0].since + self.max_delay
             ):
                 continue
             batch: list[_Pending] = []
             count = 0
             for item in items:
-                size = len(item.request.rows)
+                size = len(item.request.inputs)
                 if batch and count + size > self.max_batch:
                     break
                 batch.append(item)
@@ -117,50 +117,19 @@ class _Batches:
             del items[: len(batch)]
             if not items:
                 del self.pending[key]
-            forward_seconds = 0.0
-            load_seconds = 0.0
-            forward_calls = 0
-            loads = 0
-            answer = self.failed.get(key)
-            if answer is None:
-                try:
-                    if key not in self.loaded:
-                        checkpoint = batch[0].request.checkpoint
-                        length = checkpoint.artifact.size_bytes
-                        if length is None:
-                            raise ValueError(f"checkpoint {key} has no byte length")
-                        self._evict(length)
-                        started = time.monotonic()
-                        try:
-                            agent = cast(Agent, self.load(checkpoint))
-                        except Exception as error:
-                            self.failed[key] = Answer(
-                                [],
-                                f"load failed for {key}: {explain(error)}",
-                                isinstance(error, RetryRequested),
-                            )
-                            raise
-                        finally:
-                            load_seconds = time.monotonic() - started
-                        self.loaded[key] = (agent, length)
-                        self.loads += 1
-                        loads = 1
-                        print(f"etude: agents: loaded {key}", file=sys.stderr, flush=True)
-                    self.loaded.move_to_end(key)
-                    rows = [row for p in batch for row in p.request.rows]
-                    started = time.monotonic()
-                    forward_calls = 1
-                    try:
-                        answers = list(self.loaded[key][0].act(rows))
-                    finally:
-                        forward_seconds = time.monotonic() - started
-                    if len(answers) != len(rows):
-                        raise ValueError("Agent.act must return one answer per row")
-                    answer = Answer(answers)
-                except Exception as error:
-                    answer = self.failed.get(key) or Answer(
-                        [], f"agent {key}: {explain(error)}", isinstance(error, RetryRequested)
-                    )
+            before_calls, before_loads = self.forwards.calls, self.forwards.loads
+            before_forward, before_load = self.forwards.forward_seconds, self.forwards.load_seconds
+            answer = self.forwards.answer(
+                batch[0].request.checkpoint,
+                [item for pending in batch for item in pending.request.inputs],
+                self.pending.keys(),
+            )
+            forward_seconds = self.forwards.forward_seconds - before_forward
+            load_seconds = self.forwards.load_seconds - before_load
+            forward_calls = self.forwards.calls - before_calls
+            loads = self.forwards.loads - before_loads
+            if loads:
+                print(f"etude: agents: loaded {key}", file=sys.stderr, flush=True)
             # Serialize every reply before delivery: an unpicklable answer fails
             # the whole batch, while successful payloads are encoded only once.
             started = time.monotonic()
@@ -181,12 +150,12 @@ class _Batches:
                             match=p.request.match,
                             error=answer.error,
                             retry=answer.retry,
-                            loading=key in self.failed,
+                            loading=key in self.forwards.failed,
                         )
                         for p in batch
                     ]
                 )
-                # Only failure metadata crosses the control pipe; rows stay direct.
+                # Only failure metadata crosses the control pipe; inputs stay direct.
                 control.recv()
             started = time.monotonic()
             for item, response in zip(batch, responses, strict=True):
@@ -195,7 +164,7 @@ class _Batches:
                 except (OSError, EOFError):
                     pass  # The game may have been cancelled at its deadline.
             transport_seconds += time.monotonic() - started
-            self.rows += count
+            self.inputs += count
             self.batches += 1
             observations.append(
                 Batch(
@@ -205,28 +174,18 @@ class _Batches:
                     forward_calls=forward_calls,
                     loads=loads,
                     transport_seconds=transport_seconds,
-                    rows=tuple(
-                        BatchRow(
+                    inputs=tuple(
+                        BatchInput(
                             player=p.request.player,
                             tournament=p.request.tournament,
                             match=p.request.match,
                         )
                         for p in batch
-                        for _ in p.request.rows
+                        for _ in p.request.inputs
                     ),
                 )
             )
-            self._evict(0)
         return observations
-
-    def _evict(self, incoming: int) -> None:
-        used = sum(size for _, size in self.loaded.values())
-        for key in list(self.loaded):
-            if used + incoming <= self.memory:
-                break
-            if key not in self.pending:
-                _, size = self.loaded.pop(key)
-                used -= size
 
 
 def _run_agents(
@@ -288,7 +247,7 @@ def _run_agents(
         report.write("]")
         report.close()
         print(
-            f"etude: agents: stopped; {batches.loads} checkpoints loaded, {batches.rows} rows in {batches.batches} batches",
+            f"etude: agents: stopped; {batches.loads} checkpoints loaded, {batches.inputs} inputs in {batches.batches} batches",
             file=sys.stderr,
             flush=True,
         )

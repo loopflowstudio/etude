@@ -120,29 +120,32 @@ def _has_gpu() -> bool:
 
 @dataclass(frozen=True)
 class Cpus:
+    """Active games and shared inference threads; zero threads means direct calls."""
+
     games: int
     threads: int
 
 
 def divide_cpus(
-    pending: int, *, agents: bool, memory_gb: float | None = None, batch_rows: int = 32
+    pending: int, *, agents: bool, memory_gb: float | None = None, batch_inputs: int = 32
 ) -> Cpus:
-    """GPU games fill one batch; CPU inference reserves one eighth of CPUs.
+    """GPU games fill one shared batch; CPU games own their checkpoint forwards.
 
     A single CPU is shared by one game and inference. Memory and pending work
     may reduce games further, but never leave queued work with zero capacity.
     """
     cpus = available_cpus()
+    shared = agents and pending > 0 and _has_gpu()
     held = agent_bytes(memory_gb) if agents else 0
     capacity = cpus
-    if agents and pending:
-        capacity = batch_rows if _has_gpu() else max(1, cpus - max(1, (cpus + 7) // 8))
+    if shared:
+        capacity = batch_inputs
     games = min(
         pending,
         capacity,
         max(1, (memory_bytes() - held) // GAME_BYTES),
     )
-    return Cpus(games=games, threads=max(1, cpus - games) if agents else 0)
+    return Cpus(games=games, threads=max(1, cpus - games) if shared else 0)
 
 
 @contextmanager

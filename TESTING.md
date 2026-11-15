@@ -1,5 +1,7 @@
 # Testing
 
+This guide helps contributors verify Etude behavior without creating artificial resource pressure.
+
 **NEVER intentionally induce load for testing.** Do not start CPU burners
 (such as `yes` redirected to `/dev/null`), busy loops, stress tools, memory
 pressure generators, disk/network floods, or extra workers whose purpose is
@@ -12,7 +14,7 @@ the actual workload. Keep normal test execution focused and bounded; every
 test-owned subprocess must be terminated and reaped on success, failure,
 timeout and cancellation.
 
-See [README.md](README.md#develop) for check commands and
+See [developer guide](docs/dev/README.md#checks) for check commands and
 [AGENTS.md](AGENTS.md) for repository conventions.
 
 Run `node --test tests/test_charts.cjs` for headless report chart checks (Node 22).

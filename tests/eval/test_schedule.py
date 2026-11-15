@@ -88,7 +88,7 @@ def test_evaluate_plays_in_scheduled_order_and_order_changes_no_row(tmp_path: Pa
     expected = sorted(
         (match.key, row["seat"], row["game"], row["won"], row["hits"])
         for match in matches
-        for row in play(match)["plays"]
+        for row in play(match, [])["plays"]
     )
     assert rows(tmp_path) == expected
 

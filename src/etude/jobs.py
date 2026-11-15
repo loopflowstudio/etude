@@ -58,7 +58,7 @@ from etude.eval.records import (
     relocate_player,
     select_policy,
 )
-from etude.eval.resources import divide_cpus, resources
+from etude.eval.resources import agent_bytes, divide_cpus, resources
 from etude.eval.result import EvalResult, Result, Tables
 from etude.eval.run import (
     EvalRun,
@@ -343,7 +343,7 @@ _BENCHMARK_CHECKPOINT = "checkpoint"
 class AgentLoader(Record):
     """Portable loading declaration; batching never enters scientific identity."""
 
-    load: Function
+    load: Function | None = None
     build: Function | None = None
     max_batch: int = Field(default=32, ge=1)
     max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
@@ -351,10 +351,10 @@ class AgentLoader(Record):
 
 
 class Agents(BaseModel):
-    """How to load players, with row batching and a host memory allowance."""
+    """Checkpoint forwards and optional game-side player construction."""
 
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
-    load: Callable[..., object]
+    load: Callable[..., object] | None = None
     build: Callable[..., object] | None = None
     max_batch: int = Field(default=32, ge=1)
     max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
@@ -362,7 +362,7 @@ class Agents(BaseModel):
 
     @model_validator(mode="after")
     def _validate_loading(self) -> Agents:
-        if len(inspect.signature(self.load).parameters) != 1:
+        if self.load is not None and len(inspect.signature(self.load).parameters) != 1:
             raise TypeError("load must take one checkpoint")
         if self.build is not None and len(inspect.signature(self.build).parameters) != 2:
             raise TypeError("build must take player and leaves")
@@ -370,7 +370,7 @@ class Agents(BaseModel):
 
     def plain(self, repo: Path | None) -> AgentLoader:
         return AgentLoader(
-            load=_function(self.load, repo),
+            load=None if self.load is None else _function(self.load, repo),
             build=None if self.build is None else _function(self.build, repo),
             max_batch=self.max_batch,
             max_delay_seconds=self.max_delay_seconds,
@@ -397,14 +397,17 @@ class Evaluation(Record):
     files: dict[str, str] = {}
     # The experiment's training lines that pass saw, where relative seats find checkpoints.
     lines: tuple[Line, ...] = ()
-    agents: AgentLoader | None = None
+    agents: AgentLoader = Field(default_factory=AgentLoader)
 
     @model_validator(mode="before")
     @classmethod
     def _released(cls, value: object) -> object:
         # Released queued evaluations carried an explicit process count.
         if isinstance(value, dict):
-            return {key: item for key, item in value.items() if key != "workers"}
+            return {
+                **{key: item for key, item in value.items() if key != "workers"},
+                "agents": value.get("agents") or {},
+            }
         return value
 
     @property
@@ -505,7 +508,7 @@ class EvalJob(Job):
     checkpoint: CheckpointRecord | Input | None = Field(default=None, exclude=True)
     checkpoints: Sequence[CheckpointRecord] = Field(default=(), exclude=True)
     enter: Sequence[Player] = Field(default=(), exclude=True)
-    agents: Agents | None = Field(default=None, exclude=True)
+    agents: Agents = Field(default_factory=Agents, exclude=True)
     extras: tuple[str, ...] = Field(default=(), exclude=True)
     command: str = ""
 
@@ -559,7 +562,7 @@ class EvalJob(Job):
             )
             options["inputs"] = (*self.inputs, *inputs)
         try:
-            _match_type(self.play, int(self.agents is not None))
+            _match_type(self.play)
         except TypeError as error:
             raise LauncherError(str(error)) from None
         repo = _repo(self.play, options)
@@ -570,9 +573,9 @@ class EvalJob(Job):
             checkpoint=self.checkpoint,
             checkpoints=tuple(self.checkpoints),
             entrants=tuple(self.enter),
-            agents=None if self.agents is None else self.agents.plain(repo),
+            agents=self.agents.plain(repo),
         )
-        if spec.agents is not None and spec.agents.build is None:
+        if spec.agents.load is not None and spec.agents.build is None:
             players = list(spec.entrants)
             if isinstance(spec.tournament, Benchmark):
                 players.extend(
@@ -752,16 +755,24 @@ def hold_group(
         definition = pending[0][0].agents if pending else None
         if any(spec.agents != definition for spec, _ in pending):
             raise EtudeError("incompatible_eval_agents", 422)
+        has_checkpoints = any(
+            player_checkpoints(player)
+            for _, active in pending
+            for match in active.matches
+            if match.key not in active.done
+            for player in match.players
+        )
+        needs_loading = definition is not None and definition.load is not None and has_checkpoints
         agent_process: AgentProcess | None = None
         cpus = divide_cpus(
-            sum(len(active.matches) - len(active.done) for _, active in pending),
-            agents=definition is not None,
+            sum(match.key not in active.done for _, active in pending for match in active.matches),
+            agents=needs_loading,
             memory_gb=definition.memory_gb if definition else None,
-            batch_rows=definition.max_batch if definition else 32,
+            batch_inputs=definition.max_batch if definition else 32,
         )
         agent_lifetime = lifetime.enter_context(ExitStack())
         try:
-            if definition is not None:
+            if needs_loading and definition is not None and cpus.threads:
                 agent_process = agent_lifetime.enter_context(
                     running_agents(
                         definition,
@@ -778,7 +789,9 @@ def hold_group(
                     checkout=checkout,
                     tournament=spec.tournament.name,
                     agents=agent_process.address if agent_process and spec.agents else None,
-                    build=spec.agents.build if spec.agents else None,
+                    build=spec.agents.build,
+                    load=spec.agents.load if needs_loading and agent_process is None else None,
+                    memory=agent_bytes(spec.agents.memory_gb) // max(1, cpus.games),
                 )
                 for spec, active, _ in opened
             ]

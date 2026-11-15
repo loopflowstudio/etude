@@ -212,7 +212,7 @@ repo, with an isolated `ETUDE_HOME`:
   `uv lock`, add `.gitignore` with `.venv/` and `__pycache__/`, and commit, or every
   run says "plus uncommitted changes".
 - `train.py` with a Pydantic config whose real size raises, so a passing smoke shows
-  its smoke form ran; `games.py` with `play(match)`; `ppo.py` with `training_jobs()`, `eval_jobs(state)`
+  its smoke form ran; `games.py` with `play(match, agents)`; `ppo.py` with `training_jobs()`, `eval_jobs(state)`
   and `report()`. A job's `max_usd` must be more than zero or omitted.
 - `uv run etude smoke ppo.py`, `uv run etude launch ppo.py`, then
   `etude status`. Nothing runs the scheduler's loop here: cancel what you queued
