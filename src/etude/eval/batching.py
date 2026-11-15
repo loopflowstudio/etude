@@ -7,7 +7,6 @@ game processes never import this module.
 
 from __future__ import annotations
 
-import importlib
 import os
 import selectors
 import socket
@@ -21,6 +20,7 @@ from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from typing import cast
 
+from etude.call import Function
 from etude.errors import RetryRequested, explain
 from etude.eval.agents import Agent, AgentFailure, Answer, Request
 from etude.eval.resources import THREAD_VARIABLES
@@ -231,9 +231,8 @@ class _Batches:
 
 def _run_agents(
     address: str,
-    module: str,
-    name: str,
-    path: str,
+    load: Function,
+    checkout: str | None,
     max_batch: int,
     max_delay: float,
     memory: int,
@@ -243,12 +242,7 @@ def _run_agents(
 ) -> None:
     for variable in THREAD_VARIABLES:
         os.environ[variable] = str(threads)
-    sys.path.insert(0, path)
-    function: object = importlib.import_module(module)
-    for part in name.split("."):
-        function = getattr(function, part)
-    load = cast(Callable[..., object], function)
-    batches = _Batches(load, max_batch, max_delay, memory)
+    batches = _Batches(load.load(checkout), max_batch, max_delay, memory)
     peers: list[Connection] = []
     report = Path(artifacts, "batches.json").open("w")
     report.write("[")

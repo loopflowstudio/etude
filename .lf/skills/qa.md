@@ -476,3 +476,27 @@ When a pinned `Counts(database=N)` moves, compare statements with main. Use a
 temporary trace in `tests/launch/counting.py` to record normalized statements
 in a file named by an environment variable, then remove the trace. Fenced
 writes add `BEGIN IMMEDIATE`, `PRAGMA user_version` and `COMMIT`.
+
+## Etude: grouped evals with agents
+
+1. Lab: copy `examples/agents.py`, `agent_game.py`, `agent_models.py`, `agent.txt` into a
+   git-committed folder; `uv run --project REPO etude eval agents.py --source RUNS` twice
+   (second pass: `nothing to play`). For failure knobs, wrap `play` and `load` in lab
+   modules reading env vars (fail when a match's JSON names a player; raise from `load`
+   for one checkpoint key; sleep for one wrapper) and declare two `RoundRobin`s with
+   distinct `configs=({"lane": name},)`: identical configs give identical match keys, and
+   the second tournament then reads `0 new, N running` until the next pass (also on main).
+2. Compare outcomes by hashing `seats.player` joined to the `scores` rollup table from
+   `etude.eval.query.statsdb(EXPERIMENT, Path(RUNS))` (`matches` has `state`, `retry`);
+   memory-evicted, interrupted and retried runs must hash equal to an unconstrained one.
+3. Interrupt with a Python driver that reads the CLI's stdout with `PYTHONUNBUFFERED=1`
+   and sends SIGTERM after N `matches played` lines; then `pgrep -fl "etude (eval|worker)"`.
+4. `etude smoke FILE` exercises the smoke grouping without `--source`.
+5. Launch on the local pool without renting: a uv project lab (`package = false`,
+   `etude-sdk[eval]` editable from REPO, `.gitignore` with `.venv`), committed;
+   `uv run etude database upgrade --development`, `uv run etude launch FILE`,
+   `etude wait --experiment E`, `etude logs --run E/evals-…`. Results land under
+   `ETUDE_HOME/track`.
+6. Returning user: `main` lacks `Held`, `Agents` and `etude.eval.result`; use `Code`
+   players and a `play` without annotations, play on a `git worktree add --detach … main`
+   checkout, then here.

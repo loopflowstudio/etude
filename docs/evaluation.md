@@ -372,7 +372,6 @@ with evaluating(
   | `Final()` | its line's last checkpoint, once its run has ended |
   | `Aligned(clock="updates", job="small")` | job `small` at exactly the held checkpoint's updates |
   | `Aligned(clock="running_hours", job="small", at_or_before=True)` | job `small`'s latest checkpoint at or before the held checkpoint's running hours |
-
   | `Final(experiment="tla-frontier", job="small")` | every seed of another experiment's job |
   | `Final(policy=PolicyKey(experiment="tla-frontier", job="small"))` | one policy, using its lowest seed by default |
 

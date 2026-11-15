@@ -171,38 +171,29 @@ def _evaluate(
         declarations=declarations,
     )
     for batch in batches.values():
+        started = time.monotonic()
         tiny: list[Evaluation] = []
         for job in batch:
-            spec = evaluation_group(job).evaluations[0]
-            job = with_experiment(job, experiment)
-            for spec in evaluation_group(job).evaluations:
-                tiny.append(
-                    spec.model_copy(
-                        update={
-                            "tournament": _tiny_tournament(spec.tournament),
-                            "lines": lines,
-                        }
-                    )
+            for spec in evaluation_group(with_experiment(job, experiment)).evaluations:
+                spec = spec.model_copy(
+                    update={"tournament": _tiny_tournament(spec.tournament), "lines": lines}
                 )
-        started = time.monotonic()
-        matches = [
-            played(
-                spec.tournament,
-                experiment=experiment,
-                checkpoints=spec.held,
-                enter=spec.entrants,
-                lines=lines,
-                storages=[store],
-            ).new
-            for spec in tiny
-        ]
+                pending = played(
+                    spec.tournament,
+                    experiment=experiment,
+                    checkpoints=spec.held,
+                    enter=spec.entrants,
+                    lines=lines,
+                    storages=[store],
+                ).new
+                tiny.append(spec.model_copy(update={"matches": pending}))
         name = tiny[0].tournament.name if len(tiny) == 1 else "eval"
         with TemporaryDirectory(prefix="etude-smoke-inputs-") as folder:
             files = _try_step(
                 "eval",
                 name,
                 lambda: fetch_checkpoints(
-                    tuple(match for pending in matches for match in pending),
+                    tuple(match for spec in tiny for match in spec.matches or ()),
                     state,
                     tuple(c for spec in tiny for c in spec.checkpoints),
                     Path(folder),
@@ -215,9 +206,13 @@ def _evaluate(
                     EvalGroup(
                         evaluations=tuple(
                             spec.model_copy(
-                                update={"matches": tuple(_relocated(m, files) for m in pending)}
+                                update={
+                                    "matches": tuple(
+                                        _relocated(m, files) for m in spec.matches or ()
+                                    )
+                                }
                             )
-                            for spec, pending in zip(tiny, matches, strict=True)
+                            for spec in tiny
                         )
                     ),
                     checkout=batch[0].repo,

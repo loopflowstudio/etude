@@ -21,7 +21,7 @@ from etude.declarations import (
     select_runs,
 )
 from etude.errors import EtudeError, LauncherError
-from etude.eval.records import Line, TournamentRun, digest
+from etude.eval.records import TournamentRun, digest
 from etude.eval.resources import available_cpus
 from etude.eval.result import EvalResult
 from etude.eval.tournament import StoredRuns, played
@@ -337,7 +337,7 @@ def advance(
         members = [each.spec for each in group]
         executables = [each.job for each in group]
         if mode == "local":
-            held = _play_here(members, executables[0], state, policy_lines, source, directory)
+            held = _play_here(members, executables[0], state, source, directory)
             for each, result in zip(group, held, strict=True):
                 each.decision.played = result.played
             continue
@@ -410,7 +410,6 @@ def _play_here(
     specs: Sequence[Evaluation],
     executable: Job,
     state: ExperimentState,
-    lines: tuple[Line, ...],
     source: Storage,
     directory: Path | str | None,
 ) -> tuple[EvalResult, ...]:
@@ -428,7 +427,6 @@ def _play_here(
                     spec.model_copy(
                         update={
                             "matches": tuple(_relocated(m, here) for m in spec.matches or ()),
-                            "lines": lines,
                         }
                     )
                     for spec in specs

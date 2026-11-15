@@ -27,6 +27,7 @@ from etude.errors import RetryRequested, explain
 from etude.eval.resources import Cpus, agent_bytes, seconds_left
 
 if TYPE_CHECKING:
+    from etude.call import Function
     from etude.checkpoints import CheckpointRef
     from etude.jobs import AgentLoader
 
@@ -164,9 +165,8 @@ class AgentProcess:
 
 def _run(
     address: str,
-    module: str,
-    name: str,
-    path: str,
+    load: Function,
+    checkout: str | None,
     max_batch: int,
     max_delay: float,
     memory: int,
@@ -180,9 +180,8 @@ def _run(
 
         _run_agents(
             address,
-            module,
-            name,
-            path,
+            load,
+            checkout,
             max_batch,
             max_delay,
             memory,
@@ -210,9 +209,8 @@ def running_agents(
         target=_run,
         args=(
             address,
-            definition.load.module,
-            definition.load.name,
-            str((Path(checkout or ".") / definition.load.path).resolve()),
+            definition.load,
+            checkout,
             definition.max_batch,
             definition.max_delay_seconds,
             agent_bytes(definition.memory_gb),
