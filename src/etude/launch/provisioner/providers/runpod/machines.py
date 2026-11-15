@@ -12,7 +12,7 @@ from decimal import Decimal
 from etude.deadline import limit_time
 from etude.errors import LauncherError
 from etude.launch.errors import ProviderUnavailable
-from etude.launch.machines import (
+from etude.launch.provisioner.machines import (
     Allocation,
     Bill,
     MachineRequest,
@@ -20,8 +20,8 @@ from etude.launch.machines import (
     Safeguards,
     check_creation,
 )
-from etude.launch.providers.program import Program, boot_source
-from etude.launch.providers.runpod.api import PodFact, RunPodAPI
+from etude.launch.provisioner.providers.program import Program, boot_source
+from etude.launch.provisioner.providers.runpod.api import PodFact, RunPodAPI
 from etude.launch.records import GPU, Hardware, MachineTemplate, Offer, Provider
 from etude.launch.records import STOCK_IMAGE as DEFAULT_IMAGE
 from etude.launch.storage.s3 import Bucket
@@ -92,7 +92,11 @@ class RunPodMachines:
                 image=image.resolved,
                 registry=self._provider.registry if image.resolved != STOCK_IMAGE else "",
                 env=env,
-                entrypoint=("python3.12", "-c", boot_source("etude.launch.providers.runpod.pod")),
+                entrypoint=(
+                    "python3.12",
+                    "-c",
+                    boot_source("etude.launch.provisioner.providers.runpod.pod"),
+                ),
                 disk_gb=template.disk_gb or _disk_gb(hardware),
                 data_center=template.data_center,
             )

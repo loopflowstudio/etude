@@ -9,14 +9,14 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.declarations import read_training_jobs
+from etude.controller.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.launch.client import launch, queue, wait
 from etude.launch.database import launcher_file, upgrade
 from etude.launch.errors import LaunchError
-from etude.launch.machines import Refused
+from etude.launch.provisioner.machines import Refused
 from etude.launch.records import Offer, OnDemand, Pool, Stale
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet, Work
 from etude.spec import Job, RunRequest, Until
 from etude.train.records import ParentRun, Step
@@ -107,7 +107,7 @@ def test_cli_queue_records_the_choice(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(
@@ -225,7 +225,7 @@ def test_cli_continue_waits_without_capacity(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(
@@ -404,7 +404,7 @@ def test_machines_lists_rented_windows_and_terminate_takes_the_machine_name(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(

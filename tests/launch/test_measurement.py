@@ -25,9 +25,9 @@ from etude.launch.commands import Kind
 from etude.launch.database import launcher_file, upgrade
 from etude.launch.executor import Execution
 from etude.launch.measurement import span
-from etude.launch.providers.runpod.http import PodHTTP
+from etude.launch.provisioner.providers.runpod.http import PodHTTP
 from etude.launch.records import Machine, OnDemand
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet
 from etude.launch.ssh import SSH, SessionRequest
 from etude.launch.storage.s3 import Bucket, Keys
@@ -143,7 +143,11 @@ def test_several_run_git_and_database_counts(
 @pytest.mark.parametrize(
     ("command", "count", "forbidden"),
     [
-        (["--help"], 8, ("numpy", "pydantic", "etude.launch.scheduler", "etude.launch.worker")),
+        (
+            ["--help"],
+            8,
+            ("numpy", "pydantic", "etude.launch.scheduler", "etude.launch.worker"),
+        ),
         (
             ["worker", "--help"],
             8,
@@ -152,10 +156,11 @@ def test_several_run_git_and_database_counts(
         # Client composition includes four modules each for Vast and Lium, the
         # request every provider shares, the storage socket policy it forwards
         # to workers, its smoke of jobs, and shared run-identity validation.
-        (["pools"], 58, ("numpy", "boto3", "etude.launch.worker")),
+        # The layout adds provisioner/scheduler packages and two scheduler leaves.
+        (["pools"], 62, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            34,  # shared run/job records, out membership and storage socket policy
+            35,  # includes the empty provisioner package for generic cleanup
             (
                 "numpy",
                 "boto3",
@@ -317,7 +322,7 @@ def test_counting_covers_physical_transports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Installed archives carry provenance without consulting the checkout's Git history.
-    monkeypatch.setattr("etude.launch.providers.package.frontier", lambda root: b"{}")
+    monkeypatch.setattr("etude.launch.provisioner.providers.package.frontier", lambda root: b"{}")
     b = bench(tmp_path)
     counting = Counting(b.store, b.service)
 

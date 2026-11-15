@@ -8,7 +8,7 @@ and a second smoke does not build them again.
 
 `smoke_train` is the train step: each distinct job's smoke form (`Job.smoke`,
 applied by `tiny`) launched on that launcher's `local` pool, through the same
-path a real local run takes. `etude.smoke` adds the experiment file's
+path a real local run takes. `etude.controller.smoke` adds the experiment file's
 evaluation and report; the Python client calls `smoke_train` alone. `Smoked`
 stamps each run with its own job's train step and the file's other steps, so
 a job without a smoke form is never recorded as passed beside one that has it.
@@ -30,7 +30,7 @@ from etude.errors import LauncherError
 from etude.launch.database import open_home, upgrade
 from etude.launch.executor import local
 from etude.launch.logs import render
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.source import home
 from etude.spec import Job, RunRequest, Smoke, SmokeStep, job_id
 

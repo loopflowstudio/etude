@@ -30,9 +30,9 @@ from etude.deadline import limit_time, remaining
 from etude.launch import client
 from etude.launch.database import launcher_file
 from etude.launch.logging import log_to
-from etude.launch.providers import bootstrap
+from etude.launch.provisioner.providers import bootstrap
 from etude.launch.records import Output, Storage
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import (
     WORKER_LOG,
     AttemptRecord,

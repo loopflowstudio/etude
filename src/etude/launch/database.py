@@ -61,6 +61,9 @@ from etude.launch.usage import Transfer
 from etude.records import RunRecord, RunWriter, Tally
 from etude.spec import Job, Record, Smoke, SourcePosition
 
+__all__ = ("Database", "inspect", "upgrade", "Schema", "Upgrade")
+
+
 Fact = str | int | float | None
 
 # The schema is the packaged migrations, applied in order and recorded in this ledger.

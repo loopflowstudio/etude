@@ -251,7 +251,7 @@ def test_cli_selects_the_stored_job_and_seed_from_hand_built_requests(
     monkeypatch.setattr("etude.launch.cli.default", lambda: b.scheduler)
     monkeypatch.setattr("etude.launch.client.default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(

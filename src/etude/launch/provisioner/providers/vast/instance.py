@@ -9,8 +9,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from etude.launch.errors import ProviderUnavailable
-from etude.launch.providers.bootstrap import run
-from etude.launch.providers.vast.http import InstanceHTTP
+from etude.launch.provisioner.providers.bootstrap import run
+from etude.launch.provisioner.providers.vast.http import InstanceHTTP
 
 
 class GuardianAPI(InstanceHTTP):
@@ -41,7 +41,7 @@ def main(argv: list[str]) -> int:
         argv[1],
         api=GuardianAPI(os.environ["CONTAINER_API_KEY"]),
         machine=os.environ["CONTAINER_ID"],
-        module="etude.launch.providers.vast.instance",
+        module="etude.launch.provisioner.providers.vast.instance",
         start_ssh=_ssh_ready,
     )
 

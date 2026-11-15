@@ -18,6 +18,8 @@ from etude.errors import LauncherError, explain
 from etude.launch.records import Image
 from etude.spec import Record, Runtime
 
+__all__ = ("resolve_image", "prepare_pytorch")
+
 
 class Platform(Record):
     os: str

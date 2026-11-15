@@ -16,7 +16,8 @@ from decimal import Decimal
 
 from etude.deadline import limit_time, remaining
 from etude.launch.errors import ProviderUnavailable
-from etude.launch.machines import (
+from etude.launch.measurement import timed
+from etude.launch.provisioner.machines import (
     Allocation,
     Bill,
     MachineRequest,
@@ -24,9 +25,8 @@ from etude.launch.machines import (
     Safeguards,
     check_creation,
 )
-from etude.launch.measurement import timed
-from etude.launch.providers.lium.api import Create, LiumAPI, LiumOffer, Pod
-from etude.launch.providers.program import Program, boot_source
+from etude.launch.provisioner.providers.lium.api import Create, LiumAPI, LiumOffer, Pod
+from etude.launch.provisioner.providers.program import Program, boot_source
 from etude.launch.records import STOCK_IMAGE, MachineTemplate, Offer
 from etude.launch.storage.s3 import Bucket
 from etude.spec import Record
@@ -66,7 +66,7 @@ def _start(pod: Pod, env: dict[str, str]) -> None:
         result = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", address, "python3.12 -c " + shlex.quote(_START)],
             input=json.dumps(
-                {"env": env, "code": boot_source("etude.launch.providers.lium.pod")}
+                {"env": env, "code": boot_source("etude.launch.provisioner.providers.lium.pod")}
             ).encode(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

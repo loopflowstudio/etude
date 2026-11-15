@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from etude.eval.records import Config, Environment
 from etude.records import Record
 
+__all__ = ("Tables", "Row", "Value")
+
+
 type Value = bool | int | float | str | None
 type Row = Mapping[str, Value]
 type Tables = Mapping[str, Sequence[Row]]

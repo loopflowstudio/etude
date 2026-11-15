@@ -86,6 +86,19 @@ from etude.storage import Storage, default_root, place_artifact
 from etude.train.read import RunData, read
 from etude.train.records import ParentRun
 
+__all__ = (
+    "TrainingJob",
+    "EvalJob",
+    "Agents",
+    "ExperimentState",
+    "continue_from",
+    "TrainingRunSummary",
+    "EvalRunSummary",
+    "Policy",
+    "Checkpoints",
+    "OutMembers",
+)
+
 
 class Checkpoints(tuple[CheckpointRecord, ...]):
     """A training run's checkpoints in the order it saved them; a tuple, so slices work."""
@@ -391,7 +404,7 @@ class Evaluation(Record):
     checkpoints: tuple[CheckpointRecord, ...] = ()
     # A round robin's entrants.
     entrants: tuple[Player, ...] = ()
-    # The matches a pass found new (`etude.controller.advance`), and the
+    # The matches a pass found new (the controller pass), and the
     # job input holding each checkpoint they seat, by its key encoded.
     matches: tuple[Match, ...] | None = None
     files: dict[str, str] = {}

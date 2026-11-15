@@ -8,6 +8,9 @@ from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from threading import Thread
 
+__all__ = ("limit_time",)
+
+
 _deadline: ContextVar[float | None] = ContextVar("operation_deadline", default=None)
 
 

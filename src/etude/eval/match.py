@@ -27,6 +27,9 @@ from etude.eval.run import _evaluating_matches
 from etude.eval.source import digest_files
 from etude.storage import Storage
 
+__all__ = ("environment",)
+
+
 KIND = "evaluation"
 
 

@@ -131,6 +131,7 @@ uv add 'etude-sdk[s3]'             # with S3 or R2 storage
 
 ## Read more
 
+- [Python imports](docs/python.md): supported names and their defining modules, by task.
 - [Training](docs/training.md): the `train` function, seeds, carrying a run
   on, checkpoints, `etude train`.
 - [Tracking](docs/tracking.md): rows, row tables, storage, reading runs back, reports.

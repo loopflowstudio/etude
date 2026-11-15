@@ -46,6 +46,27 @@ from etude.spec import Variable as Variable
 from etude.spec import job_id as job_id
 from etude.spec import number as number
 
+__all__ = (
+    "MachineTemplate",
+    "OnDemand",
+    "Provider",
+    "Pool",
+    "Storage",
+    "Image",
+    "GPU",
+    "CPU",
+    "Availability",
+    "Offer",
+    "Status",
+    "Quote",
+    "Diagnostic",
+    "Machine",
+    "RentalCost",
+    "LogStream",
+    "Standing",
+)
+
+
 Outcome = Literal[
     "succeeded", "failed", "cancelled", "over_budget", "out_of_time", "lost", "stopped"
 ]

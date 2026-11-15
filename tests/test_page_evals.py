@@ -15,8 +15,8 @@ from moto import mock_aws
 from etude.block_file import parse
 from etude.carriage import EVAL_BLOCK_PACK, checkpoint_file
 from etude.checkpoints import CheckpointRef
-from etude.controller import advance
-from etude.declarations import read_experiment
+from etude.controller.advance import advance
+from etude.controller.declarations import read_experiment
 from etude.errors import EtudeError
 from etude.eval.match import environment, evaluate
 from etude.eval.query import compare, statsdb

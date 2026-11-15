@@ -9,7 +9,7 @@ from pathlib import Path
 from etude.launch.database import launcher_file
 from etude.launch.executor import local as local_service
 from etude.launch.records import Machine, Pool
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.spec import Job
 from tests.launch.fake import bench, open_database, output_bytes
 

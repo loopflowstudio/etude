@@ -16,8 +16,9 @@ from pydantic import BaseModel
 
 import etude.launch.client as client
 from etude.checkpoints import CheckpointRecord
-from etude.controller import advance
-from etude.declarations import Experiment, read_experiment
+from etude.controller.advance import advance
+from etude.controller.declarations import Experiment, read_experiment
+from etude.controller.local import _place_inputs
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval.match import environment
 from etude.eval.query import statsdb
@@ -33,7 +34,6 @@ from etude.jobs import (
     with_experiment,
 )
 from etude.launch.records import Outcome, Standing, Status
-from etude.local import _place_inputs
 from etude.out import MEMBERSHIP, OutFile, OutFiles
 from etude.records import Clock, RunCounters, RunOutcome, RunRecord, RunSubmission
 from etude.spec import Job, RunRequest

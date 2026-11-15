@@ -9,8 +9,8 @@ from __future__ import annotations
 import base64
 import hashlib
 
-from etude.launch.machines import MachineRequest
-from etude.launch.providers.package import program_archive
+from etude.launch.provisioner.machines import MachineRequest
+from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import Image
 from etude.launch.storage.s3 import Bucket
 from etude.storage_timeout import storage_environment

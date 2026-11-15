@@ -15,17 +15,18 @@ FILES = {
     "launch/__init__.py",
     "launch/errors.py",
     "launch/measurement.py",
-    "launch/providers/__init__.py",
-    "launch/providers/bootstrap.py",
-    "launch/providers/http.py",
-    "launch/providers/lium/__init__.py",
-    "launch/providers/lium/pod.py",
-    "launch/providers/vast/__init__.py",
-    "launch/providers/vast/http.py",
-    "launch/providers/vast/instance.py",
-    "launch/providers/runpod/__init__.py",
-    "launch/providers/runpod/http.py",
-    "launch/providers/runpod/pod.py",
+    "launch/provisioner/__init__.py",
+    "launch/provisioner/providers/__init__.py",
+    "launch/provisioner/providers/bootstrap.py",
+    "launch/provisioner/providers/http.py",
+    "launch/provisioner/providers/lium/__init__.py",
+    "launch/provisioner/providers/lium/pod.py",
+    "launch/provisioner/providers/vast/__init__.py",
+    "launch/provisioner/providers/vast/http.py",
+    "launch/provisioner/providers/vast/instance.py",
+    "launch/provisioner/providers/runpod/__init__.py",
+    "launch/provisioner/providers/runpod/http.py",
+    "launch/provisioner/providers/runpod/pod.py",
     "launch/environment.py",
     "launch/logging.py",
     "deadline.py",
@@ -38,7 +39,7 @@ FILES = {
 def program_archive(*, guardian: bool = False) -> bytes:
     """Stable ZIP bytes, including when an installed client forwards itself."""
     out = io.BytesIO()
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     migrations = root / "launch" / "migrations"
     paths = (
         (root / name for name in FILES)

@@ -29,7 +29,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
-from etude.declarations import asked, read_experiment, read_training_jobs
+from etude.controller.declarations import asked, read_experiment, read_training_jobs
 from etude.errors import LauncherError
 from etude.eval.records import Benchmark, RoundRobin, TournamentRun
 from etude.eval.tournament import played

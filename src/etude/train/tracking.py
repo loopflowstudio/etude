@@ -96,6 +96,9 @@ from etude.train.records import ParentRun, RowTable, checkpoint_name
 from etude.train.state import State, saved_states, state_folder, write_objects
 
 # Compaction is bounded by bytes or elapsed cadence, independent of training steps.
+__all__ = ("track", "TrainingRun")
+
+
 PERMANENT_BYTES, RECENT_BLOCKS = 8_000_000, 64
 
 type Logged = Mapping[str, object]
@@ -1305,7 +1308,7 @@ def track(
 
     A taken name is refused unless `resume=True` or the launcher requests a retry.
     A resumed run's first logged row sets where it supersedes earlier rows.
-    An attempt that logs nothing replaces nothing. `etude train` (`etude.local.train`)
+    An attempt that logs nothing replaces nothing. `etude train` (`etude.controller.local.train`)
     supplies the experiment, identity and persistent `out` for a local call.
     """
     if metric_name_limit is not None and metric_name_limit < 0:

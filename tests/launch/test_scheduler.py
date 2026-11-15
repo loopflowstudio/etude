@@ -26,7 +26,7 @@ from etude.launch.records import (
     Tally,
     Target,
 )
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Observation
 from etude.launch.ssh import Unreachable
 from etude.launch.storage.disk import DirectoryJournal
@@ -384,7 +384,7 @@ def test_quote_prints_planned_first_wave_costs_and_rents_nothing(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(
@@ -423,7 +423,7 @@ def test_availability_asks_the_provider_once_and_rents_nothing(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(
@@ -452,7 +452,7 @@ def test_machines_shows_an_owned_machines_cost_and_expiry(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(

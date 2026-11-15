@@ -8,7 +8,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from etude.launch.images import prepare_pytorch
+from etude.launch.provisioner.images import prepare_pytorch
 from etude.launch.runtime import PROBE, select_runtime
 
 IMAGE = "pytorch/pytorch@sha256:b85566342b86d13a67712e9315d40cdc2dad7f8d86df1aff3831f80835edbcca"
@@ -53,7 +53,7 @@ def main() -> None:
             "-S",
             "-c",
             "import sys; sys.path.insert(0,'/source'); "
-            "from etude.launch.providers.bootstrap import guard; "
+            "from etude.launch.provisioner.providers.bootstrap import guard; "
             "assert not any(m in sys.modules for m in ('pydantic','numpy','torch')); "
             "print('guardian imports without site packages')",
         ],

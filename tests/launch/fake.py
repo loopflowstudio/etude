@@ -19,7 +19,7 @@ from tempfile import TemporaryDirectory
 
 from etude.launch.database import Database, launcher_file, upgrade
 from etude.launch.logs import snapshot_stream
-from etude.launch.machines import Allocation, Bill, Refused
+from etude.launch.provisioner.machines import Allocation, Bill, Refused
 from etude.launch.records import (
     GPU,
     Image,
@@ -32,7 +32,7 @@ from etude.launch.records import (
     Provider,
     Storage,
 )
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Observation, Packet, Progress, Work
 
 L4 = MachineTemplate(

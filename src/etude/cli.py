@@ -50,7 +50,7 @@ def train_recipe(
     json_output: Annotated[bool, typer.Option("--json", help="print a JSON result")] = False,
 ) -> None:
     """Train a recipe on this computer; 0 finished, 75 stopped, other failed."""
-    from etude.local import train
+    from etude.controller.local import train
     from etude.spec import Until
 
     target = Until.model_validate(until) if until is not None else None
@@ -98,8 +98,8 @@ def _submit(
     import time
     from decimal import Decimal, InvalidOperation
 
-    from etude.controller import advance, source_for
-    from etude.declarations import read_experiment, read_training_jobs
+    from etude.controller.advance import advance, source_for
+    from etude.controller.declarations import read_experiment, read_training_jobs
     from etude.spec import Until
     from etude.storage import storage_from_uri
 
@@ -289,9 +289,9 @@ def smoke_experiment(
         raise typer.BadParameter("an experiment FILE is required")
     from typing import cast
 
-    from etude.declarations import read_training_jobs
+    from etude.controller.declarations import read_training_jobs
+    from etude.controller.smoke import STEPS, Step, smoke_file
     from etude.experiment_file import defined_functions
-    from etude.smoke import STEPS, Step, smoke_file
     from etude.storage import storage_from_uri
 
     steps = step or list(STEPS)
@@ -459,8 +459,8 @@ def eval_experiment(
     # Experiments join tracking, evaluation and the launcher.
     import time
 
-    from etude.controller import advance
-    from etude.declarations import read_experiment
+    from etude.controller.advance import advance
+    from etude.controller.declarations import read_experiment
     from etude.storage import default_root, storage_from_uri
 
     definition = read_experiment(file, experiment=experiment)

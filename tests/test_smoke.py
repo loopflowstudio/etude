@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
+from etude.controller.smoke import smoke_file
 from etude.errors import LauncherError
 from etude.launch.client import default, queue
 from etude.records import Clock
-from etude.smoke import smoke_file
 from etude.spec import Job, Runtime, SmokeForm
 from etude.storage import DirectoryStorage, default_root
 from etude.train.tracking import track

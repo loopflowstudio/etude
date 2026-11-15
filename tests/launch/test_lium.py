@@ -20,16 +20,16 @@ from etude.launch.client import _open
 from etude.launch.database import Database, launcher_file, upgrade
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Execution, Executor
-from etude.launch.machines import MachineRequest, Refused
-from etude.launch.providers import bootstrap as bootstrap_module
-from etude.launch.providers.bootstrap import guard
-from etude.launch.providers.lium.api import Create, LiumAPI, Pod
-from etude.launch.providers.lium.machines import _START, LiumMachines
-from etude.launch.providers.lium.pod import Watchdog
-from etude.launch.providers.lium.pod import main as pod_main
+from etude.launch.provisioner.machines import MachineRequest, Refused
+from etude.launch.provisioner.providers import bootstrap as bootstrap_module
+from etude.launch.provisioner.providers.bootstrap import guard
+from etude.launch.provisioner.providers.lium.api import Create, LiumAPI, Pod
+from etude.launch.provisioner.providers.lium.machines import _START, LiumMachines
+from etude.launch.provisioner.providers.lium.pod import Watchdog
+from etude.launch.provisioner.providers.lium.pod import main as pod_main
 from etude.launch.records import GPU, BootstrapLinks, Machine, MachineTemplate, OnDemand, Provider
 from etude.launch.records import Storage as Place
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
@@ -294,7 +294,7 @@ def test_ssh_bootstrap_starts_once_after_running(monkeypatch: pytest.MonkeyPatch
     def start(pod: Pod, env: dict[str, str]) -> None:
         environments.append(env)
 
-    monkeypatch.setattr("etude.launch.providers.lium.machines._start", start)
+    monkeypatch.setattr("etude.launch.provisioner.providers.lium.machines._start", start)
     machine.find("session")
     machines(market, storage).find("session")
     assert len(environments) == 1
@@ -429,7 +429,7 @@ def test_lium_executes_and_retains_outputs_before_server_deletion(
     def start(pod: Pod, env: dict[str, str]) -> None:
         environments.append(env)
 
-    monkeypatch.setattr("etude.launch.providers.lium.machines._start", start)
+    monkeypatch.setattr("etude.launch.provisioner.providers.lium.machines._start", start)
     errors: list[Exception] = []
 
     def leave_deletion_to_server() -> None:
@@ -497,7 +497,7 @@ def test_local_watchdog_stops_work_without_provider_credentials(
     def killpg(group: int, signal: int) -> None:
         terminated.append(group)
 
-    monkeypatch.setattr("etude.launch.providers.lium.pod.os.killpg", killpg)
+    monkeypatch.setattr("etude.launch.provisioner.providers.lium.pod.os.killpg", killpg)
     guard(
         Watchdog(),
         "4321",
@@ -525,7 +525,7 @@ def test_failed_ssh_reply_can_recover_without_renting_again(
         if attempts[0] == 1:
             raise ProviderUnavailable("fixture lost SSH reply")
 
-    monkeypatch.setattr("etude.launch.providers.lium.machines._start", start)
+    monkeypatch.setattr("etude.launch.provisioner.providers.lium.machines._start", start)
     with pytest.raises(ProviderUnavailable):
         machine.find("session")
     assert machines(market, storage).find("session") is not None
@@ -652,7 +652,7 @@ def test_unacknowledged_timer_still_allows_cleanup_at_startup_deadline(
         def now(cls, tz: object = None) -> Time:
             return cls.fromtimestamp(clock[0].timestamp(), UTC)
 
-    monkeypatch.setattr("etude.launch.providers.lium.machines.datetime", Time)
+    monkeypatch.setattr("etude.launch.provisioner.providers.lium.machines.datetime", Time)
     store = open_database(launcher_file(tmp_path))
     scheduler = _scheduler(store, market, storage)
     monkeypatch.setattr(scheduler, "_clock", lambda: clock[0])

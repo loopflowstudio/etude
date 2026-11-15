@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.declarations import read_training_jobs, select_runs
+from etude.controller.declarations import read_training_jobs, select_runs
 from etude.jobs import checkpoint_inputs_for
 from etude.launch.database import upgrade
 from etude.records import RunRecord

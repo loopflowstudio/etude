@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from etude.launch.logging import CLOSED, log_to, write_log
-from etude.launch.machines import Allocation
+from etude.launch.provisioner.machines import Allocation
 from etude.launch.records import BootstrapLinks
 from etude.launch.schemas import Packet
 from etude.launch.storage.disk import DirectoryJournal

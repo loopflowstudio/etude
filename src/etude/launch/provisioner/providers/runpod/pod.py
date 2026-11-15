@@ -11,8 +11,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from etude.launch.environment import startup_timeout
-from etude.launch.providers.bootstrap import run
-from etude.launch.providers.runpod.http import PodHTTP
+from etude.launch.provisioner.providers.bootstrap import run
+from etude.launch.provisioner.providers.runpod.http import PodHTTP
 
 
 class GuardianAPI(PodHTTP):
@@ -94,7 +94,7 @@ def main(argv: list[str]) -> int:
         argv[1],
         api=GuardianAPI(pod_key()),
         machine=os.environ["RUNPOD_POD_ID"],
-        module="etude.launch.providers.runpod.pod",
+        module="etude.launch.provisioner.providers.runpod.pod",
         start_ssh=_start_ssh,
     )
 

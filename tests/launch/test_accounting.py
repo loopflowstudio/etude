@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from etude.errors import LauncherError
-from etude.launch.machines import Allocation, Bill
+from etude.launch.provisioner.machines import Allocation, Bill
 from etude.launch.records import MachineTemplate, OnDemand, Storage
 from etude.launch.schemas import Observation
 from etude.spec import Job

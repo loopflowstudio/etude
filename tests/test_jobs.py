@@ -16,7 +16,7 @@ import pytest
 from etude.cache import Content
 from etude.checkpoints import CheckpointRecord
 from etude.cli import main
-from etude.declarations import read_training_jobs
+from etude.controller.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb

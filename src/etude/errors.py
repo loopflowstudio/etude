@@ -6,6 +6,8 @@ import subprocess
 import traceback
 from pathlib import Path
 
+__all__ = ("EtudeError", "LauncherError")
+
 
 class EtudeError(Exception):
     """A refusal with a short code a caller can match on."""

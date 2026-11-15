@@ -573,14 +573,17 @@ exercise, such as an evaluation with no checkpoints to play, is not smoked too
 
 **From Python**, the client's `queue` and `launch` take `smoke: bool = False`. With `smoke=True` they smoke the
 train step of each job that has a smoke form before submitting, and raise
-`LauncherError` naming the failed job. For the whole chain, as the command runs
-it:
+`LauncherError` naming the failed job. The whole chain uses the implementation helpers below. These helpers are
+internal and may change between releases. For supported script calls, use
+`queue(..., smoke=True)` or `launch(..., smoke=True)`.
+
+<!-- implementation-reference -->
 
 ```python
 from pathlib import Path
 
-from etude.declarations import read_training_jobs
-from etude.smoke import smoke_file
+from etude.controller.declarations import read_training_jobs
+from etude.controller.smoke import smoke_file
 
 path = Path("ppo.py")
 # Call training_jobs() with these flags; omit them to use its defaults.
@@ -1194,30 +1197,40 @@ Storage charges are excluded.
 
 ## Imports
 
-Every `__init__.py` is empty. Every name is imported from the module that
-defines it, by its full path, and relative imports are a lint error:
+```python
+from etude.jobs import TrainingJob
+from etude.launch.client import queue
+from etude.spec import Until
+```
 
-| Import | What it is |
-| --- | --- |
-| `from etude.jobs import TrainingJob, EvalJob` | typed jobs: Etude decides the command |
-| `from etude.jobs import Agents` | how an eval job's players are loaded, and how their inputs are batched |
-| `from etude.eval.agents import Forward` | a callable taking a list of inputs and returning a list of outputs |
-| `from etude.jobs import ExperimentState` | what an experiment's runs have stored, as declarations are given it |
-| `from etude.spec import Job, RunRequest` | a command job, and one run of any job |
-| `from etude.launch.client import queue, launch, status, wait, ...` | the calls a script makes; they go to the server when one is set |
-| `from etude.launch.database import Database` | validate and open existing `launcher.sqlite` records |
-| `from etude.launch.database import inspect, upgrade` | local schema evidence and the explicit upgrade boundary |
-| `from etude.launch.schemas import Packet, Work, Progress` | frozen worker messages |
-| `from etude.launch.executor import Executor` | machine acquisition, startup and journal composition |
-| `from etude.launch.scheduler import Scheduler` | the owner of one database: queueing, admission, matching runs to machines |
+Import supported names from their defining modules. The [Python reference](python.md)
+maps imports to author tasks and explains the module-level `__all__` declarations.
+Use `etude.launch.client` for scripts that submit and inspect work, including when
+a server is selected. `TrainingJob`, `EvalJob`, `Agents` and `ExperimentState`
+are defined in `etude.jobs`.
 
 Records are frozen Pydantic models, constructed with named fields:
 `Job(command="./simulate", max_hours=2)` and `RunRequest(job=job, seed=1)`.
 Use `model_dump_json()` for JSON and `model_validate_json()` to load it.
+
+### Implementation reference
+
+These entry points are for maintaining or embedding Etude internals. They are
+outside the supported author surface; an import that works is not by itself a
+compatibility promise.
+
+| Import | Ownership |
+| --- | --- |
+| `from etude.controller.advance import advance` | one pass over an experiment file |
+| `from etude.controller.declarations import read_training_jobs` | declaration-file reading |
+| `from etude.controller.smoke import smoke_file` | the full local smoke chain |
+| `from etude.launch.scheduler.loop import Scheduler` | one database's queue, placement, limits and lifecycle |
+| `from etude.launch.executor import Executor` | startup and journal composition |
+| `from etude.launch.schemas import Packet, Work, Progress` | worker messages |
+
 Entry points import only the selected command. CLI help loads neither Pydantic
 nor the scheduler; workers do not import the scheduler. Tests pin import counts.
 Each remote command imports client dependencies once in its installed environment.
-
 
 ## Launching from Python
 
@@ -1803,35 +1816,40 @@ or reports an undelivered input instead of starting with different state.
 
 ## Ownership and failure behavior
 
-The code has three levels, each built only on the public functions of the one
-below. Kubernetes calls the first a controller (the loop that compares what is
-declared with what exists); Slurm and Ray call the second a scheduler;
-Karpenter and SkyPilot call the third a provisioner.
+The code has four ownership boundaries. Kubernetes calls the experiment pass a
+controller; Slurm and Ray use scheduler for placement; Karpenter and SkyPilot
+use provisioner for machine acquisition. The worker executes delivered packets.
+These boundaries are not a four-step import chain: the scheduler composes
+provisioning and execution, while provisioners and workers remain independent.
 
 | Level | Modules | States it owns |
 | --- | --- | --- |
-| Controller | `etude/controller.py` (the pass), `experiment.py` (state), `declarations.py` (reads an experiment file), `jobs.py`, `smoke.py`, `local.py` | a run's `queued`, `running`, `stopped`, `finished`, `failed` |
-| Scheduler | `etude/launch/`, apart from the provisioner's modules | `Phase`, `Outcome`, `Cause`, `Status` |
-| Provisioner | `launch/machines.py`, `launch/providers/`, `launch/images.py` | `Machine.state`: `starting`, `available`, `unavailable`, `deleted` |
+| Controller | `etude/controller/`; declarations and state types stay in `etude/jobs.py` and `etude/experiment.py` | experiment decisions from `queued`, `running`, `stopped`, `finished`, `failed` |
+| Scheduler | `etude/launch/scheduler/`, composed with execution and persistence modules | `Phase`, `Outcome`, `Cause`, `Status` |
+| Provisioner | `etude/launch/provisioner/`, including `providers/` and `images.py` | `Machine.state`: `starting`, `available`, `unavailable`, `deleted` |
+| Worker | `etude/launch/worker/` | packet execution, local evidence and delivery |
 
-- **Controller.** Reads the experiment file, observes state through
-  `client.standing(experiment)` and storage, and calls the scheduler's
-  `launch` or `queue` once for each new run. It holds the experiment's
-  `--max-usd` and nothing else between passes.
-- **Scheduler.** `scheduler.py` owns runs, the queue, placement and each
-  job's limits in `database.py`. `executor.py` composes startup (`startup.py`,
-  `ssh.py`) with directory, SSH or bucket journals. `worker/attempts.py`
-  executes packets without knowing jobs or providers; `worker/courier.py`
-  moves inboxes and evidence. `server.py` forwards CLI commands to a selected
-  server and runs the standing loop; `source.py` freezes and publishes git
-  source, reads its history and caches transport archives. It reads no
-  experiment file and holds no limit that spans runs.
-- **Provisioner.** `machines.py` defines allocations, requests, safeguards
-  and definite capacity refusal. `providers/runpod/machines.py` obtains
-  machines, supplies stock-image boot, reads prices/bills and deletes exact
-  provider identities. `OwnedMachine` represents an existing address. It
-  knows nothing of jobs or runs. Rented machines start themselves; owned
-  hosts use their configured connection.
+- **Controller.** `controller/advance.py` reads declarations, observes state
+  through `client.standing(experiment)` and storage, and calls `launch` or
+  `queue` for new work. It holds the experiment's `--max-usd` and nothing else
+  between passes. Declaration reading, smoke and local composition live beside it.
+- **Scheduler.** `scheduler/loop.py` owns database writes, locks, runs, queue,
+  placement and job limits. `costs.py` holds dollar arithmetic and `placement.py`
+  holds placement values; neither owns lifecycle state. `executor.py` composes
+  startup (`startup.py`, `ssh.py`) with directory, SSH or bucket journals.
+  `server.py` forwards CLI commands and runs the standing loop; `source.py`
+  freezes and publishes git source. These modules read no experiment file and
+  hold no limit spanning runs.
+- **Provisioner.** `provisioner/machines.py` defines allocations, requests,
+  safeguards and definite capacity refusal. Provider implementations obtain
+  machines, supply stock-image boot, read prices/bills and terminate exact
+  identities. `OwnedMachine` represents an existing address. Provisioning knows
+  nothing of jobs or runs. Rented machines start themselves; owned hosts use
+  their configured connection.
+- **Worker.** `worker/attempts.py` executes packets; `worker/courier.py` moves
+  inboxes and evidence. Neither places runs nor acquires machines. The
+  standard-library guardian enforces the rental deadline independently of
+  dependency installation and job execution.
 
 The SQLite file is `$ETUDE_HOME/launcher.sqlite` (default `~/.etude`), carried
 across releases by migrations; see [Upgrading Etude](#upgrading-etude). Versioned
@@ -1869,41 +1887,47 @@ SSH remains the connection to a host, including its disk.
 
 ```text
 etude/
-  controller.py  experiment.py  declarations.py  jobs.py  smoke.py  local.py
-etude/launch/
-
-  records.py  schemas.py  client.py  cli.py  commands.py
-    scheduler.py  executor.py  database.py  source.py  server.py
-
-  ssh.py  startup.py  machines.py  environment.py  errors.py  measurement.py
-  storage/    disk.py  bucket.py  s3.py
-  worker/     main.py  attempts.py  courier.py  remote.py
-  providers/  cleanup.py  package.py  runpod/ api.py  machines.py  pod.py  http.py
+  jobs.py  experiment.py
+  controller/  advance.py  declarations.py  smoke.py  local.py
+  train/  eval/
+  launch/
+    client.py  server.py  cli.py  commands.py
+    records.py  schemas.py  database.py  executor.py  source.py
+    ssh.py  startup.py  environment.py  errors.py  measurement.py
+    scheduler/    loop.py  costs.py  placement.py
+    provisioner/  machines.py  images.py  providers/
+    worker/       main.py  attempts.py  courier.py  remote.py
+    storage/      disk.py  bucket.py  s3.py
+    migrations/
 ```
 
-One AST test, `tests/launch/test_layout.py`, enforces the rules:
+`tests/launch/test_layout.py` enforces the boundaries:
 
 - Workers cannot reach the scheduler, database, client, CLI or server through
   imports. Workers execute packets and return evidence, without placing runs.
-- The provisioner's modules import nothing of the scheduler (`scheduler`,
-  `executor`, `database`, `client`, `server`, `cli`, workers) and no `Job` or
-  `RunRequest`. No `etude.launch` module imports a controller-level module,
-  and nothing outside `etude.launch` imports an underscore name from it.
-- Provider implementations are named only inside `providers/`, with `client.py`
-  as the single composition point. Generic cleanup and package manifests keep
-  machine-specific choices out of workers and SSH.
-- `providers/runpod/pod.py` and its complete import graph use only the standard
-  library. `environment.py` also remains independent of client dependencies.
-- Storage cannot import machine connections or startup, directly or transitively.
+- The provisioner imports no scheduler, executor, database, client, server, CLI,
+  worker, `Job` or `RunRequest`. No launcher module imports the controller,
+  `etude.jobs` or `etude.experiment`.
+- The scheduler imports no client, server, CLI, controller or concrete provider.
+  Its costs and placement modules cannot import the loop, database, execution,
+  client or providers.
+- Concrete providers are selected in `client.py`; generic cleanup and package
+  manifests keep provider choices out of workers and SSH.
+- Guardian imports, including `provisioner/providers/runpod/pod.py`, use only
+  the standard library. `environment.py` is also independent of dependencies.
+- Storage cannot reach machine connections or startup through imports.
 - Imports use full module paths and all package initializers stay empty.
 
-`Record` lives in `records.py`; `schemas.py` owns packet, result, bootstrap and
-inbox models. `executor.py` owns `Executor` and its `Execution` interface. There is one representation of each record.
+Shared records and bootstrap facts stay outside level folders so their consumers
+need no reverse dependency. `launch/records.py` owns launcher records;
+`launch/schemas.py` owns packet, result, bootstrap and inbox models.
+`executor.py` owns `Executor` and its `Execution` interface.
 
-The stock-image bootstrap and guardian live in `providers/runpod/pod.py`;
-`providers/package.py` builds the immutable archive and its bare-Python subset.
-Startup follows the machine's kind. A session's packet, journal folder and
-bucket keys are named by its session id.
+The stock-image bootstrap and guardian live in
+`provisioner/providers/runpod/pod.py`; `provisioner/providers/package.py` builds
+the archive and its bare-Python subset. SSH's pre-install loader includes the
+same bootstrap dependencies. Startup follows the machine's kind. A session's
+packet, journal folder and bucket keys are named by its session id.
 
 ## Command expectations
 
@@ -2163,7 +2187,7 @@ and guardian readiness inherit this budget without separate 30/60-second caps.
 
 ```python
 from etude.jobs import TrainingJob
-from etude.launch.images import prepare_pytorch, resolve_image
+from etude.launch.provisioner.images import prepare_pytorch, resolve_image
 from etude.launch.records import MachineTemplate
 
 prepared = prepare_pytorch(torch="2.10.0", cuda="12.8")

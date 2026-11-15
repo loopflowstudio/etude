@@ -115,15 +115,17 @@ and flag it for rotation without quoting it again.
 Launcher records use frozen Pydantic models with named constructor fields and
 model-owned JSON serialization. For `Json[Model]` fields, pass serialized text
 through `model_validate`: the typed constructor describes the decoded model,
-while runtime validation expects JSON text. Keep `providers/runpod/http.py`,
-`providers/runpod/pod.py`, `providers/vast/http.py`, `providers/vast/instance.py`,
-`providers/lium/pod.py`,
-`providers/http.py`, `providers/bootstrap.py`, `providers/package.py` and `environment.py`
+while runtime validation expects JSON text. Keep `provisioner/providers/runpod/http.py`,
+`provisioner/providers/runpod/pod.py`, `provisioner/providers/vast/http.py`,
+`provisioner/providers/vast/instance.py`,
+`provisioner/providers/lium/pod.py`,
+`provisioner/providers/http.py`, `provisioner/providers/bootstrap.py`,
+`provisioner/providers/package.py` and `environment.py`
 standard-library-only: each rental guardian must start before
 client dependency installation. The client and each job use separate environments.
 `logging.py` and top-level `storage_timeout.py` are also in the standard-library
 bootstrap subset. New bootstrap imports must be present in both the guardian
-archive (`providers/package.py`) and SSH's pre-install loader (`ssh.py`). Operational errors
+archive (`provisioner/providers/package.py`) and SSH's pre-install loader (`ssh.py`). Operational errors
 use the shared sanitizer in `etude.errors` before retention; subprocess diagnostics omit argv and traceback
 locals. Journal log reads return `LogStream`, preserving missing versus silent
 output, and share the caller's monotonic deadline through `deadline.py`.
@@ -288,3 +290,8 @@ tolerated in Python, and no second schema definition sits beside the SQL
 files. An older etude may keep writing after an additive release, so new
 columns must read sensibly when empty; journal records a previous release's
 worker writes must still decode, so new fields on them take defaults.
+
+Supported Python modules declare a literal `__all__` tuple of locally defined
+names. Keep the independent inventory in `tests/test_public.py` and authored
+examples consistent; implementation examples in Markdown carry
+`<!-- implementation-reference -->` immediately before their code block.

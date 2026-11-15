@@ -20,7 +20,7 @@ from etude.cli import main
 from etude.launch.client import default
 from etude.launch.database import upgrade
 from etude.launch.records import Status
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.worker.prepared import Receipt, evict, home
 from etude.spec import Input, Job, Preparation, Runtime
 from tests.launch.counting import job_text

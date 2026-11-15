@@ -17,7 +17,7 @@ from decimal import Decimal
 
 from etude.deadline import limit_time
 from etude.launch.errors import ProviderUnavailable
-from etude.launch.machines import (
+from etude.launch.provisioner.machines import (
     Allocation,
     Bill,
     MachineRequest,
@@ -25,8 +25,8 @@ from etude.launch.machines import (
     Safeguards,
     check_creation,
 )
-from etude.launch.providers.program import Program, boot_source
-from etude.launch.providers.vast.api import Create, Instance, VastAPI, VastOffer
+from etude.launch.provisioner.providers.program import Program, boot_source
+from etude.launch.provisioner.providers.vast.api import Create, Instance, VastAPI, VastOffer
 from etude.launch.records import STOCK_IMAGE, MachineTemplate, Offer
 from etude.launch.storage.s3 import Bucket
 from etude.spec import Record
@@ -134,7 +134,7 @@ class VastMachines:
                     label=f"etude-{request.session}",
                     env=env,
                     onstart="exec python3.12 -c "
-                    + shlex.quote(boot_source("etude.launch.providers.vast.instance")),
+                    + shlex.quote(boot_source("etude.launch.provisioner.providers.vast.instance")),
                 ),
             )
             instance = self._api.instance(id)

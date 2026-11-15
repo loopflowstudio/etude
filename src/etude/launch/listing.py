@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 from etude.identity import run_address
 from etude.launch.records import Availability, Machine, Quote
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.source import line
 
 

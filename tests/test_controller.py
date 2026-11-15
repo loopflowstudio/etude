@@ -10,8 +10,9 @@ import pytest
 from etude.call import Function
 from etude.checkpoints import CheckpointRecord, PolicyKey
 from etude.cli import main
-from etude.controller import advance
-from etude.declarations import read_experiment
+from etude.controller.advance import advance
+from etude.controller.declarations import read_experiment
+from etude.controller.local import _place_inputs
 from etude.errors import EtudeError, LauncherError
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, CheckpointPlayer
@@ -21,7 +22,6 @@ from etude.jobs import EvalGroup, EvalJob, Evaluation, ExperimentState, Training
 from etude.launch import client
 from etude.launch.database import upgrade
 from etude.launch.records import Pool
-from etude.local import _place_inputs
 from etude.out import MEMBERSHIP, OutFile, OutFiles
 from etude.page import build
 from etude.records import ArtifactRef, RunRecord

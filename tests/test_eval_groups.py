@@ -22,8 +22,9 @@ from pydantic import ValidationError
 
 from etude.call import Function
 from etude.checkpoints import CheckpointRef
-from etude.controller import advance
-from etude.declarations import Experiment, read_experiment
+from etude.controller.advance import advance
+from etude.controller.declarations import Experiment, read_experiment
+from etude.controller.smoke import Step, smoke_file
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval import resources as eval_resources
 from etude.eval.agents import AgentConnection, Answer, Forward, Request
@@ -56,7 +57,6 @@ from etude.jobs import (
 from etude.launch import client
 from etude.launch.records import Pool, Standing, Status
 from etude.records import ArtifactRef, RunRecord, RunSubmission
-from etude.smoke import Step, smoke_file
 from etude.spec import Job, RunRequest
 from etude.storage import DirectoryStorage, default_root
 from etude.train.tracking import track

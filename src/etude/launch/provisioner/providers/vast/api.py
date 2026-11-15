@@ -15,7 +15,7 @@ from typing import Literal
 from pydantic import Field
 
 from etude.launch.errors import ProviderUnavailable
-from etude.launch.providers.vast.http import InstanceHTTP
+from etude.launch.provisioner.providers.vast.http import InstanceHTTP
 from etude.launch.records import GPU, MachineTemplate
 from etude.spec import Record
 

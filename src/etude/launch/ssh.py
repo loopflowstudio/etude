@@ -22,9 +22,9 @@ from pydantic import Field
 from etude.deadline import remaining
 from etude.errors import LauncherError
 from etude.launch.logs import snapshot_stream
-from etude.launch.machines import Allocation
 from etude.launch.measurement import timed
-from etude.launch.providers.package import program_archive
+from etude.launch.provisioner.machines import Allocation
+from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import BootstrapLinks, LogProducer, LogStream
 from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.source import source_archive

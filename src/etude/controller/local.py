@@ -27,7 +27,12 @@ from pydantic import BaseModel
 
 from etude.cache import Artifact, Content, ContentMismatch, Corrupt
 from etude.call import changed_config, config_type
-from etude.declarations import find_training_run, format_known_run, read_training_jobs, select_runs
+from etude.controller.declarations import (
+    find_training_run,
+    format_known_run,
+    read_training_jobs,
+    select_runs,
+)
 from etude.errors import EtudeError, LauncherError
 from etude.experiment import observe
 from etude.experiment_file import defined_functions, refuse_renamed

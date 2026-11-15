@@ -15,13 +15,13 @@ from threading import Thread
 import pytest
 
 from etude.cli import main
-from etude.declarations import read_training_jobs
+from etude.controller.declarations import read_training_jobs
+from etude.controller.local import train
 from etude.errors import LauncherError
 from etude.experiment import observe
 from etude.launch.client import default
 from etude.launch.database import launcher_file, upgrade
 from etude.launch.schemas import Packet
-from etude.local import train
 from etude.spec import Runtime
 from etude.storage import default_root
 from tests.launch.fake import bench
@@ -364,7 +364,7 @@ def test_launch_makes_machines_that_start_themselves(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(
@@ -401,7 +401,7 @@ def test_explicit_rent_uses_the_same_startup_rule(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(

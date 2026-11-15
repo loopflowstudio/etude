@@ -12,9 +12,9 @@ import pytest
 from etude.cli import main
 from etude.jobs import continue_from
 from etude.launch.executor import Executor, local
-from etude.launch.machines import OwnedMachine
+from etude.launch.provisioner.machines import OwnedMachine
 from etude.launch.records import Machine, Pool
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.ssh import SSH, RemoteReply, RemoteRequest, SSHJournal, SSHStart
 from etude.spec import Job, RunRequest, Until
 from etude.train.records import Step
@@ -178,7 +178,7 @@ def test_continuation_moves_between_local_and_remote_disk(
     monkeypatch.setattr("etude.launch.cli.default", lambda: scheduler)
     monkeypatch.setattr("etude.launch.client.default", lambda: scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(

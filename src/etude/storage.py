@@ -32,6 +32,8 @@ from etude.identity import SAFE_NAME, run_address
 from etude.records import RunRecord
 from etude.storage_timeout import StorageUnavailable, socket_timeout
 
+__all__ = ("default_root", "storage_from_uri", "Storage", "DirectoryStorage", "S3Storage")
+
 
 def run_prefix(run: str) -> str:
     """A folder prefix for a run name or its qualified experiment/run address."""

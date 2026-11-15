@@ -13,7 +13,8 @@ uv add 'etude-sdk[eval]'   # DuckDB, for writing and querying tables
 ```python
 from pydantic import BaseModel
 
-from etude.eval.match import Tables, environment
+from etude.eval.match import environment
+from etude.eval.result import Tables
 from etude.eval.query import statsdb
 from etude.eval.records import (
     Benchmark,

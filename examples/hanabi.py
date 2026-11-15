@@ -18,7 +18,7 @@ from etude.checkpoints import CheckpointRef
 from etude.eval.agents import Forward
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, CheckpointPlayer, Code, Held, Match, Seating
-from etude.eval.run import Tables
+from etude.eval.result import Tables
 from etude.jobs import Agents, EvalJob, ExperimentState
 from etude.train.tracking import track
 

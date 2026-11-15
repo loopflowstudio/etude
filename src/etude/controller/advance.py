@@ -11,7 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
-from etude.declarations import (
+from etude.controller.declarations import (
     Experiment,
     asked,
     find_training_run,
@@ -19,6 +19,7 @@ from etude.declarations import (
     read_training_jobs,
     select_runs,
 )
+from etude.controller.smoke import smoke_file
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import TournamentRun, digest
 from etude.eval.result import EvalResult
@@ -41,7 +42,6 @@ from etude.launch import client
 from etude.launch.listing import show_quote
 from etude.launch.server import selected
 from etude.run import located_runs
-from etude.smoke import smoke_file
 from etude.spec import Job, RunRequest, Smoke, Until
 from etude.storage import Storage, default_root
 

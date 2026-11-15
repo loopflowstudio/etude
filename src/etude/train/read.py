@@ -66,6 +66,19 @@ from etude.train.block import (
 from etude.train.manifest import BlockDescription, Manifest, StoredBlock, describe, fetch
 from etude.train.records import RowTable, TablePoint
 
+__all__ = (
+    "read",
+    "read_all",
+    "read_batches",
+    "RunData",
+    "Batch",
+    "Points",
+    "buckets",
+    "Buckets",
+    "lines",
+)
+
+
 type Floats = npt.NDArray[np.float64]
 
 

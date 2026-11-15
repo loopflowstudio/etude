@@ -27,6 +27,8 @@ from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
 from etude.train.report import job_names
 
+__all__ = ("observe",)
+
 
 def observe(
     source: Storage | Path | str,

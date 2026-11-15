@@ -80,6 +80,9 @@ from etude.records import Digest, Record, RunRecord
 from etude.run import LocatedRun, declare, run_folders, under
 from etude.storage import DirectoryStorage, Storage, default_root
 
+__all__ = ("evaluating", "scores", "standings", "ScorePoint", "Scores", "Standing", "Standings")
+
+
 if TYPE_CHECKING:
     import duckdb
 

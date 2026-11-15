@@ -13,7 +13,7 @@ import typer
 from etude.launch.commands import Kind, kind
 
 if TYPE_CHECKING:
-    from etude.launch.scheduler import Scheduler
+    from etude.launch.scheduler.loop import Scheduler
 
 # Entry points import only the command being run (AGENTS.md): help must not load
 # the scheduler, worker or tracking stack. Imports below these entries stay at top.
@@ -565,7 +565,7 @@ def image_prepare(
     ] = 0,
 ) -> None:
     """Wait for registry metadata and print the immutable selection; never rent."""
-    from etude.launch.images import resolve_image
+    from etude.launch.provisioner.images import resolve_image
 
     print(resolve_image(reference, platform=platform, timeout=timeout or None).model_dump_json())
 
@@ -580,7 +580,7 @@ def ondemand_image(
     ] = 0,
 ) -> None:
     """Resolve an image within timeout, then select it for future machines."""
-    from etude.launch.images import resolve_image
+    from etude.launch.provisioner.images import resolve_image
     from etude.launch.records import Image
 
     selected = (

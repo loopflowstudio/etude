@@ -141,7 +141,7 @@ def boot(
     start_ssh: Callable[[], None] | None,
 ) -> int:
     # A readiness handshake makes the guardian precede every download/install.
-    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[3])}
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[4])}
     marker = GUARDIAN_MARKER
     marker.unlink(missing_ok=True)
     log = (

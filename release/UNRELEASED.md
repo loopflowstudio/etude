@@ -41,17 +41,18 @@ A failed launched eval holds only its undelivered
 matches: the pass hands down unaffected work and prints all decisions before
 returning `launched_pass_failed`. `--quote` reports the hold without failing.
 
-Launching has three levels, each built on the one below: the **controller**
+Launching has four ownership boundaries: the **controller**
 makes that pass over an experiment file, the **scheduler** queues runs and
-starts each on a machine with room, and the **provisioner** rents and
-terminates machines. Limits sit on a job, on a pool or on-demand, and on the
-experiment; cohorts, which sat between, are removed.
+starts each on a machine with room, the **provisioner** rents and terminates
+machines, and the **worker** executes delivered packets independently of
+placement. Limits sit on a job, on a pool or on-demand, and on the experiment;
+cohorts, which sat between, are removed.
 
 ### Upgrade
 
 | Before | Now |
 | --- | --- |
-| `etude.declarations.read_job_file` | `etude.declarations.read_training_jobs` |
+| `etude.declarations.read_job_file` | `etude.controller.declarations.read_training_jobs` |
 | `def runs(...)` | `def training_jobs(...)` |
 | `def eval(state)` | `def eval_jobs(state)` |
 | `training(train, config=c, ...)` | `TrainingJob(name="...", train=train, config=c, ...)`; `name` is required |
@@ -315,3 +316,42 @@ may supply `line=`; policy references derive it. Released records stay readable.
 - **A hand-built key for a run of another experiment**, seated before this
   change, is read as the evaluating experiment's run. Seat it again by its
   full key if that matters.
+
+
+## Package levels and supported Python imports
+
+```python
+from etude.jobs import Agents, EvalJob, ExperimentState, TrainingJob
+from etude.eval.result import Tables
+from etude.launch.client import launch, queue
+```
+
+Experiment declarations keep their defining module, `etude.jobs`. Supported
+modules mark their supported names with `__all__`; names outside those tuples
+are implementation details. Use the [Python import reference](../docs/python.md)
+to find the defining module for each task. Import `Tables` from
+`etude.eval.result` rather than through `etude.eval.match` or `etude.eval.run`.
+
+Scripts using moved implementation modules must update their imports directly:
+
+| Previous module | Module to use |
+| --- | --- |
+| `etude.controller` (`advance`) | `etude.controller.advance` |
+| `etude.declarations` | `etude.controller.declarations` |
+| `etude.smoke` | `etude.controller.smoke` |
+| `etude.local` | `etude.controller.local` |
+| `etude.launch.scheduler` (`Scheduler`) | `etude.launch.scheduler.loop` |
+| `etude.launch.images` | `etude.launch.provisioner.images` |
+| `etude.launch.machines` | `etude.launch.provisioner.machines` |
+| `etude.launch.providers.*` | `etude.launch.provisioner.providers.*` |
+
+There are no forwarding aliases at replaced paths. If an import fails after
+upgrading, update that source import, including module names in your own scripts
+or test fixtures. `Scheduler`, executor and controller helpers remain internal;
+image preparation functions are listed in the supported reference. See
+[launcher ownership](../docs/launcher.md#ownership-and-failure-behavior) for the
+four boundaries and shared modules.
+
+This reorganization changes Python source paths, not CLI spellings, run
+identities, stored records or database schemas. It requires no data conversion.
+`etude.call` and the job commands retain their entry paths.

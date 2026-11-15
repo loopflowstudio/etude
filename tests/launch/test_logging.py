@@ -26,12 +26,12 @@ from etude.launch.environment import install
 from etude.launch.errors import LaunchError
 from etude.launch.logging import CLOSED, LIMIT, bound, bounded
 from etude.launch.logs import LogCursor, render, snapshot_stream
-from etude.launch.providers import bootstrap
-from etude.launch.providers.package import program_archive
-from etude.launch.providers.runpod import pod
+from etude.launch.provisioner.providers import bootstrap
+from etude.launch.provisioner.providers.package import program_archive
+from etude.launch.provisioner.providers.runpod import pod
 from etude.launch.records import Diagnostic, LogSnapshot, LogStream
 from etude.launch.records import Storage as StorageRecord
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import (
     WORKER_LOG,
     AttemptRecord,

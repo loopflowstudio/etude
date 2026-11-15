@@ -31,8 +31,6 @@ from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from pathlib import Path
 from uuid import uuid4
 
-from pydantic import Field
-
 from etude.carriage import RecordMismatch
 from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError, explain, sanitize
@@ -42,14 +40,13 @@ from etude.launch.database import Database
 from etude.launch.errors import LaunchError
 from etude.launch.executor import Execution
 from etude.launch.logging import bounded
-from etude.launch.machines import Refused, Safeguards, creation_guard
+from etude.launch.provisioner.machines import Refused, Safeguards, creation_guard
 from etude.launch.records import (
     RETRYABLE,
     STOCK_IMAGE,
     Availability,
     Cause,
     Diagnostic,
-    Hardware,
     Image,
     Launch,
     LaunchRequest,
@@ -78,6 +75,8 @@ from etude.launch.records import (
     Target,
     refusal,
 )
+from etude.launch.scheduler.costs import Budget, cost_between, rental_usd, usd
+from etude.launch.scheduler.placement import Placement, PlannedRun
 from etude.launch.schemas import (
     Observation,
     Packet,
@@ -144,63 +143,6 @@ def _new_session(id: str, supply: Supply, machine: Machine, now: datetime) -> Se
         version=1,
         autorun=machine.kind == "rented",
     )
-
-
-def _rental_usd(rental: Rental, machine: Machine, now: datetime) -> Decimal:
-    """Estimate an unconfirmed machine through its paid deadline."""
-    if machine.claimed_at is None or machine.refused_at is not None:
-        return Decimal(0)
-    end = machine.deleted_at or min(now, rental.deadline)
-    return _cost_between(rental, machine, machine.claimed_at, end)
-
-
-def _cost_between(r: Rental, machine: Machine, start: datetime, end: datetime) -> Decimal:
-    """Allocate billed coverage by occupied time; estimate uncovered seconds."""
-    origin = machine.claimed_at or start
-    through = r.billed_through
-    if through is None:
-        return _usd(r.usd_per_hour, start, end)
-    covered_end = min(through, machine.deleted_at or through)
-    seconds = max(0.0, (covered_end - origin).total_seconds())
-    overlap = max(0.0, (min(end, covered_end) - max(start, origin)).total_seconds())
-    paid = r.billed_usd * Decimal(overlap) / Decimal(seconds) if seconds else Decimal(0)
-    return paid + _usd(r.usd_per_hour, max(start, through), end)
-
-
-def _usd(usd_per_hour: Decimal, start: datetime, end: datetime) -> Decimal:
-    seconds = Decimal(max((end - start).total_seconds(), 0))
-    return usd_per_hour * seconds / 3600
-
-
-class PlannedRun(Record):
-    """One placement's run and budget, before any attempt or machine is claimed."""
-
-    run: RunRecord
-    cap_usd: Decimal = Field(allow_inf_nan=True)  # unlimited for owned machines
-    seconds: int
-    limit: Limit
-
-
-class Budget(Record):
-    """What a run has left across all its attempts."""
-
-    seconds: float  # execution time
-    usd: Decimal = Field(allow_inf_nan=True)  # attributed dollars; unlimited without max_usd
-
-
-class Placement(Record):
-    """A machine selected under its supplies' locks and the runs it takes at once.
-
-    None machine means a new rented machine.
-    """
-
-    runs: tuple[RunRecord, ...]
-    free: int  # runs this machine may take now; `runs` fills some of them
-    supply: str  # the pool or on-demand the machine belongs to, or would be rented from
-    session: Session | None
-    machine: Machine | None
-    price: Decimal
-    hardware: Hardware | None = None  # what a new rental would ask for
 
 
 class LogSelection(Record):
@@ -444,7 +386,7 @@ class Scheduler:
         now = self._clock()
         costs = []
         for rental in self._store.rentals():
-            usd = _rental_usd(rental, self._store.machine(rental.machine), now)
+            usd = rental_usd(rental, self._store.machine(rental.machine), now)
             costs.append(
                 RentalCost(
                     rental=rental,
@@ -2492,16 +2434,16 @@ class Scheduler:
         occupied = self._occupied(session, rental, now)
         start, end = occupied[attempt.id]
         edges = sorted({t for span in occupied.values() for t in span if start <= t <= end})
-        usd = Decimal(0)
+        dollars = Decimal(0)
         for begin, finish in zip(edges, edges[1:], strict=False):
             sharing = sum(a <= begin and finish <= b for a, b in occupied.values())
             part = (
-                _cost_between(rental, machine, begin, finish)
+                cost_between(rental, machine, begin, finish)
                 if billed
-                else _usd(rental.usd_per_hour, begin, finish)
+                else usd(rental.usd_per_hour, begin, finish)
             )
-            usd += part / sharing
-        return usd
+            dollars += part / sharing
+        return dollars
 
     def _shared(
         self, attempt: RunAttempt, session: Session, rental: Rental | None, now: datetime

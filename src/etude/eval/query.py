@@ -119,6 +119,9 @@ from etude.records import Digest, Record, RunOutcome
 from etude.run import as_storage, declared, run_folders, under
 from etude.storage import DirectoryStorage, Storage, default_root
 
+__all__ = ("statsdb", "read_blobs", "estimate", "compare", "Estimate", "Comparison")
+
+
 if TYPE_CHECKING:
     import duckdb
     from _typeshed import SupportsRichComparison

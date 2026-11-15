@@ -15,6 +15,8 @@ from pydantic import Field, JsonValue
 from etude.checkpoints import CheckpointRecord
 from etude.records import Clock, Name, Record, SourceKey
 
+__all__ = ("Time", "Step")
+
 
 def Step(name: str, meaning: str) -> Clock:  # noqa: N802 - reads as a declaration
     """Released declaration spelling; count clocks are now declared by use."""

@@ -21,7 +21,7 @@ from etude.jobs import checkpoint_inputs_for, continue_from
 from etude.launch.database import launcher_file
 from etude.launch.executor import local as local_service
 from etude.launch.records import Machine, Pool, Status
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.run import runs
 from etude.spec import Input, Job, RunRequest, Until, job_id
 from etude.storage import DirectoryStorage

@@ -61,9 +61,9 @@ def test_folder_rules() -> None:
                         "RUNPOD_",
                         "VAST_API_KEY",
                         "LIUM_API_KEY",
-                        "etude.launch.providers.runpod",
-                        "etude.launch.providers.vast",
-                        "etude.launch.providers.lium",
+                        "etude.launch.provisioner.providers.runpod",
+                        "etude.launch.provisioner.providers.vast",
+                        "etude.launch.provisioner.providers.lium",
                     )
                 )
                 for node in ast.walk(tree)
@@ -83,27 +83,31 @@ def test_folder_rules() -> None:
     forbidden = {"scheduler", "database", "client", "cli", "server"}
     for module in modules:
         if module.startswith("etude.launch.worker."):
-            assert not reachable(module) & {"etude.launch." + name for name in forbidden}, module
+            assert not any(
+                name == f"etude.launch.{part}" or name.startswith(f"etude.launch.{part}.")
+                for name in reachable(module)
+                for part in forbidden
+            ), module
         if module.startswith("etude.launch.storage."):
             assert not reachable(module) & {
                 "etude.launch.ssh",
                 "etude.launch.startup",
-                "etude.launch.machines",
+                "etude.launch.provisioner.machines",
             }, module
     for provider in providers:
         for module in modules:
-            if module.startswith(f"etude.launch.providers.{provider}."):
+            if module.startswith(f"etude.launch.provisioner.providers.{provider}."):
                 assert not any(
-                    name.startswith(f"etude.launch.providers.{other}.")
+                    name.startswith(f"etude.launch.provisioner.providers.{other}.")
                     for name in reachable(module)
                     for other in providers - {provider}
                 ), module
     for entry in (
-        "etude.launch.providers.runpod.pod",
-        "etude.launch.providers.lium.pod",
-        "etude.launch.providers.vast.instance",
-        "etude.launch.providers.bootstrap",
-        "etude.launch.providers.package",
+        "etude.launch.provisioner.providers.runpod.pod",
+        "etude.launch.provisioner.providers.lium.pod",
+        "etude.launch.provisioner.providers.vast.instance",
+        "etude.launch.provisioner.providers.bootstrap",
+        "etude.launch.provisioner.providers.package",
         "etude.launch.environment",
     ):
         for module in reachable(entry):
@@ -115,10 +119,7 @@ def test_launch_levels_import_only_downward() -> None:
     controller = {
         "controller",
         "experiment",
-        "declarations",
         "jobs",
-        "smoke",
-        "local",
         "eval",
         "page",
         "report",
@@ -141,7 +142,8 @@ def test_launch_levels_import_only_downward() -> None:
     for path in root.rglob("*.py"):
         parts = path.relative_to(root).parts
         lower = parts[0] == "launch"
-        provisioner = lower and (parts[1] == "providers" or path.stem in {"machines", "images"})
+        provisioner = lower and parts[1] == "provisioner"
+        scheduler = lower and parts[1] == "scheduler"
         for node in ast.walk(ast.parse(path.read_text())):
             if not isinstance(node, (ast.Import, ast.ImportFrom)):
                 continue
@@ -155,6 +157,24 @@ def test_launch_levels_import_only_downward() -> None:
                     assert module.split(".")[:2] not in [["etude", name] for name in controller], (
                         path
                     )
+                if scheduler:
+                    assert module.split(".")[:3] not in [
+                        ["etude", "launch", name] for name in ("client", "server", "cli")
+                    ], path
+                    assert not module.startswith("etude.launch.provisioner.providers"), path
+                    if path.stem in {"costs", "placement"}:
+                        assert module.split(".")[:3] not in [
+                            ["etude", "launch", name]
+                            for name in (
+                                "database",
+                                "executor",
+                                "ssh",
+                                "startup",
+                                "worker",
+                                "provisioner",
+                            )
+                        ], path
+                        assert module != "etude.launch.scheduler.loop", path
                 if provisioner:
                     assert module.split(".")[:3] not in [
                         ["etude", "launch", name] for name in above_machines

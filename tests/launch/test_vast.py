@@ -23,12 +23,12 @@ from etude.launch.client import _open
 from etude.launch.database import Database, launcher_file, upgrade
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Executor
-from etude.launch.machines import MachineRequest, Refused
-from etude.launch.providers.bootstrap import guard
-from etude.launch.providers.cleanup import command
-from etude.launch.providers.vast.api import Create, Instance, VastAPI
-from etude.launch.providers.vast.instance import GuardianAPI
-from etude.launch.providers.vast.machines import OUTAGE_SECONDS, Outage, VastMachines
+from etude.launch.provisioner.machines import MachineRequest, Refused
+from etude.launch.provisioner.providers.bootstrap import guard
+from etude.launch.provisioner.providers.cleanup import command
+from etude.launch.provisioner.providers.vast.api import Create, Instance, VastAPI
+from etude.launch.provisioner.providers.vast.instance import GuardianAPI
+from etude.launch.provisioner.providers.vast.machines import OUTAGE_SECONDS, Outage, VastMachines
 from etude.launch.records import (
     GPU,
     STOCK_IMAGE,
@@ -38,7 +38,7 @@ from etude.launch.records import (
     Provider,
 )
 from etude.launch.records import Storage as Place
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
@@ -206,7 +206,7 @@ def test_rental_keeps_identity_and_package_without_account_credentials() -> None
     assert "fixture-account-key" not in created.model_dump_json()
     assert created.env["ETUDE_DEADLINE"]
     with zipfile.ZipFile(io.BytesIO(base64.b64decode(created.env["ETUDE_PROGRAM"]))) as archive:
-        assert "etude/launch/providers/vast/instance.py" in archive.namelist()
+        assert "etude/launch/provisioner/providers/vast/instance.py" in archive.namelist()
         assert "etude/launch/worker/main.py" not in archive.namelist()
     assert b"fixture-not-retained" not in storage.objects["test/sessions/session/receipt.json"]
     market.counts.clear()
@@ -514,7 +514,12 @@ def test_default_cleanup_uses_only_the_active_instance(monkeypatch: pytest.Monke
     monkeypatch.delenv("RUNPOD_POD_ID", raising=False)
     monkeypatch.setenv("CONTAINER_ID", "12")
     monkeypatch.setenv("CONTAINER_API_KEY", "fixture")
-    assert command() == [sys.executable, "-m", "etude.launch.providers.vast.instance", "delete"]
+    assert command() == [
+        sys.executable,
+        "-m",
+        "etude.launch.provisioner.providers.vast.instance",
+        "delete",
+    ]
 
 
 @pytest.mark.parametrize("cancel", [False, True])

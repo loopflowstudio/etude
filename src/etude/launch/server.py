@@ -30,7 +30,7 @@ from etude.errors import LauncherError, explain
 from etude.launch.errors import LaunchError, SchemaAdvanced
 from etude.launch.listing import show_runs
 from etude.launch.measurement import timed
-from etude.launch.providers.package import program_archive
+from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import (
     Availability,
     Diagnostic,
@@ -42,7 +42,7 @@ from etude.launch.records import (
     Status,
     Target,
 )
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.source import freeze, home, retain, source_archive
 from etude.launch.ssh import (
     _INSTALL_CODE,

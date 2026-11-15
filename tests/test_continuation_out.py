@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.declarations import read_training_jobs
+from etude.controller.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.jobs import continue_from, continued_config
 from etude.out import MEMBERSHIP, OutFiles
@@ -304,7 +304,7 @@ def test_continuation_requires_saved_out_or_its_latest_checkpoint(
         monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: scheduler)
         monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: scheduler)
         monkeypatch.setattr(
-            "etude.controller.source_for",
+            "etude.controller.advance.source_for",
             lambda pool, rent, source=None: source or str(tmp_path / "track"),
         )
         monkeypatch.setattr(
@@ -430,7 +430,7 @@ def training_jobs(python: str) -> Job:
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(

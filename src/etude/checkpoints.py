@@ -25,6 +25,8 @@ from pydantic import (
 from etude.carriage import checkpoint_file_name, within
 from etude.records import ArtifactRef, Name, Record
 
+__all__ = ("CheckpointRef", "CheckpointRecord", "PolicyKey")
+
 
 def _checkpoint_id(
     *,

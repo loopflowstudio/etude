@@ -12,7 +12,7 @@ import sys
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from etude.launch.providers.bootstrap import GUARDIAN_MARKER, boot, guard
+from etude.launch.provisioner.providers.bootstrap import GUARDIAN_MARKER, boot, guard
 
 
 class Watchdog:
@@ -27,7 +27,7 @@ class Watchdog:
 
 def main(argv: list[str]) -> int:
     if argv[1] == "boot":
-        return boot("etude.launch.providers.lium.pod", None, None)
+        return boot("etude.launch.provisioner.providers.lium.pod", None, None)
     if argv[1] != "guard":
         raise ValueError("expected boot or guard")
     GUARDIAN_MARKER.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

@@ -14,7 +14,7 @@ Each function uses the selected SSH server, or a launcher under ETUDE_HOME
 call names a pool (`pool=`), an on-demand to rent from (`rent=`), or both.
 With `smoke=True`, `queue` and `launch` first
 run each job's smoke form here (`etude.launch.smoke`) and submit nothing if one
-fails; each run records what its smoke did. `etude.smoke.smoke_file` smokes a
+fails; each run records what its smoke did. `etude.controller.smoke.smoke_file` smokes a
 whole experiment file, evaluation and report too.
 """
 
@@ -30,13 +30,13 @@ from pathlib import Path
 from etude.errors import LauncherError
 from etude.launch.database import launcher_file, open_home
 from etude.launch.executor import Execution, Executor, local
-from etude.launch.machines import Machines, OwnedMachine, Safeguards
-from etude.launch.providers.lium.api import LiumAPI
-from etude.launch.providers.lium.machines import LiumMachines
-from etude.launch.providers.runpod.api import RunPodAPI
-from etude.launch.providers.runpod.machines import RunPodMachines
-from etude.launch.providers.vast.api import VastAPI
-from etude.launch.providers.vast.machines import VastMachines
+from etude.launch.provisioner.machines import Machines, OwnedMachine, Safeguards
+from etude.launch.provisioner.providers.lium.api import LiumAPI
+from etude.launch.provisioner.providers.lium.machines import LiumMachines
+from etude.launch.provisioner.providers.runpod.api import RunPodAPI
+from etude.launch.provisioner.providers.runpod.machines import RunPodMachines
+from etude.launch.provisioner.providers.vast.api import VastAPI
+from etude.launch.provisioner.providers.vast.machines import VastMachines
 from etude.launch.records import (
     Availability,
     Diagnostic,
@@ -47,7 +47,7 @@ from etude.launch.records import (
     Standing,
     Status,
 )
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.server import PythonClient, selected
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.launch.source import home
@@ -57,6 +57,24 @@ from etude.launch.storage.s3 import _send, open_bucket
 from etude.launch.storage.transport import HTTPReply, observe
 from etude.launch.usage import Usage
 from etude.spec import Job, RunRequest, expand_runs
+
+__all__ = (
+    "queue",
+    "launch",
+    "quote",
+    "availability",
+    "status",
+    "wait",
+    "cancel",
+    "diagnostics",
+    "logs",
+    "fetch",
+    "default",
+    "rent",
+    "terminate",
+    "usage",
+    "standing",
+)
 
 
 @cache

@@ -72,6 +72,28 @@ from etude.errors import EtudeError
 from etude.eval.source import digest_files, source_commit
 from etude.records import BUILT_IN_NAMES, Digest, Name, Record
 
+__all__ = (
+    "CheckpointPlayer",
+    "Code",
+    "Held",
+    "Composition",
+    "compose",
+    "Benchmark",
+    "RoundRobin",
+    "Seating",
+    "Seat",
+    "Earlier",
+    "Fraction",
+    "At",
+    "Final",
+    "Aligned",
+    "Match",
+    "Environment",
+    "Player",
+    "Rollup",
+)
+
+
 type Config = dict[str, JsonValue]
 type ColumnType = Literal["BOOLEAN", "BIGINT", "DOUBLE", "VARCHAR"]
 

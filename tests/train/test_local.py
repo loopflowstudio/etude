@@ -469,7 +469,7 @@ def test_seconds_deadline_stops_before_the_first_step_when_expired(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("etude.local.time", SimpleNamespace(time=lambda: 0.0))
+    monkeypatch.setattr("etude.controller.local.time", SimpleNamespace(time=lambda: 0.0))
     file = tmp_path / "train.py"
     file.write_text(RECIPE)
     assert main(["train", str(file), "--seconds", "1"]) == 75
