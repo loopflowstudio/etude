@@ -64,10 +64,10 @@ def evaluate[C: BaseModel | Mapping[str, JsonValue]](
     totals are never taken again. Prints one line to
     stderr as each match is stored: how many of the pending are, and since
     when. Raises
-    `EtudeError("match_failed")` after recording the first match that raised,
-    returned no rows or returned rows Etude refuses. Delivery failures do not
-    raise: the files stay in the run's directory for `etude sync`, and stderr
-    says so.
+    `EtudeError("match_failed")` when a match raised, returned no rows or
+    returned rows Etude refuses, after retaining all in-flight outcomes.
+    Delivery failures raise RetryRequested; files stay in the run's directory
+    for `etude sync`.
     """
     warnings.warn(
         "evaluate is now evaluating(...), then run.play(play); removed in 0.5",

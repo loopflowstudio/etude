@@ -24,7 +24,7 @@ from etude.eval.batching import _Batches
 from etude.eval.game import Execution
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Code, Held, Match, RoundRobin
+from etude.eval.records import Code, Config, Held, Match, RoundRobin
 from etude.eval.resources import active_games, available_cpus, memory_bytes
 from etude.eval.result import Tables
 from etude.eval.run import Terminated
@@ -788,6 +788,71 @@ def test_container_limits_include_ancestor_cpu_and_leaf_memory(
 
 def fails_game(match: Match, agents: Sequence[Agent]) -> Tables:
     raise ValueError("fixture game error")
+
+
+def mixed_outcomes(match: Match[Config]) -> Tables:
+    if match.config["outcome"] == "failed":
+        raise ValueError("fixture game error")
+    if match.config["outcome"] == "retry":
+        raise RetryRequested("fixture transient error")
+    return plain(match)
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_a_game_failure_retains_in_flight_outcomes_and_resume_skips_successes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry: bool
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
+    # Keep acceptance order deterministic: failure, success, then another failure.
+    monkeypatch.setattr("etude.eval.run.ordered", lambda matches: iter(matches))
+
+    def completed(
+        fs: Iterable[Future[object]],
+        timeout: float | None = None,
+        return_when: str = "ALL_COMPLETED",
+    ) -> tuple[set[Future[object]], set[Future[object]]]:
+        return wait(fs, timeout=timeout, return_when="ALL_COMPLETED")
+
+    monkeypatch.setattr("etude.eval.run.wait", completed)
+    matches = [
+        Match(players=(checkpoint("one"),), config={"outcome": outcome, "index": seed}, games=1)
+        for seed, outcome in enumerate(("failed", "done", "retry" if retry else "failed", "done"))
+    ]
+    world = environment("grouped")
+    with pytest.raises(RetryRequested if retry else EtudeError):
+        with evaluating(
+            world, experiment="grouped", matches=matches, run="mixed", directory=tmp_path
+        ) as active:
+            active.play(mixed_outcomes)
+    db = statsdb("grouped", tmp_path)
+    try:
+        records = dict(
+            (key, (state, again))
+            for key, state, again in db.sql("select match, state, retry from matches").fetchall()
+        )
+        expected = {
+            matches[0].key: ("failed", False),
+            matches[1].key: ("done", False),
+            matches[2].key: ("failed", retry),
+        }
+        if retry:
+            expected[matches[3].key] = ("failed", True)
+        assert records == expected
+        assert db.sql("select count(*) from scores").fetchone() == (1,)
+        assert db.sql("select state from runs").fetchall() == [("failed",)]
+    finally:
+        db.close()
+    with evaluating(
+        world,
+        experiment="grouped",
+        matches=matches,
+        run="mixed",
+        directory=tmp_path,
+        resume=True,
+    ) as active:
+        repaired = active.play(plain)
+    assert (repaired.played, repaired.skipped) == (3, 1)
 
 
 def test_a_game_failure_stops_only_its_tournament(tmp_path: Path) -> None:

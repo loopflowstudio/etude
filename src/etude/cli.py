@@ -15,7 +15,7 @@ from typing import Annotated
 
 import typer
 
-from etude.errors import EtudeError, LauncherError
+from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.launch import cli as launch_cli
 from etude.launch.commands import DEFAULT_MIN_EVAL_HOURS, Kind, kind
 from etude.train.cli import checkpoints, sync
@@ -641,7 +641,10 @@ def _main(argv: list[str]) -> int:
     except typer.Exit as error:
         return int(error.exit_code)
     except Exception as error:
-        if isinstance(error, (LauncherError, EtudeError, OSError, ValueError, typer.BadParameter)):
+        if isinstance(
+            error,
+            (LauncherError, EtudeError, RetryRequested, OSError, ValueError, typer.BadParameter),
+        ):
             # A bad flag value names its flag: "Invalid value for '--hidden': ...".
             said = error.format_message() if isinstance(error, typer.BadParameter) else str(error)
             print(f"etude: {said}", file=sys.stderr)

@@ -515,6 +515,7 @@ def test_a_launched_eval_run_reports_its_tally_a_few_times_not_once_per_match(
 def test_a_launched_eval_run_that_fails_reports_what_it_played_and_what_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
@@ -525,4 +526,4 @@ def test_a_launched_eval_run_that_fails_reports_what_it_played_and_what_failed(
             matches=matches, directory=tmp_path,
         )  # fmt: skip
     tally = read_result(outputs).tally
-    assert tally is not None and (tally.done, tally.failed) == (0, 1)
+    assert tally is not None and (tally.done, tally.failed) == (0, len(matches))

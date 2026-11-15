@@ -18,7 +18,7 @@ import etude.launch.client as client
 from etude.checkpoints import CheckpointRecord
 from etude.controller import advance
 from etude.declarations import Experiment, read_experiment
-from etude.errors import EtudeError, LauncherError
+from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Held, Seating
@@ -34,7 +34,12 @@ from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.tracking import TrainingRun as Run_
 from etude.train.tracking import track
-from tests.eval.games import play, play_catching_errors, play_failing_deal_one
+from tests.eval.games import (
+    play,
+    play_catching_errors,
+    play_failing_deal_one,
+    play_interrupted_deal_one,
+)
 from tests.eval.stored import stored_inference
 from tests.experiments import authored
 
@@ -203,7 +208,10 @@ def test_a_pass_plays_only_what_eval_returns_now(tmp_path: Path) -> None:
     assert (second.new, second.played) == (len(DEALS), len(DEALS))
 
 
-def test_a_failed_match_is_counted_and_not_replayed_unless_asked(tmp_path: Path) -> None:
+def test_a_failed_match_is_counted_and_not_replayed_unless_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
     bucket = DirectoryStorage(tmp_path / "bucket")
     training = trainer(bucket, tmp_path)
     save(training, bucket, tmp_path, range(1, 2))
@@ -220,11 +228,37 @@ def test_a_failed_match_is_counted_and_not_replayed_unless_asked(tmp_path: Path)
         advance(ppo, source=bucket, directory=local)
     # Deal 1 is counted as failed and left alone; the rest is played.
     (counted,) = advance(ppo, source=bucket, directory=local)
-    assert counted.failed == 1 and counted.played == counted.new
+    assert (counted.failed, counted.played, counted.new) == (1, 0, 0)
     (settled,) = advance(ppo, source=bucket, directory=local)
     assert (settled.new, settled.failed, settled.played) == (0, 1, 0)
     with pytest.raises(EtudeError, match="match_failed"):
         advance(ppo, source=bucket, directory=local, retry_failed=True)
+
+
+def test_a_retryable_failure_is_replayed_by_the_next_pass_and_not_counted_failed(
+    tmp_path: Path,
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    training = trainer(bucket, tmp_path)
+    save(training, bucket, tmp_path, range(1, 2))
+    anchor = heuristic(tmp_path)
+    games = {"play": play_interrupted_deal_one}
+
+    def eval_(state: ExperimentState) -> Job:
+        vs = Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS, games=2)
+        ladder = Benchmark(name="ladder", environment=WORLD, seatings=(vs,))
+        return EvalJob(tournament=ladder, play=games["play"], checkpoints=state.run("ppo-1").checkpoints,
+                          max_hours=0.1)  # fmt: skip
+
+    ppo, local = Experiment(name="ppo", eval=eval_), tmp_path / "evaluator"
+    with pytest.raises(RetryRequested):
+        advance(ppo, source=bucket, directory=local)
+    games["play"] = play
+    # The pass summary counts them once, as new, not also as failed.
+    (replayed,) = advance(ppo, source=bucket, directory=local)
+    assert replayed.failed == 0 and replayed.new == replayed.played > 0
+    (done,) = advance(ppo, source=bucket, directory=local)
+    assert (done.new, done.failed, done.played) == (0, 0, 0)
 
 
 def test_a_pass_whose_matches_all_return_no_rows_fails_and_a_retry_replays_them(

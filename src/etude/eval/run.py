@@ -464,9 +464,10 @@ def play_together(
 ) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
     """Play tournaments on one pool; loader failures follow every seated checkpoint.
 
-    Other match failures stop their tournament. Tournaments share the available
-    game processes. Storage and reporting stay on the invoking thread; only the
-    author's play crosses into a child.
+    Other match failures stop dispatch for their tournament; in-flight outcomes
+    are still delivered. Tournaments share the available game processes.
+    Storage and reporting stay on the invoking thread; only the author's play
+    crosses into a child.
     """
     started = time.monotonic()
     order = deque(plays)
@@ -644,9 +645,6 @@ def play_together(
                                 continue
                             each, match = running.pop(future)
                             fail_checkpoints()
-                            if each.stopped:
-                                start()
-                                continue
                             raised = future.exception()
                             if isinstance(raised, BrokenProcessPool):
                                 raise RetryRequested(

@@ -752,8 +752,10 @@ def test_eval_runs_from_etude_sdk_0_2_load_and_are_never_counted_as_played(
 
 
 def test_played_says_who_delivered_each_match_last_what_failed_and_what_is_new(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 6)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     bucket = DirectoryStorage(tmp_path / "bucket")
     progress = anchors(tmp_path)
     checkpoints = trained(tmp_path, bucket)
@@ -782,8 +784,9 @@ def test_played_says_who_delivered_each_match_last_what_failed_and_what_is_new(
              storages=[bucket], directory=tmp_path / "third")  # fmt: skip
     third = played(progress, experiment=EXPERIMENT, checkpoints=checkpoints[2:],
                    storages=[bucket], directory=reader)  # fmt: skip
-    (failed,) = third.failed
-    assert failed.config == {"deal": 1} and not third.delivered
+    assert len(third.failed) == 2
+    assert all(failed.config == {"deal": 1} for failed in third.failed)
+    assert len(third.delivered) == 4 and not third.new
 
 
 def test_stored_runs_read_once_answer_played_for_every_tournament_asked(tmp_path: Path) -> None:

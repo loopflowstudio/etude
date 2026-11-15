@@ -187,8 +187,10 @@ many matches wait and why, and a later pass finds them again
 - **A run's limits are its jobs' summed.** The eval run's `max_hours` and
   `max_usd` are the totals of the eval jobs it plays, and `--max-usd` admits
   it as one run.
-- **A failed match stops its tournament.** The other tournaments keep
-  playing, and the run ends failed. A loader failure instead fails every
+- **A failed match stops its tournament.** Matches already in flight retain
+  their outcomes, so successful matches are not replayed and failed ones keep
+  their retry flags. The other tournaments keep playing, and the run ends
+  failed. A loader failure instead fails every
   undelivered scheduled match containing that checkpoint across the group's
   tournaments, including matches never dispatched, with the load error.
   Matches without that checkpoint continue; delivered results stay unchanged.

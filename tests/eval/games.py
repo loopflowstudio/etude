@@ -6,6 +6,7 @@ import json
 import re
 from hashlib import sha256
 
+from etude.errors import RetryRequested
 from etude.eval.records import CheckpointPlayer, Config, Match, Player
 from etude.eval.run import Result, Tables
 
@@ -83,6 +84,13 @@ def play_failing_deal_one(match: Match[Config]) -> Tables:
     """`play`, except that deal 1 raises, as a game with a bug in one deal would."""
     if match.config.get("deal") == 1:
         raise RuntimeError("deal 1 crashed")
+    return play(match)
+
+
+def play_interrupted_deal_one(match: Match[Config]) -> Tables:
+    """`play`, except that deal 1 asks to be played again, as a transient outage would."""
+    if match.config.get("deal") == 1:
+        raise RetryRequested("deal 1 lost its connection")
     return play(match)
 
 

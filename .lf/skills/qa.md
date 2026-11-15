@@ -335,3 +335,12 @@ single-file checkpoints hide nested input names (`start/checkpoint.json`).
   --disable-gpu --screenshot=OUT.png --window-size=1300,800 file://OUT/FILE.html`
   and read the PNG. The page renders in JavaScript, so grepping the HTML text
   shows nothing.
+- Failure paths: copy the example into a git lab and edit `agent_models.py`
+  (`raise RuntimeError(...)` for a bad checkpoint, `raise RetryRequested(...)`
+  from `etude.errors` for a transient one) or `play` (raise in one lane). Each
+  needs a fresh `ETUDE_HOME` and source; run three passes to see what is
+  replayed, held for `--retry-failed`, or settled.
+- To interrupt a pass at a known point, read its output from a Python driver
+  (`Popen(..., stdout=PIPE, stderr=STDOUT)`) and send SIGTERM after the line
+  `K/N matches played`; a fixed sleep misses because this Mac runs ~16 games
+  at a time. The next pass should play only the interrupted matches.

@@ -267,7 +267,8 @@ def advance(
             tournament=spec.tournament.name,
             new=len(pending),
             running=len(new_matches) - len(pending),
-            failed=0 if retry_failed else len(found.failed),
+            # Retryable failures are replayed with the new matches, not counted twice.
+            failed=0 if retry_failed else len(found.failed) - len(found.retry),
         )
         retryable = {m.key for m in found.retry}
         stopped = {failed[m.key] for m in pending if m.key in failed and m.key not in retryable}

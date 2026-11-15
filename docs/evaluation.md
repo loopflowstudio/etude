@@ -311,8 +311,9 @@ with evaluating(
   `seat` and `group`, a seat or group the match lacks, a column named
   `player`, or a column whose type changes during a run is refused. A refused
   or raising match is recorded as failed with its error, nothing else of it
-  is stored, and the run stops and ends failed. When a match cannot be
-  played, let `play` raise: an error caught and returned as empty tables is
+  is stored. The run stops starting matches, retains in-flight outcomes and
+  ends failed. When a match cannot be played, let `play` raise: an error
+  caught and returned as empty tables is
   still refused (`match_has_no_rows`), never stored as a result.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each value from one environment.
@@ -781,7 +782,9 @@ one on a GPU, or weights too large to hold in every game process.
   error and publish no rows; delivered results stay unchanged. Matches without
   that checkpoint carry on, including in the same tournament. A load raising
   `RetryRequested` applies the same scope with `retry=True`. Other match
-  failures stop their tournament while the others finish
+  failures stop new matches in their tournament while the others finish.
+  Matches already in flight still publish their outcomes; successes are not
+  replayed, and each failure keeps its own retry flag
   ([Experiments](#experiments)). Raise `RetryRequested`
   for a refusal that is the machine's fault, such as a device out of memory.
   Rows saying a game was invalid remain rows: raise instead of returning
@@ -1042,10 +1045,12 @@ matches, as a launched one does, unless `--retry-failed`.
   killed pass keeps every block it delivered and stays partial.
 - **Failures.** A match that raised, was refused or stored no rows is
   failed, never played: `etude status RUN` counts it (`12/80 matches (1
-  failed)`), its tournament stops there, and every later pass counts it
-  (`ladder: 0 new, 1 failed`) and does not play it again, so a result is
+  failed)`), its tournament stops starting matches, and every later pass
+  counts it (`ladder: 0 new, 1 failed`) and does not play it again, so a result is
   never quietly replaced. The other tournaments keep playing; the run then
-  ends failed. A [loader failure](#agents) instead fails every undelivered
+  ends failed. Matches already in flight still publish their successes or
+  failures, so a later pass does not replay their successes. A
+  [loader failure](#agents) instead fails every undelivered
   scheduled match containing that checkpoint across the group's tournaments, while
   matches without it continue. `--retry-failed` plays the failed matches again.
   A match the machine failed rather than the game, such as one unfinished at the run's

@@ -1416,7 +1416,9 @@ def validate_checkpoints(checkpoints: Iterable[CheckpointRef]) -> None:
             a.size_bytes is not None and b.size_bytes is not None and a.size_bytes != b.size_bytes
         ):
             raise EtudeError(
-                "checkpoint_key_conflict", 409, detail=f"{checkpoint.key}: {a.uri} and {b.uri}"
+                "checkpoint_key_conflict",
+                409,
+                detail=f"{checkpoint.key}: different contents at {a.uri} and {b.uri}",
             )
 
 

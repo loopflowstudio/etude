@@ -172,6 +172,7 @@ def running_agents(
         if definition.memory_gb is not None
         else memory_bytes() // 2
     )
+    games = active_games(pending, agents=True, memory_gb=definition.memory_gb)
     process = context.Process(
         target=_run,
         args=(
@@ -182,22 +183,15 @@ def running_agents(
             definition.max_batch,
             definition.max_delay_seconds,
             memory,
-            max(
-                1,
-                available_cpus()
-                - active_games(pending, agents=True, memory_gb=definition.memory_gb),
-            ),
+            max(1, available_cpus() - games),
             child,
             str(artifacts),
         ),
     )
     process.start()
     child.close()
-    exited: Future[None] = Future()
+    agent = AgentProcess(address=address, process=process, exited=Future())
     sentinel = process.sentinel
-
-    failures: dict[tuple[str, str], AgentFailure] = {}
-    checkpoint_failures: SimpleQueue[AgentFailure] = SimpleQueue()
 
     def observe_exit() -> None:
         try:
@@ -206,9 +200,9 @@ def running_agents(
                 if parent in ready:
                     for failure in cast(list[AgentFailure], parent.recv()):
                         if failure.loading:
-                            checkpoint_failures.put(failure)
+                            agent.checkpoint_failures.put(failure)
                         else:
-                            failures.setdefault((failure.tournament, failure.match), failure)
+                            agent.failures.setdefault((failure.tournament, failure.match), failure)
                     # Register failures before a game can catch its exception and return.
                     parent.send(None)
                 if sentinel in ready:
@@ -216,7 +210,7 @@ def running_agents(
         except (EOFError, OSError):
             wait([sentinel])
         finally:
-            exited.set_result(None)
+            agent.exited.set_result(None)
 
     observer = threading.Thread(target=observe_exit, name="etude-agents")
     try:
@@ -229,18 +223,11 @@ def running_agents(
             raise RetryRequested("agent process exited during startup") from error
         observer.start()
         print(
-            f"etude: agents: started for {', '.join(tournaments)}; "
-            f"{active_games(pending, agents=True, memory_gb=definition.memory_gb)} games at a time",
+            f"etude: agents: started for {', '.join(tournaments)}; {games} games at a time",
             file=sys.stderr,
             flush=True,
         )
-        yield AgentProcess(
-            address=address,
-            process=process,
-            exited=exited,
-            failures=failures,
-            checkpoint_failures=checkpoint_failures,
-        )
+        yield agent
     finally:
         failed = sys.exc_info()[0] is not None
         if failed and process.is_alive():
