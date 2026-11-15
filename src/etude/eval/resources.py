@@ -1,6 +1,6 @@
 """Process environment for game and agent processes.
 
-`allocate` returns one CPU Allocation for agent startup and game dispatch.
+`divide_cpus` returns CPU counts for agent startup and game dispatch.
 `resources` supplies temporary fast scratch and restores the caller's
 environment when the group finishes.
 Observations are kept in the run's durable artifact folder by the group owner.
@@ -87,12 +87,12 @@ def memory_bytes() -> int:
 
 
 @dataclass(frozen=True)
-class Allocation:
+class Cpus:
     games: int
     threads: int
 
 
-def allocate(pending: int, *, agents: bool, memory_gb: float | None = None) -> Allocation:
+def divide_cpus(pending: int, *, agents: bool, memory_gb: float | None = None) -> Cpus:
     """Reserve one eighth of CPUs for inference; small game sets return unused CPUs.
 
     A single CPU is shared by one game and inference. Memory and pending work
@@ -106,7 +106,7 @@ def allocate(pending: int, *, agents: bool, memory_gb: float | None = None) -> A
         max(1, cpus - max(1, (cpus + 7) // 8)) if agents else cpus,
         max(1, (memory - held) // GAME_BYTES),
     )
-    return Allocation(games=games, threads=max(1, cpus - games) if agents else 0)
+    return Cpus(games=games, threads=max(1, cpus - games) if agents else 0)
 
 
 @contextmanager

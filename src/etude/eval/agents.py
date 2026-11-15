@@ -25,7 +25,7 @@ from queue import SimpleQueue
 from typing import TYPE_CHECKING, Protocol, cast
 
 from etude.errors import RetryRequested, explain
-from etude.eval.resources import Allocation, memory_bytes
+from etude.eval.resources import Cpus, memory_bytes
 
 if TYPE_CHECKING:
     from etude.checkpoints import CheckpointRef
@@ -209,7 +209,7 @@ def running_agents(
     checkout: str | None,
     artifacts: Path,
     tournaments: Sequence[str],
-    allocation: Allocation,
+    allocation: Cpus,
 ) -> Iterator[AgentProcess]:
     address = str(Path(os.environ["ETUDE_SCRATCH_DIR"], "agents.sock"))
     context = multiprocessing.get_context("spawn")

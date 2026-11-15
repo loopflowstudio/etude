@@ -58,7 +58,7 @@ from etude.eval.records import (
     relocate_player,
     select_policy,
 )
-from etude.eval.resources import allocate, resources
+from etude.eval.resources import divide_cpus, resources
 from etude.eval.result import EvalResult, Result, Tables
 from etude.eval.run import (
     EvalRun,
@@ -739,7 +739,7 @@ def hold_group(
             raise EtudeError("incompatible_eval_agents", 422)
         agent_process: AgentProcess | None = None
         definition = next((spec.agents for spec, _ in pending if spec.agents), None)
-        allocation = allocate(
+        allocation = divide_cpus(
             sum(len(active.matches) - len(active.done) for _, active in pending),
             agents=definition is not None,
             memory_gb=definition.memory_gb if definition else None,

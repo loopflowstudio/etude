@@ -30,7 +30,7 @@ from etude.eval.game import Execution, _performance
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Code, Config, Held, Match, RoundRobin
-from etude.eval.resources import allocate, available_cpus, memory_bytes, resources
+from etude.eval.resources import available_cpus, divide_cpus, memory_bytes, resources
 from etude.eval.result import Tables
 from etude.eval.run import Terminated
 from etude.eval.tournament import evaluating, played
@@ -482,7 +482,7 @@ def test_allocation_respects_cpu_pending_and_memory(
     monkeypatch.setattr(
         "etude.eval.resources.memory_bytes", lambda: 16 * 1024**3 if cpus >= 16 else 2 * 1024**3
     )
-    allocation = allocate(pending, agents=agents, memory_gb=memory_gb)
+    allocation = divide_cpus(pending, agents=agents, memory_gb=memory_gb)
     assert (allocation.games, allocation.threads) == (games, threads)
 
 
