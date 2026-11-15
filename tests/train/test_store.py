@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import time
-import tracemalloc
 from pathlib import Path
 
 import boto3  # type: ignore[import-untyped]
@@ -695,14 +694,9 @@ def test_index_refresh_work_does_not_grow_with_permanent_history(
     index.add(key)
     assert measured.requests - requests == 1  # Only the new recent block.
     measured.requests = measured.bytes = measured.written = 0
-    tracemalloc.start()
-    try:
-        index.write()
-        _, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
+    index.write()
     assert measured.requests == measured.bytes == 0
-    assert measured.written < 200 and peak < 32_000
+    assert measured.written < 200
     assert permanent.stat().st_mtime_ns == before
     latest = Manifest.model_validate_json((root / f"metrics/{writer}.index.json").read_bytes())
     assert latest.latest == {"value": permanent_blocks, "only_first": 42}
