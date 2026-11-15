@@ -988,6 +988,10 @@ matches, as a launched one does, unless `--retry-failed`.
   `final` is the last checkpoint once a run has finished.
   `state.policy(PolicyKey(job="small"))` is one policy, with its complete
   `key` and its checkpoints in the order they were saved ([Policies](#policies)).
+  A training run's `out` is the other files it stored, chosen with
+  `matching(pattern)` or `file(path)` and given to a training job as inputs
+  ([Files from another run](training.md#files-from-another-run)); it is read
+  from the run's `out.json` only when a declaration uses it.
 - **What `eval_jobs` returns.** Every evaluation job the experiment should
   have run or can run by now, each holding a benchmark for the checkpoints it
   chose: the whole list on every call, not only what is new. The pass works

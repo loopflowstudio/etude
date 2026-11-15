@@ -648,7 +648,7 @@ given. The launcher delivers the exact bytes, checked by digest, to whatever
 machine the run lands on, before `train` is called. The run records the
 checkpoint it started from, so a report or an evaluation can say which run a
 checkpoint descends from. A name the run was not given raises. Other files a
-job is given (`inputs=`, [the launcher](launcher.md#progress-and-continuation))
+job is given (`inputs=`, [files from another run](#files-from-another-run))
 are read the same way.
 
 Local training resolves an input's `uri`, or its `run` and `key` in this
@@ -673,6 +673,107 @@ when several runs start from one, or when the earlier result is evaluated on
 its own. Keep [phases in one run](#phases-in-one-run) when they are cheap,
 always run together and nobody uses the middle.
 
+## Files from another run
+
+A checkpoint is not the only thing a later job can be given. Anything a run
+left in `run.out` and stored can be selected the same way, through the run's
+`out` in the state:
+
+```python
+# train.py
+def play(config: PlayConfig) -> None:
+    with track(config=config) as run:
+        ...
+        for number, games in enumerate(snapshots):
+            # Written once and never changed.
+            write_pack(games, run.out / "packs" / f"{number:04d}.pack")
+
+
+def fit(config: FitConfig) -> None:
+    with track(config=config) as run:
+        for pack in sorted((run.input("source") / "packs").iterdir()):
+            ...
+```
+
+```python
+# job.py
+def training_jobs(state: ExperimentState) -> list[TrainingJob]:
+    jobs = [
+        TrainingJob(
+            name="player", train=play, config=PlayConfig(), max_hours=4, max_usd=Decimal(10)
+        )
+    ]
+    player = next(
+        (run for run in state.runs if run.job == "player" and run.state == "finished"), None
+    )
+    if player is not None:
+        packs = player.out.matching("packs/*.pack")
+        if packs:
+            jobs.append(
+                TrainingJob(
+                    name="belief",
+                    train=fit,
+                    config=FitConfig(),
+                    inputs=packs.inputs("source"),
+                    max_hours=2,
+                    max_usd=Decimal(5),
+                )
+            )
+    return jobs
+```
+
+```text
+$ etude launch job.py --rent l4                        # once player has finished
+job: state from s3://my-bucket/runs: 1 training run, 0 eval runs
+job/player@0  finished
+job/belief@0  new, running
+```
+
+`belief` is given each pack by its digest and length. The launcher delivers
+and verifies those bytes as it does a checkpoint's, and the run finds
+`packs/0000.pack` at `run.input("source") / "packs/0000.pack"`.
+
+- **`run.out` is the files the run has stored**, in the order its `out.json`
+  lists them: what it wrote under `run.out` that reached the source. Each
+  member has its `path` within out (`packs/0000.pack`), `sha256`,
+  `size_bytes`, the `run` that stored it and its `uri`.
+- **`matching(pattern)` chooses by path.** `*` matches any characters,
+  including `/`; `?` and `[abc]` match one. Matching is case-sensitive.
+  The result is another `out`, so a slice or a second `matching` narrows it.
+- **`file(path)` is the one member at that path**, and raises
+  `out_file_not_found` without one.
+- **`inputs(under)` gives every chosen member to the job** at `under/PATH`,
+  with its path within out kept below `under`. For one file under a name of
+  its own, `inputs=(player.out.file("vocab.json").input("vocab"),)` is read
+  as `run.input("vocab")`.
+- **Only stored files are listed.** A run's membership is published after its
+  files, so a declaration never selects bytes that have not arrived. A run
+  that has stored no membership has an empty `out`: one queued or only just
+  started, and one tracked only into this computer's runs directory, where
+  no `out.json` is written. A job gated on `out` waits; it is never handed
+  files that are not there.
+- **Select from a finished run**, unless the files never change once written.
+  The job holds the digests chosen when it was handed down. A file the
+  producer replaces before delivery is refused: the attempt ends
+  `input_undelivered` and `fit` is never called with different bytes.
+  Once the producer publishes its replacement in `out.json`,
+  `--job belief --seed 0 --resume` keeps the consumer's address and takes
+  the inputs selected by the declaration on that pass, with their current
+  digests; an ordinary pass leaves the failed run alone.
+- **The choice is made once.** A run is its address, so packs stored after
+  `belief` was handed down do not train it again. Give a wider selection a
+  new job name.
+- **State saves and checkpoint folders are in `out` too.** Leave them to
+  `run.resume` and `start=`: a save is replaced by the next one, and a
+  checkpoint already carries its own record.
+- **Reading costs one small file per run used.** Reading the state reads no
+  membership. The first use of one run's `out` reads that run's `out.json`
+  once; no file under `out/` is read until a machine is given it. An
+  `out.json` that cannot be read is an error, not an empty `out`.
+
+A run of another experiment is read the same way:
+`observe("s3://my-bucket/runs", "selfplay").run("selfplay/player@0").out`.
+
 ## What is on disk
 
 This layout is a contract. Everything in it reads with `json` and your own
@@ -685,6 +786,7 @@ EXPERIMENT/JOB@SEED/         a plain train(config) file's run is EXPERIMENT/
   metrics/  artifacts/     rows and tables (Tracking)
   checkpoints/
     CLOCK-VALUE.json       each checkpoint's record, pointing to its files
+  out.json                 what of out is stored: each key, SHA256 and byte length; written by delivery to storage
   out/                     run.out: follows the run to every machine
     state/
       current.json         {"save": "save-00000007"}: the save to load, written last

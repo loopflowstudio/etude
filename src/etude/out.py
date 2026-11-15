@@ -11,6 +11,7 @@ from typing import Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from etude.carriage import recovery_files, save_pointer, state_pointer, within
+from etude.spec import Input
 from etude.storage_timeout import StorageUnavailable
 
 MEMBERSHIP = "out.json"
@@ -34,6 +35,31 @@ class OutFiles(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     files: tuple[OutFile, ...]
+
+
+@dataclass(frozen=True)
+class OutMember:
+    """A stored out file and its producer; makes a verified input without seeding out."""
+
+    run: str
+    key: str
+    sha256: str
+    size_bytes: int
+    uri: str
+
+    @property
+    def path(self) -> str:
+        return self.key.removeprefix("out/")
+
+    def input(self, name: str) -> Input:
+        return Input(
+            name=name,
+            key=self.key,
+            sha256=self.sha256,
+            size_bytes=self.size_bytes,
+            run=self.run,
+            uri=self.uri,
+        )
 
 
 @dataclass(frozen=True)

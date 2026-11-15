@@ -139,6 +139,7 @@ def state_of(
                 state=_stored_state(data.outcome),
                 checkpoints=saved,
                 seed=data.file.seed if data.file else None,
+                _data=data,
             )
         )
     eval_runs = [
