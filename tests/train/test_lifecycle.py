@@ -11,17 +11,16 @@ from etude.carriage import put_back, restore_set
 from etude.errors import EtudeError
 from etude.experiment import observe
 from etude.out import OutFile, OutFiles
+from etude.records import Clock
 from etude.run import sync
-from etude.stopping import Stopped
 from etude.storage import DirectoryStorage
 from etude.train.read import read
-from etude.train.records import Step, Time
-from etude.train.report import training
-from etude.train.tracking import local_launch, track
+from etude.train.records import Time
 from tests.experiments import authored
 from tests.run.storage import MeasuredStorage
+from tests.train.tracking import open_run
 
-CLOCKS = [Step("updates", "optimizer updates")]
+CLOCKS = [Clock(name="updates", kind="step", meaning="optimizer updates")]
 
 
 @pytest.mark.parametrize("target", [None, "0", "6", "6.5"])
@@ -33,12 +32,17 @@ def test_recipe_uses_launch_target_for_its_clock_or_its_local_default(
     if target is not None:
         monkeypatch.setenv("ETUDE_UNTIL_CLOCK", "seconds")
         monkeypatch.setenv("ETUDE_UNTIL_VALUE", target)
-    with local_launch(out=tmp_path / "run", experiment="recipe"):
-        with track(clocks=[*CLOCKS, Time("seconds", "active time")]) as run:
-            assert run.until("seconds", default=2) == (2 if target is None else float(target))
-            assert run.until("updates", default=3) == 3
-            with pytest.raises(ValueError, match="undeclared clock"):
-                run.until("typo", default=2)
+    with open_run(
+        experiment="recipe",
+        run="run",
+        directory=tmp_path,
+        resume=True,
+        clocks=[*CLOCKS, Time("seconds", "active time")],
+    ) as run:
+        assert run.until("seconds", default=2) == (2 if target is None else float(target))
+        assert run.until("updates", default=3) == 3
+        with pytest.raises(ValueError, match="undeclared clock"):
+            run.until("typo", default=2)
 
 
 def test_target_for_a_clock_the_run_never_counts_stops_before_the_loop(
@@ -46,11 +50,10 @@ def test_target_for_a_clock_the_run_never_counts_stops_before_the_loop(
 ) -> None:
     monkeypatch.setenv("ETUDE_UNTIL_CLOCK", "steps")
     monkeypatch.setenv("ETUDE_UNTIL_VALUE", "5")
-    with local_launch(out=tmp_path / "run", experiment="recipe"):
-        with pytest.raises(EtudeError, match="until_clock_undeclared"):
-            with track() as run:
-                for _ in run.steps("updates", to=20):
-                    run.log({"loss": 1.0})
+    with pytest.raises(EtudeError, match="until_clock_undeclared"):
+        with open_run(experiment="recipe", run="run", directory=tmp_path) as run:
+            for _ in run.steps("updates", to=20):
+                run.log({"loss": 1.0})
     assert run.at("updates") == 0
 
 
@@ -67,37 +70,7 @@ def test_recipe_refuses_incomplete_or_invalid_launch_target(
         else:
             monkeypatch.setenv(name, given)
     with pytest.raises(ValueError, match="launch target"):
-        track(experiment="recipe", clocks=CLOCKS, directory=tmp_path)
-
-
-def test_local_recipe_stops_resumes_and_repeats_without_another_checkpoint(tmp_path: Path) -> None:
-    out = tmp_path / "run"
-    before = dict(os.environ)
-    with pytest.raises(Stopped), local_launch(out=out, experiment="recipe"):
-        with track(clocks=CLOCKS, strict=True) as run:
-            assert run.out == out
-            (run.out / "state").write_text("3")
-            run.log({"loss": 3}, updates=3)
-            raise Stopped
-    assert dict(os.environ) == before
-    stopped = read(out, "recipe", "run")
-    assert stopped.outcome is not None and stopped.outcome.state == "stopped"
-    assert training([stopped]).runs[0].state == "running or unfinished"
-    for _ in range(2):
-        with local_launch(out=out, experiment="recipe"):
-            with track(clocks=CLOCKS, strict=True) as run:
-                assert (run.out / "state").read_text() == "3"
-                model = run.out / "model.pt"
-                model.write_bytes(b"weights")
-                run.checkpoint(model, updates=4)
-    data = read(out, "recipe", "run")
-    assert len(data.checkpoints) == 1
-    assert data.points("loss", "updates").x.tolist() == [3]
-    assert data.outcome is not None and data.outcome.state == "finished"
-    assert not list((out / "etude/run/checkpoints").glob("*.pt"))
-    with local_launch(out=tmp_path / "other/run", experiment="recipe"):
-        with track(clocks=CLOCKS) as other:
-            assert other.latest_checkpoint() is None
+        open_run(experiment="recipe", clocks=CLOCKS, directory=tmp_path)
 
 
 def test_stopping_reserves_the_slowest_step_and_remembers_a_request(
@@ -110,34 +83,37 @@ def test_stopping_reserves_the_slowest_step_and_remembers_a_request(
     monkeypatch.setenv("ETUDE_DEADLINE", datetime.fromtimestamp(1010, UTC).isoformat())
     stop = tmp_path / "stop"
     monkeypatch.setenv("ETUDE_STOP_FILE", str(stop))
-    with local_launch(out=tmp_path / "run", experiment="recipe"):
-        with track(clocks=CLOCKS) as run:
-            assert not run.should_stop
-            now[0] = 4
-            assert not run.should_stop
-            now[0] = 7
-            assert run.should_stop  # three seconds left; slowest update took four
-            monkeypatch.delenv("ETUDE_DEADLINE")
-            assert run.should_stop
-        with track(clocks=CLOCKS) as run:
-            assert not run.should_stop
-            stop.touch()
-            assert run.should_stop
-            stop.unlink()
-            assert run.should_stop
+    with open_run(
+        experiment="recipe", run="run", directory=tmp_path, resume=True, clocks=CLOCKS
+    ) as run:
+        assert not run.should_stop
+        now[0] = 4
+        assert not run.should_stop
+        now[0] = 7
+        assert run.should_stop  # three seconds left; slowest update took four
+        monkeypatch.delenv("ETUDE_DEADLINE")
+        assert run.should_stop
+    with open_run(
+        experiment="recipe", run="run", directory=tmp_path, resume=True, clocks=CLOCKS
+    ) as run:
+        assert not run.should_stop
+        stop.touch()
+        assert run.should_stop
+        stop.unlink()
+        assert run.should_stop
 
 
 @pytest.mark.parametrize("logged", ["none", "other", "loss"])
 def test_first_row_replaces_history_and_an_empty_attempt_changes_nothing(
     tmp_path: Path, logged: str
 ) -> None:
-    with track(experiment="e", run="r", clocks=CLOCKS, directory=tmp_path) as run:
+    with open_run(experiment="e", run="r", clocks=CLOCKS, directory=tmp_path) as run:
         for update in range(6):
             run.log({"loss": update}, updates=update)
         model = tmp_path / "model"
         model.write_bytes(b"model at 1")
         run.checkpoint(model, updates=1)
-    with track(resume=True, experiment="e", run="r", clocks=CLOCKS, directory=tmp_path) as run:
+    with open_run(resume=True, experiment="e", run="r", clocks=CLOCKS, directory=tmp_path) as run:
         if logged != "none":
             run.log({logged: 100}, updates=4)
     data = read(tmp_path, "e", "r")
@@ -149,7 +125,7 @@ def test_first_row_replaces_history_and_an_empty_attempt_changes_nothing(
         else list(range(4))
     )
     assert data.points("loss", "updates").y.tolist() == expected
-    assert authored(data.attempts[-1].resumed_at) == ({} if logged == "none" else {"updates": 4})
+    assert authored(data.writers[-1].resumed_at) == ({} if logged == "none" else {"updates": 4})
 
 
 def test_out_checkpoint_is_carried_once_and_relocated_without_a_second_copy(
@@ -157,7 +133,7 @@ def test_out_checkpoint_is_carried_once_and_relocated_without_a_second_copy(
 ) -> None:
     root = tmp_path / "track/e/r"
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
-    with track(
+    with open_run(
         experiment="e", run="r", clocks=CLOCKS, directory=root.parent.parent, strict=True
     ) as run:
         (run.out / "nested").mkdir()
@@ -180,10 +156,14 @@ def test_out_checkpoint_is_carried_once_and_relocated_without_a_second_copy(
     put_back(restored, restore_set(root))
     assert (restored / "out/state").read_bytes() == b"step two"
     monkeypatch.setenv("ETUDE_OUT", str(restored / "out"))
-    with track(
+    with open_run(
         resume=True, experiment="e", run="r", clocks=CLOCKS, directory=restored.parent
     ) as resumed:
-        latest = resumed.latest_checkpoint()
+        latest = (
+            resumed._checkpoint_here(_saved_checkpoint)
+            if (_saved_checkpoint := resumed._latest_record()) is not None
+            else None
+        )
         assert latest is not None
         assert latest.artifact.uri == (restored / "out/nested/model.pt").as_uri()
         assert resumed.checkpoint(resumed.out / "nested/model.pt", updates=1).sha256 == ref.sha256
@@ -198,7 +178,7 @@ def test_sync_carries_out_file_deletion_and_recreation_without_duplicate_bytes(
 ) -> None:
     root = tmp_path / "track/e/r"
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
-    with track(experiment="e", run="r", clocks=CLOCKS, directory=root.parent.parent) as run:
+    with open_run(experiment="e", run="r", clocks=CLOCKS, directory=root.parent.parent) as run:
         state = run.out / "state"
         state.write_bytes(b"saved")
     storage = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
@@ -222,7 +202,7 @@ def test_sync_membership_describes_the_save_uploaded_during_atomic_replacement(
 ) -> None:
     root = tmp_path / "track/e/r"
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
-    with track(experiment="e", run="r", clocks=CLOCKS, directory=root.parent.parent) as run:
+    with open_run(experiment="e", run="r", clocks=CLOCKS, directory=root.parent.parent) as run:
         state = run.out / "state"
         state.write_bytes(b"first")
     storage = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
@@ -257,7 +237,7 @@ def test_recipe_retirement_notes_cannot_delete_tracking_or_retained_checkpoints(
 ) -> None:
     root = tmp_path / "track/e/r"
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
-    with track(experiment="e", run="r", clocks=CLOCKS, directory=root.parent.parent) as run:
+    with open_run(experiment="e", run="r", clocks=CLOCKS, directory=root.parent.parent) as run:
         model = run.out / "model.pt"
         model.write_bytes(b"weights")
         run.checkpoint(model, updates=1)
@@ -279,24 +259,24 @@ def test_tracking_contexts_have_distinct_writers_under_one_allocation(
 ) -> None:
     monkeypatch.setenv("ETUDE_ATTEMPT", "allocation-1")
     for value in (1, 2):
-        with track(
+        with open_run(
             experiment="e",
             run="allocated",
             directory=tmp_path,
-            clocks=[Step("updates", "updates")],
+            clocks=[Clock(name="updates", kind="step", meaning="updates")],
         ) as run:
             run.log({"loss": value}, updates=value)
     data = read(tmp_path, "e", "allocated")
-    assert len({writer.writer for writer in data.attempts}) == 2
-    assert [writer.attempt for writer in data.attempts] == ["allocation-1", "allocation-1"]
+    assert len({writer.writer for writer in data.writers}) == 2
+    assert [writer.attempt for writer in data.writers] == ["allocation-1", "allocation-1"]
     assert data.points("loss", "updates").y.tolist() == [1, 2]
-    with track(
+    with open_run(
         experiment="e",
         run="another",
         directory=tmp_path,
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
     ) as run:
         run.log({"loss": 3}, updates=1)
     other = read(tmp_path, "e", "another")
-    assert other.attempts[0].attempt == "allocation-1"
+    assert other.writers[0].attempt == "allocation-1"
     assert other.points("loss", "updates").y.tolist() == [3]

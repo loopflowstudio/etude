@@ -21,9 +21,16 @@ from pydantic import BaseModel
 from etude.checkpoints import CheckpointRef
 from etude.errors import EtudeError
 from etude.eval import query
-from etude.eval.match import environment, evaluate
+from etude.eval.match import environment
 from etude.eval.query import Estimate, compare, estimate, statsdb
-from etude.eval.records import CheckpointPlayer, Code, Config, Held, Match, Player
+from etude.eval.records import (
+    CheckpointPlayer,
+    Code,
+    Config,
+    Match,
+    Player,
+    checkpoint_player,
+)
 from etude.launch.storage.files import read_result
 from etude.records import ArtifactRef
 from etude.storage import DirectoryStorage, S3Storage
@@ -34,6 +41,7 @@ from tests.eval.games import (
     play_text_hits,
     play_unkeyed,
 )
+from tests.eval.playing import play_matches
 from tests.eval.stored import stored_inference
 from tests.run.storage import CountedClient, MeasuredStorage
 
@@ -78,8 +86,8 @@ def test_matches_in_the_shared_pool_resume_from_storage_without_replaying(
     matches = seatings(players, configs=[{"deal": 0}, {"deal": 1}], games=4)
     assert len(matches) == 24
     bucket = DirectoryStorage(tmp_path / "bucket")
-    first = evaluate(
-        experiment="league", environment=world, matches=matches, play=play, workers=2,
+    first = play_matches(
+        experiment="league", environment=world, matches=matches, play=play, 
         run="league-1", directory=tmp_path / "local", storages=[bucket],
     )  # fmt: skip
     assert (first.played, first.skipped) == (24, 0)
@@ -98,8 +106,8 @@ def test_matches_in_the_shared_pool_resume_from_storage_without_replaying(
 
     shutil.rmtree(tmp_path / "local")
     measured = MeasuredStorage(bucket)
-    again = evaluate(
-        experiment="league", environment=world, matches=matches, play=play, workers=2,
+    again = play_matches(
+        experiment="league", environment=world, matches=matches, play=play, 
         run="league-1", directory=tmp_path / "local", storages=[measured],
     )  # fmt: skip
     assert (again.played, again.skipped) == (0, 24)
@@ -114,7 +122,7 @@ def test_matches_in_the_shared_pool_resume_from_storage_without_replaying(
 
 def test_sql_joins_results_to_players_by_config_key(tmp_path: Path) -> None:
     players = roster(tmp_path)
-    evaluate(
+    play_matches(
         experiment="league", environment=environment("duel"), play=play,
         matches=seatings(players, configs=[{"deal": 0}], games=6), directory=tmp_path,
     )  # fmt: skip
@@ -139,7 +147,7 @@ def test_sql_joins_results_to_players_by_config_key(tmp_path: Path) -> None:
 
 def test_compare_gives_a_rate_with_an_interval_that_resamples_matches(tmp_path: Path) -> None:
     players = roster(tmp_path)
-    evaluate(
+    play_matches(
         experiment="league", environment=environment("duel"), play=play,
         matches=seatings(players[:2], configs=[{"deal": d} for d in range(5)], games=6),
         directory=tmp_path,
@@ -179,7 +187,7 @@ def test_a_row_without_seat_or_group_is_refused_and_nothing_of_its_match_is_stor
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     players = roster(tmp_path)
     with pytest.raises(EtudeError) as refused:
-        evaluate(
+        play_matches(
             experiment="league", environment=environment("duel"), play=play_unkeyed,
             matches=seatings(players[:2], configs=[{}], games=1), directory=tmp_path,
         )  # fmt: skip
@@ -196,7 +204,7 @@ def test_a_row_without_seat_or_group_is_refused_and_nothing_of_its_match_is_stor
 def test_a_row_naming_a_player_column_is_refused(tmp_path: Path) -> None:
     # Older stored tables named the seat `player`; refusing it keeps them recognisable.
     with pytest.raises(EtudeError) as refused:
-        evaluate(
+        play_matches(
             experiment="league", environment=environment("duel"), play=play_seat_and_player,
             matches=seatings(roster(tmp_path)[:2], configs=[{}], games=1), directory=tmp_path,
         )  # fmt: skip
@@ -208,10 +216,10 @@ def test_a_column_keeps_its_type_through_an_eval_run(tmp_path: Path) -> None:
     players = roster(tmp_path)
 
     matches = seatings(players[:2], configs=[{}], games=1)
-    evaluate(experiment="league", environment=environment("duel"), play=play, matches=matches[:1],
+    play_matches(experiment="league", environment=environment("duel"), play=play, matches=matches[:1],
              run="typed", directory=tmp_path)  # fmt: skip
     with pytest.raises(EtudeError) as refused:
-        evaluate(experiment="league", environment=environment("duel"), play=play_text_hits,
+        play_matches(experiment="league", environment=environment("duel"), play=play_text_hits,
                  matches=matches[1:], run="typed", directory=tmp_path)  # fmt: skip
     cause = refused.value.__cause__
     assert isinstance(cause, EtudeError) and cause.code == "column_type_conflict"
@@ -225,10 +233,10 @@ def test_two_environments_are_never_pooled(tmp_path: Path) -> None:
         environment("duel", config={"world": "w7"}),
     )
     for name, world in (("on-w6", six), ("on-w7", seven)):
-        evaluate(experiment="league", environment=world, play=play, matches=matches, run=name,
+        play_matches(experiment="league", environment=world, play=play, matches=matches, run=name,
                  directory=tmp_path)  # fmt: skip
     with pytest.raises(EtudeError) as conflict:
-        evaluate(experiment="league", environment=seven, play=play, matches=matches, run="on-w6",
+        play_matches(experiment="league", environment=seven, play=play, matches=matches, run="on-w6",
                  directory=tmp_path)  # fmt: skip
     assert conflict.value.code == "eval_run_environment_conflict"
     found = compare(statsdb("league", tmp_path), table="plays", value="won")
@@ -241,7 +249,7 @@ def test_group_keyed_rows_compare_teams_in_a_two_on_two(tmp_path: Path) -> None:
     a, b, c, d = roster(tmp_path)
     match = Match(players=(a, b, c, d), groups={"north": (0, 2), "south": (1, 3)}, games=4)
     assert match.groups["all"] == (0, 1, 2, 3)
-    evaluate(experiment="teams", environment=environment("doubles"), play=play_teams,
+    play_matches(experiment="teams", environment=environment("doubles"), play=play_teams,
              matches=[match], directory=tmp_path)  # fmt: skip
     found = compare(statsdb("teams", tmp_path), table="teams", value="won")
     north, south = (
@@ -267,7 +275,7 @@ def test_an_eval_run_delivered_to_a_bucket_is_queried_from_it(
         client = boto3.client("s3")
         client.create_bucket(Bucket="runs")
         bucket = S3Storage("runs", "evals", client=client)
-        evaluate(
+        play_matches(
             experiment="league", environment=environment("duel"), play=play,
             matches=seatings(roster(tmp_path), configs=[{}], games=4),
             directory=tmp_path / "local", storages=[bucket],
@@ -282,7 +290,7 @@ def test_an_eval_run_delivered_to_a_bucket_is_queried_from_it(
 
 def test_a_player_may_play_itself(tmp_path: Path) -> None:
     deep = roster(tmp_path)[0]
-    evaluate(experiment="mirror", environment=environment("duel"), play=play,
+    play_matches(experiment="mirror", environment=environment("duel"), play=play,
              matches=[Match(players=(deep, deep), games=6)], directory=tmp_path)  # fmt: skip
     found = compare(statsdb("mirror", tmp_path), table="plays", value="won")
     # Equal strength: seat 1 wins the ties, and each seat its every-third games on the play.
@@ -320,8 +328,8 @@ def test_a_models_inference_code_is_its_version_not_its_key(tmp_path: Path) -> N
 def test_where_a_checkpoint_stood_is_carried_by_its_seat_and_is_not_its_identity() -> None:
     file = ArtifactRef(uri="hf://lab/u600.pt", sha256=sha256(b"a").hexdigest())
     key = file.uri
-    seated = Held().player(CheckpointRef(address=key, artifact=file, at={"updates": 600}))
-    corrected = Held().player(
+    seated = checkpoint_player(CheckpointRef(address=key, artifact=file, at={"updates": 600}))
+    corrected = checkpoint_player(
         CheckpointRef(address=key, artifact=file, at={"updates": 612}, line="seed-2")
     )
     rival = Code(name="rival", source=[__file__])
@@ -465,7 +473,7 @@ def test_queries_reports_and_resumes_read_each_bucket_file_once_per_computer(
         client = CountedClient(boto3.client("s3", region_name="us-east-1"))
         client.create_bucket(Bucket="runs")
         matches = seatings(roster(tmp_path), configs=[{}], games=4)
-        evaluate(
+        play_matches(
             experiment="league", environment=environment("duel"), play=play, matches=matches,
             run="league-1", directory=tmp_path / "local", storages=[S3Storage("runs", client=client)],
         )  # fmt: skip
@@ -479,7 +487,7 @@ def test_queries_reports_and_resumes_read_each_bucket_file_once_per_computer(
             # A watched report opens the database again every few seconds.
             statsdb("league", S3Storage("runs", client=client)).close()
         shutil.rmtree(tmp_path / "local")
-        again = evaluate(
+        again = play_matches(
             experiment="league", environment=environment("duel"), play=play, matches=matches,
             run="league-1", directory=tmp_path / "local", storages=[S3Storage("runs", client=client)],
         )  # fmt: skip
@@ -504,7 +512,7 @@ def test_a_launched_eval_run_reports_its_tally_a_few_times_not_once_per_match(
 
     monkeypatch.setattr(DirectoryStorage, "put", counted)
     matches = seatings(roster(tmp_path), configs=[{"deal": d} for d in range(3)], games=1)
-    evaluate(
+    play_matches(
         experiment="league", environment=environment("duel"), play=play,
         matches=matches, directory=tmp_path,
     )  # fmt: skip
@@ -523,7 +531,7 @@ def test_a_launched_eval_run_that_fails_reports_what_it_played_and_what_failed(
     monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
     matches = seatings(roster(tmp_path)[:2], configs=[{}], games=1)
     with pytest.raises(EtudeError):
-        evaluate(
+        play_matches(
             experiment="league", environment=environment("duel"), play=play_unkeyed,
             matches=matches, directory=tmp_path,
         )  # fmt: skip

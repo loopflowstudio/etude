@@ -16,14 +16,15 @@ from etude.errors import EtudeError
 from etude.eval import block
 from etude.eval.block import Block, Staging, quote
 from etude.eval.convert import convert, delete_files
-from etude.eval.match import environment, evaluate
+from etude.eval.match import environment
 from etude.eval.query import read_blobs, statsdb
 from etude.eval.records import Code, ColumnType, Match, MatchRecord, Rollup
-from etude.eval.run import Result
+from etude.eval.result import Result
 from etude.eval.tournament import evaluating
 from etude.storage import DirectoryStorage, S3Storage
 from tests.eval.games import play, play_cards, play_with_evidence
 from tests.eval.per_file import write_per_file
+from tests.eval.playing import play_matches
 from tests.run.storage import CountedClient, MeasuredStorage
 
 DUEL = environment("duel")
@@ -68,7 +69,7 @@ def test_an_eval_run_delivers_each_match_with_packed_blobs(
     tmp_path: Path,
 ) -> None:
     bucket = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
-    evaluate(experiment="cards", environment=DUEL, play=recorded,
+    play_matches(experiment="cards", environment=DUEL, play=recorded,
              matches=deals(pair(tmp_path), 3), run="a", directory=tmp_path / "a",
              storages=[bucket])  # fmt: skip
     # Three run records, then each match's pack, two tables and index.
@@ -117,7 +118,7 @@ def test_blobs_read_from_a_bucket_are_read_once_per_computer(
         client = CountedClient(boto3.client("s3", region_name="us-east-1"))
         client.create_bucket(Bucket="runs")
         cache = Cache(tmp_path / "cache")
-        evaluate(experiment="cards", environment=DUEL, play=play_with_evidence,
+        play_matches(experiment="cards", environment=DUEL, play=play_with_evidence,
                  matches=deals(pair(tmp_path), 4), run="a", directory=tmp_path / "a",
                  storages=[S3Storage("runs", client=client, cache=cache)])  # fmt: skip
         bucket = S3Storage("runs", client=client, cache=cache)
@@ -142,7 +143,7 @@ def per_file(
     blob as an author's file under `artifacts/`.
     """
     made = tmp_path / "made"
-    evaluate(experiment="cards", environment=DUEL, play=play_with_evidence,
+    play_matches(experiment="cards", environment=DUEL, play=play_with_evidence,
              matches=deals(players, 6), run="a", directory=made)  # fmt: skip
     root = tmp_path / "old"
     write_per_file(made / "cards/a", root / "a")
@@ -200,7 +201,7 @@ def test_a_per_file_run_converts_to_blocks_with_the_same_rows_and_blobs(tmp_path
 def test_matches_a_dead_writer_staged_are_sealed_by_the_next_writer(tmp_path: Path) -> None:
     players = pair(tmp_path)
     matches = deals(players, 3)
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=matches[:1], run="a",
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=matches[:1], run="a",
              directory=tmp_path)  # fmt: skip
     root = tmp_path / "cards/a"
     # A writer stages a match and dies before sealing it.
@@ -215,7 +216,7 @@ def test_matches_a_dead_writer_staged_are_sealed_by_the_next_writer(tmp_path: Pa
         MatchRecord(match=matches[1], state="done", columns={"plays": columns}, wall_ms=1)
     )
     staging.close()
-    resumed = evaluate(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
+    resumed = play_matches(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
                        directory=tmp_path)  # fmt: skip
     assert (resumed.played, resumed.skipped) == (1, 2)
     found = statsdb("cards", tmp_path)
@@ -228,14 +229,14 @@ def test_a_match_an_older_run_stored_as_done_with_no_rows_is_failed_and_played_a
     tmp_path: Path,
 ) -> None:
     matches = deals(pair(tmp_path), 2)
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=matches[:1], run="a",
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=matches[:1], run="a",
              directory=tmp_path)  # fmt: skip
     # An older writer recorded a match whose `play` returned nothing as done.
     staging = Staging(tmp_path / "cards/a", "0123456789ab")
     staging.stage(MatchRecord(match=matches[1], state="done", wall_ms=1))
     staging.close()
     # The next writer seals what it left.
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=matches[:1], run="a",
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=matches[:1], run="a",
              directory=tmp_path)  # fmt: skip
     found = statsdb("cards", tmp_path)
     assert found.sql("select match, state, error from matches order by state").fetchall() == [
@@ -243,7 +244,7 @@ def test_a_match_an_older_run_stored_as_done_with_no_rows_is_failed_and_played_a
         (matches[1].key, "failed", "EtudeError: match_has_no_rows"),
     ]
     found.close()
-    resumed = evaluate(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
+    resumed = play_matches(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
                        directory=tmp_path)  # fmt: skip
     assert (resumed.played, resumed.skipped) == (1, 1)
     found = statsdb("cards", tmp_path)
@@ -256,7 +257,7 @@ def test_a_long_eval_run_seals_a_block_whenever_its_segment_is_old_enough(
 ) -> None:
     monkeypatch.setattr(block, "SEAL_SECONDS", 0.0)
     bucket = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(pair(tmp_path), 3),
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=deals(pair(tmp_path), 3),
              run="a", directory=tmp_path / "a", storages=[bucket])  # fmt: skip
     # Each match is delivered in a block of its own as soon as it is stored.
     indexes = [key for key in bucket.keys("cards/a/blocks/") if key.endswith("/block.json")]
@@ -286,7 +287,7 @@ def test_a_rollup_is_summed_once_per_block_and_a_new_block_adds_only_its_own_tot
     monkeypatch.setattr(block, "SEAL_SECONDS", 0.0)
     bucket = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
     matches = deals(pair(tmp_path), 5)
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=matches[:3], run="a",
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=matches[:3], run="a",
              directory=tmp_path / "a", storages=[bucket], rollups=[WINS])  # fmt: skip
     # Each block: two tables, one rollup and its index.
     assert bucket.uploads == 3 + 3 * 4 + report_uploads(tmp_path / "bucket")
@@ -294,7 +295,7 @@ def test_a_rollup_is_summed_once_per_block_and_a_new_block_adds_only_its_own_tot
     assert totals(db) == from_rows(db) and len(totals(db)) == 4
     db.close()
 
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
              directory=tmp_path / "a", storages=[bucket], rollups=[WINS])  # fmt: skip
     reading = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
     db = statsdb("cards", reading)
@@ -309,7 +310,7 @@ def test_a_rollup_is_summed_once_per_block_and_a_new_block_adds_only_its_own_tot
 
 def test_a_match_two_blocks_hold_counts_once_in_its_rollup(tmp_path: Path) -> None:
     matches = deals(pair(tmp_path), 3)
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=matches[:2], run="a",
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=matches[:2], run="a",
              directory=tmp_path, rollups=[WINS])  # fmt: skip
     root = tmp_path / "cards/a"
     # A seal wrote its block and died before emptying its staging: the next writer
@@ -321,7 +322,7 @@ def test_a_match_two_blocks_hold_counts_once_in_its_rollup(tmp_path: Path) -> No
     shutil.copy(sealed / "wins.parquet", staging.partial("wins", held.matches[0].match.key))
     staging.stage(held.matches[0])
     staging.close()
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
              directory=tmp_path, rollups=[WINS])  # fmt: skip
     db = statsdb("cards", tmp_path)
     assert db.sql("select sum(rows) from wins").fetchone() == (3 * 2 * 2,)
@@ -331,10 +332,10 @@ def test_a_match_two_blocks_hold_counts_once_in_its_rollup(tmp_path: Path) -> No
 
 def test_a_resume_with_other_rollups_is_refused(tmp_path: Path) -> None:
     matches = deals(pair(tmp_path), 2)
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=matches[:1], run="a",
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=matches[:1], run="a",
              directory=tmp_path, rollups=[WINS])  # fmt: skip
     with pytest.raises(EtudeError) as refused:
-        evaluate(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
+        play_matches(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
                  directory=tmp_path)  # fmt: skip
     assert refused.value.code == "eval_run_rollups_conflict"
 
@@ -393,7 +394,7 @@ def test_a_rollup_holds_the_card_page_and_a_catch_up_reads_only_the_new_block(
     monkeypatch.setattr(block, "SEAL_SECONDS", 0.0)
     strong, weak = pair(tmp_path)
     matches = deals((strong, weak), 4)
-    evaluate(experiment="cards", environment=DUEL, play=play_cards, matches=matches[:3],
+    play_matches(experiment="cards", environment=DUEL, play=play_cards, matches=matches[:3],
              run="a", directory=tmp_path / "a", storages=[DirectoryStorage(tmp_path / "bucket")],
              rollups=[CARDS])  # fmt: skip
     db = statsdb("cards", tmp_path / "bucket")
@@ -407,7 +408,7 @@ def test_a_rollup_holds_the_card_page_and_a_catch_up_reads_only_the_new_block(
     )
     db.close()
 
-    evaluate(experiment="cards", environment=DUEL, play=play_cards, matches=matches,
+    play_matches(experiment="cards", environment=DUEL, play=play_cards, matches=matches,
              run="a", directory=tmp_path / "a", storages=[DirectoryStorage(tmp_path / "bucket")],
              rollups=[CARDS])  # fmt: skip
     reading = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
@@ -421,7 +422,7 @@ def test_a_rollup_holds_the_card_page_and_a_catch_up_reads_only_the_new_block(
 
 def test_a_rollup_sealed_with_comma_joined_opponents_still_reads(tmp_path: Path) -> None:
     strong, weak = pair(tmp_path)
-    evaluate(experiment="cards", environment=DUEL, play=play_cards, matches=deals((strong, weak), 2),
+    play_matches(experiment="cards", environment=DUEL, play=play_cards, matches=deals((strong, weak), 2),
              run="a", directory=tmp_path / "a", storages=[DirectoryStorage(tmp_path / "bucket")],
              rollups=[CARDS])  # fmt: skip
     # As etude 0.3.0 sealed it: the other seats' keys joined by commas, one VARCHAR.
@@ -444,7 +445,7 @@ def test_a_rollup_sealed_with_comma_joined_opponents_still_reads(tmp_path: Path)
 def test_a_rollup_that_cannot_sum_a_match_refuses_it(tmp_path: Path) -> None:
     text = Rollup(name="named", table="card_counts", by=("card",), sums={"cards": "card"})
     with pytest.raises(EtudeError) as refused:
-        evaluate(experiment="cards", environment=DUEL, play=play_cards,
+        play_matches(experiment="cards", environment=DUEL, play=play_cards,
                  matches=deals(pair(tmp_path), 1), run="a", directory=tmp_path,
                  rollups=[text])  # fmt: skip
     assert refused.value.code == "match_failed"
@@ -514,7 +515,7 @@ def test_a_rollup_given_to_statsdb_sums_each_block_once_as_sealing_would(
     monkeypatch.setattr(block, "SEAL_SECONDS", 0.0)
     matches = deals(pair(tmp_path), 4)
     for run, rollups in (("sealed", [CARDS]), ("later", [])):
-        evaluate(experiment="cards", environment=DUEL, play=play_cards, matches=matches[:3],
+        play_matches(experiment="cards", environment=DUEL, play=play_cards, matches=matches[:3],
                  run=run, directory=tmp_path / run,
                  storages=[DirectoryStorage(tmp_path / f"{run}-bucket")],
                  rollups=rollups)  # fmt: skip
@@ -535,7 +536,7 @@ def test_a_rollup_given_to_statsdb_sums_each_block_once_as_sealing_would(
     db = statsdb("cards", reading)
     assert reading.got == []
     db.close()
-    evaluate(experiment="cards", environment=DUEL, play=play_cards, matches=matches,
+    play_matches(experiment="cards", environment=DUEL, play=play_cards, matches=matches,
              run="later", directory=tmp_path / "later",
              storages=[DirectoryStorage(tmp_path / "later-bucket")])  # fmt: skip
     db = statsdb("cards", reading)
@@ -553,7 +554,7 @@ def test_conversion_selects_the_experiment_before_converting_or_deleting(tmp_pat
     players = pair(tmp_path)
     source = tmp_path / "old"
     for label in ("one", "two"):
-        evaluate(
+        play_matches(
             experiment=label,
             environment=DUEL,
             play=play,

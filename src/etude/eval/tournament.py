@@ -35,8 +35,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import warnings
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,7 +58,6 @@ from etude.eval.records import (
     Match,
     MatchRecord,
     Player,
-    Rollup,
     RoundRobin,
     Seated,
     Share,
@@ -73,7 +71,6 @@ from etude.eval.records import (
     resolve_player,
     validate_checkpoints,
 )
-from etude.eval.result import EvalResult, Result, Tables
 from etude.eval.run import ETUDE_TABLES, EvalRun, _evaluating_matches
 from etude.eval.schedule import ordered
 from etude.records import Digest, Record, RunRecord
@@ -86,7 +83,6 @@ __all__ = ("evaluating", "scores", "standings", "ScorePoint", "Scores", "Standin
 if TYPE_CHECKING:
     import duckdb
 
-    from etude.jobs import Agents
 
 # Every eval run's `etude.eval.records.Environment`.
 _ENVIRONMENT_FILE = "environment.json"
@@ -189,59 +185,41 @@ def evaluating(
         or os.environ.get("ETUDE_RUN")
         or (f"{folder_name(tournament.name)}.{digest(added.model_dump(mode='json'))[:12]}")
     )
-    _record(added, experiment, run, directory, resume=resume)
-    with _evaluating_matches(
+    with _evaluating_tournament(
+        added,
         experiment=experiment,
-        environment=tournament.environment,
         matches=pending,
         run=run,
         directory=directory,
         storages=storages,
-        rollups=tournament.rollups,
-        resume=True,
+        resume=resume,
     ) as active:
         yield active
 
 
-def hold(
-    tournament: Benchmark | RoundRobin,
+@contextmanager
+def _evaluating_tournament(
+    recorded: TournamentRun,
     *,
     experiment: str,
-    play: Callable[..., Tables | Result],
-    agents: Agents | None = None,
-    checkpoint: CheckpointRef | None = None,
-    checkpoints: Sequence[CheckpointRef] = (),
-    enter: Sequence[Player] = (),
-    matches: Sequence[Match] | None = None,
-    workers: int = 1,
+    matches: Sequence[Match],
+    run: str,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
-    share: Share = Share(),
-    rollups: Sequence[Rollup] = (),
-    lines: Sequence[Line] = (),
-) -> EvalResult:
-    """Deprecated one-call spelling; use evaluating and run.play, removed in 0.5."""
-    warnings.warn(
-        "hold is now evaluating(...), then run.play(play); removed in 0.5",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    if rollups:
-        tournament = tournament.model_copy(update={"rollups": tuple(rollups)})
-    with evaluating(
-        tournament,
+    resume: bool = False,
+) -> Iterator[EvalRun]:
+    _record(recorded, experiment, run, directory, resume=resume)
+    with _evaluating_matches(
         experiment=experiment,
-        checkpoint=checkpoint,
-        checkpoints=checkpoints,
-        enter=enter,
+        environment=recorded.tournament.environment,
         matches=matches,
+        run=run,
         directory=directory,
         storages=storages,
-        share=share,
-        lines=lines,
+        rollups=recorded.tournament.rollups,
         resume=True,
     ) as active:
-        return active.play(play, agents=agents)
+        yield active
 
 
 class Delivered(Record):
@@ -282,10 +260,10 @@ def played(
     eval run of the experiment in its environment delivered counts, whichever
     tournament it was held for; of several, the one that recorded it last.
     So one place can decide what is new and another, such as a launched
-    machine that reads no other eval run, play it with `hold(matches=...)`,
+    machine that reads no other eval run, open `evaluating(..., matches=...)`,
     and a reader counts each match from the run whose rows are latest.
     Raises as a batch hold does, so a seating name defined two ways is refused.
-    Relative seats find their checkpoints among `lines`, as in `hold`.
+    Relative seats find their checkpoints among `lines`, as in `evaluating`.
 
     Asking about several tournaments, pass `runs` (`stored_runs`), read once,
     instead of `directory` and `storages`, which are read on every call.
@@ -300,17 +278,6 @@ def played(
     return _called(
         added, experiment=experiment, on_the_go=False, lines=lines, wanted_only=True, runs=runs
     ).played
-
-
-def tournament_runs(
-    experiment: str, *, directory: Path | str | None = None, storages: Sequence[Storage] = ()
-) -> dict[str, list[TournamentRun]]:
-    """What each eval run of the experiment held for a tournament added, by tournament, in
-    run order: `assemble` makes each tournament of them.
-
-    One listing per place, each eval run's `run.json` and `tournament.json`.
-    """
-    return stored_runs(experiment, directory=directory, storages=storages).tournaments()
 
 
 @dataclass(frozen=True)

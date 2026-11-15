@@ -10,11 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from etude.records import HOURS_SINCE_START, RUNNING_HOURS, SourceKey
+from etude.records import HOURS_SINCE_START, RUNNING_HOURS, Clock, SourceKey
 from etude.train.read import read
-from etude.train.records import ParentRun, Step
+from etude.train.records import ParentRun
 from etude.train.report import training
-from etude.train.tracking import TrainingRun, track
+from etude.train.tracking import TrainingRun
+from tests.train.tracking import open_run
 
 HOUR_MS = 3_600_000
 START_MS = 1_800_000_000_000
@@ -54,11 +55,11 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clockwork:
 
 
 def _start(directory: Path, name: str, *, resume: bool = False) -> TrainingRun:
-    return track(
+    return open_run(
         resume=resume,
         experiment="e",
         run=name,
-        clocks=[Step("step", "updates")],
+        clocks=[Clock(name="step", kind="step", meaning="updates")],
         directory=directory,
     )
 

@@ -1,5 +1,7 @@
 # Train and evaluate a Hanabi team
 
+This guide is for authors trying a small cooperative PyTorch/OpenSpiel learner.
+
 ```sh
 uv sync --extra train --extra eval --extra hanabi
 .venv/bin/etude train examples/hanabi.py --config '{"updates":20}'
@@ -29,7 +31,7 @@ A second Ctrl-C interrupts immediately. Resume with no `--config` uses the
 stored config, including any overrides from the first command.
 
 `arena(config: ArenaConfig) -> Benchmark` is pure. It seats the checkpoint as
-both teammates, then with a random teammate. `play(match, agents)` gets an author-owned Pydantic config and uses checkpoint
+both teammates, then with a random teammate. `play(match, agents)` uses the shared indexed `match.seed` and checkpoint
 forwards loaded by `load`. Its build hook supplies the random teammate.
 Its rows name group `all`, the cooperative team, rather than claiming that one
 seat won. Evaluation chooses the first and final checkpoint of each run and

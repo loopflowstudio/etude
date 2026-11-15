@@ -31,18 +31,16 @@ from typing import Literal
 
 from etude.controller.declarations import asked, read_experiment, read_training_jobs
 from etude.errors import LauncherError
-from etude.eval.records import Benchmark, RoundRobin, TournamentRun
+from etude.eval.records import Benchmark, RoundRobin
 from etude.eval.tournament import played
 from etude.experiment import observe, read_tournament_lines
 from etude.experiment_file import defined_functions, experiment_named, refuse_renamed
 from etude.jobs import (
     EvalGroup,
-    Evaluation,
     _group_key,
     evaluation_group,
     fetch_checkpoints,
     hold_group,
-    with_experiment,
 )
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.page import build, render, write
@@ -137,64 +135,55 @@ def _evaluate(
         return [
             SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="eval returned none")
         ]
-    batches: dict[str, list[Job]] = {}
     steps: list[SmokeStep] = []
+    runnable = []
     for job in jobs:
-        spec = evaluation_group(job).evaluations[0]
         outside = (
-            spec.tournament.experiments - {experiment}
-            if isinstance(spec.tournament, Benchmark)
+            job.tournament.experiments - {experiment}
+            if isinstance(job.tournament, Benchmark)
             else frozenset()
         )
         if outside:
             steps.append(
                 SmokeStep(
                     step="eval",
-                    name=spec.tournament.name,
+                    name=job.tournament.name,
                     outcome="not_smoked",
                     detail="cross-experiment seats: " + ", ".join(sorted(outside)),
                 )
             )
         else:
-            batches.setdefault(_group_key(job, spec), []).append(job)
+            runnable.append(job)
     lines = read_tournament_lines(
-        source,
-        state,
-        [
-            TournamentRun(tournament=spec.tournament, checkpoints=spec.held)
-            for batch in batches.values()
-            for job in batch
-            for spec in evaluation_group(job).evaluations
-        ],
-        keys=keys,
-        declarations=declarations,
+        source, state, [job.recorded() for job in runnable], keys=keys, declarations=declarations
     )
+    batches: dict[str, list[Job]] = {}
+    for job in runnable:
+        tiny = job.model_copy(update={"tournament": _tiny_tournament(job.tournament)})
+        recorded = tiny.recorded()
+        pending = played(
+            tiny.tournament,
+            experiment=experiment,
+            checkpoints=recorded.checkpoints,
+            enter=recorded.entrants,
+            lines=lines,
+            storages=[store],
+        ).new
+        lowered = tiny.lower(state, pending, lines)
+        spec = evaluation_group(lowered).evaluations[0]
+        batches.setdefault(_group_key(lowered, spec), []).append(lowered)
     for batch in batches.values():
         started = time.monotonic()
-        tiny: list[Evaluation] = []
-        for job in batch:
-            for spec in evaluation_group(with_experiment(job, experiment)).evaluations:
-                spec = spec.model_copy(
-                    update={"tournament": _tiny_tournament(spec.tournament), "lines": lines}
-                )
-                pending = played(
-                    spec.tournament,
-                    experiment=experiment,
-                    checkpoints=spec.held,
-                    enter=spec.entrants,
-                    lines=lines,
-                    storages=[store],
-                ).new
-                tiny.append(spec.model_copy(update={"matches": pending}))
-        name = tiny[0].tournament.name if len(tiny) == 1 else "eval"
+        tiny_specs = tuple(spec for job in batch for spec in evaluation_group(job).evaluations)
+        name = tiny_specs[0].definition.name if len(tiny_specs) == 1 else "eval"
         with TemporaryDirectory(prefix="etude-smoke-inputs-") as folder:
             files = _try_step(
                 "eval",
                 name,
                 lambda: fetch_checkpoints(
-                    tuple(match for spec in tiny for match in spec.matches or ()),
+                    tuple(match for spec in tiny_specs for match in spec.matches),
                     state,
-                    tuple(c for spec in tiny for c in spec.checkpoints),
+                    (),
                     Path(folder),
                 ),
             )
@@ -202,16 +191,16 @@ def _evaluate(
                 "eval",
                 name,
                 lambda: hold_group(
-                    EvalGroup(evaluations=tuple(spec.relocate(files) for spec in tiny)),
+                    EvalGroup(evaluations=tuple(spec.relocate(files) for spec in tiny_specs)),
                     checkout=batch[0].repo,
                     storages=[store],
                 ),
             )
-        for spec, result in zip(tiny, held, strict=True):
+        for spec, result in zip(tiny_specs, held, strict=True):
             steps.append(
                 SmokeStep(
                     step="eval",
-                    name=spec.tournament.name if result.played else "eval",
+                    name=spec.definition.name if result.played else "eval",
                     outcome="passed" if result.played else "not_smoked",
                     seconds=time.monotonic() - started,
                     detail=f"{result.played} match{'' if result.played == 1 else 'es'}, 1 game each"

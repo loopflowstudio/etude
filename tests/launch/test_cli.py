@@ -55,20 +55,20 @@ if __name__ == "__main__":
 
 
 # A tracked job: it resumes from the checkpoint its run, or its parent, recorded.
-TRAIN = r"""
+TRAIN = """
 import os
 from pathlib import Path
 from urllib.parse import urlparse
-from etude.train.records import Step
+from etude.records import Clock
 from etude.train.tracking import track
-run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
-latest = run.latest_checkpoint()
+run = track(clocks=[Clock(name='steps', kind='step', meaning='training steps')])
+latest = (run._checkpoint_here(_saved_checkpoint) if (_saved_checkpoint := run._latest_record()) is not None else None)
 start = 0 if latest is None else int(latest.at["steps"])
 target = int(os.environ["ETUDE_UNTIL_VALUE"])
 config = Path(os.environ["ETUDE_CONFIG"]).read_text()
 print(f"{config} seed {os.environ['ETUDE_SEED']} from {start} to {target}")
 weights = Path(os.environ["ETUDE_OUTPUT_DIR"]) / "weights.pt"
-weights.write_text("weights\n")
+weights.write_text("weights\\n")
 run.log({"loss": 0.5}, steps=target)
 run.checkpoint(weights, steps=target)
 run.finish()
@@ -160,11 +160,12 @@ def test_an_experiment_file_launches_runs_of_its_experiment(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     upgrade(tmp_path / "home", development=True)
     (tmp_path / "train.py").write_text(
-        "from etude.train.records import Step\n"
-        "from etude.train.tracking import track\n"
-        'run = track(clocks=[Step("steps", "training steps")])\n'
-        'run.log({"loss": 0.5}, steps=1)\n'
-        "run.finish()\n"
+        """from etude.records import Clock
+from etude.train.tracking import track
+run = track(clocks=[Clock(name='steps', kind='step', meaning='training steps')])
+run.log({"loss": 0.5}, steps=1)
+run.finish()
+"""
     )
     (tmp_path / "ppo.py").write_text(
         r"""from etude.jobs import TrainingJob

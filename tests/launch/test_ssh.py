@@ -16,11 +16,11 @@ from etude.launch.provisioner.machines import OwnedMachine
 from etude.launch.records import Machine, Pool
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.ssh import SSH, RemoteReply, RemoteRequest, SSHJournal, SSHStart
+from etude.records import Clock
 from etude.spec import Job, RunRequest, Until
-from etude.train.records import Step
-from etude.train.tracking import track
 from tests.launch.counting import job_text
 from tests.launch.fake import open_database
+from tests.train.tracking import open_run
 
 
 def test_remote_host_runs_kept_work_logs_outputs_and_stops(
@@ -116,10 +116,10 @@ class CountedSSH(SSH):
 TRAIN = """
 import os
 from pathlib import Path
-from etude.train.records import Step
+from etude.records import Clock
 from etude.train.tracking import track
-run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
-latest = run.latest_checkpoint()
+run = track(clocks=[Clock(name='steps', kind='step', meaning='training steps')])
+latest = (run._checkpoint_here(_saved_checkpoint) if (_saved_checkpoint := run._latest_record()) is not None else None)
 start = 0 if latest is None else int(latest.at["steps"])
 kept = "" if latest is None else latest.path.read_text()
 target = int(os.environ["ETUDE_UNTIL_VALUE"])
@@ -214,9 +214,9 @@ def test_a_runs_folder_relays_between_hosts_over_ssh(tmp_path: Path) -> None:
     executable = tmp_path / "ssh"
     executable.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
     executable.chmod(0o755)
-    run = track(
+    run = open_run(
         experiment="lab",
-        clocks=[Step("steps", "training steps")],
+        clocks=[Clock(name="steps", kind="step", meaning="training steps")],
         run="r",
         directory=tmp_path / "a/track",
     )

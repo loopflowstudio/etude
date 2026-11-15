@@ -14,6 +14,16 @@ Design around the domain's data structures and public APIs, with one code
 concept per real concept. Keep core types and entry points easy to find. Start
 with the smallest types and APIs that are right; every line must earn its place.
 
+Treat the codebase as yours. Existing code is a draft, not a precedent:
+when it is wrong for the change, change it instead of working around it.
+
+Keep one way to do each thing. Before adding a mechanism, helper, record or
+option, find where the codebase already does that job and extend or
+replace it; never build a second one beside it. When a change reveals two
+pieces doing one job, unify them in that change and delete the one that
+loses. A new general utility starts with that search, and its commit
+message names what was found and why it did not fit.
+
 A redesign deletes what it replaces, in the same change. Keep one
 implementation and one owner for each fact: no `_old`, `_new`, `v2_` or backup
 variants, and no compatibility shims unless a released database or a published
@@ -195,8 +205,7 @@ modules import each other, move the shared part or pass it in; do not hide the
 cycle inside a function. Keep every `__init__.py` empty, so importing one
 module never loads the rest.
 
-**Layout.** Add a folder only when it has a rule a test can enforce, such as
-"nothing in here imports the scheduler". A theme is not a reason for a folder.
+**Layout.** Lay the package out by the parts of the system: one folder per part the docs name, such as the controller, scheduler, provisioner and worker, called what the docs call it. Each part's import rule is enforced by a test. A grouping that is not a part of the system is not a folder.
 
 **Records.** Anything stored or sent between machines is a frozen Pydantic
 model. Do not keep a second kind of record beside them.
@@ -277,7 +286,7 @@ its name or id as a plain `str`.
 
 The launcher database changes only through a new SQL file in
 `src/etude/launch/migrations/`, named for what it does and never numbered;
-`docs/launcher.md` ("Writing a migration") shows one. It may change until it merges to main; afterwards it never changes
+`docs/dev/launcher.md` ("Writing a migration") shows one. It may change until it merges to main; afterwards it never changes
 (`scripts/check_migrations.py`). Explicit `database upgrade` advances the one
 operational `launcher.sqlite`; ordinary opens never migrate or select copies.
 Recovery snapshots are never scheduling inputs.

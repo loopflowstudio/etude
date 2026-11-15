@@ -18,26 +18,29 @@ from moto import mock_aws
 
 from etude.block_file import block_key
 from etude.page import build
-from etude.records import RunRecord
+from etude.records import Clock, RunRecord
 from etude.storage import DirectoryStorage, S3Storage, Storage, run_prefix
 from etude.train.block import Columns, Series, encode
 from etude.train.manifest import Index
 from etude.train.read import buckets, read
-from etude.train.records import Step, Time
-from etude.train.tracking import track
+from etude.train.records import Time
 from tests.experiments import experiment_file
 from tests.run.storage import MeasuredStorage
+from tests.train.tracking import open_run
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("ETUDE_MEASURE") != "1", reason="measurement, not a check"
 )
 
-CLOCKS = (Step("updates", "optimizer updates"), Time("training_seconds", "active training"))
+CLOCKS = (
+    Clock(name="updates", kind="step", meaning="optimizer updates"),
+    Time("training_seconds", "active training"),
+)
 METRICS = 20
 
 
 def test_log_call_latency(tmp_path: Path) -> None:
-    run = track(
+    run = open_run(
         experiment="measure", run="latency", clocks=CLOCKS, directory=tmp_path, queue_size=50_000
     )
     row = {f"rl/metric_{i}": float(i) for i in range(METRICS)}
@@ -63,7 +66,7 @@ def test_log_call_latency(tmp_path: Path) -> None:
 
 def test_chart_read_time(tmp_path: Path) -> None:
     rows = 500_000
-    run = track(
+    run = open_run(
         experiment="measure", run="read", clocks=CLOCKS, directory=tmp_path, queue_size=50_000
     )
     row = {f"rl/metric_{i}": float(i) for i in range(METRICS)}

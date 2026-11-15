@@ -16,16 +16,17 @@ from etude.checkpoints import CheckpointRecord, CheckpointRef
 from etude.errors import EtudeError
 from etude.eval import query
 from etude.eval.convert import convert
-from etude.eval.match import environment, evaluate
+from etude.eval.match import environment
 from etude.eval.query import compare, statsdb
 from etude.eval.records import Benchmark, CheckpointPlayer, Code, Match, Rollup, Seating
-from etude.eval.run import Tables
+from etude.eval.result import Tables
 from etude.eval.tournament import evaluating, played, scores
 from etude.jobs import EvalGroup, Evaluation, hold_group
 from etude.records import ArtifactRef
 from etude.storage import DirectoryStorage
 from tests.eval.games import play, play_game_seats
 from tests.eval.per_file import write_per_file
+from tests.eval.playing import play_matches
 from tests.eval.stored import stored_inference
 from tests.run.storage import MeasuredStorage
 
@@ -67,7 +68,7 @@ def test_an_experiment_holds_its_own_eval_runs_only(tmp_path: Path) -> None:
         ("cards", "b", (2,)),
         ("other", "c", (3,)),
     ):
-        evaluate(experiment=experiment, environment=DUEL, play=play, matches=deals(players, *numbers),
+        play_matches(experiment=experiment, environment=DUEL, play=play, matches=deals(players, *numbers),
                  run=run, directory=tmp_path / run, storages=[bucket])  # fmt: skip
     # Every run of the experiment, joined; another experiment's run is not.
     assert held("cards", bucket) == (2, 3, 3 * 2 * 2)
@@ -80,7 +81,7 @@ def test_an_experiment_holds_its_own_eval_runs_only(tmp_path: Path) -> None:
 def test_opening_again_reads_only_what_arrived(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     players = pair(tmp_path)
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(players, 0, 1, 2),
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=deals(players, 0, 1, 2),
              run="a", directory=tmp_path / "a", storages=[bucket])  # fmt: skip
     first = MeasuredStorage(bucket)
     statsdb("cards", first).close()
@@ -95,7 +96,7 @@ def test_opening_again_reads_only_what_arrived(tmp_path: Path) -> None:
 
     # One match more, in a run of its own: its declaration, environment, record, two
     # tables and how it ended.
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(players, 3),
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=deals(players, 3),
              run="b", directory=tmp_path / "b", storages=[bucket])  # fmt: skip
     grown = MeasuredStorage(bucket)
     db = statsdb("cards", grown)
@@ -119,7 +120,7 @@ class Asked(MeasuredStorage):
 
 def test_a_folder_listed_without_a_declaration_is_not_asked_for_one(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(pair(tmp_path), 0),
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=deals(pair(tmp_path), 0),
              run="a", directory=tmp_path / "a", storages=[bucket])  # fmt: skip
     # A launcher's journal beside the run can hold folders shaped like a run's.
     bucket.put("a/attempts/a1/share/blocks/block.json", b"{}")
@@ -133,7 +134,7 @@ def test_a_run_that_has_not_ended_is_partial(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     players = pair(tmp_path)
     for run, numbers in (("a", (0,)), ("b", (1, 2))):
-        evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(players, *numbers),
+        play_matches(experiment="cards", environment=DUEL, play=play, matches=deals(players, *numbers),
                  run=run, directory=tmp_path / run, storages=[bucket])  # fmt: skip
     # Killed mid-pass, `b` delivered its blocks but never wrote how it ended.
     (bucket.root / "cards" / "b" / "outcome.json").unlink()
@@ -148,7 +149,7 @@ def test_a_run_that_has_not_ended_is_partial(tmp_path: Path) -> None:
 
 def test_a_match_counts_once_from_the_latest_block_holding_it(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(pair(tmp_path), 0, 1),
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=deals(pair(tmp_path), 0, 1),
              run="a", directory=tmp_path / "a", storages=[bucket])  # fmt: skip
     assert held("cards", bucket) == (1, 2, 2 * 2 * 2)
     # The same matches arrive again, in a later block and in an earlier one, as a
@@ -170,14 +171,14 @@ def test_a_failed_match_retried_counts_once_as_done(tmp_path: Path) -> None:
     matches = deals(pair(tmp_path), 0)
 
     with pytest.raises(EtudeError):
-        evaluate(experiment="cards", environment=DUEL, play=broken, matches=matches, run="a",
+        play_matches(experiment="cards", environment=DUEL, play=broken, matches=matches, run="a",
                  directory=tmp_path / "a", storages=[bucket])  # fmt: skip
     db = statsdb("cards", bucket)
     assert db.sql("select state, error from matches").fetchall() == [
         ("failed", "RuntimeError: engine crashed")
     ]
     db.close()
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
              directory=tmp_path / "a", storages=[bucket])  # fmt: skip
     db = statsdb("cards", bucket)
     assert db.sql("select state from matches").fetchall() == [("done",)]
@@ -197,7 +198,7 @@ def test_a_match_two_runs_played_counts_from_the_later_under_its_latest_name(
     # One model, renamed between runs: a name is part of no key.
     for run, name in (("first", "early"), ("second", "late")):
         model = CheckpointPlayer(name=name, checkpoint=ref, config={"strength": 3})
-        evaluate(experiment="cards", environment=DUEL, play=play, run=run,
+        play_matches(experiment="cards", environment=DUEL, play=play, run=run,
                  matches=[Match(players=(model, rival), config={"deal": 0}, games=2)],
                  directory=tmp_path / run, storages=[bucket])  # fmt: skip
     db = statsdb("cards", bucket)
@@ -217,7 +218,7 @@ def test_a_kept_database_is_rebuilt_on_request_or_for_another_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
-    evaluate(experiment="cards", environment=DUEL, play=play, matches=deals(pair(tmp_path), 0),
+    play_matches(experiment="cards", environment=DUEL, play=play, matches=deals(pair(tmp_path), 0),
              run="a", directory=tmp_path / "a", storages=[bucket])  # fmt: skip
     statsdb("cards", bucket).close()
     for rebuild in (True, False):
@@ -257,7 +258,7 @@ def _published(tmp_path: Path, play: Callable[..., Tables]) -> tuple[Path, Path]
     """Run `a` played as blocks (`now`), and the same run as published etude-sdk stored it, converted."""
     players = pair(tmp_path)
     now = tmp_path / "now"
-    evaluate(experiment="cards", environment=DUEL, play=play, run="a",
+    play_matches(experiment="cards", environment=DUEL, play=play, run="a",
              matches=deals(players, 0, 1, 2), directory=now)  # fmt: skip
     published = tmp_path / "published"
     write_per_file(now / "cards/a", published / "a")
@@ -320,7 +321,7 @@ def test_pandas_lookups_do_not_grow_with_the_matches_played_and_held(
         bucket = DirectoryStorage(tmp_path / f"bucket-{matches}")
         players = pair(tmp_path)
         lookups.count = 0
-        evaluate(experiment="cards", environment=DUEL, play=play,
+        play_matches(experiment="cards", environment=DUEL, play=play,
                  matches=deals(players, *range(matches)), run="a",
                  directory=tmp_path / f"run-{matches}", storages=[bucket])  # fmt: skip
         played = lookups.count
@@ -336,7 +337,7 @@ def test_same_named_eval_runs_keep_each_experiments_results(tmp_path: Path) -> N
     source = DirectoryStorage(tmp_path / "runs")
     players = pair(tmp_path)
     for experiment, numbers in (("one", (0,)), ("two", (1, 2))):
-        evaluate(
+        play_matches(
             experiment=experiment,
             environment=DUEL,
             play=play,
@@ -439,16 +440,18 @@ def test_legacy_queued_evaluation_keeps_its_workers_original_checkpoint_identity
         tournament, experiment="cards", checkpoint=legacy, directory=tmp_path
     ) as active:
         assert active.play(play).played == 1
-    spec = Evaluation(
-        tournament=tournament,
-        experiment="cards",
-        play=Function(module="tests.eval.games", name="play"),
-        checkpoints=(
-            CheckpointRecord(
-                run="base@0", experiment="cards", ordinal=1, at={}, artifact=legacy.artifact
+    spec = Evaluation.model_validate(
+        dict(
+            tournament=tournament,
+            experiment="cards",
+            play=Function(module="tests.eval.games", name="play"),
+            checkpoints=(
+                CheckpointRecord(
+                    run="base@0", experiment="cards", ordinal=1, at={}, artifact=legacy.artifact
+                ),
             ),
-        ),
-        matches=tuple(tournament.seatings[0].matches(legacy)),
+            matches=tuple(tournament.seatings[0].matches(legacy)),
+        )
     )
     (result,) = hold_group(EvalGroup(evaluations=(spec,)), directory=tmp_path)
     assert result.played == 0 and result.skipped == 1

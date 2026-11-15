@@ -270,24 +270,15 @@ def read_experiment(path: Path, *, experiment: str | None = None) -> Experiment:
     )
 
 
-def asked(function: EvalFunction, state: ExperimentState) -> list[Job]:
+def asked(function: EvalFunction, state: ExperimentState) -> list[EvalJob]:
     returned = function(state)
     given = list(returned) if isinstance(returned, (list, tuple)) else [returned]
-    jobs: list[Job] = []
+    jobs: list[EvalJob] = []
     for each in given:
-        if isinstance(each, EvalJob):
-            jobs.append(each.plain())
-            continue
-        if isinstance(each, RunRequest):
-            try:
-                evaluation_group(each.job)
-            except EtudeError:
-                pass
-            else:
-                jobs.append(each.job)
-                continue
-        defining = function if inspect.isroutine(function) else type(function)
-        raise LauncherError(
-            f"{Path(inspect.getfile(defining)).name}: eval_jobs() must return EvalJob"
-        )
+        if not isinstance(each, EvalJob):
+            defining = function if inspect.isroutine(function) else type(function)
+            raise LauncherError(
+                f"{Path(inspect.getfile(defining)).name}: eval_jobs() must return EvalJob"
+            )
+        jobs.append(each)
     return jobs

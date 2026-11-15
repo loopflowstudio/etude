@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
-from typing import cast
 
 import pytest
 from pydantic import JsonValue, ValidationError
 
-import etude.eval.records as records
 from etude.checkpoints import CheckpointRecord, CheckpointRef, PolicyKey
 from etude.eval.records import (
     Aligned,
@@ -25,7 +22,6 @@ from etude.eval.records import (
     Final,
     Fraction,
     Gap,
-    Held,
     Line,
     Match,
     Relative,
@@ -36,6 +32,7 @@ from etude.eval.records import (
     Share,
     TournamentRun,
     assemble,
+    checkpoint_player,
 )
 from etude.records import ArtifactRef
 from tests.eval.stored import stored_inference, stored_relative
@@ -48,14 +45,6 @@ U500 = CheckpointRef(
 )
 SEARCH = stored_inference(config={"sims": 64})
 HEURISTIC = Code(name="heuristic")
-
-
-def test_published_checkpoint_key_still_names_a_run_checkpoint() -> None:
-    with pytest.warns(DeprecationWarning):
-        checkpoint_key = cast(Callable[..., str], getattr(records, "CheckpointKey"))
-    assert checkpoint_key(run="ppo-1", name="updates-500.pt") == (
-        "ppo-1/checkpoints/updates-500.pt"
-    )
 
 
 # Written by etude-sdk at 2eb32d5, before players were named.
@@ -424,7 +413,7 @@ def test_checkpoint_paths_decode_local_files_and_refuse_remote_addresses(tmp_pat
         run="learner", ordinal=1, artifact=ArtifactRef(uri=path.as_uri(), sha256=DIGEST), at={}
     )
     assert checkpoint.path == checkpoint.ref.path == path
-    assert Held().player(checkpoint.ref).checkpoint.path.read_bytes() == b"weights"
+    assert checkpoint_player(checkpoint.ref).checkpoint.path.read_bytes() == b"weights"
     for uri in ("s3://bucket/policy.pt", "file://other-machine/policy.pt"):
         remote = CheckpointRecord(
             run="learner", ordinal=1, artifact=ArtifactRef(uri=uri, sha256=DIGEST), at={}
@@ -444,11 +433,9 @@ def test_tournament_configs_keep_released_conditions_bytes_and_warnings() -> Non
         stored = current.model_dump_json()
         assert '"conditions":[{"deal":1}]' in stored
         assert '"configs"' not in stored
-        with pytest.warns(DeprecationWarning, match="conditions is now configs"):
-            old = type(current).model_validate(json.loads(stored))
+        old = type(current).model_validate(json.loads(stored))
         assert old.model_dump_json() == stored
-        with pytest.warns(DeprecationWarning, match="conditions is now configs"):
-            assert old.conditions == current.configs
+        assert old.configs == current.configs
         with pytest.raises(ValidationError):
             type(current).model_validate({**current.model_dump(), "config": current.configs})
 

@@ -14,8 +14,8 @@ from etude.launch.client import default, queue
 from etude.records import Clock
 from etude.spec import Job, Runtime, SmokeForm
 from etude.storage import DirectoryStorage, default_root
-from etude.train.tracking import track
 from tests.run.storage import MeasuredStorage
+from tests.train.tracking import open_run
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +36,7 @@ from etude.train.tracking import track
 updates = int(sys.argv[1])
 if updates > 10 or "diverge" in sys.argv:
     raise SystemExit(f"{updates} updates diverged")
-with track(clocks=[Clock(name="updates", kind="step", meaning="optimizer updates")]) as run:
+with track(clocks=[Clock(name='updates', kind='step', meaning='optimizer updates')]) as run:
     if "unsaved" not in sys.argv:
         Path("model.pt").write_bytes(b"weights")
         run.checkpoint(Path("model.pt"), updates=updates)
@@ -46,7 +46,7 @@ EXPERIMENT = """
 from pathlib import Path
 
 from etude.eval.match import environment
-from etude.eval.records import Held, Benchmark, Code, Seating
+from etude.eval.records import CheckpointSlot, Benchmark, Code, Seating, checkpoint_player
 from etude.jobs import ExperimentState
 from etude.jobs import EvalJob, TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
@@ -69,7 +69,7 @@ def training_jobs(seeds: int = 1, tiny: str = "1", bare: bool = False) -> list:
 def eval_jobs(state: ExperimentState) -> Job:
     chosen = [saved for run in state.runs for saved in run.checkpoints]
     anchor = Code(name="heuristic", source=[__file__], config={{"strength": 0}})
-    vs = Seating(name="vs heuristic", players=(Held(), anchor),
+    vs = Seating(name="vs heuristic", players=(CheckpointSlot(), anchor),
                  configs=({{"deal": 0}}, {{"deal": 1}}), games=4)
     ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(vs,))
     return EvalJob(tournament=ladder, play={play}, checkpoints=chosen, max_hours=0.1,
@@ -217,7 +217,7 @@ def test_without_smoke_a_broken_tiny_job_queues_unsmoked(
 def _trained(source: Path, tmp_path: Path) -> None:
     """One checkpoint of experiment ppo's run ppo-1, delivered to `source`."""
     clocks = [Clock(name="updates", kind="step", meaning="optimizer updates")]
-    with track(experiment="ppo", run="ppo-1", clocks=clocks, directory=source) as run:
+    with open_run(experiment="ppo", run="ppo-1", clocks=clocks, directory=source) as run:
         (tmp_path / "model.pt").write_bytes(b"weights 1")
         run.checkpoint(tmp_path / "model.pt", updates=100)
 
@@ -306,7 +306,7 @@ def test_eval_only_smoke_uses_outside_checkpoints_and_this_computers_environment
     source_given: bool,
 ) -> None:
     source = tmp_path / "source"
-    with track(experiment="producer", run="base@0", directory=source, clocks=["updates"]) as run:
+    with open_run(experiment="producer", run="base@0", directory=source, clocks=["updates"]) as run:
         path = run.out / "weights.pt"
         path.write_bytes(b"outside weights")
         run.checkpoint(path, updates=1)
@@ -316,7 +316,7 @@ def test_eval_only_smoke_uses_outside_checkpoints_and_this_computers_environment
 import os
 from etude.experiment import observe
 from etude.jobs import EvalJob
-from etude.eval.records import Held, RoundRobin, Code
+from etude.eval.records import CheckpointSlot, RoundRobin, Code, checkpoint_player
 from etude.eval.match import environment
 
 def play(match, agents):
@@ -328,7 +328,7 @@ def play(match, agents):
 def eval_jobs(state):
     checkpoint = observe({str(source)!r}, "producer").runs[0].final
     return EvalJob(tournament=RoundRobin(name="outside", environment=environment("game"),
-        configs=({{}},), games=3), enter=(checkpoint.player(Held()), Code(name="fixed")),
+        configs=({{}},), games=3), enter=(checkpoint_player(checkpoint.ref), Code(name="fixed")),
         play=play, max_hours=0.1)
 """)
     before = sorted(source.rglob("*"))
@@ -348,13 +348,13 @@ def test_policy_key_smoke_names_cross_experiment_seat(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     source = tmp_path / "source"
-    with track(
+    with open_run(
         experiment="rival", run="small", job="small", directory=source, clocks=["updates"]
     ) as run:
         weights = run.out / "weights.pt"
         weights.write_bytes(b"weights")
         run.checkpoint(weights, updates=1)
-    with track(
+    with open_run(
         experiment="tla-frontier", run="small", job="small", directory=source, clocks=["updates"]
     ) as run:
         weights = run.out / "weights.pt"
@@ -364,13 +364,13 @@ def test_policy_key_smoke_names_cross_experiment_seat(
     file.write_text("""
 from etude.checkpoints import PolicyKey
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Final, Held, Seating
+from etude.eval.records import Benchmark, Final, CheckpointSlot, Seating, checkpoint_player
 from etude.jobs import EvalJob
 from tests.eval.games import play
 
 def eval_jobs(state):
     return EvalJob(tournament=Benchmark(name="frontier", environment=environment("duel"),
-        seatings=(Seating(name="vs frontier", players=(Held(),
+        seatings=(Seating(name="vs frontier", players=(CheckpointSlot(),
             Final(experiment="tla-frontier")), configs=({},), games=8),)),
         checkpoints=state.policy(PolicyKey()).checkpoints, play=play, repo=None, max_hours=1)
 """)

@@ -285,11 +285,6 @@ def publication(root: Path, *, tail_seconds: float) -> Publication:
     return Publication(keys=tuple(selected), pointers=pointers)
 
 
-def listing(root: Path, *, tail_seconds: float) -> list[str]:
-    """Ready files in publication order, with only the selected saves."""
-    return list(publication(root, tail_seconds=tail_seconds).keys)
-
-
 def prune_state(root: Path, pointers: Mapping[str, bytes]) -> None:
     """Remove only save folders older than acknowledged pointers, including private files."""
     for key, number in _numbers(pointers).items():

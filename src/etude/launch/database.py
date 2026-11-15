@@ -922,11 +922,6 @@ class Database:
         rows = self._db.execute(f"{_RUNS}{where} ORDER BY r.seq", values)
         return tuple(_run_from_row(row) for row in rows)
 
-    def job_runs(self, job: str) -> tuple[RunRecord, ...]:
-        """Every run of one job, oldest first: its seeds side by side."""
-        rows = self._db.execute(f"{_RUNS} WHERE r.job = ? ORDER BY r.seq", (job,))
-        return tuple(_run_from_row(row) for row in rows)
-
     def waiting(self, supply: str) -> tuple[RunRecord, ...]:
         """Runs that may use this pool or on-demand and want a new attempt, oldest first.
 
@@ -1097,12 +1092,6 @@ class Database:
         """Paid window, if this working session runs on a rented machine."""
         row = self._db.execute(f"{_RENTALS} WHERE r.machine=?", (session.machine,)).fetchone()
         return None if row is None else Rental.model_validate(dict(row))
-
-    def rental(self, machine: str) -> Rental:
-        row = self._db.execute(f"{_RENTALS} WHERE r.machine=?", (machine,)).fetchone()
-        if row is None:
-            raise LauncherError(f"machine {machine!r} has no rental")
-        return Rental.model_validate(dict(row))
 
     def rented_session(self, machine: str) -> Session:
         """The one working session of a rented machine."""

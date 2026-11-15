@@ -17,7 +17,6 @@ Every time is timezone-aware UTC.
 
 from __future__ import annotations
 
-import warnings
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -642,17 +641,6 @@ class BootstrapLinks(Record):
     url: str
     log_url: str
     worker_log_url: str
-
-
-def __getattr__(name: str) -> object:
-    if name == "Run":
-        warnings.warn(
-            "etude.launch.records.Run is now RunRequest; removed in 0.5",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return RunRequest
-    raise AttributeError(name)
 
 
 class Standing(Record):

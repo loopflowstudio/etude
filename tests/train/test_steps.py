@@ -11,7 +11,8 @@ from etude.stopping import Stopped
 from etude.train.read import read
 from etude.train.records import Time
 from etude.train.state import read_state
-from etude.train.tracking import EtudeWarning, track
+from etude.train.tracking import EtudeWarning
+from tests.train.tracking import open_run
 
 
 class Counts(BaseModel):
@@ -20,7 +21,7 @@ class Counts(BaseModel):
 
 def test_steps_declare_the_clock_and_resume_its_saved_position(tmp_path: Path) -> None:
     for resume, target in ((False, 2), (True, 4)):
-        with track(experiment="e", run="r", directory=tmp_path, resume=resume) as run:
+        with open_run(experiment="e", run="r", directory=tmp_path, resume=resume) as run:
             counts = run.resume(extra=Counts())
             for update in run.steps("updates", to=target, save_every=1):
                 counts.updates = update
@@ -35,7 +36,7 @@ def test_steps_declare_the_clock_and_resume_its_saved_position(tmp_path: Path) -
 
 @pytest.mark.parametrize("table", [False, True])
 def test_a_row_without_a_clock_explains_how_to_declare_one(tmp_path: Path, table: bool) -> None:
-    with track(experiment="e", run="r", directory=tmp_path) as run:
+    with open_run(experiment="e", run="r", directory=tmp_path) as run:
         with pytest.raises(EtudeError, match="declare.*clock.*run.steps"):
             if table:
                 run.log_table("games", [{"score": 1}])
@@ -65,7 +66,7 @@ def test_save_cadence_and_final_save(
 ) -> None:
     now = [0.0]
     monkeypatch.setattr("etude.train.tracking.time.monotonic", lambda: now[0])
-    with track(experiment="e", run="r", directory=tmp_path) as run:
+    with open_run(experiment="e", run="r", directory=tmp_path) as run:
         run.resume(extra=Counts())
         saved: list[int | None] = []
         for update in run.steps(
@@ -83,7 +84,7 @@ def test_implicit_clock_is_saved_before_a_planned_stop(
 ) -> None:
     stop = tmp_path / "stop"
     monkeypatch.setenv("ETUDE_STOP_FILE", str(stop))
-    with pytest.raises(Stopped), track(experiment="e", run="r", directory=tmp_path) as run:
+    with pytest.raises(Stopped), open_run(experiment="e", run="r", directory=tmp_path) as run:
         counts = run.resume(extra=Counts())
         for update in run.steps("updates", to=3):
             counts.updates = update
@@ -98,7 +99,7 @@ def test_implicit_clock_is_saved_before_a_planned_stop(
 
 
 def test_a_second_implicit_clock_preserves_rows_already_queued(tmp_path: Path) -> None:
-    with track(experiment="e", run="r", directory=tmp_path) as run:
+    with open_run(experiment="e", run="r", directory=tmp_path) as run:
         run.log({"score": 0}, seconds=0)
         for update in run.steps("updates", to=2):
             run.log({"score": update}, seconds=update)
@@ -111,7 +112,7 @@ def test_a_second_implicit_clock_preserves_rows_already_queued(tmp_path: Path) -
 
 
 def test_log_keywords_declare_count_clocks_and_require_them_on_later_rows(tmp_path: Path) -> None:
-    with track(experiment="e", run="r", directory=tmp_path, strict=True) as run:
+    with open_run(experiment="e", run="r", directory=tmp_path, strict=True) as run:
         run.log({"loss": 0.5}, updates=1, learner_transitions=4)
         with pytest.raises(EtudeError, match="row_missing_clock"):
             run.log({"loss": 0.4}, updates=2)
@@ -127,7 +128,7 @@ def test_log_keywords_declare_count_clocks_and_require_them_on_later_rows(tmp_pa
 def test_missing_used_clock_warns_outside_strict_mode(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    with track(experiment="e", run="r", directory=tmp_path) as run:
+    with open_run(experiment="e", run="r", directory=tmp_path) as run:
         run.log({"loss": 1}, updates=1, transitions=4)
         with pytest.warns(EtudeWarning, match="no value for clock 'transitions'"):
             run.log({"loss": 2}, updates=2)
@@ -137,7 +138,7 @@ def test_missing_used_clock_warns_outside_strict_mode(
 
 
 def test_table_keywords_declare_clocks_and_time_keeps_its_kind(tmp_path: Path) -> None:
-    with track(
+    with open_run(
         experiment="e", run="r", directory=tmp_path, clocks=[Time("simulation_seconds"), "updates"]
     ) as run:
         run.log_table("games", [{"score": 1}], updates=1, simulation_seconds=10)
@@ -151,7 +152,7 @@ def test_table_keywords_declare_clocks_and_time_keeps_its_kind(tmp_path: Path) -
 
 @pytest.mark.parametrize("strict", [False, True])
 def test_explicit_clock_names_close_the_set(tmp_path: Path, strict: bool) -> None:
-    with track(
+    with open_run(
         experiment="e", run="r", directory=tmp_path, clocks=["updates"], strict=strict
     ) as run:
         run.log({"loss": 1}, updates=1)
@@ -170,7 +171,9 @@ def test_explicit_clock_names_close_the_set(tmp_path: Path, strict: bool) -> Non
 
 
 def test_metrics_are_sparse_while_rows_keep_their_clock(tmp_path: Path) -> None:
-    with track(experiment="e", run="r", directory=tmp_path, clocks=["updates"], strict=True) as run:
+    with open_run(
+        experiment="e", run="r", directory=tmp_path, clocks=["updates"], strict=True
+    ) as run:
         run.log({"loss": 0.5}, updates=1)
         run.log({"accuracy": 0.9}, updates=2)
         run.log({"loss": 0.25, "accuracy": 0.95}, updates=3)

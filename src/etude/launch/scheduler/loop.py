@@ -75,7 +75,7 @@ from etude.launch.records import (
     Target,
     refusal,
 )
-from etude.launch.scheduler.costs import Budget, cost_between, rental_usd, usd
+from etude.launch.scheduler.costs import Budget, cost_between, rental_usd
 from etude.launch.scheduler.placement import Placement, PlannedRun
 from etude.launch.schemas import (
     Observation,
@@ -2419,7 +2419,7 @@ class Scheduler:
             occupied[attempt.id] = (start, max(start, end))
         return occupied
 
-    def _attempt_usd(self, attempt: RunAttempt, now: datetime, *, billed: bool = True) -> Decimal:
+    def _attempt_usd(self, attempt: RunAttempt, now: datetime) -> Decimal:
         """One attempt's share of its rental.
 
         Each moment of the rental is split equally among the attempts occupying
@@ -2437,11 +2437,7 @@ class Scheduler:
         dollars = Decimal(0)
         for begin, finish in zip(edges, edges[1:], strict=False):
             sharing = sum(a <= begin and finish <= b for a, b in occupied.values())
-            part = (
-                cost_between(rental, machine, begin, finish)
-                if billed
-                else usd(rental.usd_per_hour, begin, finish)
-            )
+            part = cost_between(rental, machine, begin, finish)
             dollars += part / sharing
         return dollars
 
