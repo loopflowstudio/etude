@@ -20,19 +20,12 @@ training `Line`s, which the caller passes, since evaluation reads no training
 run. What it finds is exact, so found for good: the hold records it
 (`Seated`), and every later read schedules from the record.
 
-A `Player` is whatever takes a seat: a `CheckpointPlayer`, a checkpoint and how it plays
-(`Inference`), or `Code`. A player is identified by its key: the checkpoint's
-own key (`CheckpointId`) or the code's name, together with its config. One
-checkpoint at two search budgets is two models; two checkpoint keys holding
-the same bytes are two models too, since where a checkpoint's bytes came from
-is not part of what it is. The code's commit and source digest are its
-`Version`, where a checkpoint stood on its clocks is `CheckpointRef.at` and
-the learner it belongs to is `CheckpointRef.line`; all are recorded with each
-match but not part of the key: a match one
-version played counts as played for every version, and reads can select a
-version. A match seats players by position (`seat`), names groups of seats
-and fixes the config it is played with. A match's key is the digest of
-its players' keys, its groups and config.
+A player is a resolved checkpoint, code, or a composition of other players.
+Compositions store an author's qualified record type and fields; their identity
+replaces every checkpoint leaf by its key, never its current byte location.
+Held and relative seats resolve before play. Old inference-configured players
+retain their keys and provenance. Match identity fixes player keys by seat,
+groups, config and game count.
 
 Records published etude-sdk wrote, with `agents` and etude-sdk 0.2's digest
 identities, load as players (`_player`); a 0.2 player's key equals no key
@@ -44,9 +37,10 @@ from __future__ import annotations
 import json
 import re
 import warnings
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from hashlib import sha256
-from itertools import combinations
+from itertools import combinations, islice, product
+from math import prod
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Generic, Literal, Self
 
@@ -179,75 +173,122 @@ def _encoded(player: str, config: Config) -> str:
     return player + " " + json.dumps(config, sort_keys=True, separators=(",", ":"))
 
 
-class Inference(Record):
-    """How a checkpoint plays: the author's `config` and the inference code's `Version`.
+class CheckpointPlayer(Record):
+    """A resolved checkpoint leaf. Config and version read released model players."""
 
-    `config` is the author's typed model or JSON, such as whether search runs
-    on top of the network and how; it is part of each model's key. `source`
-    is the inference code's files: their `Version`, recorded with each match
-    but not part of the key, so changed inference code reuses what was played.
-    In a seating it is a seat each checkpoint the benchmark is held for fills.
-    """
-
+    kind: Literal["model"] = "model"
+    name: Name
+    checkpoint: CheckpointRef
     config: _GivenConfig = {}
     version: Version = Version()
 
-    if TYPE_CHECKING:
-        # What a person writes; the validators below make the stored fields of it.
-        def __init__(
-            self,
-            *,
-            source: Sequence[Path | str] = (),
-            config: Mapping[str, object] | BaseModel | None = None,
-        ) -> None: ...
-
     @model_validator(mode="before")
     @classmethod
-    def versioned(cls, data: Any) -> Any:
-        if isinstance(data, dict) and isinstance(data.get("code"), str):
-            # etude-sdk 0.2 stored the inference files' digest as `code`.
-            data = dict(data)
-            data["version"] = {"source": data.pop("code")}
-        return _versioned(data)
-
-    def player(self, checkpoint: CheckpointRef) -> CheckpointPlayer:
-        """The player `checkpoint` is when it plays this way, named for its files."""
-        return CheckpointPlayer(
-            name=re.sub(r"\s", "_", checkpoint.key.rstrip("/").rsplit("/", 1)[-1]),
-            checkpoint=checkpoint,
-            inference=self,
-        )
-
-    def model(self, checkpoint: CheckpointRef) -> CheckpointPlayer:
-        """Released spelling; use player()."""
-        warnings.warn(
-            "Inference.model() is now player(); removed in 0.5", DeprecationWarning, stacklevel=2
-        )
-        return self.player(checkpoint)
-
-
-class CheckpointPlayer(Record):
-    """A checkpoint and how it plays (`Inference`). One checkpoint at two configs is two players."""
-
-    kind: Literal["model"] = "model"
-    # What a report calls it.
-    name: Name
-    checkpoint: CheckpointRef
-    inference: Inference
+    def _released(cls, value: object) -> object:
+        if isinstance(value, dict) and "inference" in value:
+            value = dict(value)
+            inference = value.pop("inference")
+            return {**value, **inference}
+        return value
 
     @property
     def key(self) -> str:
-        """Its identity as one string, for files, columns and indexes."""
         return _encoded(f"checkpoint:{self.checkpoint.key}", self.config)
 
-    # A player's config and version, as `Code` has them; `inference` holds both.
+
+def compose(player: BaseModel) -> Composition:
+    """Make an author's player record portable, retaining its type and fields."""
+    return Composition.model_validate(_encode_tree(player))
+
+
+def checkpoint_player(checkpoint: CheckpointRef) -> CheckpointPlayer:
+    """Seat a checkpoint directly, without an inference configuration."""
+    return CheckpointPlayer(
+        name=re.sub(r"\s", "_", checkpoint.key.rstrip("/").rsplit("/", 1)[-1]),
+        checkpoint=checkpoint,
+    )
+
+
+class Held(Record):
+    """The checkpoint a benchmark is held for, used directly as a player."""
+
+    kind: Literal["held"] = "held"
+
+    def player(self, checkpoint: CheckpointRef) -> CheckpointPlayer:
+        return checkpoint_player(checkpoint)
+
+
+class Composition(Record):
+    """Portable author record: its qualified type and recursively encoded fields.
+
+    Only the game's build hook reconstructs author types. Reading results and
+    scheduling never imports their code.
+    """
+
+    kind: Literal["composition"] = "composition"
+    name: str
+    fields: dict[str, JsonValue]
+
+    @property
+    def key(self) -> str:
+        if self.name == "etude:configured":
+            over = _PLAYER.validate_python(self.fields["over"])
+            config = _CONFIG.validate_python(self.fields["config"])
+            if not isinstance(over, CheckpointPlayer):
+                raise ValueError("configured checkpoint is unresolved")
+            return _encoded(f"checkpoint:{over.checkpoint.key}", config)
+        return "composition:" + digest([self.name, self.config])
+
     @property
     def config(self) -> Config:
-        return self.inference.config
+        if self.name == "etude:configured":
+            return _CONFIG.validate_python(self.fields["config"])
+        return {key: _tree_identity(value) for key, value in self.fields.items()}
 
     @property
     def version(self) -> Version:
-        return self.inference.version
+        if self.name == "etude:configured":
+            return Version.model_validate(self.fields.get("version", {}))
+        return Version()
+
+    def player(self, checkpoint: CheckpointRef) -> Player:
+        return _seat(self, checkpoint, None)
+
+
+def _tree_identity(value: JsonValue) -> JsonValue:
+    if isinstance(value, dict):
+        if value.get("kind") == "mapping":
+            items = _CONFIG.validate_python(value["items"])
+            return {key: _tree_identity(each) for key, each in items.items()}
+        if value.get("kind") in ("model", "code", "composition"):
+            return _PLAYER.validate_python(value).key
+        return {key: _tree_identity(each) for key, each in value.items()}
+    if isinstance(value, list):
+        return [_tree_identity(each) for each in value]
+    return value
+
+
+def _encode_tree(value: object) -> JsonValue:
+    if isinstance(value, (CheckpointPlayer, Code, Held, Composition, *_RELATIVE)):
+        return _JSON.validate_python(value.model_dump(mode="json"))
+    if isinstance(value, BaseModel):
+        kind = type(value)
+        if "<locals>" in kind.__qualname__:
+            raise ValueError("player records must be importable module-level types")
+        return {
+            "kind": "composition",
+            "name": f"{kind.__module__}:{kind.__qualname__}",
+            "fields": {name: _encode_tree(getattr(value, name)) for name in kind.model_fields},
+        }
+    if isinstance(value, (list, tuple)):
+        return [_encode_tree(each) for each in value]
+    if isinstance(value, dict):
+        # Tag mappings too: an author's literal {"kind": "model"} is data, not a seat.
+        return {
+            "kind": "mapping",
+            "items": {str(key): _encode_tree(each) for key, each in value.items()},
+        }
+    return _JSON.validate_json(TypeAdapter(type(value)).dump_json(value))
 
 
 class Code(Record):
@@ -287,6 +328,8 @@ def _player(data: Any) -> Any:
     which becomes the checkpoint address or code name `etude-sdk-0.2:DIGEST`,
     equal to no key since, so its matches are never counted as played again.
     """
+    if isinstance(data, BaseModel) and not isinstance(data, (CheckpointPlayer, Code, Composition)):
+        return _encode_tree(data)
     if not isinstance(data, dict) or data.get("kind") == "model":
         return data
     if "key" in data:
@@ -295,12 +338,9 @@ def _player(data: Any) -> Any:
         if key.get("checkpoint") is not None:
             ref = {"key": key["checkpoint"], "artifact": data.get("artifact")}
             inference = {"config": config, "version": version}
-            return {
-                "kind": "model",
-                "name": data["name"],
-                "checkpoint": ref,
-                "inference": inference,
-            }
+            return _player(
+                {"kind": "model", "name": data["name"], "checkpoint": ref, "inference": inference}
+            )
         if key.get("code") is not None:
             return {"kind": "code", "name": key["code"], "config": config, "version": version}
         return data
@@ -319,13 +359,15 @@ def _player(data: Any) -> Any:
             "artifact": {"uri": data.get("uri") or recorded, "sha256": data.get("artifact")},
         }
         inference = {"config": config}
-        return {"kind": "model", "name": data["name"], "checkpoint": ref, "inference": inference}
+        return _player(
+            {"kind": "model", "name": data["name"], "checkpoint": ref, "inference": inference}
+        )
     return data
 
 
 # What takes a seat: a checkpoint playing some way, or code.
 type Player = Annotated[
-    CheckpointPlayer | Code, Field(discriminator="kind"), BeforeValidator(_player)
+    CheckpointPlayer | Code | Composition, Field(discriminator="kind"), BeforeValidator(_player)
 ]
 
 
@@ -409,6 +451,12 @@ class Match(Record, Generic[_MatchConfig]):
 
     @model_validator(mode="after")
     def seated(self) -> Self:
+        if any(
+            not isinstance(leaf, (CheckpointPlayer, Code))
+            for player in self.players
+            for leaf in seat_leaves(player)
+        ):
+            raise ValueError("match_player_has_unresolved_checkpoint")
         if self.groups[EVERYONE] != tuple(range(len(self.players))):
             raise ValueError("group_all_is_every_seat")
         for seats in self.groups.values():
@@ -534,7 +582,7 @@ class Rollup(Record):
 
 
 class _OnClock(Record):
-    """A relative seat that looks for a value of `clock`, playing as `inference`.
+    """A checkpoint seat that looks for a value of `clock`.
 
     It looks in the held checkpoint's line, or with `job` in each of that
     job's lines. Positions are exact: with no checkpoint there, the seat is a
@@ -547,7 +595,6 @@ class _OnClock(Record):
     """
 
     clock: str
-    inference: Inference
     job: str | None = None
     at_or_before: bool = False
     trained: bool = False
@@ -581,7 +628,6 @@ class Final(Record):
     """The held checkpoint's line's last checkpoint, once its run has ended, finished or failed."""
 
     kind: Literal["final"] = "final"
-    inference: Inference
     job: str | None = None
 
 
@@ -633,6 +679,9 @@ class Pairing(Record):
     # By seat: the checkpoint a relative seat found; None for any other seat.
     seats: tuple[CheckpointRef | None, ...]
     games: int = Field(ge=1)
+    resolved: dict[str, CheckpointRef] = Field(
+        default_factory=dict, exclude_if=lambda refs: not refs
+    )
 
 
 class Seated(Record):
@@ -678,13 +727,10 @@ _SeatingConfig = TypeVar(
 class Seating(Record, Generic[_SeatingConfig]):
     """The rule for who meets whom: `players` in seat order, played under each of `configs`.
 
-    A seat is a fixed player, an `Inference` that each checkpoint the
-    benchmark is held for fills, or a relative seat (`Earlier`, `Fraction`,
-    `At`, `Final`, `Aligned`) naming a checkpoint by where it stands relative
-    to the held one. Its value is the first player's against the second. With
-    no inference seat it is played once, not for each checkpoint, so two
-    chosen checkpoints can meet: `Inference.player(checkpoint)` seats one as the
-    benchmark would. It makes one match per config (`matches`).
+    A seat is a fixed player, `Held()` for the checkpoint being evaluated,
+    a relative seat, or an author's composition of these. No held leaf means
+    it plays once, rather than once per held checkpoint. Each config makes
+    one match per resolved pairing, with the first player's value reported.
 
     `games` is per config and point: an `at` of the held checkpoint's
     job, whatever its seeds. With `seeds="every"` a point plays every pair of
@@ -696,7 +742,7 @@ class Seating(Record, Generic[_SeatingConfig]):
     """
 
     name: str = Field(min_length=1, max_length=200)
-    players: tuple[Player | Inference | Relative, Player | Inference | Relative]
+    players: tuple[Seat, Seat]
     # Mapping, so a literal like `{"deal": 1}` type-checks as a config.
     model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
     configs: tuple[SerializeAsAny[_SeatingConfig], ...] = Field(
@@ -723,33 +769,29 @@ class Seating(Record, Generic[_SeatingConfig]):
 
     @model_validator(mode="after")
     def relative_to_a_held_checkpoint(self) -> Self:
-        if self.relative and not any(isinstance(each, Inference) for each in self.players):
-            raise ValueError("relative_seat_needs_an_inference_seat")
+        if self.relative and not any(isinstance(each, Held) for each in self.leaves):
+            raise ValueError("relative_seat_needs_a_held_seat")
         return self
+
+    @property
+    def leaves(self) -> list[Seat]:
+        return [leaf for player in self.players for leaf in seat_leaves(player)]
 
     @property
     def fixed(self) -> bool:
         """Whether every seat is a fixed player, so no checkpoint changes its matches."""
-        return not any(isinstance(each, Inference) for each in self.players)
+        return not any(isinstance(each, Held) for each in self.leaves)
 
     @property
     def relative(self) -> bool:
         """Whether a seat names a checkpoint relative to the held one."""
-        return any(isinstance(each, _RELATIVE) for each in self.players)
+        return any(isinstance(each, _RELATIVE) for each in self.leaves)
 
     @property
     def definition(self) -> Digest:
         """What two eval runs must agree on to share the name: keys, not versions."""
-        # An inference seat's literal "model" predates the name `Inference`; it stays, so
-        # every seating keeps the definition it was first held with.
-        players = [
-            ["model", identifying(each.config)]
-            if isinstance(each, Inference)
-            else ["relative", _relative_definition(each)]
-            if isinstance(each, _RELATIVE)
-            else each.key
-            for each in self.players
-        ]
+        # Preserve the released definitions of held and relative seats.
+        players = [_seat_definition(each) for each in self.players]
         # Default seeds leave the definition every seating was first held with.
         seeds = [] if self.seeds == "every" else [self.seeds]
         return digest(
@@ -766,7 +808,7 @@ class Seating(Record, Generic[_SeatingConfig]):
     def matches(
         self, checkpoint: CheckpointRef | None = None, seated: Seated | None = None
     ) -> list[Match]:
-        """One match per config and pairing: `checkpoint` in every inference seat, and in
+        """One match per config and pairing: `checkpoint` in every held seat, and in
         a relative seat the checkpoint the pairing found. Without `seated`, one pairing
         playing every game, as for a checkpoint of a job with one seed."""
         if seated is None:
@@ -780,7 +822,7 @@ class Seating(Record, Generic[_SeatingConfig]):
         return [
             Match(
                 players=tuple(
-                    _seat(each, checkpoint, found)
+                    _seat(each, checkpoint, found, pairing.resolved)
                     for each, found in zip(self.players, pairing.seats, strict=True)
                 ),
                 config=as_config(given),
@@ -809,29 +851,37 @@ class Seating(Record, Generic[_SeatingConfig]):
             if held.job is None
             else [line for line in ordered if line.job == held.job]
         )
-        relative = next((each for each in self.players if isinstance(each, _RELATIVE)), None)
-        # The other side's seeds: the lines of the job a relative seat names; its own line,
-        # or a fixed player, counts as one (None).
-        theirs: list[Line | None] = [None]
-        if relative is not None and relative.job is not None:
-            job = relative.job
-            theirs = [line for line in ordered if job in (line.job, line.launch)]
-        counted = tuple(sorted({line.name for line in (*mine, *theirs) if line is not None}))
-        if self.seeds == "one" and mine and theirs:
-            chosen, pick = _chosen(self.name, mine, theirs)
-            if held != chosen:
+        relatives = {
+            digest(_relative_definition(each)): each
+            for each in self.leaves
+            if isinstance(each, _RELATIVE)
+        }
+        axes: list[list[Line | None]] = [
+            [line for line in ordered if relative.job in (line.job, line.launch)]
+            if relative.job is not None
+            else [None]
+            for relative in relatives.values()
+        ]
+        counted = {line.name for line in mine}
+        counted.update(line.name for axis in axes for line in axis if line is not None)
+        if self.seeds == "one" and mine and all(axes):
+            # Choose across all leaf axes together: independent choices could pick
+            # incompatible held seeds and leave every seed with no matches.
+            chosen = _chosen(self.name, [mine, *(axes or [[None]])])
+            if held != chosen[0]:
                 return Seated(
-                    seating=self.name, checkpoint=checkpoint.key, pairings=(), lines=counted
+                    seating=self.name,
+                    checkpoint=checkpoint.key,
+                    pairings=(),
+                    lines=tuple(sorted(counted)),
                 )
-            mine, theirs = [chosen], [pick]
-        found: list[CheckpointRef | None] = [None]
-        if relative is not None:
-            # A seat with no job looks in the held checkpoint's own line.
-            looked = [held] if relative.job is None else theirs
-            results = [_find(relative, checkpoint, line) for line in looked if line is not None]
+            axes = [[line] for line in chosen[1:]] if axes else []
+        choices: list[list[CheckpointRef]] = []
+        for relative, axis in zip(relatives.values(), axes, strict=True):
+            theirs = axis if relative.job is not None else [held]
+            results = [_find(relative, checkpoint, line) for line in theirs if line is not None]
             found = [each for each in results if isinstance(each, CheckpointRef)]
             if not found or "not_yet" in results:
-                # No line yet: the job has not started, or the held one's line is unknown.
                 unknown = not results and checkpoint.line is not None
                 return Gap(
                     seating=self.name,
@@ -840,43 +890,224 @@ class Seating(Record, Generic[_SeatingConfig]):
                     seat=relative,
                     value=_wanted(relative, checkpoint),
                 )
-        # Pairs in seed order, (mine, theirs); this checkpoint's are contiguous from `first`.
-        pairs = max(len(mine), 1) * len(found)
-        first = (mine.index(held) if held in mine else 0) * len(found)
-        pairings = [
-            Pairing(
-                seats=tuple(ref if isinstance(each, _RELATIVE) else None for each in self.players),
-                games=games,
+            choices.append(found)
+        combinations_ = prod(len(choice) for choice in choices)
+        seeds = 1 if self.seeds == "one" else max(len(mine), 1)
+        first = (mine.index(held) if held in mine and self.seeds != "one" else 0) * combinations_
+        pairs = seeds * combinations_
+        pairings: list[Pairing] = []
+        nested_relative = any(
+            sum(isinstance(leaf, _RELATIVE) for leaf in seat_leaves(player)) > 1
+            for player in self.players
+        )
+        # At most games pairings can get a game. Avoid materializing a Cartesian
+        # product, especially when many checkpoint leaves each span several seeds.
+        count = min(combinations_, max(self.games - first, 0))
+        for index, refs in enumerate(islice(product(*choices), count), start=first):
+            games = _share(self.games, pairs, index)
+            if not games:
+                continue
+            resolved = dict(zip(relatives, refs, strict=True))
+            pairings.append(
+                Pairing(
+                    seats=tuple(
+                        next(
+                            (
+                                resolved[digest(_relative_definition(leaf))]
+                                for leaf in seat_leaves(each)
+                                if isinstance(leaf, _RELATIVE)
+                            ),
+                            None,
+                        )
+                        for each in self.players
+                    ),
+                    games=games,
+                    # Flat released seats keep their original wire shape and definition.
+                    resolved=resolved if nested_relative else {},
+                )
             )
-            for index, ref in enumerate(found, start=first)
-            if (games := _share(self.games, pairs, index))
-        ]
         return Seated(
-            seating=self.name, checkpoint=checkpoint.key, pairings=tuple(pairings), lines=counted
+            seating=self.name,
+            checkpoint=checkpoint.key,
+            pairings=tuple(pairings),
+            lines=tuple(sorted(counted)),
         )
 
 
+def _seat_definition(seat: Seat) -> JsonValue:
+    if isinstance(seat, Held):
+        return ["model", {}]
+    if isinstance(seat, _RELATIVE):
+        return ["relative", _relative_definition(seat)]
+    if isinstance(seat, Composition) and seat.name == "etude:configured":
+        over = _SEAT.validate_python(seat.fields["over"])
+        config = identifying(_CONFIG.validate_python(seat.fields["config"]))
+        if isinstance(over, Held):
+            return ["model", config]
+        if isinstance(over, _RELATIVE):
+            return ["relative", {**over.model_dump(mode="json"), "inference": {"config": config}}]
+    return seat.key
+
+
 def _relative_definition(seat: Relative) -> dict[str, JsonValue]:
-    """A relative seat as a seating's definition takes it: its inference by config, less setup."""
-    found = seat.model_dump(mode="json", exclude={"inference"})
-    return {**found, "inference": {"config": identifying(seat.inference.config)}}
+    # Empty inference was part of released seating identities.
+    return {**seat.model_dump(mode="json"), "inference": {"config": {}}}
 
 
 def _seat(
-    each: Player | Inference | Relative,
+    each: Seat,
     checkpoint: CheckpointRef | None,
     found: CheckpointRef | None,
+    resolved: Mapping[str, CheckpointRef] | None = None,
 ) -> Player:
-    """Who takes a seating's seat in one pairing."""
+    if isinstance(each, Composition):
+        if each.name == "etude:configured":
+            over = _seat(_SEAT.validate_python(each.fields["over"]), checkpoint, found, resolved)
+            if not isinstance(over, CheckpointPlayer):
+                raise ValueError("stored config needs a checkpoint")
+            return over.model_copy(update={"config": each.config, "version": each.version})
+        return each.model_copy(
+            update={
+                "fields": _map_fields(
+                    each.fields,
+                    lambda seat: _seat(seat, checkpoint, found, resolved).model_dump(mode="json"),
+                )
+            }
+        )
     if isinstance(each, _RELATIVE):
+        found = (resolved or {}).get(digest(_relative_definition(each)), found)
         if found is None:
             raise ValueError("relative_seat_needs_its_checkpoints")
-        return each.inference.player(found)
-    if isinstance(each, Inference):
+        return checkpoint_player(found)
+    if isinstance(each, Held):
         if checkpoint is None:
-            raise ValueError("inference_seat_needs_a_checkpoint")
-        return each.player(checkpoint)
+            raise ValueError("held_seat_needs_a_checkpoint")
+        return checkpoint_player(checkpoint)
     return each
+
+
+def _seat_value(value: object) -> object:
+    if (
+        isinstance(value, dict)
+        and not value.get("kind")
+        and set(value) <= {"config", "version", "source", "code"}
+    ):
+        # Released Inference seats become an explicit configuration wrapper.
+        config = value.get("config", {})
+        return {
+            "kind": "composition",
+            "name": "etude:configured",
+            "fields": {
+                "over": {"kind": "held"},
+                "config": config,
+                "version": Version.model_validate(
+                    value.get("version", {"source": value["code"]} if "code" in value else {})
+                ).model_dump(mode="json"),
+            },
+        }
+    if isinstance(value, BaseModel) and not isinstance(value, (Held, *_RELATIVE)):
+        return _player(value)
+    if isinstance(value, dict) and "inference" in value and value.get("kind") != "model":
+        value = dict(value)
+        inference = value.pop("inference")
+        config = inference.get("config", {})
+        return {
+            "kind": "composition",
+            "name": "etude:configured",
+            "fields": {"over": value, "config": config},
+        }
+    return value
+
+
+type Seat = Annotated[Player | Held | Relative, BeforeValidator(_seat_value)]
+_JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
+_PLAYER: TypeAdapter[Player] = TypeAdapter(Player)
+_SEAT: TypeAdapter[Seat] = TypeAdapter(Seat)
+
+
+def _map_fields(
+    fields: dict[str, JsonValue], visit: Callable[[Seat], JsonValue]
+) -> dict[str, JsonValue]:
+    def walk(value: JsonValue) -> JsonValue:
+        if isinstance(value, dict):
+            if value.get("kind") == "mapping":
+                items = _CONFIG.validate_python(value["items"])
+                return {
+                    "kind": "mapping",
+                    "items": {key: walk(each) for key, each in items.items()},
+                }
+            if value.get("kind") in (
+                "model",
+                "code",
+                "held",
+                "composition",
+                "earlier",
+                "fraction",
+                "at",
+                "final",
+                "aligned",
+            ):
+                return visit(_SEAT.validate_python(value))
+            return {key: walk(each) for key, each in value.items()}
+        if isinstance(value, list):
+            return [walk(each) for each in value]
+        return value
+
+    return {key: walk(value) for key, value in fields.items()}
+
+
+def seat_leaves(player: Seat) -> list[Seat]:
+    if not isinstance(player, Composition):
+        return [player]
+    if player.name == "etude:configured":
+        return seat_leaves(_SEAT.validate_python(player.fields["over"]))
+    found: list[Seat] = []
+
+    def visit(seat: Seat) -> JsonValue:
+        found.extend(seat_leaves(seat))
+        return None
+
+    _map_fields(player.fields, visit)
+    return found
+
+
+def player_checkpoints(player: Seat) -> tuple[CheckpointRef, ...]:
+    """Every checkpoint in a player tree, including repeated leaves."""
+    return tuple(
+        leaf.checkpoint for leaf in seat_leaves(player) if isinstance(leaf, CheckpointPlayer)
+    )
+
+
+def player_checkpoint(player: Player) -> CheckpointRef | None:
+    """The checkpoint of a single-network player; multiple different leaves have no primary."""
+    found = {checkpoint.key: checkpoint for checkpoint in player_checkpoints(player)}
+    return next(iter(found.values())) if len(found) == 1 else None
+
+
+def relocate_player(player: Player, here: Mapping[str, str]) -> Player:
+    if isinstance(player, Composition):
+        return player.model_copy(
+            update={
+                "fields": _map_fields(
+                    player.fields,
+                    lambda seat: relocate_player(_PLAYER.validate_python(seat), here).model_dump(
+                        mode="json"
+                    ),
+                )
+            }
+        )
+    if not isinstance(player, CheckpointPlayer) or player.checkpoint.key not in here:
+        return player
+    checkpoint = player.checkpoint
+    return player.model_copy(
+        update={
+            "checkpoint": checkpoint.model_copy(
+                update={
+                    "artifact": checkpoint.artifact.model_copy(update={"uri": here[checkpoint.key]})
+                }
+            )
+        }
+    )
 
 
 def _share(games: int, pairs: int, index: int) -> int:
@@ -884,19 +1115,15 @@ def _share(games: int, pairs: int, index: int) -> int:
     return games // pairs + (1 if index < games % pairs else 0)
 
 
-def _chosen(
-    seating: str, mine: Sequence[Line], theirs: Sequence[Line | None]
-) -> tuple[Line, Line | None]:
-    """The one seed pair a `seeds="one"` seating plays: drawn from its name and the seed sets,
-    never the clock, so every point and hold draws the same until a seed is added."""
-    seeds = [
-        [None if line is None else [line.seed, line.name] for line in side]
-        for side in (mine, theirs)
-    ]
-    # The same row-major pair order as every-seed play, without materializing the product.
-    index = int(digest([seating, seeds])[:15], 16) % (len(mine) * len(theirs))
-    one, other = divmod(index, len(theirs))
-    return mine[one], theirs[other]
+def _chosen(seating: str, sides: Sequence[Sequence[Line | None]]) -> tuple[Line | None, ...]:
+    """Choose one stable seed tuple without enumerating the Cartesian product."""
+    seeds = [[None if line is None else [line.seed, line.name] for line in side] for side in sides]
+    index = int(digest([seating, seeds])[:15], 16) % prod(len(side) for side in sides)
+    chosen: list[Line | None] = []
+    for side in reversed(sides):
+        index, pick = divmod(index, len(side))
+        chosen.append(side[pick])
+    return tuple(reversed(chosen))
 
 
 def _wanted(seat: Relative, held: CheckpointRef) -> float | None:
@@ -1076,7 +1303,7 @@ class TournamentRun(Record):
 
 class Scheduled(Record):
     """A match a tournament calls for; a benchmark's also names its seating and, for a
-    seating with an inference seat, its checkpoint."""
+    seating with an held seat, its checkpoint."""
 
     match: Match
     seating: str | None = None
@@ -1176,15 +1403,11 @@ def _checkpoint_refs(run: TournamentRun) -> Iterable[CheckpointRef]:
     for seated in run.seated:
         for pairing in seated.pairings:
             yield from (c for c in pairing.seats if c is not None)
-    players = list(run.entrants)
+            yield from pairing.resolved.values()
+    players: list[Seat] = list(run.entrants)
     if isinstance(run.tournament, Benchmark):
-        players.extend(
-            p
-            for seating in run.tournament.seatings
-            for p in seating.players
-            if isinstance(p, CheckpointPlayer)
-        )
-    yield from (p.checkpoint for p in players if isinstance(p, CheckpointPlayer))
+        players.extend(p for seating in run.tournament.seatings for p in seating.players)
+    yield from (c for p in players for c in player_checkpoints(p))
 
 
 def assemble(held: Iterable[TournamentRun]) -> Tournament:

@@ -870,7 +870,12 @@ def _players(
                     f"{name}: seated at {clock} {seated[clock]:g};"
                     f" its training record says {recorded[clock]:g}."
                 )
-        if kind == "model" and bound is None and not seated:
+        if (
+            kind in {"model", "composition"}
+            and checkpoint is not None
+            and bound is None
+            and not seated
+        ):
             unplaced.append(name)
         at = recorded | seated
         players.append(
@@ -967,7 +972,7 @@ def _points(
     its point. Several pairs, such as each line of a job, are their mean.
     """
     # The optional `eval` extra, as in `_read_evals`.
-    from etude.eval.records import Benchmark, CheckpointPlayer  # noqa: PLC0415
+    from etude.eval.records import Benchmark, player_checkpoint  # noqa: PLC0415
 
     index = {each.key: i for i, each in enumerate(players)}
     refs = {str(ref.key): ref for each in held for ref in each.tournament.checkpoints}
@@ -978,11 +983,11 @@ def _points(
                 continue
             held_for = called.checkpoint
             if held_for is None:
-                seat = called.match.players[0]
-                if not isinstance(seat, CheckpointPlayer):
+                leaf = player_checkpoint(called.match.players[0])
+                if leaf is None:
                     continue
-                held_for = seat.checkpoint.key
-                refs.setdefault(str(held_for), seat.checkpoint)
+                held_for = leaf.key
+                refs.setdefault(str(held_for), leaf)
             seated = pairs.setdefault(_HeldFor(each.name, called.seating, str(held_for)), set())
             # A player no eval run seated yet has played nothing to draw.
             first, second = (index.get(p.key) for p in called.match.players[:2])
@@ -1496,6 +1501,9 @@ class _CheckpointIn:
 
 def _coverage(saved: dict[str, _Saved], held: Sequence[_HeldTournament]) -> tuple[Coverage, ...]:
     """Each checkpoint's matches in each tournament: played, failed since, and not yet played."""
+    # Report entry point: evaluation imports stay out of non-evaluation pages.
+    from etude.eval.records import player_checkpoints  # noqa: PLC0415
+
     played: Counter[_CheckpointIn] = Counter()
     failed: Counter[_CheckpointIn] = Counter()
     unplayed: Counter[_CheckpointIn] = Counter()
@@ -1506,7 +1514,7 @@ def _coverage(saved: dict[str, _Saved], held: Sequence[_HeldTournament]) -> tupl
             (unplayed, each.played.new),
         ):
             for match in matches:
-                keys = {str(s.checkpoint.key) for s in match.players if s.kind == "model"}
+                keys = {str(c.key) for player in match.players for c in player_checkpoints(player)}
                 for key in keys & saved.keys():
                     counts[_CheckpointIn(saved[key].run, saved[key].ordinal, each.name)] += 1
     return tuple(

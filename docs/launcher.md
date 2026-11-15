@@ -298,7 +298,7 @@ imports nothing else of Etude before the function's own module.
   agent process there ([Agents](evaluation.md#agents)). A benchmark's `checkpoints` are
   `CheckpointRecord`s, read from the experiment's state
   ([Evaluation jobs](evaluation.md#evaluation-jobs)). Each member reaches
-  the machine verified by digest; the checkpoint fills every inference seat, where
+  the machine verified by digest; the checkpoint fills every held seat, where
   `play` finds the folder or file at the player's `checkpoint.path`. A round robin
   takes `enter=` players. A single-file `Input` is also accepted. The job's environment needs
   `etude-sdk[eval]`.

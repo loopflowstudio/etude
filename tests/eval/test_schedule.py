@@ -10,7 +10,7 @@ import duckdb
 
 from etude.checkpoints import CheckpointId, CheckpointRef, checkpoint_id
 from etude.eval.match import environment, evaluate
-from etude.eval.records import CheckpointPlayer, Code, Inference, Match
+from etude.eval.records import CheckpointPlayer, Code, Held, Match
 from etude.eval.run import Tables
 from etude.eval.schedule import checkpoints, ordered
 from etude.records import ArtifactRef
@@ -48,7 +48,7 @@ def checkpoint(updates: int) -> CheckpointPlayer:
     name = f"updates-{updates}.pt"
     artifact = ArtifactRef(uri=f"s3://models/{name}", sha256=sha256(name.encode()).hexdigest())
     ref = CheckpointRef(key=checkpoint_id(run="ppo-1", name=name), artifact=artifact)
-    return Inference().player(ref)
+    return Held().player(ref)
 
 
 def code(name: str, strength: int) -> Code:
@@ -123,7 +123,7 @@ def test_a_queue_of_code_players_plays_in_the_callers_order() -> None:
 def test_two_checkpoint_keys_holding_the_same_bytes_are_two_checkpoints() -> None:
     file = ArtifactRef(uri="s3://models/init.pt", sha256=sha256(b"init").hexdigest())
     starts = [
-        Inference().player(CheckpointRef(
+        Held().player(CheckpointRef(
             key=checkpoint_id(run=run, name="updates-100.pt"), artifact=file))
         for run in ("ppo-1", "ppo-2")
     ]  # fmt: skip

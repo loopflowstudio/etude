@@ -16,15 +16,17 @@ from etude.eval.records import (
     Benchmark,
     CheckpointPlayer,
     Code,
+    Composition,
     Earlier,
     Environment,
     Final,
     Fraction,
     Gap,
-    Inference,
+    Held,
     Line,
     Match,
     RoundRobin,
+    Seat,
     Seated,
     Seating,
     Share,
@@ -32,6 +34,7 @@ from etude.eval.records import (
     assemble,
 )
 from etude.records import ArtifactRef
+from tests.eval.stored import stored_inference, stored_relative
 
 DIGEST = "0" * 64
 WORLD = Environment(name="world", files="1" * 64)
@@ -39,7 +42,7 @@ U500 = CheckpointRef(
     key=checkpoint_id(run="ppo-1", name="updates-500.pt"),
     artifact=ArtifactRef(uri="s3://b/updates-500.pt", sha256=DIGEST),
 )
-SEARCH = Inference(config={"sims": 64})
+SEARCH = stored_inference(config={"sims": 64})
 HEURISTIC = Code(name="heuristic")
 
 # Written by etude-sdk at 2eb32d5, before players were named.
@@ -128,14 +131,14 @@ def test_etude_sdk_0_2_players_load_and_equal_no_player_since() -> None:
                                              {"name": "heuristic", "kind": "code", "code": DIGEST}],
          "conditions": [{"deal": 1}], "games": 2}
     )  # fmt: skip
-    assert placeholder.players[0] == Inference.model_validate(
-        {"config": {"search": 0}, "version": {"source": DIGEST}}
-    )
+    assert isinstance(placeholder.players[0], Composition)
+    assert placeholder.players[0].config == {"search": 0}
+    assert placeholder.players[0].version.source == DIGEST
     assert isinstance(placeholder.players[1], Code)
     assert isinstance(model, CheckpointPlayer) and isinstance(code, Code)
-    assert model.inference.config == {"search": 0}
+    assert model.config == {"search": 0}
     assert model.checkpoint.artifact.uri == "s3://models/updates-100.pt"
-    now = Inference(config={"search": 0}).player(
+    now = stored_inference(config={"search": 0}).player(
         CheckpointRef(
             key=checkpoint_id(run="ppo-1", name="updates-100.pt"),
             artifact=ArtifactRef(uri="s3://models/updates-100.pt", sha256=sha),
@@ -177,13 +180,13 @@ def _found(seated: Seated) -> list[tuple[CheckpointRef | None, int]]:
 
 
 def test_a_point_splits_its_games_over_every_pair_of_seeds() -> None:
-    direct = Inference(config={"search": 0})
+    direct = stored_inference(config={"search": 0})
     large = [_line(f"l{seed}", "large", 100, seed=seed) for seed in (1, 2)]
     small = [_line(f"s{seed}", "small", 100, seed=seed) for seed in (3, 1, 2)]
     lines = [*large, *small]
     aligned = Seating(
         name="s",
-        players=(direct, Aligned(clock="updates", job="small", inference=direct)),
+        players=(direct, stored_relative(Aligned(clock="updates", job="small"), direct)),
         configs=({"deal": 0},),
         games=10,
     )
@@ -196,7 +199,7 @@ def test_a_point_splits_its_games_over_every_pair_of_seeds() -> None:
     # The point holds every game; its own line and a fixed player count as one seed.
     own = Seating(
         name="o",
-        players=(direct, At(clock="updates", value=100, inference=direct)),
+        players=(direct, stored_relative(At(clock="updates", value=100), direct)),
         configs=({"deal": 0},),
         games=3,
     )
@@ -215,13 +218,13 @@ def test_a_point_splits_its_games_over_every_pair_of_seeds() -> None:
 
 
 def test_one_seed_plays_the_same_pair_at_every_point_and_hold() -> None:
-    direct = Inference(config={"search": 0})
+    direct = stored_inference(config={"search": 0})
     large = [_line(f"l{seed}", "large", 100, 200, seed=seed) for seed in (1, 2, 3)]
     small = [_line(f"s{seed}", "small", 100, 200, seed=seed) for seed in (1, 2, 3)]
     lines = [*large, *small]
     one = Seating(
         name="s",
-        players=(direct, Aligned(clock="updates", job="small", inference=direct)),
+        players=(direct, stored_relative(Aligned(clock="updates", job="small"), direct)),
         configs=({"deal": 0},),
         games=10,
         seeds="one",
@@ -245,24 +248,24 @@ def test_one_seed_plays_the_same_pair_at_every_point_and_hold() -> None:
 
 
 def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_come() -> None:
-    direct = Inference(config={"search": 0})
+    direct = stored_inference(config={"search": 0})
 
-    def seating(seat: Earlier | Fraction | Final | Aligned) -> Seating:
+    def seating(seat: Seat) -> Seating:
         return Seating(name="s", players=(direct, seat), configs=({"deal": 0},), games=1)
 
     small = _line("s1", "small", 63, 90)
     large = _line("l1", "large", 90, 180)
     lines = [small, large]
     # 90 × 0.7 is 62.99999999999999 in binary, and still the checkpoint at 63.
-    found = seating(Fraction(clock="updates", value=0.7, inference=direct)).resolve(
+    found = seating(stored_relative(Fraction(clock="updates", value=0.7), direct)).resolve(
         small.checkpoints[1], lines
     )
     assert isinstance(found, Seated) and _found(found) == [(small.checkpoints[0], 1)]
     # Passed without saving there: never. Ahead of the line: not yet, until it ends.
-    earlier = seating(Earlier(clock="updates", by=10, inference=direct))
+    earlier = seating(stored_relative(Earlier(clock="updates", by=10), direct))
     assert isinstance(gap := earlier.resolve(small.checkpoints[1], lines), Gap)
     assert (gap.missing, gap.value) == ("never", 80)
-    aligned = seating(Aligned(clock="updates", job="small", inference=direct))
+    aligned = seating(stored_relative(Aligned(clock="updates", job="small"), direct))
     assert isinstance(gap := aligned.resolve(large.checkpoints[1], lines), Gap)
     assert (gap.missing, gap.seat.job) == ("not_yet", "small")
     ended = [small.model_copy(update={"ended": True}), large]
@@ -271,40 +274,41 @@ def test_a_relative_seat_finds_an_exact_position_or_says_whether_one_may_still_c
     # Held for the job it names, it plays that job: here the held checkpoint against itself.
     selfplay = aligned.resolve(small.checkpoints[0], lines)
     assert isinstance(selfplay, Seated) and _found(selfplay) == [(small.checkpoints[0], 1)]
-    final = seating(Final(job="small", inference=direct))
+    final = seating(stored_relative(Final(job="small"), direct))
     assert isinstance(final.resolve(large.checkpoints[0], lines), Gap)
     done = final.resolve(large.checkpoints[0], ended)
     assert isinstance(done, Seated) and _found(done) == [(small.checkpoints[1], 1)]
     (match,) = final.matches(large.checkpoints[0], done)
     assert match.players[1] == direct.player(small.checkpoints[1])
-    with pytest.raises(ValidationError, match="relative_seat_needs_an_inference_seat"):
+    with pytest.raises(ValidationError, match="relative_seat_needs_a_held_seat"):
         Seating(
             name="s",
-            players=(Earlier(clock="updates", by=1, inference=direct), HEURISTIC),
+            players=(stored_relative(Earlier(clock="updates", by=1), direct), HEURISTIC),
             configs=({"deal": 0},),
             games=1,
         )
 
 
 def test_a_trained_seat_never_seats_the_lines_initial_weights() -> None:
-    direct = Inference(config={"search": 0})
+    direct = stored_inference(config={"search": 0})
 
-    def seating(seat: Fraction | At) -> Seating:
+    def seating(seat: Seat) -> Seating:
         return Seating(name="s", players=(direct, seat), configs=({"deal": 0},), games=1)
 
     line = _line("l1", "large", 0, 100, 300, 700)
-    half = Fraction(clock="updates", value=0.5, at_or_before=True, inference=direct)
-    trained = seating(half.model_copy(update={"trained": True}))
+    half = stored_relative(Fraction(clock="updates", value=0.5, at_or_before=True), direct)
+    trained_seat = Fraction(clock="updates", value=0.5, at_or_before=True, trained=True)
+    trained = seating(stored_relative(trained_seat, direct))
     # At or before half of 100, only the initial weights: seated unless trained is asked.
     found = seating(half).resolve(line.checkpoints[1], [line])
     assert isinstance(found, Seated) and _found(found) == [(line.checkpoints[0], 1)]
     assert isinstance(gap := trained.resolve(line.checkpoints[1], [line]), Gap)
-    assert (gap.missing, gap.value, gap.seat) == ("never", 50, trained.players[1])
+    assert (gap.missing, gap.value, gap.seat) == ("never", 50, trained_seat)
     # A trained checkpoint at or before the target is seated as ever.
     found = trained.resolve(line.checkpoints[3], [line])
     assert isinstance(found, Seated) and _found(found) == [(line.checkpoints[2], 1)]
     # Exactly at the initial weights: never, though a checkpoint stands there.
-    initial = seating(At(clock="updates", value=0, trained=True, inference=direct))
+    initial = seating(stored_relative(At(clock="updates", value=0, trained=True), direct))
     assert isinstance(gap := initial.resolve(line.checkpoints[1], [line]), Gap)
     assert gap.missing == "never"
     # Etude's hours are above 0 from the start; the run's own clock says it is untrained.
@@ -318,8 +322,8 @@ def test_a_trained_seat_never_seats_the_lines_initial_weights() -> None:
         ),
     )
     by_hours = seating(
-        Fraction(
-            clock="running_hours", value=0.5, at_or_before=True, trained=True, inference=direct
+        stored_relative(
+            Fraction(clock="running_hours", value=0.5, at_or_before=True, trained=True), direct
         )
     )
     assert isinstance(gap := by_hours.resolve(hours.checkpoints[1], [hours]), Gap)
@@ -327,13 +331,13 @@ def test_a_trained_seat_never_seats_the_lines_initial_weights() -> None:
 
 
 def test_an_at_or_before_seat_takes_the_latest_checkpoint_once_none_nearer_can_come() -> None:
-    direct = Inference(config={"search": 0})
+    direct = stored_inference(config={"search": 0})
 
-    def seating(seat: Fraction) -> Seating:
+    def seating(seat: Seat) -> Seating:
         return Seating(name="s", players=(direct, seat), configs=({"deal": 0},), games=1)
 
-    half = seating(Fraction(clock="updates", value=0.5, at_or_before=True, inference=direct))
-    exact = seating(Fraction(clock="updates", value=0.5, inference=direct))
+    half = seating(stored_relative(Fraction(clock="updates", value=0.5, at_or_before=True), direct))
+    exact = seating(stored_relative(Fraction(clock="updates", value=0.5), direct))
     line = _line("l1", "large", 100, 300, 400, 700)
     # Half of 700 is 350: none sits there, and the latest at or before it is 300.
     found = half.resolve(line.checkpoints[3], [line])
@@ -342,11 +346,17 @@ def test_an_at_or_before_seat_takes_the_latest_checkpoint_once_none_nearer_can_c
     assert gap.missing == "never"
     # In another job's line that has not saved past 350, a save at 340 could still come.
     other = seating(
-        Fraction(clock="updates", value=0.5, at_or_before=True, job="small", inference=direct)
+        stored_relative(
+            Fraction(clock="updates", value=0.5, at_or_before=True, job="small"), direct
+        )
     )
     small = _line("s1", "small", 100, 300)
     assert isinstance(gap := other.resolve(line.checkpoints[3], [line, small]), Gap)
-    assert (gap.missing, gap.value, gap.seat) == ("not_yet", 350, other.players[1])
+    assert (gap.missing, gap.value, gap.seat) == (
+        "not_yet",
+        350,
+        Fraction(clock="updates", value=0.5, at_or_before=True, job="small"),
+    )
     # Once it saves past the target or ends, nothing nearer can come.
     for done in (_line("s1", "small", 100, 300, 500), small.model_copy(update={"ended": True})):
         found = other.resolve(line.checkpoints[3], [line, done])
@@ -360,7 +370,7 @@ def test_an_at_or_before_seat_takes_the_latest_checkpoint_once_none_nearer_can_c
 def test_setup_is_recorded_and_part_of_no_identity() -> None:
     def run_on(device: str) -> TournamentRun:
         setup: dict[str, JsonValue] = {"setup": {"device": device}}
-        direct = Inference(config={"search": 0, **setup})
+        direct = stored_inference(config={"search": 0, **setup})
         weak = Code(name="weak", config={"strength": 0, **setup})
         seating = Seating(
             name="vs weak",
@@ -398,7 +408,7 @@ def test_checkpoint_paths_decode_local_files_and_refuse_remote_addresses(tmp_pat
         run="learner", ordinal=1, artifact=ArtifactRef(uri=path.as_uri(), sha256=DIGEST), at={}
     )
     assert checkpoint.path == checkpoint.ref.path == path
-    assert SEARCH.player(checkpoint.ref).checkpoint.path.read_bytes() == b"weights"
+    assert Held().player(checkpoint.ref).checkpoint.path.read_bytes() == b"weights"
     for uri in ("s3://bucket/policy.pt", "file://other-machine/policy.pt"):
         remote = CheckpointRecord(
             run="learner", ordinal=1, artifact=ArtifactRef(uri=uri, sha256=DIGEST), at={}

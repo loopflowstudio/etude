@@ -7,7 +7,7 @@ beside Etude's own tables:
 | table | columns |
 |---|---|
 | `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament, state (`finished` or `failed` from its `outcome.json`; null while it has not ended, so its results are partial) |
-| `players` | player (its key, encoded), name (the latest its seats give), names (every one, the latest first), kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, seated_at, lines, and `config.KEY` per scalar config key |
+| `players` | player (its key, encoded), name (the latest its seats give), names (every one, the latest first), kind (`model`, `composition` or `code`), checkpoint (its key), artifact (digest), uri, config, seated_at, lines, and `config.KEY` per scalar config key |
 | `matches` | run, match, config, games, seed, state, retry, error, wall_ms, execution (result provenance), newest (of the match's done records in its environment, 1 for the latest recorded, the one that counts; null for a failure) |
 | `seats` | run, match, seat, player, name (what the record calls it), the version that played: commit, source (digest), at (where its checkpoint stood, or null) and line (the learner it belongs to, or null) |
 | `groups` | run, match, group, seat |
@@ -101,7 +101,6 @@ from etude.eval.records import (
     ROLLUP_ROWS,
     TOURNAMENT_FILE,
     Benchmark,
-    CheckpointPlayer,
     ColumnType,
     Environment,
     Player,
@@ -111,6 +110,7 @@ from etude.eval.records import (
     as_config,
     assemble,
     outcomes,
+    player_checkpoint,
 )
 from etude.eval.run import ETUDE_TABLES
 from etude.identity import SAFE_NAME
@@ -548,11 +548,11 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
         [
             [index, seat, player.key, player.name, player.model_dump_json(),
              player.version.commit, player.version.source,
-             _canonical(player.checkpoint.at)
-             if isinstance(player, CheckpointPlayer) and player.checkpoint.at else None,
-             player.checkpoint.line if isinstance(player, CheckpointPlayer) else None]
+             _canonical(checkpoint.at) if checkpoint is not None and checkpoint.at else None,
+             checkpoint.line if checkpoint is not None else None]
             for index, record in enumerate(records)
             for seat, player in enumerate(record.match.players)
+            for checkpoint in (player_checkpoint(player),)
         ],
     )  # fmt: skip
     db.execute(
@@ -1030,9 +1030,9 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
 
 def _checkpoint(player: Player) -> tuple[str | None, str | None, str | None]:
     """A model's checkpoint key, digest and file; nothing for code."""
-    if not isinstance(player, CheckpointPlayer):
+    checkpoint = player_checkpoint(player)
+    if checkpoint is None:
         return None, None, None
-    checkpoint = player.checkpoint
     return str(checkpoint.key), checkpoint.artifact.sha256, checkpoint.artifact.uri
 
 

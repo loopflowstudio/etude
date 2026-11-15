@@ -44,7 +44,8 @@ EXPERIMENT = """
 from pathlib import Path
 
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Inference, Seating
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import Held, Benchmark, Code, Seating
 from etude.jobs import ExperimentState
 from etude.jobs import EvalJob, TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
@@ -67,7 +68,7 @@ def training_jobs(seeds: int = 1, tiny: str = "1", bare: bool = False) -> list:
 def eval_jobs(state: ExperimentState) -> Job:
     chosen = [saved for run in state.runs for saved in run.checkpoints]
     anchor = Code(name="heuristic", source=[__file__], config={{"strength": 0}})
-    vs = Seating(name="vs heuristic", players=(Inference(config={{"search": 0}}), anchor),
+    vs = Seating(name="vs heuristic", players=(stored_inference(config={{"search": 0}}), anchor),
                  configs=({{"deal": 0}}, {{"deal": 1}}), games=4)
     ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(vs,))
     return EvalJob(tournament=ladder, play={play}, checkpoints=chosen, max_hours=0.1,
@@ -314,7 +315,8 @@ def test_eval_only_smoke_uses_outside_checkpoints_and_this_computers_environment
 import os
 from etude.experiment import observe
 from etude.jobs import EvalJob
-from etude.eval.records import RoundRobin, Inference, Code
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import Held, RoundRobin, Code
 from etude.eval.match import environment
 
 def play(match):
@@ -326,7 +328,7 @@ def play(match):
 def eval_jobs(state):
     checkpoint = observe({str(source)!r}, "producer").runs[0].final
     return EvalJob(tournament=RoundRobin(name="outside", environment=environment("game"),
-        configs=({{}},), games=3), enter=(checkpoint.player(Inference()), Code(name="fixed")),
+        configs=({{}},), games=3), enter=(checkpoint.player(Held()), Code(name="fixed")),
         play=play, max_hours=0.1)
 """)
     before = sorted(source.rglob("*"))

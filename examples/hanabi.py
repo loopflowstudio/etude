@@ -15,7 +15,7 @@ import torch
 from pydantic import BaseModel, Field
 
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, CheckpointPlayer, Code, Inference, Match, Seating
+from etude.eval.records import Benchmark, CheckpointPlayer, Code, Held, Match, Seating
 from etude.eval.run import Tables
 from etude.jobs import EvalJob, ExperimentState
 from etude.train.tracking import track
@@ -153,13 +153,13 @@ def arena(config: ArenaConfig) -> Benchmark:
         seatings=(
             Seating(
                 name="self-play",
-                players=(Inference(), Inference()),
+                players=(Held(), Held()),
                 configs=config.deals,
                 games=config.games,
             ),
             Seating(
                 name="random teammate",
-                players=(Inference(), Code(name="random")),
+                players=(Held(), Code(name="random")),
                 configs=config.deals,
                 games=config.games,
             ),

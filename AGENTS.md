@@ -244,9 +244,10 @@ names; the declaration reader adds the file's directory to the import path.
 Game functions are importable top-level functions, including fixtures: the game
 pool imports their defining module and cannot inherit a parent closure.
 
-Eval vocabulary: an `Agent` is a loaded player, anything with `act(rows)`;
-`Agents` is a job's declaration of how to load them. The agent process holds
-them and game processes play; say neither "server", "worker" nor "policy"
+Eval vocabulary: an `Agent` is anything with `act(rows)`; `Agents` declares
+`load(checkpoint)` and an optional game-side `build(player, leaves)`. Player
+wrappers are frozen author records; checkpoint leaves share loading and batches.
+The agent process holds checkpoint agents; game processes build wrappers and play; say neither "server", "worker" nor "policy"
 for any of these ("policy" is reserved for policy keys).
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns

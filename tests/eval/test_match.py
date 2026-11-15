@@ -23,7 +23,7 @@ from etude.errors import EtudeError
 from etude.eval import query
 from etude.eval.match import environment, evaluate
 from etude.eval.query import Estimate, compare, estimate, statsdb
-from etude.eval.records import CheckpointPlayer, Code, Config, Inference, Match, Player
+from etude.eval.records import CheckpointPlayer, Code, Config, Held, Match, Player
 from etude.launch.storage.files import read_result
 from etude.records import ArtifactRef
 from etude.storage import DirectoryStorage, S3Storage
@@ -34,6 +34,7 @@ from tests.eval.games import (
     play_text_hits,
     play_unkeyed,
 )
+from tests.eval.stored import stored_inference
 from tests.run.storage import CountedClient, MeasuredStorage
 
 
@@ -46,12 +47,12 @@ def roster(tmp_path: Path) -> list[Player]:
         CheckpointPlayer(
             name="deep",
             checkpoint=model,
-            inference=Inference(config={"strength": 3, "search": {"simulations": 64}}),
+            config=stored_inference(config={"strength": 3, "search": {"simulations": 64}}).config,
         ),
         CheckpointPlayer(
             name="shallow",
             checkpoint=model,
-            inference=Inference(config={"strength": 2, "search": {"simulations": 8}}),
+            config=stored_inference(config={"strength": 2, "search": {"simulations": 8}}).config,
         ),
         Code(name="scripted", source=[script], config={"strength": 1}),
         Code(name="random", source=[script], config={"strength": 0}),
@@ -302,23 +303,23 @@ def test_a_models_inference_code_is_its_version_not_its_key(tmp_path: Path) -> N
     checkpoint = CheckpointRef(key=checkpoint_id(run="ppo-1", name="updates-100.pt"), artifact=file)
     inference = tmp_path / "inference.py"
     inference.write_text("def act(state): return 0\n")
-    before = Inference(source=[inference], config=Direct()).player(checkpoint)
+    before = stored_inference(source=[inference], config=Direct()).player(checkpoint)
     assert before.key == 'checkpoint:ppo-1/checkpoints/updates-100.pt {"search":0}'
     assert before.name == "updates-100.pt"
     inference.write_text("def act(state): return 1\n")
-    changed = Inference(source=[inference], config=Direct()).player(checkpoint)
+    changed = stored_inference(source=[inference], config=Direct()).player(checkpoint)
     assert changed.key == before.key
     assert changed.version.source != before.version.source
     # The same bytes under another key are another model.
     copied = CheckpointRef(key=checkpoint_id(run="ppo-2", name="updates-100.pt"), artifact=file)
-    assert Inference(config=Direct()).player(copied).key != before.key
+    assert stored_inference(config=Direct()).player(copied).key != before.key
 
 
 def test_where_a_checkpoint_stood_is_carried_by_its_seat_and_is_not_its_identity() -> None:
     file = ArtifactRef(uri="hf://lab/u600.pt", sha256=sha256(b"a").hexdigest())
     key = checkpoint_id(address=file.uri)
-    seated = Inference().player(CheckpointRef(key=key, artifact=file, at={"updates": 600}))
-    corrected = Inference().player(
+    seated = Held().player(CheckpointRef(key=key, artifact=file, at={"updates": 600}))
+    corrected = Held().player(
         CheckpointRef(key=key, artifact=file, at={"updates": 612}, line="seed-2")
     )
     rival = Code(name="rival", source=[__file__])

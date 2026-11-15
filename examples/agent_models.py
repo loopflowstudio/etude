@@ -1,15 +1,9 @@
-"""A tiny loaded player; real models may import their framework in this module."""
+"""A tiny checkpoint loader; real models may import their framework here."""
 
 from collections.abc import Sequence
 
-from pydantic import BaseModel
-
+from etude.checkpoints import CheckpointRef
 from etude.eval.agents import Agent
-from etude.eval.records import Player
-
-
-class Loading(BaseModel):
-    bias: int = 1
 
 
 class Adder:
@@ -20,5 +14,5 @@ class Adder:
         return [int(str(row)) + self.bias for row in rows]
 
 
-def load(player: Player, config: Loading) -> Agent:
-    return Adder(config.bias)
+def load(checkpoint: CheckpointRef) -> Agent:
+    return Adder(int(checkpoint.path.read_text()))

@@ -81,8 +81,8 @@ class CheckpointRef(Record):
         return Path(unquote(parsed.path))
 
 
-class _Inference[P](Protocol):
-    """How a checkpoint plays (`etude.eval.records.Inference`); evaluation is not imported here."""
+class _Seat[P](Protocol):
+    """A checkpoint seat (`etude.eval.records.Held`); evaluation is not imported here."""
 
     def player(self, checkpoint: CheckpointRef) -> P: ...
 
@@ -140,15 +140,15 @@ class CheckpointRecord(Record):
         """This checkpoint on the current machine; remote addresses need an input first."""
         return self.ref.path
 
-    def player[P](self, inference: _Inference[P]) -> P:
-        return inference.player(self.ref)
+    def player[P](self, seat: _Seat[P]) -> P:
+        return seat.player(self.ref)
 
-    def model[P](self, inference: _Inference[P]) -> P:
+    def model[P](self, seat: _Seat[P]) -> P:
         """Released spelling; use player()."""
         warnings.warn(
             "Checkpoint.model() is now player(); removed in 0.5", DeprecationWarning, stacklevel=2
         )
-        return self.player(inference)
+        return self.player(seat)
 
     @field_validator("file")
     @classmethod

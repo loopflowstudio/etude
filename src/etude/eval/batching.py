@@ -8,22 +8,18 @@ game processes never import this module.
 from __future__ import annotations
 
 import importlib
-import inspect
 import os
 import pickle
 import selectors
 import socket
 import sys
 import time
-import typing
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import cast
-
-from pydantic import BaseModel
 
 from etude.errors import RetryRequested, explain
 from etude.eval.agents import Agent, AgentFailure, Answer, Request
@@ -32,12 +28,13 @@ from etude.records import Record
 
 
 class BatchRow(Record):
+    player: str
     tournament: str
     match: str
 
 
 class Batch(Record):
-    player: str
+    checkpoint: str
     rows: tuple[BatchRow, ...]
 
 
@@ -54,13 +51,11 @@ class _Batches:
     def __init__(
         self,
         load: Callable[..., object],
-        config: BaseModel,
         max_batch: int,
         max_delay: float,
         memory: int,
     ) -> None:
         self.load = load
-        self.config = config
         self.max_batch = max_batch
         self.max_delay = max_delay
         self.memory = memory
@@ -72,7 +67,9 @@ class _Batches:
         self.rows = 0
 
     def add(self, connection: Connection, request: Request, now: float) -> None:
-        self.pending.setdefault(request.player.key, []).append(_Pending(connection, request, now))
+        self.pending.setdefault(request.checkpoint.key, []).append(
+            _Pending(connection, request, now)
+        )
 
     def delay(self, now: float) -> float | None:
         if not self.pending:
@@ -102,14 +99,14 @@ class _Batches:
             if answer is None:
                 try:
                     if key not in self.loaded:
-                        player = batch[0].request.player
-                        checkpoint = getattr(player, "checkpoint", None)
-                        size = 0 if checkpoint is None else checkpoint.artifact.size_bytes
-                        if size is None:
-                            raise ValueError(f"player {key} has no checkpoint byte length")
+                        checkpoint = batch[0].request.checkpoint
+                        length = checkpoint.artifact.size_bytes
+                        if length is None:
+                            raise ValueError(f"checkpoint {key} has no byte length")
+                        size = length
                         self._evict(size)
                         try:
-                            agent = cast(Agent, self.load(player, self.config))
+                            agent = cast(Agent, self.load(checkpoint))
                         except Exception as error:
                             self.failed[key] = Answer(
                                 [],
@@ -136,7 +133,7 @@ class _Batches:
                 control.send(
                     [
                         AgentFailure(
-                            player=key,
+                            checkpoint=key,
                             tournament=p.request.tournament,
                             match=p.request.match,
                             error=answer.error,
@@ -161,9 +158,13 @@ class _Batches:
             self.batches += 1
             observations.append(
                 Batch(
-                    player=key,
+                    checkpoint=key,
                     rows=tuple(
-                        BatchRow(tournament=p.request.tournament, match=p.request.match)
+                        BatchRow(
+                            player=p.request.player,
+                            tournament=p.request.tournament,
+                            match=p.request.match,
+                        )
                         for p in batch
                         for _ in p.request.rows
                     ),
@@ -185,7 +186,6 @@ def _run_agents(
     module: str,
     name: str,
     path: str,
-    config: str,
     max_batch: int,
     max_delay: float,
     memory: int,
@@ -200,9 +200,7 @@ def _run_agents(
     for part in name.split("."):
         function = getattr(function, part)
     load = cast(Callable[..., object], function)
-    parameter = list(inspect.signature(load).parameters.values())[1]
-    kind = cast(type[BaseModel], typing.get_type_hints(load)[parameter.name])
-    batches = _Batches(load, kind.model_validate_json(config), max_batch, max_delay, memory)
+    batches = _Batches(load, max_batch, max_delay, memory)
     peers: list[Connection] = []
     report = Path(artifacts, "batches.json").open("w")
     report.write("[")
@@ -246,7 +244,7 @@ def _run_agents(
         report.write("]")
         report.close()
         print(
-            f"etude: agents: stopped; {batches.loads} players loaded, {batches.rows} rows in {batches.batches} batches",
+            f"etude: agents: stopped; {batches.loads} checkpoints loaded, {batches.rows} rows in {batches.batches} batches",
             file=sys.stderr,
             flush=True,
         )

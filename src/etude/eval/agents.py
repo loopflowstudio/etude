@@ -1,7 +1,7 @@
-"""Direct game-to-agent transport and one process owning loaded players.
+"""Direct game-to-agent transport and one process owning loaded checkpoints.
 
 Games send picklable rows over a private Unix socket. The agent process groups
-requests by player and owns loading, eviction and the retained batch report.
+requests by checkpoint and owns loading, eviction and the retained batch report.
 This module's game-side imports are standard library only.
 """
 
@@ -27,7 +27,7 @@ from etude.errors import RetryRequested, explain
 from etude.eval.resources import active_games, available_cpus, memory_bytes
 
 if TYPE_CHECKING:
-    from etude.eval.records import Player
+    from etude.checkpoints import CheckpointRef
     from etude.jobs import AgentLoader
 
 
@@ -39,10 +39,11 @@ class Agent(Protocol):
 
 @dataclass(frozen=True)
 class Request:
-    player: Player
+    checkpoint: CheckpointRef
     rows: list[object]
     tournament: str
     match: str
+    player: str
 
 
 @dataclass(frozen=True)
@@ -54,7 +55,7 @@ class Answer:
 
 @dataclass(frozen=True)
 class AgentFailure:
-    player: str
+    checkpoint: str
     tournament: str
     match: str
     error: str
@@ -65,15 +66,18 @@ class AgentFailure:
 @dataclass(frozen=True)
 class _RemoteAgent:
     connection: Connection
-    player: Player
+    checkpoint: CheckpointRef
     tournament: str
     match: str
+    player: str
 
     def act(self, rows: Sequence[object]) -> Sequence[object]:
         if not rows:
             return []
         try:
-            self.connection.send(Request(self.player, list(rows), self.tournament, self.match))
+            self.connection.send(
+                Request(self.checkpoint, list(rows), self.tournament, self.match, self.player)
+            )
             if not self.connection.poll(_remaining()):
                 raise RetryRequested("agent response exceeded the evaluation deadline")
             answer = cast(Answer, self.connection.recv())
@@ -94,9 +98,7 @@ def _remaining() -> float | None:
 
 
 @contextmanager
-def connect_agents(
-    address: str, players: Sequence[Player], tournament: str, match: str
-) -> Iterator[Sequence[Agent]]:
+def connect_agents(address: str) -> Iterator[Connection]:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
         peer.settimeout(_remaining())
         try:
@@ -105,7 +107,7 @@ def connect_agents(
             raise RetryRequested("agent process is unavailable") from error
         peer.settimeout(None)
         with Connection(peer.detach()) as connection:
-            yield [_RemoteAgent(connection, p, tournament, match) for p in players]
+            yield connection
 
 
 @dataclass(frozen=True)
@@ -114,7 +116,7 @@ class AgentProcess:
     process: multiprocessing.context.SpawnProcess
     exited: Future[None]
     failures: dict[tuple[str, str], AgentFailure] = field(default_factory=dict)
-    player_failures: SimpleQueue[AgentFailure] = field(default_factory=SimpleQueue)
+    checkpoint_failures: SimpleQueue[AgentFailure] = field(default_factory=SimpleQueue)
 
     def check(self) -> None:
         if self.process.exitcode is not None:
@@ -126,7 +128,6 @@ def _run(
     module: str,
     name: str,
     path: str,
-    config: str,
     max_batch: int,
     max_delay: float,
     memory: int,
@@ -143,7 +144,6 @@ def _run(
             module,
             name,
             path,
-            config,
             max_batch,
             max_delay,
             memory,
@@ -179,7 +179,6 @@ def running_agents(
             definition.load.module,
             definition.load.name,
             str((Path(checkout or ".") / definition.load.path).resolve()),
-            definition.config,
             definition.max_batch,
             definition.max_delay_seconds,
             memory,
@@ -198,7 +197,7 @@ def running_agents(
     sentinel = process.sentinel
 
     failures: dict[tuple[str, str], AgentFailure] = {}
-    player_failures: SimpleQueue[AgentFailure] = SimpleQueue()
+    checkpoint_failures: SimpleQueue[AgentFailure] = SimpleQueue()
 
     def observe_exit() -> None:
         try:
@@ -207,7 +206,7 @@ def running_agents(
                 if parent in ready:
                     for failure in cast(list[AgentFailure], parent.recv()):
                         if failure.loading:
-                            player_failures.put(failure)
+                            checkpoint_failures.put(failure)
                         else:
                             failures.setdefault((failure.tournament, failure.match), failure)
                     # Register failures before a game can catch its exception and return.
@@ -240,7 +239,7 @@ def running_agents(
             process=process,
             exited=exited,
             failures=failures,
-            player_failures=player_failures,
+            checkpoint_failures=checkpoint_failures,
         )
     finally:
         failed = sys.exc_info()[0] is not None

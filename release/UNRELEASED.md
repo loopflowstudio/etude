@@ -126,13 +126,13 @@ def play(match: Match[Deal], agents: Sequence[Agent]) -> Tables:
 
 
 # models.py: may import Torch
-def load(player: Player, config: Loading) -> Agent: ...  # anything with act(rows)
+def load(checkpoint: CheckpointRef) -> Agent: ...  # anything with act(rows)
 
 
 # capacity.py
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     ...
-    net = Agents(load=load, config=Loading(device="cuda"))
+    net = Agents(load=load)
     return [
         EvalJob(play=play, tournament=ladder, checkpoints=rated, agents=net, max_hours=1),
         EvalJob(play=play, tournament=gauntlet, checkpoints=large, agents=net, max_hours=1),
@@ -150,11 +150,10 @@ A pass hands down the eval jobs that can run together as one run on one
 machine, instead of one run per tournament, and their tournaments play at
 once.
 
-An eval job may declare `agents=Agents(load=..., config=...)`. You write the
-game, `play(match, agents)`, and how a player is loaded, `load(player,
-config)`, which returns anything with `act(rows)`. Etude runs the rest: light
+An eval job may declare `agents=Agents(load=..., build=...)`. You write the
+game, `play(match, agents)`, and how a checkpoint is loaded, `load(checkpoint)`, which returns anything with `act(rows)`. Etude runs the rest: light
 game processes that import only `play`'s module, one agent process that loads
-each player once, and batches of rows per player (32 rows or 0.005 seconds
+each checkpoint once, and batches of rows per checkpoint (32 rows or 0.005 seconds
 by default), drawn from every game and tournament in the run. `act` must
 answer each row as if it were alone. An eval job without `agents=` calls
 `play(match)` as before, in the same game processes
@@ -190,9 +189,9 @@ many matches wait and why, and a later pass finds them again
   it as one run.
 - **A failed match stops its tournament.** The other tournaments keep
   playing, and the run ends failed. A loader failure instead fails every
-  undelivered scheduled match seating that player across the group's
+  undelivered scheduled match containing that checkpoint across the group's
   tournaments, including matches never dispatched, with the load error.
-  Matches without that player continue; delivered results stay unchanged.
+  Matches without that checkpoint continue; delivered results stay unchanged.
   A load raising `RetryRequested` applies the same scope with `retry=True`.
 - **Some failed matches are replayed without `--retry-failed`.** A match the
   machine failed rather than the game (unfinished at the run's time limit or
@@ -213,3 +212,13 @@ game errors without adding another status. Older match records default it to
 false. The derived statsdb cache rebuilds from schema 14 to 15 automatically.
 Game processes load play's defining module; for a job with agents, heavy
 imports there produce one warning per run naming their importer.
+
+Checkpoint seats now play directly: `Held()` replaces a bare inference seat;
+relative seats take no `inference=`. Author records wrap seats to describe
+search or other composition. `compose(record)` preserves the wrapper type and
+fields in identity, replacing every leaf with its resolved checkpoint key.
+`Agents(load=load, build=build)` calls `load(checkpoint)` in the agent process
+and `build(player, leaves)` in each game. The hook receives the author's tree
+and shared remote checkpoint agents; nested and bare players reuse those
+networks and their batches. `Agents.config` and `Inference` are removed.
+Released inference-configured results retain their keys and stay delivered.

@@ -57,6 +57,7 @@ from etude.eval.records import (
     Rollup,
     as_config,
     outcomes,
+    player_checkpoints,
 )
 from etude.eval.resources import active_games
 from etude.eval.result import EvalResult as EvalResult
@@ -440,6 +441,7 @@ class Playing:
     checkout: str | None = None
     tournament: str | None = None
     agents: str | None = None
+    build: Function | None = None
     pending: deque[Match] = field(init=False)
     skipped: int = field(init=False)
     played: int = 0
@@ -457,7 +459,7 @@ def play_together(
     memory_gb: float | None = None,
     agent_process: AgentProcess | None = None,
 ) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
-    """Play tournaments on one pool; loader failures follow the seated player.
+    """Play tournaments on one pool; loader failures follow every seated checkpoint.
 
     Other match failures stop their tournament. Tournaments share the available
     game processes. Storage and reporting stay on the invoking thread; only the
@@ -468,26 +470,30 @@ def play_together(
     stopping = False
     warned_imports = False
     reported_imports: set[int] = set()
-    failed_players: set[str] = set()
+    failed_checkpoints: set[str] = set()
 
-    def fail_players() -> None:
+    def fail_checkpoints() -> None:
         if agent_process is None:
             return
         while True:
             try:
-                failure = agent_process.player_failures.get_nowait()
+                failure = agent_process.checkpoint_failures.get_nowait()
             except Empty:
                 return
-            if failure.player in failed_players:
+            if failure.checkpoint in failed_checkpoints:
                 continue
-            failed_players.add(failure.player)
+            failed_checkpoints.add(failure.checkpoint)
             for each in plays:
                 affected = [
                     match
                     for match in each.run.matches
                     if match.key not in each.run.done
                     and match.key not in each.run._failed
-                    and any(player.key == failure.player for player in match.players)
+                    and any(
+                        c.key == failure.checkpoint
+                        for player in match.players
+                        for c in player_checkpoints(player)
+                    )
                 ]
                 if not affected:
                     continue
@@ -533,7 +539,7 @@ def play_together(
         if each.agents and imports is not None and imports.warning and not warned_imports:
             print(imports.warning, file=sys.stderr, flush=True)
             warned_imports = True
-        fail_players()
+        fail_checkpoints()
         if match.key in each.run._failed:
             return
         if agent_process is not None:
@@ -583,7 +589,7 @@ def play_together(
                 running: dict[Future[Execution], tuple[Playing, Match]] = {}
 
                 def start() -> None:
-                    fail_players()
+                    fail_checkpoints()
                     for _ in range(len(order)):
                         each = order.popleft()
                         order.append(each)
@@ -604,6 +610,7 @@ def play_together(
                                     each.agents,
                                     each.checkout,
                                     each.tournament or each.run.name,
+                                    each.build,
                                 )
                             ] = (
                                 each,
@@ -648,7 +655,7 @@ def play_together(
                             if future not in finished:
                                 continue
                             each, match = running.pop(future)
-                            fail_players()
+                            fail_checkpoints()
                             if each.stopped:
                                 start()
                                 continue

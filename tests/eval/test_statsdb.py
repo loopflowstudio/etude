@@ -17,12 +17,13 @@ from etude.eval import query
 from etude.eval.convert import convert
 from etude.eval.match import environment, evaluate
 from etude.eval.query import compare, statsdb
-from etude.eval.records import CheckpointPlayer, Code, Inference, Match
+from etude.eval.records import CheckpointPlayer, Code, Match
 from etude.eval.run import Tables
 from etude.records import ArtifactRef
 from etude.storage import DirectoryStorage
 from tests.eval.games import play, play_game_seats
 from tests.eval.per_file import write_per_file
+from tests.eval.stored import stored_inference
 from tests.run.storage import MeasuredStorage
 
 DUEL = environment("duel")
@@ -193,7 +194,7 @@ def test_a_match_two_runs_played_counts_from_the_later_under_its_latest_name(
     # One model, renamed between runs: a name is part of no key.
     for run, name in (("first", "early"), ("second", "late")):
         model = CheckpointPlayer(
-            name=name, checkpoint=ref, inference=Inference(config={"strength": 3})
+            name=name, checkpoint=ref, config=stored_inference(config={"strength": 3}).config
         )
         evaluate(experiment="cards", environment=DUEL, play=play, run=run,
                  matches=[Match(players=(model, rival), config={"deal": 0}, games=2)],

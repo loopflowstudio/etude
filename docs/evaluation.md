@@ -19,7 +19,9 @@ from etude.eval.records import (
     Benchmark,
     Code,
     Fraction,
-    Inference,
+    Held,
+    Seat,
+    compose,
     Match,
     RoundRobin,
     Seating,
@@ -27,6 +29,7 @@ from etude.eval.records import (
 from etude.eval.tournament import evaluating, scores, standings
 from etude.experiment import observe
 from etude.checkpoints import CheckpointRef, checkpoint_id
+from etude.records import Record
 
 world = environment("allies-vs-lessons", files=["game/"], config={"world": "w6"})
 
@@ -57,10 +60,15 @@ def play(match: Match[Deal]) -> Tables:  # importable by name: games play in fre
     }
 
 
-# An Inference seat is filled by the checkpoint being held, run by your inference code
-# and playing with your config (a Pydantic model or JSON): together, a player.
-net = ["players/net.py"]
-direct = Inference(source=net, config=Direct())
+# A bare checkpoint is the default player. Wrappers are your records.
+class PUCT(Record):
+    over: Seat
+    belief: Seat | None = None
+    simulations: int = 64
+
+
+direct = Held()
+search = compose(PUCT(over=direct))
 progress = Benchmark(
     name="anchors",
     environment=world,
@@ -79,14 +87,14 @@ progress = Benchmark(
         ),
         Seating(
             name="search vs no search",
-            players=(Inference(source=net, config=PUCT(simulations=64)), direct),
+            players=(search, direct),
             configs=deals[:10],
             games=4,
         ),
         # A relative seat: the held checkpoint against its own learner at half its updates.
         Seating(
             name="half-training",
-            players=(direct, Fraction(clock="updates", value=0.5, inference=direct)),
+            players=(direct, Fraction(clock="updates", value=0.5)),
             configs=deals[:10],
             games=4,
         ),
@@ -151,23 +159,20 @@ with evaluating(
     run.play(play)
 ```
 
-- **Players.** A player is whatever takes a seat: a checkpoint and the code
-  that plays it (`Inference`), or `Code` alone, such as a heuristic. "Model"
-  is left to mean your network. A checkpoint player's
-  key is the checkpoint's own key plus its inference config; code's is its
-  name plus its config. A config is free JSON or a Pydantic model. One
-  checkpoint at two search budgets is two players. A checkpoint's key
-  (`CheckpointRef.key`) is its training run and name
-  (`ppo-1/checkpoints/updates-00000500`) or, for any other, its address; never
-  its bytes, so two runs started from one file hold two checkpoints,
-  each evaluated. An outside player is one whose checkpoint is an
-  address. `Inference(source=["players/net.py"], config=...).player(ref)` and
-  `Code(name="heuristic", source=[...])` name the code that plays: its commit
-  and source digest are its `Version`, recorded with each match
-  (`seats.commit`, `seats.source`) but not part of the key, so changed code
-  reuses what was played. Joins use the key, encoded (`players.player`,
-  `seats.player`). Eval runs stored before this wording keep `"kind":
-  "model"` and read the same.
+- **Players.** A checkpoint seat is a player: `Held()` for the checkpoint
+  being evaluated, `Held().player(ref)` for a fixed checkpoint, or a relative
+  seat below. Wrap seats in your own frozen Pydantic records to describe search,
+  belief models or other composition; Etude interprets only their checkpoint
+  leaves. `compose(record)` makes the record portable and gives it a key; a
+  seating also accepts the author record directly. The whole wrapper type and
+  its fields identify the player, with each resolved leaf replaced by its
+  checkpoint key. A bare network, search over it, and search using another
+  belief model are three players. Nesting wrappers and containers works too.
+  `Code(name="heuristic", source=[...], config=...)` still names code players.
+  Code's version records source provenance without changing its key.
+  A checkpoint's key is its training run and file name, or its outside address,
+  never its bytes or current location. Released inference-configured players
+  remain readable under their original keys, so their matches stay delivered.
 - **A checkpoint is a folder or a file.** `play` finds it at the player's
   `checkpoint.path`. A checkpoint a run published from named objects
   (`run.checkpoint(policy=model)`, [Training](training.md#checkpoints)) is a
@@ -180,10 +185,9 @@ with evaluating(
   policy.load_state_dict(torch.load(folder / files["policy"]))
   ```
 
-  One checkpoint holding several models is still one checkpoint. Two
-  `Inference` seats with different source seat it as two players: one that
-  loads every file to draft, build and play, and one that loads only
-  `player.pt`. A checkpoint recorded as a single file is that file.
+  One checkpoint holding several models is still one checkpoint. An author's
+  wrappers select how to use its loaded agent. A checkpoint recorded as a
+  single file is that file.
 - **Setup.** How a game is run, such as the device or dtype, is provenance,
   like the seed, and is said in two places. What `play` is asked to run with
   goes under a `setup` key of the environment's or a player's config:
@@ -197,7 +201,7 @@ with evaluating(
   counts for both, and their games pool. Requested games may finish across
   any setups; a replay's latest delivered result counts once in reports.
   Etude never guesses which fields are setup: anything outside `setup`,
-  in `Inference.config`, `Code.config` or match config, is identity, and
+  in a wrapper, `Code.config` or match config, is identity, and
   older configs keep theirs. `execution` on older records reads as `{}`.
 - **Where a checkpoint stood.** A seated checkpoint may say where it stood on
   its clocks: `CheckpointRef(key=..., artifact=..., at={"updates": 600})`.
@@ -347,21 +351,21 @@ with evaluating(
 
   | Seat | Seats |
   |---|---|
-  | `Inference(source=net, config=Direct())` | the held checkpoint, playing with that config |
-  | `Code(name="heuristic", ...)`, or `Inference(...).player(ref)` | the same fixed player for every checkpoint: code, or one chosen checkpoint such as the initialization or a frozen anchor |
-  | `Earlier(clock="updates", by=400, inference=direct)` | the held checkpoint's line exactly 400 updates before it |
-  | `Fraction(clock="updates", value=0.5, inference=direct)` | its line at exactly half the held checkpoint's updates (3,000 for 6,000) |
-  | `Fraction(clock="running_hours", value=0.5, at_or_before=True, inference=direct)` | its line's latest checkpoint at or before half the held checkpoint's running hours |
-  | `Earlier(clock="running_hours", by=2, at_or_before=True, inference=direct)` | its line's latest checkpoint at or before two running hours before it |
-  | `At(clock="updates", value=200, inference=direct)` | its line at update 200 |
-  | `Final(inference=direct)` | its line's last checkpoint, once its run has ended |
-  | `Aligned(clock="updates", job="small", inference=direct)` | job `small` at exactly the held checkpoint's updates |
-  | `Aligned(clock="running_hours", job="small", at_or_before=True, inference=direct)` | job `small`'s latest checkpoint at or before the held checkpoint's running hours |
+  | `Held()` | the held checkpoint, played directly |
+  | `Code(name="heuristic", ...)`, or `Held().player(ref)` | the same fixed player for every checkpoint: code, or one chosen checkpoint such as the initialization or a frozen anchor |
+  | `Earlier(clock="updates", by=400)` | the held checkpoint's line exactly 400 updates before it |
+  | `Fraction(clock="updates", value=0.5)` | its line at exactly half the held checkpoint's updates (3,000 for 6,000) |
+  | `Fraction(clock="running_hours", value=0.5, at_or_before=True)` | its line's latest checkpoint at or before half the held checkpoint's running hours |
+  | `Earlier(clock="running_hours", by=2, at_or_before=True)` | its line's latest checkpoint at or before two running hours before it |
+  | `At(clock="updates", value=200)` | its line at update 200 |
+  | `Final()` | its line's last checkpoint, once its run has ended |
+  | `Aligned(clock="updates", job="small")` | job `small` at exactly the held checkpoint's updates |
+  | `Aligned(clock="running_hours", job="small", at_or_before=True)` | job `small`'s latest checkpoint at or before the held checkpoint's running hours |
 
   The remaining rows are relative seats: each names a checkpoint by where it
-  stands relative to the one held, and plays it with its own `inference`.
+  stands relative to the one held, and supplies that checkpoint as a leaf. Wrap a relative seat in the same author records as a held or fixed seat.
   `Earlier`, `Fraction`, `At` and `Final` look in the held checkpoint's own
-  line unless given a `job`: `Final(job="small", inference=direct)` seats
+  line unless given a `job`: `Final(job="small")` seats
   job `small`'s final checkpoint, `At(clock="updates", value=0, job="small",
   ...)` its initial one. `Aligned` always names a job, as the report names it
   ([tracking](tracking.md#reports)): its launch name, or the full name with
@@ -370,7 +374,7 @@ with evaluating(
   its `lines`, the experiment's training lines (`observe(source,
   experiment).lines`), held or not; `etude eval` and `etude launch` pass them themselves.
   A seating against a fixed player and one against a relative seat are held,
-  scored and drawn alike. A seating with a relative seat needs an inference
+  scored and drawn alike. A seating with a relative seat needs an held
   seat to be relative to. A seating of two fixed players, such as two jobs'
   checkpoints chosen in `eval_jobs(state)`, is drawn at its first seat's checkpoint,
   so `Curve(matches=...)` over such seatings draws each pair once.
@@ -419,14 +423,14 @@ with evaluating(
   and the seed sets, the same pair at every point: faster, but the curve
   shows one pair of seeds, not the jobs. A seed added later changes the
   split, so that job's points are played again and count only the new one.
-- **Pairs of checkpoints.** A seating with no inference seat is played once,
+- **Pairs of checkpoints.** A seating with no held seat is played once,
   not per checkpoint, so chosen checkpoints can meet: seat each as
-  `Inference(...).player(ref)`, the player an inference seat would make of it.
+  `Held().player(ref)`, the player an held seat would make of it.
   Prefer a relative seat where one says the rule; hand-built pairs suit a
   rule none states. Hold such a benchmark in batch whenever more checkpoints
   appear; each pass plays only the pairs not yet delivered. A hold on the go
   leaves these seatings to batch. Their rows are `schedule` rows with no
-  `checkpoint`; `scores` follows only seatings with an inference seat.
+  `checkpoint`; `scores` follows only seatings with an held seat.
 - **Round robins.** `evaluating(round_robin, enter=players)` plays every pair of
   the players given once per config; seat swaps belong inside `play`.
   `evaluating(round_robin)` then plays every pair of every entrant so far that no
@@ -585,7 +589,7 @@ def play(match: Match[Deal], agents: Sequence[Agent]) -> Tables:
 ```
 
 ```python
-# arena_models.py: how a player is loaded. It may import Torch.
+# arena_models.py: how a checkpoint is loaded. It may import Torch.
 from collections.abc import Sequence
 from typing import TypedDict, cast
 
@@ -593,14 +597,8 @@ import numpy as np
 import numpy.typing as npt
 
 import torch
-from pydantic import BaseModel
-
 from etude.eval.agents import Agent
-from etude.eval.records import CheckpointPlayer, Code, Player
-
-
-class Loading(BaseModel):
-    device: str = "cuda"
+from etude.checkpoints import CheckpointRef
 
 
 class Observation(TypedDict):
@@ -609,9 +607,9 @@ class Observation(TypedDict):
 
 
 class Net:
-    def __init__(self, player: CheckpointPlayer, config: Loading) -> None:
-        self.device = config.device
-        self.model = read_model(player.checkpoint.path).to(self.device)  # your code
+    def __init__(self, checkpoint: CheckpointRef, device: str) -> None:
+        self.device = device
+        self.model = read_model(checkpoint.path).to(device)  # your code
 
     def act(self, rows: Sequence[object]) -> Sequence[int]:
         # The game constructs this pickled shape; its typing belongs at this boundary.
@@ -626,10 +624,8 @@ class Net:
         ]
 
 
-def load(player: Player, config: Loading) -> Agent:
-    if isinstance(player, Code):
-        return Heuristic(player.name)  # code players are agents too
-    return Net(player, config)
+def load(checkpoint: CheckpointRef) -> Agent:
+    return Net(checkpoint, device="cuda")
 ```
 
 ```python
@@ -637,12 +633,12 @@ def load(player: Player, config: Loading) -> Agent:
 from etude.jobs import Agents, EvalJob, ExperimentState
 
 from arena_game import play
-from arena_models import Loading, load
+from arena_models import load
 
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     ...
-    net = Agents(load=load, config=Loading(device="cuda"))
+    net = Agents(load=load)
     return [
         EvalJob(play=play, tournament=ladder, checkpoints=rated, agents=net, max_hours=1),
         EvalJob(play=play, tournament=against_small, checkpoints=large, agents=net, max_hours=1),
@@ -653,20 +649,54 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
 $ etude eval capacity.py --source s3://bucket/etude/launch
 capacity: state from s3://bucket/etude/launch: 6 training runs, 2 eval runs
 etude: agents: started for ladder, against small; 7 games at a time
-etude: agents: loaded heuristic
 etude: agents: loaded large@0/updates-00001000
 ...
-etude: agents: stopped; 9 players loaded, 41280 rows in 1612 batches
+etude: agents: stopped; 9 checkpoints loaded, 41280 rows in 1612 batches
 eval ladder: 48 new, 0 running, 0 failed, 48 played
 eval against small: 24 new, 0 running, 0 failed, 24 played
 ```
 
-You write two functions: the game, and how a player is loaded. Etude runs
-everything between them. Games are played in light processes that import only
-`play`'s module. One agent process holds the loaded players and answers every
-game's moves, batching the rows that ask for the same player, whichever game,
-match or tournament they come from. The same happens wherever the games are
-played: `etude eval` here, a smoke, or a launched run on its machine.
+You write the game and `load(checkpoint)`. Etude starts light game processes
+and one agent process, which loads checkpoint leaves and batches rows across
+every player, game and tournament using the same checkpoint. A bare checkpoint
+seat's agent is its remote loaded network. Code and wrapped players also need
+`Agents(build=build)`: an importable hook in a light module, run in the game
+process, receiving the reconstructed author record and a mapping from
+checkpoint key to its remote `Agent`.
+
+```python
+# arena_game.py: this module may import wrapper types, never the model loader.
+from collections.abc import Mapping
+
+from etude.eval.agents import Agent
+from etude.eval.records import CheckpointPlayer
+
+
+def build(player: object, leaves: Mapping[str, Agent]) -> Agent:
+    if isinstance(player, CheckpointPlayer):
+        return leaves[player.checkpoint.key]
+    if isinstance(player, PUCT):
+        return SearchAgent(
+            over=build(player.over, leaves),
+            belief=None if player.belief is None else build(player.belief, leaves),
+            simulations=player.simulations,
+        )  # your search implementation
+    if isinstance(player, Code):
+        return Heuristic(player.name)
+    raise TypeError(f"unknown player {type(player).__name__}")
+
+
+net = Agents(load=load, build=build)
+# Nested search and its bare network share one loaded checkpoint.
+deep_search = compose(PUCT(over=compose(PUCT(over=Held())), simulations=256))
+```
+
+The hook runs once per seat per match. Search runs in that game process;
+network calls through `leaves` go directly to the shared agent process. Etude
+delivers and verifies all checkpoint leaves before games start. Use module-level
+wrapper classes, so games can import them by name. The runnable
+[`examples/agents.py`](../examples/agents.py) uses two nested arithmetic wrappers
+and a bare checkpoint in two tournaments; its second pass plays nothing.
 
 Declaring agents is optional. An `EvalJob` with no `agents=` calls
 `play(match)`, which does all the playing itself in the same game processes,
@@ -685,28 +715,26 @@ one on a GPU, or weights too large to hold in every game process.
 - **`agents` is one agent per seat**, in the order of `match.players`.
   `agents[seat].act(rows)` sends the rows straight to the agent process and
   waits for the answers. A game that needs several answers at once, such as
-  the leaves of a search, sends them as one call. A player in two seats is
-  one loaded agent.
+  the leaves of a search, sends them as one call. A checkpoint shared by several seats is
+  one loaded network.
 - **Rows and answers are picklable values**: NumPy arrays, numbers, text,
   and tuples, lists and dicts of them. A type from a model library would make
   every game process import that library.
-- **`load` is called when a player is first used**, in the agent process,
-  with the config the job gave, and again only if that player was dropped
-  for memory (below). It is called for every
-  player seated, a `Code` player included. A checkpoint player's folder or
-  file is at `player.checkpoint.path`: the agent process runs on the machine
-  that plays the games, and has no setting for where it runs. Like `play`,
-  `load` is imported by name, so define it at the top of a module.
-- **Test a game without Etude.** Both sides are the same protocol, so
-  `play(match, [load(player, Loading()) for player in match.players])` plays
-  a match in one process.
-- **Batching** is per player. A batch is answered when it holds `max_batch`
-  rows (default 32) or when its oldest row has waited `max_delay_seconds`
-  (default 0.005). One call's rows always arrive in one batch, even when
-  there are more than `max_batch`. Set either on `Agents(...)`.
+- **`load` is called on a checkpoint's first use**, in the agent process,
+  and again only after eviction. It receives a `CheckpointRef`; its local
+  file or folder is `checkpoint.path`. Declare machine setup in the loading
+  module; `Agents` has no `config` parameter. Setup, batching and the build
+  hook are execution choices, outside scientific player identity.
+- **Test a game without Etude.** Load each checkpoint into a local `leaves`
+  mapping and call your build hook, then `play(match, agents)`. A bare
+  checkpoint needs only `load(checkpoint)`.
+- **Batching is per checkpoint.** Rows from a bare network, search over it,
+  and nested search over it share batches. A batch is answered at `max_batch`
+  rows (default 32) or `max_delay_seconds` (default 0.005). One call's rows
+  always arrive together, even above `max_batch`. Set either on `Agents(...)`.
 - **Memory.** `memory_gb` on `Agents(...)` bounds what the loaded agents may
-  hold, counting each by its checkpoint's size on disk and a code player as
-  nothing. The default is half the memory the run may use. Over the bound,
+  hold, counting each checkpoint once by its size on disk. Game-side code and
+  wrappers do not consume this checkpoint allowance. The default is half the memory the run may use. Over the bound,
   the least recently used agent with no row waiting is dropped, and loaded
   again if a game asks for it. Matches are ordered so those sharing
   checkpoints are played together (see "Order" above). The bound counts host
@@ -734,7 +762,7 @@ one on a GPU, or weights too large to hold in every game process.
   | What happened | Matches | Run |
   | --- | --- | --- |
   | the agent process exits | unfinished ones failed with `retry=True` | failed |
-  | `load` raises | every undelivered scheduled match seating that player, across tournaments, failed with `retry=False`; the player is not loaded again in this run | failed |
+  | `load` raises | every undelivered scheduled match containing that checkpoint, across tournaments, failed with `retry=False`; the checkpoint is not loaded again in this run | failed |
   | `act` raises, returns the wrong number of answers, or one that does not pickle | the matches with rows in that batch failed with `retry=False` | failed |
   | `load` or `act` raises `etude.errors.RetryRequested` | failed with `retry=True` | failed |
   | `play` raises | failed with `retry=False` | failed |
@@ -742,10 +770,10 @@ one on a GPU, or weights too large to hold in every game process.
 
   The next pass plays `retry=True` matches again by itself; `retry=False`
   ones wait for `--retry-failed`. A loader failure reaches every undelivered
-  scheduled match seating that player in the group, including matches never
+  scheduled match containing that checkpoint in the group, including matches never
   dispatched or games that never call `act`. Those matches retain the load
   error and publish no rows; delivered results stay unchanged. Matches without
-  that player carry on, including in the same tournament. A load raising
+  that checkpoint carry on, including in the same tournament. A load raising
   `RetryRequested` applies the same scope with `retry=True`. Other match
   failures stop their tournament while the others finish
   ([Experiments](#experiments)). Raise `RetryRequested`
@@ -760,8 +788,8 @@ one on a GPU, or weights too large to hold in every game process.
   `tensorflow`, or exceeds 256 modules, naming the importing module and
   saying to move the import to `load`'s.
 - **Kept with the run.** `artifacts/agents/batches.json` below the launched
-  run lists each batch: its player, and the tournament and match of each
-  row. The startup import counts are kept beside it. `ETUDE_SCRATCH_DIR` and
+  run lists each batch's checkpoint and each row's player, tournament and
+  match. The startup import counts are kept beside it. `ETUDE_SCRATCH_DIR` and
   `TMPDIR` point to temporary scratch (`/dev/shm` when available) in the
   game and agent processes.
 - **Results do not depend on it.** A match is its seats, config and game
@@ -793,7 +821,7 @@ declares those training runs, so `track()` in the training code needs no
 from etude.eval.records import Aligned, Benchmark, Earlier, Final, Fraction, Seating
 from etude.jobs import EvalJob, ExperimentState
 
-# direct is an Inference, heuristic Code, deals the configs
+# direct is Held(), heuristic Code, deals the configs
 from arena import deals, direct, heuristic, play, world
 
 
@@ -806,7 +834,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
             Seating(name="vs heuristic", players=(direct, heuristic), configs=deals, games=8),
             Seating(
                 name="vs previous",
-                players=(direct, Earlier(clock="updates", by=1_000, inference=direct)),
+                players=(direct, Earlier(clock="updates", by=1_000)),
                 configs=deals,
                 games=8,
             ),
@@ -814,7 +842,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
                 name="half-training",
                 players=(
                     direct,
-                    Fraction(clock="running_hours", value=0.5, at_or_before=True, inference=direct),
+                    Fraction(clock="running_hours", value=0.5, at_or_before=True),
                 ),
                 configs=deals,
                 games=8,
@@ -828,13 +856,13 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         seatings=(
             Seating(
                 name="large vs small",
-                players=(direct, Aligned(clock="updates", job="small", inference=direct)),
+                players=(direct, Aligned(clock="updates", job="small")),
                 configs=deals,
                 games=8,
             ),
             Seating(
                 name="large vs final small",
-                players=(direct, Final(job="small", inference=direct)),
+                players=(direct, Final(job="small")),
                 configs=deals,
                 games=8,
             ),
@@ -923,13 +951,13 @@ matches, as a launched one does, unless `--retry-failed`.
   out what is left to play. A relative seat finds its checkpoint among every
   run under the source, held or not: `Earlier(by=1_000)` above seats the
   checkpoint 1,000 updates back whether or not `every(5)` chose it. Seat a
-  chosen checkpoint with `checkpoint.player(inference)` to make a seating of
+  chosen checkpoint with `checkpoint.player(Held())` to make a seating of
   fixed players, played once rather than per checkpoint. `tags` mark
   seatings for readers, such as pairs a rating fit leaves out.
 - **Other experiments' checkpoints.** A file may define only `eval_jobs`.
   Read a producer with `observe(source, "producer")` and give its checkpoint
   records to a benchmark's `checkpoints=`, or use
-  `checkpoint.player(inference)` in a round robin's `enter=`.
+  `checkpoint.player(Held())` in a round robin's `enter=`.
 
   ```python
   def eval_jobs(state):
@@ -1012,7 +1040,7 @@ matches, as a launched one does, unless `--retry-failed`.
   (`ladder: 0 new, 1 failed`) and does not play it again, so a result is
   never quietly replaced. The other tournaments keep playing; the run then
   ends failed. A [loader failure](#agents) instead fails every undelivered
-  scheduled match seating that player across the group's tournaments, while
+  scheduled match containing that checkpoint across the group's tournaments, while
   matches without it continue. `--retry-failed` plays the failed matches again.
   A match the machine failed rather than the game, such as one unfinished at the run's
   time limit or when its [agent process](#agents) exited, is failed with

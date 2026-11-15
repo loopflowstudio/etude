@@ -15,7 +15,6 @@ import runpy
 import shlex
 import sys
 import tomllib
-import typing
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -36,6 +35,8 @@ from etude.eval.game import _match_type
 from etude.eval.records import (
     Benchmark,
     CheckpointPlayer,
+    Code,
+    Composition,
     Line,
     Match,
     Player,
@@ -44,6 +45,8 @@ from etude.eval.records import (
     assemble,
     digest,
     folder_name,
+    player_checkpoints,
+    relocate_player,
 )
 from etude.eval.resources import resources
 from etude.eval.result import EvalResult, Result, Tables
@@ -186,10 +189,9 @@ def checkpoint_inputs(
     declared = {each.key: each for each in checkpoints}
     found: dict[str, CheckpointRecord | CheckpointRef] = {}
     for match in matches:
-        for player in match.players:
-            if not isinstance(player, CheckpointPlayer) or player.checkpoint.key in found:
+        for ref in (c for player in match.players for c in player_checkpoints(player)):
+            if ref.key in found:
                 continue
-            ref = player.checkpoint
             record = declared.get(ref.key) or state.checkpoint(ref.key)
             # Compact checkpoint keys can coincide across experiments. The
             # seated artifact, not this experiment's matching spelling, owns the bytes.
@@ -261,20 +263,10 @@ class AgentLoader(Record):
     """Portable loading declaration; batching never enters scientific identity."""
 
     load: Function
-    config: str
+    build: Function | None = None
     max_batch: int = Field(default=32, ge=1)
     max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
     memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-
-
-def _loading_type(load: Callable[..., object]) -> type[BaseModel]:
-    parameters = list(inspect.signature(load).parameters.values())
-    if len(parameters) != 2:
-        raise TypeError("load must take player and config")
-    kind = typing.get_type_hints(load).get(parameters[1].name)
-    if not isinstance(kind, type) or not issubclass(kind, BaseModel):
-        raise TypeError("load's config must be annotated with a Pydantic model")
-    return kind
 
 
 class Agents(BaseModel):
@@ -282,20 +274,23 @@ class Agents(BaseModel):
 
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
     load: Callable[..., object]
-    config: BaseModel
+    build: Callable[..., object] | None = None
     max_batch: int = Field(default=32, ge=1)
     max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
     memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
     def _validate_loading(self) -> Agents:
-        _loading_type(self.load).model_validate_json(self.config.model_dump_json())
+        if len(inspect.signature(self.load).parameters) != 1:
+            raise TypeError("load must take one checkpoint")
+        if self.build is not None and len(inspect.signature(self.build).parameters) != 2:
+            raise TypeError("build must take player and leaves")
         return self
 
     def plain(self, repo: Path | None) -> AgentLoader:
         return AgentLoader(
             load=_function(self.load, repo),
-            config=self.config.model_dump_json(),
+            build=None if self.build is None else _function(self.build, repo),
             max_batch=self.max_batch,
             max_delay_seconds=self.max_delay_seconds,
             memory_gb=self.memory_gb,
@@ -472,6 +467,20 @@ class EvalJob(Job):
             entrants=tuple(self.enter),
             agents=None if self.agents is None else self.agents.plain(repo),
         )
+        if spec.agents is not None and spec.agents.build is None:
+            players = list(spec.entrants)
+            if isinstance(spec.tournament, Benchmark):
+                players.extend(
+                    p
+                    for seating in spec.tournament.seatings
+                    for p in seating.players
+                    if isinstance(p, (CheckpointPlayer, Code, Composition))
+                )
+            if any(
+                isinstance(p, (Code, Composition)) or (isinstance(p, CheckpointPlayer) and p.config)
+                for p in players
+            ):
+                raise LauncherError("composed and code players need Agents(build=)")
         assemble(
             [
                 TournamentRun(
@@ -639,6 +648,7 @@ def hold_group(
                     checkout=checkout,
                     tournament=spec.tournament.name,
                     agents=agent_process.address if agent_process and spec.agents else None,
+                    build=spec.agents.build if spec.agents else None,
                 )
                 for spec, active, _ in opened
             ]
@@ -1013,19 +1023,9 @@ def _received(evaluation: Evaluation) -> Evaluation:
 
 def _relocated(match: Match, here: Mapping[str, str]) -> Match:
     """The match with each model's checkpoint file where it lies on this machine."""
-    players: list[Player] = []
-    for player in match.players:
-        if not isinstance(player, CheckpointPlayer) or str(player.checkpoint.key) not in here:
-            players.append(player)
-            continue
-        checkpoint = player.checkpoint
-        moved = checkpoint.artifact.model_copy(update={"uri": here[str(checkpoint.key)]})
-        players.append(
-            player.model_copy(
-                update={"checkpoint": checkpoint.model_copy(update={"artifact": moved})}
-            )
-        )
-    return match.model_copy(update={"players": tuple(players)})
+    return match.model_copy(
+        update={"players": tuple(relocate_player(p, here) for p in match.players)}
+    )
 
 
 def _require_hours(options: JobOptions) -> None:

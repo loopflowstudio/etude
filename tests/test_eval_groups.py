@@ -24,7 +24,7 @@ from etude.eval.batching import _Batches
 from etude.eval.game import Execution
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Code, Inference, Match, Player, RoundRobin
+from etude.eval.records import Code, Held, Match, RoundRobin
 from etude.eval.resources import active_games, available_cpus, memory_bytes
 from etude.eval.result import Tables
 from etude.eval.run import Terminated
@@ -46,8 +46,8 @@ from etude.smoke import Step, smoke_file
 from etude.spec import Job, RunRequest
 from etude.storage import DirectoryStorage, default_root
 from etude.train.tracking import track
-from examples.agent_game import play
-from examples.agent_models import Loading, load
+from examples.agent_game import checkpoint, play
+from examples.agent_models import load
 from tests.launch.counting import Counting, Counts, job_text
 from tests.launch.fake import bench
 from tests.test_jobs import checkout
@@ -67,7 +67,7 @@ def job(name: str, agents: Agents | None) -> EvalJob:
     return EvalJob(
         tournament=tournament(name),
         experiment="grouped",
-        enter=(Code(name="left"), Code(name="right")),
+        enter=(checkpoint("left"), checkpoint("right")),
         play=plain if agents is None else play,
         agents=agents,
         repo=None,
@@ -89,7 +89,7 @@ def test_a_pass_groups_by_agents_and_keeps_group_limits(
     b.scheduler.add_pool(Pool(name="waiting"))
     monkeypatch.setattr(client, "_client", lambda: b.scheduler)
     monkeypatch.setattr(client, "standing", b.scheduler.standing)
-    agents = Agents(load=load, config=Loading())
+    agents = Agents(load=load)
     jobs = [job("one", agents), job("two", agents), job("plain", None)]
 
     def declare(state: ExperimentState) -> list[EvalJob]:
@@ -128,7 +128,7 @@ def test_estimated_machine_hours_wait_without_remote_calls_then_threshold_queues
         with evaluating(
             historical,
             experiment="grouped",
-            enter=(Code(name="earlier"), Code(name="right")),
+            enter=(Code(name="earlier"), checkpoint("right")),
             directory=source.root,
         ) as active:
             for match in active.matches:
@@ -361,7 +361,7 @@ def test_two_tournaments_share_loaded_agents_and_resume_without_starting_them(
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
-    agents = Agents(load=load, config=Loading(), max_delay_seconds=0.25)
+    agents = Agents(load=load, max_delay_seconds=0.25)
     selected = group(job("ladder", agents), job("gauntlet", agents))
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [1, 1]
     batches = json.loads((tmp_path / "grouped/artifacts/agents/batches.json").read_text())
@@ -371,7 +371,7 @@ def test_two_tournaments_share_loaded_agents_and_resume_without_starting_them(
     log = capfd.readouterr().err
     assert log.count("agents: started") == 1
     assert log.count("agents: loaded") == 2
-    assert "2 players loaded, 4 rows" in log
+    assert "2 checkpoints loaded, 4 rows" in log
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [0, 0]
     assert "agents: started" not in capfd.readouterr().err
     db = statsdb("grouped", tmp_path)
@@ -381,11 +381,11 @@ def test_two_tournaments_share_loaded_agents_and_resume_without_starting_them(
         db.close()
 
 
-def raises_load(player: Player, config: Loading) -> Agent:
+def raises_load(checkpoint: CheckpointRef) -> Agent:
     raise ValueError("fixture loading error")
 
 
-def exits_load(player: Player, config: Loading) -> Agent:
+def exits_load(checkpoint: CheckpointRef) -> Agent:
     os._exit(3)
 
 
@@ -393,7 +393,7 @@ def exits_load(player: Player, config: Loading) -> Agent:
 def test_loading_failure_never_records_success_and_only_process_exit_retries(
     tmp_path: Path, exit_process: bool
 ) -> None:
-    agents = Agents(load=exits_load if exit_process else raises_load, config=Loading())
+    agents = Agents(load=exits_load if exit_process else raises_load)
     active = job("failure", agents)
     with pytest.raises(RetryRequested if exit_process else EtudeError):
         hold_group(group(active), directory=tmp_path)
@@ -407,7 +407,7 @@ def test_loading_failure_never_records_success_and_only_process_exit_retries(
     finally:
         db.close()
     if exit_process:
-        repaired = job("failure", Agents(load=load, config=Loading()))
+        repaired = job("failure", Agents(load=load))
         assert hold_group(group(repaired), directory=tmp_path)[0].played == 1
 
 
@@ -420,7 +420,7 @@ def test_plain_games_use_the_pool_without_agents(
 
 
 def test_play_arity_and_removed_workers_are_refused() -> None:
-    agents = Agents(load=load, config=Loading())
+    agents = Agents(load=load)
     with pytest.raises(LauncherError, match="and agents"):
         job("bad", agents).model_copy(update={"play": plain}).plain()
     with pytest.raises(LauncherError, match="without agents"):
@@ -462,7 +462,7 @@ def test_group_execution_respects_declared_agent_memory(
         return wait(signals, timeout=timeout, return_when=return_when)
 
     monkeypatch.setattr("etude.eval.run.wait", count_games)
-    agents = Agents(load=load, config=Loading(), memory_gb=memory_gb)
+    agents = Agents(load=load, memory_gb=memory_gb)
     selected = group(*(job(name, agents) for name in ("one", "two", "three")))
     assert [result.played for result in hold_group(selected, directory=tmp_path)] == [1, 1, 1]
     assert max(outstanding) == concurrent
@@ -486,24 +486,24 @@ class Echo:
         return rows
 
 
-def echo(player: Player, config: Loading) -> Agent:
+def echo(checkpoint: CheckpointRef) -> Agent:
     return Echo()
 
 
 def test_batch_size_and_delay_flush_with_a_controlled_clock() -> None:
     parent, child = get_context("spawn").Pipe()
-    player = Code(name="one")
-    batches = _Batches(echo, Loading(), 2, 0.5, 1024)
+    player = checkpoint("one")
+    batches = _Batches(echo, 2, 0.5, 1024)
     try:
-        batches.add(child, Request(player, [1], "first", "a"), 10)
+        batches.add(child, Request(player.checkpoint, [1], "first", "a", player.key), 10)
         batches.flush(10.49)
         assert not parent.poll()
-        batches.add(child, Request(player, [2], "second", "b"), 10.49)
+        batches.add(child, Request(player.checkpoint, [2], "second", "b", player.key), 10.49)
         full = batches.flush(10.49)
         assert parent.recv() == Answer([1])
         assert parent.recv() == Answer([2])
         assert batches.loads == 1
-        batches.add(child, Request(player, [3], "third", "c"), 11)
+        batches.add(child, Request(player.checkpoint, [3], "third", "c", player.key), 11)
         delayed = batches.flush(11.5)
         assert parent.recv() == Answer([3])
         assert [len(batch.rows) for batch in [*full, *delayed]] == [2, 1]
@@ -514,7 +514,7 @@ def test_batch_size_and_delay_flush_with_a_controlled_clock() -> None:
 
 def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_rows() -> None:
     players = [
-        Inference().player(
+        Held().player(
             CheckpointRef(
                 key=f"{name}/checkpoints/model",
                 artifact=ArtifactRef(uri=f"file:///unused/{name}", sha256="0" * 64, size_bytes=1),
@@ -523,23 +523,23 @@ def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_rows() -> N
         for name in ("a", "b", "c")
     ]
     a, b, c = players
-    batches = _Batches(echo, Loading(), 1, 0.5, 2)
+    batches = _Batches(echo, 1, 0.5, 2)
     parent, child = get_context("spawn").Pipe()
     try:
         for player in (a, b):
-            batches.add(child, Request(player, [player.name], "one", "m"), 0)
+            batches.add(child, Request(player.checkpoint, [player.name], "one", "m", player.key), 0)
             batches.flush(0)
             assert parent.recv() == Answer([player.name])
         # A future row protects a even though it is the oldest loaded player.
         batches.max_batch = 2
-        batches.add(child, Request(a, ["a"], "one", "m"), 2)
-        batches.add(child, Request(c, ["c"], "two", "n"), 1)
+        batches.add(child, Request(a.checkpoint, ["a"], "one", "m", a.key), 2)
+        batches.add(child, Request(c.checkpoint, ["c"], "two", "n", c.key), 1)
         batches.flush(1.5)
         assert parent.recv() == Answer(["c"])
         batches.flush(2.5)
         assert parent.recv() == Answer(["a"])
         assert batches.loads == 3
-        batches.add(child, Request(b, ["b"], "one", "m"), 3)
+        batches.add(child, Request(b.checkpoint, ["b"], "one", "m", b.key), 3)
         batches.flush(3.5)
         assert parent.recv() == Answer(["b"])
         assert batches.loads == 4  # b was evicted to make room for c.
@@ -553,12 +553,12 @@ class WrongAnswers:
         return []
 
 
-def wrong_answers(player: Player, config: Loading) -> Agent:
+def wrong_answers(checkpoint: CheckpointRef) -> Agent:
     return WrongAnswers()
 
 
 def test_bad_batch_answers_fail_all_asking_tournaments(tmp_path: Path) -> None:
-    agents = Agents(load=wrong_answers, config=Loading(), max_delay_seconds=0.25)
+    agents = Agents(load=wrong_answers, max_delay_seconds=0.25)
     selected = group(job("one", agents), job("two", agents))
     with pytest.raises(EtudeError, match="match_failed"):
         hold_group(selected, directory=tmp_path)
@@ -581,14 +581,15 @@ from etude.jobs import Agents, EvalJob, ExperimentState
 from etude.eval.records import Code, RoundRobin
 from etude.eval.match import environment
 from etude.spec import Runtime
-from examples.agent_models import Loading, load
+from examples.agent_models import load
+from examples.agent_game import checkpoint
 from examples.agent_game import play
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
-    agents = Agents(load=load, config=Loading())
+    agents = Agents(load=load)
     return [EvalJob(tournament=RoundRobin(name=name, environment=environment("agents"),
                    configs=({{"lane": name}},), games=1),
-                   enter=(Code(name="left"), Code(name="right")), play=play, agents=agents,
+                   enter=(checkpoint("left"), checkpoint("right")), play=play, agents=agents,
                    repo=None, runtime=Runtime(python={command_python!r}), max_hours=0.05)
             for name in ("one", "two")]
 """
@@ -645,7 +646,8 @@ from tempfile import TemporaryDirectory
 from etude.call import Function
 from etude.eval.agents import Answer
 from etude.eval.game import play_match
-from etude.eval.records import Code, Match
+from etude.eval.records import Match
+from examples.agent_game import checkpoint
 
 counts = {"sent": 0, "received": 0}
 with TemporaryDirectory(dir="/tmp", prefix="etude-test-") as scratch, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
@@ -662,7 +664,7 @@ with TemporaryDirectory(dir="/tmp", prefix="etude-test-") as scratch, socket.soc
     thread = threading.Thread(target=answer)
     thread.start()
     result = play_match(Function(module="light_agent_game", name="play", path=sys.argv[1]),
-                        Match(players=(Code(name="one"),)), address)
+                        Match(players=(checkpoint("one"),)), address)
     thread.join()
 assert counts == {"sent": 1, "received": 1}
 print(result.imports.model_dump_json())
@@ -696,9 +698,7 @@ def stop_parent(match: Match, agents: Sequence[Agent]) -> Tables:
 
 def test_sigterm_reaps_agents_and_games_and_records_retry(tmp_path: Path) -> None:
     before = {p.pid for p in active_children()}
-    active = job("stop", Agents(load=load, config=Loading())).model_copy(
-        update={"play": stop_parent}
-    )
+    active = job("stop", Agents(load=load)).model_copy(update={"play": stop_parent})
     with pytest.raises(Terminated):
         hold_group(group(active), directory=tmp_path)
     assert {p.pid for p in active_children()} <= before
@@ -707,17 +707,17 @@ def test_sigterm_reaps_agents_and_games_and_records_retry(tmp_path: Path) -> Non
 
 
 def test_a_failed_load_is_not_attempted_again_in_the_run() -> None:
-    batches = _Batches(raises_load, Loading(), 1, 0, 10)
+    batches = _Batches(raises_load, 1, 0, 10)
     parent, child = get_context("spawn").Pipe()
     try:
-        player = Code(name="one")
-        batches.add(child, Request(player, [1], "one", "a"), 0)
+        player = checkpoint("one")
+        batches.add(child, Request(player.checkpoint, [1], "one", "a", player.key), 0)
         batches.flush(0)
         first = parent.recv()
         assert first.error and "fixture loading error" in first.error
         # If loading is attempted a second time this function would now succeed.
         batches.load = echo
-        batches.add(child, Request(player, [2], "two", "b"), 1)
+        batches.add(child, Request(player.checkpoint, [2], "two", "b", player.key), 1)
         batches.flush(1)
         assert parent.recv() == first
         assert batches.loads == 0
@@ -791,7 +791,7 @@ def fails_game(match: Match, agents: Sequence[Agent]) -> Tables:
 
 
 def test_a_game_failure_stops_only_its_tournament(tmp_path: Path) -> None:
-    agents = Agents(load=load, config=Loading())
+    agents = Agents(load=load)
     bad = job("bad", agents).model_copy(update={"play": fails_game})
     with pytest.raises(EtudeError, match="match_failed"):
         hold_group(group(bad, job("good", agents)), directory=tmp_path)
@@ -826,10 +826,11 @@ from heavy_fixture_game import play
 from etude.eval.match import environment
 from etude.eval.records import Code, RoundRobin
 from etude.jobs import Agents, EvalGroup, EvalJob, evaluation_group, hold_group
-from examples.agent_models import Loading, load
-agents = Agents(load=load, config=Loading()) if sys.argv[2] == "True" else None
+from examples.agent_models import load
+from examples.agent_game import checkpoint
+agents = Agents(load=load) if sys.argv[2] == "True" else None
 jobs = [EvalJob(tournament=RoundRobin(name=name, environment=environment("heavy"), configs=({},), games=1),
-               enter=(Code(name="one"), Code(name="two")), experiment="heavy", play=play,
+               enter=(checkpoint("one"), checkpoint("two")), experiment="heavy", play=play,
                agents=agents, repo=None, max_hours=0.1) for name in ("first", "second")]
 hold_group(EvalGroup(evaluations=tuple(evaluation_group(job).evaluations[0] for job in jobs)),
            directory=sys.argv[1])
@@ -857,7 +858,7 @@ def test_agent_startup_failure_reports_retryable_matches(
     (tmp_path / "bad_agent_import_fixture.py").write_text(
         "import os\nraise RuntimeError('startup: ' + os.environ['ETUDE_FIXTURE_TOKEN'])\n"
     )
-    selected = group(job("startup", Agents(load=load, config=Loading())))
+    selected = group(job("startup", Agents(load=load)))
     spec = selected.evaluations[0]
     assert spec.agents is not None
     spec = spec.model_copy(
@@ -893,19 +894,19 @@ class RaisingAgent:
         raise ValueError("fixture acting error")
 
 
-def raises_act(player: Player, config: Loading) -> Agent:
+def raises_act(checkpoint: CheckpointRef) -> Agent:
     return RaisingAgent()
 
 
-def retry_load(player: Player, config: Loading) -> Agent:
+def retry_load(checkpoint: CheckpointRef) -> Agent:
     raise RetryRequested("fixture transient loading error")
 
 
 @pytest.mark.parametrize("loader", [raises_load, raises_act, wrong_answers, retry_load])
 def test_caught_agent_errors_fail_matches_without_publishing_returned_rows(
-    tmp_path: Path, loader: Callable[[Player, Loading], Agent]
+    tmp_path: Path, loader: Callable[[CheckpointRef], Agent]
 ) -> None:
-    agents = Agents(load=loader, config=Loading(), max_delay_seconds=0.25)
+    agents = Agents(load=loader, max_delay_seconds=0.25)
     jobs = [
         job(name, agents).model_copy(update={"play": catches_agent_error})
         for name in ("one", "two")
@@ -930,12 +931,16 @@ def test_caught_agent_errors_fail_matches_without_publishing_returned_rows(
         db.close()
 
 
-def selective_load(player: Player, config: Loading) -> Agent:
-    if player.name == "broken":
-        if config.bias == 2:
-            raise RetryRequested("fixture player unavailable")
+def selective_load(checkpoint: CheckpointRef) -> Agent:
+    if str(checkpoint.key) == "broken":
         raise ValueError("fixture broken player")
-    return load(player, config)
+    return load(checkpoint)
+
+
+def selective_retry_load(checkpoint: CheckpointRef) -> Agent:
+    if str(checkpoint.key) == "broken":
+        raise RetryRequested("fixture player unavailable")
+    return load(checkpoint)
 
 
 def asks_or_returns(match: Match[dict[str, str]], agents: Sequence[Agent]) -> Tables:
@@ -955,11 +960,11 @@ def test_loader_failure_reaches_undispatched_matches_across_tournaments(
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3 if in_flight else 2)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
-    agents = Agents(load=selective_load, config=Loading(bias=2 if retry else 1))
+    agents = Agents(load=selective_retry_load if retry else selective_load)
     jobs = [
         job(name, agents).model_copy(
             update={
-                "enter": (Code(name="broken"), Code(name="left"), Code(name="right")),
+                "enter": (checkpoint("broken"), checkpoint("left"), checkpoint("right")),
                 "play": catches_agent_error if in_flight else asks_or_returns,
             }
         )
@@ -1002,11 +1007,11 @@ def test_loader_failure_preserves_previously_delivered_matches(
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
-    agents = Agents(load=selective_load, config=Loading())
+    agents = Agents(load=selective_load)
     jobs = [
         job(name, agents).model_copy(
             update={
-                "enter": (Code(name="broken"), Code(name="left"), Code(name="right")),
+                "enter": (checkpoint("broken"), checkpoint("left"), checkpoint("right")),
                 "play": returns_before_loading,
             }
         )

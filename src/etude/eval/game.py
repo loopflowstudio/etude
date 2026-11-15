@@ -19,6 +19,7 @@ from typing import cast
 
 from etude.call import Function
 from etude.eval.agents import connect_agents
+from etude.eval.composition import build_agents
 from etude.eval.records import Match
 from etude.eval.resources import THREAD_VARIABLES
 from etude.eval.result import Result, Tables
@@ -106,6 +107,7 @@ def play_match(
     agents: str | None = None,
     checkout: str | None = None,
     tournament: str = "",
+    build: Function | None = None,
 ) -> Execution:
     before = _startup_modules if _startup_modules is not None else frozenset(sys.modules)
     first: str | None = None
@@ -143,7 +145,10 @@ def play_match(
         if agents is None:
             result = play(checked)
         else:
-            with connect_agents(agents, match.players, tournament, match.key) as players:
+            with connect_agents(agents) as connection:
+                players = build_agents(
+                    match.players, connection, tournament, match.key, build, checkout
+                )
                 result = play(checked, players)
         return Execution(result=result, seconds=time.monotonic() - started, imports=observed())
     except Exception as error:

@@ -106,10 +106,11 @@ them on this computer instead.
 
 Eval jobs that can run together share one machine, rented once enough
 estimated work is waiting or training has ended (new tournaments start
-without an estimate). Write how a player is loaded beside the game
-(`EvalJob(..., agents=Agents(load=load, config=Loading()))`, with
-`play(match, agents)`) and Etude loads each player once there, in one
-process, and batches every game's moves to it
+without an estimate). Write `load(checkpoint)` beside the game
+(`EvalJob(..., agents=Agents(load=load))`, with `play(match, agents)`) and
+Etude shares each loaded checkpoint across players, games and tournaments.
+Author records compose players; a game-side `build(player, leaves)` hook
+builds their agents over the shared, batched networks
 ([agents](docs/evaluation.md#agents)).
 
 Everything a run records goes to your own directory or S3 bucket. Saved state and checkpoints are JSON

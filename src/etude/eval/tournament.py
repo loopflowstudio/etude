@@ -53,7 +53,6 @@ from etude.eval.records import (
     IDENTIFIER,
     TOURNAMENT_FILE,
     Benchmark,
-    CheckpointPlayer,
     Environment,
     Line,
     Match,
@@ -68,6 +67,7 @@ from etude.eval.records import (
     digest,
     folder_name,
     outcomes,
+    player_checkpoints,
     validate_checkpoints,
 )
 from etude.eval.result import EvalResult, Result, Tables
@@ -460,9 +460,7 @@ def _called(
         for each in tournament.schedule()
         if not on_the_go or each.checkpoint is not None or not added.checkpoints
     }
-    seated = tuple(
-        p.checkpoint for m in matches.values() for p in m.players if isinstance(p, CheckpointPlayer)
-    )
+    seated = tuple(c for m in matches.values() for p in m.players for c in player_checkpoints(p))
     keys = {c.key for c in seated}
     validate_checkpoints((*seated, *(c for c in stored.checkpoints if c.key in keys)))
     ordered_keys = sorted(matches)
@@ -488,7 +486,11 @@ def _called(
 def _found(seated: Seated) -> tuple[str, str, tuple[tuple[tuple[str | None, ...], int], ...]]:
     """What a `Seated` plays, by key: equal for one found again at another file."""
     pairings = tuple(
-        (tuple(None if ref is None else str(ref.key) for ref in each.seats), each.games)
+        (
+            tuple(None if ref is None else str(ref.key) for ref in each.seats)
+            + tuple(f"{key}:{ref.key}" for key, ref in sorted(each.resolved.items())),
+            each.games,
+        )
         for each in seated.pairings
     )
     return seated.seating, str(seated.checkpoint), pairings
@@ -565,11 +567,11 @@ def _stored(tournament: Benchmark | RoundRobin, runs: StoredRuns) -> _Stored:
         delivered={key: run for key, (_, run) in newest.items()},
         failed={key: retry for key, (_, _, retry) in failures.items() if key not in newest},
         checkpoints=tuple(
-            p.checkpoint
+            c
             for items in records.values()
             for record in items
             for p in record.match.players
-            if isinstance(p, CheckpointPlayer)
+            for c in player_checkpoints(p)
         ),
     )
 
@@ -623,7 +625,7 @@ class ScorePoint(Record):
     # Its key (`etude.eval.records.CheckpointId`), encoded.
     checkpoint: str
     # What the checkpoint's players are called: the latest name its seats give, the least of
-    # several players'. A benchmark's inference seat names it for its file (`Inference.model`).
+    # several players'. A benchmark's held seat names it for its checkpoint file.
     name: str
     # None for a checkpoint no training run under the source recorded.
     ordinal: int | None
@@ -686,11 +688,11 @@ def scores(
                 select checkpoint, min(name) as name from players where checkpoint is not null
                 group by checkpoint
             )
-            select s.seating, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t."at",
+            select s.seating, t.run, t.experiment, s.checkpoint, coalesce(n.name, s.checkpoint), t.ordinal, t."at",
                 r.match, sum(r._value), sum(r._per), count(*)
             from r join _held using (run, match)
             join schedule s on s.tournament = ? and s.match = r.match
-            join named n on n.checkpoint = s.checkpoint
+            left join named n on n.checkpoint = s.checkpoint
             left join training_checkpoints t on t.checkpoint = s.checkpoint
             group by s.seating, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t."at",
                 r.match

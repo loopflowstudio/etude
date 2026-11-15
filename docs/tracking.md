@@ -558,7 +558,7 @@ control. Ask for a setup under a config's `setup` key, which is part of no
 identity; `play` returns the one it actually used as `Result.execution`, read
 alongside `matches.seed` and `seats.commit` in `statsdb`
 ([evaluation](evaluation.md#eval-runs)).
-Scientific differences, such as search budgets in `Inference.config`, remain
+Scientific differences, such as search budgets in author player records, remain
 distinct players. A seating fixes the variant each seat plays, so a curve
 draws the variants its selected seatings name; where one point would pool two
 configs of one seat, it names the ambiguity instead. Select the intended

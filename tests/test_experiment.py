@@ -21,7 +21,7 @@ from etude.declarations import Experiment, read_experiment
 from etude.errors import EtudeError, LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.eval.records import Benchmark, Code, Held, Seating
 from etude.eval.tournament import evaluating, scores
 from etude.experiment import observe
 from etude.jobs import EvalJob, ExperimentState, _hold, evaluation_group
@@ -35,11 +35,12 @@ from etude.train.read import read
 from etude.train.tracking import TrainingRun as Run_
 from etude.train.tracking import track
 from tests.eval.games import play, play_catching_errors, play_failing_deal_one
+from tests.eval.stored import stored_inference
 from tests.experiments import authored
 
 WORLD = environment("duel", config={"world": "w6"})
 DEALS = tuple({"deal": deal} for deal in range(2))
-DIRECT = Inference(config={"search": 0})
+DIRECT = stored_inference(config={"search": 0})
 
 
 def heuristic(tmp_path: Path) -> Code:
@@ -526,8 +527,9 @@ def test_a_tracked_checkpoints_seat_says_where_its_run_stood_and_its_line(tmp_pa
     run.finish(timeout=30)
     (saved,) = observe(bucket, "ppo").run("ppo-1").checkpoints
     assert saved.ref.at == saved.at
-    assert authored(saved.at) == authored(saved.player(DIRECT).checkpoint.at) == {"updates": 100}
-    assert saved.ref.line == saved.player(DIRECT).checkpoint.line == "ppo-1"
+    player = saved.player(Held())
+    assert authored(saved.at) == authored(player.checkpoint.at) == {"updates": 100}
+    assert saved.ref.line == player.checkpoint.line == "ppo-1"
 
 
 def test_a_checkpoint_carries_the_wall_time_its_record_stored(tmp_path: Path) -> None:
@@ -584,12 +586,13 @@ def test_a_finished_run_without_checkpoints_has_no_final(tmp_path: Path) -> None
 
 CAPACITY = """
 from etude.eval.match import environment
-from etude.eval.records import Aligned, Benchmark, Fraction, Inference, Seating
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import Aligned, Benchmark, Fraction, Seating
 from etude.jobs import EvalJob
 from etude.report import Curve, Matches, Report, Score
 from tests.eval.games import play
 
-DIRECT = Inference(config={"search": 0})
+DIRECT = stored_inference(config={"search": 0})
 DEALS = ({"deal": 0},)
 
 
@@ -597,13 +600,13 @@ def eval_jobs(state):
     seatings = (
         Seating(
             name="half-training",
-            players=(DIRECT, Fraction(clock="updates", value=0.5, inference=DIRECT)),
+            players=(DIRECT, stored_relative(Fraction(clock="updates", value=0.5), DIRECT)),
             configs=DEALS,
             games=2,
         ),
         Seating(
             name="large vs small",
-            players=(DIRECT, Aligned(clock="updates", job="small", inference=DIRECT)),
+            players=(DIRECT, stored_relative(Aligned(clock="updates", job="small"), DIRECT)),
             configs=DEALS,
             games=2,
         ),

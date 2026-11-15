@@ -21,7 +21,6 @@ from etude.eval.records import (
     Benchmark,
     CheckpointPlayer,
     Code,
-    Inference,
     Line,
     Match,
     RoundRobin,
@@ -35,13 +34,14 @@ from etude.records import ArtifactRef, Clock
 from etude.storage import DirectoryStorage
 from etude.train.tracking import track
 from tests.eval.games import play, play_failing_deal_one
+from tests.eval.stored import stored_inference, stored_relative
 from tests.experiments import authored
 from tests.run.storage import MeasuredStorage
 
 WORLD = environment("duel", config={"world": "w6"})
 OTHER = environment("duel", config={"world": "w7"})
 DEALS = tuple({"deal": deal} for deal in range(3))
-DIRECT, SEARCH = Inference(config={"search": 0}), Inference(config={"search": 2})
+DIRECT, SEARCH = stored_inference(config={"search": 0}), stored_inference(config={"search": 2})
 # The experiment trains the model and evaluates it.
 EXPERIMENT = "ppo"
 
@@ -103,7 +103,7 @@ def test_a_relative_seat_waits_for_its_checkpoint_and_a_batch_hold_plays_it_once
     )  # fmt: skip
     seating = Seating(
         name="large vs small",
-        players=(DIRECT, Aligned(clock="updates", job="small", inference=DIRECT)),
+        players=(DIRECT, stored_relative(Aligned(clock="updates", job="small"), DIRECT)),
         configs=DEALS[:1],
         games=2,
     )
@@ -161,7 +161,7 @@ def test_an_aligned_hours_seat_takes_the_other_jobs_latest_checkpoint_once_it_ha
          for ref, hours in zip(saved, positions, strict=True)]
         for line, positions in (("small-1", (0.9, 1.8, 2.7)), ("large-1", (1.0, 2.0, 3.0)))
     )  # fmt: skip
-    seat = Aligned(clock="running_hours", job="small", at_or_before=True, inference=DIRECT)
+    seat = stored_relative(Aligned(clock="running_hours", job="small", at_or_before=True), DIRECT)
     seating = Seating(name="large vs small", players=(DIRECT, seat), configs=DEALS[:1], games=2)
     benchmark = Benchmark(name="paired", environment=WORLD, seatings=(seating,))
 
@@ -306,13 +306,13 @@ def _agent(player: object) -> object:
             "checkpoint": player["checkpoint"]["key"],
             "code": None,
             "recorded": None,
-            "config": player["inference"]["config"],
+            "config": player["config"],
         }
         return {
             "key": key,
             "name": player["name"],
             "artifact": player["checkpoint"]["artifact"],
-            "version": player["inference"]["version"],
+            "version": player["version"],
         }
     if player.get("kind") == "code":
         key = {
@@ -574,7 +574,7 @@ def test_a_seed_added_splits_the_point_again_and_counts_only_the_new_split(
     )  # fmt: skip
     seating = Seating(
         name="large vs small",
-        players=(DIRECT, Aligned(clock="updates", job="small", inference=DIRECT)),
+        players=(DIRECT, stored_relative(Aligned(clock="updates", job="small"), DIRECT)),
         configs=DEALS[:1],
         games=4,
     )

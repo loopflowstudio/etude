@@ -20,7 +20,7 @@ from etude.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, Inference, Match, RoundRobin
+from etude.eval.records import Benchmark, Code, Held, Match, RoundRobin
 from etude.experiment import observe
 from etude.jobs import EvalJob, JobOptions, TrainingJob, checkpoint_inputs
 from etude.launch.smoke import tiny
@@ -69,7 +69,8 @@ import json
 from pathlib import Path
 
 from etude.eval.match import Tables
-from etude.eval.records import Match, CheckpointPlayer
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import Held, Match, CheckpointPlayer
 
 
 def weights(checkpoint: Path) -> bytes:
@@ -340,7 +341,8 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
         {
             f"arena_duel_{form}.py": """from pydantic import BaseModel
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Inference, Seating
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import Held, Benchmark, Code, Seating
 """
             + PLAY
             + """
@@ -349,7 +351,7 @@ class ArenaConfig(BaseModel):
 
 def arena(config: ArenaConfig) -> Benchmark:
     return Benchmark(name="anchors", environment=environment("duel"), seatings=(
-        Seating(name="model vs fixed", players=(Inference(config={"search": 0}), Code(name="fixed")),
+        Seating(name="model vs fixed", players=(stored_inference(config={"search": 0}), Code(name="fixed")),
                 configs=({"deal": 1}, {"deal": 2}), games=config.games),))
 """
         },
@@ -587,7 +589,7 @@ def test_a_seated_artifact_wins_over_a_local_checkpoint_with_the_same_compact_ke
     assert checkpoint is not None
     state = observe(source, "review")
     assert state.checkpoint(checkpoint.key) is not None
-    match = Match(players=(checkpoint.player(Inference()), Code(name="fixed")), games=1)
+    match = Match(players=(checkpoint.player(Held()), Code(name="fixed")), games=1)
     saved = checkpoint_inputs([match], state, [checkpoint] if declared else [])
     assert saved[checkpoint.key].artifact == checkpoint.artifact
 
