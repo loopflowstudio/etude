@@ -575,8 +575,8 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         if command == "eval":
             assert observed_counts == Counts(git=2, database=2)
         elif command == "queue":
-            # Two reads find the target's known CPUs, which divide estimated game seconds.
-            assert observed_counts == Counts(git=12, database=46)
+            # Admission no longer reads target CPUs to estimate game duration.
+            assert observed_counts == Counts(git=12, database=44)
         else:
             assert observed_counts.model_copy(update={"database": 0}) == Counts(git=13)
         assert all(not key.endswith("weights.pt") for key in measured.got)
