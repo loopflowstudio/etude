@@ -64,6 +64,9 @@ class AgentFailure:
     loading: bool = False
 
 
+LATENCY_BUCKETS = 64
+
+
 class AgentConnection(Connection):
     """One game's direct channel; counters exclude the four-byte framing header.
 
@@ -79,7 +82,7 @@ class AgentConnection(Connection):
         self.answer_bytes = 0
         self.round_trip_seconds = 0.0
         self.transport_seconds = 0.0
-        self.latencies = [0] * 64
+        self.latencies = [0] * LATENCY_BUCKETS
 
     def send(self, obj: object) -> None:
         started = time.monotonic()
@@ -103,7 +106,7 @@ class AgentConnection(Connection):
 
     def observe(self, seconds: float) -> None:
         self.round_trip_seconds += seconds
-        bucket = min(63, max(0, int(seconds * 1_000_000).bit_length()))
+        bucket = min(LATENCY_BUCKETS - 1, max(0, int(seconds * 1_000_000).bit_length()))
         self.latencies[bucket] += 1
 
 

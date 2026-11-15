@@ -857,6 +857,14 @@ frozen panel, 158 ms per decision under Etude against 160 ms in a raw
   game bookkeeping.
   These durations overlap across concurrent games; do not divide their sum
   by run wall time to claim CPU utilization.
+  `started_monotonic` and `finished_monotonic` locate each game's `build` and
+  `play` interval on the same host's monotonic clock. Sort interval endpoints
+  across the group's reports and count starts minus finishes to see games in
+  play over time and the final tail. These coordinates cannot be compared
+  across hosts; older reports lack them, and killed processes may leave no
+  interval.
+  Games without `agents=` retain these intervals too, with zero inference
+  counters and no latency percentiles.
   Latency p50/p95 are upper bounds from 64 power-of-two microsecond buckets;
   sum `latency_buckets` across match reports before computing a run percentile.
   Do not average match percentiles. Reports include ordinary game failures;

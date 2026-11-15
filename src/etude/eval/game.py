@@ -19,7 +19,7 @@ from types import ModuleType
 from typing import cast
 
 from etude.call import Function
-from etude.eval.agents import AgentConnection, connect_agents
+from etude.eval.agents import LATENCY_BUCKETS, AgentConnection, connect_agents
 from etude.eval.composition import build_agents
 from etude.eval.records import Match
 from etude.eval.resources import THREAD_VARIABLES
@@ -93,6 +93,10 @@ class Performance(Record):
     latency_buckets: tuple[int, ...]
     round_trip_p50_seconds: float | None
     round_trip_p95_seconds: float | None
+    # Same-host monotonic coordinates allow concurrent play intervals to be overlaid.
+    # Released reports lack them; a killed process may leave no interval at all.
+    started_monotonic: float | None = None
+    finished_monotonic: float | None = None
 
 
 def _percentile(buckets: Sequence[int], percent: int) -> float | None:
@@ -109,21 +113,29 @@ def _percentile(buckets: Sequence[int], percent: int) -> float | None:
 
 
 def _performance(
-    connection: AgentConnection, seconds: float, tournament: str, match: str
+    connection: AgentConnection | None,
+    started: float,
+    finished: float,
+    tournament: str,
+    match: str,
 ) -> Performance:
+    round_trips = connection.round_trip_seconds if connection else 0.0
+    buckets = tuple(connection.latencies) if connection else (0,) * LATENCY_BUCKETS
     return Performance(
         tournament=tournament,
         match=match,
-        requests=connection.requests,
-        answers=connection.answers,
-        request_bytes=connection.request_bytes,
-        answer_bytes=connection.answer_bytes,
-        round_trip_seconds=connection.round_trip_seconds,
-        transport_seconds=connection.transport_seconds,
-        game_seconds=max(0.0, seconds - connection.round_trip_seconds),
-        latency_buckets=tuple(connection.latencies),
-        round_trip_p50_seconds=_percentile(connection.latencies, 50),
-        round_trip_p95_seconds=_percentile(connection.latencies, 95),
+        requests=connection.requests if connection else 0,
+        answers=connection.answers if connection else 0,
+        request_bytes=connection.request_bytes if connection else 0,
+        answer_bytes=connection.answer_bytes if connection else 0,
+        round_trip_seconds=round_trips,
+        transport_seconds=connection.transport_seconds if connection else 0.0,
+        game_seconds=max(0.0, finished - started - round_trips),
+        latency_buckets=buckets,
+        round_trip_p50_seconds=_percentile(buckets, 50),
+        round_trip_p95_seconds=_percentile(buckets, 95),
+        started_monotonic=started,
+        finished_monotonic=finished,
     )
 
 
@@ -176,14 +188,15 @@ def play_match(
 
     connection: AgentConnection | None = None
     play_started: float | None = None
-    play_seconds = 0.0
     started = time.monotonic()
     try:
         play = cast(Callable[..., Tables | Result], function.load(checkout))
         kind = _match_type(play, int(agents is not None))
         checked = kind.model_validate_json(match.model_dump_json()) if kind is not Match else match
         if agents is None:
+            play_started = time.monotonic()
             result = play(checked)
+            play_finished = time.monotonic()
         else:
             with connect_agents(agents) as connection:
                 play_started = time.monotonic()
@@ -191,23 +204,25 @@ def play_match(
                     match.players, connection, tournament, match.key, build, checkout
                 )
                 result = play(checked, players)
-                play_seconds = time.monotonic() - play_started
+                play_finished = time.monotonic()
         return Execution(
             result=result,
             seconds=time.monotonic() - started,
             imports=observed(),
-            performance=None
-            if connection is None
-            else _performance(connection, play_seconds, tournament, match.key),
+            performance=_performance(
+                connection, play_started, play_finished, tournament, match.key
+            ),
         )
     except Exception as error:
         # Exception dictionaries survive ProcessPoolExecutor transport; keep the real error type.
         setattr(error, "_etude_imports", observed().model_dump_json())
-        if connection is not None:
-            seconds = 0.0 if play_started is None else time.monotonic() - play_started
+        if play_started is not None:
+            finished = time.monotonic()
             setattr(
                 error,
                 "_etude_performance",
-                _performance(connection, seconds, tournament, match.key).model_dump_json(),
+                _performance(
+                    connection, play_started, finished, tournament, match.key
+                ).model_dump_json(),
             )
         raise

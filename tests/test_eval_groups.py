@@ -26,7 +26,7 @@ from etude.declarations import Experiment, read_experiment
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval.agents import Agent, AgentConnection, Answer, Request
 from etude.eval.batching import _Batches
-from etude.eval.game import Execution, _performance
+from etude.eval.game import Execution, Performance, _performance
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Code, Config, Held, Match, RoundRobin
@@ -1322,10 +1322,29 @@ def test_protocol_percentiles_bound_injected_latencies_and_exclude_inference_wai
     with AgentConnection(parent.detach()) as connection, child:
         for seconds in (0.001, 0.0015, 0.003):
             connection.observe(seconds)
-        report = _performance(connection, 1.0, "fixture", "match")
+        report = _performance(connection, 9.0, 10.0, "fixture", "match")
     assert report.round_trip_p50_seconds == 0.002048
     assert report.round_trip_p95_seconds == 0.004096
     assert sum(report.latency_buckets) == 3
     assert report.round_trip_seconds == pytest.approx(0.0055)
     assert report.game_seconds == pytest.approx(0.9945)
+    assert report.started_monotonic == 9.0
+    assert report.finished_monotonic == 10.0
     assert report.transport_seconds == 0.0
+
+
+def test_agentless_game_intervals_have_no_inference_wait(tmp_path: Path) -> None:
+    selected = group(job("plain", None))
+    assert [r.played for r in hold_group(selected, directory=tmp_path)] == [1]
+    paths = list((tmp_path / "grouped/artifacts/agents").glob("protocol-*.json"))
+    assert len(paths) == 1
+    report = Performance.model_validate_json(paths[0].read_bytes())
+    assert report.started_monotonic is not None
+    assert report.finished_monotonic is not None
+    assert report.game_seconds == report.finished_monotonic - report.started_monotonic
+    assert report.requests == report.answers == 0
+    assert report.round_trip_seconds == report.transport_seconds == 0.0
+    assert sum(report.latency_buckets) == 0
+    assert report.round_trip_p50_seconds is report.round_trip_p95_seconds is None
+    assert [r.played for r in hold_group(selected, directory=tmp_path)] == [0]
+    assert len(list((tmp_path / "grouped/artifacts/agents").glob("protocol-*.json"))) == 1

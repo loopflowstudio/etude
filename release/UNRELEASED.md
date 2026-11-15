@@ -211,6 +211,9 @@ CPU quotas set CPU game capacity and model thread budgets; a visible NVIDIA
 GPU selects batch-sized game capacity instead. The loader selects its device, and
 `ETUDE_SCRATCH_DIR` supplies temporary fast scratch. A run with agents keeps
 which rows shared each batch in `artifacts/agents/batches.json`.
+Per-match protocol reports retain play intervals on the host's monotonic
+clock, including games without agents, so concurrent games and the final
+tail can be reconstructed. Killed games may leave no interval.
 On CPUs, a small model plays faster without `agents=`: with a frozen Manabot
 Small checkpoint on 32 CPUs, one agent process reached at most about half the
 rate of a process per game holding the model. A frozen Large GPU panel favored
