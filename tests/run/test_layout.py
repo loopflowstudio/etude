@@ -54,6 +54,8 @@ def test_shared_run_code_imports_no_kind_of_run_and_training_imports_no_evaluati
 def test_only_the_top_level_command_and_typed_jobs_import_evaluation() -> None:
     composers = {
         SOURCE / "etude/cli.py",
+        SOURCE / "etude/controller.py",
+        SOURCE / "etude/declarations.py",
         SOURCE / "etude/jobs.py",
         SOURCE / "etude/experiment.py",
         SOURCE / "etude/page.py",

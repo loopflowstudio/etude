@@ -305,8 +305,11 @@ single-file checkpoints hide nested input names (`start/checkpoint.json`).
   local pool), and `launch` again, immediately and after waiting. In-flight matches read
   `0 new, N running`. `--max-usd 1.5` with `max_usd=1` per job holds the second seed.
 - Ctrl-C: a slower copy of the file (`pause=0.5`) under the `Popen`/`SIGINT` driver after
-  ~7 s gives exit 75; the next pass prints the stopped run as `running`; resume with
-  `--job base --seed 1 --resume`.
+  ~7 s gives exit 75; the next pass prints `stopped; --job base --seed N --resume`
+  (which seed depends on timing); follow that hint.
+- Cancelled before start: `etude queue two.py`, `etude cancel --experiment two`, wait;
+  the next pass prints `failed; --job base --seed 0 --resume`; following it with both
+  `etude train` and `etude launch` must start the run.
 - Returning user: `git worktree add --detach /tmp/X main`, a lab whose pyproject points
   at it, train `runs()` files (compact `ppo@0`, `solo`) and `etude queue` (makes
   `launcher-19.db`). Repoint the pyproject at this checkout, `uv lock`, rename per

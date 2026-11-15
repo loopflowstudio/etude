@@ -639,3 +639,15 @@ class Standing(Record):
 
     record: RunRecord
     status: Status
+
+    @property
+    def committed_usd(self) -> Decimal:
+        """What the run holds of an experiment's dollars: its cost once done, its limit until then."""
+        return (
+            self.status.usd if self.status.done else self.record.launch.spec.max_usd or Decimal(0)
+        )
+
+    @property
+    def placement(self) -> Literal["queued", "running"]:
+        """Whether a run that has not ended still waits for a machine."""
+        return "queued" if self.status.phase in {"queued", "renting"} else "running"
