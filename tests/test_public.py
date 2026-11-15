@@ -23,7 +23,7 @@ SURFACE: dict[str, tuple[str, ...]] = {
         "OutMembers",
     ),
     "etude.experiment": ("observe",),
-    "etude.train.tracking": ("track", "TrainingRun"),
+    "etude.train.tracking": ("EtudeWarning", "TrainingRun", "local_launch", "seal_runs", "track"),
     "etude.train.records": ("Time", "Step"),
     "etude.train.read": (
         "read",
@@ -161,48 +161,51 @@ SURFACE: dict[str, tuple[str, ...]] = {
 }
 
 
-def test_supported_names_resolve_in_their_defining_modules() -> None:
-    declared_modules = set()
+def test_supported_names_are_locally_declared() -> None:
+    declared_modules: set[str] = set()
     for path in (ROOT / "src/etude").rglob("*.py"):
         tree = ast.parse(path.read_text())
-        if any(
-            isinstance(node, ast.Assign)
+        declarations = [
+            node.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
             and any(
                 isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets
             )
-            for node in tree.body
-        ):
-            declared_modules.add(".".join(path.relative_to(ROOT / "src").with_suffix("").parts))
+        ]
+        if not declarations:
+            continue
+        module = ".".join(path.relative_to(ROOT / "src").with_suffix("").parts)
+        declared_modules.add(module)
+        [declaration] = declarations
+        assert isinstance(declaration, ast.Tuple), module
+        assert ast.literal_eval(declaration) == SURFACE[module], module
+        local: set[str] = set()
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                local.add(node.name)
+            elif isinstance(node, ast.TypeAlias):
+                local.add(node.name.id)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                local.update(target.id for target in targets if isinstance(target, ast.Name))
+        assert set(SURFACE[module]) <= local, (module, set(SURFACE[module]) - local)
     assert declared_modules == set(SURFACE)
-    # Keep these broad author imports out of pytest's process: startup checks own
-    # their fresh interpreter and must never inherit this inventory's imports.
+
+
+def test_supported_names_resolve() -> None:
+    # Keep broad author imports out of pytest's process; startup checks must not
+    # inherit this inventory's imports. Syntax and ownership are checked above.
     result = subprocess.run(
         [
             sys.executable,
             "-c",
             f"""
-import ast
 import importlib
-from pathlib import Path
-surface = {SURFACE!r}
-for module, expected in surface.items():
+for module, names in {SURFACE!r}.items():
     loaded = importlib.import_module(module)
-    tree = ast.parse(Path(loaded.__file__).read_text())
-    declared = next(node for node in tree.body if isinstance(node, ast.Assign)
-                    and any(isinstance(t, ast.Name) and t.id == '__all__' for t in node.targets))
-    assert isinstance(declared.value, ast.Tuple), module
-    assert ast.literal_eval(declared.value) == expected, module
-    local = set()
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
-            local.add(node.name)
-        elif isinstance(node, ast.TypeAlias):
-            local.add(node.name.id)
-        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            local.update(t.id for t in targets if isinstance(t, ast.Name))
-    assert set(expected) <= local, (module, set(expected) - local)
-    for name in expected:
+    assert loaded.__all__ == names, module
+    for name in names:
         getattr(loaded, name)
 """,
         ],

@@ -95,10 +95,10 @@ from etude.train.manifest import Index, metric_names
 from etude.train.records import ParentRun, RowTable, checkpoint_name
 from etude.train.state import State, saved_states, state_folder, write_objects
 
+__all__ = ("EtudeWarning", "TrainingRun", "local_launch", "seal_runs", "track")
+
+
 # Compaction is bounded by bytes or elapsed cadence, independent of training steps.
-__all__ = ("track", "TrainingRun")
-
-
 PERMANENT_BYTES, RECENT_BLOCKS = 8_000_000, 64
 
 type Logged = Mapping[str, object]
@@ -1423,12 +1423,3 @@ def seal_runs(directory: Path | str) -> None:
         if declared is not None:
             names = [clock.name for clock in declared.clocks]
             seal_logs(root, [*names, *BUILT_IN_NAMES])
-
-
-__all__ = [
-    "EtudeWarning",
-    "TrainingRun",
-    "local_launch",
-    "seal_runs",
-    "track",
-]
