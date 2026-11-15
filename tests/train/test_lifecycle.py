@@ -190,7 +190,7 @@ def test_out_checkpoint_is_carried_once_and_relocated_without_a_second_copy(
     assert len(read(restored.parent, "e", "r").checkpoints) == 1
     saved = observe(restored.parent, "e").runs[0].checkpoints[0]
     assert saved.file == "out/nested/model.pt"
-    assert str(saved.key) == "r/out/nested/model.pt"
+    assert str(saved.key) == "e/r/out/nested/model.pt"
 
 
 def test_sync_carries_out_file_deletion_and_recreation_without_duplicate_bytes(

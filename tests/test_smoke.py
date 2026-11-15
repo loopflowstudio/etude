@@ -11,9 +11,11 @@ from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch.client import default, queue
 from etude.records import Clock
+from etude.smoke import smoke_file
 from etude.spec import Job, Runtime, SmokeForm
-from etude.storage import default_root
+from etude.storage import DirectoryStorage, default_root
 from etude.train.tracking import track
+from tests.run.storage import MeasuredStorage
 
 
 @pytest.fixture(autouse=True)
@@ -339,3 +341,48 @@ def eval_jobs(state):
     assert "smoke report: passed" in error
     assert sorted(source.rglob("*")) == before
     assert not default_root().exists()
+
+
+def test_policy_key_smoke_names_cross_experiment_seat(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = tmp_path / "source"
+    with track(
+        experiment="rival", run="small", job="small", directory=source, clocks=["updates"]
+    ) as run:
+        weights = run.out / "weights.pt"
+        weights.write_bytes(b"weights")
+        run.checkpoint(weights, updates=1)
+    with track(
+        experiment="tla-frontier", run="small", job="small", directory=source, clocks=["updates"]
+    ) as run:
+        weights = run.out / "weights.pt"
+        weights.write_bytes(b"frontier weights")
+        run.checkpoint(weights, updates=1)
+    file = tmp_path / "rival.py"
+    file.write_text("""
+from etude.checkpoints import PolicyKey
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Final, Inference, Seating
+from etude.jobs import EvalJob
+from tests.eval.games import play
+
+def eval_jobs(state):
+    direct = Inference()
+    return EvalJob(tournament=Benchmark(name="frontier", environment=environment("duel"),
+        seatings=(Seating(name="vs frontier", players=(direct,
+            Final(experiment="tla-frontier", inference=direct)), configs=({},), games=8),)),
+        checkpoints=state.policy(PolicyKey()).checkpoints, play=play, repo=None, max_hours=1)
+""")
+    measured = MeasuredStorage(DirectoryStorage(source))
+    smoked = smoke_file(file, steps=["eval"], source=measured)
+    assert smoked.rest[0].outcome == "not_smoked"
+    assert measured.listings == 1
+    # Discovery reads every run declaration; skipped opponents need no other records or bytes.
+    assert [key for key in measured.got if key.startswith("tla-frontier/")] == [
+        "tla-frontier/small/run.json"
+    ]
+    error = capsys.readouterr().err
+    assert "not smoked" in error and "cross-experiment seats: tla-frontier" in error
+    assert "no checkpoints" not in error

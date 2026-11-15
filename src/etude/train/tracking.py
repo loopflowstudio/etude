@@ -673,6 +673,7 @@ class TrainingRun(Run):
         /,
         *,
         tags: Sequence[str] = (),
+        role: str = "policy",
         **objects: object,
     ) -> ArtifactRef:
         """Store a saved model and record where every declared clock stood.
@@ -721,6 +722,15 @@ class TrainingRun(Run):
                 and Path(artifact).is_dir()
             )
             name = checkpoint_name(at, padded=folder_checkpoint)
+            if role != "policy":
+                if not role or any(
+                    c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+                    for c in role
+                ):
+                    raise ValueError(
+                        "checkpoint role must use letters, digits, underscores or hyphens"
+                    )
+                name = role + "." + name
             if artifact is None or callable(artifact):
                 if artifact is None and not objects:
                     raise ValueError("a checkpoint needs objects, a path, or an export function")
@@ -736,7 +746,7 @@ class TrainingRun(Run):
                     raise ValueError("checkpoint_file_changed")
                 # Etude's clocks always move on, so the same `at` is the author's.
                 same = all(known.at.get(n) == v for n, v in declared.items())
-                if same and _same_content(known.artifact, reference):
+                if same and known.role == role and _same_content(known.artifact, reference):
                     if staged is not None:
                         _remove(staged)
                     return known.artifact
@@ -754,6 +764,7 @@ class TrainingRun(Run):
                 if self._inherited is not None and self._inherited.line
                 else self.name,
                 ordinal=ordinal,
+                role=role,
                 artifact=reference,
                 at=at,
                 wall_ms=wall_ms,
