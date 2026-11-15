@@ -23,7 +23,6 @@ from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wai
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from queue import Empty
@@ -59,7 +58,7 @@ from etude.eval.records import (
     outcomes,
     player_checkpoints,
 )
-from etude.eval.resources import Cpus, divide_cpus
+from etude.eval.resources import Cpus, divide_cpus, seconds_left
 from etude.eval.result import EvalResult as EvalResult
 from etude.eval.result import Result as Result
 from etude.eval.result import Row
@@ -455,6 +454,15 @@ class Playing:
         self.skipped = len(self.run.matches) - len(self.pending)
 
 
+def _retain(name: str, report: Imports | Performance) -> None:
+    """Keep a game process's report beside the group's batches, when the group has a folder."""
+    if artifacts := os.environ.get("ETUDE_AGENTS_DIR"):
+        try:
+            DirectoryStorage(Path(artifacts)).put(name, report.model_dump_json().encode())
+        except OSError as error:
+            raise RetryRequested(f"game report {name} could not be retained") from error
+
+
 def play_together(
     plays: Sequence[Playing],
     *,
@@ -522,27 +530,15 @@ def play_together(
                 imports = Imports.model_validate_json(raw)
         if imports is not None and imports.pid not in reported_imports:
             reported_imports.add(imports.pid)
-            if artifacts := os.environ.get("ETUDE_AGENTS_DIR"):
-                try:
-                    DirectoryStorage(Path(artifacts)).put(
-                        f"game-imports-{imports.pid}.json", imports.model_dump_json().encode()
-                    )
-                except OSError as error:
-                    raise RetryRequested("game import report could not be retained") from error
+            _retain(f"game-imports-{imports.pid}.json", imports)
         performance = outcome.performance if isinstance(outcome, Execution) else None
         if performance is None and isinstance(
             raw_performance := getattr(outcome, "_etude_performance", None), str
         ):
             performance = Performance.model_validate_json(raw_performance)
-        if performance is not None and (artifacts := os.environ.get("ETUDE_AGENTS_DIR")):
+        if performance is not None:
             # The run writer distinguishes retries and tournaments with identical matches.
-            try:
-                DirectoryStorage(Path(artifacts)).put(
-                    f"protocol-{each.run.id}-{match.key}.json",
-                    performance.model_dump_json().encode(),
-                )
-            except OSError as error:
-                raise RetryRequested("game protocol report could not be retained") from error
+            _retain(f"protocol-{each.run.id}-{match.key}.json", performance)
         if each.agents and imports is not None and imports.warning and not warned_imports:
             print(imports.warning, file=sys.stderr, flush=True)
             warned_imports = True
@@ -613,16 +609,11 @@ def play_together(
                     for _ in range(workers):
                         start()
                     while running:
-                        deadline = os.environ.get("ETUDE_DEADLINE")
+                        left = seconds_left()
                         allowance = (
                             None
-                            if not deadline
-                            else max(
-                                0.0,
-                                datetime.fromisoformat(deadline).timestamp()
-                                - time.time()
-                                - max(each.run._slowest for each in plays),
-                            )
+                            if left is None
+                            else max(0.0, left - max(each.run._slowest for each in plays))
                         )
                         # Future is invariant; wait observes completion, never result values.
                         signals = cast(

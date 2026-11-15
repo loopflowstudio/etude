@@ -17,7 +17,6 @@ from collections.abc import Iterator, Sequence
 from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
 from multiprocessing.connection import Connection, wait
 from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
@@ -25,7 +24,7 @@ from queue import SimpleQueue
 from typing import TYPE_CHECKING, Protocol, cast
 
 from etude.errors import RetryRequested, explain
-from etude.eval.resources import Cpus, memory_bytes
+from etude.eval.resources import Cpus, agent_bytes, seconds_left
 
 if TYPE_CHECKING:
     from etude.checkpoints import CheckpointRef
@@ -123,7 +122,7 @@ class _RemoteAgent:
             self.connection.send(
                 Request(self.checkpoint, list(rows), self.tournament, self.match, self.player)
             )
-            if not self.connection.poll(_remaining()):
+            if not self.connection.poll(seconds_left()):
                 raise RetryRequested("agent response exceeded the evaluation deadline")
             answer = cast(Answer, self.connection.recv())
         except (EOFError, OSError) as error:
@@ -137,17 +136,10 @@ class _RemoteAgent:
         return answer.rows
 
 
-def _remaining() -> float | None:
-    deadline = os.environ.get("ETUDE_DEADLINE")
-    return (
-        None if not deadline else max(0, datetime.fromisoformat(deadline).timestamp() - time.time())
-    )
-
-
 @contextmanager
 def connect_agents(address: str) -> Iterator[AgentConnection]:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
-        peer.settimeout(_remaining())
+        peer.settimeout(seconds_left())
         try:
             peer.connect(address)
         except OSError as error:
@@ -214,11 +206,6 @@ def running_agents(
     address = str(Path(os.environ["ETUDE_SCRATCH_DIR"], "agents.sock"))
     context = multiprocessing.get_context("spawn")
     parent, child = context.Pipe()
-    memory = (
-        int(definition.memory_gb * 1024**3)
-        if definition.memory_gb is not None
-        else memory_bytes() // 2
-    )
     process = context.Process(
         target=_run,
         args=(
@@ -228,7 +215,7 @@ def running_agents(
             str((Path(checkout or ".") / definition.load.path).resolve()),
             definition.max_batch,
             definition.max_delay_seconds,
-            memory,
+            agent_bytes(definition.memory_gb),
             cpus.threads,
             child,
             str(artifacts),
@@ -260,7 +247,7 @@ def running_agents(
 
     observer = threading.Thread(target=observe_exit, name="etude-agents")
     try:
-        ready = wait([parent, process.sentinel], timeout=_remaining())
+        ready = wait([parent, process.sentinel], timeout=seconds_left())
         if parent not in ready:
             raise RetryRequested("agent process failed to start before the deadline")
         try:
@@ -283,7 +270,7 @@ def running_agents(
                 parent.send(None)
             except (OSError, EOFError):
                 pass
-        process.join(timeout=_remaining())
+        process.join(timeout=seconds_left())
         if process.is_alive():
             process.terminate()
             process.join()

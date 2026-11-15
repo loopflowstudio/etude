@@ -10,9 +10,11 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 THREAD_VARIABLES = (
@@ -86,6 +88,19 @@ def memory_bytes() -> int:
     return physical
 
 
+def agent_bytes(memory_gb: float | None) -> int:
+    """Loaded-checkpoint bytes the agent process may hold: declared, or half of memory."""
+    return int(memory_gb * 1024**3) if memory_gb is not None else memory_bytes() // 2
+
+
+def seconds_left() -> float | None:
+    """Seconds before the run's `ETUDE_DEADLINE`, never negative; None without one."""
+    deadline = os.environ.get("ETUDE_DEADLINE")
+    if not deadline:
+        return None
+    return max(0.0, datetime.fromisoformat(deadline).timestamp() - time.time())
+
+
 @dataclass(frozen=True)
 class Cpus:
     games: int
@@ -99,12 +114,11 @@ def divide_cpus(pending: int, *, agents: bool, memory_gb: float | None = None) -
     may reduce games further, but never leave queued work with zero capacity.
     """
     cpus = available_cpus()
-    memory = memory_bytes()
-    held = int(memory_gb * 1024**3) if memory_gb is not None else memory // 2 if agents else 0
+    held = agent_bytes(memory_gb) if agents else 0
     games = min(
         pending,
         max(1, cpus - max(1, (cpus + 7) // 8)) if agents else cpus,
-        max(1, (memory - held) // GAME_BYTES),
+        max(1, (memory_bytes() - held) // GAME_BYTES),
     )
     return Cpus(games=games, threads=max(1, cpus - games) if agents else 0)
 

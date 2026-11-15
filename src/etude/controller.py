@@ -6,7 +6,7 @@ new runs. The scheduler's public records are the only memory of a hand-down.
 
 import math
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -45,14 +45,16 @@ from etude.launch.commands import DEFAULT_MIN_EVAL_HOURS
 from etude.launch.listing import show_quote
 from etude.launch.records import CPU, GPU
 from etude.launch.server import selected
-from etude.records import Record
 from etude.run import located_runs
 from etude.smoke import smoke_file
 from etude.spec import Job, RunRequest, Smoke, Until
 from etude.storage import Storage, default_root
 
 
-class TournamentDecision(Record):
+@dataclass
+class TournamentDecision:
+    """What one pass found and did for a tournament; filled in as the pass decides."""
+
     tournament: str
     new: int
     running: int
@@ -64,10 +66,11 @@ class TournamentDecision(Record):
     stopped: tuple[str, ...] = ()
 
 
-class _PendingEvaluation(Record):
+@dataclass(frozen=True)
+class _PendingEvaluation:
     job: Job
     spec: Evaluation
-    decision: int
+    decision: TournamentDecision
 
 
 def source_for(pool: str | None, rent: str | None, source: str | None = None) -> str:
@@ -101,6 +104,22 @@ def source_for(pool: str | None, rent: str | None, source: str | None = None) ->
 
 def _fits(job: Job, committed: Decimal, max_usd: Decimal | None) -> bool:
     return max_usd is None or committed + (job.max_usd or Decimal(0)) <= max_usd
+
+
+def _resumed(
+    request: RunRequest, experiment: str, until: Until | None
+) -> tuple[RunRequest, Decimal]:
+    """The request as a resume under its standing record's id, and the dollars that record releases."""
+    request = request.model_copy(
+        update={
+            "resume": True,
+            "job": request.job.model_copy(update={"until": until or request.job.until}),
+        }
+    )
+    for item in client.standing(experiment):
+        if item.record.launch.spec.name == request.job.name and item.record.seed == request.seed:
+            return request.model_copy(update={"id": item.record.id}), item.committed_usd
+    return request, Decimal(0)
 
 
 def _eval_cpus(pool: str | None, rent: str | None) -> int | None:
@@ -206,27 +225,11 @@ def advance(
             requests = select_runs(requests, job=job, seed=seed)
         if resume and len(requests) != 1:
             raise LauncherError("--resume needs one run; select --job and --seed")
-        resumed = client.standing(experiment.name) if resume else ()
         for request in requests:
             if resume:
-                existing = next(
-                    (
-                        item
-                        for item in resumed
-                        if item.record.launch.spec.name == request.job.name
-                        and item.record.seed == request.seed
-                    ),
-                    None,
-                )
-                if existing is not None:
-                    request = request.model_copy(update={"id": existing.record.id})
-                    committed -= (
-                        existing.status.usd
-                        if existing.status.done
-                        else existing.record.launch.spec.max_usd or Decimal(0)
-                    )
-            known = None if resume else format_known_run(request, find_training_run(request, state))
-            if known is not None:
+                request, released = _resumed(request, experiment.name, until)
+                committed -= released
+            elif known := format_known_run(request, find_training_run(request, state)):
                 lines[request.id] = known
                 continue
             if not _fits(request.job, committed, max_usd):
@@ -234,13 +237,6 @@ def advance(
                     f"{request.id}  new, not queued: --max-usd {max_usd} (${committed:.2f} committed)"
                 )
                 continue
-            if resume:
-                request = request.model_copy(
-                    update={
-                        "resume": True,
-                        "job": request.job.model_copy(update={"until": until or request.job.until}),
-                    }
-                )
             new.append(request)
             lines[request.id] = f"{request.id}  new"
             committed += request.job.max_usd or Decimal(0)
@@ -321,7 +317,7 @@ def advance(
         stopped = {failed[m.key] for m in pending if m.key in failed and m.key not in retryable}
         if stopped and not retry_failed:
             stopped_runs.update(stopped)
-            done = done.model_copy(update={"stopped": tuple(sorted(stopped))})
+            done.stopped = tuple(sorted(stopped))
             pending = [
                 match for match in pending if match.key not in failed or match.key in retryable
             ]
@@ -330,7 +326,7 @@ def advance(
                 _PendingEvaluation(
                     job=executable,
                     spec=spec.model_copy(update={"matches": tuple(pending), "lines": policy_lines}),
-                    decision=len(decisions),
+                    decision=done,
                 )
             )
             running.update(m.key for m in pending)
@@ -343,8 +339,7 @@ def advance(
         if mode == "local":
             held = _play_here(members, executables[0], state, policy_lines, source, directory)
             for each, result in zip(group, held, strict=True):
-                n = each.decision
-                decisions[n] = decisions[n].model_copy(update={"played": result.played})
+                each.decision.played = result.played
             continue
         executable = group_evaluations(executables, members, state)
         keys = sorted(m.key for spec in members for m in spec.matches or ())
@@ -363,55 +358,46 @@ def advance(
         hours = None
         if estimates and all(seconds is not None for seconds in estimates):
             hours = sum(seconds or 0 for seconds in estimates) / (cpu_capacity or 1) / 3600
-        changes: dict[str, object]
+        held_back: Literal["not queued", "waiting"] | None = None
+        reason: str | None = None
         if not _fits(executable, committed, max_usd):
-            changes = {
-                "state": "not queued",
-                "reason": f"--max-usd {max_usd} (${committed:.2f} committed)",
-            }
+            held_back = "not queued"
+            reason = f"--max-usd {max_usd} (${committed:.2f} committed)"
         elif (
             training_active
             and hours is not None
             and hours < min_eval_hours
             and identity not in client.room([*planned, request], pool, rent=rent)
         ):
-            changes = {
-                "state": "waiting",
-                "reason": f"{len(keys)} eval matches, estimated {hours:.2f} machine hours below --min-eval-hours {min_eval_hours:g}; no machine has room and training is running",
-            }
+            held_back = "waiting"
+            reason = f"{len(keys)} eval matches, estimated {hours:.2f} machine hours below --min-eval-hours {min_eval_hours:g}; no machine has room and training is running"
         else:
             planned.append(request)
             taken.add(identity)
             committed += executable.max_usd or Decimal(0)
-            changes = {"launched": identity}
         for each in group:
-            n = each.decision
-            decisions[n] = decisions[n].model_copy(update=changes)
+            each.decision.state, each.decision.reason = held_back, reason
+            each.decision.launched = identity if held_back is None else None
     if planned:
         if quote:
             for request in new:
                 lines[request.id] = f"{request.id}  new, would launch"
             _print_lines(lines)
             show_quote(client.quote(planned, pool, rent=rent))
-            decisions = [
-                p.model_copy(update={"state": "would launch"}) if p.launched else p
-                for p in decisions
-            ]
+            for decision in decisions:
+                if decision.launched:
+                    decision.state = "would launch"
         else:
             submit = client.queue if mode == "queue" else client.launch
             submit(planned, pool, rent=rent)
             placed: dict[str | None, Literal["queued", "running"]] = {
-                item.record.id: "queued"
-                if item.status.phase in {"queued", "renting"}
-                else "running"
-                for item in client.standing(experiment.name)
+                item.record.id: item.placement for item in client.standing(experiment.name)
             }
             for request in new:
                 lines[request.id] = f"{request.id}  new, {placed[request.id]}"
-            decisions = [
-                p.model_copy(update={"state": placed[p.launched]}) if p.launched else p
-                for p in decisions
-            ]
+            for decision in decisions:
+                if decision.launched:
+                    decision.state = placed[decision.launched]
     _print_lines(lines)
     for decision in decisions:
         _show_tournament(decision)

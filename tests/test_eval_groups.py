@@ -745,9 +745,11 @@ from multiprocessing.connection import Connection
 from tempfile import TemporaryDirectory
 from etude.call import Function
 from etude.eval.agents import Answer
-from etude.eval.game import play_match
+from etude.eval.game import initialize_game, play_match
 from etude.eval.records import Match
 from examples.agent_game import checkpoint
+
+initialize_game()
 
 counts = {"sent": 0, "received": 0}
 with TemporaryDirectory(dir="/tmp", prefix="etude-test-") as scratch, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:

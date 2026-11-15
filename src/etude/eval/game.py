@@ -1,8 +1,9 @@
 """Load a game's defining module, validate its match and report startup imports.
 
 The parent sends a Function and a portable Match; the game process imports only the
-play module it names. Imports are measured before loading that module, so a
-warning can name the code that pulled training libraries into game processes.
+play module it names. `initialize_game` starts each game process: imports are
+measured from there, before that module loads, so a warning can name the code
+that pulled training libraries into game processes.
 """
 
 import builtins
@@ -159,23 +160,9 @@ def play_match(
     tournament: str = "",
     build: Function | None = None,
 ) -> Execution:
-    before = _startup_modules if _startup_modules is not None else frozenset(sys.modules)
-    first: str | None = None
-    original = builtins.__import__
-
-    def importing(
-        name: str,
-        globals: Mapping[str, object] | None = None,
-        locals: Mapping[str, object] | None = None,
-        fromlist: Sequence[str] | None = (),
-        level: int = 0,
-    ) -> ModuleType:
-        nonlocal first
-        if first is None and name.split(".", 1)[0] in _HEAVY:
-            first = str((globals or {}).get("__name__", function.module))
-        return original(name, globals, locals, fromlist, level)
-
-    builtins.__import__ = importing
+    if _startup_modules is None:
+        raise RuntimeError("initialize_game must start the game process")
+    before = _startup_modules
 
     def observed() -> Imports:
         return Imports(
@@ -184,7 +171,7 @@ def play_match(
             count=len(set(sys.modules) - before),
             total=len(sys.modules),
             heavy=tuple(sorted(_HEAVY.intersection(sys.modules))),
-            importer=_first_importer or first,
+            importer=_first_importer,
         )
 
     connection: AgentConnection | None = None
@@ -224,5 +211,3 @@ def play_match(
                 _performance(connection, seconds, tournament, match.key).model_dump_json(),
             )
         raise
-    finally:
-        builtins.__import__ = original
