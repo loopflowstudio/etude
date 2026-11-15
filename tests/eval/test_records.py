@@ -456,11 +456,11 @@ def test_tournament_configs_keep_released_conditions_bytes_and_warnings() -> Non
 @pytest.mark.parametrize(
     "seat",
     [
-        Final(inference=SEARCH),
-        At(clock="updates", value=100, inference=SEARCH),
-        Earlier(clock="updates", by=100, inference=SEARCH),
-        Fraction(clock="updates", value=0.5, inference=SEARCH),
-        Aligned(clock="updates", inference=SEARCH),
+        Final(),
+        At(clock="updates", value=100),
+        Earlier(clock="updates", by=100),
+        Fraction(clock="updates", value=0.5),
+        Aligned(clock="updates"),
     ],
 )
 def test_policy_seat_key_selects_one_seed_and_parts_select_every_seed(seat: Relative) -> None:
@@ -507,7 +507,7 @@ def test_policy_seat_counts_nondefault_role_line_once() -> None:
         name="roles",
         players=(
             SEARCH,
-            Final(experiment="frontier", job="small", role="exploiter", inference=SEARCH),
+            Final(experiment="frontier", job="small", role="exploiter"),
         ),
         configs=({},),
         games=1,

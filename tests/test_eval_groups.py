@@ -37,6 +37,7 @@ from etude.jobs import (
     ExperimentState,
     evaluation_group,
     hold_group,
+    with_experiment,
 )
 from etude.launch import client
 from etude.launch.commands import DEFAULT_MIN_EVAL_HOURS
@@ -66,7 +67,6 @@ def tournament(name: str) -> RoundRobin:
 def job(name: str, agents: Agents | None) -> EvalJob:
     return EvalJob(
         tournament=tournament(name),
-        experiment="grouped",
         enter=(checkpoint("left"), checkpoint("right")),
         play=plain if agents is None else play,
         agents=agents,
@@ -78,7 +78,11 @@ def job(name: str, agents: Agents | None) -> EvalJob:
 
 def group(*jobs: EvalJob) -> EvalGroup:
     return EvalGroup(
-        evaluations=tuple(spec for job in jobs for spec in evaluation_group(job).evaluations)
+        evaluations=tuple(
+            spec
+            for job in jobs
+            for spec in evaluation_group(with_experiment(job, "grouped")).evaluations
+        )
     )
 
 
@@ -892,14 +896,14 @@ sys.path.insert(0, sys.argv[1])
 from heavy_fixture_game import play
 from etude.eval.match import environment
 from etude.eval.records import Code, RoundRobin
-from etude.jobs import Agents, EvalGroup, EvalJob, evaluation_group, hold_group
+from etude.jobs import Agents, EvalGroup, EvalJob, evaluation_group, hold_group, with_experiment
 from examples.agent_models import load
 from examples.agent_game import checkpoint
 agents = Agents(load=load) if sys.argv[2] == "True" else None
 jobs = [EvalJob(tournament=RoundRobin(name=name, environment=environment("heavy"), configs=({},), games=1),
-               enter=(checkpoint("one"), checkpoint("two")), experiment="heavy", play=play,
+               enter=(checkpoint("one"), checkpoint("two")), play=play,
                agents=agents, repo=None, max_hours=0.1) for name in ("first", "second")]
-hold_group(EvalGroup(evaluations=tuple(evaluation_group(job).evaluations[0] for job in jobs)),
+hold_group(EvalGroup(evaluations=tuple(evaluation_group(with_experiment(job, "heavy")).evaluations[0] for job in jobs)),
            directory=sys.argv[1])
 """
     result = subprocess.run(
