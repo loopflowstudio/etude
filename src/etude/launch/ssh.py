@@ -160,7 +160,7 @@ with contextlib.redirect_stdout(sys.stderr):
         root=namespace["install"](code)
     except Exception as error:
         failed=True
-        logging.write_log("client install", logging.explain(error))
+        logging.write_log("client install", sys.modules["etude.errors"].explain(error))
         if globals().get('request',{}).get('action')=='start':
             from datetime import datetime,UTC
             (home/'ended').write_text(datetime.now(UTC).isoformat())
@@ -233,7 +233,7 @@ if request['action']=='start':
         if done.returncode:
             raise RuntimeError(f'worker entry exited with status {done.returncode}')
     except Exception as error:
-        logging.write_log('worker entry',logging.explain(error))
+        logging.write_log('worker entry',sys.modules["etude.errors"].explain(error))
         if not invoked:
             (home/'ended').write_text(datetime.now(UTC).isoformat())
         else:

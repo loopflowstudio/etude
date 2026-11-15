@@ -1,90 +1,56 @@
-"""Grouped evals share serving lifetimes and preserve tournament delivery and admission."""
+"""Grouped evals share agents and preserve tournament delivery and admission."""
 
 import json
 import os
 import signal
 import subprocess
 import sys
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterable, Sequence
 from concurrent.futures import Future
-from contextlib import AbstractContextManager, contextmanager
 from decimal import Decimal
-from multiprocessing import get_context
-from multiprocessing.connection import Client, Connection, Listener
+from multiprocessing import active_children, get_context
 from pathlib import Path
 
 import pytest
-from pydantic import BaseModel
+from pydantic import ValidationError
 
-from etude.controller import advance
+from etude.call import Function
+from etude.checkpoints import CheckpointRef
+from etude.controller import _eval_cpus, advance
 from etude.declarations import Experiment, read_experiment
 from etude.errors import EtudeError, LauncherError, RetryRequested
+from etude.eval.agents import Agent, Answer, Request
+from etude.eval.batching import _Batches
 from etude.eval.game import Execution
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Code, Config, Match, RoundRobin
-from etude.eval.resources import THREAD_VARIABLES, available_cpus
+from etude.eval.records import Code, Inference, Match, Player, RoundRobin
+from etude.eval.resources import active_games, available_cpus, memory_bytes
 from etude.eval.result import Tables
 from etude.eval.run import Terminated
 from etude.eval.tournament import evaluating, played
 from etude.experiment import state_of
 from etude.jobs import (
+    Agents,
     EvalGroup,
     EvalJob,
     ExperimentState,
-    InferenceServer,
     evaluation_group,
     hold_group,
 )
 from etude.launch import client
 from etude.launch.commands import DEFAULT_MIN_EVAL_HOURS
 from etude.launch.records import Pool, Standing, Status
-from etude.records import RunRecord, RunSubmission
+from etude.records import ArtifactRef, RunRecord, RunSubmission
 from etude.smoke import Step, smoke_file
 from etude.spec import Job, RunRequest
 from etude.storage import DirectoryStorage, default_root
 from etude.train.tracking import track
-from examples.served import Endpoint, ServeConfig, play, serve
+from examples.agent_game import play
+from examples.agent_models import Loading, load
 from tests.launch.counting import Counting, Counts, job_text
 from tests.launch.fake import bench
 from tests.test_jobs import checkout
-
-
-class CountedConfig(BaseModel):
-    events: Path
-    bias: int = 1
-
-
-@contextmanager
-def counted(config: CountedConfig) -> Iterator[Endpoint]:
-    with config.events.open("a") as log:
-        with serve(ServeConfig(bias=config.bias)) as endpoint:
-            log.write("started\n")
-            log.flush()
-            try:
-                yield endpoint
-            finally:
-                log.write("stopped\n")
-
-
-@contextmanager
-def unpicklable(config: CountedConfig) -> Iterator[object]:
-    yield lambda: config.bias
-
-
-@contextmanager
-def broken(config: CountedConfig) -> Iterator[object]:
-    raise ValueError("server could not load weights")
-    yield  # pragma: no cover - defines a context manager that fails before entry
-
-
-def fails(match: Match, inference: Endpoint) -> Tables:
-    raise ValueError("bad game")
-
-
-def terminate(match: Match, inference: Endpoint) -> Tables:
-    os.kill(os.getpid(), signal.SIGTERM)
-    return {}
 
 
 def plain(match: Match) -> Tables:
@@ -93,26 +59,21 @@ def plain(match: Match) -> Tables:
 
 def tournament(name: str) -> RoundRobin:
     return RoundRobin(
-        name=name, environment=environment("served"), configs=({"lane": name},), games=1
+        name=name, environment=environment("grouped"), configs=({"lane": name},), games=1
     )
 
 
-def job(name: str, server: InferenceServer | None, *, workers: int = 2) -> EvalJob:
+def job(name: str, agents: Agents | None) -> EvalJob:
     return EvalJob(
         tournament=tournament(name),
         experiment="grouped",
         enter=(Code(name="left"), Code(name="right")),
-        play=plain if server is None else play,
-        server=server,
-        workers=workers,
+        play=plain if agents is None else play,
+        agents=agents,
         repo=None,
         max_hours=0.1,
         max_usd=Decimal(1),
     )
-
-
-def server_at(path: Path) -> InferenceServer:
-    return InferenceServer(name="net", serve=counted, config=CountedConfig(events=path))
 
 
 def group(*jobs: EvalJob) -> EvalGroup:
@@ -121,92 +82,15 @@ def group(*jobs: EvalJob) -> EvalGroup:
     )
 
 
-def test_two_tournaments_share_one_real_serving_child_and_resume_without_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    events = tmp_path / "events"
-    server = server_at(events)
-    jobs = (job("ladder", server), job("gauntlet", server), job("plain", None))
-    (tmp_path / "output").mkdir()
-    monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(tmp_path / "output"))
-    held = hold_group(group(*jobs), directory=tmp_path / "runs")
-    assert [result.played for result in held] == [1, 1, 1]
-    assert events.read_text().splitlines() == ["started", "stopped"]
-    assert json.loads((tmp_path / "output" / "etude-result.json").read_text())["tally"]["done"] == 3
-    again = hold_group(group(*jobs), directory=tmp_path / "runs")
-    assert [result.played for result in again] == [0, 0, 0]
-    assert events.read_text().splitlines() == ["started", "stopped"]
-    for each in jobs:
-        assert not played(
-            each.tournament, experiment="grouped", enter=each.enter, directory=tmp_path / "runs"
-        ).new
-
-
-def test_match_failure_finishes_its_tournament_and_allows_the_next(tmp_path: Path) -> None:
-    events = tmp_path / "events"
-    server = server_at(events)
-    bad = job("bad", server).model_copy(update={"play": fails})
-    with pytest.raises(EtudeError, match="match_failed"):
-        hold_group(group(bad, job("good", server)), directory=tmp_path)
-    assert events.read_text().splitlines() == ["started", "stopped"]
-    db = statsdb("grouped", tmp_path)
-    try:
-        assert db.sql("select count(*) from scores").fetchone() == (2,)
-        assert {row[0] for row in db.sql("select state from runs").fetchall()} == {
-            "failed",
-            "finished",
-        }
-    finally:
-        db.close()
-
-
-def test_sigterm_leaves_the_serving_context(tmp_path: Path) -> None:
-    events = tmp_path / "events"
-    active = job("stop", server_at(events), workers=1).model_copy(update={"play": terminate})
-    with pytest.raises(RetryRequested):
-        hold_group(group(active), directory=tmp_path)
-    assert events.read_text().splitlines() == ["started", "stopped"]
-
-
-@pytest.mark.parametrize(
-    "function, message",
-    [(broken, "could not load"), (unpicklable, "inference_handle_not_picklable")],
-)
-def test_server_refusal_records_retryable_failures_without_results(
-    tmp_path: Path,
-    function: Callable[[CountedConfig], AbstractContextManager[object]],
-    message: str,
-) -> None:
-    server = InferenceServer(
-        name="net", serve=function, config=CountedConfig(events=tmp_path / "events")
-    )
-    active = job("ladder", server)
-    with pytest.raises(RetryRequested, match=message):
-        hold_group(group(active), directory=tmp_path)
-    found = played(active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path)
-    assert len(found.new) == len(found.failed) == len(found.retry) == 1
-
-
-def test_server_conflicts_and_play_arity_are_refused_before_games(tmp_path: Path) -> None:
-    first = server_at(tmp_path / "one")
-    second = server_at(tmp_path / "two")
-    with pytest.raises(EtudeError, match="inference_server_conflict"):
-        hold_group(group(job("one", first), job("two", second)), directory=tmp_path)
-    with pytest.raises(LauncherError, match="inference handle"):
-        job("wrong", first).model_copy(update={"play": plain}).plain()
-    with pytest.raises(LauncherError, match="without an inference server"):
-        job("wrong", None).model_copy(update={"play": play}).plain()
-
-
-def test_a_pass_groups_by_server_and_keeps_group_limits(
+def test_a_pass_groups_by_agents_and_keeps_group_limits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     b = bench(tmp_path)
     b.scheduler.add_pool(Pool(name="waiting"))
     monkeypatch.setattr(client, "_client", lambda: b.scheduler)
     monkeypatch.setattr(client, "standing", b.scheduler.standing)
-    server = server_at(tmp_path / "events")
-    jobs = [job("one", server), job("two", server), job("plain", None)]
+    agents = Agents(load=load, config=Loading())
+    jobs = [job("one", agents), job("two", agents), job("plain", None)]
 
     def declare(state: ExperimentState) -> list[EvalJob]:
         return jobs
@@ -248,7 +132,7 @@ def test_estimated_machine_hours_wait_without_remote_calls_then_threshold_queues
             directory=source.root,
         ) as active:
             for match in active.matches:
-                active.store(match, plain(match), seconds=3600)
+                active.store(match, plain(match), seconds=1800)
     definition = Experiment(name="grouped", eval=declare)
     counts = Counting(b.store, b.service)
     try:
@@ -280,67 +164,6 @@ def test_room_reads_existing_capacity_after_queued_work_without_remote_calls(
         assert b.scheduler.room([candidate], rent="l4") == ()
     assert counts.snapshot().provider == 0
     assert b.service.creates == 0
-
-
-def _batch_pair(ready: Connection, events: Path) -> None:
-    """A real two-request batch: neither tournament can finish without the other."""
-    with Listener(("127.0.0.1", 0)) as listener:
-        ready.send(listener.address)
-        ready.close()
-        connections = []
-        try:
-            for _ in range(2):
-                connection = listener.accept()
-                connections.append(connection)
-            requests = [connection.recv() for connection in connections]
-            events.write_text(f"batch={len(requests)}\n")
-            for connection, request in zip(connections, requests, strict=True):
-                connection.send(int(request) + 1)
-        finally:
-            for connection in connections:
-                connection.close()
-
-
-@contextmanager
-def batched(config: CountedConfig) -> Iterator[Endpoint]:
-    context = get_context("spawn")
-    parent, child = context.Pipe(duplex=False)
-    process = context.Process(target=_batch_pair, args=(child, config.events))
-    process.start()
-    child.close()
-    try:
-        if not parent.poll(10):
-            raise RuntimeError("batch server did not start")
-        yield Endpoint(address=parent.recv())
-    finally:
-        parent.close()
-        process.terminate()
-        process.join()
-
-
-def batch_play(match: Match, inference: Endpoint) -> Tables:
-    with Client(inference.address) as connection:
-        connection.send(match.games)
-        if not connection.poll(5):
-            raise RuntimeError("the other tournament never reached the batch")
-        score = connection.recv()
-    return {"scores": [{"seat": 0, "score": score}]}
-
-
-def test_tournaments_feed_the_same_inference_batch_concurrently(tmp_path: Path) -> None:
-    events = tmp_path / "batch"
-    server = InferenceServer(name="net", serve=batched, config=CountedConfig(events=events))
-    held = hold_group(
-        group(
-            *(
-                job(name, server, workers=2).model_copy(update={"play": batch_play})
-                for name in ("one", "two")
-            )
-        ),
-        directory=tmp_path,
-    )
-    assert [result.played for result in held] == [1, 1]
-    assert events.read_text() == "batch=2\n"
 
 
 def test_room_reserves_free_owned_slots_for_already_queued_work(tmp_path: Path) -> None:
@@ -398,100 +221,6 @@ def test_retained_single_eval_records_are_read_and_finished_groups_stop_being_in
     assert state.eval_runs[0].matches == tuple(m.key for m in selected)
 
 
-@pytest.mark.parametrize("refuse_first", [False, True])
-def test_a_worker_delivers_both_nested_tournaments_and_the_next_pass_plays_nothing(
-    tmp_path: Path, command_python: str, monkeypatch: pytest.MonkeyPatch, refuse_first: bool
-) -> None:
-    ready = tmp_path / "ready"
-    if not refuse_first:
-        ready.touch()
-    repo = checkout(
-        tmp_path / "repo",
-        {
-            "served_group.py": f"""
-from etude.jobs import EvalJob, ExperimentState, InferenceServer
-from etude.eval.records import Code, RoundRobin
-from etude.eval.match import environment
-from etude.spec import Runtime
-from examples.served import serve, ServeConfig
-from tests.test_eval_groups import play_when_ready as play
-
-def eval_jobs(state: ExperimentState) -> list[EvalJob]:
-    net = InferenceServer(name="net", serve=serve, config=ServeConfig())
-    return [EvalJob(tournament=RoundRobin(name=name, environment=environment("served"),
-                  configs=({{"lane": name, "ready": {str(ready)!r}}},), games=1),
-                  enter=(Code(name="left"), Code(name="right")), play=play, server=net,
-                  workers=2, repo=None, runtime=Runtime(python={command_python!r}), max_hours=0.05)
-            for name in ("ladder", "gauntlet")]
-"""
-        },
-    )
-    scheduler = client.default()
-    monkeypatch.setattr(client, "_client", lambda: scheduler)
-    monkeypatch.setattr(client, "standing", scheduler.standing)
-    source = DirectoryStorage(default_root())
-    definition = read_experiment(repo / "served_group.py")
-    try:
-        decisions = advance(definition, source=source, pool="local", mode="launch")
-        assert decisions[0].launched == decisions[1].launched
-        (status,) = scheduler.wait(str(decisions[0].launched), every=0.05, timeout=30)
-        if refuse_first:
-            assert status.outcome == "failed"
-            ready.touch()
-            decisions = advance(definition, source=source, pool="local", mode="launch")
-            assert all(d.new == 1 and not d.stopped for d in decisions)
-            (status,) = scheduler.wait(str(decisions[0].launched), every=0.05, timeout=30)
-        assert status.outcome == "succeeded", job_text(scheduler.logs(refresh=True, run=status.run))
-        assert len([key for key in source.keys("") if key.endswith("tournament.json")]) == (
-            4 if refuse_first else 2
-        )
-        assert all(
-            "/evals-" in key and "/served_group/" in key
-            for key in source.keys("")
-            if key.endswith("tournament.json")
-        )
-        log = job_text(scheduler.logs(refresh=True, run=status.run))
-        assert log.count("server net: started") == log.count("server net: stopped") == 1
-        again = advance(definition, source=source, pool="local", mode="launch")
-        assert all(d.new == 0 and d.launched is None for d in again)
-        assert len(scheduler.runs(done=True)) == (2 if refuse_first else 1)
-    finally:
-        for active in scheduler.runs():
-            scheduler.cancel(active.id)
-        scheduler.wait(every=0.05, timeout=30)
-
-
-def refused(match: Match) -> Tables:
-    raise RetryRequested("the runtime refused this allocation")
-
-
-def disconnected(match: Match, inference: Endpoint) -> Tables:
-    raise RetryRequested("the serving process exited")
-
-
-@pytest.mark.parametrize("with_server", [False, True])
-def test_infrastructure_refusal_keeps_matches_new_and_never_records_success(
-    tmp_path: Path, with_server: bool
-) -> None:
-    server = server_at(tmp_path / "events") if with_server else None
-    active = job("refused", server).model_copy(
-        update={"play": disconnected if with_server else refused}
-    )
-    with pytest.raises(RetryRequested):
-        hold_group(group(active), directory=tmp_path)
-    found = played(active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path)
-    assert len(found.new) == len(found.retry) == 1
-    assert len(found.failed) == 1 and not found.delivered
-    db = statsdb("grouped", tmp_path)
-    try:
-        assert db.sql("select state from runs").fetchall() == [("failed",)]
-        assert db.sql("select state, retry from matches").fetchall() == [("failed", True)]
-    finally:
-        db.close()
-    repaired = job("refused", server)
-    assert hold_group(group(repaired), directory=tmp_path)[0].played == 1
-
-
 def test_unknown_durations_rent_instead_of_stranding_new_tournaments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -512,27 +241,6 @@ def test_unknown_durations_rent_instead_of_stranding_new_tournaments(
         assert len(b.scheduler.runs()) == 1
 
 
-def resource_play(match: Match) -> Tables:
-    assert Path(os.environ["ETUDE_SCRATCH_DIR"]).is_dir()
-    receipts = Path(os.environ["ETUDE_RECEIPTS_DIR"])
-    receipts.joinpath("environment.json").write_text(
-        json.dumps({name: os.environ[name] for name in THREAD_VARIABLES})
-    )
-    return {"threads": [{"seat": 0, "threads": int(os.environ["OMP_NUM_THREADS"])}]}
-
-
-def test_group_workers_get_container_cpu_budget_and_fast_scratch_with_retained_receipts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 6)
-    active = job("resources", None).model_copy(update={"play": resource_play})
-    old = os.environ.get("OMP_NUM_THREADS")
-    hold_group(group(active), directory=tmp_path)
-    receipt = tmp_path / "grouped" / "artifacts" / "inference" / "environment.json"
-    assert set(json.loads(receipt.read_text()).values()) == {"3"}
-    assert os.environ.get("OMP_NUM_THREADS") == old
-
-
 def test_room_does_not_assign_another_targets_queued_job_to_the_wrong_pool(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.scheduler.add_pool(Pool(name="first"))
@@ -548,12 +256,6 @@ def test_room_does_not_assign_another_targets_queued_job_to_the_wrong_pool(tmp_p
     assert counts.snapshot().provider == 0
 
 
-def play_when_ready(match: Match[Config], inference: Endpoint) -> Tables:
-    if not Path(str(match.config["ready"])).exists():
-        raise RetryRequested("the serving runtime refused this allocation")
-    return play(match, inference)
-
-
 def test_room_cost_does_not_grow_with_other_targets_backlogs(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.scheduler.add_pool(Pool(name="room"))
@@ -565,31 +267,6 @@ def test_room_cost_does_not_grow_with_other_targets_backlogs(tmp_path: Path) -> 
     with counts.record():
         assert b.scheduler.room([RunRequest(id="next", job=command)], "room") == ("next",)
     assert counts.snapshot() == Counts(database=6)
-
-
-def terminate_parent(match: Match, inference: Endpoint) -> Tables:
-    os.kill(os.getppid(), signal.SIGTERM)
-    return {"scores": [{"seat": 0, "score": 1}]}
-
-
-def test_sigterm_reaps_the_shared_worker_pool_before_leaving_the_server(tmp_path: Path) -> None:
-    events = tmp_path / "events"
-    server = server_at(events)
-    stopping = job("signal", server).model_copy(update={"play": terminate_parent})
-    with pytest.raises(Terminated):
-        hold_group(group(stopping, job("other", server)), directory=tmp_path)
-    assert events.read_text().splitlines() == ["started", "stopped"]
-
-
-def test_an_eval_only_smoke_starts_the_shared_server_without_training_checkpoints(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    steps: tuple[Step, ...] = ("eval",)
-    result = smoke_file(Path("examples/served.py"), steps=steps, source=DirectoryStorage(tmp_path))
-    assert len(result.rest) == 2
-    assert all(step.outcome == "passed" for step in result.rest)
-    log = capsys.readouterr().err
-    assert log.count("server net: started") == log.count("server net: stopped") == 1
 
 
 def test_an_execution_deadline_is_a_retryable_failure_not_a_success(
@@ -624,91 +301,6 @@ def test_statsdb_rebuilds_the_last_released_schema_with_retry_flags(tmp_path: Pa
         upgraded.close()
 
 
-@pytest.mark.parametrize("heavy, expected", [(False, 1), (True, 2)])
-def test_game_startup_imports_only_the_defining_module_and_counts_its_imports(
-    tmp_path: Path, heavy: bool, expected: int
-) -> None:
-    (tmp_path / "torch.py").write_text(
-        "# Controlled import fixture; no framework or resource load.\n"
-    )
-    (tmp_path / "game_module.py").write_text(
-        ("import torch\n" if heavy else "")
-        + "def play(match):\n    return {'scores': [{'seat': 0, 'score': 1}]}\n"
-    )
-    (tmp_path / "experiment_module.py").write_text(
-        "raise RuntimeError('a game must not import the experiment')\n"
-    )
-    program = """
-import sys
-from etude.call import Function
-from etude.eval.game import play_match
-from etude.eval.records import Match, Code
-match = Match(players=(Code(name="one"),))
-result = play_match(Function(module="game_module", name="play", path=sys.argv[1]), match)
-print(result.imports.model_dump_json())
-assert "experiment_module" not in sys.modules
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", program, str(tmp_path)],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=15,
-    )
-    record = json.loads(result.stdout)
-    assert record["count"] == expected
-    assert record["heavy"] == (["torch"] if heavy else [])
-    assert record["importer"] == ("game_module" if heavy else None)
-
-
-@pytest.mark.parametrize("fails", [False, True])
-def test_heavy_game_import_warning_is_reported_once_for_the_group(
-    tmp_path: Path, fails: bool
-) -> None:
-    (tmp_path / "torch.py").write_text("# Controlled framework fixture.\n")
-    game = (
-        "raise RuntimeError('fixture game failed')"
-        if fails
-        else "return {'scores': [{'seat': 0, 'score': 1}]}"
-    )
-    (tmp_path / "game_module.py").write_text("import torch\ndef play(match):\n    " + game + "\n")
-    program = """
-import sys
-sys.path.insert(0, sys.argv[1])
-from game_module import play
-from etude.eval.tournament import evaluating
-from etude.errors import EtudeError
-from etude.eval.records import Environment, Match, Code
-matches = [Match(players=(Code(name="one"),), config={"case": i}) for i in range(2)]
-with evaluating(Environment(name="imports", files="0" * 64), experiment="imports", matches=matches,
-                workers=2, directory=sys.argv[1]) as active:
-    try:
-        assert active.play(play).played == 2
-    except EtudeError:
-        assert sys.argv[2] == "True"
-    else:
-        assert sys.argv[2] == "False"
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", program, str(tmp_path), str(fails)],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=15,
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stderr.count("game module game_module: imported torch via game_module") == 1
-    assert "define play in a lightweight module" in result.stderr
-
-
-class OfflineStorage(DirectoryStorage):
-    def put(self, key: str, data: bytes) -> None:
-        raise OSError("fixture storage is offline")
-
-    def put_file(self, key: str, path: Path) -> None:
-        raise OSError("fixture storage is offline")
-
-
 def test_delivery_failure_preserves_local_results_and_fails_the_run_for_retry(
     tmp_path: Path,
 ) -> None:
@@ -737,55 +329,6 @@ def test_delivery_failure_preserves_local_results_and_fails_the_run_for_retry(
         db.close()
 
 
-@pytest.mark.parametrize("version", [1, 2])
-def test_container_cpu_count_respects_nested_cgroup_limits(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: int
-) -> None:
-    root = tmp_path / "cgroup"
-    membership = tmp_path / "membership"
-    if version == 2:
-        (root / "tenant").mkdir(parents=True)
-        (root / "tenant" / "cpu.max").write_text("max 100000")
-        (root / "cpu.max").write_text("200000 100000")
-        membership.write_text("0::/tenant\n")
-    else:
-        (root / "cpu" / "tenant").mkdir(parents=True)
-        (root / "cpu" / "tenant" / "cpu.cfs_quota_us").write_text("200000")
-        (root / "cpu" / "tenant" / "cpu.cfs_period_us").write_text("100000")
-        membership.write_text("2:cpu,cpuacct:/tenant\n")
-
-    def fixture_path(value: str) -> Path:
-        return (
-            root
-            if value == "/sys/fs/cgroup"
-            else membership
-            if value == "/proc/self/cgroup"
-            else Path(value)
-        )
-
-    monkeypatch.setattr("etude.eval.resources.Path", fixture_path)
-
-    def allowed_cpus(pid: int) -> set[int]:
-        return set(range(32))
-
-    monkeypatch.setattr(os, "sched_getaffinity", allowed_cpus, raising=False)
-    assert available_cpus() == 2
-
-
-def game_eof(match: Match, inference: Endpoint) -> Tables:
-    raise EOFError("a game parsing error")
-
-
-def test_an_ordinary_play_exception_does_not_request_retry_even_with_a_server(
-    tmp_path: Path,
-) -> None:
-    active = job("game-error", server_at(tmp_path / "events")).model_copy(update={"play": game_eof})
-    with pytest.raises(EtudeError, match="match_failed"):
-        hold_group(group(active), directory=tmp_path)
-    result = played(active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path)
-    assert len(result.failed) == 1 and not result.retry and not result.new
-
-
 def test_a_wait_expiring_stops_and_reaps_games_with_retryable_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -805,19 +348,498 @@ def test_a_wait_expiring_stops_and_reaps_games_with_retryable_failures(
     assert len(result.failed) == len(result.retry) == len(result.new) == 1
 
 
-class MissingReceiptStorage(DirectoryStorage):
+class OfflineStorage(DirectoryStorage):
     def put(self, key: str, data: bytes) -> None:
-        if key.startswith("game-imports-"):
-            raise OSError("fixture cannot retain receipt")
-        super().put(key, data)
+        raise OSError("fixture storage is offline")
+
+    def put_file(self, key: str, path: Path) -> None:
+        raise OSError("fixture storage is offline")
 
 
-def test_an_import_receipt_write_failure_requests_retry(
+def test_two_tournaments_share_loaded_agents_and_resume_without_starting_them(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
+    agents = Agents(load=load, config=Loading(), max_delay_seconds=0.25)
+    selected = group(job("ladder", agents), job("gauntlet", agents))
+    assert [r.played for r in hold_group(selected, directory=tmp_path)] == [1, 1]
+    batches = json.loads((tmp_path / "grouped/artifacts/agents/batches.json").read_text())
+    assert any(
+        {row["tournament"] for row in batch["rows"]} == {"ladder", "gauntlet"} for batch in batches
+    )
+    log = capfd.readouterr().err
+    assert log.count("agents: started") == 1
+    assert log.count("agents: loaded") == 2
+    assert "2 players loaded, 4 rows" in log
+    assert [r.played for r in hold_group(selected, directory=tmp_path)] == [0, 0]
+    assert "agents: started" not in capfd.readouterr().err
+    db = statsdb("grouped", tmp_path)
+    try:
+        assert db.sql("select score from scores").fetchall() == [(2,)] * 4
+    finally:
+        db.close()
+
+
+def raises_load(player: Player, config: Loading) -> Agent:
+    raise ValueError("fixture loading error")
+
+
+def exits_load(player: Player, config: Loading) -> Agent:
+    os._exit(3)
+
+
+@pytest.mark.parametrize("exit_process", [False, True])
+def test_loading_failure_never_records_success_and_only_process_exit_retries(
+    tmp_path: Path, exit_process: bool
+) -> None:
+    agents = Agents(load=exits_load if exit_process else raises_load, config=Loading())
+    active = job("failure", agents)
+    with pytest.raises(RetryRequested if exit_process else EtudeError):
+        hold_group(group(active), directory=tmp_path)
+    found = played(active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path)
+    assert len(found.failed) == 1 and not found.delivered
+    assert len(found.retry) == len(found.new) == int(exit_process)
+    db = statsdb("grouped", tmp_path)
+    try:
+        assert db.sql("select state from runs").fetchall() == [("failed",)]
+        assert db.sql("select retry from matches").fetchall() == [(exit_process,)]
+    finally:
+        db.close()
+    if exit_process:
+        repaired = job("failure", Agents(load=load, config=Loading()))
+        assert hold_group(group(repaired), directory=tmp_path)[0].played == 1
+
+
+def test_plain_games_use_the_pool_without_agents(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    assert hold_group(group(job("plain", None)), directory=tmp_path)[0].played == 1
+    assert "agents:" not in capfd.readouterr().err
+    assert not (tmp_path / "grouped/artifacts/agents/batches.json").exists()
+
+
+def test_play_arity_and_removed_workers_are_refused() -> None:
+    agents = Agents(load=load, config=Loading())
+    with pytest.raises(LauncherError, match="and agents"):
+        job("bad", agents).model_copy(update={"play": plain}).plain()
+    with pytest.raises(LauncherError, match="without agents"):
+        job("bad", None).model_copy(update={"play": play}).plain()
+    with pytest.raises(ValidationError, match="workers"):
+        EvalJob.model_validate({**job("bad", None).model_dump(), "workers": 2})
+
+
+def test_active_games_respects_cpu_and_declared_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
+    assert active_games(20, agents=False) == 8
+    assert active_games(20, agents=True) == 4
+    assert active_games(20, agents=True, memory_gb=1.5) == 2
+    assert active_games(1, agents=True) == 1
+    assert active_games(0, agents=True) == 0
+
+
+def test_released_queued_evaluation_discards_workers() -> None:
+    spec = evaluation_group(job("old", None)).evaluations[0]
+    text = spec.model_dump()
+    text["workers"] = 28
+    assert EvalGroup.model_validate(text).evaluations == (spec,)
+
+
+class Echo:
+    def act(self, rows: Sequence[object]) -> Sequence[object]:
+        return rows
+
+
+def echo(player: Player, config: Loading) -> Agent:
+    return Echo()
+
+
+def test_batch_size_and_delay_flush_with_a_controlled_clock() -> None:
+    parent, child = get_context("spawn").Pipe()
+    player = Code(name="one")
+    batches = _Batches(echo, Loading(), 2, 0.5, 1024)
+    try:
+        batches.add(child, Request(player, [1], "first", "a"), 10)
+        batches.flush(10.49)
+        assert not parent.poll()
+        batches.add(child, Request(player, [2], "second", "b"), 10.49)
+        full = batches.flush(10.49)
+        assert parent.recv() == Answer([1])
+        assert parent.recv() == Answer([2])
+        assert batches.loads == 1
+        batches.add(child, Request(player, [3], "third", "c"), 11)
+        delayed = batches.flush(11.5)
+        assert parent.recv() == Answer([3])
+        assert [len(batch.rows) for batch in [*full, *delayed]] == [2, 1]
+    finally:
+        child.close()
+        parent.close()
+
+
+def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_rows() -> None:
+    players = [
+        Inference().player(
+            CheckpointRef(
+                key=f"{name}/checkpoints/model",
+                artifact=ArtifactRef(uri=f"file:///unused/{name}", sha256="0" * 64, size_bytes=1),
+            )
+        )
+        for name in ("a", "b", "c")
+    ]
+    a, b, c = players
+    batches = _Batches(echo, Loading(), 1, 0.5, 2)
+    parent, child = get_context("spawn").Pipe()
+    try:
+        for player in (a, b):
+            batches.add(child, Request(player, [player.name], "one", "m"), 0)
+            batches.flush(0)
+            assert parent.recv() == Answer([player.name])
+        # A future row protects a even though it is the oldest loaded player.
+        batches.max_batch = 2
+        batches.add(child, Request(a, ["a"], "one", "m"), 2)
+        batches.add(child, Request(c, ["c"], "two", "n"), 1)
+        batches.flush(1.5)
+        assert parent.recv() == Answer(["c"])
+        batches.flush(2.5)
+        assert parent.recv() == Answer(["a"])
+        assert batches.loads == 3
+        batches.add(child, Request(b, ["b"], "one", "m"), 3)
+        batches.flush(3.5)
+        assert parent.recv() == Answer(["b"])
+        assert batches.loads == 4  # b was evicted to make room for c.
+    finally:
+        parent.close()
+        child.close()
+
+
+class WrongAnswers:
+    def act(self, rows: Sequence[object]) -> Sequence[object]:
+        return []
+
+
+def wrong_answers(player: Player, config: Loading) -> Agent:
+    return WrongAnswers()
+
+
+def test_bad_batch_answers_fail_all_asking_tournaments(tmp_path: Path) -> None:
+    agents = Agents(load=wrong_answers, config=Loading(), max_delay_seconds=0.25)
+    selected = group(job("one", agents), job("two", agents))
+    with pytest.raises(EtudeError, match="match_failed"):
+        hold_group(selected, directory=tmp_path)
+    db = statsdb("grouped", tmp_path)
+    try:
+        assert db.sql("select state, retry from matches").fetchall() == [("failed", False)] * 2
+        assert db.sql("select state from runs").fetchall() == [("failed",)] * 2
+    finally:
+        db.close()
+
+
+def test_launched_group_delivers_members_then_the_next_pass_plays_nothing(
+    tmp_path: Path, command_python: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = checkout(
+        tmp_path / "repo",
+        {
+            "launched_agents.py": f"""
+from etude.jobs import Agents, EvalJob, ExperimentState
+from etude.eval.records import Code, RoundRobin
+from etude.eval.match import environment
+from etude.spec import Runtime
+from examples.agent_models import Loading, load
+from examples.agent_game import play
+
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    agents = Agents(load=load, config=Loading())
+    return [EvalJob(tournament=RoundRobin(name=name, environment=environment("agents"),
+                   configs=({{"lane": name}},), games=1),
+                   enter=(Code(name="left"), Code(name="right")), play=play, agents=agents,
+                   repo=None, runtime=Runtime(python={command_python!r}), max_hours=0.05)
+            for name in ("one", "two")]
+"""
+        },
+    )
+    scheduler = client.default()
+    monkeypatch.setattr(client, "_client", lambda: scheduler)
+    monkeypatch.setattr(client, "standing", scheduler.standing)
+    source = DirectoryStorage(default_root())
+    definition = read_experiment(repo / "launched_agents.py")
+    try:
+        decisions = advance(definition, source=source, pool="local", mode="launch")
+        assert decisions[0].launched == decisions[1].launched
+        (status,) = scheduler.wait(str(decisions[0].launched), every=0.05, timeout=30)
+        assert status.outcome == "succeeded", job_text(scheduler.logs(refresh=True, run=status.run))
+        assert len([key for key in source.keys("") if key.endswith("tournament.json")]) == 2
+        assert any("/artifacts/agents/batches.json" in key for key in source.keys(""))
+        log = job_text(scheduler.logs(refresh=True, run=status.run))
+        assert log.count("agents: started") == log.count("agents: stopped") == 1
+        again = advance(definition, source=source, pool="local", mode="launch")
+        assert all(d.new == 0 and d.launched is None for d in again)
+        assert len(scheduler.runs(done=True)) == 1
+    finally:
+        for active in scheduler.runs():
+            scheduler.cancel(active.id)
+        scheduler.wait(every=0.05, timeout=30)
+
+
+def test_game_imports_only_play_module_with_one_send_and_receive_per_decision(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "light_agent_game.py").write_text("""
+import sys
+from collections.abc import Sequence
+from etude.eval.agents import Agent
+from etude.eval.records import Match
+from etude.eval.result import Tables
+
+def play(match: Match, agents: Sequence[Agent]) -> Tables:
+    assert "separate_loading" not in sys.modules
+    assert "etude.eval.batching" not in sys.modules
+    return {"scores": [{"seat": 0, "score": int(str(agents[0].act([1])[0]))}]}
+""")
+    (tmp_path / "separate_loading.py").write_text(
+        "raise RuntimeError('model module imported by game')\n"
+    )
+    program = """
+import json
+import socket
+import sys
+import threading
+from multiprocessing.connection import Connection
+from tempfile import TemporaryDirectory
+from etude.call import Function
+from etude.eval.agents import Answer
+from etude.eval.game import play_match
+from etude.eval.records import Code, Match
+
+counts = {"sent": 0, "received": 0}
+with TemporaryDirectory(dir="/tmp", prefix="etude-test-") as scratch, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+    address = scratch + "/a.sock"
+    listener.bind(address)
+    listener.listen()
+    def answer() -> None:
+        peer, _ = listener.accept()
+        with Connection(peer.detach()) as connection:
+            request = connection.recv()
+            counts["received"] += 1
+            connection.send(Answer(request.rows))
+            counts["sent"] += 1
+    thread = threading.Thread(target=answer)
+    thread.start()
+    result = play_match(Function(module="light_agent_game", name="play", path=sys.argv[1]),
+                        Match(players=(Code(name="one"),)), address)
+    thread.join()
+assert counts == {"sent": 1, "received": 1}
+print(result.imports.model_dump_json())
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=15,
+    )
+    assert json.loads(result.stdout)["count"] == 1
+
+
+def test_eval_only_smoke_starts_one_agent_process(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    steps: tuple[Step, ...] = ("eval",)
+    result = smoke_file(Path("examples/agents.py"), steps=steps, source=DirectoryStorage(tmp_path))
+    assert len(result.rest) == 2
+    assert all(step.outcome == "passed" for step in result.rest)
+    log = capfd.readouterr().err
+    assert log.count("agents: started") == log.count("agents: stopped") == 1
+
+
+def stop_parent(match: Match, agents: Sequence[Agent]) -> Tables:
+    agents[0].act([1])
+    os.kill(os.getppid(), signal.SIGTERM)
+    return {"scores": [{"seat": 0, "score": 1}]}
+
+
+def test_sigterm_reaps_agents_and_games_and_records_retry(tmp_path: Path) -> None:
+    before = {p.pid for p in active_children()}
+    active = job("stop", Agents(load=load, config=Loading())).model_copy(
+        update={"play": stop_parent}
+    )
+    with pytest.raises(Terminated):
+        hold_group(group(active), directory=tmp_path)
+    assert {p.pid for p in active_children()} <= before
+    found = played(active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path)
+    assert len(found.new) == len(found.retry) == len(found.failed) == 1
+
+
+def test_a_failed_load_is_not_attempted_again_in_the_run() -> None:
+    batches = _Batches(raises_load, Loading(), 1, 0, 10)
+    parent, child = get_context("spawn").Pipe()
+    try:
+        player = Code(name="one")
+        batches.add(child, Request(player, [1], "one", "a"), 0)
+        batches.flush(0)
+        first = parent.recv()
+        assert first.error and "fixture loading error" in first.error
+        # If loading is attempted a second time this function would now succeed.
+        batches.load = echo
+        batches.add(child, Request(player, [2], "two", "b"), 1)
+        batches.flush(1)
+        assert parent.recv() == first
+        assert batches.loads == 0
+    finally:
+        parent.close()
+        child.close()
+
+
+def test_admission_reads_known_target_cpus_without_provider_calls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.eval.run.DirectoryStorage", MissingReceiptStorage)
-    active = job("receipt", None)
-    with pytest.raises(RetryRequested, match="receipt could not be retained"):
-        hold_group(group(active), directory=tmp_path)
-    result = played(active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path)
-    assert len(result.new) == len(result.failed) == len(result.retry) == 1
+    b = bench(tmp_path)
+    monkeypatch.setattr(client, "default", lambda: b.scheduler)
+    ondemand = next(r for r in b.scheduler.ondemands() if r.name == "l4")
+    b.scheduler.add_ondemand(
+        ondemand.model_copy(
+            update={"name": "cpu8", "template": ondemand.template.model_copy(update={"vcpus": 8})}
+        )
+    )
+    counts = Counting(b.store, b.service)
+    with counts.record():
+        assert _eval_cpus(None, "cpu8") == 8
+    assert counts.snapshot().provider == counts.snapshot().ssh == 0
+    b.scheduler.add_pool(Pool(name="unknown"))
+    b.scheduler.add_machine("cpu", "fixture-host", pool="unknown")
+    assert _eval_cpus("unknown", "cpu8") is None
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_container_limits_include_ancestor_cpu_and_leaf_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: int
+) -> None:
+    root = tmp_path / "cgroup"
+    membership = tmp_path / "membership"
+    if version == 2:
+        (root / "tenant").mkdir(parents=True)
+        (root / "tenant/cpu.max").write_text("max 100000")
+        (root / "cpu.max").write_text("200000 100000")
+        (root / "tenant/memory.max").write_text(str(1024**3))
+        (root / "memory.max").write_text(str(2 * 1024**3))
+        membership.write_text("0::/tenant\n")
+    else:
+        (root / "cpu/tenant").mkdir(parents=True)
+        (root / "memory/tenant").mkdir(parents=True)
+        (root / "cpu/cpu.cfs_quota_us").write_text("200000")
+        (root / "cpu/cpu.cfs_period_us").write_text("100000")
+        (root / "memory/tenant/memory.limit_in_bytes").write_text(str(1024**3))
+        (root / "memory/memory.limit_in_bytes").write_text(str(2 * 1024**3))
+        membership.write_text("2:cpu,cpuacct:/tenant\n3:memory:/tenant\n")
+
+    def fixture_path(value: str) -> Path:
+        return (
+            root
+            if value == "/sys/fs/cgroup"
+            else membership
+            if value == "/proc/self/cgroup"
+            else Path(value)
+        )
+
+    def affinity(pid: int) -> set[int]:
+        return set(range(32))
+
+    monkeypatch.setattr("etude.eval.resources.Path", fixture_path)
+    monkeypatch.setattr(os, "sched_getaffinity", affinity, raising=False)
+    assert available_cpus() == 2
+    assert memory_bytes() == 1024**3
+
+
+def fails_game(match: Match, agents: Sequence[Agent]) -> Tables:
+    raise ValueError("fixture game error")
+
+
+def test_a_game_failure_stops_only_its_tournament(tmp_path: Path) -> None:
+    agents = Agents(load=load, config=Loading())
+    bad = job("bad", agents).model_copy(update={"play": fails_game})
+    with pytest.raises(EtudeError, match="match_failed"):
+        hold_group(group(bad, job("good", agents)), directory=tmp_path)
+    db = statsdb("grouped", tmp_path)
+    try:
+        assert db.sql("select count(*) from scores").fetchone() == (2,)
+        assert sorted(row[0] for row in db.sql("select state from runs").fetchall()) == [
+            "failed",
+            "finished",
+        ]
+    finally:
+        db.close()
+
+
+@pytest.mark.parametrize("with_agents", [False, True])
+def test_heavy_import_warning_is_once_and_only_for_games_with_agents(
+    tmp_path: Path, with_agents: bool
+) -> None:
+    (tmp_path / "torch.py").write_text("# Controlled framework fixture.\n")
+    (tmp_path / "heavy_fixture_game.py").write_text(
+        "import torch\nfrom collections.abc import Sequence\nfrom etude.eval.records import Match\n"
+        "from etude.eval.agents import Agent\nfrom etude.eval.result import Tables\n"
+        "def play(match: Match"
+        + (", agents: Sequence[Agent]" if with_agents else "")
+        + ") -> Tables:\n"
+        "    return {'scores': [{'seat': 0, 'score': 1}]}\n"
+    )
+    program = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from heavy_fixture_game import play
+from etude.eval.match import environment
+from etude.eval.records import Code, RoundRobin
+from etude.jobs import Agents, EvalGroup, EvalJob, evaluation_group, hold_group
+from examples.agent_models import Loading, load
+agents = Agents(load=load, config=Loading()) if sys.argv[2] == "True" else None
+jobs = [EvalJob(tournament=RoundRobin(name=name, environment=environment("heavy"), configs=({},), games=1),
+               enter=(Code(name="one"), Code(name="two")), experiment="heavy", play=play,
+               agents=agents, repo=None, max_hours=0.1) for name in ("first", "second")]
+hold_group(EvalGroup(evaluations=tuple(evaluation_group(job).evaluations[0] for job in jobs)),
+           directory=sys.argv[1])
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(tmp_path), str(with_agents)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("game module heavy_fixture_game: imported torch") == int(with_agents)
+    if with_agents:
+        assert "move the import to load's module" in result.stderr
+
+
+def test_agent_startup_failure_reports_retryable_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
+    monkeypatch.setenv("ETUDE_FIXTURE_TOKEN", "synthetic-fixture-credential")
+    (tmp_path / "bad_agent_import_fixture.py").write_text(
+        "import os\nraise RuntimeError('startup: ' + os.environ['ETUDE_FIXTURE_TOKEN'])\n"
+    )
+    selected = group(job("startup", Agents(load=load, config=Loading())))
+    spec = selected.evaluations[0]
+    assert spec.agents is not None
+    spec = spec.model_copy(
+        update={
+            "agents": spec.agents.model_copy(
+                update={
+                    "load": Function(
+                        module="bad_agent_import_fixture", name="load", path=str(tmp_path)
+                    )
+                }
+            )
+        }
+    )
+    with pytest.raises(RetryRequested, match="startup"):
+        hold_group(EvalGroup(evaluations=(spec,)), directory=tmp_path)
+    log = capfd.readouterr().err
+    assert "[redacted]" in log and "synthetic-fixture-credential" not in log
+    assert json.loads((outputs / "etude-result.json").read_text())["tally"]["failed"] == 1
+    found = played(spec.tournament, experiment="grouped", enter=spec.entrants, directory=tmp_path)
+    assert len(found.new) == len(found.retry) == len(found.failed) == 1

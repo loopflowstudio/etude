@@ -1,6 +1,6 @@
 # Evaluation
 
-Play players against each other in parallel workers, hand Etude whatever tables
+Play players against each other in parallel game processes, hand Etude whatever tables
 your game code produces, and query each experiment's results as one DuckDB
 database. Tournaments decide which matches to play: each checkpoint of a run
 through a benchmark's seatings as it trains, or hand-picked players in a round
@@ -40,7 +40,7 @@ heuristic = Code(name="heuristic", source=["players/heuristic.py"])
 greedy = Code(name="greedy", source=["players/greedy.py"])
 
 
-def play(match: Match[Deal]) -> Tables:  # importable by name: workers are fresh processes
+def play(match: Match[Deal]) -> Tables:  # importable by name: games play in fresh processes
     results = play_deal(match.players, deal=match.config.deal, games=match.games, seed=match.seed)
     return {
         "plays": [
@@ -103,12 +103,12 @@ with evaluating(progress, experiment="ppo", checkpoint=ref, storages=[bucket], l
 
 # Batch: add a seating to the definition; holding with no checkpoint plays every
 # missing match, so the new seating is played for every checkpoint held so far.
-with evaluating(progress, experiment="ppo", workers=8, storages=[bucket], lines=lines) as run:
+with evaluating(progress, experiment="ppo", storages=[bucket], lines=lines) as run:
     run.play(play)
 
 # Batch: hand-picked players, each against every other.
 league = RoundRobin(name="finals-1", environment=world, configs=deals, games=8)
-with evaluating(league, experiment="ppo", enter=finals, workers=8, storages=[bucket]) as run:
+with evaluating(league, experiment="ppo", enter=finals, storages=[bucket]) as run:
     run.play(play)
 
 db = statsdb("ppo", bucket)  # or "s3://my-bucket/runs", a directory, or nothing: ~/.etude/track
@@ -146,7 +146,6 @@ with evaluating(
             games=4,
         )
     ],
-    workers=4,
     storages=[bucket],
 ) as run:
     run.play(play)
@@ -239,12 +238,15 @@ with evaluating(
   `games`: the unit Etude schedules, resumes and resamples. A tournament's
   `Seating` makes one match per config. Seat swaps belong
   inside `play`. Group `all` holds every seat; a player may sit in two seats.
-- **Order.** Matches start, `workers` at a time, in the order
-  `etude.eval.schedule.ordered` gives, so consecutive matches reuse the
-  checkpoints your inference runtime keeps loaded: first those loading the
-  fewest checkpoints not yet used, then those reusing the most recently used.
-  Ties, and queues of code players only, keep your order. Order changes no
-  result. Your runtime counts its loads; Etude does not.
+- **Game processes.** Matches are played in fresh processes, as many at once
+  as the run has CPUs, by affinity and container quota, and never more than
+  there are matches. `evaluating` has no setting for the number; a job that
+  declares [agents](#agents) has it sized for them too.
+- **Order.** Matches start in the order `etude.eval.schedule.ordered` gives,
+  so consecutive matches reuse the checkpoints kept loaded: first those
+  loading the fewest checkpoints not yet used, then those reusing the most
+  recently used. Ties, and queues of code players only, keep your order.
+  Order changes no result.
 - **Rows are yours.** `play` returns any tables. Each row names a `seat`
   (its position in `match.players`) or a `group` of its match; Etude adds `run` and `match`. Values are
   numbers, text, booleans or nulls. A game's own seat numbering, when it
@@ -500,7 +502,6 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
             play=play,
             tournament=progress,
             checkpoints=finals,
-            workers=8,
             max_hours=0.5,
             max_usd=Decimal(1),
         )
@@ -539,9 +540,10 @@ and its delivered folder or file is each player's `checkpoint.path`, which `play
 opens. A single-file `Input` is also accepted. The job's environment needs
 `etude-sdk[eval]`; the rest is as for any [typed job](launcher.md#typed-jobs).
 
-Compatible eval jobs naming the same server, or no server, share a launched
-run ([Experiments](#experiments)). Its tournaments play concurrently on one
-pool, bounded by the largest declared `workers` and each member's own limit.
+Eval jobs that can run together share a launched run
+([Experiments](#experiments)). Its tournaments play at once in one set of
+game processes, and Etude decides how many games are active
+([Agents](#agents)); an eval job has no setting for it.
 Each writes its own eval run below the launched run's folder
 (`capacity/evals-1a2b3c4d5e6f/capacity/ladder-3c4d5e6f7a8b/`). Their tables
 reach the machine's storage with the run's other files and `statsdb` finds
@@ -549,153 +551,215 @@ them there, by tournament and match as before. A launched run reads no other
 eval run: the pass that launched it decided which matches are new and gave it
 exactly those.
 
-### Inference servers
+### Agents
 
 ```python
-# arena.py
-from collections.abc import Iterator
-from contextlib import contextmanager
+# arena_game.py: the game. It imports no model library.
+from collections.abc import Sequence
 
 from pydantic import BaseModel
 
-from etude.jobs import InferenceServer
-from arena_game import Endpoint
-
-
-class ServeConfig(BaseModel):
-    max_batch: int = 64
-    device: str = "cuda"
-
-
-@contextmanager
-def serve(config: ServeConfig) -> Iterator[Endpoint]:
-    child = start_serving(config)  # your code: the one process that loads weights
-    try:
-        yield Endpoint(address=child.address)  # yours too: how a game reaches it
-    finally:
-        child.stop()
-
-
-net = InferenceServer(name="net", serve=serve, config=ServeConfig(max_batch=64))
-```
-
-```python
-# arena_game.py: importing a game must not import its model-serving code
-from pydantic import BaseModel
-
+from etude.eval.agents import Agent
 from etude.eval.records import Match
 from etude.eval.result import Tables
 
 
-class Endpoint(BaseModel):
-    address: str
+class Deal(BaseModel):
+    deal: int
 
 
-def play(match: Match, inference: Endpoint) -> Tables:
-    # ask the server for each move, naming each player's checkpoint.path
-    ...
+def play(match: Match[Deal], agents: Sequence[Agent]) -> Tables:
+    plays = []
+    for game in range(match.games):
+        state = deal(match.config.deal, seed=match.seed + game)  # your game
+        while not state.over:
+            # One row asks for one move. The row carries its own seed.
+            row = {"view": state.view(), "seed": state.seed}
+            [action] = agents[state.seat].act([row])
+            state = state.step(action)
+        plays += [
+            {"game": game, "seat": seat, "score": state.score(seat)}
+            for seat in range(len(match.players))
+        ]
+    return {"plays": plays}
 ```
 
 ```python
-# capacity.py, the experiment file under Experiments below, its two jobs naming the server
-from arena import net
+# arena_models.py: how a player is loaded. It may import Torch.
+from collections.abc import Sequence
+from typing import TypedDict, cast
+
+import numpy as np
+import numpy.typing as npt
+
+import torch
+from pydantic import BaseModel
+
+from etude.eval.agents import Agent
+from etude.eval.records import CheckpointPlayer, Code, Player
+
+
+class Loading(BaseModel):
+    device: str = "cuda"
+
+
+class Observation(TypedDict):
+    view: npt.NDArray[np.float32]
+    seed: int
+
+
+class Net:
+    def __init__(self, player: CheckpointPlayer, config: Loading) -> None:
+        self.device = config.device
+        self.model = read_model(player.checkpoint.path).to(self.device)  # your code
+
+    def act(self, rows: Sequence[object]) -> Sequence[int]:
+        # The game constructs this pickled shape; its typing belongs at this boundary.
+        observations = [cast(Observation, row) for row in rows]
+        views = torch.stack([torch.from_numpy(row["view"]) for row in observations])
+        with torch.no_grad():
+            logits = self.model(views.to(self.device)).cpu()
+        # Each row samples with its own seed, so its answer is the same in any batch.
+        return [
+            int(torch.multinomial(each.softmax(0), 1, generator=seeded(row["seed"])))
+            for each, row in zip(logits, observations, strict=True)
+        ]
+
+
+def load(player: Player, config: Loading) -> Agent:
+    if isinstance(player, Code):
+        return Heuristic(player.name)  # code players are agents too
+    return Net(player, config)
+```
+
+```python
+# capacity.py, the experiment file under Experiments below, its two jobs declaring agents
+from etude.jobs import Agents, EvalJob, ExperimentState
+
 from arena_game import play
+from arena_models import Loading, load
 
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     ...
+    net = Agents(load=load, config=Loading(device="cuda"))
     return [
-        EvalJob(
-            play=play, tournament=ladder, checkpoints=rated, server=net, workers=8, max_hours=1
-        ),
-        EvalJob(
-            play=play,
-            tournament=against_small,
-            checkpoints=large,
-            server=net,
-            workers=8,
-            max_hours=1,
-        ),
+        EvalJob(play=play, tournament=ladder, checkpoints=rated, agents=net, max_hours=1),
+        EvalJob(play=play, tournament=against_small, checkpoints=large, agents=net, max_hours=1),
     ]
 ```
 
 ```text
 $ etude eval capacity.py --source s3://bucket/etude/launch
 capacity: state from s3://bucket/etude/launch: 6 training runs, 2 eval runs
-etude: server net: started for ladder, against small
-etude: server net: stopped
+etude: agents: started for ladder, against small; 7 games at a time
+etude: agents: loaded heuristic
+etude: agents: loaded large@0/updates-00001000
+...
+etude: agents: stopped; 9 players loaded, 41280 rows in 1612 batches
 eval ladder: 48 new, 0 running, 0 failed, 48 played
 eval against small: 24 new, 0 running, 0 failed, 24 played
 ```
 
-Without a server every game process loads its own weights. An
-`InferenceServer` is one process, started once, that the games of every eval
-job naming it send their moves to: Etude enters `serve(config)` before the
-first game, gives what it yields to every `play(match, inference)`, and
-leaves it after the last game, wherever the games are played: `etude eval`
-here, a smoke, or a launched run on its machine.
+You write two functions: the game, and how a player is loaded. Etude runs
+everything between them. Games are played in light processes that import only
+`play`'s module. One agent process holds the loaded players and answers every
+game's moves, batching the rows that ask for the same player, whichever game,
+match or tournament they come from. The same happens wherever the games are
+played: `etude eval` here, a smoke, or a launched run on its machine.
 
-Naming a server is optional. An `EvalJob` with no `server` calls
-`play(match)`, which does all the playing itself, as above; one run may hold
-jobs of both kinds.
+Declaring agents is optional. An `EvalJob` with no `agents=` calls
+`play(match)`, which does all the playing itself in the same game processes,
+each loading whatever weights it needs. That is the simpler choice for code
+players and small models on CPUs. Agents are for a model worth loading once:
+one on a GPU, or weights too large to hold in every game process.
 
-- **A server is a name, a `serve` function and its config.** `serve` takes
-  one Pydantic config and returns a context manager; like `play`, it is
-  imported by name, so define it at the top of a module. Everything about
-  serving is yours, in `serve` and its config: how requests are batched,
-  which device, how models are loaded and kept. `EvalJob`, the experiment and
-  the launch command have no setting for any of it, and Etude never speaks to
-  the server.
-- **The handle is whatever `serve` yields.** Etude passes it to `play`
-  unread, into each worker process, so it must pickle: an address and a key,
-  not a socket. A handle that does not is refused before the first game,
-  naming the server.
-- **Same machine.** The server runs beside the games it serves, so `play`
-  can name a checkpoint to it by the player's `checkpoint.path`. A server has
-  no setting for where it runs.
-- **Shared by name.** Eval jobs of one run that name the same server share
-  one process. Two different definitions under one name are refused
-  (`inference_server_conflict`): give the other a new name. Define the server
-  in a module so several experiment files can import it.
-- **Zero or one server per job.** One `serve` can host several models and
-  route requests by checkpoint key. Jobs naming different servers run in
-  separate groups; jobs without a server remain supported.
-- **`play` takes what the job names.** `play(match)` with `server=`, or a
-  second parameter without one, is refused where the job is written.
-- **Started only when needed.** A run enters only the servers its new
-  matches' jobs name, each once, and none when there is nothing to play.
-  Each launched run starts its own: a second eval run placed later on the
-  same machine does not reuse the first's.
-- **Stopped whatever happens.** Etude leaves `serve` after the last game,
-  after a failure, and when the run is stopped or cancelled (SIGTERM), so
-  `serve` must stop its process in its `finally`.
-- **Failures.** If `serve` raises before yielding, no game is played. Its unfinished
-  matches are failed with `retry=True`, and the run fails. If the server
-  adapter raises `RetryRequested`, its unfinished matches are failed with
-  `retry=True` and remain eligible for the next pass.
-  A serving context must raise `RetryRequested` when its child exits unexpectedly,
-  including on context exit; Etude does not inspect an opaque handle's protocol.
-  An author can raise `etude.errors.RetryRequested` for other infrastructure
-  refusals. An ordinary exception from `play` is failed with `retry=False`;
-  only `RetryRequested` opts into automatic retry. Rows saying a game was
-  invalid remain rows: the author must raise instead of returning them.
-  Ordinary game errors still fail that match
-  ([Experiments](#experiments)).
-- **Local resources.** `ETUDE_SCRATCH_DIR` and `TMPDIR` point to temporary
-  scratch (`/dev/shm` when available); thread-pool environment variables divide
-  the CPUs allowed by affinity and container quotas among the group's workers.
-  `ETUDE_RECEIPTS_DIR` retains serving receipts below the launched run's
-  `artifacts/inference/`. A serve can host models admitted by `play` at match
-  time: checkpoints are inputs, and need not be known when `serve` starts.
-- **Light game modules.** A game process imports the module defining `play`,
-  rather than the experiment file unless `play` is defined there. Keep play
-  and its address types in a small module, as `arena_game.py` above. Etude
-  records startup import counts and reports once per group if they include
-  `torch`, `jax` or `tensorflow`, or exceed 256 modules. The warning names
-  the importer and the fix; import receipts are retained with the run.
+- **An agent is anything with `act(rows)`.** It takes a sequence of rows and
+  returns one answer per row, in order. `Agent` is a protocol, not a base
+  class, and nothing else is asked of it.
+- **Each row is answered as if alone.** Which rows share a batch depends on
+  timing, so an answer must not: a row that needs randomness carries its own
+  seed, and `act` uses that seed for that row only. Etude cannot check this.
+  It keeps which rows shared each batch (see "Kept with the run" below), so
+  a result that differs between two runs can be traced.
+- **`agents` is one agent per seat**, in the order of `match.players`.
+  `agents[seat].act(rows)` sends the rows straight to the agent process and
+  waits for the answers. A game that needs several answers at once, such as
+  the leaves of a search, sends them as one call. A player in two seats is
+  one loaded agent.
+- **Rows and answers are picklable values**: NumPy arrays, numbers, text,
+  and tuples, lists and dicts of them. A type from a model library would make
+  every game process import that library.
+- **`load` is called once per player**, in the agent process, the first time
+  a game asks for it, with the config the job gave. It is called for every
+  player seated, a `Code` player included. A checkpoint player's folder or
+  file is at `player.checkpoint.path`: the agent process runs on the machine
+  that plays the games, and has no setting for where it runs. Like `play`,
+  `load` is imported by name, so define it at the top of a module.
+- **Test a game without Etude.** Both sides are the same protocol, so
+  `play(match, [load(player, Loading()) for player in match.players])` plays
+  a match in one process.
+- **Batching** is per player. A batch is answered when it holds `max_batch`
+  rows (default 32) or when its oldest row has waited `max_delay_seconds`
+  (default 0.005). One call's rows always arrive in one batch, even when
+  there are more than `max_batch`. Set either on `Agents(...)`.
+- **Memory.** `memory_gb` on `Agents(...)` bounds what the loaded agents may
+  hold, counting each by its checkpoint's size on disk and a code player as
+  nothing. The default is half the memory the run may use. Over the bound,
+  the least recently used agent with no row waiting is dropped, and loaded
+  again if a game asks for it. Matches are ordered so those sharing
+  checkpoints are played together (see "Order" above). The bound counts host
+  memory, not a GPU's: on a small device, set it to what the device holds.
+- **Active games are Etude's to decide.** One game per CPU the run may use,
+  by affinity and container quota, less one for the agent process; never
+  more than there are matches left, or than fit in memory beside the agents
+  at 256 MiB a game. A game process gets one thread, the agent process the
+  rest. The line that starts the agents says how many.
+- **Shared by jobs that declare the same agents.** Eval jobs of one pass
+  whose `Agents` are equal share a run and its agent process. Jobs with
+  different `Agents`, and jobs with none, go in separate eval runs.
+- **`play` takes what the job declares.** `play(match)` with `agents=`, or a
+  second parameter without it, is refused where the job is written.
+- **Started only when needed.** A run with nothing to play starts no agent
+  process. Each launched run starts its own: a second eval run placed later
+  on the same machine does not reuse the first's.
+- **Stopped whatever happens.** Etude stops the agent process after the last
+  game, after a failure, and when the run is stopped or cancelled (SIGTERM).
+- **Failures.** A game never has to notice a dead agent process: `act`
+  raises for it, and Etude records the match.
+
+  | What happened | Matches | Run |
+  | --- | --- | --- |
+  | the agent process exits | unfinished ones failed with `retry=True` | failed |
+  | `load` raises | each match that asks for that player failed with `retry=False`; the player is not loaded again in this run | failed |
+  | `act` raises, returns the wrong number of answers, or one that does not pickle | the matches with rows in that batch failed with `retry=False` | failed |
+  | `load` or `act` raises `etude.errors.RetryRequested` | failed with `retry=True` | failed |
+  | `play` raises | failed with `retry=False` | failed |
+  | the run's time limit, SIGTERM, or a failed delivery | unfinished ones failed with `retry=True` | failed |
+
+  The next pass plays `retry=True` matches again by itself; `retry=False`
+  ones wait for `--retry-failed`. As for any failed match, a tournament
+  stops at its first `retry=False` failure while the others finish
+  ([Experiments](#experiments)), so a `load` that raises fails the first
+  match of each tournament that asks for the player. Raise `RetryRequested`
+  for a refusal that is the machine's fault, such as a device out of memory.
+  Rows saying a game was invalid remain rows: raise instead of returning
+  them. A run with a failed match is never recorded as succeeded.
+- **Light game modules.** A game process imports the module that defines
+  `play`, not the experiment file (unless `play` is defined there) and not
+  `load`'s module. Keep the game in a small module, as `arena_game.py`
+  above. For a job with agents, Etude counts what each game process imported
+  at startup and warns once per run if that includes `torch`, `jax` or
+  `tensorflow`, or exceeds 256 modules, naming the importing module and
+  saying to move the import to `load`'s.
+- **Kept with the run.** `artifacts/agents/batches.json` below the launched
+  run lists each batch: its player, and the tournament and match of each
+  row. The startup import counts are kept beside it. `ETUDE_SCRATCH_DIR` and
+  `TMPDIR` point to temporary scratch (`/dev/shm` when available) in the
+  game and agent processes.
 - **Results do not depend on it.** A match is its seats, config and game
-  count, whoever served it: changing a server's config, or adding or removing
-  the server, plays no delivered match again. Return what served a game in
+  count, however it was played: changing `Agents`, or adding or removing
+  them, plays no delivered match again. Return what played a game in
   `Result(execution=...)` to keep it with the result.
 
 ## Experiments
@@ -771,8 +835,8 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     )
     large = [c for run in state.runs if run.job == "large" for c in run.checkpoints.every(5)]
     return [
-        EvalJob(play=play, tournament=ladder, checkpoints=rated, workers=8, max_hours=1),
-        EvalJob(play=play, tournament=against_small, checkpoints=large, workers=8, max_hours=1),
+        EvalJob(play=play, tournament=ladder, checkpoints=rated, max_hours=1),
+        EvalJob(play=play, tournament=against_small, checkpoints=large, max_hours=1),
     ]
 ```
 
@@ -882,27 +946,28 @@ matches, as a launched one does, unless `--retry-failed`.
   and delivers them to the source. `etude launch` and `etude queue` submit
   one eval run to play exactly those, with each checkpoint they seat as an
   input from its training run's folder.
-- **One run for the pass.** The new matches of compatible eval jobs naming the same server go to one
-  machine as one run, `capacity/evals-1a2b3c4d5e6f`, so a pass with a few
-  matches for each of several tournaments rents once, and the jobs share
-  their [inference servers](#inference-servers). Every tournament's line
-  names that run. The run's `max_hours` and `max_usd` are the sums of its
-  jobs', giving the concurrent tournaments a conservative combined allowance.
-  Jobs that
-  could not run together get a run each: those that differ in checkout or
-  revision, `runtime`, `prepare`, `setup`, `cleanup`, environment variables,
-  stop or cleanup allowance, or `max_attempts`.
+- **One run for the pass.** The new matches of eval jobs that can run
+  together go to one machine as one run, `capacity/evals-1a2b3c4d5e6f`, so a
+  pass with a few matches for each of several tournaments rents once, and the
+  jobs share their game processes and their [agents](#agents). Every
+  tournament's line names that run. The run's `max_hours` and `max_usd` are
+  the sums of its jobs', giving the concurrent tournaments a conservative
+  combined allowance. Jobs that could not run together get a run each: those
+  that differ in `agents`, checkout or revision, `runtime`, `prepare`,
+  `setup`, `cleanup`, environment variables, stop or cleanup allowance, or
+  `max_attempts`.
 - **Waiting for useful machine time.** `etude eval` always plays.
   `etude launch` and `etude queue` hand a group down when a machine that
   already exists has room after this pass's training runs, when its estimated
   work reaches `--min-eval-hours H` (default: 2 hours), or when no training
   run of the experiment is queued or running.
 
-  The estimate uses this tournament's recorded seconds per game, multiplied
-  by its new games and divided by the available callers. The estimate also
-  respects each tournament's own worker limit and the number of pending matches. All tournaments in a
-  group share one pool with the largest declared `workers`, rather than the
-  sum. With no timing history for any member, there is no estimate and the
+  The estimate is each tournament's recorded seconds per game, multiplied by
+  its new games, summed over the run and divided by the CPUs of the machine
+  the pool or on-demand would give it, since that many games play at once.
+  Where the pass cannot tell the machine's CPUs it does not divide, so it
+  hands the run down sooner. With no timing history for any member, there is
+  no estimate and the
   pass hands it down so a new tournament can establish its pace. This is a
   work estimate, not a price quote or a guarantee across different hardware.
 
@@ -938,7 +1003,12 @@ matches, as a launched one does, unless `--retry-failed`.
   failed, never played: `etude status RUN` counts it (`12/80 matches (1
   failed)`), its tournament stops there, and every later pass counts it
   (`ladder: 0 new, 1 failed`) and does not play it again, so a result is
-  never quietly replaced. The other tournaments keep playing; the run then ends failed. `--retry-failed` plays the failed matches again. A match an
+  never quietly replaced. The other tournaments keep playing; the run then
+  ends failed. `--retry-failed` plays the failed matches again. A match the
+  machine failed rather than the game, such as one unfinished at the run's
+  time limit or when its [agent process](#agents) exited, is failed with
+  `retry=True` (`matches.retry`) and the next pass plays it again without
+  the flag. A match an
   older run stored as done with no rows counts as failed too, so its games
   are asked for again rather than silently missing.
 - **Without playing.** `etude.eval.tournament.played` answers what a pass

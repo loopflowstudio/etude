@@ -1,17 +1,19 @@
 """A live evaluation run: match validation, staging, rollups and outcome publication.
 
-EvalRun owns match execution, worker processes and its local DuckDB connection
+EvalRun owns match execution, game processes and its local DuckDB connection
 until finish. Result is the playing code's returned data; EvalResult counts
 what play completed. Tournament scheduling lives in eval.tournament.
 """
 
 from __future__ import annotations
 
+import inspect
 import multiprocessing
 import os
 import secrets
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -25,12 +27,13 @@ from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from types import FrameType
-from typing import TYPE_CHECKING, Literal, NoReturn
+from typing import TYPE_CHECKING, Literal, NoReturn, cast
 
 from pydantic import BaseModel, JsonValue
 
 from etude.call import Function
-from etude.errors import EtudeError, RetryRequested
+from etude.errors import EtudeError, RetryRequested, explain, sanitize
+from etude.eval.agents import AgentProcess
 from etude.eval.block import (
     Block,
     Staging,
@@ -54,6 +57,7 @@ from etude.eval.records import (
     as_config,
     outcomes,
 )
+from etude.eval.resources import active_games
 from etude.eval.result import EvalResult as EvalResult
 from etude.eval.result import Result as Result
 from etude.eval.result import Row
@@ -97,7 +101,6 @@ class EvalRun(Run):
         experiment: str,
         environment: Environment,
         matches: Sequence[Match],
-        workers: int,
     ) -> None:
         # Imported here: DuckDB is the optional `eval` extra.
         import duckdb  # noqa: PLC0415
@@ -105,7 +108,6 @@ class EvalRun(Run):
         super().__init__(experiment=experiment, name=name, root=root, targets=targets)
         self.environment = environment
         self.matches = tuple(matches)
-        self.workers = workers
         self.rollups = rollups
         self.id = secrets.token_hex(6)
         self.writer = RunWriter(
@@ -183,20 +185,25 @@ class EvalRun(Run):
         """Mark unfinished matches failed with retry=True before the run fails."""
         for match in self.matches:
             if match.key not in self.done and match.key not in self._failed:
+                self._failed.add(match.key)
                 self.failed += 1
                 self.staging.stage(
                     MatchRecord(
                         match=match,
                         state="failed",
                         retry=True,
-                        error=str(error)[:2000],
+                        error=sanitize(str(error))[:2000],
                         wall_ms=_now_ms(),
                     )
                 )
         self._seal()
 
     def fail(self, scheduled: Match, error: BaseException) -> NoReturn:
-        detail = f"{type(error).__name__}: {error}"[:2000]
+        detail = (
+            explain(error)
+            if isinstance(error, subprocess.SubprocessError)
+            else sanitize(f"{type(error).__name__}: {error}")
+        )[:2000]
         self._failed.add(scheduled.key)
         self.failed += 1
         self.staging.stage(
@@ -425,26 +432,32 @@ def _terminable() -> Iterator[None]:
 
 @dataclass
 class Playing:
-    """A live tournament and the function and handle its workers call."""
+    """A live tournament and its game function and optional agent address."""
 
     run: EvalRun
-    play: Callable[..., Tables | Result]
-    arguments: tuple[object, ...] = ()
+    play: Callable[..., Tables | Result] | Function
+    checkout: str | None = None
+    tournament: str | None = None
+    agents: str | None = None
     pending: deque[Match] = field(init=False)
     skipped: int = field(init=False)
     played: int = 0
     failure: EtudeError | None = None
-    active: int = 0
 
     def __post_init__(self) -> None:
         self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
         self.skipped = len(self.run.matches) - len(self.pending)
 
 
-def play_together(plays: Sequence[Playing]) -> tuple[EvalResult | EtudeError, ...]:
+def play_together(
+    plays: Sequence[Playing],
+    *,
+    memory_gb: float | None = None,
+    agent_process: AgentProcess | None = None,
+) -> tuple[EvalResult | EtudeError, ...]:
     """Play tournaments concurrently on one pool, stopping only the member that fails.
 
-    Each tournament contributes at most its own workers. Storage and reporting
+    Tournaments share the available game processes. Storage and reporting
     stay on the invoking thread; only the author's play crosses into a child.
     """
     started = time.monotonic()
@@ -463,14 +476,14 @@ def play_together(plays: Sequence[Playing]) -> tuple[EvalResult | EtudeError, ..
                 imports = Imports.model_validate_json(raw)
         if imports is not None and imports.pid not in reported_imports:
             reported_imports.add(imports.pid)
-            if receipts := os.environ.get("ETUDE_RECEIPTS_DIR"):
+            if artifacts := os.environ.get("ETUDE_AGENTS_DIR"):
                 try:
-                    DirectoryStorage(Path(receipts)).put(
+                    DirectoryStorage(Path(artifacts)).put(
                         f"game-imports-{imports.pid}.json", imports.model_dump_json().encode()
                     )
                 except OSError as error:
-                    raise RetryRequested("game import receipt could not be retained") from error
-        if imports is not None and imports.warning and not warned_imports:
+                    raise RetryRequested("game import report could not be retained") from error
+        if each.agents and imports is not None and imports.warning and not warned_imports:
             print(imports.warning, file=sys.stderr, flush=True)
             warned_imports = True
         try:
@@ -498,9 +511,8 @@ def play_together(plays: Sequence[Playing]) -> tuple[EvalResult | EtudeError, ..
             return None
         return each.pending.popleft() if each.pending else None
 
-    workers = min(
-        max((each.run.workers for each in plays), default=0),
-        sum(len(each.pending) for each in plays),
+    workers = active_games(
+        sum(len(each.pending) for each in plays), agents=any(each.agents for each in plays)
     )
     try:
         with _terminable():
@@ -513,19 +525,23 @@ def play_together(plays: Sequence[Playing]) -> tuple[EvalResult | EtudeError, ..
                     for _ in range(len(order)):
                         each = order.popleft()
                         order.append(each)
-                        if each.active >= each.run.workers or each.failure is not None:
+                        if each.failure is not None:
                             continue
                         match = next_match(each)
                         if match is not None:
-                            each.active += 1
                             running[
                                 pool.submit(
                                     play_match,
-                                    Function(
-                                        module=each.play.__module__, name=each.play.__qualname__
+                                    each.play
+                                    if isinstance(each.play, Function)
+                                    else Function(
+                                        module=inspect.unwrap(each.play).__module__,
+                                        name=inspect.unwrap(each.play).__qualname__,
                                     ),
                                     match,
-                                    each.arguments,
+                                    each.agents,
+                                    each.checkout,
+                                    each.tournament or each.run.name,
                                 )
                             ] = (
                                 each,
@@ -548,14 +564,28 @@ def play_together(plays: Sequence[Playing]) -> tuple[EvalResult | EtudeError, ..
                                 - max(each.run._slowest for each in plays),
                             )
                         )
-                        finished, _ = wait(running, timeout=allowance, return_when=FIRST_COMPLETED)
+                        # Future is invariant; wait observes completion, never result values.
+                        signals = cast(
+                            list[Future[object]],
+                            [*running, *([agent_process.exited] if agent_process else [])],
+                        )
+                        finished, _ = wait(
+                            signals,
+                            timeout=allowance,
+                            return_when=FIRST_COMPLETED,
+                        )
+                        if agent_process is not None:
+                            agent_process.check()
+                            if agent_process.exited in finished:
+                                raise RetryRequested("agent process exited before games finished")
                         if not finished:
                             raise RetryRequested(
                                 "evaluation deadline reached before a match completed"
                             )
-                        for future in finished:
+                        for future in list(running):
+                            if future not in finished:
+                                continue
                             each, match = running.pop(future)
-                            each.active -= 1
                             if each.failure is not None:
                                 start()
                                 continue
@@ -568,7 +598,7 @@ def play_together(plays: Sequence[Playing]) -> tuple[EvalResult | EtudeError, ..
                             start()
                 finally:
                     # Python 3.12 has no public terminate_workers. Reap children on
-                    # cancellation before server contexts leave and drop their handles.
+                    # cancellation before the agent process is stopped.
                     if sys.exc_info()[0] is not None:
                         processes = pool._processes  # Python 3.12 executor-owned children.
                         for process in processes.values():
@@ -605,15 +635,12 @@ def _evaluating_matches(
     experiment: str,
     environment: Environment,
     matches: Sequence[Match],
-    workers: int = 1,
     run: str | None = None,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
     rollups: Sequence[Rollup] = (),
     resume: bool = False,
 ) -> Iterator[EvalRun]:
-    if workers < 1:
-        raise EtudeError("workers_must_be_positive", 422)
     if len({scheduled.key for scheduled in matches}) != len(matches):
         raise EtudeError("duplicate_match", 422)
     names = [rollup.name for rollup in rollups]
@@ -644,7 +671,6 @@ def _evaluating_matches(
         experiment=experiment,
         environment=environment,
         matches=list(ordered(matches)),
-        workers=workers,
     )
     try:
         yield writer

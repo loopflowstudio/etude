@@ -116,27 +116,27 @@ Unchanged: `Job.runs(...)`, `ExperimentState.runs`, the `etude runs` command,
 `report()`, `play(match)`, typed flags on `training_jobs`, a job's command and
 identity, and everything already stored.
 
-## Eval jobs share one run and one inference server
+## Eval jobs share one run, and Etude runs their agents
 
 ```python
-from etude.jobs import EvalJob, ExperimentState, InferenceServer
+# game.py: imports no model library
+def play(match: Match[Deal], agents: Sequence[Agent]) -> Tables:
+    ...
+    [action] = agents[seat].act([row])  # the row carries its own seed
 
-net = InferenceServer(name="net", serve=serve, config=ServeConfig(max_batch=64))
+
+# models.py: may import Torch
+def load(player: Player, config: Loading) -> Agent: ...  # anything with act(rows)
 
 
+# capacity.py
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     ...
+    net = Agents(load=load, config=Loading(device="cuda"))
     return [
-        EvalJob(
-            play=play, tournament=ladder, checkpoints=rated, server=net, workers=8, max_hours=1
-        ),
-        EvalJob(
-            play=play, tournament=gauntlet, checkpoints=large, server=net, workers=8, max_hours=1
-        ),
+        EvalJob(play=play, tournament=ladder, checkpoints=rated, agents=net, max_hours=1),
+        EvalJob(play=play, tournament=gauntlet, checkpoints=large, agents=net, max_hours=1),
     ]
-
-
-def play(match: Match[Deal], inference: Endpoint) -> Tables: ...
 ```
 
 ```text
@@ -146,17 +146,19 @@ eval ladder: 48 new, 0 running, 0 failed, running capacity/evals-1a2b3c4d5e6f
 eval gauntlet: 24 new, 0 running, 0 failed, running capacity/evals-1a2b3c4d5e6f
 ```
 
-A pass hands down compatible eval jobs sharing a server (or no server) as
-one run on one machine, instead of one run per tournament. An eval job may name an
-`InferenceServer`: a name, a `serve(config)` context manager and its config.
-Etude enters `serve` once before the run's first game, gives what it yields
-to every `play(match, inference)`, and leaves it after the last game, on
-failure and on SIGTERM. Batching, devices and model loading belong to `serve`
-and its config and to nothing else. A job names zero or one server; one
-server can host several models. Jobs naming different servers form separate
-groups. Tournaments in a group play concurrently so requests can batch
-together. An eval job that names no server calls `play(match)` as before
-([Inference servers](../docs/evaluation.md#inference-servers)).
+A pass hands down the eval jobs that can run together as one run on one
+machine, instead of one run per tournament, and their tournaments play at
+once.
+
+An eval job may declare `agents=Agents(load=..., config=...)`. You write the
+game, `play(match, agents)`, and how a player is loaded, `load(player,
+config)`, which returns anything with `act(rows)`. Etude runs the rest: light
+game processes that import only `play`'s module, one agent process that loads
+each player once, and batches of rows per player (32 rows or 0.005 seconds
+by default), drawn from every game and tournament in the run. `act` must
+answer each row as if it were alone. An eval job without `agents=` calls
+`play(match)` as before, in the same game processes
+([Agents](../docs/evaluation.md#agents)).
 
 `etude launch` and `etude queue` no longer rent for every few new matches.
 The eval run is handed down when a machine that already exists has room, when
@@ -167,9 +169,13 @@ many matches wait and why, and a later pass finds them again
 
 ### Upgrade
 
+- **Remove `workers=`** from `EvalJob(...)` and `evaluating(...)`; it is
+  refused. Etude plays one game per CPU the run may use, fewer when agents
+  or memory need the room. The deprecated `evaluate(workers=)` accepts and
+  ignores it until 0.5. Eval jobs already queued with `workers` still run.
 - **Existing results remain readable and are not replayed.** Results stay keyed
   by tournament and match; eval runs already stored, queued or running are
-  read as before.
+  read as before. Declaring, changing or removing `agents` replays nothing.
 - **A launched eval run is `EXPERIMENT/evals-DIGEST`**, not
   `EXPERIMENT/TOURNAMENT-DIGEST`, and every tournament it plays prints that
   one name. Each tournament's tables are in its own eval run below that
@@ -184,20 +190,22 @@ many matches wait and why, and a later pass finds them again
   it as one run.
 - **A failed match stops its tournament.** The other tournaments keep
   playing, and the run ends failed.
+- **Some failed matches are replayed without `--retry-failed`.** A match the
+  machine failed rather than the game (unfinished at the run's time limit or
+  SIGTERM, a failed delivery, an agent process that exited, or code that
+  raised `etude.errors.RetryRequested`) is failed with `retry=True`, and the
+  next pass plays it again. An ordinary error from `play`, `load` or `act`
+  is `retry=False` and waits for `--retry-failed`, as before.
 - **`etude.jobs.with_matches` is removed.** The pass builds the run itself.
 
-The shared worker pool uses the largest `workers` declared by its members,
-so adding another eval job does not multiply serving concurrency. Match
-records now retain execution seconds for later machine-time estimates.
-`etude.errors.RetryRequested` means an infrastructure refusal, rather than a
-player failure: the run fails and its unfinished matches are failed with
-`retry=True`, which the next pass plays again without `--retry-failed`. Serving adapters use it for infrastructure failures. Completed matches are
-sealed and offered to storage individually. Container CPU quotas set thread
-budgets, `ETUDE_SCRATCH_DIR` supplies temporary fast scratch, and
-`ETUDE_RECEIPTS_DIR` retains server receipts with the run.
+Match records now retain execution seconds for later machine-time estimates.
+Completed matches are sealed and offered to storage individually. Container
+CPU quotas set how many games play and their thread budgets, and
+`ETUDE_SCRATCH_DIR` supplies temporary fast scratch. A run with agents keeps
+which rows shared each batch in `artifacts/agents/batches.json`.
 
 `matches.retry` distinguishes retryable infrastructure failures from ordinary
 game errors without adding another status. Older match records default it to
 false. The derived statsdb cache rebuilds from schema 14 to 15 automatically.
-Game processes load play's defining module and retain startup import counts;
-heavy imports produce one warning per group naming their importer.
+Game processes load play's defining module; for a job with agents, heavy
+imports there produce one warning per run naming their importer.

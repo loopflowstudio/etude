@@ -50,45 +50,49 @@ def rows(db: duckdb.DuckDBPyConnection) -> dict[str, list[tuple[object, ...]]]:
     }
 
 
-def test_an_eval_run_delivers_a_few_objects_per_block_not_one_per_match_or_blob(
+def recorded(match: Match) -> Result:
+    result = play_with_evidence(match)
+    return Result(tables=result.tables, blobs=result.blobs, execution={"device": "cpu"})
+
+
+def test_an_eval_run_delivers_each_match_with_packed_blobs(
     tmp_path: Path,
 ) -> None:
-    def recorded(match: Match) -> Result:
-        result = play_with_evidence(match)
-        return Result(tables=result.tables, blobs=result.blobs, execution={"device": "cpu"})
-
     bucket = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
     evaluate(experiment="cards", environment=DUEL, play=recorded,
-             matches=deals(pair(tmp_path), 40), run="a", directory=tmp_path / "a",
+             matches=deals(pair(tmp_path), 3), run="a", directory=tmp_path / "a",
              storages=[bucket])  # fmt: skip
-    # run.json, environment.json and state.json; one block of its pack, two tables and index.
-    assert bucket.uploads == 3 + 4
-    (index,) = (key for key in bucket.keys("cards/a/blocks/") if key.endswith("/block.json"))
-    kept = Block.model_validate_json(bucket.get(index))
-    assert len(kept.matches) == 40 and len(kept.blobs) == 80
-    assert all(record.execution == {"device": "cpu"} for record in kept.matches)
+    # Three run records, then each match's pack, two tables and index.
+    assert bucket.uploads == 3 + 3 * 4
+    indices = [key for key in bucket.keys("cards/a/blocks/") if key.endswith("/block.json")]
+    kept = [Block.model_validate_json(bucket.get(index)) for index in indices]
+    assert len(kept) == 3
+    assert all(len(block.matches) == 1 and len(block.blobs) == 2 for block in kept)
+    assert all(record.execution == {"device": "cpu"} for block in kept for record in block.matches)
     # Plain DuckDB reads the delivered tables without Etude.
     games = tmp_path / "bucket" / "cards" / "a" / "blocks" / "*" / "games.parquet"
-    assert duckdb.sql(f"select count(*) from read_parquet({quote(games)})").fetchone() == (80,)
+    assert duckdb.sql(f"select count(*) from read_parquet({quote(games)})").fetchone() == (6,)
     # Sorted by match and game, so a filtered read skips the rest.
-    order = duckdb.sql(f"select match, game from read_parquet({quote(games)})").fetchall()
+    order = duckdb.sql(
+        f"select match, game from read_parquet({quote(games)}) order by all"
+    ).fetchall()
     assert order == sorted(order)
 
     reading = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
     db = statsdb("cards", reading)
     # run.json, environment.json, state.json (read once, so the run is marked ended),
     # the index and two tables; not one byte of the pack.
-    assert (reading.listings, reading.requests, reading.ranges) == (1, 6, 0)
+    assert (reading.listings, reading.requests, reading.ranges) == (1, 3 + 3 * 3, 0)
     assert db.sql("select distinct execution from matches").fetchall() == [('{"device": "cpu"}',)]
-    assert kept.pack is not None and reading.bytes < kept.pack.size_bytes
-    assert db.sql("select count(*), count(distinct match) from blobs").fetchone() == (80, 40)
+    assert reading.bytes < sum(block.pack.size_bytes for block in kept if block.pack is not None)
+    assert db.sql("select count(*), count(distinct match) from blobs").fetchone() == (6, 3)
     # Rows name their blobs, and each blob's bytes come back verified.
     named = [digest for (digest,) in db.sql("select evidence_sha256 from games").fetchall()]
     found = dict(read_blobs(db, reading, named))
     assert sorted(found) == sorted(named)
     assert all(sha256(body).hexdigest() == digest for digest, body in found.items())
-    # The pack's blobs lie together: one range read for all of them.
-    assert reading.ranges == 1
+    # Each pack's adjacent blobs cost one range read.
+    assert reading.ranges == 3
     with pytest.raises(EtudeError) as unknown:
         list(read_blobs(db, reading, ["0" * 64]))
     assert unknown.value.code == "blob_unknown"

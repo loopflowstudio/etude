@@ -1,6 +1,6 @@
 """Load a game's defining module, validate its match and report startup imports.
 
-The parent sends a Function and a portable Match; the worker imports only the
+The parent sends a Function and a portable Match; the game process imports only the
 play module it names. Imports are measured before loading that module, so a
 warning can name the code that pulled training libraries into game processes.
 """
@@ -18,7 +18,9 @@ from types import ModuleType
 from typing import cast
 
 from etude.call import Function
+from etude.eval.agents import connect_agents
 from etude.eval.records import Match
+from etude.eval.resources import THREAD_VARIABLES
 from etude.eval.result import Result, Tables
 from etude.records import Record
 
@@ -31,8 +33,10 @@ _first_importer: str | None = None
 
 
 def initialize_game() -> None:
-    """Measure imports before the worker unpickles a match or serving address."""
+    """Measure imports before the game process unpickles a match or agent address."""
     global _startup_modules
+    for variable in THREAD_VARIABLES:
+        os.environ[variable] = "1"
     _startup_modules = frozenset(sys.modules)
     original = builtins.__import__
 
@@ -68,7 +72,7 @@ class Imports(Record):
         )
         return (
             f"etude: game module {self.module}: {reason} via {self.importer or self.module}; "
-            "define play in a lightweight module and load models in serve instead"
+            "define play in a lightweight module and move the import to load's module"
         )
 
 
@@ -88,7 +92,7 @@ def _match_type(play: Callable[..., object], arguments: int = 0) -> type[Match]:
     ):
         raise TypeError(
             "play must take one Match parameter"
-            + (" and an inference handle" if arguments else " without an inference server")
+            + (" and agents" if arguments else " without agents=")
         )
     kind = typing.get_type_hints(play).get(parameters[0].name, Match)
     if not isinstance(kind, type) or not issubclass(kind, Match):
@@ -96,7 +100,13 @@ def _match_type(play: Callable[..., object], arguments: int = 0) -> type[Match]:
     return kind
 
 
-def play_match(function: Function, match: Match, arguments: tuple[object, ...] = ()) -> Execution:
+def play_match(
+    function: Function,
+    match: Match,
+    agents: str | None = None,
+    checkout: str | None = None,
+    tournament: str = "",
+) -> Execution:
     before = _startup_modules if _startup_modules is not None else frozenset(sys.modules)
     first: str | None = None
     original = builtins.__import__
@@ -127,10 +137,14 @@ def play_match(function: Function, match: Match, arguments: tuple[object, ...] =
 
     started = time.monotonic()
     try:
-        play = cast(Callable[..., Tables | Result], function.load())
-        kind = _match_type(play, len(arguments))
+        play = cast(Callable[..., Tables | Result], function.load(checkout))
+        kind = _match_type(play, int(agents is not None))
         checked = kind.model_validate_json(match.model_dump_json()) if kind is not Match else match
-        result = play(checked, *arguments)
+        if agents is None:
+            result = play(checked)
+        else:
+            with connect_agents(agents, match.players, tournament, match.key) as players:
+                result = play(checked, players)
         return Execution(result=result, seconds=time.monotonic() - started, imports=observed())
     except Exception as error:
         # Exception dictionaries survive ProcessPoolExecutor transport; keep the real error type.

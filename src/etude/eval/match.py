@@ -51,7 +51,9 @@ def evaluate[C: BaseModel | Mapping[str, JsonValue]](
     storages: Sequence[Storage] = (),
     rollups: Sequence[Rollup] = (),
 ) -> EvalResult:
-    """Play every match not already stored in this eval run, `workers` at a time.
+    """Play every match not already stored in this eval run.
+
+    The deprecated workers option is ignored; Etude sizes the game pool.
 
     Matches start in the order `etude.eval.schedule.ordered` gives, so
     consecutive matches reuse the checkpoints the author's runtime keeps loaded.
@@ -76,7 +78,6 @@ def evaluate[C: BaseModel | Mapping[str, JsonValue]](
         experiment=experiment,
         environment=environment,
         matches=matches,
-        workers=workers,
         run=run,
         directory=directory,
         storages=storages,

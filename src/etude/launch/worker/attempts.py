@@ -54,7 +54,8 @@ from typing import BinaryIO, Literal
 from urllib.parse import unquote, urlsplit
 
 from etude.cache import Cache, Content
-from etude.launch.logging import Console, explain, log_to, sanitize
+from etude.errors import explain, sanitize
+from etude.launch.logging import Console, log_to
 from etude.launch.records import Cause, Outcome, Output, Prepared
 from etude.launch.runtime import PROBE, find_python, select_runtime
 from etude.launch.schemas import Finished, Packet, Work

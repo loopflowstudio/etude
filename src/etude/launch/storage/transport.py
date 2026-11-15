@@ -21,7 +21,8 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from etude.deadline import call, remaining
-from etude.launch.logging import sanitize, write_log
+from etude.errors import sanitize
+from etude.launch.logging import write_log
 from etude.storage_timeout import socket_timeout
 
 _sink: ContextVar[Callable[[str], None] | None] = ContextVar("transfer_sink", default=None)

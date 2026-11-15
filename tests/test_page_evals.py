@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Iterator
 from hashlib import sha256
@@ -381,6 +382,16 @@ def duel(first: Player, second: Player, deal: int = 0) -> Match:
     return Match(players=(first, second), config={"deal": deal}, games=2)
 
 
+def recorded_execution(match: Match) -> Result:
+    return Result(
+        tables=play(match),
+        execution={
+            "device": os.environ["ETUDE_TEST_DEVICE"],
+            "compute": os.environ["ETUDE_TEST_COMPUTE"],
+        },
+    )
+
+
 def test_mixed_execution_fills_requested_games_and_replays_count_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -391,13 +402,12 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
     monkeypatch.setattr(sys, "path", list(sys.path))
     checkpoint = outside("u100", {"updates": 100}, "learner").checkpoint
 
-    def recorded(match: Match) -> Result:
-        return Result(tables=play(match), execution={"device": device, "compute": compute})
-
     for run, device, compute, commit in (
         ("cpu", "cpu", "serial", "a" * 40),
         ("cuda", "cuda:0", "shared-eval-v2", "b" * 40),
     ):
+        monkeypatch.setenv("ETUDE_TEST_DEVICE", device)
+        monkeypatch.setenv("ETUDE_TEST_COMPUTE", compute)
         monkeypatch.setenv("ETUDE_COMMIT", commit)
         monkeypatch.setenv("ETUDE_RUN", run)
         seating = Seating(
@@ -413,7 +423,7 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
             experiment="lab",
             checkpoints=[checkpoint],
             matches=matches[:1] if run == "cpu" else None,
-            play=recorded,
+            play=recorded_execution,
             directory=runs,
         )
         assert held.played == 1
@@ -424,12 +434,13 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
             )
 
     # A replay on another setup still names the same requested games and seed.
-    device, compute = "mps", "serial"
+    monkeypatch.setenv("ETUDE_TEST_DEVICE", "mps")
+    monkeypatch.setenv("ETUDE_TEST_COMPUTE", "serial")
     evaluate(
         experiment="lab",
         environment=DUEL,
         matches=matches[:1],
-        play=recorded,
+        play=recorded_execution,
         run="z-replay",
         directory=runs,
     )
@@ -439,7 +450,7 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
             benchmark,
             experiment="lab",
             checkpoints=[checkpoint],
-            play=recorded,
+            play=recorded_execution,
             directory=runs,
         ).played
         == 0
@@ -461,6 +472,7 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
             " using (run, match) where s.seat = 0 order by m.run"
         ).fetchall()
         # A schema-8 cache has no execution column; rebuilding must recover provenance.
+        db.execute("drop index matches_identity")
         db.execute("alter table matches drop column execution")
         db.execute("update kept.statsdb set schema = 8")
     with statsdb("lab", runs) as db:

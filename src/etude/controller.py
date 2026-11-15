@@ -21,6 +21,7 @@ from etude.declarations import (
 )
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import digest
+from etude.eval.resources import available_cpus
 from etude.eval.result import EvalResult
 from etude.eval.tournament import StoredRuns, played
 from etude.experiment import observe
@@ -30,9 +31,8 @@ from etude.jobs import (
     ExperimentState,
     _group_key,
     _relocated,
-    _servers,
-    fetch_checkpoints,
     evaluation_group,
+    fetch_checkpoints,
     group_evaluations,
     hold_group,
     with_experiment,
@@ -40,6 +40,7 @@ from etude.jobs import (
 from etude.launch import client
 from etude.launch.commands import DEFAULT_MIN_EVAL_HOURS
 from etude.launch.listing import show_quote
+from etude.launch.records import CPU, GPU
 from etude.launch.server import selected
 from etude.records import Record
 from etude.smoke import smoke_file
@@ -90,6 +91,34 @@ def source_for(pool: str | None, rent: str | None, source: str | None = None) ->
 
 def _fits(job: Job, committed: Decimal, max_usd: Decimal | None) -> bool:
     return max_usd is None or committed + (job.max_usd or Decimal(0)) <= max_usd
+
+
+def _eval_cpus(pool: str | None, rent: str | None) -> int | None:
+    """Known target capacity, from local records only; unknown targets stay undivided."""
+    if selected():
+        return None
+    scheduler = client.default()
+    if pool is None and rent is None:
+        target = scheduler.default_target()
+        pool, rent = target.pool, target.rent
+    counts: list[int | None] = []
+    if pool is not None:
+        for machine in scheduler.machines(pool):
+            hardware = machine.hardware
+            counts.append(
+                available_cpus()
+                if machine.kind == "local"
+                else hardware.vcpus
+                if isinstance(hardware, CPU)
+                else hardware.min_vcpus
+                if isinstance(hardware, GPU)
+                else None
+            )
+    if rent is not None:
+        counts.append(
+            next((r.template.vcpus for r in scheduler.ondemands() if r.name == rent), None)
+        )
+    return min(c for c in counts if c is not None) if counts and all(c for c in counts) else None
 
 
 def _print_lines(lines: dict[str | None, str]) -> None:
@@ -194,7 +223,6 @@ def advance(
         if experiment.eval is not None and evaluate
         else []
     )
-    _servers(tuple(spec for job in jobs for spec in evaluation_group(job).evaluations))
     if smoke_file_first and not quote:
         assert experiment.file is not None
         before = (
@@ -261,6 +289,7 @@ def advance(
     for index, executable in enumerate(pending_jobs):
         groups.setdefault(_group_key(executable, pending_specs[index]), []).append(index)
     training_active = bool(new) or any(r.state in {"queued", "running"} for r in state.runs)
+    cpu_capacity = _eval_cpus(pool, rent) if mode != "local" and groups else None
     for indices in groups.values():
         members = [pending_specs[i] for i in indices]
         executables = [pending_jobs[i] for i in indices]
@@ -286,18 +315,7 @@ def advance(
         )
         hours = None
         if estimates and all(seconds is not None for seconds in estimates):
-            workers = min(max(spec.workers for spec in members), len(keys))
-            # Both shared capacity and each tournament's own caller limit constrain time.
-            hours = (
-                max(
-                    sum(seconds or 0 for seconds in estimates) / workers,
-                    max(
-                        (seconds or 0) / min(spec.workers, len(spec.matches or ()))
-                        for spec, seconds in zip(members, estimates, strict=True)
-                    ),
-                )
-                / 3600
-            )
+            hours = sum(seconds or 0 for seconds in estimates) / (cpu_capacity or 1) / 3600
         changes: dict[str, object]
         if not _fits(executable, committed, max_usd):
             changes = {

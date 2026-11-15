@@ -119,7 +119,7 @@ client dependency installation. The client and each job use separate environment
 `logging.py` and top-level `storage_timeout.py` are also in the standard-library
 bootstrap subset. New bootstrap imports must be present in both the guardian
 archive (`providers/package.py`) and SSH's pre-install loader (`ssh.py`). Operational errors
-use its sanitizer before retention; subprocess diagnostics omit argv and traceback
+use the shared sanitizer in `etude.errors` before retention; subprocess diagnostics omit argv and traceback
 locals. Journal log reads return `LogStream`, preserving missing versus silent
 output, and share the caller's monotonic deadline through `deadline.py`.
 HTTP body reads may run in a deadline-bounded thread; emit transfer observations
@@ -235,9 +235,19 @@ another machine comes with a counting test.
 Experiment declarations import `TrainingJob`, `EvalJob` and `ExperimentState`
 from `etude.jobs`, where they are defined. `etude.experiment` reads state; the
 worker startup path must not import either module. Resolve an authored callable's
-source through `inspect.unwrap` before locating its file: a `contextmanager`
-decorator is implemented in `contextlib`, while its wrapped `serve` belongs
-to the experiment module.
+source through `inspect.unwrap` before locating its file: a decorator is
+implemented in its own library, while the wrapped function belongs to the
+author's module.
+
+Experiment files import sibling game and loading modules by their top-level
+names; the declaration reader adds the file's directory to the import path.
+Game functions are importable top-level functions, including fixtures: the game
+pool imports their defining module and cannot inherit a parent closure.
+
+Eval vocabulary: an `Agent` is a loaded player, anything with `act(rows)`;
+`Agents` is a job's declaration of how to load them. The agent process holds
+them and game processes play; say neither "server", "worker" nor "policy"
+for any of these ("policy" is reserved for policy keys).
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any

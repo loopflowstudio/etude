@@ -1,6 +1,6 @@
 """The author-facing experiment model: typed jobs and the state declarations read.
 
-`TrainingJob`, `EvalJob`, `InferenceServer` and `ExperimentState` are defined here. Typed jobs
+`TrainingJob`, `EvalJob`, `Agents` and `ExperimentState` are defined here. Typed jobs
 lower to `spec.Job` for storage, transport and identity, deriving their command
 and JSON config afresh after a copy. State is observed, never stored.
 The worker calls `_hold` only when executing an evaluation; worker startup
@@ -11,13 +11,13 @@ from __future__ import annotations
 
 import inspect
 import os
-import pickle
 import runpy
 import shlex
 import sys
 import tomllib
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from contextlib import AbstractContextManager, ExitStack, contextmanager
+import typing
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass
 from decimal import Decimal
 from hashlib import sha256
@@ -31,6 +31,7 @@ from etude.call import Function, changed_config, config_type
 from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, checkpoint_key
 from etude.checkpoints import CheckpointId, CheckpointRecord, CheckpointRef, checkpoint_id
 from etude.errors import EtudeError, LauncherError, RetryRequested
+from etude.eval.agents import AgentProcess, running_agents
 from etude.eval.game import _match_type
 from etude.eval.records import (
     Benchmark,
@@ -49,7 +50,6 @@ from etude.eval.result import EvalResult, Result, Tables
 from etude.eval.run import (
     EvalRun,
     Playing,
-    Terminated,
     _terminable,
     play_together,
 )
@@ -257,32 +257,48 @@ class JobOptions(TypedDict, total=False):
 _BENCHMARK_CHECKPOINT = "checkpoint"
 
 
-class Server(Record):
-    """A named serving context, imported and configured on the job's machine."""
+class AgentLoader(Record):
+    """Portable loading declaration; batching never enters scientific identity."""
 
-    name: str = Field(min_length=1)
-    serve: Function
+    load: Function
     config: str
+    max_batch: int = Field(default=32, ge=1)
+    max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
+    memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 
-class InferenceServer(BaseModel):
-    """A serving context shared by the evaluation jobs that name it."""
+def _loading_type(load: Callable[..., object]) -> type[BaseModel]:
+    parameters = list(inspect.signature(load).parameters.values())
+    if len(parameters) != 2:
+        raise TypeError("load must take player and config")
+    kind = typing.get_type_hints(load).get(parameters[1].name)
+    if not isinstance(kind, type) or not issubclass(kind, BaseModel):
+        raise TypeError("load's config must be annotated with a Pydantic model")
+    return kind
+
+
+class Agents(BaseModel):
+    """How to load players, with row batching and a host memory allowance."""
 
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
-    name: str = Field(min_length=1)
-    serve: Callable[..., AbstractContextManager[object]]
+    load: Callable[..., object]
     config: BaseModel
+    max_batch: int = Field(default=32, ge=1)
+    max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
+    memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
-    def _validate_server(self) -> InferenceServer:
-        _config_text(self.serve, self.config)
+    def _validate_loading(self) -> Agents:
+        _loading_type(self.load).model_validate_json(self.config.model_dump_json())
         return self
 
-    def plain(self, repo: Path | None) -> Server:
-        return Server(
-            name=self.name,
-            serve=_function(self.serve, repo),
-            config=_config_text(self.serve, self.config),
+    def plain(self, repo: Path | None) -> AgentLoader:
+        return AgentLoader(
+            load=_function(self.load, repo),
+            config=self.config.model_dump_json(),
+            max_batch=self.max_batch,
+            max_delay_seconds=self.max_delay_seconds,
+            memory_gb=self.memory_gb,
         )
 
 
@@ -299,14 +315,21 @@ class Evaluation(Record):
     checkpoints: tuple[CheckpointRecord, ...] = ()
     # A round robin's entrants.
     entrants: tuple[Player, ...] = ()
-    workers: int = Field(default=1, ge=1)
     # The matches a pass found new (`etude.controller.advance`), and the
     # job input holding each checkpoint they seat, by its key encoded.
     matches: tuple[Match, ...] | None = None
     files: dict[str, str] = {}
     # The experiment's training lines that pass saw, where relative seats find checkpoints.
     lines: tuple[Line, ...] = ()
-    server: Server | None = None
+    agents: AgentLoader | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _released(cls, value: object) -> object:
+        # Released queued evaluations carried an explicit process count.
+        if isinstance(value, dict):
+            return {key: item for key, item in value.items() if key != "workers"}
+        return value
 
 
 class EvalGroup(Record):
@@ -386,8 +409,7 @@ class EvalJob(Job):
     checkpoint: CheckpointRecord | Input | None = Field(default=None, exclude=True)
     checkpoints: Sequence[CheckpointRecord] = Field(default=(), exclude=True)
     enter: Sequence[Player] = Field(default=(), exclude=True)
-    workers: int = Field(default=1, ge=1, exclude=True)
-    server: InferenceServer | None = Field(default=None, exclude=True)
+    agents: Agents | None = Field(default=None, exclude=True)
     extras: tuple[str, ...] = Field(default=(), exclude=True)
     command: str = ""
 
@@ -437,7 +459,7 @@ class EvalJob(Job):
             )
             options["inputs"] = (*self.inputs, *inputs)
         try:
-            _match_type(self.play, int(self.server is not None))
+            _match_type(self.play, int(self.agents is not None))
         except TypeError as error:
             raise LauncherError(str(error)) from None
         repo = _repo(self.play, options)
@@ -448,8 +470,7 @@ class EvalJob(Job):
             checkpoint=self.checkpoint,
             checkpoints=tuple(self.checkpoints),
             entrants=tuple(self.enter),
-            workers=self.workers,
-            server=None if self.server is None else self.server.plain(repo),
+            agents=None if self.agents is None else self.agents.plain(repo),
         )
         assemble(
             [
@@ -519,20 +540,8 @@ def _group_key(job: Job, spec: Evaluation) -> str:
         "max_attempts",
     }
     return job.model_dump_json(include=shared) + (
-        spec.server.model_dump_json() if spec.server else ""
+        spec.agents.model_dump_json() if spec.agents else ""
     )
-
-
-def _servers(evaluations: Sequence[Evaluation]) -> dict[str, Server]:
-    """One definition owns each server name across an experiment pass."""
-    found: dict[str, Server] = {}
-    for spec in evaluations:
-        server = spec.server
-        if server is not None:
-            if server.name in found and found[server.name] != server:
-                raise EtudeError("inference_server_conflict", 422, detail=server.name)
-            found[server.name] = server
-    return found
 
 
 def hold_group(
@@ -542,28 +551,26 @@ def hold_group(
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
 ) -> tuple[EvalResult, ...]:
-    """Enter needed servers once, play every tournament, then raise any match failure.
+    """Start agents once, play every tournament, then raise any match failure.
 
     Each member owns its stored run and failure outcome. The outer SIGTERM
-    scope includes server startup and shutdown as well as games.
+    scope includes agent startup and shutdown as well as games.
     """
     results: list[EvalResult] = []
     failures: list[EtudeError] = []
-    definitions = _servers(group.evaluations)
     # A launched attempt's courier collects only below its assigned track folder.
     launched = os.environ.get("ETUDE_RUN_ADDRESS") or os.environ.get("ETUDE_RUN")
     base = Path(directory) if directory is not None else default_root()
     if launched is not None:
         base = base / launched
-    receipts = (
-        base / "artifacts" / "inference"
+    artifacts = (
+        base / "artifacts" / "agents"
         if launched
-        else base / (group.evaluations[0].experiment or "eval") / "artifacts" / "inference"
+        else base / (group.evaluations[0].experiment or "eval") / "artifacts" / "agents"
         if group.evaluations
-        else base / "artifacts" / "inference"
+        else base / "artifacts" / "agents"
     )
-    workers = max((spec.workers for spec in group.evaluations), default=1)
-    with _terminable(), resources(workers, receipts), ExitStack() as lifetime:
+    with _terminable(), resources(artifacts), ExitStack() as lifetime:
         opened: list[tuple[Evaluation, EvalRun, ExitStack]] = []
         for spec in group.evaluations:
             if spec.experiment is None:
@@ -573,9 +580,7 @@ def hold_group(
             identity = (
                 digest(sorted(m.key for m in spec.matches))
                 if spec.matches is not None
-                else digest(
-                    spec.model_dump(mode="json", exclude={"server", "play", "workers", "files"})
-                )
+                else digest(spec.model_dump(mode="json", exclude={"agents", "play", "files"}))
             )
             active = member.enter_context(
                 evaluating(
@@ -589,7 +594,6 @@ def hold_group(
                     checkpoints=tuple(each.ref for each in spec.checkpoints),
                     enter=spec.entrants,
                     matches=spec.matches,
-                    workers=spec.workers,
                     run=f"{spec.experiment}/{folder_name(spec.tournament.name)}-{identity[:12]}",
                     directory=base,
                     storages=storages,
@@ -606,46 +610,52 @@ def hold_group(
         for _, active, _ in opened:
             active._report = report
         report.write()
-        needed: dict[str, list[str]] = {}
-        for spec, active, _ in opened:
-            if any(m.key not in active.done for m in active.matches):
-                for server in (spec.server,) if spec.server is not None else ():
-                    needed.setdefault(server.name, []).append(spec.tournament.name)
-        handles: dict[str, object] = {}
-        for name, tournaments in needed.items():
-            definition = definitions[name]
-            try:
-                serve = definition.serve.load(checkout)
-                context = cast(
-                    AbstractContextManager[object],
-                    serve(config_type(serve).model_validate_json(definition.config)),
+        pending = [
+            (spec, active)
+            for spec, active, _ in opened
+            if any(m.key not in active.done for m in active.matches)
+        ]
+        loaders = {spec.agents.model_dump_json() for spec, _ in pending if spec.agents}
+        if len(loaders) > 1 or loaders and any(spec.agents is None for spec, _ in pending):
+            raise EtudeError("incompatible_eval_agents", 422)
+        agent_process: AgentProcess | None = None
+        definition = next((spec.agents for spec, _ in pending if spec.agents), None)
+        agent_lifetime = lifetime.enter_context(ExitStack())
+        try:
+            if definition is not None:
+                agent_process = agent_lifetime.enter_context(
+                    running_agents(
+                        definition,
+                        checkout,
+                        artifacts,
+                        [spec.tournament.name for spec, _ in pending],
+                        sum(len(active.matches) - len(active.done) for _, active in pending),
+                    )
                 )
-                handle = lifetime.enter_context(_serving(context, name, tournaments))
-            except Terminated as error:
-                for _, active, _ in opened:
-                    active.fail_pending(error)
-                raise
-            except Exception as error:
-                refusal = RetryRequested(f"server {name} could not start: {error}")
-                for _, active, _ in opened:
-                    active.fail_pending(refusal)
-                raise refusal from error
-            try:
-                pickle.dumps(handle)
-            except Exception as error:
-                refusal = RetryRequested(f"inference_handle_not_picklable: {name}")
-                for _, active, _ in opened:
-                    active.fail_pending(refusal)
-                raise refusal from error
-            handles[name] = handle
-        plays = []
-        for spec, active, _ in opened:
-            play = cast(Callable[..., Tables | Result], spec.play.load(checkout))
-            arguments: tuple[object, ...] = ()
-            if spec.server is not None:
-                arguments = (handles.get(spec.server.name),)
-            plays.append(Playing(run=active, play=play, arguments=arguments))
-        outcomes = play_together(plays)
+            plays = [
+                Playing(
+                    run=active,
+                    play=spec.play,
+                    checkout=checkout,
+                    tournament=spec.tournament.name,
+                    agents=agent_process.address if agent_process and spec.agents else None,
+                )
+                for spec, active, _ in opened
+            ]
+            outcomes = play_together(
+                plays,
+                memory_gb=definition.memory_gb if definition else None,
+                agent_process=agent_process,
+            )
+            if agent_process is not None:
+                agent_process.check()
+            agent_lifetime.close()
+        except RetryRequested as error:
+            for _, active, _ in opened:
+                active.fail_pending(error)
+            report.failed = sum(active.failed for _, active, _ in opened)
+            report.write()
+            raise
         for (_, _, member), outcome in zip(opened, outcomes, strict=True):
             if isinstance(outcome, EtudeError):
                 member.__exit__(type(outcome), outcome, outcome.__traceback__)
@@ -656,25 +666,6 @@ def hold_group(
         if failures:
             raise failures[0]
     return tuple(results)
-
-
-@contextmanager
-def _serving(
-    context: AbstractContextManager[object], name: str, tournaments: Sequence[str]
-) -> Iterator[object]:
-    entered = False
-    try:
-        with context as handle:
-            entered = True
-            print(
-                f"etude: server {name}: started for {', '.join(tournaments)}",
-                file=sys.stderr,
-                flush=True,
-            )
-            yield handle
-    finally:
-        if entered:
-            print(f"etude: server {name}: stopped", file=sys.stderr, flush=True)
 
 
 def group_evaluations(

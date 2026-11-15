@@ -104,12 +104,13 @@ been run, so the same command launches training first and, typed again as
 checkpoints arrive, the matches nobody has played. `etude eval job.py` plays
 them on this computer instead.
 
-Compatible eval jobs share one machine, rented once enough estimated work is waiting
-or training has ended (new tournaments start without an estimate). Name an `InferenceServer` on them
-(`EvalJob(..., server=net)`) and Etude starts it once there, hands its handle
-to every `play(match, inference)`, and stops it after the last game, so
-weights are loaded and requests batched in one process
-([inference servers](docs/evaluation.md#inference-servers)).
+Eval jobs that can run together share one machine, rented once enough
+estimated work is waiting or training has ended (new tournaments start
+without an estimate). Write how a player is loaded beside the game
+(`EvalJob(..., agents=Agents(load=load, config=Loading()))`, with
+`play(match, agents)`) and Etude loads each player once there, in one
+process, and batches every game's moves to it
+([agents](docs/evaluation.md#agents)).
 
 Everything a run records goes to your own directory or S3 bucket. Saved state and checkpoints are JSON
 and your framework's own files, [readable without Etude](docs/training.md#what-is-on-disk).

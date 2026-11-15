@@ -40,7 +40,6 @@ from etude.jobs import (
     Evaluation,
     _group_key,
     _relocated,
-    _servers,
     evaluation_group,
     fetch_checkpoints,
     hold_group,
@@ -136,7 +135,6 @@ def _evaluate(
         return [
             SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="eval returned none")
         ]
-    _servers(tuple(spec for job in jobs for spec in evaluation_group(job).evaluations))
     batches: dict[str, list[Job]] = {}
     for job in jobs:
         spec = evaluation_group(job).evaluations[0]

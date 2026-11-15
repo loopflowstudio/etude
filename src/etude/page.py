@@ -85,10 +85,9 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import JsonValue
 
-from etude.errors import EtudeError
+from etude.errors import EtudeError, explain
 from etude.eval.records import Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named, refuse_renamed
-from etude.launch.logging import explain
 from etude.records import BUILT_IN_NAMES, Record
 from etude.report import Counters, Flame, Matches, Report, Score, Series
 from etude.run import as_storage, declared, run_folders, runs, under

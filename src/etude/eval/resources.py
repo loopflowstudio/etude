@@ -1,12 +1,14 @@
-"""Process environment for evaluation callers and serving code.
+"""Process environment for game and agent processes.
 
 `resources` divides the CPUs available to this container, supplies temporary
 fast scratch, and restores the caller's environment when the group finishes.
-Receipts are kept in the run's durable artifact folder by the group owner.
+Observations are kept in the run's durable artifact folder by the group owner.
 """
 
 import math
 import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -60,17 +62,64 @@ def available_cpus() -> int:
     return max(1, count)
 
 
+GAME_BYTES = 256 * 1024**2
+
+
+def memory_bytes() -> int:
+    """Host memory capped by the container's inherited memory limits."""
+    physical = (
+        os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") if sys.platform != "darwin" else 0
+    )
+    if not physical:
+        # macOS exposes physical memory through sysctl, not SC_PHYS_PAGES.
+        physical = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True))
+    root = Path("/sys/fs/cgroup")
+    membership = Path("/proc/self/cgroup")
+    paths = [root]
+    if membership.is_file():
+        for line in membership.read_text().splitlines():
+            if line.startswith("0::"):
+                leaf = root / line.split("::", 1)[1].lstrip("/")
+                if leaf.is_relative_to(root):
+                    paths = [leaf, *(p for p in leaf.parents if p.is_relative_to(root))]
+    for folder in paths:
+        limit = folder / "memory.max"
+        if limit.is_file() and (value := limit.read_text().strip()) != "max":
+            physical = min(physical, int(value))
+    mount = root / "memory"
+    paths = [mount]
+    if membership.is_file():
+        for line in membership.read_text().splitlines():
+            _, controllers, location = line.split(":", 2)
+            if "memory" in controllers.split(","):
+                leaf = mount / location.lstrip("/")
+                if leaf.is_relative_to(mount):
+                    paths = [leaf, *(p for p in leaf.parents if p.is_relative_to(mount))]
+    for folder in paths:
+        limit = folder / "memory.limit_in_bytes"
+        if limit.is_file():
+            physical = min(physical, int(limit.read_text()))
+    return physical
+
+
+def active_games(pending: int, *, agents: bool, memory_gb: float | None = None) -> int:
+    memory = memory_bytes()
+    held = int(memory_gb * 1024**3) if memory_gb is not None else memory // 2 if agents else 0
+    return min(
+        pending, max(1, available_cpus() - int(agents)), max(1, (memory - held) // GAME_BYTES)
+    )
+
+
 @contextmanager
-def resources(workers: int, receipts: Path) -> Iterator[None]:
-    """Give serving and play the same scratch and per-worker thread budget."""
-    receipts.mkdir(parents=True, exist_ok=True)
-    threads = str(max(1, available_cpus() // max(1, workers)))
+def resources(artifacts: Path) -> Iterator[None]:
+    """Give game processes one thread each and private temporary scratch."""
+    artifacts.mkdir(parents=True, exist_ok=True)
     fast = Path("/dev/shm")
     directory = fast if fast.is_dir() and os.access(fast, os.W_OK) else None
     with TemporaryDirectory(prefix="etude-eval-", dir=directory) as scratch:
-        values = {name: threads for name in THREAD_VARIABLES}
+        values = {name: "1" for name in THREAD_VARIABLES}
         values.update(
-            TMPDIR=scratch, ETUDE_SCRATCH_DIR=scratch, ETUDE_RECEIPTS_DIR=str(receipts.resolve())
+            TMPDIR=scratch, ETUDE_SCRATCH_DIR=scratch, ETUDE_AGENTS_DIR=str(artifacts.resolve())
         )
         previous = {name: os.environ.get(name) for name in values}
         os.environ.update(values)

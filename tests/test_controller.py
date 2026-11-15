@@ -239,14 +239,11 @@ def test_declaration_types_are_defined_in_one_module() -> None:
 
 def test_eval_job_lowering_preserves_the_executable_record() -> None:
     tournament = Benchmark(name="ladder", environment=environment("duel"))
-    typed = EvalJob(
-        tournament=tournament, play=play, experiment="two", workers=2, repo=None, max_hours=1
-    )
+    typed = EvalJob(tournament=tournament, play=play, experiment="two", repo=None, max_hours=1)
     config = Evaluation(
         tournament=tournament,
         experiment="two",
         play=Function(module="tests.eval.games", name="play"),
-        workers=2,
     )
     plain = Job(
         name="ladder",

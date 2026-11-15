@@ -42,8 +42,9 @@ from etude.carriage import (
     within,
 )
 from etude.deadline import limit_time
+from etude.errors import explain
 from etude.launch.environment import startup_timeout
-from etude.launch.logging import CLOSED, Console, bounded, explain, log_to, publish, write_log
+from etude.launch.logging import CLOSED, Console, bounded, log_to, publish, write_log
 from etude.launch.records import Diagnostic
 from etude.launch.schemas import (
     WORKER_LOG,

@@ -1,4 +1,4 @@
-"""Eval runs end to end: play matches in workers, resume from storage, query with DuckDB."""
+"""Eval runs end to end: play matches in game processes, resume from storage, query with DuckDB."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def seatings(players: Sequence[Player], *, configs: Sequence[Config], games: int
     ]
 
 
-def test_matches_in_two_workers_resumes_from_storage_without_replaying(
+def test_matches_in_the_shared_pool_resume_from_storage_without_replaying(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     players = roster(tmp_path)

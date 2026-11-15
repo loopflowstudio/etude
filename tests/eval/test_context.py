@@ -1,18 +1,31 @@
 """An evaluation context saves a planned stop and resumes only its unfinished matches."""
 
+import os
 from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
 
-from etude.errors import EtudeError
+from etude.errors import EtudeError, RetryRequested
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Match, Rollup, Seating
 from etude.eval.run import Tables
 from etude.eval.tournament import evaluating
 from etude.records import RunOutcome
-from etude.stopping import Stopped
+
+
+def play_until_stopped(match: Match) -> Tables:
+    Path(os.environ["ETUDE_STOP_FILE"]).touch()
+    return finish_match(match)
+
+
+def finish_match(match: Match) -> Tables:
+    return {"scores": [{"seat": 0, "score": 1}]}
+
+
+def score_seven(match: Match) -> Tables:
+    return {"scores": [{"seat": 0, "score": 7}]}
 
 
 def test_evaluation_stop_resume_and_refused_attempt_preserve_results(
@@ -32,33 +45,27 @@ def test_evaluation_stop_resume_and_refused_attempt_preserve_results(
             ),
         ),
     )
-    played: list[str] = []
-
-    def play(match: Match) -> Tables:
-        played.append(match.key)
-        stop.touch()
-        return {"scores": [{"seat": 0, "score": 1}]}
-
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     with (
-        pytest.raises(Stopped),
+        pytest.raises(RetryRequested),
         evaluating(tournament, experiment="pilot", run="arena", directory=tmp_path) as active,
     ):
-        active.play(play)
+        active.play(play_until_stopped)
     outcome = tmp_path / "pilot/arena/outcome.json"
-    assert RunOutcome.model_validate_json(outcome.read_bytes()).state == "stopped"
-    assert len(played) == 1
+    assert RunOutcome.model_validate_json(outcome.read_bytes()).state == "failed"
+    partial = statsdb("pilot", tmp_path)
+    assert partial.sql("select count(*) from scores").fetchone() == (1,)
+    partial.close()
     stop.unlink()
-
-    def finish(match: Match) -> Tables:
-        played.append(match.key)
-        return {"scores": [{"seat": 0, "score": 1}]}
 
     with evaluating(
         tournament, experiment="pilot", run="arena", directory=tmp_path, resume=True
     ) as active:
-        result = active.play(finish)
+        result = active.play(finish_match)
     assert result.played == 1
-    assert len(set(played)) == 2
+    completed = statsdb("pilot", tmp_path)
+    assert completed.sql("select count(*) from scores").fetchone() == (2,)
+    completed.close()
     finished = outcome.read_bytes()
     with (
         pytest.raises(EtudeError, match="run_name_taken"),
@@ -85,15 +92,12 @@ def test_a_tournaments_rollups_are_stored_once_and_checked_on_resume(tmp_path: P
         rollups=(Rollup(name="totals", table="scores", by=("player",), sums={"score": "score"}),),
     )
 
-    def play(match: Match) -> Tables:
-        return {"scores": [{"seat": 0, "score": 7}]}
-
     with evaluating(tournament, experiment="pilot", run="totals", directory=tmp_path) as run:
-        assert run.play(play).played == 1
+        assert run.play(score_seven).played == 1
     with evaluating(
         tournament, experiment="pilot", run="totals", directory=tmp_path, resume=True
     ) as run:
-        assert run.play(play).played == 0
+        assert run.play(score_seven).played == 0
     db = statsdb("pilot", tmp_path)
     assert db.sql("select score, rows from totals").fetchall() == [(7, 1)]
     changed = tournament.model_copy(update={"rollups": ()})
@@ -112,10 +116,7 @@ def play_typed(match: Match[Deal]) -> Tables:
     return {"scores": [{"seat": 0, "score": match.config.deal}]}
 
 
-@pytest.mark.parametrize("workers", [1, 2])
-def test_author_match_config_reaches_play_and_keeps_its_historical_key(
-    tmp_path: Path, workers: int
-) -> None:
+def test_author_match_config_reaches_play_and_keeps_its_historical_key(tmp_path: Path) -> None:
     players = (Code(name="a"), Code(name="b"))
     typed = Match[Deal](players=players, config=Deal(deal=7), games=1)
     inferred = Match(players=players, config=Deal(deal=7), games=1)
@@ -132,7 +133,6 @@ def test_author_match_config_reaches_play_and_keeps_its_historical_key(
         Benchmark(name="typed", environment=environment("duel"), seatings=(seating,)),
         experiment="typed",
         directory=tmp_path,
-        workers=workers,
     ) as run:
         assert run.play(play_typed).played == 2
     db = statsdb("typed", tmp_path)

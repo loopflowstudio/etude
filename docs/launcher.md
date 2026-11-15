@@ -224,7 +224,7 @@ base = TrainingJob(
     max_usd=Decimal(30),
 )
 wide = base.model_copy(update={"name": "wide", "config": TrainConfig(lr=1e-3, hidden=1024)})
-check = EvalJob(play=play, tournament=progress, checkpoints=saved, workers=8, max_hours=0.5)
+check = EvalJob(play=play, tournament=progress, checkpoints=saved, max_hours=0.5)
 ```
 
 A **job** is one function called with one Pydantic value, with a name, limits,
@@ -234,13 +234,13 @@ experiment file declares:
 | | Calls | With | Named by | Varies by |
 | --- | --- | --- | --- | --- |
 | `TrainingJob` | one training function, `train(config)` | one config | `name=`, required | seed: each seed is one run |
-| `EvalJob` | one play function, `play(match)`, or `play(match, inference)` when it names a server | one tournament and the checkpoints to play it for | its tournament | match: checkpoint, seating and config |
+| `EvalJob` | one play function, `play(match)`, or `play(match, agents)` when it declares agents | one tournament and the checkpoints to play it for | its tournament | match: checkpoint, seating and config |
 
 A job says what to run and its limits. Which machine runs it, and how many
 runs share one, belong to the launch command and its pools and on-demands
 ([Several runs on one machine](#several-runs-on-one-machine)); a job has no
-field for either. `EvalJob.workers`, the parallel processes that play its
-matches, is the one setting of that kind.
+field for either. How many games an eval job plays at once is Etude's to
+decide from the machine it lands on ([Agents](evaluation.md#agents)).
 
 A typed job keeps its config's type, so a variant is a copy with a new name:
 `wide` above runs the same function under the same limits with another
@@ -294,14 +294,13 @@ imports nothing else of Etude before the function's own module.
   from the project's environment: `uv run etude launch job.py`.
 - **An eval job** holds a [tournament](evaluation.md#tournaments) as one eval
   run. A pass launches the eval jobs of an experiment file together, as one
-  run on one machine, and those that name an `InferenceServer` share it
-  there ([Inference servers](evaluation.md#inference-servers)). A benchmark's `checkpoints` are
+  run on one machine, and those that declare the same `agents=` share one
+  agent process there ([Agents](evaluation.md#agents)). A benchmark's `checkpoints` are
   `CheckpointRecord`s, read from the experiment's state
   ([Evaluation jobs](evaluation.md#evaluation-jobs)). Each member reaches
   the machine verified by digest; the checkpoint fills every inference seat, where
   `play` finds the folder or file at the player's `checkpoint.path`. A round robin
-  takes `enter=` players. A single-file `Input` is also accepted. `workers=`
-  plays matches in parallel processes. The job's environment needs
+  takes `enter=` players. A single-file `Input` is also accepted. The job's environment needs
   `etude-sdk[eval]`.
 - **Commands are for work that is not Python**:
   `Job(command="./simulate --games 1000", max_hours=1)` runs by `sh` in the
@@ -387,9 +386,9 @@ Three levels do the work, each built only on the one below it:
   `new, not queued` with the limit that held it back. A tournament's line
   counts its matches that are new, in flight and failed, and names the eval
   run handed down for the new ones, or says that they wait and why.
-- **Eval jobs go down as one run.** Compatible jobs naming the same server,
-  or no server, share a run, `two/evals-1a2b3c4d5e6f`, on one machine. Its `max_hours` and `max_usd` are the
-  sums of its jobs'.
+- **Eval jobs go down as one run.** Jobs that can run together, declaring
+  the same agents or none, share a run, `two/evals-1a2b3c4d5e6f`, on one
+  machine. Its `max_hours` and `max_usd` are the sums of its jobs'.
 - **Eval work waits for enough of it.** The eval run is handed down when a
   machine that already exists has room after this pass's training runs, when
   its estimated new work reaches `--min-eval-hours H` (default 2 hours), or
@@ -507,10 +506,10 @@ thing, only small, in order:
 2. **Evaluate.** `eval_jobs(state)` is called on the smoke's runs and checkpoints.
    Each match it calls for plays one game here, under every condition, so a
    game that breaks under only one deal is still caught. The jobs are held
-   together as a pass would launch them, and each
-   [inference server](evaluation.md#inference-servers) they name is started
-   here, once, so a `serve` that cannot start, or a `play` that cannot reach
-   it, fails the smoke before anything is rented.
+   together as a pass would launch them, and the
+   [agents](evaluation.md#agents) they declare are loaded here, in an agent
+   process as on a machine, so a `load` that raises, or a row that does not
+   pickle, fails the smoke before anything is rented.
 3. **Report.** `report()` (or the default `Report()`) is drawn from those tiny
    results.
 
@@ -907,7 +906,7 @@ runs placed with it, splitting a new rental's planned cost among them.
 A pass's eval jobs are one run and take one slot, whatever their number. A
 free slot on a machine training has rented is room for them, so with
 `--slots 2` evals start beside training without another rental. Each eval
-run starts its own inference server: two eval runs sharing a machine do not
+run starts its own agent process: two eval runs sharing a machine do not
 share one.
 
 ## The worker and its bucket
@@ -1132,7 +1131,8 @@ defines it, by its full path, and relative imports are a lint error:
 | Import | What it is |
 | --- | --- |
 | `from etude.jobs import TrainingJob, EvalJob` | typed jobs: Etude decides the command |
-| `from etude.jobs import InferenceServer` | a serving process eval jobs name, started once per eval run |
+| `from etude.jobs import Agents` | how an eval job's players are loaded, and how their rows are batched |
+| `from etude.eval.agents import Agent` | what `load` returns and `play` is given: anything with `act(rows)` |
 | `from etude.jobs import ExperimentState` | what an experiment's runs have stored, as declarations are given it |
 | `from etude.spec import Job, RunRequest` | a command job, and one run of any job |
 | `from etude.launch.client import queue, launch, status, wait, ...` | the calls a script makes; they go to the server when one is set |

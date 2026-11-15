@@ -91,7 +91,7 @@ def state_of(
     committed = Decimal(0)
     for item in retained:
         record, status = item.record, item.status
-        committed += status.usd if status.done else record.launch.spec.max_usd or Decimal(0)
+        committed += item.committed_usd
         name = record.id.removeprefix(experiment + "/")
         # Evaluation matches are part of the executable job's public config.
         try:
@@ -165,7 +165,7 @@ def _launcher_state(
         return state
     if item.status.done:
         return state if item.status.outcome == "succeeded" else "failed"
-    return "queued" if item.status.phase in {"queued", "renting"} else "running"
+    return item.placement
 
 
 def __getattr__(name: str) -> object:

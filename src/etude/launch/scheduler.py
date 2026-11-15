@@ -35,13 +35,13 @@ from pydantic import Field
 
 from etude.carriage import RecordMismatch
 from etude.deadline import limit_time, remaining
-from etude.errors import LauncherError
+from etude.errors import LauncherError, explain, sanitize
 from etude.identity import resume_conflicts, run_address
 from etude.launch import source
 from etude.launch.database import Database
 from etude.launch.errors import LaunchError
 from etude.launch.executor import Execution
-from etude.launch.logging import bounded, explain, sanitize
+from etude.launch.logging import bounded
 from etude.launch.machines import Refused, Safeguards, creation_guard
 from etude.launch.records import (
     RETRYABLE,

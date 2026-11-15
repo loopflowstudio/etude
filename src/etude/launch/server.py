@@ -26,10 +26,9 @@ from typing import Annotated, Any, Literal
 from pydantic import Field, RootModel, TypeAdapter
 
 from etude.deadline import limit_time, remaining
-from etude.errors import LauncherError
+from etude.errors import LauncherError, explain
 from etude.launch.errors import LaunchError
 from etude.launch.listing import show_runs
-from etude.launch.logging import explain
 from etude.launch.measurement import timed
 from etude.launch.providers.package import program_archive
 from etude.launch.records import (

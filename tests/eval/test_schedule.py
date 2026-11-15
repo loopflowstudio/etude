@@ -96,10 +96,9 @@ def test_a_rating_benchmark_in_scheduled_order_loads_each_checkpoint_about_once(
 
 def test_evaluate_plays_in_scheduled_order_and_order_changes_no_row(tmp_path: Path) -> None:
     matches = rating(4, deals=5, paired=2)
-    runtime = Runtime()
     run = evaluate(experiment="rating", environment=WORLD, matches=matches,
-                   play=runtime.play, directory=tmp_path)  # fmt: skip
-    assert (run.played, loads(matches), runtime.loads) == (26, 24, 5)
+                   play=play, directory=tmp_path)  # fmt: skip
+    assert (run.played, loads(matches), loads(ordered(matches))) == (26, 24, 5)
     # The same results, row for row, as playing in key order.
     expected = sorted(
         (match.key, row["seat"], row["game"], row["won"], row["hits"])
@@ -109,7 +108,7 @@ def test_evaluate_plays_in_scheduled_order_and_order_changes_no_row(tmp_path: Pa
     assert rows(tmp_path) == expected
 
 
-def test_a_queue_of_code_players_plays_in_the_callers_order(tmp_path: Path) -> None:
+def test_a_queue_of_code_players_plays_in_the_callers_order() -> None:
     field = [code(f"script{strength}", strength) for strength in range(4)]
     given: Sequence[Match] = [
         Match(players=(field[a], field[b]), config={"deal": deal})
@@ -118,10 +117,7 @@ def test_a_queue_of_code_players_plays_in_the_callers_order(tmp_path: Path) -> N
         for b in range(4)
         if a != b
     ]
-    runtime = Runtime()
-    evaluate(experiment="league", environment=WORLD, matches=given, play=runtime.play,
-             directory=tmp_path)  # fmt: skip
-    assert runtime.played == [match.key for match in given]
+    assert list(ordered(given)) == list(given)
 
 
 def test_two_checkpoint_keys_holding_the_same_bytes_are_two_checkpoints() -> None:

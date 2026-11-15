@@ -157,12 +157,13 @@ def test_a_match_counts_once_from_the_latest_block_holding_it(tmp_path: Path) ->
         assert held("cards", bucket) == (1, 2, 2 * 2 * 2)
 
 
+def broken(match: Match) -> Tables:
+    raise RuntimeError("engine crashed")
+
+
 def test_a_failed_match_retried_counts_once_as_done(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     matches = deals(pair(tmp_path), 0)
-
-    def broken(match: Match) -> Tables:
-        raise RuntimeError("engine crashed")
 
     with pytest.raises(EtudeError):
         evaluate(experiment="cards", environment=DUEL, play=broken, matches=matches, run="a",

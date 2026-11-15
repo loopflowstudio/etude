@@ -93,7 +93,6 @@ def evaluating(
     checkpoints: Sequence[CheckpointRef] = (),
     enter: Sequence[Player] = (),
     matches: Sequence[Match] | None = None,
-    workers: int = 1,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
     share: Share = Share(),
@@ -122,7 +121,6 @@ def evaluating(
             experiment=experiment,
             environment=tournament,
             matches=matches,
-            workers=workers,
             run=run,
             directory=directory,
             storages=storages,
@@ -151,7 +149,9 @@ def evaluating(
         added, so_far = asked.recorded, asked.played
         every = [*(each.match for each in so_far.delivered), *so_far.failed, *so_far.new]
         # Contiguous runs of the play order, so each share seats fewer checkpoints.
-        order = list(ordered(sorted(every, key=lambda match: match.key)))
+        order = list(
+            ordered(sorted({m.key: m for m in every}.values(), key=lambda match: match.key))
+        )
         size, larger = divmod(len(order), share.count)
         start = share.index * size + min(share.index, larger)
         delivered = {each.match.key for each in so_far.delivered}
@@ -170,7 +170,6 @@ def evaluating(
         experiment=experiment,
         environment=tournament.environment,
         matches=pending,
-        workers=workers,
         run=run,
         directory=directory,
         storages=storages,
@@ -211,7 +210,6 @@ def hold[C: BaseModel | Mapping[str, JsonValue]](
         checkpoints=checkpoints,
         enter=enter,
         matches=matches,
-        workers=workers,
         directory=directory,
         storages=storages,
         share=share,
@@ -343,10 +341,10 @@ class StoredRuns:
     def estimate_seconds(
         self, tournament: Benchmark | RoundRobin, matches: Sequence[Match]
     ) -> float | None:
-        """Estimated worker time from this tournament's delivered seconds per game.
+        """Estimated game time from this tournament's delivered seconds per game.
 
-        Legacy matches without timing are no estimate. The pass divides worker
-        time by the group's caller count to estimate its machine window.
+        Legacy matches without timing are no estimate. The pass divides game
+        time by the target's known CPUs to estimate its machine window.
         """
         history = {
             record.match.key: record
