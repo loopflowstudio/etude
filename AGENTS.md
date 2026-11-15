@@ -254,6 +254,10 @@ for any of these ("policy" is reserved for policy keys).
 Etude sets the model-library thread environment before importing the agent
 loading module. Loaders must honor that inference budget when configuring
 their library; each game process keeps one thread.
+On visible NVIDIA hardware, active games fill the declared batch, bounded by
+pending matches and host memory. Probe hardware without importing the loader;
+agentless games keep CPU capacity and perform no GPU probe. Hardware capacity
+does not select the author's model device or promise GPU memory residency.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any

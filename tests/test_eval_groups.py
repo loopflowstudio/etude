@@ -478,12 +478,47 @@ def test_divide_cpus_respects_cpu_pending_and_memory(
     games: int,
     threads: int,
 ) -> None:
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
     monkeypatch.setattr(
         "etude.eval.resources.memory_bytes", lambda: 16 * 1024**3 if cpus >= 16 else 2 * 1024**3
     )
     split = divide_cpus(pending, agents=agents, memory_gb=memory_gb)
     assert (split.games, split.threads) == (games, threads)
+
+
+@pytest.mark.parametrize(
+    ("pending", "batch_rows", "memory_gb", "agents", "visible", "games"),
+    [
+        (64, 32, None, True, "0", 32),
+        (3, 32, None, True, "0", 3),
+        (64, 8, None, True, "0", 8),
+        (64, 32, 15.5, True, "0", 2),
+        (64, 32, None, False, "0", 4),
+        (64, 32, None, True, "", 3),
+    ],
+)
+def test_gpu_games_fill_a_batch_with_pending_and_memory_bounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    pending: int,
+    batch_rows: int,
+    memory_gb: float | None,
+    agents: bool,
+    visible: str,
+    games: int,
+) -> None:
+    # Controlled hardware output, without importing or executing a model library.
+    probe = tmp_path / "nvidia-smi"
+    probe.write_text("#!/bin/sh\nprintf '0\\n'\n")
+    probe.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    split = divide_cpus(pending, agents=agents, memory_gb=memory_gb, batch_rows=batch_rows)
+    assert split.games == games
+    assert split.threads == (max(1, 4 - games) if agents else 0)
 
 
 @pytest.mark.parametrize("cached", [False, True])

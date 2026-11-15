@@ -738,7 +738,9 @@ each loading whatever weights it needs. That is the simpler choice for code
 players and small models on CPUs: with a frozen Manabot Small checkpoint on 32
 CPUs, one agent process reached at most about half the rate of a process per
 game holding the model. Agents are for a model worth loading once: one on a
-GPU (not yet measured), or weights too large to hold in every game process.
+GPU, or weights too large to hold in every game process. A frozen Large GPU
+panel favored separate game processes and one shared agent over game threads
+beside model copies; model preparation and active-game counts also differed.
 Without agents, a game costs what it does in a plain process pool: on the same
 frozen panel, 158 ms per decision under Etude against 160 ms in a raw
 28-process pool, with identical trajectories.
@@ -777,11 +779,15 @@ frozen panel, 158 ms per decision under Etude against 160 ms in a raw
   wrappers do not consume this checkpoint allowance. The default is half the memory the run may use. Over the bound,
   the least recently used agent with no row waiting is dropped, and loaded
   again if a game asks for it. Matches are ordered so those sharing
-  checkpoints are played together (see "Order" above). The bound counts host
-  memory, not a GPU's: on a small device, set it to what the device holds.
+  checkpoints are played together (see "Order" above). Checkpoint-file bytes
+  do not measure GPU residency; the loader owns its model's device allocation.
 - **Active games are Etude's to decide.** Etude divides CPUs available by
   affinity and container quota between active games and the agent process,
-  reserving one eighth (rounded up) for inference. Each game gets one thread.
+  reserving one eighth (rounded up) for CPU inference. When `nvidia-smi`
+  reports a visible NVIDIA GPU, games instead fill `max_batch` (default 32),
+  even when that exceeds the CPU count. `CUDA_VISIBLE_DEVICES=""` or `-1`
+  disables this GPU capacity. The loader still selects its model's device.
+  Each game gets one thread.
   Pending matches and memory beside the agents (256 MiB per game) can reduce
   concurrency; unused game CPUs go to inference. A single CPU shares a game
   and inference. Jobs without agents can use every CPU for games.

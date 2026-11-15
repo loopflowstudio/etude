@@ -170,8 +170,9 @@ many matches wait and why, and a later pass finds them again
 ### Upgrade
 
 - **Remove `workers=`** from `EvalJob(...)` and `evaluating(...)`; it is
-  refused. Etude plays one game per CPU the run may use, fewer when agents
-  or memory need the room. The deprecated `evaluate(workers=)` accepts and
+  refused. Etude owns game concurrency: CPU and memory allowances bound CPU
+  games; on a visible NVIDIA GPU, games fill the declared batch, bounded by
+  pending work and memory. The deprecated `evaluate(workers=)` accepts and
   ignores it until 0.5. Eval jobs already queued with `workers` still run.
 - **Existing results remain readable and are not replayed.** Results stay keyed
   by tournament and match; eval runs already stored, queued or running are
@@ -206,13 +207,15 @@ many matches wait and why, and a later pass finds them again
 
 Match records now retain execution seconds for later machine-time estimates.
 Completed matches are sealed and offered to storage individually. Container
-CPU quotas set how many games play and their thread budgets, and
+CPU quotas set CPU game capacity and model thread budgets; a visible NVIDIA
+GPU selects batch-sized game capacity instead. The loader selects its device, and
 `ETUDE_SCRATCH_DIR` supplies temporary fast scratch. A run with agents keeps
 which rows shared each batch in `artifacts/agents/batches.json`.
 On CPUs, a small model plays faster without `agents=`: with a frozen Manabot
 Small checkpoint on 32 CPUs, one agent process reached at most about half the
-rate of a process per game holding the model. Agents on a GPU are not yet
-measured. Without agents, a game costs what it does in a plain process pool:
+rate of a process per game holding the model. A frozen Large GPU panel favored
+separate game processes with shared inference over threads beside model copies;
+model preparation and active-game counts also differed. Without agents, a game costs what it does in a plain process pool:
 158 ms per decision under Etude against 160 ms in a raw 28-process pool on the
 same frozen panel, with identical trajectories.
 

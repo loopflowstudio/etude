@@ -404,7 +404,14 @@ Launched grouping without renting: put the same lab files in a uv lab (as in
 not reach the launched worker, so drive failures through `etude eval`.
 
 Retain the startup game count and inference thread count with protocol comparison
-results. Controlled CPU/memory checks cover one CPU, fewer pending games than
+results. On NVIDIA hardware, verify batch-sized game capacity with pending and
+host-memory bounds; hide the GPU to verify the CPU allocation. Hardware probing
+must not import the loading library or run for agentless games. Keep model
+placement separate from the loader's device choice. Exercise cross-job batches,
+multiple checkpoint leaves, partial-batch drain, loader failure propagation and
+fresh-host resume. Keep per-decision and whole-arm metrics separate; CPU results
+do not select GPU placement, or conversely.
+Controlled CPU/memory checks cover one CPU, fewer pending games than
 CPUs, memory-limited games, agentless games and multiple tournaments; verify
 one shared allocation reaches dispatch and the loading module. Keep scalar
 Torch threads at one; grouped Torch loading honors `OMP_NUM_THREADS` before

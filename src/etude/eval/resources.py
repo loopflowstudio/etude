@@ -1,12 +1,13 @@
 """Process environment for game and agent processes.
 
-`divide_cpus` returns CPU counts for agent startup and game dispatch.
+`divide_cpus` returns game and inference-thread budgets for startup and dispatch.
 `resources` supplies temporary fast scratch and restores the caller's
 environment when the group finishes.
 Observations are kept in the run's durable artifact folder by the group owner.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -101,23 +102,44 @@ def seconds_left() -> float | None:
     return max(0.0, datetime.fromisoformat(deadline).timestamp() - time.time())
 
 
+def _has_gpu() -> bool:
+    """Read visible NVIDIA hardware without importing the author's model library."""
+    if os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1"):
+        return False
+    command = shutil.which("nvidia-smi")
+    if command is None:
+        return False
+    return bool(
+        subprocess.check_output(
+            [command, "--query-gpu=index", "--format=csv,noheader"],
+            text=True,
+            timeout=seconds_left(),
+        ).strip()
+    )
+
+
 @dataclass(frozen=True)
 class Cpus:
     games: int
     threads: int
 
 
-def divide_cpus(pending: int, *, agents: bool, memory_gb: float | None = None) -> Cpus:
-    """Reserve one eighth of CPUs for inference; small game sets return unused CPUs.
+def divide_cpus(
+    pending: int, *, agents: bool, memory_gb: float | None = None, batch_rows: int = 32
+) -> Cpus:
+    """GPU games fill one batch; CPU inference reserves one eighth of CPUs.
 
     A single CPU is shared by one game and inference. Memory and pending work
     may reduce games further, but never leave queued work with zero capacity.
     """
     cpus = available_cpus()
     held = agent_bytes(memory_gb) if agents else 0
+    capacity = cpus
+    if agents and pending:
+        capacity = batch_rows if _has_gpu() else max(1, cpus - max(1, (cpus + 7) // 8))
     games = min(
         pending,
-        max(1, cpus - max(1, (cpus + 7) // 8)) if agents else cpus,
+        capacity,
         max(1, (memory_bytes() - held) // GAME_BYTES),
     )
     return Cpus(games=games, threads=max(1, cpus - games) if agents else 0)

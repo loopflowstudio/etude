@@ -743,6 +743,7 @@ def hold_group(
             sum(len(active.matches) - len(active.done) for _, active in pending),
             agents=definition is not None,
             memory_gb=definition.memory_gb if definition else None,
+            batch_rows=definition.max_batch if definition else 32,
         )
         agent_lifetime = lifetime.enter_context(ExitStack())
         try:
