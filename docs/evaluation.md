@@ -783,6 +783,12 @@ one on a GPU, or weights too large to hold in every game process.
   and the other model library thread environment variables to the inference
   budget. The loader must honor this budget when configuring its library
   (for Torch, `torch.set_num_threads(int(os.environ["OMP_NUM_THREADS"]))`).
+  An agent can instead spend that budget on concurrent forwards inside `act`,
+  with one library thread per forward. It owns synchronization and must use
+  per-row random generators; mutating a global random generator is unsafe
+  across those forwards. Etude calls `act` serially on each loaded agent.
+  Large padded observations can travel as compact picklable rows, with the
+  agent restoring the exact model inputs before inference.
   Startup reports both active games and inference threads.
 - **Shared by jobs that declare the same agents.** Eval jobs of one pass
   whose `Agents` are equal share a run and its agent process. Jobs with
