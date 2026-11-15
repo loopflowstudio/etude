@@ -57,6 +57,7 @@ from examples.agent_models import load
 from tests.eval.thread_budget import load_checkpoint
 from tests.launch.counting import Counting, Counts, job_text
 from tests.launch.fake import bench
+from tests.run.storage import MeasuredStorage
 from tests.test_jobs import checkout
 
 
@@ -1348,3 +1349,26 @@ def test_agentless_game_intervals_have_no_inference_wait(tmp_path: Path) -> None
     assert report.round_trip_p50_seconds is report.round_trip_p95_seconds is None
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [0]
     assert len(list((tmp_path / "grouped/artifacts/agents").glob("protocol-*.json"))) == 1
+
+
+def test_standalone_play_retains_intervals_without_a_group(tmp_path: Path) -> None:
+    match = Match(players=(checkpoint("left"),), games=1)
+    bucket = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
+    with evaluating(
+        environment("grouped"),
+        experiment="grouped",
+        matches=(match,),
+        run="standalone",
+        directory=tmp_path,
+        storages=(bucket,),
+    ) as active:
+        assert active.play(plain).played == 1
+    paths = list((tmp_path / "grouped/standalone/artifacts/agents").glob("protocol-*.json"))
+    assert len(paths) == 1
+    report = Performance.model_validate_json(paths[0].read_bytes())
+    assert report.match == match.key
+    assert report.started_monotonic is not None
+    assert report.finished_monotonic is not None
+    assert report.game_seconds == report.finished_monotonic - report.started_monotonic
+    assert bucket.uploads == 7
+    assert len([key for key in bucket.keys("") if "/protocol-" in key]) == 1

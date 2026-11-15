@@ -454,13 +454,14 @@ class Playing:
         self.skipped = len(self.run.matches) - len(self.pending)
 
 
-def _retain(name: str, report: Imports | Performance) -> None:
-    """Keep a game process's report beside the group's batches, when the group has a folder."""
-    if artifacts := os.environ.get("ETUDE_AGENTS_DIR"):
-        try:
-            DirectoryStorage(Path(artifacts)).put(name, report.model_dump_json().encode())
-        except OSError as error:
-            raise RetryRequested(f"game report {name} could not be retained") from error
+def _retain(name: str, report: Imports | Performance, root: Path) -> None:
+    """Keep reports beside group batches, or under a standalone run's artifacts."""
+    artifacts = os.environ.get("ETUDE_AGENTS_DIR")
+    directory = Path(artifacts) if artifacts else root / "artifacts" / "agents"
+    try:
+        DirectoryStorage(directory).put(name, report.model_dump_json().encode())
+    except OSError as error:
+        raise RetryRequested(f"game report {name} could not be retained") from error
 
 
 def play_together(
@@ -530,7 +531,7 @@ def play_together(
                 imports = Imports.model_validate_json(raw)
         if imports is not None and imports.pid not in reported_imports:
             reported_imports.add(imports.pid)
-            _retain(f"game-imports-{imports.pid}.json", imports)
+            _retain(f"game-imports-{imports.pid}.json", imports, each.run.files.root)
         performance = outcome.performance if isinstance(outcome, Execution) else None
         if performance is None and isinstance(
             raw_performance := getattr(outcome, "_etude_performance", None), str
@@ -538,7 +539,7 @@ def play_together(
             performance = Performance.model_validate_json(raw_performance)
         if performance is not None:
             # The run writer distinguishes retries and tournaments with identical matches.
-            _retain(f"protocol-{each.run.id}-{match.key}.json", performance)
+            _retain(f"protocol-{each.run.id}-{match.key}.json", performance, each.run.files.root)
         if each.agents and imports is not None and imports.warning and not warned_imports:
             print(imports.warning, file=sys.stderr, flush=True)
             warned_imports = True
