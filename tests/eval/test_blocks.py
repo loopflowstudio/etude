@@ -56,6 +56,14 @@ def recorded(match: Match) -> Result:
     return Result(tables=result.tables, blobs=result.blobs, execution={"device": "cpu"})
 
 
+def report_uploads(root: Path) -> int:
+    reports = list((root / "cards" / "a" / "artifacts" / "agents").glob("*.json"))
+    assert sum(path.name.startswith("protocol-") for path in reports) == 3
+    imports = sum(path.name.startswith("game-imports-") for path in reports)
+    assert 1 <= imports <= 3
+    return len(reports)
+
+
 def test_an_eval_run_delivers_each_match_with_packed_blobs(
     tmp_path: Path,
 ) -> None:
@@ -64,7 +72,7 @@ def test_an_eval_run_delivers_each_match_with_packed_blobs(
              matches=deals(pair(tmp_path), 3), run="a", directory=tmp_path / "a",
              storages=[bucket])  # fmt: skip
     # Three run records, then each match's pack, two tables and index.
-    assert bucket.uploads == 3 + 3 * 4
+    assert bucket.uploads == 3 + 3 * 4 + report_uploads(tmp_path / "bucket")
     indices = [key for key in bucket.keys("cards/a/blocks/") if key.endswith("/block.json")]
     kept = [Block.model_validate_json(bucket.get(index)) for index in indices]
     assert len(kept) == 3
@@ -253,7 +261,7 @@ def test_a_long_eval_run_seals_a_block_whenever_its_segment_is_old_enough(
     # Each match is delivered in a block of its own as soon as it is stored.
     indexes = [key for key in bucket.keys("cards/a/blocks/") if key.endswith("/block.json")]
     assert len(indexes) == 3
-    assert bucket.uploads == 3 + 3 * 3
+    assert bucket.uploads == 3 + 3 * 3 + report_uploads(tmp_path / "bucket")
 
 
 WINS = Rollup(
@@ -281,7 +289,7 @@ def test_a_rollup_is_summed_once_per_block_and_a_new_block_adds_only_its_own_tot
     evaluate(experiment="cards", environment=DUEL, play=play, matches=matches[:3], run="a",
              directory=tmp_path / "a", storages=[bucket], rollups=[WINS])  # fmt: skip
     # Each block: two tables, one rollup and its index.
-    assert bucket.uploads == 3 + 3 * 4
+    assert bucket.uploads == 3 + 3 * 4 + report_uploads(tmp_path / "bucket")
     db = statsdb("cards", DirectoryStorage(tmp_path / "bucket"))
     assert totals(db) == from_rows(db) and len(totals(db)) == 4
     db.close()
