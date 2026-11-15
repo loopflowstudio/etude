@@ -17,6 +17,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -387,6 +388,12 @@ class Database:
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("database timeout must be nonnegative and finite")
         _refuse_takeover(path.parent)
+        if legacy := _sources(path.parent):
+            raise LauncherError(
+                f"{path.parent} holds {len(legacy)} legacy launcher histories: "
+                f"{', '.join(map(str, legacy))}; "
+                "stop old local scheduling clients, then run etude database upgrade"
+            )
         if not path.is_file():
             raise LauncherError(f"{path} is not initialized; run etude database upgrade")
         self._locks: dict[str, tuple[str, Callable[[], datetime]]] = {}
@@ -1987,6 +1994,13 @@ def _authorize_upgrade(state: Schema, development: bool, catalog: dict[str, str]
         )
 
 
+def _remove_abandoned_staging(home: Path) -> None:
+    """Delete staging left by a killed upgrade; the held upgrade lock proves none is live."""
+    for staging in home.glob(".launcher-*"):
+        if staging.is_dir():
+            shutil.rmtree(staging)
+
+
 def upgrade(home: Path, *, timeout: float | None = None, development: bool = False) -> Upgrade:
     """Explicitly initialize or advance local state; never schedule or contact a worker.
 
@@ -2004,6 +2018,7 @@ def upgrade(home: Path, *, timeout: float | None = None, development: bool = Fal
         _authorize_upgrade(state, development, from_catalog)
         home.mkdir(parents=True, exist_ok=True)
         with _upgrade_lock(home):
+            _remove_abandoned_staging(home)
             state = inspect(home)
             _authorize_upgrade(state, development, from_catalog)
             if state.takeover is not None:

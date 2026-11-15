@@ -336,3 +336,35 @@ Rerunning explicit upgrade must retain all histories exactly once. Changed or
 missing evidence must refuse with its reconciliation path, preserving files;
 retired inputs must never be interpreted as an empty home. Use controlled file
 operation failures in fixtures, never interrupt an operational cutover for QA.
+
+## Etude: rehearsing a launcher database upgrade on this machine's data
+
+Never point a branch build at `~/.etude`. Work in `mktemp -d /tmp/qa-NAME.XXXX`
+(other sessions leave read-only `/tmp/qa*` folders behind).
+
+1. Snapshot the real histories with the SQLite backup API, read-only
+   (`sqlite3.connect(f"file:{src}?mode=ro", uri=True).backup(dst)`), keeping the
+   layout: `launcher*.db` at the home root, `copies/*/launcher.db`. The sqlite3
+   CLI's `.backup` with a `file:` URI fails here. Clone later homes with
+   `cp -c` from `recovery/consolidation-*/N-retired-*` after the first run.
+2. A branch build refuses real data (`unmerged or unproven migrations`). To
+   rehearse the merged build without forging anything in the repo:
+   `git clone --no-hardlinks . LAB/merged-src`, then copy the tracked files in
+   (`git ls-files -z | rsync -a --from0 --files-from=- ./ LAB/merged-src/`;
+   `git diff` misses staged and freshly committed work), commit, `git branch -f main HEAD`,
+   and install via a uv project depending on
+   `etude-sdk @ git+file://LAB/merged-src@main` (`requires-python = "==3.12.*"`).
+   Check `.venv/lib/python3.12/site-packages/etude/launch/migrations/merged.json`
+   is not `{}`. uv's pin checkouts carry `refs/heads/main` and no `origin/main`.
+3. Drive `etude database status`, `etude status`, `etude database upgrade`,
+   `etude runs`, `etude machines` with `ETUDE_HOME=LAB/home`. The real data takes
+   about 2.5–4 minutes and about 2.7× its size again in `recovery/`.
+4. Interrupt: start the upgrade with `(etude database upgrade > out 2>&1 &)`,
+   SIGKILL it from a background `sleep 80; pkill -9 -f "...etude database upgrade"`,
+   then rerun. Foreground `sleep` is blocked in this harness.
+5. Old clients: `uv venv -p 3.12 LAB/old-V && uv pip install --python
+   LAB/old-V/bin/python etude-sdk==V`, run against a `cp -c` of the consolidated
+   home and list what files appear.
+6. Compare fact counts with `sqlite3 "file:DB?mode=ro"` (`runs`, `sessions`,
+   `rentals`, `attempts`, `cohorts`, `transfers`). The published file's hash differs
+   between runs: `migrations.applied_at` holds the time. Delete the lab afterwards.

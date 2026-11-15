@@ -106,6 +106,43 @@ def test_open_pending_migration_changes_nothing(
     assert not list(tmp_path.glob("*.backup-*"))
 
 
+@pytest.mark.parametrize(
+    "name",
+    ["launcher.db", "launcher-17.db", "launcher-19.db", "copies/previous/launcher.sqlite"],
+)
+@pytest.mark.parametrize("canonical", [False, True])
+def test_ordinary_opens_refuse_stray_histories_without_changing_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+    canonical: bool,
+) -> None:
+    if canonical:
+        _ready(tmp_path)
+    legacy = tmp_path / name
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(legacy)) as old:
+        old.executescript((FIXTURES / "launcher-0.3.2.sql").read_text())
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    with pytest.raises(LauncherError, match="legacy launcher histories"):
+        database.Database(launcher_file(tmp_path))
+    with pytest.raises(LauncherError, match="legacy launcher histories") as error:
+        open_home(tmp_path)
+    assert str(legacy) in str(error.value)
+    assert "stop old local scheduling clients" in str(error.value)
+    assert "etude database upgrade" in str(error.value)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    monkeypatch.delenv("ETUDE_SERVER", raising=False)
+    assert main(["status"]) == 1
+    output = capsys.readouterr()
+    assert str(legacy) in output.err and "etude database upgrade" in output.err
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+    assert inspect(tmp_path).sources == (legacy,)
+    assert main(["database", "status"]) == 0
+    assert f"legacy history: {legacy}" in capsys.readouterr().out
+
+
 def test_unmerged_upgrade_refuses_operational_state(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -299,6 +336,8 @@ def test_explicit_takeover_retains_cohort_and_worker_facts(
     with sqlite3.connect(source) as old:
         old.executescript((FIXTURES / f"launcher-{version}.sql").read_text())
     old.close()
+    with pytest.raises(LauncherError, match="legacy launcher histories"):
+        open_home(tmp_path)
     monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in migrations()})
     result = upgrade(tmp_path)
     assert result.sources == (source,) and not source.exists()
@@ -313,6 +352,21 @@ def test_explicit_takeover_retains_cohort_and_worker_facts(
     store.close()
     with sqlite3.connect(result.backups[0]) as original:
         assert original.execute("SELECT count(*) FROM runs").fetchone()[0] == 2
+
+
+def test_upgrade_after_a_killed_upgrade_removes_its_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with sqlite3.connect(tmp_path / "launcher.db") as old:
+        old.executescript((FIXTURES / "launcher-0.4.0.sql").read_text())
+    old.close()
+    abandoned = tmp_path / ".launcher-killed"
+    abandoned.mkdir()
+    (abandoned / "launcher.sqlite").write_bytes(b"partial conversion")
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in migrations()})
+    upgrade(tmp_path)
+    assert not abandoned.exists()
+    assert sorted(p.name for p in tmp_path.glob(".launcher-*")) == [".launcher-upgrade"]
 
 
 def test_shared_inherited_facts_are_imported_once(

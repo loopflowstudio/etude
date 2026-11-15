@@ -540,7 +540,6 @@ def test_job_help_required_flags_mixed_order_and_collision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
-    upgrade(tmp_path / "home", development=True)
     path = tmp_path / "job.py"
     path.write_text(
         r'''from etude.jobs import TrainingJob
@@ -560,6 +559,7 @@ def training_jobs(width: int, fast: bool = False):
         and "Train a chosen width" in help
     )
     assert not (tmp_path / "home").exists()
+    upgrade(tmp_path / "home", development=True)
     assert main(["queue", str(path), "--width", "32", "--pool", "local", "--fast"]) == 0
     id = [line for line in capsys.readouterr().out.splitlines() if ": state from " not in line][
         0
@@ -683,6 +683,7 @@ def training_jobs(width: int = 32) -> list[Job]:
         "sweep/wide@7",
     ]
     assert all(request.params == {"width": 64} for request in requests)
+    upgrade(home, development=True)
     assert main(["queue", str(path), "--width", "64", "--job", "wide", "--seed", "7"]) == 0
     assert "sweep/wide@7  new, queued" in capsys.readouterr().out
     assert default().record("sweep/wide@7").launch.params == {"width": 64}

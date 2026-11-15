@@ -738,9 +738,11 @@ def database_upgrade(
     ] = False,
 ) -> None:
     """Explicitly initialize or upgrade this computer's database without scheduling."""
-    from etude.launch.database import upgrade
+    from etude.launch.database import inspect, upgrade
     from etude.launch.source import home
 
+    if histories := len(inspect(home()).sources):
+        print(f"consolidating {histories} launcher histories; this can take minutes", flush=True)
     result = upgrade(home(), timeout=timeout, development=development)
     print(f"database {result.path}")
     for source in result.sources:

@@ -1125,6 +1125,12 @@ recent activity evidence, never proof that every client stopped. Existing legacy
 and copy histories must be consolidated before their files are archived; a newer
 schema number alone does not select the authoritative history. Unsupported or
 conflicting history refuses takeover instead of exposing an empty launcher.
+Update every pre-migration client sharing the home before resuming scheduling.
+An old binary can recreate a legacy file and start a separate queue after takeover.
+If legacy or copy histories exist beside the canonical file, ordinary Python and
+CLI opens refuse and name the files. Stop the old local scheduling clients,
+update their environments, then run `etude database upgrade` to consolidate again.
+`etude database status` remains available to inspect the histories.
 
 ### Compatible clients and development
 
