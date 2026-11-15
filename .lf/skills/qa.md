@@ -204,6 +204,10 @@ repo, with an isolated `ETUDE_HOME`:
 - Client jobs submitted directly from Python need `experiment=`
   (`job.model_copy(update=...)`). `etude launch FILE.py` defaults unnamed jobs
   to the file stem; recipes call `track()` without an experiment.
+- Smoke trains each distinct `job_id` once: two jobs differing only in name share one
+  smoke run, so give each lab job its own config.
+- Pass output: unbuffered (`PYTHONUNBUFFERED=1`) to see stdout and stderr in order;
+  a failing pass otherwise shows its error before its state line.
 - A `--keep` smoke folder's `track/` holds a tiny tournament (games=1): as an
   `etude eval --source` it gives `seating_conflict`. Copy only the training run's
   folder out for a clean source.

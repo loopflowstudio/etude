@@ -5,7 +5,7 @@ new runs. The scheduler's public records are the only memory of a hand-down.
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -30,8 +30,10 @@ from etude.eval.records import (
 from etude.eval.tournament import StoredRuns, played
 from etude.experiment import observe, read_tournament_lines
 from etude.jobs import (
+    Checkpoints,
     Evaluation,
     ExperimentState,
+    TrainingRunSummary,
     evaluation_spec,
     fetch_checkpoints,
     hold_evaluation,
@@ -118,6 +120,21 @@ def _print_lines(lines: dict[str | None, str]) -> None:
     lines.clear()
 
 
+def _queued(request: RunRequest, experiment: str) -> TrainingRunSummary:
+    assert request.id is not None
+    name = request.id.removeprefix(experiment + "/")
+    return TrainingRunSummary(
+        name=name,
+        experiment=experiment,
+        job=request.job.name,
+        launch=request.job.name,
+        line=name,
+        state="queued",
+        checkpoints=Checkpoints(),
+        seed=request.seed,
+    )
+
+
 def advance(
     experiment: Experiment,
     *,
@@ -182,11 +199,17 @@ def advance(
             new.append(request)
             lines[request.id] = f"{request.id}  new"
             committed += request.job.max_usd or Decimal(0)
-    jobs = (
-        [with_experiment(j, experiment.name) for j in asked(experiment.eval, state)]
-        if experiment.eval is not None and evaluate
-        else []
-    )
+    jobs: list[Job] = []
+    if experiment.eval is not None and evaluate:
+        # This pass's new runs have no checkpoints yet, but their policies already exist
+        # for eval_jobs. Selection/resume passes skip evaluation, so every run here is new.
+        asking = replace(state, runs=(*state.runs, *(_queued(r, experiment.name) for r in new)))
+        try:
+            jobs = [with_experiment(j, experiment.name) for j in asked(experiment.eval, asking)]
+        except EtudeError:
+            # A policy of a run this pass left out (`--max-usd`) is missing; say which and why.
+            _print_lines(lines)
+            raise
     policy_lines = read_tournament_lines(
         source,
         state,

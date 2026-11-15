@@ -550,9 +550,11 @@ def _qualified(db: duckdb.DuckDBPyConnection, experiment: str, original: Block) 
         {"stored": "VARCHAR", "qualified": "VARCHAR"},
         [[a, b] for a, b in players.items() if a != b],
     )
-    yield block
-    db.execute("drop table _qualified_matches")
-    db.execute("drop table _qualified_players")
+    try:
+        yield block
+    finally:
+        db.execute("drop table _qualified_matches")
+        db.execute("drop table _qualified_players")
 
 
 def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:

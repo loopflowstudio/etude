@@ -688,8 +688,6 @@ def training_jobs(state: ExperimentState) -> list[TrainingJob]:
                         repo=None, max_hours=1)]
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
-    if not state.runs:
-        return []
     tournament = Benchmark(name="progress", environment=environment("duel"), seatings=(
         Seating(name="vs fixed", players=(Inference(config={"strength": 1}),
                 Code(name="fixed", config={"strength": 0})), configs=({},), games=1),))
@@ -697,7 +695,8 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     return [EvalJob(tournament=tournament, checkpoints=mine, play=play, repo=None, max_hours=1)]
 """)
     definition = read_experiment(file)
-    assert advance(definition, source=source, pool="waiting", mode="queue") == []
+    first = advance(definition, source=source, pool="waiting", mode="queue")
+    assert [(decision.new, decision.running) for decision in first] == [(0, 0)]
     assert [run.id for run in b.scheduler.runs()] == ["fresh_policy/small@0"]
     # A queued run exists before its first checkpoint; another pass stays safe.
     queued = advance(definition, source=source, pool="waiting", mode="queue")
@@ -719,6 +718,89 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     assert [(decision.new, decision.played) for decision in decisions] == [(1, 1)]
     stored = StoredRuns.read("fresh_policy", source)
     assert sum(len(stored.records(folder)) for folder in stored.folders()) == 1
+
+
+def test_policy_key_of_a_job_added_to_a_started_experiment_is_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    b = bench(tmp_path)
+    b.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    source = DirectoryStorage(tmp_path / "source")
+    file = tmp_path / "grown_policy.py"
+    jobs = """
+from etude.checkpoints import PolicyKey
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.jobs import EvalJob, ExperimentState, TrainingJob
+from tests.eval.games import play
+from tests.launch.tasks import Command, train_command
+
+def training_jobs(state: ExperimentState) -> list[TrainingJob]:
+    return [TrainingJob(name=name, train=train_command, config=Command(command="true"),
+                        repo=None, max_hours=1) for name in NAMES]
+"""
+    file.write_text(jobs + 'NAMES = ["small"]\n')
+    assert advance(read_experiment(file), source=source, pool="waiting", mode="queue") == []
+    file.write_text(
+        jobs
+        + """NAMES = ["small", "large"]
+
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    tournament = Benchmark(name="progress", environment=environment("duel"), seatings=(
+        Seating(name="vs fixed", players=(Inference(config={"strength": 1}),
+                Code(name="fixed", config={"strength": 0})), configs=({},), games=1),))
+    large = state.policy(PolicyKey(job="large")).checkpoints
+    return [EvalJob(tournament=tournament, checkpoints=large, play=play, repo=None, max_hours=1)]
+"""
+    )
+    decisions = advance(read_experiment(file), source=source, pool="waiting", mode="queue")
+    assert [(decision.new, decision.running) for decision in decisions] == [(0, 0)]
+    assert sorted(run.id for run in b.scheduler.runs()) == [
+        "grown_policy/large@0",
+        "grown_policy/small@0",
+    ]
+
+
+def test_policy_key_of_a_run_over_budget_says_why_it_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    b = bench(tmp_path)
+    b.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    file = tmp_path / "over_budget.py"
+    file.write_text("""
+from etude.checkpoints import PolicyKey
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.jobs import EvalJob, ExperimentState, TrainingJob
+from tests.eval.games import play
+from tests.launch.tasks import Command, train_command
+
+def training_jobs(state: ExperimentState) -> list[TrainingJob]:
+    return [TrainingJob(name=name, train=train_command, config=Command(command="true"),
+                        repo=None, max_hours=1, max_usd=1) for name in ("small", "large")]
+
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    tournament = Benchmark(name="progress", environment=environment("duel"), seatings=(
+        Seating(name="vs fixed", players=(Inference(config={"strength": 1}),
+                Code(name="fixed", config={"strength": 0})), configs=({},), games=1),))
+    large = state.policy(PolicyKey(job="large")).checkpoints
+    return [EvalJob(tournament=tournament, checkpoints=large, play=play, repo=None, max_hours=1)]
+""")
+    source = DirectoryStorage(tmp_path / "source")
+    with pytest.raises(EtudeError, match="policy_not_found"):
+        advance(
+            read_experiment(file),
+            source=source,
+            pool="waiting",
+            mode="queue",
+            max_usd=Decimal("1.5"),
+        )
+    assert "over_budget/large@0  new, not queued: --max-usd 1.5" in capsys.readouterr().out
+    assert b.scheduler.runs() == ()
 
 
 def test_policy_key_cross_experiment_seats_split_seeds_and_do_not_replay(

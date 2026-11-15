@@ -210,7 +210,7 @@ class ExperimentState:
 def checkpoint_inputs(
     matches: Iterable[Match],
     state: ExperimentState,
-    checkpoints: Sequence[CheckpointRecord | CheckpointRef] = (),
+    checkpoints: Sequence[CheckpointRecord] = (),
 ) -> dict[str, CheckpointRecord | CheckpointRef]:
     """The checkpoints seated, keeping producer records where available.
 
@@ -224,8 +224,7 @@ def checkpoint_inputs(
             if not isinstance(player, CheckpointPlayer) or player.checkpoint.key in found:
                 continue
             ref = player.checkpoint
-            record = declared.get(ref.key) or state.checkpoint(ref.key)
-            saved = record or ref
+            saved = declared.get(ref.key) or state.checkpoint(ref.key) or ref
             if saved.artifact.sha256 is None or saved.artifact.size_bytes is None:
                 raise EtudeError("checkpoint_not_stored", 404, detail=ref.key)
             found[ref.key] = saved
@@ -235,7 +234,7 @@ def checkpoint_inputs(
 def fetch_checkpoints(
     matches: Sequence[Match],
     state: ExperimentState,
-    checkpoints: Sequence[CheckpointRecord | CheckpointRef],
+    checkpoints: Sequence[CheckpointRecord],
     folder: Path,
 ) -> dict[str, str]:
     """Verify seated artifacts into a caller-owned folder and return their local URIs by key."""

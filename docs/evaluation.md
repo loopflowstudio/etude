@@ -709,7 +709,9 @@ does, unless `--retry-failed`.
   unplayed.
 - **State.** What the experiment's runs have stored, together with the
   scheduler's records of those queued or only just started, read fresh each
-  pass and never stored itself. Summary names are local (`base@0`,
+  pass and never stored itself. A launch's `eval_jobs` also sees the runs
+  that pass is queuing, as queued runs with no checkpoints. Summary names are
+  local (`base@0`,
   `ladder-1a2b3c4d5e6f`) in both cases; `state.run("capacity/base@0")` and
   `state.run("base@0")` find the same training run. `state.eval_runs` is its eval runs, each with
   its name and whether it is `queued`, `running`, `stopped`, `finished` or `failed`. `state.runs` is
@@ -833,8 +835,6 @@ from arena import deals, direct, play, world
 
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
-    if not state.runs:
-        return []
     frontier = Benchmark(
         name="frontier",
         environment=world,
@@ -889,10 +889,9 @@ PolicyKey(experiment="tla-frontier", job="small")  # the same policy, by the def
   file's experiment; for another's, `observe(source,
   "tla-frontier").policy(PolicyKey(job="small"))`. `job` is the name a seat's
   `job=` takes: the launch name, or the full name with its config digest.
-  A policy with no run yet raises `policy_not_found`. For a fresh experiment,
-  return `[]` from `eval_jobs` until `state.runs` exists, as above: a launch
-  evaluates the file before submitting its first training jobs. A queued run
-  has a policy with no checkpoints yet, so it schedules no matches.
+  A queued run, including one the launch is queuing this pass, has a policy
+  with no checkpoints yet, so it schedules no matches. A policy with no run, stored
+  or being queued, raises `policy_not_found`.
 - **A default that would have to choose refuses.** With several training
   jobs and none named, or several roles and none named, the key is refused
   with an error listing them. So is a job, seed or role the experiment does
