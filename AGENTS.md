@@ -248,9 +248,7 @@ The launcher database changes only through a new SQL file in
 `docs/launcher.md` ("Writing a migration") shows one. It may change until it merges to main; afterwards it never changes
 (`scripts/check_migrations.py`). Explicit `database upgrade` advances the one
 operational `launcher.sqlite`; ordinary opens never migrate or select copies.
-First takeover retains a synced publication record before retiring source files.
-Pending publication blocks ordinary opens; explicit upgrade verifies its evidence
-and resumes. Never treat retired inputs as an empty home or run recovery copies.
+Recovery snapshots are never scheduling inputs.
 Unmerged SQL runs only in explicit empty development fixtures. Expand before
 contracting; destructive changes export facts before commit and name their
 preceding expansion. Release metadata records reader floors, and packaged

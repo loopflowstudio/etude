@@ -17,14 +17,12 @@ import json
 import math
 import os
 import re
-import shutil
 import sqlite3
-import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import closing, contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from functools import cache, partial
@@ -72,15 +70,6 @@ _FOLDER = Path(__file__).with_name("migrations")
 _LEDGER = """CREATE TABLE migrations(
   name TEXT PRIMARY KEY, sha256 TEXT NOT NULL, applied_at TEXT NOT NULL,
   floor TEXT, program TEXT)"""
-
-
-# Actual supported pre-ledger histories on this machine, plus the shipped 0.4.0
-# schema. Older named recovery snapshots never become operational queues.
-_PREDECESSORS: dict[int, tuple[str, ...]] = {
-    19: ("baseline", "run_resume_and_writers"),
-    17: ("baseline",),
-    13: ("baseline",),
-}
 
 
 class Released(Record):
@@ -387,13 +376,6 @@ class Database:
         """
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("database timeout must be nonnegative and finite")
-        _refuse_takeover(path.parent)
-        if legacy := _sources(path.parent):
-            raise LauncherError(
-                f"{path.parent} holds legacy launcher histories: "
-                f"{', '.join(map(str, legacy))}; "
-                "stop old local scheduling clients, then run etude database upgrade"
-            )
         if not path.is_file():
             raise LauncherError(f"{path} is not initialized; run etude database upgrade")
         self._locks: dict[str, tuple[str, Callable[[], datetime]]] = {}
@@ -1283,44 +1265,12 @@ def _read_only(path: Path, timeout: float = 5) -> sqlite3.Connection:
     return sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=timeout)
 
 
-def _copy_file(source: Path, target: Path) -> None:
-    """Copy closed or signature-checked bytes within the caller's remaining allowance."""
-    with source.open("rb") as reader, target.open("wb") as writer:
-        while chunk := reader.read(1024 * 1024):
-            remaining()
-            writer.write(chunk)
-
-
 @contextmanager
 def _inspection(path: Path) -> Iterator[sqlite3.Connection]:
-    """Read stable evidence without letting SQLite create or update source sidecars."""
-    path = path.resolve()
-    revision = _signature(path)
-    wal = path.with_name(path.name + "-wal")
-    # Immutable reads ignore WAL. Copy a WAL-backed database privately instead;
-    # SQLite rebuilds its shared-memory index there, including committed WAL rows.
-    # Check identities after reading too: copies must not mix checkpoint generations.
-    try:
-        with ExitStack() as stack:
-            if wal.exists() and wal.stat().st_size:
-                temporary = stack.enter_context(
-                    tempfile.TemporaryDirectory(prefix="etude-inspect-")
-                )
-                target = Path(temporary) / path.name
-                for source in (path, wal):
-                    _copy_file(source, target.parent / source.name)
-                connection = _read_only(target, timeout=0)
-            else:
-                connection = sqlite3.connect(
-                    path.as_uri() + "?mode=ro&immutable=1", uri=True, timeout=0
-                )
-            with closing(connection) as db:
-                yield db
-    finally:
-        if not path.exists() or _signature(path) != revision:
-            raise LauncherError(
-                "launcher database changed during inspection; rerun database status"
-            )
+    """Read one committed SQLite snapshot, including compatible writers' WAL rows."""
+    with closing(_read_only(path, timeout=0)) as db:
+        db.execute("BEGIN")
+        yield db
 
 
 def _snapshot(source: Path, target: Path, timeout: float) -> None:
@@ -1378,18 +1328,15 @@ class Schema(Record):
     """Local schema evidence; inspection never changes records or selects a queue."""
 
     path: Path
-    sources: tuple[Path, ...]
     applied: tuple[str, ...]
     pending: tuple[str, ...]
     problem: str | None
-    takeover: Path | None = None
 
 
 class Upgrade(Record):
     """The facts published by an explicit upgrade, including recovery locations."""
 
     path: Path
-    sources: tuple[Path, ...]
     backups: tuple[Path, ...]
     applied: tuple[str, ...]
     floor: str | None
@@ -1408,32 +1355,10 @@ def _merged() -> dict[str, str]:
     return result
 
 
-def _sources(home: Path) -> tuple[Path, ...]:
-    return tuple(
-        sorted(
-            {
-                *home.glob("launcher*.db"),
-                *(home / "copies").glob("*/launcher*.db"),
-                *(home / "copies").glob("*/launcher.sqlite"),
-            }
-        )
-    )
-
-
 def inspect(home: Path) -> Schema:
     """Read local catalog membership, without database creation, provider keys or network."""
     home = home.resolve()
     path = launcher_file(home)
-    sources = _sources(home)
-    if (record := _takeover_path(home)).exists():
-        return Schema(
-            path=path,
-            sources=sources,
-            applied=(),
-            pending=(),
-            takeover=record,
-            problem=_takeover_problem(record),
-        )
     applied: tuple[str, ...] = ()
     problem: str | None = None
     if path.exists():
@@ -1455,12 +1380,12 @@ def inspect(home: Path) -> Schema:
             else:
                 problem = "canonical file has no migration ledger"
     pending = tuple(m.name for m in migrations() if m.name not in applied)
-    return Schema(path=path, sources=sources, applied=applied, pending=pending, problem=problem)
+    return Schema(path=path, applied=applied, pending=pending, problem=problem)
 
 
 def has_launcher(home: Path) -> bool:
-    """Whether local launcher evidence exists, including a legacy home needing upgrade."""
-    return _takeover_path(home).exists() or launcher_file(home).exists() or bool(_sources(home))
+    """Whether the canonical launcher file exists."""
+    return launcher_file(home).exists()
 
 
 def open_home(home: Path, *, timeout: float = 30) -> Database:
@@ -1584,9 +1509,7 @@ def _contracts(migration: Migration) -> bool:
     )
 
 
-def _apply(
-    db: sqlite3.Connection, applied: tuple[str, ...], path: Path, exports: list[Path]
-) -> tuple[str, ...]:
+def _apply(db: sqlite3.Connection, path: Path, exports: list[Path]) -> tuple[str, ...]:
     if not db.execute("SELECT 1 FROM sqlite_master WHERE name='migrations'").fetchone():
         db.execute(_LEDGER)
     existing = {r[0] for r in db.execute("SELECT name FROM migrations")}
@@ -1595,20 +1518,19 @@ def _apply(
         remaining()
         if migration.name in existing:
             continue
-        if migration.name not in applied:
-            if _contracts(migration):
-                exports.append(_export(db, migration, path))
-            _check_sqlite(migration)
-            try:
-                for statement in _statements(migration):
-                    remaining()
-                    db.execute(statement)
-            except sqlite3.Error as error:
+        if _contracts(migration):
+            exports.append(_export(db, migration, path))
+        _check_sqlite(migration)
+        try:
+            for statement in _statements(migration):
                 remaining()
-                raise LauncherError(
-                    f"launcher: migration {migration.name} failed ({type(error).__name__})"
-                ) from None
-            changed.append(migration.name)
+                db.execute(statement)
+        except sqlite3.Error as error:
+            remaining()
+            raise LauncherError(
+                f"launcher: migration {migration.name} failed ({type(error).__name__})"
+            ) from None
+        changed.append(migration.name)
         db.execute(
             "INSERT INTO migrations(name,sha256,applied_at,floor,program) VALUES (?,?,?,?,?)",
             (
@@ -1632,192 +1554,6 @@ def _quote(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _normalize_history(db: sqlite3.Connection, path: Path) -> tuple[str, ...] | None:
-    """Expand this machine's old inline schemas; retain superseded columns/tables."""
-    schema = int(db.execute("PRAGMA user_version").fetchone()[0])
-    if db.execute("SELECT 1 FROM sqlite_master WHERE name='migrations'").fetchone():
-        # Historical automatic copies had a different baseline. Only the actual
-        # empty schema-6 copy is supported; it owns no allocations or paid work.
-        if schema != 6 or any(
-            db.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
-            for table in ("runs", "sessions", "rentals", "attempts", "providers", "storages")
-        ):
-            raise LauncherError(
-                f"history {path} has an unsupported migration ledger; retain it for reconciliation"
-            )
-        return None
-    if schema not in _PREDECESSORS:
-        raise LauncherError(f"history {path} has unsupported schema {schema}")
-    if schema == 13:
-        db.execute("ALTER TABLE runs ADD COLUMN smoke TEXT NOT NULL DEFAULT '{}'")
-        db.execute("ALTER TABLE sessions ADD COLUMN provider_id TEXT")
-        db.execute("UPDATE sessions SET provider_id=receipt")
-    return _PREDECESSORS[schema]
-
-
-def _merge_history(target: sqlite3.Connection, path: Path, converted: Path) -> None:
-    """Merge each table in bulk through its identity index, preserving distinct facts."""
-    alias = f"history{len(target.execute('PRAGMA database_list').fetchall())}"
-    target.execute(f"ATTACH DATABASE ? AS {alias}", (converted.resolve().as_uri() + "?mode=ro",))
-    tables = [
-        r[0]
-        for r in target.execute(
-            f"SELECT name FROM {alias}.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('migrations','locks')"
-        )
-    ]
-    for table in tables:
-        remaining()
-        shape = {
-            row["name"]: row
-            for row in target.execute(f"PRAGMA {alias}.table_info({_quote(table)})")
-            if row["name"] != "seq"
-        }
-        columns = list(shape)
-        target_columns = {r[1] for r in target.execute(f"PRAGMA main.table_info({_quote(table)})")}
-        if not target_columns:
-            sql = target.execute(
-                f"SELECT sql FROM {alias}.sqlite_master WHERE type='table' AND name=?", (table,)
-            ).fetchone()[0]
-            target.execute(sql)
-            target_columns = set(columns)
-        for column in set(columns) - target_columns:
-            kind = shape[column]["type"]
-            if not re.fullmatch(r"[A-Z ]*", kind.upper()):
-                raise LauncherError(f"unsupported historical column {table}.{column}")
-            target.execute(f"ALTER TABLE {_quote(table)} ADD COLUMN {_quote(column)} {kind}")
-        keys = [name for name, row in shape.items() if row["pk"]] or ["id"]
-        match = " AND ".join(f"t.{_quote(k)}=s.{_quote(k)}" for k in keys)
-        difference = " OR ".join(f"t.{_quote(c)} IS NOT s.{_quote(c)}" for c in columns)
-        table_sql = _quote(table)
-        query = (
-            f"SELECT t.*,s.body AS source_body FROM main.{table_sql} t JOIN {alias}.{table_sql} s ON {match} WHERE {difference}"
-            if table == "ondemands"
-            else f"SELECT 1 FROM main.{table_sql} t JOIN {alias}.{table_sql} s ON {match} WHERE {difference} LIMIT 1"
-        )
-        if table == "ondemands":
-            for row in target.execute(query).fetchall():
-                before = OnDemand.model_validate_json(row["body"])
-                other = OnDemand.model_validate_json(row["source_body"])
-                # Two disjoint histories share a named supply whose only change
-                # is its concurrency cap. Keep the safer cap; originals remain
-                # in their recovery snapshots. Never combine paid allocations.
-                if before.model_copy(update={"max_machines": other.max_machines}) != other:
-                    raise LauncherError(f"conflicting on-demand identity from {path}")
-                retained = before.model_copy(
-                    update={"max_machines": min(before.max_machines, other.max_machines)}
-                )
-                target.execute(
-                    "UPDATE ondemands SET body=? WHERE name=?",
-                    (retained.model_dump_json(), retained.name),
-                )
-        elif target.execute(query).fetchone():
-            raise LauncherError(
-                f"conflicting historical identity in {table} from {path}; retain sources and reconcile before publication"
-            )
-        selected = ",".join(_quote(c) for c in columns)
-        target.execute(
-            f"INSERT INTO main.{table_sql}({selected}) SELECT {selected} FROM {alias}.{table_sql} s WHERE NOT EXISTS (SELECT 1 FROM main.{table_sql} t WHERE {match})"
-        )
-
-
-def _require_closed(sources: tuple[Path, ...]) -> None:
-    """Reject observed open legacy files; callers must also prevent old clients restarting."""
-    if not sources:
-        return
-    try:
-        result = subprocess.run(
-            [
-                "lsof",
-                "-t",
-                "--",
-                *(
-                    str(p)
-                    for source in sources
-                    for p in (
-                        source,
-                        source.with_name(source.name + "-wal"),
-                        source.with_name(source.name + "-shm"),
-                    )
-                ),
-            ],
-            capture_output=True,
-            timeout=remaining(),
-        )
-    except FileNotFoundError:
-        raise LauncherError("legacy cutover needs lsof to inspect open local clients") from None
-    if result.returncode not in (0, 1):
-        raise LauncherError("could not inspect open legacy clients; no cutover performed")
-    if result.stdout.strip():
-        pids = ",".join(sorted({p for p in result.stdout.decode().split() if p.isdigit()}))
-        raise LauncherError(
-            f"legacy databases are open by local processes {pids}; stop their scheduling commands before upgrade"
-        )
-
-
-def _signature(source: Path) -> str:
-    """Detect intervening filesystem writes; this is evidence, not client exclusion."""
-    parts: list[str] = []
-    for path in (source, source.with_name(source.name + "-wal")):
-        try:
-            state = path.stat()
-        except FileNotFoundError:
-            if path == source:
-                raise
-            continue
-        if path == source or state.st_size:
-            parts.append(f"{path.name}:{state.st_ino}:{state.st_size}:{state.st_mtime_ns}")
-    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
-
-
-class Evidence(Record):
-    """Immutable bytes required to finish a local publication."""
-
-    path: Path
-    sha256: str
-
-
-class Retirement(Record):
-    """One original file and its sole recovery destination, including SQLite sidecars."""
-
-    source: Path
-    retired: Path
-    sha256: str
-
-
-class Takeover(Record):
-    """Durable publication intent; named file identities determine progress on retry."""
-
-    result: Upgrade
-    target: Evidence
-    evidence: tuple[Evidence, ...]
-    files: tuple[Retirement, ...]
-
-
-def _takeover_path(home: Path) -> Path:
-    return home / ".launcher-takeover.json"
-
-
-def _takeover_problem(record: Path) -> str:
-    return (
-        f"unfinished launcher takeover; recovery record: {record}; "
-        "keep scheduling stopped and rerun etude database upgrade"
-    )
-
-
-def _refuse_takeover(home: Path) -> None:
-    if (record := _takeover_path(home)).exists():
-        raise LauncherError(_takeover_problem(record))
-
-
-def _digest(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(1024 * 1024):
-            remaining()
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _sync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
@@ -1826,223 +1562,21 @@ def _sync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _write_takeover(record: Path, takeover: Takeover) -> None:
-    temporary = record.with_suffix(".pending")
-    temporary.write_text(takeover.model_dump_json() + "\n")
-    _sync(temporary)
-    temporary.replace(record)
-    _sync_directory(record.parent)
-
-
-def _finish_takeover(home: Path) -> Upgrade:
-    record = _takeover_path(home)
-    takeover = Takeover.model_validate_json(record.read_text())
-
-    def refuse(reason: str) -> None:
-        raise LauncherError(
-            f"{reason}; preserve all files and reconcile against recovery record: {record}"
-        )
-
-    for evidence in (takeover.target, *takeover.evidence):
-        if not evidence.path.is_file() or _digest(evidence.path) != evidence.sha256:
-            refuse(f"takeover evidence differs or is missing: {evidence.path}")
-    # Validate the retained target against this program, including ledger checksums.
-    with closing(Database(takeover.target.path)):
-        pass
-    sources = tuple(item.source for item in takeover.files)
-    if unexpected := set(_sources(home)) - set(sources):
-        refuse("unrecorded launcher histories: " + ", ".join(map(str, sorted(unexpected))))
-    sidecars = {
-        path
-        for source in (*takeover.result.sources, takeover.result.path)
-        for path in (source.with_name(source.name + "-wal"), source.with_name(source.name + "-shm"))
-        if path.exists()
-    }
-    if unexpected_sidecars := sidecars - set(sources):
-        refuse("unrecorded SQLite sidecars: " + ", ".join(map(str, sorted(unexpected_sidecars))))
-    _require_closed(
-        tuple(p for p in (*takeover.result.sources, takeover.result.path) if p.exists())
-    )
-    canonical = takeover.result.path
-    # A prior attempt may have published before archiving the intent.
-    published = (
-        all(item.retired.exists() for item in takeover.files)
-        and canonical.exists()
-        and _digest(canonical) == takeover.target.sha256
-    )
-    for item in takeover.files:
-        original = item.source.exists() and not (published and item.source == canonical)
-        if original == item.retired.exists():
-            refuse(f"expected exactly one original or retired file for {item.source}")
-        actual = item.source if original else item.retired
-        if _digest(actual) != item.sha256:
-            refuse(f"takeover file identity differs: {actual}")
-    if canonical.exists() and not published and canonical not in sources:
-        refuse(f"unexpected canonical database: {canonical}")
-    for item in takeover.files:
-        remaining()
-        if not item.retired.exists():
-            item.source.replace(item.retired)
-        # Sync both directories even when a prior run performed the rename.
-        _sync_directory(item.retired.parent)
-        _sync_directory(item.source.parent)
-    if not published:
-        publication = takeover.target.path.with_name("publication.sqlite")
-        _copy_file(takeover.target.path, publication)
-        remaining()
-        _sync(publication)
-        publication.replace(canonical)
-    _sync(canonical)
-    _sync_directory(takeover.target.path.parent)
-    # The record stays immutable: file identities recover even interrupted renames.
-    # Archiving it marks completion and enables ordinary opens.
-    record.replace(takeover.target.path.parent / "takeover.json")
-    _sync_directory(takeover.target.path.parent)
-    _sync_directory(home)
-    return takeover.result
-
-
-def _takeover(home: Path, state: Schema) -> Upgrade:
-    """Validate consistent snapshots together; leave originals intact until cutover."""
-    # A legacy binary cannot honor a new marker. Source closure and retirement
-    # require host-level coordination; this stage must never publish a second queue.
-    sources = (*state.sources, *((state.path,) if state.path.exists() else ()))
-    _require_closed(sources)
-    revisions = {source: _signature(source) for source in sources}
-    recovery = home / "recovery" / f"consolidation-{datetime.now(UTC):%Y%m%dT%H%M%S%fZ}"
-    recovery.mkdir(parents=True, mode=0o700)
-    snapshots: list[Path] = []
-    exports: list[Path] = []
-    with tempfile.TemporaryDirectory(prefix=".launcher-", dir=home) as temporary:
-        stage = Path(temporary) / "launcher.sqlite"
-        if state.path.exists():
-            snapshot = recovery / "canonical-before.sqlite"
-            _retain_snapshot(state.path, snapshot)
-            snapshots.append(snapshot)
-            _snapshot(snapshot, stage, remaining() or 0)
-        db = sqlite3.connect(stage, isolation_level=None, uri=True)
-        db.row_factory = sqlite3.Row
-        try:
-            db.execute("BEGIN IMMEDIATE")
-            _apply(db, state.applied, state.path, exports)
-            for index, source in enumerate(state.sources):
-                snapshot = recovery / f"{index}-{source.name}"
-                _retain_snapshot(source, snapshot)
-                snapshots.append(snapshot)
-                converted = Path(temporary) / f"{index}.sqlite"
-                _snapshot(snapshot, converted, remaining() or 0)
-                with closing(sqlite3.connect(converted, isolation_level=None)) as old:
-                    old.row_factory = sqlite3.Row
-                    old.execute("BEGIN IMMEDIATE")
-                    applied = _normalize_history(old, source)
-                    if applied is None:
-                        old.execute("ROLLBACK")
-                        continue
-                    _apply(old, applied, state.path, exports)
-                    old.execute("COMMIT")
-                _merge_history(db, source, converted)
-            if problems := _invalid_records(db):
-                raise LauncherError("consolidated rows do not validate:\n" + "\n".join(problems))
-            if db.execute("PRAGMA foreign_key_check").fetchone():
-                raise LauncherError("consolidation has broken foreign key references")
-            db.execute("COMMIT")
-            db.execute("PRAGMA main.journal_mode=WAL")
-        except LauncherError as error:
-            raise LauncherError(f"{error}; recovery snapshots: {recovery}") from None
-        finally:
-            db.close()
-        # Validation bytes and their directory entries outlive temporary cleanup.
-        validated = recovery / "validated.sqlite"
-        _snapshot(stage, validated, remaining() or 0)
-        _sync(validated)
-        _sync_directory(recovery.parent)
-        _sync_directory(home)
-        _require_closed(sources)
-        if any(_signature(source) != revisions[source] for source in sources):
-            raise LauncherError(
-                f"legacy files changed during validation; no cutover performed; recovery snapshots: {recovery}"
-            )
-        floors = [m.floor for m in migrations() if m.floor is not None]
-        required = _required()
-        result = Upgrade(
-            path=state.path,
-            sources=sources,
-            backups=tuple(snapshots),
-            exports=tuple(exports),
-            applied=tuple(m.name for m in migrations()),
-            floor=max(floors, key=_version) if floors and not required else None,
-            required=required,
-        )
-        files = tuple(
-            Retirement(
-                source=path, retired=recovery / f"{index}-retired-{path.name}", sha256=_digest(path)
-            )
-            for index, source in enumerate(sources)
-            for path in (
-                source,
-                source.with_name(source.name + "-wal"),
-                source.with_name(source.name + "-shm"),
-            )
-            if path.exists()
-        )
-        if any(_signature(source) != revisions[source] for source in sources):
-            raise LauncherError(
-                f"legacy files changed while recording takeover; recovery snapshots: {recovery}"
-            )
-        evidence_paths = (*snapshots, *(p.with_name(p.name + ".json") for p in snapshots), *exports)
-        _write_takeover(
-            _takeover_path(home),
-            Takeover(
-                result=result,
-                target=Evidence(path=validated, sha256=_digest(validated)),
-                evidence=tuple(Evidence(path=p, sha256=_digest(p)) for p in evidence_paths),
-                files=files,
-            ),
-        )
-    return _finish_takeover(home)
-
-
 def _authorize_upgrade(state: Schema, development: bool, catalog: dict[str, str]) -> None:
-    if state.problem and state.takeover is None:
+    if state.problem:
         raise LauncherError(state.problem)
     if development:
-        if state.path.exists() or state.sources or state.takeover:
+        if state.path.exists():
             raise LauncherError("development upgrades require an empty fixture home")
         return
     if unproven := [
-        m.name
-        for m in migrations()
-        if (m.name in state.pending or state.sources or state.takeover)
-        and catalog.get(m.name) != m.sha256
+        m.name for m in migrations() if m.name in state.pending and catalog.get(m.name) != m.sha256
     ]:
         raise LauncherError(
             "unmerged or unproven migrations: "
             + ", ".join(unproven)
             + "; use an empty development fixture or a merged build"
         )
-
-
-def _remove_abandoned_staging(home: Path) -> None:
-    """Delete staging left by a killed upgrade; the held upgrade lock proves none is live."""
-    for staging in home.glob(".launcher-*"):
-        if staging.is_dir():
-            shutil.rmtree(staging)
-
-
-def _mark_abandoned_recovery(home: Path) -> None:
-    """Under the upgrade lock, retain and label snapshots with no publication owner."""
-    record = _takeover_path(home)
-    active = (
-        Takeover.model_validate_json(record.read_text()).target.path.parent
-        if record.exists()
-        else None
-    )
-    for recovery in (home / "recovery").glob("consolidation-*"):
-        if recovery != active and not (recovery / "takeover.json").exists():
-            marker = recovery / "abandoned"
-            if not marker.exists():
-                marker.touch(mode=0o600)
-                _sync(marker)
 
 
 def upgrade(home: Path, *, timeout: float | None = None, development: bool = False) -> Upgrade:
@@ -2054,27 +1588,18 @@ def upgrade(home: Path, *, timeout: float | None = None, development: bool = Fal
     with limit_time(timeout):
         home = home.resolve()
         state = inspect(home)
-        if state.problem and state.takeover is None:
+        if state.problem:
             raise LauncherError(state.problem)
-        if not state.pending and not state.sources and state.takeover is None:
-            return Upgrade(path=state.path, sources=(), backups=(), applied=(), floor=None)
+        if not state.pending:
+            return Upgrade(path=state.path, backups=(), applied=(), floor=None)
         from_catalog = {} if development else _merged()
         _authorize_upgrade(state, development, from_catalog)
         home.mkdir(parents=True, exist_ok=True)
         with _upgrade_lock(home):
-            _remove_abandoned_staging(home)
-            _mark_abandoned_recovery(home)
             state = inspect(home)
             _authorize_upgrade(state, development, from_catalog)
-            if state.takeover is not None:
-                return _finish_takeover(home)
-            if not state.pending and not state.sources:
-                return Upgrade(path=state.path, sources=(), backups=(), applied=(), floor=None)
-            if state.sources:
-                try:
-                    return _takeover(home, state)
-                finally:
-                    _mark_abandoned_recovery(home)
+            if not state.pending:
+                return Upgrade(path=state.path, backups=(), applied=(), floor=None)
             backups: tuple[Path, ...] = ()
             exports: list[Path] = []
             path = state.path
@@ -2100,7 +1625,7 @@ def upgrade(home: Path, *, timeout: float | None = None, development: bool = Fal
                         )
                         _retain_snapshot(path, backup)
                         backups = (backup,)
-                    applied = _apply(db, state.applied, path, exports)
+                    applied = _apply(db, path, exports)
                     if not state.applied:
                         db.execute("INSERT INTO pools(name) VALUES ('local')")
                         db.execute(
@@ -2122,7 +1647,6 @@ def upgrade(home: Path, *, timeout: float | None = None, development: bool = Fal
             required = _required()
             return Upgrade(
                 path=path,
-                sources=(),
                 backups=backups,
                 applied=applied,
                 exports=tuple(exports),

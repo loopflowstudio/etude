@@ -106,9 +106,9 @@ experiment; cohorts, which sat between, are removed.
   "Controller" now means the pass over an experiment file.
 - **Launcher upgrades are explicit.** Install the SDK, inspect with `etude database
   status`, then run `etude database upgrade`. Ordinary reads do not migrate or
-  select copied queues. All compatible clients share `launcher.sqlite`. Stop
-  legacy local scheduling commands before consolidation; workers and guardians
-  keep running. Cohort evidence remains stored. Unmerged SQL requires an empty
+  select copied queues. All compatible clients share `launcher.sqlite`. Workers
+  and guardians keep running during upgrades. Cohort evidence remains stored.
+  Unmerged SQL requires an empty
   development fixture. See [Upgrading Etude](../docs/launcher.md#upgrading-etude).
 - **`~/.etude/experiments/launched.json` is gone.** In-flight eval matches
   are read from the launcher's run records; delete the file.

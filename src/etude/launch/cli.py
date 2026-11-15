@@ -717,11 +717,9 @@ def database_status() -> None:
     print(f"database {state.path}")
     print("applied: " + (", ".join(state.applied) or "none"))
     print("pending: " + (", ".join(state.pending) or "none"))
-    for source in state.sources:
-        print(f"legacy history: {source}")
     if state.problem:
         print(state.problem)
-    elif state.pending or state.sources:
+    elif state.pending:
         print("run etude database upgrade")
     else:
         print("compatible")
@@ -743,8 +741,6 @@ def database_upgrade(
 
     result = upgrade(home(), timeout=timeout, development=development)
     print(f"database {result.path}")
-    for source in result.sources:
-        print(f"source: {source}")
     print("applied: " + (", ".join(result.applied) or "none"))
     for backup in result.backups:
         print(f"recovery snapshot: {backup}")

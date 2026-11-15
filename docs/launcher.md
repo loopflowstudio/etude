@@ -1077,7 +1077,6 @@ bucket inboxes; they never need a reachable address for the server.
 ```sh
 uv sync --upgrade-package etude-sdk
 etude database status
-# Stop older local etude wait/controller/server commands first.
 etude database upgrade
 etude status
 ```
@@ -1088,10 +1087,9 @@ compatible clients and experiments share `$ETUDE_HOME/launcher.sqlite` (default
 `~/.etude`). Workers and their deadline guardians keep running during an upgrade.
 
 `database status` reads local schema evidence without credentials, network or
-changes to the launcher home. With uncheckpointed WAL data, inspection copies
-the database and WAL into a temporary directory, reads their committed state,
-then removes the copy. This needs temporary space for both files. If the source
-changes during inspection, it refuses the mixed evidence; rerun status.
+record changes. SQLite provides a consistent snapshot of committed data, including
+WAL data while compatible clients write. Inspection uses normal SQLite sidecar
+coordination and never copies the database.
 `database upgrade [--timeout SECONDS]` is an explicit local wait; its default
 allowance is unlimited. Python uses the same implementation:
 
@@ -1105,40 +1103,15 @@ state = inspect(home)
 result = upgrade(home, timeout=None)
 ```
 
-`Schema` names the canonical file, existing sources, applied and pending
-migrations, compatibility problem and an unfinished takeover record, if any.
-`Upgrade` records source snapshots, target, applied migrations and reader floor. Existing canonical files are backed
-up before SQL changes; recovery snapshots are retained without automatic pruning.
-First takeover stages and validates before publishing. Failed staging publishes
-nothing. Before retiring any source, takeover syncs its validated target and a
-publication record at `$ETUDE_HOME/.launcher-takeover.json`. An interruption leaves
-that record visible through `database status` and `Schema.takeover`; ordinary
-opens refuse. Keep scheduling stopped and rerun `etude database upgrade` with a
-merged build. It verifies the recorded files and completes the same publication.
-Changed or missing evidence requires reconciliation against the named record;
-all files remain available. Never run a recovery copy. The completed record stays
-beside the recovery snapshots as `takeover.json`. Failed attempts before publication
-intent retain their snapshots with an `abandoned` marker. After a killed process,
-the next authorized upgrade marks those abandoned folders under its upgrade lock;
-folders with pending intent or completed takeovers are never marked abandoned.
-Snapshots without either record or marker have not completed publication.
+`Schema` names the canonical file, applied and pending migrations and any
+compatibility problem. `Upgrade` records backups, applied migrations, exports
+and reader requirements. Existing files are backed up before SQL changes;
+recovery snapshots are retained without automatic pruning. A failed migration
+rolls back its transaction. Rerun the explicit upgrade after resolving the error.
 
-A backup restores database facts, not provider state: stop scheduling
-and reconcile live machines and attempts before restoring or resuming any queue.
-Never restart an old scheduler on a legacy file as ordinary rollback.
-
-Stop pre-migration scheduling clients across every project sharing this home.
-They cannot honor a new writer fence. Thirty seconds without a write is only
-recent activity evidence, never proof that every client stopped. Existing legacy
-and copy histories must be consolidated before their files are archived; a newer
-schema number alone does not select the authoritative history. Unsupported or
-conflicting history refuses takeover instead of exposing an empty launcher.
-Update every pre-migration client sharing the home before resuming scheduling.
-An old binary can recreate a legacy file and start a separate queue after takeover.
-If legacy or copy histories exist beside the canonical file, ordinary Python and
-CLI opens refuse and name the files. Stop the old local scheduling clients,
-update their environments, then run `etude database upgrade` to consolidate again.
-`etude database status` remains available to inspect the histories.
+A backup restores database facts, not provider state: stop scheduling and
+reconcile live machines and attempts before restoring or resuming any queue.
+Recovery snapshots are never scheduling inputs.
 
 ### Compatible clients and development
 

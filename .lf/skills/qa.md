@@ -324,62 +324,40 @@ Use an empty lab `ETUDE_HOME` and explicitly run `etude database upgrade
 --development` before launcher scenarios with unmerged SQL. Ordinary status
 and library opens must leave missing or outdated state unchanged. Real-data
 snapshots are inspection inputs only: never call wait, tick, cancel, rent or
-refresh against them. On this machine consolidate legacy and copy histories
-before retiring their files; never choose authority by schema number or treat
-a quiet WAL as proof of exclusive ownership. Keep remote training and guardians
-running. Recovery requires stopping scheduling and reconciling provider state.
+refresh against them. Keep remote training and guardians running. Recovery
+requires stopping scheduling and reconciling provider state.
 
-Interrupt takeover after each source retirement and canonical replacement, with
-and without an existing canonical input. Status must name the pending recovery
-record and ordinary opens must refuse, even when every legacy source has moved.
-Rerunning explicit upgrade must retain all histories exactly once. Changed or
-missing evidence must refuse with its reconciliation path, preserving files;
-retired inputs must never be interpreted as an empty home. Use controlled file
-operation failures in fixtures, never interrupt an operational cutover for QA.
+Use controlled additive and breaking migrations on the canonical file. Check
+that a compatible open writer keeps working, an incompatible writer stops,
+failed SQL rolls back, and backups and exports preserve the original facts.
+Inspect with a compatible writer holding committed WAL data; status must read
+it without copying the database. Normal SQLite sidecar coordination is allowed.
+Read-only inspection must not change scientific or operational records.
 
 ## Etude: rehearsing a launcher database upgrade on this machine's data
 
-Never point a branch build at `~/.etude`. Work in `mktemp -d /tmp/qa-NAME.XXXX`
-(other sessions leave read-only `/tmp/qa*` folders behind).
+The one-time conversion of this machine's pre-ledger files is separate from the
+shipped forward-upgrade API. Inventory and snapshot actual files first, using
+SQLite's read-only backup API. Rehearse the conversion in a private temporary
+home without scheduling. Compare distinct facts and allocation identities,
+including runs, sessions, rentals, attempts, cohorts and transfers. Deduplicate
+inherited facts and retain original policy definitions in recovery snapshots.
+Never infer exclusive ownership from a quiet WAL or heartbeat.
 
-1. Snapshot the real histories with the SQLite backup API, read-only
-   (`sqlite3.connect(f"file:{src}?mode=ro", uri=True).backup(dst)`), keeping the
-   layout: `launcher*.db` at the home root, `copies/*/launcher.db`. The sqlite3
-   CLI works too: `sqlite3 'file:SRC?mode=ro' ".backup DST"` (2026-11-14; an
-   earlier run saw it fail). Clone later homes with
-   `cp -c` from `recovery/consolidation-*/N-retired-*` after the first run.
-2. A branch build refuses real data (`unmerged or unproven migrations`). To
-   rehearse the merged build without forging anything in the repo:
-   `git clone --no-hardlinks . LAB/merged-src`, then copy the tracked files in
-   (`git ls-files -z | rsync -a --from0 --files-from=- ./ LAB/merged-src/`;
-   `git diff` misses staged and freshly committed work), commit, `git branch -f main HEAD`,
-   and install via a uv project depending on
-   `etude-sdk @ git+file://LAB/merged-src@main` (`requires-python = "==3.12.*"`).
-   Check `.venv/lib/python3.12/site-packages/etude/launch/migrations/merged.json`
-   is not `{}`. Shorter: in the clone run `git update-ref refs/remotes/origin/main
-   HEAD`, `uv build --wheel -o LAB/dist`, `uv venv LAB/venv` and
-   `VIRTUAL_ENV=LAB/venv uv pip install LAB/dist/*.whl`; check with
-   `unzip -p LAB/dist/*.whl etude/launch/migrations/merged.json`. uv's pin checkouts carry `refs/heads/main` and no `origin/main`.
-3. Drive `etude database status`, `etude status`, `etude database upgrade`,
-   `etude runs`, `etude machines` with `ETUDE_HOME=LAB/home`. The real data takes
-   about 2.5–4 minutes and about 2.7× its size again in `recovery/`.
-4. Interrupt: start the upgrade with `(etude database upgrade > out 2>&1 &)`,
-   SIGKILL it from a background `sleep 80; pkill -9 -f "...etude database upgrade"`,
-   then rerun. Foreground `sleep` is blocked in this harness.
-5. Old clients: `uvx -q --from etude-sdk==V etude status` (or `uv venv -p 3.12
-   LAB/old-V && uv pip install --python LAB/old-V/bin/python etude-sdk==V`), run against a `cp -c` of the consolidated
-   home and list what files appear.
-6. Compare fact counts with `sqlite3 "file:DB?mode=ro"` (`runs`, `sessions`,
-   `rentals`, `attempts`, `cohorts`, `transfers`). The published file's hash differs
-   between runs: `migrations.applied_at` holds the time. Delete the lab afterwards.
-7. Before QA, read the PR's CI (`gh pr checks N`, `gh run view RUN --log-failed`):
-   "launcher.sqlite is not initialized" there is a fixture that sets its own
-   `ETUDE_HOME` (or calls `client._open(path)`) without `upgrade(path,
-   development=True)`; conftest only initializes its autouse home. `etude smoke`
-   needs no initialized home (it upgrades its own folder).
-8. When a pinned `Counts(database=N)` moves, diff the statements against main:
-   temporarily make `tests/launch/counting.py`'s `statement` append
-   `" ".join(sql.split())[:160]` to a file named by an env var, run the test in
-   this checkout and in a `git worktree add --detach` of main, `diff` the traces,
-   then `git checkout tests/launch/counting.py`. Each fenced write on this branch
-   adds `BEGIN IMMEDIATE`, `PRAGMA user_version` and `COMMIT`.
+Operational conversion requires stopping identified local scheduling clients,
+updating every relevant environment including Manabot, and retiring old active
+filenames to private recovery storage. Workers and guardians continue. Use
+merged code for the final schema, verify the one operational database through
+CLI and library reads across experiments, and never rent as part of validation.
+Do not complete the Task on merge alone.
+
+Before QA, read the PR's CI (`gh pr checks N`, `gh run view RUN --log-failed`).
+A `launcher.sqlite is not initialized` failure can mean a fixture sets its own
+`ETUDE_HOME` or calls `client._open(path)` without `upgrade(path,
+development=True)`. Conftest initializes only its autouse home. `etude smoke`
+initializes its own folder.
+
+When a pinned `Counts(database=N)` moves, compare statements with main. Use a
+temporary trace in `tests/launch/counting.py` to record normalized statements
+in a file named by an environment variable, then remove the trace. Fenced
+writes add `BEGIN IMMEDIATE`, `PRAGMA user_version` and `COMMIT`.
