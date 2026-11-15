@@ -326,25 +326,6 @@ leaves it `stopping`. Use a fresh `ETUDE_HOME` and prefix after installing an
 interim schema. Afterwards remove the containers and delete the prefixes
 (`aws s3 rm --recursive` under Doppler, as above).
 
-## Etude: package layout, installed wheel and forwarded archives
-
-- Fresh install: `uv build --wheel -o DIR`, `uv venv -p 3.12`, install `WHL[eval]`,
-  then run the venv's `etude --help` and import from outside the checkout (`cd /tmp`,
-  `python -I`). Walk `pkgutil.walk_packages(etude.__path__)` skipping `vendor`,
-  `migrations` and `__main__` (importing `__main__` runs the CLI) and check each
-  `__all__` is a tuple of present names; parse `docs/python.md` tables the same way.
-- Labs: add `.python-version` with `3.12`, or uv picks the newest Python.
-  `etude train` has no `--source` (it writes `$ETUDE_HOME/track`); `etude logs`
-  takes `--run`/`--experiment`, not a positional run. In zsh, split a command held
-  in a variable with `${=c}`.
-- Regression or existing behaviour: `git worktree add --detach /tmp/X <base>`, copy
-  the lab with its pyproject pointing at X, rerun the same commands and compare;
-  repoint the copy at this checkout to test a returning user's launcher home.
-- Guardian: `program_archive(guardian=True)` from the installed wheel, unzip, and
-  import the provider pod modules with `$(uv python find 3.12) -I -S` and the
-  folder on `sys.path`; `pydantic` must not load. Build the full archive with
-  `uv build`, install it, and check `program_archive()` is byte-identical.
-
 ## Etude: one pass over an experiment file (train, eval, launch, queue)
 
 Lab as in "launching an experiment file on this computer", with `two.py` declaring
