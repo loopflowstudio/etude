@@ -7,17 +7,20 @@ from pathlib import Path
 import pytest
 
 from etude.call import Function
+from etude.checkpoints import CheckpointRecord, PolicyKey
 from etude.cli import main
 from etude.controller import advance
 from etude.declarations import read_experiment
-from etude.errors import LauncherError
+from etude.errors import EtudeError, LauncherError
 from etude.eval.match import environment
-from etude.eval.records import Benchmark
+from etude.eval.records import Benchmark, CheckpointPlayer
+from etude.eval.tournament import StoredRuns
 from etude.experiment import observe
-from etude.jobs import EvalGroup, EvalJob, Evaluation, ExperimentState, TrainingJob
+from etude.jobs import EvalGroup, EvalJob, Evaluation, ExperimentState, TrainingJob, with_experiment
 from etude.launch import client
 from etude.launch.records import Pool
-from etude.records import RunRecord
+from etude.page import build
+from etude.records import ArtifactRef, RunRecord
 from etude.spec import Job, RunRequest, job_id
 from etude.storage import DirectoryStorage, default_root
 from etude.train.tracking import track
@@ -240,7 +243,8 @@ def test_declaration_types_are_defined_in_one_module() -> None:
 
 def test_eval_job_lowering_preserves_the_executable_record() -> None:
     tournament = Benchmark(name="ladder", environment=environment("duel"))
-    typed = EvalJob(tournament=tournament, play=play, experiment="two", repo=None, max_hours=1)
+    typed = EvalJob(tournament=tournament, play=play, repo=None, max_hours=1)
+    executable = with_experiment(typed, "two")
     config = Evaluation(
         tournament=tournament,
         experiment="two",
@@ -254,8 +258,8 @@ def test_eval_job_lowering_preserves_the_executable_record() -> None:
         experiment="two",
         max_hours=1,
     )
-    assert RunRequest(job=typed).model_dump_json() == RunRequest(job=plain).model_dump_json()
-    assert job_id(typed) == job_id(plain)
+    assert RunRequest(job=executable).model_dump_json() == RunRequest(job=plain).model_dump_json()
+    assert job_id(executable) == job_id(plain)
 
 
 def test_unnamed_training_job_and_callable_tournament_are_refused() -> None:
@@ -490,7 +494,7 @@ from tests.eval.games import play
 from hashlib import sha256
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
-    checkpoint = CheckpointRef(key="producer/base@0/out/weights.pt", artifact=ArtifactRef(
+    checkpoint = CheckpointRef(address="producer/base@0/out/weights.pt", artifact=ArtifactRef(
         uri={weights.as_uri()!r}, sha256=sha256(b"right bytes").hexdigest(), size_bytes=11))
     return [EvalJob(tournament=RoundRobin(name="ladder", environment=environment("duel"),
                         configs=({{}},), games=1),
@@ -523,10 +527,11 @@ from etude.jobs import EvalJob
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
 from etude.eval.records import Held, Benchmark, RoundRobin, Code, Seating
+from tests.eval.stored import stored_inference
 from tests.eval.games import play
 
 def eval_jobs(state):
-    checkpoints = tuple(observe({str(source.root)!r}, name).runs[0].final for name in ("a", "b"))
+    checkpoints = tuple(observe({str(source.root)!r}, name).runs[0].final.model_copy(update={{"experiment": "a"}}) for name in ("a", "b"))
     if {format!r} == "benchmark":
         tournament = Benchmark(name="ladder", environment=environment("duel"),
             seatings=(Seating(name="anchor", players=(stored_inference(), Code(name="fixed")), configs=({{}},), games=1),))
@@ -564,7 +569,7 @@ from etude.eval.records import Held, RoundRobin, Code
 from tests.eval.games import play
 
 def eval_jobs(state):
-    checkpoint = observe({str(source.root)!r}, "a").runs[0].final
+    checkpoint = observe({str(source.root)!r}, "a").runs[0].final.model_copy(update={{"experiment": "a"}})
     return EvalJob(tournament=RoundRobin(name="first", environment=environment("duel"),
         configs=({{}},), games=1), enter=(checkpoint.player(stored_inference(config={{"strength": 1}})), Code(name="fixed", config={{"strength": 0}})),
         play=play, max_hours=0.1)
@@ -575,7 +580,7 @@ def eval_jobs(state):
     file.write_text(text.replace(', "a")', ', "b")').replace('name="first"', 'name="second"'))
     assert main([command, str(file), "--source", str(source.root)]) == 1
     error = capsys.readouterr().err
-    assert "checkpoint_key_conflict: base@0/out/weights.pt" in error
+    assert "checkpoint_key_conflict: a/base@0/out/weights.pt" in error
     assert client.default().runs(done=True) == ()
 
 
@@ -638,3 +643,264 @@ def test_known_run_address_survives_a_changed_job_name(
     assert main([command, str(file)]) == 0
     assert "two/base@0  queued" in capsys.readouterr().out
     assert [run.id for run in b.scheduler.runs(done=True)] == ["two/base@0"]
+
+
+def test_a_launch_cancelled_before_its_first_save_resumes_here(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    b = bench(tmp_path)
+    b.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    recipe = """
+from pydantic import BaseModel
+from etude.jobs import TrainingJob
+from etude.train.tracking import track
+
+class Config(BaseModel):
+    pass
+
+def train(config: Config) -> None:
+    with track(config=config, clocks=["updates"]) as run:
+        run.log({"value": 1}, updates=1)
+
+def training_jobs() -> list[TrainingJob]:
+    return [TrainingJob(name="base", train=train, config=Config(), max_hours=1)]
+"""
+    file = checkout(tmp_path / "repo", {"cancelled.py": recipe}) / "cancelled.py"
+    assert main(["queue", str(file), "--pool", "waiting"]) == 0
+    (queued,) = b.scheduler.runs()
+    b.scheduler.cancel(queued.id)
+    capsys.readouterr()
+    assert main(["train", str(file)]) == 0
+    assert "cancelled/base@0  failed; --job base --seed 0 --resume" in capsys.readouterr().out
+    assert main(["train", str(file), "--job", "base", "--seed", "0", "--resume"]) == 0
+    (run,) = observe(default_root(), "cancelled").runs
+    assert run.state == "finished"
+
+
+def test_policy_key_fresh_experiment_submits_training_then_evaluates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    b = bench(tmp_path)
+    b.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    source = DirectoryStorage(tmp_path / "source")
+    with pytest.raises(EtudeError, match="policy_not_found"):
+        observe(source, "fresh_policy").policy(PolicyKey())
+    file = tmp_path / "fresh_policy.py"
+    file.write_text("""
+from etude.checkpoints import PolicyKey
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Code, Seating
+from tests.eval.stored import stored_inference
+from etude.jobs import EvalJob, ExperimentState, TrainingJob
+from tests.eval.games import play
+from tests.launch.tasks import Command, train_command
+
+def training_jobs(state: ExperimentState) -> list[TrainingJob]:
+    return [TrainingJob(name="small", train=train_command, config=Command(command="true"),
+                        repo=None, max_hours=1)]
+
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    tournament = Benchmark(name="progress", environment=environment("duel"), seatings=(
+        Seating(name="vs fixed", players=(stored_inference(config={"strength": 1}),
+                Code(name="fixed", config={"strength": 0})), configs=({},), games=1),))
+    mine = state.policy(PolicyKey()).checkpoints
+    return [EvalJob(tournament=tournament, checkpoints=mine, play=play, repo=None, max_hours=1)]
+""")
+    definition = read_experiment(file)
+    first = advance(definition, source=source, pool="waiting", mode="queue")
+    assert [(decision.new, decision.running) for decision in first] == [(0, 0)]
+    assert [run.id for run in b.scheduler.runs()] == ["fresh_policy/small@0"]
+    # A queued run exists before its first checkpoint; another pass stays safe.
+    queued = advance(definition, source=source, pool="waiting", mode="queue")
+    assert [(decision.new, decision.running) for decision in queued] == [(0, 0)]
+    assert len(b.scheduler.runs()) == 1
+    with track(
+        experiment="fresh_policy",
+        run="small@0",
+        job="small",
+        seed=0,
+        directory=source.root,
+        clocks=["updates"],
+        strict=True,
+    ) as run:
+        path = run.out / "weights.pt"
+        path.write_bytes(b"first checkpoint")
+        run.checkpoint(path, updates=1)
+    decisions = advance(definition, source=source, directory=tmp_path / "evals")
+    assert [(decision.new, decision.played) for decision in decisions] == [(1, 1)]
+    stored = StoredRuns.read("fresh_policy", source)
+    assert sum(len(stored.records(folder)) for folder in stored.folders()) == 1
+
+
+def test_policy_key_of_a_job_added_to_a_started_experiment_is_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    b = bench(tmp_path)
+    b.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    source = DirectoryStorage(tmp_path / "source")
+    file = tmp_path / "grown_policy.py"
+    jobs = """
+from etude.checkpoints import PolicyKey
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Code, Seating
+from tests.eval.stored import stored_inference
+from etude.jobs import EvalJob, ExperimentState, TrainingJob
+from tests.eval.games import play
+from tests.launch.tasks import Command, train_command
+
+def training_jobs(state: ExperimentState) -> list[TrainingJob]:
+    return [TrainingJob(name=name, train=train_command, config=Command(command="true"),
+                        repo=None, max_hours=1) for name in NAMES]
+"""
+    file.write_text(jobs + 'NAMES = ["small"]\n')
+    assert advance(read_experiment(file), source=source, pool="waiting", mode="queue") == []
+    file.write_text(
+        jobs
+        + """NAMES = ["small", "large"]
+
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    tournament = Benchmark(name="progress", environment=environment("duel"), seatings=(
+        Seating(name="vs fixed", players=(stored_inference(config={"strength": 1}),
+                Code(name="fixed", config={"strength": 0})), configs=({},), games=1),))
+    large = state.policy(PolicyKey(job="large")).checkpoints
+    return [EvalJob(tournament=tournament, checkpoints=large, play=play, repo=None, max_hours=1)]
+"""
+    )
+    decisions = advance(read_experiment(file), source=source, pool="waiting", mode="queue")
+    assert [(decision.new, decision.running) for decision in decisions] == [(0, 0)]
+    assert sorted(run.id for run in b.scheduler.runs()) == [
+        "grown_policy/large@0",
+        "grown_policy/small@0",
+    ]
+
+
+def test_policy_key_of_a_run_over_budget_says_why_it_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    b = bench(tmp_path)
+    b.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    file = tmp_path / "over_budget.py"
+    file.write_text("""
+from etude.checkpoints import PolicyKey
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Code, Seating
+from tests.eval.stored import stored_inference
+from etude.jobs import EvalJob, ExperimentState, TrainingJob
+from tests.eval.games import play
+from tests.launch.tasks import Command, train_command
+
+def training_jobs(state: ExperimentState) -> list[TrainingJob]:
+    return [TrainingJob(name=name, train=train_command, config=Command(command="true"),
+                        repo=None, max_hours=1, max_usd=1) for name in ("small", "large")]
+
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    tournament = Benchmark(name="progress", environment=environment("duel"), seatings=(
+        Seating(name="vs fixed", players=(stored_inference(config={"strength": 1}),
+                Code(name="fixed", config={"strength": 0})), configs=({},), games=1),))
+    large = state.policy(PolicyKey(job="large")).checkpoints
+    return [EvalJob(tournament=tournament, checkpoints=large, play=play, repo=None, max_hours=1)]
+""")
+    source = DirectoryStorage(tmp_path / "source")
+    with pytest.raises(EtudeError, match="policy_not_found"):
+        advance(
+            read_experiment(file),
+            source=source,
+            pool="waiting",
+            mode="queue",
+            max_usd=Decimal("1.5"),
+        )
+    assert "over_budget/large@0  new, not queued: --max-usd 1.5" in capsys.readouterr().out
+    assert b.scheduler.runs() == ()
+
+
+def test_policy_key_cross_experiment_seats_split_seeds_and_do_not_replay(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = DirectoryStorage(tmp_path / "source")
+    for experiment, seed in (("tla-frontier", 0), ("tla-frontier", 1), ("rival", 0)):
+        with track(
+            experiment=experiment,
+            run=f"small@{seed}",
+            job="small",
+            seed=seed,
+            directory=source.root,
+            clocks=["updates"],
+            strict=True,
+        ) as run:
+            path = run.out / "weights.pt"
+            path.write_text(f"{experiment} {seed}")
+            run.checkpoint(path, updates=100)
+    file = tmp_path / "rival.py"
+    file.write_text("""
+from etude.checkpoints import PolicyKey
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Final, Seating
+from tests.eval.stored import stored_inference
+from etude.jobs import EvalJob
+from tests.eval.games import play
+
+def eval_jobs(state):
+    direct = stored_inference(config={"strength": 1})
+    tournament = Benchmark(name="frontier", environment=environment("duel"), seatings=(
+        Seating(name="vs frontier", players=(direct, Final(experiment="tla-frontier", job="small")),
+                configs=({},), games=8),))
+    return EvalJob(tournament=tournament, checkpoints=state.policy(PolicyKey()).checkpoints,
+                   play=play, repo=None, max_hours=1)
+""")
+    measured = MeasuredStorage(source)
+    decisions = advance(read_experiment(file), source=measured, directory=tmp_path / "evals")
+    assert [(d.new, d.played) for d in decisions] == [(2, 2)]
+    assert measured.listings == 2  # one discovery, one check of the eval run's own output prefix
+    assert measured.requests == 12  # three declarations, writers, checkpoints and outcomes
+    assert all(measured.got.count(key) == 1 for key in measured.got)
+    assert not any(key.endswith("weights.pt") for key in measured.got)
+    stored = StoredRuns.read("rival", source)
+    matches = [record.match for folder in stored.folders() for record in stored.records(folder)]
+    assert {
+        tuple(
+            player.checkpoint.key
+            for player in match.players
+            if isinstance(player, CheckpointPlayer)
+        ): match.games
+        for match in matches
+    } == {
+        ("rival/small@0/out/weights.pt", f"tla-frontier/small@{seed}/out/weights.pt"): 4
+        for seed in (0, 1)
+    }
+    # The second pass reads delivery under experiment-qualified identities.
+    advance(read_experiment(file), source=source, directory=tmp_path / "evals")
+    assert "eval frontier: nothing to play" in capsys.readouterr().out
+    # The report keeps tla-frontier's runs apart from rival's own run of the same name.
+    assert {(player.run, player.line) for player in build(source.root, file).players} == {
+        ("small@0", "small@0"),
+        (None, "tla-frontier/small@0"),
+        (None, "tla-frontier/small@1"),
+    }
+
+
+def test_policy_key_refuses_held_run_without_experiment(tmp_path: Path) -> None:
+    # Unlabelled command jobs and historical records have no experiment provenance.
+    checkpoint = CheckpointRecord(
+        run="unlabelled",
+        ordinal=1,
+        at={},
+        artifact=ArtifactRef(uri=(tmp_path / "weights").as_uri(), sha256="a" * 64, size_bytes=1),
+    )
+    job = EvalJob(
+        tournament=Benchmark(name="held", environment=environment("duel")),
+        checkpoints=(checkpoint,),
+        play=play,
+        repo=None,
+        max_hours=1,
+    )
+    with pytest.raises(EtudeError, match="checkpoint_names_no_experiment"):
+        with_experiment(job, "league")

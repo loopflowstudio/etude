@@ -13,7 +13,7 @@ beside Etude's own tables:
 | `groups` | run, match, group, seat |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
 | `schedule` | tournament, match, seating, checkpoint (its key, the one held) and the seating's tags of a benchmark's match; no checkpoint for a seating of fixed players |
-| `training_checkpoints` | run, experiment, ordinal, checkpoint (its key, `RUN/checkpoints/NAME`), artifact (digest), wall_ms, at (where each of its run's clocks stood) |
+| `training_checkpoints` | run, experiment, ordinal, checkpoint (its key, `EXPERIMENT/RUN/checkpoints/NAME`), artifact (digest), wall_ms, at (where each of its run's clocks stood) |
 | `blobs` | run, match (none for a converted run's other files), sha256, size_bytes |
 | ROLLUP (one per `etude.eval.records.Rollup`) | run, the rollup's `by` columns, rows, and its `sums` |
 
@@ -72,6 +72,7 @@ import threading
 import warnings
 from collections import defaultdict
 from collections.abc import Container, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -81,7 +82,7 @@ import numpy.typing as npt
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from etude.carriage import EVAL_BLOCK_INDEX, EVAL_BLOCK_PACK
-from etude.checkpoints import CheckpointRecord, checkpoint_id
+from etude.checkpoints import CheckpointRecord
 from etude.errors import EtudeError
 from etude.eval.block import (
     BLOCK_FILE,
@@ -133,7 +134,7 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 15
+SCHEMA = 16
 
 # How a match's records order, newest first: by when each was recorded, then by run name.
 # `matches.newest` ranks done records so; `etude.eval.tournament.played` orders runs alike.
@@ -308,14 +309,22 @@ def _catch_up(
                 new = sorted(located.keys() - seen)
                 if eval_run:
                     for name in new:
-                        changed |= _read(db, storage, run, located[name], name, Path(copies))
+                        changed |= _read(
+                            db,
+                            storage,
+                            run,
+                            located[name],
+                            name,
+                            Path(copies),
+                            experiment=experiment,
+                        )
                     # A resumed run, such as a retry of failed matches, writes its end again.
                     if new and (
                         outcome := next((name for name in _OUTCOME_FILES if name in located), None)
                     ):
                         _ended(db, storage, run, located[outcome], outcome)
                         changed = True
-                    _sum_missing(db, storage, run, located, Path(copies))
+                    _sum_missing(db, storage, run, located, Path(copies), experiment=experiment)
                 else:
                     changed |= _training_checkpoints(db, storage, run, experiment, located, new)
                 _put(db, "kept.seen", {"run": "VARCHAR", "name": "VARCHAR"},
@@ -416,7 +425,7 @@ def _training_checkpoints(
         stored = CheckpointRecord.model_validate_json(storage.get(located[name] + name))
         rows.append(
             [run, experiment, stored.ordinal,
-             checkpoint_id(run=run, name=stored.name),
+             stored.model_copy(update={"experiment": experiment, "run": run}).key,
              stored.artifact.sha256, stored.wall_ms, json.dumps(stored.at)]
         )  # fmt: skip
     stage(
@@ -443,14 +452,18 @@ def _read(
     place: str,
     name: str,
     copies: Path,
+    *,
+    experiment: str,
 ) -> bool:
     """Take in one file of the eval run not read before; whether any table changed."""
     if name == TOURNAMENT_FILE:
-        held = TournamentRun.model_validate_json(storage.get(place + name))
+        held = TournamentRun.model_validate_json(
+            storage.get(place + name), context={"experiment": experiment}
+        )
         db.execute("insert into kept.tournament_runs values (?, ?)", [run, held.model_dump_json()])
         return True
     if found := BLOCK_FILE.match(name):
-        _block(db, storage, run, place, found[1], copies)
+        _block(db, storage, run, place, found[1], copies, experiment=experiment)
         return True
     return False
 
@@ -462,47 +475,88 @@ def _block(
     place: str,
     name: str,
     copies: Path,
+    *,
+    experiment: str,
 ) -> None:
     """Take in block `name`: its match records, where its blobs lie, then its tables and rollups."""
-    block = read(storage, place, name)
-    held = block.model_dump_json(
+    original = read(storage, place, name)
+    # Kept as stored: `_sum_missing` reads its tables' own match keys again.
+    held = original.model_dump_json(
         exclude={"blobs": True, "replaces": True, "matches": {"__all__": {"blobs"}}}
     )
-    # Metadata literals avoid DuckDB probing optional pandas for every bound value
-    # in every match block. Table rows still enter through staged files.
     db.execute(f"insert into kept.blocks values ({quote(run)}, {quote(name)}, {quote(held)})")
-    pack = place + file_key(name, EVAL_BLOCK_PACK)
-    _put(
-        db,
-        "kept.blobs",
-        {"run": "VARCHAR", "sha256": "VARCHAR", "pack": "VARCHAR", "start": "BIGINT",
-         "size_bytes": "BIGINT"},
-        [[run, digest, pack, span.offset, span.size_bytes] for digest, span in block.blobs.items()],
-    )  # fmt: skip
-    _matches(db, run, block)
-    # A converted run's files that no match named.
-    named = {digest for record in block.matches for digest in record.blobs}
+    with _qualified(db, experiment, original) as block:
+        pack = place + file_key(name, EVAL_BLOCK_PACK)
+        _put(
+            db,
+            "kept.blobs",
+            {"run": "VARCHAR", "sha256": "VARCHAR", "pack": "VARCHAR", "start": "BIGINT",
+             "size_bytes": "BIGINT"},
+            [[run, digest, pack, span.offset, span.size_bytes] for digest, span in block.blobs.items()],
+        )  # fmt: skip
+        _matches(db, run, block)
+        # A converted run's files that no match named.
+        named = {digest for record in block.matches for digest in record.blobs}
+        stage(
+            db,
+            "_unnamed_blobs",
+            {"sha256": "VARCHAR", "size_bytes": "BIGINT"},
+            [
+                [digest, span.size_bytes]
+                for digest, span in block.blobs.items()
+                if digest not in named
+            ],
+        )
+        db.execute(
+            f"insert into blobs select {quote(run)}, null, a.sha256, a.size_bytes from _unnamed_blobs a"
+            f" anti join blobs b on b.run = {quote(run)} and b.match is null and b.sha256 = a.sha256",
+        )
+        db.execute("drop table _unnamed_blobs")
+        _put(db, "kept.replaced", {"run": "VARCHAR", "name": "VARCHAR"},
+             [[run, each] for each in block.replaces])  # fmt: skip
+        for table in block.tables:
+            file = file_key(name, f"{table}.parquet")
+            _table(db, run, table, name, _local(storage, place + file, copies / run / file))
+        for rollup in block.summed:
+            file = file_key(name, f"{rollup.name}.parquet")
+            _rollup(db, run, rollup, name, _local(storage, place + file, copies / run / file))
+        _put(db, "kept.summed", {"name": "VARCHAR", "run": "VARCHAR", "block": "VARCHAR"},
+             [[rollup.name, run, name] for rollup in block.summed])  # fmt: skip
+
+
+@contextmanager
+def _qualified(db: duckdb.DuckDBPyConnection, experiment: str, original: Block) -> Iterator[Block]:
+    """The block with released identities qualified by `experiment`.
+
+    Within, `_table` and `_rollup` translate the block's rows alike, from the
+    staged `_qualified_matches` and `_qualified_players`.
+    """
+    block = Block.model_validate(original.model_dump(), context={"experiment": experiment})
+    matches = {
+        a.match.key: b.match.key for a, b in zip(original.matches, block.matches, strict=True)
+    }
+    players = {
+        a.key: b.key
+        for old, new in zip(original.matches, block.matches, strict=True)
+        for a, b in zip(old.match.players, new.match.players, strict=True)
+    }
     stage(
         db,
-        "_unnamed_blobs",
-        {"sha256": "VARCHAR", "size_bytes": "BIGINT"},
-        [[digest, span.size_bytes] for digest, span in block.blobs.items() if digest not in named],
+        "_qualified_matches",
+        {"stored": "VARCHAR", "qualified": "VARCHAR"},
+        [[a, b] for a, b in matches.items() if a != b],
     )
-    db.execute(
-        f"insert into blobs select {quote(run)}, null, a.sha256, a.size_bytes from _unnamed_blobs a"
-        f" anti join blobs b on b.run = {quote(run)} and b.match is null and b.sha256 = a.sha256"
+    stage(
+        db,
+        "_qualified_players",
+        {"stored": "VARCHAR", "qualified": "VARCHAR"},
+        [[a, b] for a, b in players.items() if a != b],
     )
-    db.execute("drop table _unnamed_blobs")
-    _put(db, "kept.replaced", {"run": "VARCHAR", "name": "VARCHAR"},
-         [[run, each] for each in block.replaces])  # fmt: skip
-    for table in block.tables:
-        file = file_key(name, f"{table}.parquet")
-        _table(db, run, table, name, _local(storage, place + file, copies / run / file))
-    for rollup in block.summed:
-        file = file_key(name, f"{rollup.name}.parquet")
-        _rollup(db, run, rollup, name, _local(storage, place + file, copies / run / file))
-    _put(db, "kept.summed", {"name": "VARCHAR", "run": "VARCHAR", "block": "VARCHAR"},
-         [[rollup.name, run, name] for rollup in block.summed])  # fmt: skip
+    try:
+        yield block
+    finally:
+        db.execute("drop table _qualified_matches")
+        db.execute("drop table _qualified_players")
 
 
 def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
@@ -613,6 +667,33 @@ def _canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _qualify_arrived(db: duckdb.DuckDBPyConnection, *, players: bool = False) -> None:
+    """Translate released table identities with the block's own match and player records."""
+    if not db.execute("select 1 from _qualified_matches limit 1").fetchone():
+        return
+    db.execute(
+        "update _arrived set match = q.qualified from _qualified_matches q where match = q.stored"
+    )
+    if not players:
+        return
+    columns = {column: kind for column, kind, *_ in db.execute("describe _arrived").fetchall()}
+    if columns.get("player") == "VARCHAR":
+        db.execute(
+            "update _arrived set player = q.qualified from _qualified_players q where player = q.stored"
+        )
+    if columns.get("opponents") == "VARCHAR[]":
+        db.execute(
+            "create or replace temp table _arrived as select a.* replace "
+            "(list_transform(opponents, p -> coalesce(map_extract_value(q.codes, p), p)) as opponents) "
+            "from _arrived a cross join "
+            "(select map(list(stored), list(qualified)) as codes from _qualified_players) q"
+        )
+    elif columns.get("opponents") == "VARCHAR":
+        db.execute(
+            "update _arrived set opponents = q.qualified from _qualified_players q where opponents = q.stored"
+        )
+
+
 def _table(db: duckdb.DuckDBPyConnection, run: str, table: str, file: str, path: Path) -> None:
     """Add one block's rows of a table, keeping each match's rows from the latest block holding them.
 
@@ -622,6 +703,7 @@ def _table(db: duckdb.DuckDBPyConnection, run: str, table: str, file: str, path:
     db.execute(
         f"create or replace temp table _arrived as select * from read_parquet({quote(path)})"
     )
+    _qualify_arrived(db)
     db.execute(
         f'delete from _arrived using kept.table_files f where f."table" = {quote(table)} and f.run = _arrived.run'
         f" and f.match = _arrived.match and f.file > {quote(file)}"
@@ -659,6 +741,7 @@ def _rollup(db: duckdb.DuckDBPyConnection, run: str, rollup: Rollup, file: str, 
     db.execute(
         f"create or replace temp table _arrived as select * from read_parquet({quote(path)})"
     )
+    _qualify_arrived(db, players=True)
     db.execute(
         f'delete from _arrived using kept.table_files f where f."table" = {quote(name)} and f.run = _arrived.run'
         f" and f.match = _arrived.match and f.file > {quote(file)}"
@@ -745,6 +828,8 @@ def _sum_missing(
     run: str,
     located: Mapping[str, str],
     copies: Path,
+    *,
+    experiment: str,
 ) -> None:
     """Add each held rollup's partial totals of the run's blocks that lack them.
 
@@ -773,7 +858,8 @@ def _sum_missing(
         target = copies / run / "summed" / name / f"{rollup.name}.parquet"
         target.parent.mkdir(parents=True, exist_ok=True)
         if partial_totals(db, rollup, tables, [record.match for record in block.matches], target):
-            _rollup(db, run, rollup, name, target)
+            with _qualified(db, experiment, block):
+                _rollup(db, run, rollup, name, target)
     _put(db, "kept.summed", {"name": "VARCHAR", "run": "VARCHAR", "block": "VARCHAR"}, summed)
 
 

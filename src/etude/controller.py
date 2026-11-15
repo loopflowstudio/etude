@@ -6,6 +6,7 @@ new runs. The scheduler's public records are the only memory of a hand-down.
 
 import math
 from collections.abc import Sequence
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,15 +21,17 @@ from etude.declarations import (
     select_runs,
 )
 from etude.errors import EtudeError, LauncherError
-from etude.eval.records import digest
+from etude.eval.records import Line, TournamentRun, digest
 from etude.eval.resources import available_cpus
 from etude.eval.result import EvalResult
 from etude.eval.tournament import StoredRuns, played
-from etude.experiment import observe
+from etude.experiment import observe, read_tournament_lines
 from etude.jobs import (
+    Checkpoints,
     EvalGroup,
     Evaluation,
     ExperimentState,
+    TrainingRunSummary,
     _group_key,
     _relocated,
     evaluation_group,
@@ -43,6 +46,7 @@ from etude.launch.listing import show_quote
 from etude.launch.records import CPU, GPU
 from etude.launch.server import selected
 from etude.records import Record
+from etude.run import located_runs
 from etude.smoke import smoke_file
 from etude.spec import Job, RunRequest, Smoke, Until
 from etude.storage import Storage, default_root
@@ -134,6 +138,21 @@ def _print_lines(lines: dict[str | None, str]) -> None:
     lines.clear()
 
 
+def _queued(request: RunRequest, experiment: str) -> TrainingRunSummary:
+    assert request.id is not None
+    name = request.id.removeprefix(experiment + "/")
+    return TrainingRunSummary(
+        name=name,
+        experiment=experiment,
+        job=request.job.name,
+        launch=request.job.name,
+        line=name,
+        state="queued",
+        checkpoints=Checkpoints(),
+        seed=request.seed,
+    )
+
+
 def advance(
     experiment: Experiment,
     *,
@@ -160,7 +179,8 @@ def advance(
     if not math.isfinite(min_eval_hours) or min_eval_hours < 0:
         raise LauncherError("--min-eval-hours must be finite and nonnegative")
     listed = source.keys("")
-    state = observe(source, experiment.name, keys=listed)
+    declarations = located_runs(source, listed)
+    state = observe(source, experiment.name, keys=listed, declarations=declarations)
     committed = state.committed_usd
     print(
         f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: "
@@ -224,10 +244,29 @@ def advance(
             new.append(request)
             lines[request.id] = f"{request.id}  new"
             committed += request.job.max_usd or Decimal(0)
-    jobs = (
-        [with_experiment(j, experiment.name) for j in asked(experiment.eval, state)]
-        if experiment.eval is not None and evaluate
-        else []
+    jobs: list[Job] = []
+    if experiment.eval is not None and evaluate:
+        # This pass's new runs have no checkpoints yet, but their policies already exist
+        # for eval_jobs. Selection/resume passes skip evaluation, so every run here is new.
+        asking = replace(state, runs=(*state.runs, *(_queued(r, experiment.name) for r in new)))
+        try:
+            jobs = [with_experiment(j, experiment.name) for j in asked(experiment.eval, asking)]
+        except EtudeError:
+            # A policy of a run this pass left out (`--max-usd`) is missing; say which and why.
+            _print_lines(lines)
+            raise
+    policy_lines = read_tournament_lines(
+        source,
+        state,
+        [
+            TournamentRun(
+                tournament=(spec := evaluation_group(job).evaluations[0]).tournament,
+                checkpoints=spec.held,
+            )
+            for job in jobs
+        ],
+        keys=listed,
+        declarations=declarations,
     )
     if smoke_file_first and not quote:
         assert experiment.file is not None
@@ -251,17 +290,21 @@ def advance(
     taken = {f"{experiment.name}/{run.name}" for run in state.eval_runs}
     decisions: list[TournamentDecision] = []
     stopped_runs: set[str] = set()
-    stored = StoredRuns.read(experiment.name, source, keys=listed) if jobs else None
+    stored = (
+        StoredRuns.read(experiment.name, source, keys=listed, declarations=declarations)
+        if jobs
+        else None
+    )
     groups: dict[str, list[_PendingEvaluation]] = {}
     for executable in jobs:
         spec = evaluation_group(executable).evaluations[0]
         found = played(
             spec.tournament,
             experiment=experiment.name,
-            checkpoints=tuple(each.ref for each in spec.checkpoints),
+            checkpoints=spec.held,
             enter=spec.entrants,
             runs=stored,
-            lines=state.lines,
+            lines=policy_lines,
         )
         new_matches = list(
             {m.key: m for m in (*found.new, *(found.failed if retry_failed else ()))}.values()
@@ -286,7 +329,7 @@ def advance(
             groups.setdefault(_group_key(executable, spec), []).append(
                 _PendingEvaluation(
                     job=executable,
-                    spec=spec.model_copy(update={"matches": tuple(pending), "lines": state.lines}),
+                    spec=spec.model_copy(update={"matches": tuple(pending), "lines": policy_lines}),
                     decision=len(decisions),
                 )
             )
@@ -298,7 +341,7 @@ def advance(
         members = [each.spec for each in group]
         executables = [each.job for each in group]
         if mode == "local":
-            held = _play_here(members, executables[0], state, source, directory)
+            held = _play_here(members, executables[0], state, policy_lines, source, directory)
             for each, result in zip(group, held, strict=True):
                 n = each.decision
                 decisions[n] = decisions[n].model_copy(update={"played": result.played})
@@ -381,6 +424,7 @@ def _play_here(
     specs: Sequence[Evaluation],
     executable: Job,
     state: ExperimentState,
+    lines: tuple[Line, ...],
     source: Storage,
     directory: Path | str | None,
 ) -> tuple[EvalResult, ...]:
@@ -398,7 +442,7 @@ def _play_here(
                     spec.model_copy(
                         update={
                             "matches": tuple(_relocated(m, here) for m in spec.matches or ()),
-                            "lines": state.lines,
+                            "lines": lines,
                         }
                     )
                     for spec in specs

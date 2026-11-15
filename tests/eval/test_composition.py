@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from etude.checkpoints import CheckpointRef, PolicyKey
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval.agents import Answer, Request
 from etude.eval.batching import _Batches
@@ -16,11 +17,13 @@ from etude.eval.records import (
     Benchmark,
     Code,
     Composition,
+    Final,
     Held,
     Line,
     Match,
     Seated,
     Seating,
+    TournamentRun,
     compose,
     player_checkpoints,
     relocate_player,
@@ -28,6 +31,7 @@ from etude.eval.records import (
 from etude.eval.tournament import evaluating, played, scores
 from etude.jobs import Agents, ExperimentState, _relocated, checkpoint_inputs, hold_group
 from etude.page import _players
+from etude.records import ArtifactRef
 from examples.agent_game import Shift, build, checkpoint
 from examples.agent_models import load
 from tests.eval.trees import Ensemble, Tagged
@@ -264,10 +268,14 @@ def test_loader_failure_follows_a_checkpoint_inside_every_player_tree(
 
 
 def test_composition_resolves_two_relative_leaves() -> None:
-    held = checkpoint("held").checkpoint.model_copy(update={"line": "held", "at": {"updates": 10}})
-    left = checkpoint("left").checkpoint.model_copy(update={"line": "left", "at": {"updates": 10}})
+    held = checkpoint("held").checkpoint.model_copy(
+        update={"outside_line": "held", "at": {"updates": 10}}
+    )
+    left = checkpoint("left").checkpoint.model_copy(
+        update={"outside_line": "left", "at": {"updates": 10}}
+    )
     right = checkpoint("right").checkpoint.model_copy(
-        update={"line": "right", "at": {"updates": 10}}
+        update={"outside_line": "right", "at": {"updates": 10}}
     )
     # A record may carry any number of checkpoint-bearing fields, including containers.
     tree = compose(
@@ -374,7 +382,9 @@ def test_a_composed_player_needs_its_build_hook_at_declaration() -> None:
 
 def test_one_seed_selects_one_held_line_for_fixed_and_composed_opponents() -> None:
     def line(name: str, job_name: str, seed: int) -> Line:
-        ref = checkpoint(name).checkpoint.model_copy(update={"line": name, "at": {"updates": 10}})
+        ref = checkpoint(name).checkpoint.model_copy(
+            update={"outside_line": name, "at": {"updates": 10}}
+        )
         return Line(name=name, job=job_name, seed=seed, checkpoints=(ref,))
 
     mine = [line(f"mine-{seed}", "mine", seed) for seed in range(3)]
@@ -395,3 +405,74 @@ def test_one_seed_selects_one_held_line_for_fixed_and_composed_opponents() -> No
         ]
         assert len(nonempty) == 1
         assert sum(pair.games for pair in nonempty[0].pairings) == 7
+
+
+def test_composed_policy_seats_resolve_each_experiment_and_role() -> None:
+    artifact = ArtifactRef(uri="file:///weights", sha256="a" * 64, size_bytes=1)
+    held = CheckpointRef(
+        experiment="league", job="base", seed=0, role="policy", name="final", artifact=artifact
+    )
+    opponent = CheckpointRef(
+        experiment="rival", job="base", seed=2, role="policy", name="final", artifact=artifact
+    )
+    belief = CheckpointRef(
+        experiment="belief", job="base", seed=1, role="sampler", name="final", artifact=artifact
+    )
+    seating: Seating = Seating(
+        name="composed",
+        players=(
+            Held(),
+            compose(
+                Ensemble(
+                    members=(
+                        Final(experiment="rival", job="base", seed=2),
+                        Final(
+                            policy=PolicyKey(
+                                experiment="belief", job="base", seed=1, role="sampler"
+                            )
+                        ),
+                    )
+                )
+            ),
+        ),
+        configs=({},),
+        games=3,
+    )
+    benchmark = Benchmark(
+        name="policies", environment=job("unused", None).tournament.environment, seatings=(seating,)
+    )
+    assert benchmark.experiments == frozenset({"rival", "belief"})
+    lines = (
+        Line(
+            name="base@0", experiment="league", job="base", seed=0, checkpoints=(held,), ended=True
+        ),
+        Line(
+            name="base@2",
+            experiment="rival",
+            job="base",
+            seed=2,
+            checkpoints=(opponent,),
+            ended=True,
+        ),
+        Line(
+            name="base@1/roles/sampler",
+            experiment="belief",
+            job="base",
+            seed=1,
+            role="sampler",
+            checkpoints=(belief,),
+            ended=True,
+        ),
+    )
+    seated = seating.resolve(held, lines, experiment="league")
+    assert isinstance(seated, Seated)
+    (match,) = seating.matches(held, seated)
+    assert [ref.key for ref in player_checkpoints(match.players[1])] == [opponent.key, belief.key]
+    assert match.games == 3
+    # Defaults inside fixed wrappers bind using the same policy lines.
+    unresolved = CheckpointRef(experiment="rival", job="base", name="final", artifact=artifact)
+    fixed = compose(Ensemble(members=(Held().player(unresolved),)))
+    bound = TournamentRun(tournament=benchmark, entrants=(fixed,)).bind(lines, experiment="league")
+    (ref,) = player_checkpoints(bound.entrants[0])
+    assert ref.key == opponent.key
+    assert ref.line == "rival/base@2"

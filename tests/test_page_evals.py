@@ -14,7 +14,7 @@ from moto import mock_aws
 
 from etude.block_file import parse
 from etude.carriage import EVAL_BLOCK_PACK, checkpoint_file
-from etude.checkpoints import CheckpointRef, checkpoint_id
+from etude.checkpoints import CheckpointRef
 from etude.controller import advance
 from etude.declarations import read_experiment
 from etude.errors import EtudeError
@@ -38,7 +38,7 @@ LAB = """
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
 from etude.eval.records import (Held,Benchmark, Code, Seating, CheckpointPlayer)
-from etude.checkpoints import CheckpointId, checkpoint_id, CheckpointRef
+from etude.checkpoints import CheckpointId, CheckpointRef
 from etude.records import ArtifactRef
 from etude.jobs import EvalJob
 from etude.report import Anchors, Curve, Matches, Report, Score
@@ -52,7 +52,7 @@ STRONG = Code(name="strong", source=[__file__], config={"strength": 9})
 OUTSIDE = CheckpointPlayer(
     name="outside",
     checkpoint=CheckpointRef(
-        key=checkpoint_id(address="hf://lab/outside.pt"),
+        address="hf://lab/outside.pt",
         artifact=ArtifactRef(uri="hf://lab/outside.pt", sha256="ab" * 32),
     ),
     config={"strength": 5},
@@ -373,7 +373,7 @@ def outside(
     """A checkpoint no Etude run recorded, keyed by its address, seated where `at` says."""
     address = f"hf://lab/{name}.pt" if line is None else f"hf://lab/{line}/{name}.pt"
     ref = CheckpointRef(
-        key=checkpoint_id(address=address),
+        address=address,
         artifact=ArtifactRef(uri=address, sha256="cd" * 32),
         at=at,
         line=line,
@@ -515,7 +515,7 @@ def evaluation_only(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[
         ):
             drift = outside("drift", {"updates": 300 if run == "plain-a" else 350}, strength=6)
             drift = drift.model_copy(
-                update={"checkpoint": drift.checkpoint.model_copy(update={"line": run})}
+                update={"checkpoint": drift.checkpoint.model_copy(update={"outside_line": run})}
             )
             # Seated before Etude's hour clocks, then with them: the same position.
             hours = outside(
@@ -784,7 +784,10 @@ def test_a_continued_run_is_one_line_with_the_run_it_continues(
     assert {(each.run, each.ref.line) for each in saved} == {("a", "a"), ("b", "a")}
     # Seated with no line, as matches recorded before seats carried one: each checkpoint's
     # line is its training run's, the first run of its chain.
-    unlined = [Held().player(each.ref.model_copy(update={"line": None})) for each in saved]
+    unlined = [
+        Held().player(CheckpointRef(address=each.key, artifact=each.artifact, at=each.at))
+        for each in saved
+    ]
     evaluate(
         experiment="seated",
         environment=DUEL,

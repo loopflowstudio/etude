@@ -18,7 +18,7 @@ import pytest
 from moto import mock_aws
 from pydantic import BaseModel
 
-from etude.checkpoints import CheckpointRef, checkpoint_id
+from etude.checkpoints import CheckpointRef
 from etude.errors import EtudeError
 from etude.eval import query
 from etude.eval.match import environment, evaluate
@@ -42,7 +42,7 @@ def roster(tmp_path: Path) -> list[Player]:
     script = tmp_path / "scripted.py"
     script.write_text("def act(state): return 0\n")
     file = ArtifactRef(uri="s3://models/a.pt", sha256=sha256(b"a").hexdigest())
-    model = CheckpointRef(key=checkpoint_id(address=file.uri), artifact=file)
+    model = CheckpointRef(address=file.uri, artifact=file)
     return [
         CheckpointPlayer(
             name="deep",
@@ -300,7 +300,7 @@ def _git(repo: Path, *args: str) -> None:
 
 def test_a_models_inference_code_is_its_version_not_its_key(tmp_path: Path) -> None:
     file = ArtifactRef(uri="s3://models/updates-100.pt", sha256=sha256(b"a").hexdigest())
-    checkpoint = CheckpointRef(key=checkpoint_id(run="ppo-1", name="updates-100.pt"), artifact=file)
+    checkpoint = CheckpointRef(experiment="", job="ppo-1", name="updates-100.pt", artifact=file)
     inference = tmp_path / "inference.py"
     inference.write_text("def act(state): return 0\n")
     before = stored_inference(source=[inference], config=Direct()).player(checkpoint)
@@ -311,16 +311,16 @@ def test_a_models_inference_code_is_its_version_not_its_key(tmp_path: Path) -> N
     assert changed.key == before.key
     assert changed.version.source != before.version.source
     # The same bytes under another key are another model.
-    copied = CheckpointRef(key=checkpoint_id(run="ppo-2", name="updates-100.pt"), artifact=file)
+    copied = CheckpointRef(experiment="", job="ppo-2", name="updates-100.pt", artifact=file)
     assert stored_inference(config=Direct()).player(copied).key != before.key
 
 
 def test_where_a_checkpoint_stood_is_carried_by_its_seat_and_is_not_its_identity() -> None:
     file = ArtifactRef(uri="hf://lab/u600.pt", sha256=sha256(b"a").hexdigest())
-    key = checkpoint_id(address=file.uri)
-    seated = Held().player(CheckpointRef(key=key, artifact=file, at={"updates": 600}))
+    key = file.uri
+    seated = Held().player(CheckpointRef(address=key, artifact=file, at={"updates": 600}))
     corrected = Held().player(
-        CheckpointRef(key=key, artifact=file, at={"updates": 612}, line="seed-2")
+        CheckpointRef(address=key, artifact=file, at={"updates": 612}, line="seed-2")
     )
     rival = Code(name="rival", source=[__file__])
     assert (seated.checkpoint.at, corrected.checkpoint.at) == ({"updates": 600}, {"updates": 612})

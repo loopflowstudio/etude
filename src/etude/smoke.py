@@ -30,10 +30,10 @@ from tempfile import TemporaryDirectory
 from typing import Literal
 
 from etude.declarations import asked, read_experiment, read_training_jobs
-from etude.errors import EtudeError, LauncherError
-from etude.eval.records import Benchmark, RoundRobin
+from etude.errors import LauncherError
+from etude.eval.records import Benchmark, RoundRobin, TournamentRun
 from etude.eval.tournament import played
-from etude.experiment import observe
+from etude.experiment import observe, read_tournament_lines
 from etude.experiment_file import defined_functions, experiment_named, refuse_renamed
 from etude.jobs import (
     EvalGroup,
@@ -47,6 +47,7 @@ from etude.jobs import (
 )
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.page import build, render, write
+from etude.run import located_runs
 from etude.spec import Job, RunRequest, SmokeStep
 from etude.storage import DirectoryStorage, Storage, default_root
 
@@ -126,7 +127,9 @@ def _evaluate(
         return [
             SmokeStep(step="eval", name="eval", outcome="skipped", detail="no eval_jobs(state)")
         ]
-    state = observe(source, experiment)
+    keys = source.keys("")
+    declarations = located_runs(source, keys)
+    state = observe(source, experiment, keys=keys, declarations=declarations)
     definition = read_experiment(path)
     function = definition.eval
     assert function is not None
@@ -136,26 +139,48 @@ def _evaluate(
             SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="eval returned none")
         ]
     batches: dict[str, list[Job]] = {}
+    steps: list[SmokeStep] = []
     for job in jobs:
         spec = evaluation_group(job).evaluations[0]
-        batches.setdefault(_group_key(job, spec), []).append(job)
-    steps: list[SmokeStep] = []
+        outside = (
+            spec.tournament.experiments - {experiment}
+            if isinstance(spec.tournament, Benchmark)
+            else frozenset()
+        )
+        if outside:
+            steps.append(
+                SmokeStep(
+                    step="eval",
+                    name=spec.tournament.name,
+                    outcome="not_smoked",
+                    detail="cross-experiment seats: " + ", ".join(sorted(outside)),
+                )
+            )
+        else:
+            batches.setdefault(_group_key(job, spec), []).append(job)
+    lines = read_tournament_lines(
+        source,
+        state,
+        [
+            TournamentRun(tournament=spec.tournament, checkpoints=spec.held)
+            for batch in batches.values()
+            for job in batch
+            for spec in evaluation_group(job).evaluations
+        ],
+        keys=keys,
+        declarations=declarations,
+    )
     for batch in batches.values():
         tiny: list[Evaluation] = []
         for job in batch:
             spec = evaluation_group(job).evaluations[0]
-            try:
-                job = with_experiment(job, experiment)
-            except EtudeError as error:
-                raise LauncherError(
-                    f"smoke eval {spec.tournament.name}: a job of experiment {spec.experiment!r}"
-                ) from error
+            job = with_experiment(job, experiment)
             for spec in evaluation_group(job).evaluations:
                 tiny.append(
                     spec.model_copy(
                         update={
                             "tournament": _tiny_tournament(spec.tournament),
-                            "lines": state.lines,
+                            "lines": lines,
                         }
                     )
                 )
@@ -164,9 +189,9 @@ def _evaluate(
             played(
                 spec.tournament,
                 experiment=experiment,
-                checkpoints=tuple(c.ref for c in spec.checkpoints),
+                checkpoints=spec.held,
                 enter=spec.entrants,
-                lines=state.lines,
+                lines=lines,
                 storages=[store],
             ).new
             for spec in tiny

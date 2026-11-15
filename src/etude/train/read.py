@@ -46,7 +46,7 @@ from etude.records import (
     RunRecord,
     RunWriter,
 )
-from etude.run import as_storage, located_runs, run_folders, under
+from etude.run import LocatedRun, as_storage, located_runs, run_folders, under
 from etude.storage import Storage, run_prefix
 from etude.train.block import (
     COUNT,
@@ -744,6 +744,7 @@ def read_all(
     metrics: frozenset[str] | None = None,
     prefixes: tuple[str, ...] = (),
     keys: Sequence[str] | None = None,
+    declarations: Sequence[LocatedRun] | None = None,
 ) -> list[RunData]:
     """Every run under a source, listing it once.
 
@@ -753,7 +754,7 @@ def read_all(
     storage = as_storage(source)
     keys = sorted(storage.keys("") if keys is None else keys)
     data = []
-    for located in located_runs(storage, keys):
+    for located in located_runs(storage, keys) if declarations is None else declarations:
         file = located.file
         if experiment in (None, file.experiment):
             data.append(

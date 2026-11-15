@@ -28,7 +28,16 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 from etude.cache import Artifact, Content, ContentMismatch, Corrupt
 from etude.call import Function, changed_config, config_type
 from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, checkpoint_key
-from etude.checkpoints import CheckpointId, CheckpointRecord, CheckpointRef, checkpoint_id
+from etude.checkpoints import (
+    CheckpointId,
+    CheckpointRecord,
+    CheckpointRef,
+    PolicyKey,
+    _checkpoint_id,
+    in_role,
+    qualified,
+    seen_from,
+)
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval.agents import AgentProcess, running_agents
 from etude.eval.game import _match_type
@@ -41,12 +50,11 @@ from etude.eval.records import (
     Match,
     Player,
     RoundRobin,
-    TournamentRun,
-    assemble,
     digest,
     folder_name,
     player_checkpoints,
     relocate_player,
+    select_policy,
 )
 from etude.eval.resources import resources
 from etude.eval.result import EvalResult, Result, Tables
@@ -133,6 +141,14 @@ class EvalRunSummary:
 
 
 @dataclass(frozen=True)
+class Policy:
+    """One resolved policy and its published checkpoints in save order."""
+
+    key: PolicyKey
+    checkpoints: Checkpoints
+
+
+@dataclass(frozen=True)
 class ExperimentState:
     """An experiment's training runs under a source, as a pass found it. Never stored."""
 
@@ -148,6 +164,25 @@ class ExperimentState:
                 return each
         raise EtudeError("run_not_found", 404) from ValueError(name)
 
+    def policy(self, key: PolicyKey) -> Policy:
+        if key.experiment is not None and key.experiment != self.experiment:
+            raise EtudeError(
+                "policy_not_found",
+                422,
+                detail=f"Use observe(source, {key.experiment!r}).policy(key) for another experiment",
+            )
+        line = select_policy(self.lines, key, experiment=self.experiment)
+        keys = {checkpoint.key for checkpoint in line.checkpoints}
+        return Policy(
+            key=line.policy,
+            checkpoints=Checkpoints(
+                checkpoint
+                for run in self.runs
+                for checkpoint in run.checkpoints
+                if checkpoint.key in keys
+            ),
+        )
+
     @property
     def lines(self) -> tuple[Line, ...]:
         """Each learner line, as relative seats find checkpoints in it: seeded as its first
@@ -155,17 +190,25 @@ class ExperimentState:
         found: dict[str, list[TrainingRunSummary]] = {}
         for run in self.runs:
             found.setdefault(run.line, []).append(run)
-        made = (
-            Line(
-                name=name,
-                seed=next((run.seed for run in runs if run.name == name), runs[0].seed),
-                job=runs[0].job,
-                launch=runs[0].launch,
-                ended=all(run.ended for run in runs),
-                checkpoints=tuple(c.ref for run in runs for c in run.checkpoints),
-            )
-            for name, runs in found.items()
-        )
+        made = []
+        for name, runs in found.items():
+            first = next((run for run in runs if run.name == name), runs[0])
+            roles = {c.role for run in runs for c in run.checkpoints} or {"policy"}
+            for role in sorted(roles):
+                made.append(
+                    Line(
+                        name=in_role(name, role),
+                        experiment=self.experiment,
+                        role=role,
+                        seed=first.seed,
+                        job=first.job,
+                        launch=first.launch,
+                        ended=all(run.ended for run in runs),
+                        checkpoints=tuple(
+                            c.ref for run in runs for c in run.checkpoints if c.role == role
+                        ),
+                    )
+                )
         return tuple(sorted(made, key=lambda line: line.order))
 
     def checkpoint(self, key: CheckpointId) -> CheckpointRecord | None:
@@ -326,6 +369,11 @@ class Evaluation(Record):
             return {key: item for key, item in value.items() if key != "workers"}
         return value
 
+    @property
+    def held(self) -> tuple[CheckpointRef, ...]:
+        """The checkpoints as this experiment's evaluation seats them (`seen_from`)."""
+        return tuple(seen_from(each.ref, self.experiment) for each in self.checkpoints)
+
 
 class EvalGroup(Record):
     """The tournaments one run plays, in declaration order."""
@@ -419,6 +467,10 @@ class EvalJob(Job):
 
     @model_validator(mode="after")
     def _validate_evaluation(self) -> EvalJob:
+        if self.experiment is not None:
+            raise LauncherError(
+                "EvalJob belongs to its file's experiment; use experiment= or policy= on a seat"
+            )
         if self.name and self.name != self.tournament.name:
             raise LauncherError("an EvalJob is named by its tournament")
         object.__setattr__(self, "name", self.tournament.name)
@@ -481,15 +533,6 @@ class EvalJob(Job):
                 for p in players
             ):
                 raise LauncherError("composed and code players need Agents(build=)")
-        assemble(
-            [
-                TournamentRun(
-                    tournament=self.tournament,
-                    checkpoints=tuple(c.ref for c in spec.checkpoints),
-                    entrants=spec.entrants,
-                )
-            ]
-        )
         return _job(
             _hold,
             EvalGroup(evaluations=(spec,)),
@@ -524,8 +567,12 @@ def with_experiment(job: Job, experiment: str) -> Job:
     job = job.plain()
     group = evaluation_group(job)
     for spec in group.evaluations:
-        if spec.experiment not in (None, experiment):
-            raise EtudeError("eval_job_of_another_experiment", 422) from ValueError(spec.experiment)
+        if any(not checkpoint.experiment for checkpoint in spec.checkpoints):
+            raise EtudeError(
+                "checkpoint_names_no_experiment",
+                422,
+                detail="Hold checkpoints from an experiment; unlabelled runs have legacy identities",
+            )
     group = EvalGroup(
         evaluations=tuple(
             spec.model_copy(update={"experiment": experiment}) for spec in group.evaluations
@@ -584,6 +631,30 @@ def hold_group(
         for spec in group.evaluations:
             if spec.experiment is None:
                 raise EtudeError("evaluation_names_no_experiment", 422)
+            held = spec.held
+            checkpoint = (
+                spec.checkpoint.ref
+                if isinstance(spec.checkpoint, CheckpointRecord)
+                else spec.checkpoint
+                if isinstance(spec.checkpoint, CheckpointRef)
+                else None
+            )
+            seated = {
+                qualified(ref.key, spec.experiment): ref
+                for match in spec.matches or ()
+                for player in match.players
+                for ref in player_checkpoints(player)
+                if qualified(ref.key, spec.experiment) != ref.key
+            }
+            if seated:
+                held = tuple(
+                    seated.get(ref.key, ref).model_copy(update={"artifact": ref.artifact})
+                    for ref in held
+                )
+                if checkpoint is not None:
+                    checkpoint = seated.get(checkpoint.key, checkpoint).model_copy(
+                        update={"artifact": checkpoint.artifact}
+                    )
             member = lifetime.enter_context(ExitStack())
             # The match digest survives relocation: checkpoint paths are transport only.
             identity = (
@@ -595,12 +666,8 @@ def hold_group(
                 evaluating(
                     spec.tournament,
                     experiment=spec.experiment,
-                    checkpoint=spec.checkpoint.ref
-                    if isinstance(spec.checkpoint, CheckpointRecord)
-                    else spec.checkpoint
-                    if isinstance(spec.checkpoint, CheckpointRef)
-                    else None,
-                    checkpoints=tuple(each.ref for each in spec.checkpoints),
+                    checkpoint=checkpoint,
+                    checkpoints=held,
                     enter=spec.entrants,
                     matches=spec.matches,
                     run=f"{spec.experiment}/{folder_name(spec.tournament.name)}-{identity[:12]}",
@@ -701,7 +768,7 @@ def group_evaluations(
                 if given.name in inputs and inputs[given.name] != given:
                     raise EtudeError("eval_input_conflict", 422, detail=given.name)
                 inputs[given.name] = given
-        members.append(spec.model_copy(update={"files": files, "lines": state.lines}))
+        members.append(spec.model_copy(update={"files": files}))
     return first.model_copy(
         update={
             "name": "evals",
@@ -993,25 +1060,31 @@ def _received(evaluation: Evaluation) -> Evaluation:
     if isinstance(given, CheckpointRecord):
         # The record keeps its own key; only its bytes moved, to this input.
         uri = (Path(str(folder)) / _BENCHMARK_CHECKPOINT).as_uri()
-        checkpoint = given.ref.model_copy(
+        ref = (
+            given.ref
+            if given.experiment
+            else given.model_copy(update={"experiment": evaluation.experiment}).ref
+        )
+        checkpoint = ref.model_copy(
             update={"artifact": given.artifact.model_copy(update={"uri": uri})}
         )
     elif isinstance(given, Input):
         # A training run's file is keyed by its run and name; any other, by where it lies.
         key = (
-            checkpoint_id(
+            _checkpoint_id(
+                experiment="",
                 run=given.run,
                 name=given.key if given.key.startswith("out/") else checkpoint_file_name(given.key),
             )
             if given.run is not None
-            else checkpoint_id(address=given.key)
+            else given.key
         )
         artifact = ArtifactRef(
             uri=(Path(str(folder)) / given.name).as_uri(),
             sha256=given.sha256,
             size_bytes=given.size_bytes,
         )
-        checkpoint = CheckpointRef(key=key, artifact=artifact)
+        checkpoint = CheckpointRef(address=key, artifact=artifact)
     if checkpoint is not None:
         evaluation = evaluation.model_copy(update={"checkpoint": checkpoint})
     if evaluation.matches is not None:

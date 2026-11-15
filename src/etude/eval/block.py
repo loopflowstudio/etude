@@ -145,13 +145,21 @@ def sealed(names: Iterable[str]) -> list[str]:
     return sorted(found[1] for name in names if (found := BLOCK_FILE.match(name)))
 
 
-def read(storage: Storage, folder: str, name: str) -> Block:
+def read(storage: Storage, folder: str, name: str, *, experiment: str | None = None) -> Block:
     """Block `name` of the run in `folder` (a prefix of `storage`)."""
-    return Block.model_validate_json(storage.get(folder + file_key(name, EVAL_BLOCK_INDEX)))
+    return Block.model_validate_json(
+        storage.get(folder + file_key(name, EVAL_BLOCK_INDEX)), context={"experiment": experiment}
+    )
 
 
 def run_blocks(
-    storage: Storage, folder: str, run: str, names: Iterable[str], known: dict[str, Block]
+    storage: Storage,
+    folder: str,
+    run: str,
+    names: Iterable[str],
+    known: dict[str, Block],
+    *,
+    experiment: str | None = None,
 ) -> list[Block]:
     """The sealed blocks of eval run `run` in `folder`, given the names of its files.
 
@@ -163,7 +171,7 @@ def run_blocks(
     found = sealed(names)
     for name in found:
         if name not in known:
-            known[name] = read(storage, folder, name)
+            known[name] = read(storage, folder, name, experiment=experiment)
     refuse_unconverted(run, names, (each for block in known.values() for each in block.replaces))
     return [known[name] for name in found]
 

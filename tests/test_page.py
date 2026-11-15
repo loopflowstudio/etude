@@ -599,3 +599,48 @@ def test_default_rl_panels_use_logged_keys_but_explicit_panels_keep_missing_keys
         Series(title="Losses", keys=("rl/loss", "rl/value_loss") if explicit else ("rl/loss",)),
     )
     assert page.training.series["updates"]["rl/loss"][0].mean == [0.5]
+
+
+def test_policy_key_report_resolves_cross_experiment_seats_once(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path / "source")
+    for experiment, seed in (("frontier", 0), ("frontier", 1), ("rival", 0)):
+        with track(
+            experiment=experiment,
+            run=f"small@{seed}",
+            job="small",
+            seed=seed,
+            directory=source.root,
+            clocks=["updates"],
+            strict=True,
+        ) as run:
+            weights = run.out / "weights.pt"
+            weights.write_bytes(b"weights")
+            run.checkpoint(weights, updates=100)
+    file = tmp_path / "rival.py"
+    file.write_text("""
+from etude.checkpoints import PolicyKey
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, Final, Seating
+from tests.eval.stored import stored_inference
+from etude.jobs import EvalJob
+from tests.eval.games import play
+
+def eval_jobs(state):
+    direct = stored_inference()
+    return [EvalJob(tournament=Benchmark(name=name, environment=environment("duel"),
+        seatings=(Seating(name="vs frontier", players=(direct,
+            Final(experiment="frontier", job="small")), configs=({},), games=8),)),
+        checkpoints=state.policy(PolicyKey()).checkpoints, play=play, repo=None, max_hours=1)
+        for name in ("first", "second")]
+""")
+    measured = MeasuredStorage(source)
+    page = build(measured, file)
+    assert [(c.tournament, c.unplayed) for c in page.coverage] == [("first", 2), ("second", 2)]
+    assert measured.requests == 16  # 12 discovery reads, four existing statsdb reads
+    assert measured.listings == 2
+    for seed in (0, 1):
+        # Two tournaments share the external checkpoint/outcome reads. Statsdb separately
+        # reads declarations to retain its own experiment membership.
+        assert measured.got.count(f"frontier/small@{seed}/checkpoints/updates-100.json") == 1
+        assert measured.got.count(f"frontier/small@{seed}/outcome.json") == 1
+    assert not any(key.endswith("weights.pt") for key in measured.got)

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import duckdb
 
-from etude.checkpoints import CheckpointRef, checkpoint_id
+from etude.checkpoints import CheckpointRef
 from etude.eval.match import environment, evaluate
 from etude.eval.records import CheckpointPlayer, Code, Held, Match, player_checkpoints
 from etude.eval.schedule import checkpoints, ordered
@@ -23,7 +23,7 @@ GAMES = Path(__file__).with_name("games.py")
 def checkpoint(updates: int) -> CheckpointPlayer:
     name = f"updates-{updates}.pt"
     artifact = ArtifactRef(uri=f"s3://models/{name}", sha256=sha256(name.encode()).hexdigest())
-    ref = CheckpointRef(key=checkpoint_id(run="ppo-1", name=name), artifact=artifact)
+    ref = CheckpointRef(experiment="", job="ppo-1", name=name, artifact=artifact)
     return Held().player(ref)
 
 
@@ -109,7 +109,7 @@ def test_two_checkpoint_keys_holding_the_same_bytes_are_two_checkpoints() -> Non
     file = ArtifactRef(uri="s3://models/init.pt", sha256=sha256(b"init").hexdigest())
     starts = [
         Held().player(CheckpointRef(
-            key=checkpoint_id(run=run, name="updates-100.pt"), artifact=file))
+            experiment="", job=run, name="updates-100.pt", artifact=file))
         for run in ("ppo-1", "ppo-2")
     ]  # fmt: skip
     assert len(checkpoints(Match(players=(starts[0], starts[1])))) == 2

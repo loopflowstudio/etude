@@ -22,7 +22,7 @@ from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Held, Match, RoundRobin
 from etude.experiment import observe
-from etude.jobs import EvalJob, JobOptions, TrainingJob, checkpoint_inputs
+from etude.jobs import EvalJob, JobOptions, TrainingJob, checkpoint_inputs, with_experiment
 from etude.launch.smoke import tiny
 from etude.records import ArtifactRef
 from etude.spec import Input, Job, Preparation, Runtime, SmokeForm, Until, job_id
@@ -398,7 +398,6 @@ def arena(config: ArenaConfig) -> Benchmark:
     given = legacy if form == "input" else record
     job = EvalJob(
         tournament=duel.arena(duel.ArenaConfig()),
-        experiment="ppo",
         play=duel.play,
         checkpoint=given,
         max_hours=0.1,
@@ -406,11 +405,12 @@ def arena(config: ArenaConfig) -> Benchmark:
         max_attempts=1,
         runtime=Runtime(python=job_python),
     )
+    executable = with_experiment(job, "ppo")
     assert len(job.plain().inputs) == len(members)
     assert {each.key for each in job.plain().inputs} == {
         "checkpoints/updates-100" + ("/" + name if name else "") for name in members
     }
-    (run,) = c.scheduler.launch(job, rent="l4")
+    (run,) = c.scheduler.launch(executable, rent="l4")
     (status,) = c.scheduler.wait(run, every=0.05, timeout=60)
     assert status.outcome == "succeeded", job_text(c.scheduler.logs(refresh=True, run=run))
     assert c.provider.creates == 1
@@ -426,7 +426,7 @@ def arena(config: ArenaConfig) -> Benchmark:
             (delivered / run / key.removeprefix(folder)).write_bytes(body)
     db = statsdb("ppo", delivered)
     assert db.sql("select distinct checkpoint from players where kind = 'model'").fetchall() == [
-        (record.key,)
+        ("ppo/" + record.key,)
     ]
     assert (
         db.sql(
@@ -443,7 +443,6 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
     with pytest.raises(LauncherError, match="give it checkpoints, no entrants"):
         EvalJob(
             tournament=progress,
-            experiment="ppo",
             play=lambda match: {},
             enter=[entrant],
             max_hours=0.1,
@@ -456,7 +455,6 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
         # The omission under test.
         EvalJob(
             tournament=progress,
-            experiment="ppo",
             play=lambda match: {},
             checkpoint=weights,
             repo=None,
@@ -465,9 +463,7 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
         name="league", environment=environment("duel"), configs=({},), games=1
     )
     with pytest.raises(LauncherError, match="give it entrants"):
-        EvalJob(
-            tournament=league, experiment="ppo", play=lambda match: {}, max_hours=0.1, repo=None
-        )
+        EvalJob(tournament=league, play=lambda match: {}, max_hours=0.1, repo=None)
 
 
 def test_the_job_command_starts_by_importing_no_other_part_of_etude() -> None:
@@ -573,7 +569,7 @@ def write(config: TrainConfig) -> None:
 
 
 @pytest.mark.parametrize("declared", [False, True])
-def test_a_seated_artifact_wins_over_a_local_checkpoint_with_the_same_compact_key(
+def test_a_seated_artifact_keeps_its_experiment_when_a_local_run_has_the_same_name(
     tmp_path: Path,
     declared: bool,
 ) -> None:
@@ -588,7 +584,7 @@ def test_a_seated_artifact_wins_over_a_local_checkpoint_with_the_same_compact_ke
     checkpoint = observe(source, "producer").runs[0].final
     assert checkpoint is not None
     state = observe(source, "review")
-    assert state.checkpoint(checkpoint.key) is not None
+    assert state.checkpoint(checkpoint.key) is None
     match = Match(players=(checkpoint.player(Held()), Code(name="fixed")), games=1)
     saved = checkpoint_inputs([match], state, [checkpoint] if declared else [])
     assert saved[checkpoint.key].artifact == checkpoint.artifact

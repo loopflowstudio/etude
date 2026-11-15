@@ -47,7 +47,7 @@ def checkpoint(name: str) -> CheckpointPlayer:
     data = path.read_bytes()
     return Held().player(
         CheckpointRef(
-            key=name,
+            address=name,
             artifact=ArtifactRef(
                 uri=path.as_uri(), sha256=sha256(data).hexdigest(), size_bytes=len(data)
             ),

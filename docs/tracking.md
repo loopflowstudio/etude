@@ -566,7 +566,8 @@ seating to resolve it.
 
 **Evals** are the experiment's eval runs ([evaluation](evaluation.md#experiments)).
 A checkpoint is drawn where its seat says it stood (`CheckpointRef.at`), else,
-for a key a training run of the experiment saved (`RUN/checkpoints/NAME`),
+for a key a training run of the experiment saved
+(`EXPERIMENT/RUN/checkpoints/NAME`),
 where that run's clocks stood; where both give a clock and differ, the seat's
 value is drawn and the page notes it. Two runs' checkpoints holding the same
 bytes are two points. A checkpoint's line, the learner it belongs to, is

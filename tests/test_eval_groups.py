@@ -296,7 +296,7 @@ def test_statsdb_rebuilds_the_last_released_schema_with_retry_flags(tmp_path: Pa
     upgraded = statsdb("grouped", tmp_path)
     try:
         assert upgraded.sql("select state, retry from matches").fetchall() == [("done", False)]
-        assert upgraded.sql("select schema from kept.statsdb").fetchone() == (15,)
+        assert upgraded.sql("select schema from kept.statsdb").fetchone() == (16,)
     finally:
         upgraded.close()
 
@@ -518,7 +518,7 @@ def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_rows() -> N
     players = [
         Held().player(
             CheckpointRef(
-                key=f"{name}/checkpoints/model",
+                address=f"{name}/checkpoints/model",
                 artifact=ArtifactRef(uri=f"file:///unused/{name}", sha256="0" * 64, size_bytes=1),
             )
         )
