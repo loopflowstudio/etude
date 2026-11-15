@@ -344,3 +344,18 @@ single-file checkpoints hide nested input names (`start/checkpoint.json`).
   (`Popen(..., stdout=PIPE, stderr=STDOUT)`) and send SIGTERM after the line
   `K/N matches played`; a fixed sleep misses because this Mac runs ~16 games
   at a time. The next pass should play only the interrupted matches.
+
+## Etude: grouped evals with agents
+
+Copy `examples/{agents.py,agent_game.py,agent_models.py,agent.txt}` into a git lab
+and run `uv run --project REPO etude eval agents.py --source RUNS` with a fresh
+`ETUDE_HOME`. Drive scenarios with environment knobs read inside the lab's own
+modules: a `play` wrapper that raises when `QA_FAIL` appears in a player's JSON or
+sleeps for `QA_SLOW` (make one player's matches ten times longer, or every match
+finishes before a SIGTERM lands), a loader that raises when `QA_BAD` names a
+checkpoint key, and `Agents(memory_gb=float(os.environ["QA_MEM"]))` (`3e-9` fits
+one two-byte checkpoint and forces eviction). Send each pass's output to its own file:
+`grep -v` in a pipe buffers until exit, so a slow pass looks hung, and several passes
+in one tool call can exceed its timeout on a busy Mac. Judge a suspected hang from the
+timestamps under `ETUDE_HOME/track/NAME/artifacts/agents/` and the run's `blocks/`,
+not from `ps` elapsed times.

@@ -449,7 +449,6 @@ class Playing:
     skipped: int = field(init=False)
     played: int = 0
     failure: EtudeError | RetryRequested | None = None
-    stopped: bool = False
 
     def __post_init__(self) -> None:
         self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
@@ -550,8 +549,8 @@ def play_together(
             if error.code != "match_failed":
                 raise
             each.failure = error
+            # Empty the dispatch queue; already-running matches still reach accept.
             each.pending.clear()
-            each.stopped = True
         else:
             each.played += 1
             print(
@@ -560,15 +559,6 @@ def play_together(
                 file=sys.stderr,
                 flush=True,
             )
-
-    def next_match(each: Playing) -> Match | None:
-        nonlocal stopping
-        if not each.pending:
-            return None
-        if stopping or each.run.should_stop:
-            stopping = True
-            return None
-        return each.pending.popleft()
 
     workers = active_games(
         sum(len(each.pending) for each in plays),
@@ -583,29 +573,29 @@ def play_together(
                 running: dict[Future[Execution], tuple[Playing, Match]] = {}
 
                 def start() -> None:
+                    nonlocal stopping
                     fail_checkpoints()
                     for _ in range(len(order)):
                         each = order.popleft()
                         order.append(each)
-                        if each.stopped:
+                        if not each.pending:
                             continue
-                        match = next_match(each)
-                        if match is not None:
-                            running[
-                                pool.submit(
-                                    play_match,
-                                    each.play,
-                                    match,
-                                    each.agents,
-                                    each.checkout,
-                                    each.tournament or each.run.name,
-                                    each.build,
-                                )
-                            ] = (
-                                each,
-                                match,
-                            )
+                        if stopping or each.run.should_stop:
+                            stopping = True
                             return
+                        match = each.pending.popleft()
+                        running[
+                            pool.submit(
+                                play_match,
+                                each.play,
+                                match,
+                                each.agents,
+                                each.checkout,
+                                each.tournament or each.run.name,
+                                each.build,
+                            )
+                        ] = (each, match)
+                        return
 
                 try:
                     for _ in range(workers):
@@ -644,7 +634,6 @@ def play_together(
                             if future not in finished:
                                 continue
                             each, match = running.pop(future)
-                            fail_checkpoints()
                             raised = future.exception()
                             if isinstance(raised, BrokenProcessPool):
                                 raise RetryRequested(

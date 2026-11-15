@@ -103,8 +103,7 @@ class _Batches:
                         length = checkpoint.artifact.size_bytes
                         if length is None:
                             raise ValueError(f"checkpoint {key} has no byte length")
-                        size = length
-                        self._evict(size)
+                        self._evict(length)
                         try:
                             agent = cast(Agent, self.load(checkpoint))
                         except Exception as error:
@@ -114,7 +113,7 @@ class _Batches:
                                 isinstance(error, RetryRequested),
                             )
                             raise
-                        self.loaded[key] = (agent, size)
+                        self.loaded[key] = (agent, length)
                         self.loads += 1
                         print(f"etude: agents: loaded {key}", file=sys.stderr, flush=True)
                     self.loaded.move_to_end(key)
@@ -174,11 +173,13 @@ class _Batches:
         return observations
 
     def _evict(self, incoming: int) -> None:
+        used = sum(size for _, size in self.loaded.values())
         for key in list(self.loaded):
-            if sum(size for _, size in self.loaded.values()) + incoming <= self.memory:
+            if used + incoming <= self.memory:
                 break
             if key not in self.pending:
-                del self.loaded[key]
+                _, size = self.loaded.pop(key)
+                used -= size
 
 
 def _run_agents(

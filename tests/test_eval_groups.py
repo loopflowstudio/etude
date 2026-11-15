@@ -361,13 +361,15 @@ def test_two_tournaments_share_loaded_agents_and_resume_without_starting_them(
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
-    agents = Agents(load=load, max_delay_seconds=0.25)
+    # Each game asks one row per seat in turn; two concurrent games fill every
+    # two-row batch, so batches flush on size, never on the delay.
+    agents = Agents(load=load, max_batch=2, max_delay_seconds=60)
     selected = group(job("ladder", agents), job("gauntlet", agents))
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [1, 1]
     batches = json.loads((tmp_path / "grouped/artifacts/agents/batches.json").read_text())
-    assert any(
-        {row["tournament"] for row in batch["rows"]} == {"ladder", "gauntlet"} for batch in batches
-    )
+    assert [{row["tournament"] for row in batch["rows"]} for batch in batches] == [
+        {"ladder", "gauntlet"}
+    ] * 2
     log = capfd.readouterr().err
     assert log.count("agents: started") == 1
     assert log.count("agents: loaded") == 2

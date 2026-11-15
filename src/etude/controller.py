@@ -60,6 +60,12 @@ class TournamentDecision(Record):
     stopped: tuple[str, ...] = ()
 
 
+class _PendingEvaluation(Record):
+    job: Job
+    spec: Evaluation
+    decision: int
+
+
 def source_for(pool: str | None, rent: str | None, source: str | None = None) -> str:
     """The target's delivery storage; ambiguous targets need an explicit source."""
     if source is not None:
@@ -246,9 +252,7 @@ def advance(
     decisions: list[TournamentDecision] = []
     stopped_runs: set[str] = set()
     stored = StoredRuns.read(experiment.name, source, keys=listed) if jobs else None
-    pending_jobs: list[Job] = []
-    pending_specs: list[Evaluation] = []
-    pending_decisions: list[int] = []
+    groups: dict[str, list[_PendingEvaluation]] = {}
     for executable in jobs:
         spec = evaluation_group(executable).evaluations[0]
         found = played(
@@ -279,25 +283,24 @@ def advance(
                 match for match in pending if match.key not in failed or match.key in retryable
             ]
         if pending:
-            pending_jobs.append(executable)
-            pending_specs.append(
-                spec.model_copy(update={"matches": tuple(pending), "lines": state.lines})
+            groups.setdefault(_group_key(executable, spec), []).append(
+                _PendingEvaluation(
+                    job=executable,
+                    spec=spec.model_copy(update={"matches": tuple(pending), "lines": state.lines}),
+                    decision=len(decisions),
+                )
             )
-            pending_decisions.append(len(decisions))
             running.update(m.key for m in pending)
         decisions.append(done)
-    groups: dict[str, list[int]] = {}
-    for index, executable in enumerate(pending_jobs):
-        groups.setdefault(_group_key(executable, pending_specs[index]), []).append(index)
     training_active = bool(new) or any(r.state in {"queued", "running"} for r in state.runs)
     cpu_capacity = _eval_cpus(pool, rent) if mode != "local" and groups else None
-    for indices in groups.values():
-        members = [pending_specs[i] for i in indices]
-        executables = [pending_jobs[i] for i in indices]
+    for group in groups.values():
+        members = [each.spec for each in group]
+        executables = [each.job for each in group]
         if mode == "local":
             held = _play_here(members, executables[0], state, source, directory)
-            for index, result in zip(indices, held, strict=True):
-                n = pending_decisions[index]
+            for each, result in zip(group, held, strict=True):
+                n = each.decision
                 decisions[n] = decisions[n].model_copy(update={"played": result.played})
             continue
         executable = group_evaluations(executables, members, state)
@@ -338,8 +341,8 @@ def advance(
             taken.add(identity)
             committed += executable.max_usd or Decimal(0)
             changes = {"launched": identity}
-        for index in indices:
-            n = pending_decisions[index]
+        for each in group:
+            n = each.decision
             decisions[n] = decisions[n].model_copy(update=changes)
     if planned:
         if quote:
