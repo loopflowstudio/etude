@@ -928,3 +928,114 @@ def test_caught_agent_errors_fail_matches_without_publishing_returned_rows(
         assert "scores" not in {row[0] for row in db.sql("show tables").fetchall()}
     finally:
         db.close()
+
+
+def selective_load(player: Player, config: Loading) -> Agent:
+    if player.name == "broken":
+        if config.bias == 2:
+            raise RetryRequested("fixture player unavailable")
+        raise ValueError("fixture broken player")
+    return load(player, config)
+
+
+def asks_or_returns(match: Match[dict[str, str]], agents: Sequence[Agent]) -> Tables:
+    # The second tournament never asks for an agent, even when it seats the broken player.
+    if match.config["lane"] == "two":
+        return plain(match)
+    try:
+        return play(match, agents)
+    except Exception:
+        return plain(match)
+
+
+@pytest.mark.parametrize("retry", [False, True])
+@pytest.mark.parametrize("in_flight", [False, True])
+def test_loader_failure_reaches_undispatched_matches_across_tournaments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry: bool, in_flight: bool
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3 if in_flight else 2)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
+    agents = Agents(load=selective_load, config=Loading(bias=2 if retry else 1))
+    jobs = [
+        job(name, agents).model_copy(
+            update={
+                "enter": (Code(name="broken"), Code(name="left"), Code(name="right")),
+                "play": catches_agent_error if in_flight else asks_or_returns,
+            }
+        )
+        for name in ("one", "two")
+    ]
+    with pytest.raises(RetryRequested if retry else EtudeError):
+        hold_group(group(*jobs), directory=tmp_path)
+    for active in jobs:
+        found = played(
+            active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path
+        )
+        assert len(found.failed) == 2
+        assert len(found.delivered) == 1
+        assert len(found.retry) == len(found.new) == (2 if retry else 0)
+        assert all(any(p.name == "broken" for p in m.players) for m in found.failed)
+    db = statsdb("grouped", tmp_path)
+    try:
+        assert db.sql("select state from runs").fetchall() == [("failed",)] * 2
+        assert (
+            db.sql("select retry from matches where state = 'failed'").fetchall() == [(retry,)] * 4
+        )
+        assert all(
+            "fixture" in row[0]
+            for row in db.sql("select error from matches where state = 'failed'").fetchall()
+        )
+        assert db.sql("select count(distinct match) from scores").fetchone() == (2,)
+    finally:
+        db.close()
+
+
+def returns_before_loading(match: Match, agents: Sequence[Agent]) -> Tables:
+    if any(player.name == "left" for player in match.players):
+        return plain(match)
+    return play(match, agents)
+
+
+def test_loader_failure_preserves_previously_delivered_matches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
+    agents = Agents(load=selective_load, config=Loading())
+    jobs = [
+        job(name, agents).model_copy(
+            update={
+                "enter": (Code(name="broken"), Code(name="left"), Code(name="right")),
+                "play": returns_before_loading,
+            }
+        )
+        for name in ("one", "two")
+    ]
+    selected = group(*jobs)
+    scheduled = []
+    for spec, active in zip(selected.evaluations, jobs, strict=True):
+        matches = played(
+            active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path
+        ).new
+        # Deliver the broken player's match with left before attempting its load with right.
+        first = next(m for m in matches if {p.name for p in m.players} == {"broken", "left"})
+        scheduled.append(
+            spec.model_copy(update={"matches": (first, *(m for m in matches if m != first))})
+        )
+    selected = selected.model_copy(update={"evaluations": tuple(scheduled)})
+    with pytest.raises(EtudeError):
+        hold_group(selected, directory=tmp_path)
+    for active in jobs:
+        found = played(
+            active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path
+        )
+        assert len(found.failed) == 1
+        assert len(found.delivered) == 2
+        assert not found.new
+    db = statsdb("grouped", tmp_path)
+    try:
+        assert db.sql("select state from runs").fetchall() == [("failed",)] * 2
+        assert db.sql("select count(distinct match) from scores").fetchone() == (4,)
+    finally:
+        db.close()

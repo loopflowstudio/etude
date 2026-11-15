@@ -734,17 +734,21 @@ one on a GPU, or weights too large to hold in every game process.
   | What happened | Matches | Run |
   | --- | --- | --- |
   | the agent process exits | unfinished ones failed with `retry=True` | failed |
-  | `load` raises | each match that asks for that player failed with `retry=False`; the player is not loaded again in this run | failed |
+  | `load` raises | every undelivered scheduled match seating that player, across tournaments, failed with `retry=False`; the player is not loaded again in this run | failed |
   | `act` raises, returns the wrong number of answers, or one that does not pickle | the matches with rows in that batch failed with `retry=False` | failed |
   | `load` or `act` raises `etude.errors.RetryRequested` | failed with `retry=True` | failed |
   | `play` raises | failed with `retry=False` | failed |
   | the run's time limit, SIGTERM, or a failed delivery | unfinished ones failed with `retry=True` | failed |
 
   The next pass plays `retry=True` matches again by itself; `retry=False`
-  ones wait for `--retry-failed`. As for any failed match, a tournament
-  stops at its first `retry=False` failure while the others finish
-  ([Experiments](#experiments)), so a `load` that raises fails the first
-  match of each tournament that asks for the player. Raise `RetryRequested`
+  ones wait for `--retry-failed`. A loader failure reaches every undelivered
+  scheduled match seating that player in the group, including matches never
+  dispatched or games that never call `act`. Those matches retain the load
+  error and publish no rows; delivered results stay unchanged. Matches without
+  that player carry on, including in the same tournament. A load raising
+  `RetryRequested` applies the same scope with `retry=True`. Other match
+  failures stop their tournament while the others finish
+  ([Experiments](#experiments)). Raise `RetryRequested`
   for a refusal that is the machine's fault, such as a device out of memory.
   Rows saying a game was invalid remain rows: raise instead of returning
   them. A run with a failed match is never recorded as succeeded.
@@ -1007,8 +1011,10 @@ matches, as a launched one does, unless `--retry-failed`.
   failed)`), its tournament stops there, and every later pass counts it
   (`ladder: 0 new, 1 failed`) and does not play it again, so a result is
   never quietly replaced. The other tournaments keep playing; the run then
-  ends failed. `--retry-failed` plays the failed matches again. A match the
-  machine failed rather than the game, such as one unfinished at the run's
+  ends failed. A [loader failure](#agents) instead fails every undelivered
+  scheduled match seating that player across the group's tournaments, while
+  matches without it continue. `--retry-failed` plays the failed matches again.
+  A match the machine failed rather than the game, such as one unfinished at the run's
   time limit or when its [agent process](#agents) exited, is failed with
   `retry=True` (`matches.retry`) and the next pass plays it again without
   the flag. A match an

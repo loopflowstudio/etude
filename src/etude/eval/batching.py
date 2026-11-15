@@ -141,6 +141,7 @@ class _Batches:
                             match=p.request.match,
                             error=answer.error,
                             retry=answer.retry,
+                            loading=key in self.failed,
                         )
                         for p in batch
                     ]

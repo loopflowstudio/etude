@@ -557,7 +557,7 @@ def hold_group(
     scope includes agent startup and shutdown as well as games.
     """
     results: list[EvalResult] = []
-    failures: list[EtudeError] = []
+    failures: list[EtudeError | RetryRequested] = []
     # A launched attempt's courier collects only below its assigned track folder.
     launched = os.environ.get("ETUDE_RUN_ADDRESS") or os.environ.get("ETUDE_RUN")
     base = Path(directory) if directory is not None else default_root()
@@ -657,7 +657,7 @@ def hold_group(
             report.write()
             raise
         for (_, _, member), outcome in zip(opened, outcomes, strict=True):
-            if isinstance(outcome, EtudeError):
+            if isinstance(outcome, (EtudeError, RetryRequested)):
                 member.__exit__(type(outcome), outcome, outcome.__traceback__)
                 failures.append(outcome)
             else:

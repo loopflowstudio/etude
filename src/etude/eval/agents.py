@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from multiprocessing.connection import Connection, wait
 from pathlib import Path
+from queue import SimpleQueue
 from typing import TYPE_CHECKING, Protocol, cast
 
 from etude.errors import RetryRequested, explain
@@ -58,6 +59,7 @@ class AgentFailure:
     match: str
     error: str
     retry: bool
+    loading: bool = False
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,7 @@ class AgentProcess:
     process: multiprocessing.context.SpawnProcess
     exited: Future[None]
     failures: dict[tuple[str, str], AgentFailure] = field(default_factory=dict)
+    player_failures: SimpleQueue[AgentFailure] = field(default_factory=SimpleQueue)
 
     def check(self) -> None:
         if self.process.exitcode is not None:
@@ -195,6 +198,7 @@ def running_agents(
     sentinel = process.sentinel
 
     failures: dict[tuple[str, str], AgentFailure] = {}
+    player_failures: SimpleQueue[AgentFailure] = SimpleQueue()
 
     def observe_exit() -> None:
         try:
@@ -202,7 +206,10 @@ def running_agents(
                 ready = wait([parent, sentinel])
                 if parent in ready:
                     for failure in cast(list[AgentFailure], parent.recv()):
-                        failures.setdefault((failure.tournament, failure.match), failure)
+                        if failure.loading:
+                            player_failures.put(failure)
+                        else:
+                            failures.setdefault((failure.tournament, failure.match), failure)
                     # Register failures before a game can catch its exception and return.
                     parent.send(None)
                 if sentinel in ready:
@@ -228,7 +235,13 @@ def running_agents(
             file=sys.stderr,
             flush=True,
         )
-        yield AgentProcess(address=address, process=process, exited=exited, failures=failures)
+        yield AgentProcess(
+            address=address,
+            process=process,
+            exited=exited,
+            failures=failures,
+            player_failures=player_failures,
+        )
     finally:
         failed = sys.exc_info()[0] is not None
         if failed and process.is_alive():

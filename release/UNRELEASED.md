@@ -189,7 +189,11 @@ many matches wait and why, and a later pass finds them again
   `max_usd` are the totals of the eval jobs it plays, and `--max-usd` admits
   it as one run.
 - **A failed match stops its tournament.** The other tournaments keep
-  playing, and the run ends failed.
+  playing, and the run ends failed. A loader failure instead fails every
+  undelivered scheduled match seating that player across the group's
+  tournaments, including matches never dispatched, with the load error.
+  Matches without that player continue; delivered results stay unchanged.
+  A load raising `RetryRequested` applies the same scope with `retry=True`.
 - **Some failed matches are replayed without `--retry-failed`.** A match the
   machine failed rather than the game (unfinished at the run's time limit or
   SIGTERM, a failed delivery, an agent process that exited, or code that

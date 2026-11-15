@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
+from queue import Empty
 from types import FrameType
 from typing import TYPE_CHECKING, Literal, NoReturn, cast
 
@@ -147,7 +148,7 @@ class EvalRun(Run):
         """Play the selected matches once, skipping this run's durable results on resume."""
         results = play_together((Playing(run=self, play=play),))
         result = results[0]
-        if isinstance(result, EtudeError):
+        if isinstance(result, (EtudeError, RetryRequested)):
             raise result
         return result
 
@@ -442,7 +443,8 @@ class Playing:
     pending: deque[Match] = field(init=False)
     skipped: int = field(init=False)
     played: int = 0
-    failure: EtudeError | None = None
+    failure: EtudeError | RetryRequested | None = None
+    stopped: bool = False
 
     def __post_init__(self) -> None:
         self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
@@ -454,17 +456,62 @@ def play_together(
     *,
     memory_gb: float | None = None,
     agent_process: AgentProcess | None = None,
-) -> tuple[EvalResult | EtudeError, ...]:
-    """Play tournaments concurrently on one pool, stopping only the member that fails.
+) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
+    """Play tournaments on one pool; loader failures follow the seated player.
 
-    Tournaments share the available game processes. Storage and reporting
-    stay on the invoking thread; only the author's play crosses into a child.
+    Other match failures stop their tournament. Tournaments share the available
+    game processes. Storage and reporting stay on the invoking thread; only the
+    author's play crosses into a child.
     """
     started = time.monotonic()
     order = deque(plays)
     stopping = False
     warned_imports = False
     reported_imports: set[int] = set()
+    failed_players: set[str] = set()
+
+    def fail_players() -> None:
+        if agent_process is None:
+            return
+        while True:
+            try:
+                failure = agent_process.player_failures.get_nowait()
+            except Empty:
+                return
+            if failure.player in failed_players:
+                continue
+            failed_players.add(failure.player)
+            for each in plays:
+                affected = [
+                    match
+                    for match in each.run.matches
+                    if match.key not in each.run.done
+                    and match.key not in each.run._failed
+                    and any(player.key == failure.player for player in match.players)
+                ]
+                if not affected:
+                    continue
+                each.failure = (
+                    RetryRequested(failure.error)
+                    if failure.retry
+                    else EtudeError("match_failed", 500, detail=failure.error)
+                )
+                for match in affected:
+                    each.run._failed.add(match.key)
+                    each.run.failed += 1
+                    each.run.staging.stage(
+                        MatchRecord(
+                            match=match,
+                            state="failed",
+                            error=failure.error[:2000],
+                            retry=failure.retry,
+                            wall_ms=_now_ms(),
+                        )
+                    )
+                each.run._seal()
+                each.pending = deque(
+                    match for match in each.pending if match.key not in each.run._failed
+                )
 
     def accept(each: Playing, match: Match, outcome: Execution | BaseException) -> None:
         nonlocal warned_imports
@@ -486,6 +533,9 @@ def play_together(
         if each.agents and imports is not None and imports.warning and not warned_imports:
             print(imports.warning, file=sys.stderr, flush=True)
             warned_imports = True
+        fail_players()
+        if match.key in each.run._failed:
+            return
         if agent_process is not None:
             failure = agent_process.failures.pop(
                 (each.tournament or each.run.name, match.key), None
@@ -501,6 +551,7 @@ def play_together(
                 raise
             each.failure = error
             each.pending.clear()
+            each.stopped = True
         else:
             each.played += 1
             print(
@@ -532,10 +583,11 @@ def play_together(
                 running: dict[Future[Execution], tuple[Playing, Match]] = {}
 
                 def start() -> None:
+                    fail_players()
                     for _ in range(len(order)):
                         each = order.popleft()
                         order.append(each)
-                        if each.failure is not None:
+                        if each.stopped:
                             continue
                         match = next_match(each)
                         if match is not None:
@@ -596,7 +648,8 @@ def play_together(
                             if future not in finished:
                                 continue
                             each, match = running.pop(future)
-                            if each.failure is not None:
+                            fail_players()
+                            if each.stopped:
                                 start()
                                 continue
                             raised = future.exception()
