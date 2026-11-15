@@ -16,11 +16,13 @@ import shlex
 import sys
 import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
+from fnmatch import fnmatchcase
+from functools import cached_property
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Literal, TypedDict, cast
+from typing import Literal, SupportsIndex, TypedDict, cast, overload
 
 from pydantic import BaseModel, Field, JsonValue, ValidationError, field_validator, model_validator
 
@@ -51,8 +53,8 @@ from etude.eval.records import (
 )
 from etude.eval.run import Result, Tables
 from etude.eval.tournament import evaluating
-from etude.identity import run_address
-from etude.out import MEMBERSHIP, OutFile, OutFiles
+from etude.identity import stored_owner
+from etude.out import MEMBERSHIP, OutFile, OutFiles, OutMember
 from etude.records import ArtifactRef, Record, RunRecord, SourceKey
 from etude.run import as_storage, located_runs
 from etude.spec import (
@@ -67,7 +69,7 @@ from etude.spec import (
     number,
 )
 from etude.storage import Storage, place_artifact
-from etude.train.read import read
+from etude.train.read import RunData, read
 from etude.train.records import ParentRun
 
 
@@ -93,6 +95,36 @@ class Checkpoints(tuple[CheckpointRecord, ...]):
         return self[-1] if self else None
 
 
+class OutMembers(tuple[OutMember, ...]):
+    """A run's stored out files, in membership order; selections remain OutMembers."""
+
+    @overload
+    def __getitem__(self, index: SupportsIndex) -> OutMember: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> OutMembers: ...
+
+    def __getitem__(self, index: SupportsIndex | slice) -> OutMember | OutMembers:
+        if isinstance(index, slice):
+            return OutMembers(super().__getitem__(index))
+        return super().__getitem__(index)
+
+    def matching(self, pattern: str) -> OutMembers:
+        """Match paths case-sensitively; `*` also matches across `/`."""
+        return OutMembers(member for member in self if fnmatchcase(member.path, pattern))
+
+    def file(self, path: str) -> OutMember:
+        for member in self:
+            if member.path == path:
+                return member
+        runs = ", ".join(dict.fromkeys(member.run for member in self)) or "a run with no stored out"
+        raise EtudeError("out_file_not_found", 404, detail=f"{path} is not stored in {runs}")
+
+    def inputs(self, under: str) -> tuple[Input, ...]:
+        """Give each member at `under/PATH`, preserving its path within out."""
+        return tuple(member.input(under + "/" + member.path) for member in self)
+
+
 @dataclass(frozen=True)
 class TrainingRunSummary:
     name: str
@@ -108,6 +140,12 @@ class TrainingRunSummary:
     checkpoints: Checkpoints
     # The seed it declared, if any.
     seed: int | None = None
+    # Launcher-only runs have no stored data. Copies keep the same lazy storage read.
+    _data: RunData | None = field(default=None, repr=False, compare=False)
+
+    @cached_property
+    def out(self) -> OutMembers:
+        return OutMembers(self._data.out if self._data is not None else ())
 
     @property
     def ended(self) -> bool:
@@ -595,24 +633,10 @@ def checkpoint_inputs_for(
     else:
         files = {"": Content(sha256=artifact.sha256, size_bytes=artifact.size_bytes)}
     owner = (
-        run_address(checkpoint.run, checkpoint.experiment)
+        stored_owner(checkpoint.run, checkpoint.experiment, checkpoint.folder)
         if isinstance(checkpoint, CheckpointRecord) and checkpoint.run
         else None
     )
-    if (
-        isinstance(checkpoint, CheckpointRecord)
-        and checkpoint.folder is not None
-        and owner is not None
-    ):
-        # Stored folders distinguish a compact sole job from an explicitly
-        # qualified job bearing the experiment's name, including historical copies.
-        qualified = f"{checkpoint.experiment}/{checkpoint.run}"
-        if checkpoint.experiment and (
-            checkpoint.folder == qualified or checkpoint.folder.endswith("/" + qualified)
-        ):
-            owner = qualified
-        elif checkpoint.folder != owner and not checkpoint.folder.endswith("/" + owner):
-            owner = checkpoint.run
     return tuple(
         Input(
             name=name + member,

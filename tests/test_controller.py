@@ -2,6 +2,7 @@
 
 import re
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,8 @@ from etude.experiment import observe
 from etude.jobs import EvalJob, Evaluation, ExperimentState, TrainingJob, with_experiment
 from etude.launch import client
 from etude.launch.records import Pool
+from etude.local import _place_inputs
+from etude.out import MEMBERSHIP, OutFile, OutFiles
 from etude.page import build
 from etude.records import ArtifactRef, RunRecord
 from etude.spec import Job, RunRequest, job_id
@@ -42,6 +45,117 @@ def training_jobs(state):
     return [base, fine] if any(r.launch == "base" and r.seed == 0 and r.state == "finished"
                               for r in state.runs) else [base]
 """
+
+
+def test_out_member_inputs_queue_after_a_producer_stores_its_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    b = bench(tmp_path)
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    file = tmp_path / "packs.py"
+    file.write_text("""from decimal import Decimal
+from etude.jobs import ExperimentState, TrainingJob
+from tests.launch.tasks import Command, train_command
+
+def training_jobs(state: ExperimentState) -> list[TrainingJob]:
+    jobs = [TrainingJob(name="player", train=train_command, config=Command(command="true"),
+                        repo=None, max_hours=1, max_usd=Decimal(1))]
+    player = next((r for r in state.runs if r.launch == "player" and r.state == "finished"), None)
+    if player is not None:
+        packs = player.out.matching("packs/*.pack")
+        if packs:
+            jobs.append(TrainingJob(name="belief", train=train_command,
+                config=Command(command="true"), repo=None, max_hours=1, max_usd=Decimal(1),
+                inputs=packs.inputs("source")))
+    return jobs
+""")
+    definition = read_experiment(file)
+    source = DirectoryStorage(tmp_path / "source")
+    advance(definition, source=source, rent="l4", mode="queue")
+    assert [r.id for r in b.scheduler.runs()] == ["packs/player@0"]
+    queued = MeasuredStorage(source)
+    assert observe(queued, "packs").run("player@0").out == ()
+    assert (queued.listings, queued.requests) == (1, 0)
+    b.scheduler.tick()
+    b.run(601)
+    with track(
+        experiment="packs",
+        run="player@0",
+        job="player",
+        seed=0,
+        directory=tmp_path / "producer",
+        storages=[source],
+    ) as run:
+        (run.out / "packs").mkdir()
+        (run.out / "packs/0001.pack").write_bytes(b"games")
+    baseline = MeasuredStorage(source)
+    state = observe(baseline, "packs")
+    assert baseline.requests == 3
+    measured = MeasuredStorage(source)
+    counts = Counting(b.store, b.service)
+    with counts.record():
+        advance(definition, source=measured, rent="l4", mode="queue")
+    assert counts.snapshot().provider == 0
+    assert counts.snapshot().ssh == 0
+    assert [r.id for r in b.scheduler.runs(done=True)] == ["packs/player@0", "packs/belief@0"]
+    consumer = b.scheduler.runs()[-1]
+    assert (measured.listings, measured.requests) == (1, 4)
+    assert consumer.launch.spec.inputs == state.run("player@0").out.inputs("source")
+    assert measured.got.count("packs/player@0/out.json") == 1
+    assert not any("/out/" in key for key in measured.got)
+
+    b.scheduler.tick()
+    (attempt,) = b.scheduler.attempts(consumer.id)
+    replacement = b"replacement games"
+    source.put("packs/player@0/out/packs/0001.pack", replacement)
+    with pytest.raises(EtudeError, match="input_undelivered"):
+        _place_inputs(consumer.launch.spec.inputs, tmp_path / "refused", tmp_path / "artifacts")
+    # Inject the worker's delivery failure into the scheduler's controlled records.
+    b.store.fail_before_start(attempt, "input_undelivered", b.clock())
+    failed = b.scheduler.read(consumer.id)
+    assert (failed.outcome, failed.cause, failed.attempts) == ("lost", "input_undelivered", 1)
+    membership = OutFiles(
+        files=(
+            OutFile(
+                key="out/packs/0001.pack",
+                sha256=sha256(replacement).hexdigest(),
+                size_bytes=len(replacement),
+            ),
+        )
+    )
+    source.put("packs/player@0/" + MEMBERSHIP, membership.model_dump_json().encode())
+    capsys.readouterr()
+    advance(definition, source=source, rent="l4", mode="queue")
+    assert "packs/belief@0  failed; --job belief --seed 0 --resume" in capsys.readouterr().out
+    assert b.scheduler.record(consumer.id) == consumer
+    measured = MeasuredStorage(source)
+    with counts.record():
+        advance(
+            definition,
+            source=measured,
+            rent="l4",
+            mode="queue",
+            job="belief",
+            seed=0,
+            resume=True,
+        )
+    assert counts.snapshot().provider == 0
+    assert counts.snapshot().ssh == 0
+    resumed = b.scheduler.record(consumer.id)
+    assert [r.id for r in b.scheduler.runs(done=True)] == ["packs/player@0", consumer.id]
+    assert resumed.launch.resume_after == 1
+    assert b.scheduler.read(consumer.id).phase == "queued"
+    (given,) = resumed.launch.spec.inputs
+    assert given == observe(source, "packs").run("player@0").out.file("packs/0001.pack").input(
+        "source/packs/0001.pack"
+    )
+    assert given.sha256 != consumer.launch.spec.inputs[0].sha256
+    assert (given.sha256, given.size_bytes) == (sha256(replacement).hexdigest(), len(replacement))
+    assert (measured.listings, measured.requests) == (1, 4)
+    assert not any("/out/" in key for key in measured.got)
+    _place_inputs((given,), tmp_path / "resumed", tmp_path / "artifacts")
+    assert (tmp_path / "resumed/source/packs/0001.pack").read_bytes() == replacement
 
 
 def test_a_pass_leaves_known_runs_alone_and_queues_only_a_new_stage(

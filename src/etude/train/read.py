@@ -37,6 +37,8 @@ from etude.block_file import BlockFile, parse, select
 from etude.carriage import checkpoint_key
 from etude.checkpoints import CheckpointRecord
 from etude.errors import EtudeError
+from etude.identity import stored_owner
+from etude.out import MEMBERSHIP, OutFiles, OutMember
 from etude.records import (
     HOURS_SINCE_START,
     RUNNING_HOURS,
@@ -101,6 +103,12 @@ class RunData(Arrays):
     # Every process that wrote to this run, in start order.
     writers: tuple[RunWriter, ...]
     _read_blocks: Callable[[], tuple[StoredBlock, ...]] = PrivateAttr()
+    _read_out: Callable[[], tuple[OutMember, ...]] = PrivateAttr(default=tuple)
+
+    @cached_property
+    def out(self) -> tuple[OutMember, ...]:
+        """Stored membership read once, without reading any out bytes."""
+        return self._read_out()
 
     @property
     def attempts(self) -> tuple[RunWriter, ...]:
@@ -1013,7 +1021,34 @@ def _read(
         writers=writers,
     )
     data._read_blocks = lambda: _blocks(storage, folders, keys, writers, metrics, prefixes)
+    data._read_out = lambda: _read_out(storage, experiment, run, folders, present)
     return data
+
+
+def _read_out(
+    storage: Storage,
+    experiment: str,
+    run: str,
+    folders: Sequence[str],
+    present: set[tuple[str, str]],
+) -> tuple[OutMember, ...]:
+    for folder in folders:
+        if (folder, MEMBERSHIP) not in present:
+            continue
+        membership = OutFiles.model_validate_json(storage.get(folder + MEMBERSHIP))
+        owner = stored_owner(run, experiment, folder.rstrip("/"))
+        return tuple(
+            OutMember(
+                run=owner,
+                key=member.key,
+                sha256=member.sha256,
+                size_bytes=member.size_bytes,
+                uri=storage.uri(folder + member.key),
+            )
+            for member in membership.files
+            if (folder, member.key) in present
+        )
+    return ()
 
 
 def _blocks(
