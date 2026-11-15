@@ -28,7 +28,7 @@ from functools import cache
 from pathlib import Path
 
 from etude.errors import LauncherError
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import launcher_file, open_home
 from etude.launch.executor import Execution, Executor, local
 from etude.launch.machines import Machines, OwnedMachine, Safeguards
 from etude.launch.providers.lium.api import LiumAPI
@@ -43,7 +43,6 @@ from etude.launch.records import (
     LogSnapshot,
     Machine,
     OnDemand,
-    Pool,
     Quote,
     Standing,
     Status,
@@ -62,8 +61,7 @@ from etude.spec import Job, RunRequest, expand_runs
 
 @cache
 def _open(home: Path) -> Scheduler:
-    fresh = not launcher_file(home).exists()
-    store = Database(launcher_file(home))
+    store = open_home(home)
     here = local(home / "sessions")
     owner = threading.get_ident()
 
@@ -136,9 +134,6 @@ def _open(home: Path) -> Scheduler:
         store,
         {"local": lambda machine: here, "ssh": ssh, "runpod": rented, "vast": rented, "lium": lium},
     )
-    if fresh:  # this computer is offered once; `etude pool off local` withdraws it
-        scheduler.add_pool(Pool(name="local"))
-        store.add_machine(Machine(name="local", pool="local", kind="local"))
     if os.environ.get("ETUDE_SERVER_LOCAL"):
         store.name_server_pool()
     return scheduler
@@ -253,10 +248,9 @@ def standing(
     address = None if local else selected()
     if address:
         return PythonClient(address).standing(experiment, job=job)
-    path = launcher_file(home())
-    if not path.exists():
+    if not launcher_file(home()).exists():
         return ()
-    store = Database(path)
+    store = open_home(home())
     try:
         return Scheduler(store, {}).standing(experiment, job=job)
     finally:

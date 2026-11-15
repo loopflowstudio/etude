@@ -26,7 +26,7 @@ from etude.launch.client import (
     status,
     wait,
 )
-from etude.launch.database import launcher_file
+from etude.launch.database import launcher_file, upgrade
 from etude.launch.records import Pool
 from etude.launch.server import FetchRequest, PythonClient, forward, warning
 from etude.spec import Job, RunRequest, Runtime, Until
@@ -100,6 +100,7 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]
     # can expire during cold imports and leave the remote installation running.
     assert main(["server", "set", "server-alias", "--startup-seconds", "15"]) == 0
     assert not launcher_file(client).exists()
+    upgrade(remote, development=True)
     return client, remote
 
 
@@ -165,6 +166,7 @@ def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, co
     assert (destination / "weights.pt").read_text() == "from 10 to 20\n"
     assert command("server").stdout.startswith("server: server-alias\nlast loop: ")
     assert command("server", "unset").returncode == 0
+    upgrade(client, development=True)
     assert command("pools").stdout == "local  this computer (default)\n"
     assert launcher_file(client).exists()
 
@@ -224,6 +226,7 @@ def test_waiting_work_warns_when_loop_is_absent_or_stale(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    upgrade(tmp_path, development=True)
     scheduler = _open(tmp_path)
     scheduler.turn_pool("local", off=True)
     scheduler.add_pool(Pool(name="waiting"))
@@ -349,6 +352,7 @@ def test_a_machine_that_cannot_be_a_server_is_refused_with_a_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "client"))
+    upgrade(tmp_path / "client", development=True)
     monkeypatch.delenv("ETUDE_SERVER_LOCAL", raising=False)
     scripts = tmp_path / "bin"
     scripts.mkdir()

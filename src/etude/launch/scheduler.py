@@ -1438,6 +1438,7 @@ class Scheduler:
         Every pool goes before any on-demand, so a run that may use both takes a
         free owned machine before anything is rented for it.
         """
+        self._store.check_schema()
         supplies: tuple[Supply, ...] = (*self._store.pools(), *self._store.ondemands())
         for supply in supplies:
             with self._store.lock(supply.name, self._clock) as acquired:

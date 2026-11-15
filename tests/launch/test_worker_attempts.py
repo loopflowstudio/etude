@@ -18,7 +18,7 @@ from etude.cache import Artifact, Cache, Fetched
 from etude.carriage import put_back, restore_set
 from etude.errors import LauncherError
 from etude.jobs import checkpoint_inputs_for, continue_from
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import launcher_file
 from etude.launch.executor import local as local_service
 from etude.launch.records import Machine, Pool, Status
 from etude.launch.scheduler import Scheduler
@@ -31,6 +31,7 @@ from etude.train.report import training
 from etude.train.tracking import track
 from tests.experiments import authored
 from tests.launch.counting import job_text
+from tests.launch.fake import open_database
 from tests.run.storage import MeasuredStorage
 
 TRAIN = """
@@ -44,7 +45,7 @@ printf '{"clocks": {"%s": %s, "wall_time_ms": 1500}}' \\
 
 def local(tmp_path: Path) -> Scheduler:
     service = local_service(tmp_path / "sessions")
-    scheduler = Scheduler(Database(launcher_file(tmp_path)), {"local": lambda held: service})
+    scheduler = Scheduler(open_database(launcher_file(tmp_path)), {"local": lambda held: service})
     scheduler.add_pool(Pool(name="local"))
     scheduler._store.add_machine(Machine(name="local", pool="local", kind="local"))
     return scheduler

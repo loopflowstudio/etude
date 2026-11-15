@@ -20,7 +20,7 @@ import pytest
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch.client import _open
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import Database, launcher_file, upgrade
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Executor
 from etude.launch.machines import MachineRequest, Refused
@@ -44,7 +44,7 @@ from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker.courier import run as run_courier
 from etude.spec import Job
-from tests.launch.fake import Clock
+from tests.launch.fake import Clock, open_database
 from tests.launch.test_runpod_machines import Storage, released, repository, until
 
 OFFER: dict[str, object] = {
@@ -284,7 +284,7 @@ def test_scheduler_retains_uncertain_acquisition_until_owned_deletion(
     clock.now = datetime.now(UTC)
     market.lost_reply = True
     market.inventory_visible = False
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     try:
         scheduler = _scheduler(store, market, storage, clock)
         name = scheduler.rent("4090", hours=1)
@@ -297,7 +297,7 @@ def test_scheduler_retains_uncertain_acquisition_until_owned_deletion(
         # Rebuild the server from retained evidence; process-local state cannot
         # prove ownership or preserve the reservation after a lost create reply.
         store.close()
-        store = Database(launcher_file(tmp_path))
+        store = open_database(launcher_file(tmp_path))
         scheduler = _scheduler(store, market, storage, clock)
         clock.advance(60 if action == "terminate" else 3601)
         if action == "terminate":
@@ -339,7 +339,7 @@ def test_scheduler_releases_confirmed_vast_refusal(tmp_path: Path) -> None:
     market, storage, clock = Marketplace(), Storage(), Clock()
     clock.now = datetime.now(UTC)
     market.offers = [{**OFFER, "end_date": clock.now.timestamp() + 5}]
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     try:
         scheduler = _scheduler(store, market, storage, clock)
         refused = scheduler.rent("4090", hours=1)
@@ -498,6 +498,7 @@ def test_configured_vast_reads_need_no_provider_credentials(
 ) -> None:
     monkeypatch.delenv("VAST_API_KEY", raising=False)
     monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
+    upgrade(tmp_path, development=True)
     scheduler = _open(tmp_path)
     scheduler.add_storage(
         Place(name="evidence", bucket="fixture", prefix="test", provider="s3", region="us-west-2")
@@ -524,7 +525,7 @@ def test_vast_cohort_uses_the_worker_and_retains_outputs_before_deletion(
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "client"))
     market, storage = Marketplace(), Storage()
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     scheduler = _scheduler(store, market, storage, lambda: datetime.now(UTC))
     # Only the remote host boundary is replaced; the scheduler, journal, courier,
     # worker, job subprocess and output retention all use their production paths.
@@ -714,6 +715,7 @@ def test_vast_cli_configuration_is_local(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    upgrade(tmp_path, development=True)
     monkeypatch.delenv("VAST_API_KEY", raising=False)
     assert (
         main(

@@ -9,6 +9,7 @@ import pytest
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch.client import _open, default
+from etude.launch.database import upgrade
 from etude.launch.records import Pool
 from etude.launch.source import checkout, contains, line, retain, source_archive, stored
 from etude.spec import Job, SourcePosition
@@ -39,6 +40,8 @@ def git(repo: Path, *args: str) -> str:
 @pytest.fixture
 def repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    for home in (tmp_path / "home", tmp_path / "launcher"):
+        upgrade(home, development=True)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
     origin, repo = tmp_path / "origin.git", tmp_path / "repo"

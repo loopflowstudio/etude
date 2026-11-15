@@ -1,6 +1,7 @@
 # The launcher
 
 ```sh
+etude database upgrade                              # initialize or explicitly upgrade
 etude pool add lab                                   # machines you own
 etude machine add mini me@mini.local --pool lab      # cost $0, never expires
 etude ondemand add runpod-cpu8 --provider runpod --vcpus 8 --memory-gb 16 \
@@ -995,10 +996,11 @@ Preparation intent is recorded there before the submitting client publishes its
 source. A disconnected submitting client can leave a preparing launch; it is
 reported as unresolved and does not authorize automatic resubmission.
 
-This prototype schema is version 2. As with other launcher schema changes, an
-older database is refused; there is no migration path in the prototype.
-
 ## The server
+
+The server holds the database and matches waiting runs to machines. No
+separate server is required: without a setting, CLI commands use this
+computer's database and match while they run.
 
 ```sh
 etude server                         # selection, last loop time, waiting-work warning
@@ -1026,7 +1028,10 @@ It is never advertised as the client's local machine.
 client's own package over SSH, where it and its environment are kept by digest under
 `ETUDE_HOME/programs`, and every later command runs that exact version. The two
 sides therefore cannot be different versions; after the client changes, the
-next command sends the new code first. The server needs Python 3.12, uv
+next command sends the new code first. Commands never upgrade the server's
+launcher file: when it needs migrations, they refuse and you run
+`etude database upgrade` on the server itself ([Upgrading Etude](#upgrading-etude)).
+The server needs Python 3.12, uv
 and working SSH keys. If it cannot take the program, `server set` fails
 with the reason and the setting is not changed.
 
@@ -1067,6 +1072,80 @@ pass has completed in 30 seconds. Slow provider operations may also cause this
 warning. `wait` still exits when its runs finish. Workers read their own disk or
 bucket inboxes; they never need a reachable address for the server.
 
+## Upgrading Etude
+
+```sh
+uv sync --upgrade-package etude-sdk
+etude database status
+etude database upgrade
+etude status
+```
+
+Package installation and database upgrade are separate actions. Reads and ordinary
+library opens never initialize, migrate or select a different database. All
+compatible clients and experiments share `$ETUDE_HOME/launcher.sqlite` (default
+`~/.etude`). Workers and their deadline guardians keep running during an upgrade.
+
+`database status` reads local schema evidence without credentials, network or
+record changes. SQLite provides a consistent snapshot of committed data, including
+WAL data while compatible clients write. Inspection uses normal SQLite sidecar
+coordination and never copies the database.
+`database upgrade [--timeout SECONDS]` is an explicit local wait; its default
+allowance is unlimited. Python uses the same implementation:
+
+```python
+from pathlib import Path
+
+from etude.launch.database import inspect, upgrade
+
+home = Path.home() / ".etude"
+state = inspect(home)
+result = upgrade(home, timeout=None)
+```
+
+`Schema` names the canonical file, applied and pending migrations and any
+compatibility problem. `Upgrade` records backups, applied migrations, exports
+and reader requirements. Existing files are backed up before SQL changes;
+recovery snapshots are retained without automatic pruning. A failed migration
+rolls back its transaction. Rerun the explicit upgrade after resolving the error.
+
+A backup restores database facts, not provider state: stop scheduling and
+reconcile live machines and attempts before restoring or resuming any queue.
+Recovery snapshots are never scheduling inputs.
+
+### Compatible clients and development
+
+Additive expansion retains old columns and defaults, so an older compatible
+client can continue using the same file. Breaking upgrades raise the reader
+floor; fresh clients refuse, and stale writers and scheduling passes stop before
+new actions. Requests already in flight can still complete and need reconciliation.
+A managed server hands over only to a validated installed program; otherwise it
+exits with a restart instruction. It never installs code during handover.
+
+Merged migration names and checksums travel in wheels and server archives.
+A merged-main build can explicitly upgrade an operational home before release.
+Unmerged or unproven migrations cannot advance operational state. Test them with
+`etude database upgrade --development` in an explicitly empty fixture home;
+this is never an alternative home for real experiments or inherited work.
+There are no automatically selected copies. Snapshots are validation inputs,
+never independent queues to schedule.
+
+### Writing a migration
+
+Add one named SQL file under `src/etude/launch/migrations/` with dependencies:
+
+```sql
+-- after: run_resume_and_writers
+CREATE INDEX runs_name ON runs(json_extract(spec, '$.name'), seq);
+```
+
+Merged migrations are immutable. `scripts/check_migrations.py` checks main's
+files as well as released checksums. Release metadata adds version names and
+reader floors. A `-- breaks: reason` header declares incompatible stored JSON
+changes even when DDL is additive. Prefer compatible expansion; a destructive
+contraction must name its preceding expansion and durably export superseded
+facts before SQL commits. Preserve shipped worker journal decoding.
+
 ## Safeguards and bills
 
 `etude ondemands` lists each on-demand's safeguards. Providers declare lifetime
@@ -1104,17 +1183,19 @@ defines it, by its full path, and relative imports are a lint error:
 | `from etude.jobs import ExperimentState` | what an experiment's runs have stored, as declarations are given it |
 | `from etude.spec import Job, RunRequest` | a command job, and one run of any job |
 | `from etude.launch.client import queue, launch, status, wait, ...` | the calls a script makes; they go to the server when one is set |
-| `from etude.launch.database import Database` | the SQLite records in `launcher-<schema>.db` |
+| `from etude.launch.database import Database` | validate and open existing `launcher.sqlite` records |
+| `from etude.launch.database import inspect, upgrade` | local schema evidence and the explicit upgrade boundary |
 | `from etude.launch.schemas import Packet, Work, Progress` | frozen worker messages |
 | `from etude.launch.executor import Executor` | machine acquisition, startup and journal composition |
 | `from etude.launch.scheduler import Scheduler` | the owner of one database: queueing, admission, matching runs to machines |
 
 Records are frozen Pydantic models, constructed with named fields:
 `Job(command="./simulate", max_hours=2)` and `RunRequest(job=job, seed=1)`.
-Use `model_dump_json()` for JSON and `model_validate_json()` to load it. Imports sit at the top of each module, so every command, including `--help`,
-loads the whole launcher: 33 modules and Pydantic, about 70 ms measured on
-2026-10-13. A test pins the module count. Each remote command imports client dependencies once
-in its installed environment.
+Use `model_dump_json()` for JSON and `model_validate_json()` to load it.
+Entry points import only the selected command. CLI help loads neither Pydantic
+nor the scheduler; workers do not import the scheduler. Tests pin import counts.
+Each remote command imports client dependencies once in its installed environment.
+
 
 ## Launching from Python
 
@@ -1301,8 +1382,8 @@ one, so name the job the same (`TrainingJob(name="ppo", ...)`) and the run is
 recognised as `ppo/ppo@0` or `ppo/ppo@1` rather than trained again. Commands
 go on accepting the stored spelling.
 
-The launcher database is a new version: an older file is refused and left
-untouched, so let its runs finish under the version that made it. A server
+The launcher database needs an explicit `etude database upgrade`
+([Upgrading Etude](#upgrading-etude)); remote workers keep running through it. A server
 selection is not carried over; run `etude server set` again. A stored
 `run.json` that names a cohort still reads.
 
@@ -1729,10 +1810,8 @@ Karpenter and SkyPilot call the third a provisioner.
   knows nothing of jobs or runs. Rented machines start themselves; owned
   hosts use their configured connection.
 
-The SQLite file is `$ETUDE_HOME/launcher-<schema>.db` (default `~/.etude`), one
-per schema version: the launcher never migrates, so a client of another version
-keeps its own file, rentals and records beside this one. Delete an old version's
-file once nothing of that version is running. Versioned
+The SQLite file is `$ETUDE_HOME/launcher.sqlite` (default `~/.etude`), carried
+across releases by migrations; see [Upgrading Etude](#upgrading-etude). Versioned
 writes claim each session once. A lost create reply is looked up, never
 repeated; if the provider still has no such machine at the rental's deadline,
 or when it is terminated, it is recorded as never acquired: it costs nothing and
@@ -1743,9 +1822,6 @@ provider machine is gone. Infrastructure losses retry up to `max_attempts`,
 including confirmed loss after code started. If startup intent reached storage
 but an attempt claim did not, its start is uncertain and it is not retried.
 
-The database has no migrations while the launcher is a prototype. The file
-carries a schema version; a file written by another version is refused with a
-message naming it, and is left untouched. Move or delete it to start again.
 Tables are `machines`, `sessions`, `rentals` (one per rented machine, keyed by
 machine) and `attempts`. What the provider said about making and deleting a
 rented machine is stored on that machine's one session and read as Machine.
@@ -2322,9 +2398,6 @@ current attempt, or its allocation time before any write is observed. Failed
 requests and successful reads do not reset it. The scheduler may simply have
 stopped collecting evidence; use the worker log to distinguish that from a
 storage outage. Completed and local-only attempts have no delivery-age warning.
-The launcher database schema is version 20; files from other versions are refused rather
-than modified. Preserve an old database with its matching Etude version when
-reading historical evidence.
 
 Finite HTTP operations also bound waiting for the complete response, even when
 a connection keeps streaming bytes. Expiry leaves the in-flight outcome unknown:
@@ -2503,10 +2576,7 @@ is not by itself proof of billable internet egress. Reconciliation does not
 change observed transport totals or turn them into billed amounts.
 
 Adoption requires the SDK revision containing these APIs on both launcher
-and worker; generated archives include the same revision automatically. The
-launcher uses that same schema and deliberately refuses older prototype
-files. Preserve the old database and retained journals before choosing a fresh
-`ETUDE_HOME`; this change does not migrate or modify live experiment files.
+and worker; generated archives include the same revision automatically.
 Use a fresh `ETUDE_HOME` for offline integration proof and install the reviewed
 PR commit with `uv add 'etude-sdk @ git+https://github.com/loopflowstudio/etude@COMMIT'`.
 

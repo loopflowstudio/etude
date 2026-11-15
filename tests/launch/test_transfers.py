@@ -28,7 +28,7 @@ from etude import cache as engine
 from etude.cache import Artifact, Cache, Content, Fetched
 from etude.deadline import limit_time, remaining
 from etude.launch import client
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import launcher_file
 from etude.launch.logging import log_to
 from etude.launch.providers import bootstrap
 from etude.launch.records import Output, Storage
@@ -59,7 +59,7 @@ from etude.spec import Job
 from etude.storage import S3Storage
 from etude.storage_timeout import StorageUnavailable, socket_timeout
 from tests.launch.counting import Counting, Counts
-from tests.launch.fake import bench
+from tests.launch.fake import bench, open_database
 from tests.run.storage import CountedClient
 
 
@@ -779,7 +779,7 @@ def test_completed_workload_before_and_after(
     # Delete the simulated worker and reopen the database: reports need only
     # retained evidence, with no provider/SSH/git/artifact effects.
     b.service.sessions.clear()
-    store = Database(launcher_file(tmp_path))
+    store = open_database(launcher_file(tmp_path))
     counting = Counting(store, b.service)
     restored = Scheduler(store, {})
     requests_before = http.requests

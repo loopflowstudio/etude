@@ -12,7 +12,7 @@ from etude.cli import main
 from etude.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.launch.client import launch, queue, wait
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import launcher_file, upgrade
 from etude.launch.errors import LaunchError
 from etude.launch.machines import Refused
 from etude.launch.records import Offer, OnDemand, Pool, Stale
@@ -22,7 +22,7 @@ from etude.spec import Job, RunRequest, Until
 from etude.train.records import ParentRun, Step
 from etude.train.tracking import track
 from tests.experiments import authored
-from tests.launch.fake import L4, bench
+from tests.launch.fake import L4, bench, open_database
 
 
 def job() -> Job:
@@ -38,7 +38,7 @@ def test_queue_grows_after_restart(tmp_path: Path) -> None:
     b.store._db.execute("UPDATE runs SET queued=1 WHERE id=?", (run,))
     b.scheduler.set_ondemand_max("l4", 1)
     reopened = Scheduler(
-        Database(launcher_file(tmp_path)), {"runpod": lambda held: b.service}, b.clock
+        open_database(launcher_file(tmp_path)), {"runpod": lambda held: b.service}, b.clock
     )
     reopened.tick()
     assert reopened.read(run).phase == "setting_up"
@@ -151,6 +151,7 @@ def test_public_queue_functions_run_locally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    upgrade(tmp_path, development=True)
     (one,) = queue(Job(command="echo queued", max_hours=0.01, max_usd=Decimal(1)))
     assert wait(one, every=0.01, timeout=10)[0].outcome == "succeeded"
     ids = queue(Job(command="true", max_hours=0.01, max_usd=Decimal(1)).runs(1, 2))
@@ -313,7 +314,7 @@ def test_partial_launch_cleans_up_without_executable_work(
 def test_launch_lock_fences_rivals_and_keeps_other_pools_working(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=1)
     b.scheduler.add_machine("shed", "owned")
-    other = Scheduler(Database(launcher_file(tmp_path)), b.scheduler._services, b.clock)
+    other = Scheduler(open_database(launcher_file(tmp_path)), b.scheduler._services, b.clock)
     create = b.service.create
     queued: list[str] = []
 
@@ -339,7 +340,7 @@ def test_launch_lock_fences_rivals_and_keeps_other_pools_working(tmp_path: Path)
 
 def test_expired_launch_cannot_commit_and_orphan_is_cleaned(tmp_path: Path) -> None:
     b = bench(tmp_path)
-    other = Scheduler(Database(launcher_file(tmp_path)), b.scheduler._services, b.clock)
+    other = Scheduler(open_database(launcher_file(tmp_path)), b.scheduler._services, b.clock)
     create = b.service.create
 
     def delayed(packet: Packet) -> str:

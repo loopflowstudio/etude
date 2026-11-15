@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from etude.errors import LauncherError
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import launcher_file
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.machines import MachineRequest
 from etude.launch.providers.program import boot_source
@@ -23,6 +23,7 @@ from etude.launch.records import Provider as Account
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
 from tests.launch.counting import Counting, Counts
+from tests.launch.fake import open_database
 from tests.launch.test_runpod_machines import Storage
 
 POD = {
@@ -241,7 +242,11 @@ def test_bills_are_whole_hours_for_this_pod_only() -> None:
     assert api.bills(fact, datetime(2026, 10, 11, 12, 50, tzinfo=UTC)) == ()
 
 
-def test_stock_create_counts_package_reuse_without_waiting_for_ssh(tmp_path: Path) -> None:
+def test_stock_create_counts_package_reuse_without_waiting_for_ssh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Installed programs carry fixed provenance; counts must not depend on local Git history.
+    monkeypatch.setattr("etude.launch.providers.package.frontier", lambda root: b"{}")
     storage = Storage()
     provider = Provider(
         replies={
@@ -249,7 +254,7 @@ def test_stock_create_counts_package_reuse_without_waiting_for_ssh(tmp_path: Pat
             "POST pods": (200, POD),
         }
     )
-    counting = Counting(Database(launcher_file(tmp_path)))
+    counting = Counting(open_database(launcher_file(tmp_path)))
     bucket = Bucket(
         "journal",
         "us-west-2",
@@ -316,8 +321,10 @@ def test_stock_create_counts_package_reuse_without_waiting_for_ssh(tmp_path: Pat
 
 
 def test_one_cpu_rental_quotes_creates_and_deletes_with_pinned_provider_calls(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Installed programs carry fixed provenance; counts must not depend on local Git history.
+    monkeypatch.setattr("etude.launch.providers.package.frontier", lambda root: b"{}")
     cpu_pod = {**POD, "cost": 0.24}
     provider = Provider(
         replies={
@@ -330,7 +337,7 @@ def test_one_cpu_rental_quotes_creates_and_deletes_with_pinned_provider_calls(
             "DELETE pods/abc123": (200, None),
         }
     )
-    counting = Counting(Database(launcher_file(tmp_path)))
+    counting = Counting(open_database(launcher_file(tmp_path)))
     bucket = Bucket(
         "journal",
         "us-west-2",

@@ -18,6 +18,7 @@ import pytest
 
 from etude.cli import main
 from etude.launch.client import default
+from etude.launch.database import upgrade
 from etude.launch.records import Status
 from etude.launch.scheduler import Scheduler
 from etude.launch.worker.prepared import Receipt, evict, home
@@ -103,6 +104,7 @@ def test_status_and_usage_say_what_a_second_attempt_reused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
     repo, count = _repo(tmp_path), tmp_path / "count"
     weights = _input(tmp_path / "home", "weights", b"w" * 1000)
     job = _job(repo, count, inputs=(weights,))

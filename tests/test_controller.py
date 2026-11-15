@@ -19,6 +19,7 @@ from etude.eval.tournament import StoredRuns
 from etude.experiment import observe
 from etude.jobs import EvalJob, Evaluation, ExperimentState, TrainingJob, with_experiment
 from etude.launch import client
+from etude.launch.database import upgrade
 from etude.launch.records import Pool
 from etude.local import _place_inputs
 from etude.out import MEMBERSHIP, OutFile, OutFiles
@@ -184,7 +185,7 @@ def test_a_pass_leaves_known_runs_alone_and_queues_only_a_new_stage(
     measured = MeasuredStorage(source)
     with counts.record():
         advance(definition, source=measured, pool="waiting", mode="queue", max_usd=Decimal(3))
-    assert counts.snapshot() == Counts(database=38)
+    assert counts.snapshot() == Counts(database=53)
     assert measured.listings == 1
     assert [r.id for r in b.scheduler.runs()] == ["two/base@0", "two/base@1", "two/fine@0"]
     assert "two/base@0  finished" in capsys.readouterr().out
@@ -279,6 +280,7 @@ def test_cli_drives_training_stages_and_eval_through_one_local_slot(
 ) -> None:
     home = tmp_path / "home"
     monkeypatch.setenv("ETUDE_HOME", str(home))
+    upgrade(home, development=True)
     file = (
         checkout(
             tmp_path / "repo",
@@ -467,7 +469,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     assert re.search(r"eval free: 0 new, [1-9]\d* running", second.out)
     assert "launched_pass_failed" in second.err
     assert len(b.scheduler.runs(done=True)) == 3
-    assert first_counts == Counts(database=39)
+    assert first_counts == Counts(database=54)
     assert second_counts == Counts(database=9)
     assert main(["launch", *args[1:], "--quote"]) == 0
     quoted = capsys.readouterr()
@@ -564,7 +566,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         if command == "eval":
             assert observed_counts == Counts(git=2, database=2)
         elif command == "queue":
-            assert observed_counts == Counts(git=12, database=29)
+            assert observed_counts == Counts(git=12, database=44)
         else:
             assert observed_counts.model_copy(update={"database": 0}) == Counts(git=13)
         assert all(not key.endswith("weights.pt") for key in measured.got)
@@ -747,6 +749,7 @@ def test_a_launch_cancelled_before_its_first_save_resumes_here(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
     b = bench(tmp_path)
     b.scheduler.add_pool(Pool(name="waiting"))
     monkeypatch.setattr(client, "_client", lambda: b.scheduler)
