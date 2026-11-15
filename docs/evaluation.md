@@ -1250,10 +1250,11 @@ PolicyKey(experiment="tla-frontier", job="small")  # the same policy, by the def
   (`tla-frontier/small@0/checkpoints/updates-00000500`). A nondefault role
   adds `/roles/ROLE` after the run, including when two roles reference the
   same file; give `role=` on the reference or its `PolicyKey`. A player is a
-  checkpoint and its `Inference`. Results are stored under those keys, so
-  the same players meeting under the same config are one match in every
-  experiment that seats them, and any query that reads several experiments'
-  eval runs pools them. Each experiment's pass and its database still read
+  checkpoint or an author's composition of players; its key includes the
+  wrapper's type and fields with resolved checkpoint keys. Results are stored
+  under those keys, so the same players meeting under the same config are one
+  match in every experiment that seats them, and any query that reads several
+  experiments' eval runs pools them. Each experiment's pass and its database still read
   only that experiment's eval runs: a match another experiment delivered is
   played again here.
 - **Runs of two experiments never collide.** `tla-frontier/small@0` and
