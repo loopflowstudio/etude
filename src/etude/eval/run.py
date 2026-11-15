@@ -59,7 +59,7 @@ from etude.eval.records import (
     outcomes,
     player_checkpoints,
 )
-from etude.eval.resources import active_games
+from etude.eval.resources import Allocation, allocate
 from etude.eval.result import EvalResult as EvalResult
 from etude.eval.result import Result as Result
 from etude.eval.result import Row
@@ -458,7 +458,7 @@ class Playing:
 def play_together(
     plays: Sequence[Playing],
     *,
-    memory_gb: float | None = None,
+    allocation: Allocation | None = None,
     agent_process: AgentProcess | None = None,
 ) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
     """Play tournaments on one pool; loader failures follow every seated checkpoint.
@@ -574,11 +574,9 @@ def play_together(
                 flush=True,
             )
 
-    workers = active_games(
-        sum(len(each.pending) for each in plays),
-        agents=any(each.agents for each in plays),
-        memory_gb=memory_gb,
-    )
+    if allocation is None:
+        allocation = allocate(sum(len(each.pending) for each in plays), agents=False)
+    workers = allocation.games
     try:
         with _terminable():
             if workers > 0:

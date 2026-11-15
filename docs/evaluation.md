@@ -773,11 +773,17 @@ one on a GPU, or weights too large to hold in every game process.
   again if a game asks for it. Matches are ordered so those sharing
   checkpoints are played together (see "Order" above). The bound counts host
   memory, not a GPU's: on a small device, set it to what the device holds.
-- **Active games are Etude's to decide.** One game per CPU the run may use,
-  by affinity and container quota, less one for the agent process; never
-  more than there are matches left, or than fit in memory beside the agents
-  at 256 MiB a game. A game process gets one thread, the agent process the
-  rest. The line that starts the agents says how many.
+- **Active games are Etude's to decide.** Etude divides CPUs available by
+  affinity and container quota between active games and the agent process,
+  reserving one eighth (rounded up) for inference. Each game gets one thread.
+  Pending matches and memory beside the agents (256 MiB per game) can reduce
+  concurrency; unused game CPUs go to inference. A single CPU shares a game
+  and inference. Jobs without agents can use every CPU for games.
+  Before importing the loader, Etude sets `OMP_NUM_THREADS`, `MKL_NUM_THREADS`
+  and the other model library thread environment variables to the inference
+  budget. The loader must honor this budget when configuring its library
+  (for Torch, `torch.set_num_threads(int(os.environ["OMP_NUM_THREADS"]))`).
+  Startup reports both active games and inference threads.
 - **Shared by jobs that declare the same agents.** Eval jobs of one pass
   whose `Agents` are equal share a run and its agent process. Jobs with
   different `Agents`, and jobs with none, go in separate eval runs.

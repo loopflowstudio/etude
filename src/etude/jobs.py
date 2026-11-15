@@ -58,7 +58,7 @@ from etude.eval.records import (
     relocate_player,
     select_policy,
 )
-from etude.eval.resources import resources
+from etude.eval.resources import allocate, resources
 from etude.eval.result import EvalResult, Result, Tables
 from etude.eval.run import (
     EvalRun,
@@ -739,6 +739,11 @@ def hold_group(
             raise EtudeError("incompatible_eval_agents", 422)
         agent_process: AgentProcess | None = None
         definition = next((spec.agents for spec, _ in pending if spec.agents), None)
+        allocation = allocate(
+            sum(len(active.matches) - len(active.done) for _, active in pending),
+            agents=definition is not None,
+            memory_gb=definition.memory_gb if definition else None,
+        )
         agent_lifetime = lifetime.enter_context(ExitStack())
         try:
             if definition is not None:
@@ -748,7 +753,7 @@ def hold_group(
                         checkout,
                         artifacts,
                         [spec.tournament.name for spec, _ in pending],
-                        sum(len(active.matches) - len(active.done) for _, active in pending),
+                        allocation,
                     )
                 )
             plays = [
@@ -764,7 +769,7 @@ def hold_group(
             ]
             outcomes = play_together(
                 plays,
-                memory_gb=definition.memory_gb if definition else None,
+                allocation=allocation,
                 agent_process=agent_process,
             )
             if agent_process is not None:

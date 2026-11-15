@@ -30,7 +30,7 @@ from etude.eval.game import Execution, _performance
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Code, Config, Held, Match, RoundRobin
-from etude.eval.resources import active_games, available_cpus, memory_bytes, resources
+from etude.eval.resources import allocate, available_cpus, memory_bytes, resources
 from etude.eval.result import Tables
 from etude.eval.run import Terminated
 from etude.eval.tournament import evaluating, played
@@ -54,6 +54,7 @@ from etude.storage import DirectoryStorage, default_root
 from etude.train.tracking import track
 from examples.agent_game import checkpoint, play
 from examples.agent_models import load
+from tests.eval.thread_budget import load_checkpoint
 from tests.launch.counting import Counting, Counts, job_text
 from tests.launch.fake import bench
 from tests.test_jobs import checkout
@@ -368,7 +369,7 @@ class OfflineStorage(DirectoryStorage):
 def test_two_tournaments_share_loaded_agents_and_resume_without_starting_them(
     tmp_path: Path, capfd: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     # Each game asks one row per seat in turn; two concurrent games fill every
     # two-row batch, so batches flush on size, never on the delay.
@@ -451,14 +452,38 @@ def test_play_arity_and_removed_workers_are_refused() -> None:
         EvalJob.model_validate({**job("bad", None).model_dump(), "workers": 2})
 
 
-def test_active_games_respects_cpu_and_declared_memory(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
-    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
-    assert active_games(20, agents=False) == 8
-    assert active_games(20, agents=True) == 4
-    assert active_games(20, agents=True, memory_gb=1.5) == 2
-    assert active_games(1, agents=True) == 1
-    assert active_games(0, agents=True) == 0
+@pytest.mark.parametrize(
+    ("cpus", "pending", "agents", "memory_gb", "games", "threads"),
+    [
+        (32, 64, True, None, 28, 4),
+        (16, 64, True, None, 14, 2),
+        (3, 20, True, None, 2, 1),
+        (2, 20, True, None, 1, 1),
+        (8, 20, False, None, 8, 0),
+        (8, 20, True, None, 4, 4),
+        (8, 20, True, 1.5, 2, 6),
+        (8, 1, True, None, 1, 7),
+        (1, 20, True, None, 1, 1),
+        (1, 20, False, None, 1, 0),
+        (8, 0, True, None, 0, 8),
+        (8, 20, True, 2.0, 1, 7),
+    ],
+)
+def test_allocation_respects_cpu_pending_and_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    cpus: int,
+    pending: int,
+    agents: bool,
+    memory_gb: float | None,
+    games: int,
+    threads: int,
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
+    monkeypatch.setattr(
+        "etude.eval.resources.memory_bytes", lambda: 16 * 1024**3 if cpus >= 16 else 2 * 1024**3
+    )
+    allocation = allocate(pending, agents=agents, memory_gb=memory_gb)
+    assert (allocation.games, allocation.threads) == (games, threads)
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -481,15 +506,20 @@ def test_temporary_files_work_after_game_scratch_is_removed(
         assert Path(after).is_dir()
 
 
-@pytest.mark.parametrize(("memory_gb", "concurrent"), [(None, 3), (1.75, 1)])
+@pytest.mark.parametrize(
+    ("cpus", "memory_gb", "concurrent"),
+    [(1, None, 1), (4, None, 3), (4, 1.75, 1), (8, None, 3)],
+)
 def test_group_execution_respects_declared_agent_memory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
+    cpus: int,
     memory_gb: float | None,
     concurrent: int,
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
+    measurements = iter([cpus])
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: next(measurements))
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     outstanding: list[int] = []
 
@@ -504,11 +534,18 @@ def test_group_execution_respects_declared_agent_memory(
         return wait(signals, timeout=timeout, return_when=return_when)
 
     monkeypatch.setattr("etude.eval.run.wait", count_games)
-    agents = Agents(load=load, memory_gb=memory_gb)
+    agents = Agents(load=load_checkpoint, memory_gb=memory_gb)
     selected = group(*(job(name, agents) for name in ("one", "two", "three")))
     assert [result.played for result in hold_group(selected, directory=tmp_path)] == [1, 1, 1]
     assert max(outstanding) == concurrent
-    assert f"{concurrent} games at a time" in capfd.readouterr().err
+    assert (
+        f"{concurrent} games at a time; {max(1, cpus - concurrent)} inference threads"
+        in capfd.readouterr().err
+    )
+    batches = json.loads((tmp_path / "grouped/artifacts/agents/batches.json").read_bytes())
+    assert sum(batch["loads"] for batch in batches) == 2
+    budgets = json.loads((tmp_path / "grouped/artifacts/agents/threads.json").read_text())
+    assert set(budgets.values()) == {str(max(1, cpus - concurrent))}
     for spec in selected.evaluations:
         found = played(
             spec.tournament, experiment="grouped", enter=spec.entrants, directory=tmp_path
@@ -1089,7 +1126,7 @@ def asks_or_returns(match: Match[dict[str, str]], agents: Sequence[Agent]) -> Ta
 def test_loader_failure_reaches_undispatched_matches_across_tournaments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry: bool, in_flight: bool
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3 if in_flight else 2)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4 if in_flight else 2)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     agents = Agents(load=selective_retry_load if retry else selective_load)
     jobs = [

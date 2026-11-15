@@ -25,7 +25,7 @@ from queue import SimpleQueue
 from typing import TYPE_CHECKING, Protocol, cast
 
 from etude.errors import RetryRequested, explain
-from etude.eval.resources import active_games, available_cpus, memory_bytes
+from etude.eval.resources import Allocation, memory_bytes
 
 if TYPE_CHECKING:
     from etude.checkpoints import CheckpointRef
@@ -209,7 +209,7 @@ def running_agents(
     checkout: str | None,
     artifacts: Path,
     tournaments: Sequence[str],
-    pending: int,
+    allocation: Allocation,
 ) -> Iterator[AgentProcess]:
     address = str(Path(os.environ["ETUDE_SCRATCH_DIR"], "agents.sock"))
     context = multiprocessing.get_context("spawn")
@@ -219,7 +219,6 @@ def running_agents(
         if definition.memory_gb is not None
         else memory_bytes() // 2
     )
-    games = active_games(pending, agents=True, memory_gb=definition.memory_gb)
     process = context.Process(
         target=_run,
         args=(
@@ -230,7 +229,7 @@ def running_agents(
             definition.max_batch,
             definition.max_delay_seconds,
             memory,
-            max(1, available_cpus() - games),
+            allocation.threads,
             child,
             str(artifacts),
         ),
@@ -270,7 +269,7 @@ def running_agents(
             raise RetryRequested("agent process exited during startup") from error
         observer.start()
         print(
-            f"etude: agents: started for {', '.join(tournaments)}; {games} games at a time",
+            f"etude: agents: started for {', '.join(tournaments)}; {allocation.games} games at a time; {allocation.threads} inference threads",
             file=sys.stderr,
             flush=True,
         )

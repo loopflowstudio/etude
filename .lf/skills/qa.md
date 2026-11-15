@@ -396,6 +396,14 @@ in one tool call can exceed its timeout on a busy Mac. Judge a suspected hang fr
 timestamps under `ETUDE_HOME/track/NAME/artifacts/agents/` and the run's `blocks/`,
 not from `ps` elapsed times.
 
+Retain the startup game count and inference thread count with protocol comparison
+results. Controlled CPU/memory checks cover one CPU, fewer pending games than
+CPUs, memory-limited games, agentless games and multiple tournaments; verify
+one shared allocation reaches dispatch and the loading module. Keep scalar
+Torch threads at one; grouped Torch loading honors `OMP_NUM_THREADS` before
+model execution. Use the unchanged frozen panel, retain its whole-arm timer
+before querying reports, and compare complete action sequences.
+
 ## Etude: explicit launcher upgrades
 
 Use an empty lab `ETUDE_HOME` and explicitly run `etude database upgrade

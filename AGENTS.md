@@ -251,6 +251,9 @@ Eval vocabulary: an `Agent` is anything with `act(rows)`; `Agents` declares
 wrappers are frozen author records; checkpoint leaves share loading and batches.
 The agent process holds checkpoint agents; game processes build wrappers and play; say neither "server", "worker" nor "policy"
 for any of these ("policy" is reserved for policy keys).
+Etude sets the model-library thread environment before importing the agent
+loading module. Loaders must honor that inference budget when configuring
+their library; each game process keeps one thread.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any

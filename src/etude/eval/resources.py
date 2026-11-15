@@ -1,7 +1,8 @@
 """Process environment for game and agent processes.
 
-`resources` divides the CPUs available to this container, supplies temporary
-fast scratch, and restores the caller's environment when the group finishes.
+`allocate` returns one CPU Allocation for agent startup and game dispatch.
+`resources` supplies temporary fast scratch and restores the caller's
+environment when the group finishes.
 Observations are kept in the run's durable artifact folder by the group owner.
 """
 
@@ -11,6 +12,7 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 THREAD_VARIABLES = (
@@ -84,12 +86,27 @@ def memory_bytes() -> int:
     return physical
 
 
-def active_games(pending: int, *, agents: bool, memory_gb: float | None = None) -> int:
+@dataclass(frozen=True)
+class Allocation:
+    games: int
+    threads: int
+
+
+def allocate(pending: int, *, agents: bool, memory_gb: float | None = None) -> Allocation:
+    """Reserve one eighth of CPUs for inference; small game sets return unused CPUs.
+
+    A single CPU is shared by one game and inference. Memory and pending work
+    may reduce games further, but never leave queued work with zero capacity.
+    """
+    cpus = available_cpus()
     memory = memory_bytes()
     held = int(memory_gb * 1024**3) if memory_gb is not None else memory // 2 if agents else 0
-    return min(
-        pending, max(1, available_cpus() - int(agents)), max(1, (memory - held) // GAME_BYTES)
+    games = min(
+        pending,
+        max(1, cpus - max(1, (cpus + 7) // 8)) if agents else cpus,
+        max(1, (memory - held) // GAME_BYTES),
     )
+    return Allocation(games=games, threads=max(1, cpus - games) if agents else 0)
 
 
 @contextmanager
