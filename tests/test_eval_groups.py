@@ -3,12 +3,15 @@
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import Future, wait
 from decimal import Decimal
 from multiprocessing import active_children, get_context
+from multiprocessing.connection import Connection
+from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 
 import pytest
@@ -19,9 +22,9 @@ from etude.checkpoints import CheckpointRef
 from etude.controller import _eval_cpus, advance
 from etude.declarations import Experiment, read_experiment
 from etude.errors import EtudeError, LauncherError, RetryRequested
-from etude.eval.agents import Agent, Answer, Request
+from etude.eval.agents import Agent, AgentConnection, Answer, Request
 from etude.eval.batching import _Batches
-from etude.eval.game import Execution
+from etude.eval.game import Execution, _performance
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Code, Config, Held, Match, RoundRobin
@@ -374,12 +377,23 @@ def test_two_tournaments_share_loaded_agents_and_resume_without_starting_them(
     assert [{row["tournament"] for row in batch["rows"]} for batch in batches] == [
         {"ladder", "gauntlet"}
     ] * 2
+    protocols = [
+        json.loads(path.read_text())
+        for path in (tmp_path / "grouped/artifacts/agents").glob("protocol-*.json")
+    ]
+    assert len(protocols) == 2
+    assert sum(p["requests"] for p in protocols) == 4
+    assert sum(p["answers"] for p in protocols) == 4
+    assert sum(sum(p["latency_buckets"]) for p in protocols) == 4
+    assert sum(batch["forward_calls"] for batch in batches) == 2
+    assert sum(batch["loads"] for batch in batches) == 2
     log = capfd.readouterr().err
     assert log.count("agents: started") == 1
     assert log.count("agents: loaded") == 2
     assert "2 checkpoints loaded, 4 rows" in log
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [0, 0]
     assert "agents: started" not in capfd.readouterr().err
+    assert len(list((tmp_path / "grouped/artifacts/agents").glob("protocol-*.json"))) == 2
     db = statsdb("grouped", tmp_path)
     try:
         assert db.sql("select score from scores").fetchall() == [(2,)] * 4
@@ -563,11 +577,31 @@ def wrong_answers(checkpoint: CheckpointRef) -> Agent:
     return WrongAnswers()
 
 
-def test_bad_batch_answers_fail_all_asking_tournaments(tmp_path: Path) -> None:
-    agents = Agents(load=wrong_answers, max_delay_seconds=0.25)
+class UnpicklableAnswers:
+    def act(self, rows: Sequence[object]) -> Sequence[object]:
+        return [lambda: None for _ in rows]
+
+
+def unpicklable_answers(checkpoint: CheckpointRef) -> Agent:
+    return UnpicklableAnswers()
+
+
+@pytest.mark.parametrize("loader", [wrong_answers, unpicklable_answers])
+def test_bad_batch_answers_fail_all_asking_tournaments(
+    tmp_path: Path, loader: Callable[[CheckpointRef], Agent]
+) -> None:
+    agents = Agents(load=loader, max_delay_seconds=0.25)
     selected = group(job("one", agents), job("two", agents))
     with pytest.raises(EtudeError, match="match_failed"):
         hold_group(selected, directory=tmp_path)
+    protocols = [
+        json.loads(path.read_text())
+        for path in (tmp_path / "grouped/artifacts/agents").glob("protocol-*.json")
+    ]
+    assert len(protocols) == 2
+    assert [p["requests"] for p in protocols] == [1, 1]
+    assert [p["answers"] for p in protocols] == [1, 1]
+    assert all(sum(p["latency_buckets"]) == 1 for p in protocols)
     db = statsdb("grouped", tmp_path)
     try:
         assert db.sql("select state, retry from matches").fetchall() == [("failed", False)] * 2
@@ -637,6 +671,7 @@ from etude.eval.result import Tables
 def play(match: Match, agents: Sequence[Agent]) -> Tables:
     assert "separate_loading" not in sys.modules
     assert "etude.eval.batching" not in sys.modules
+    assert agents[0].act([]) == []
     return {"scores": [{"seat": 0, "score": int(str(agents[0].act([1])[0]))}]}
 """)
     (tmp_path / "separate_loading.py").write_text(
@@ -673,6 +708,9 @@ with TemporaryDirectory(dir="/tmp", prefix="etude-test-") as scratch, socket.soc
                         Match(players=(checkpoint("one"),)), address)
     thread.join()
 assert counts == {"sent": 1, "received": 1}
+assert result.performance.requests == result.performance.answers == 1
+assert sum(result.performance.latency_buckets) == 1
+assert result.performance.round_trip_p50_seconds == result.performance.round_trip_p95_seconds
 print(result.imports.model_dump_json())
 """
     result = subprocess.run(
@@ -1115,3 +1153,83 @@ def test_loader_failure_preserves_previously_delivered_matches(
         assert db.sql("select count(distinct match) from scores").fetchone() == (4,)
     finally:
         db.close()
+
+
+class WireValue:
+    serializations = 0
+
+    def __init__(self, value: int) -> None:
+        self.value = value
+
+    def __reduce__(self) -> tuple[type[str], tuple[str]]:
+        type(self).serializations += 1
+        return str, (str(self.value),)
+
+
+class WireAgent:
+    def act(self, rows: Sequence[object]) -> Sequence[object]:
+        return [WireValue(int(str(row))) for row in rows]
+
+
+def wire_agent(checkpoint: CheckpointRef) -> Agent:
+    return WireAgent()
+
+
+def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoint() -> None:
+    # Small real sockets retain the wire bytes; no load or clock threshold.
+    checkpoint_player = checkpoint("wire")
+    batches = _Batches(wire_agent, 2, 60, 1024)
+    sockets = [socket.socketpair() for _ in range(2)]
+    clients = [AgentConnection(parent.detach()) for parent, _ in sockets]
+    receivers = [Connection(child.detach()) for _, child in sockets]
+    answer_size = len(ForkingPickler.dumps(Answer([WireValue(0)])))
+    WireValue.serializations = 0
+    request_bytes = 0
+    observations = []
+    try:
+        for turn in range(2):
+            for index, (client, receiver) in enumerate(zip(clients, receivers, strict=True)):
+                client.send(
+                    Request(
+                        checkpoint_player.checkpoint,
+                        [WireValue(turn)],
+                        "wire",
+                        str(index),
+                        checkpoint_player.key,
+                    )
+                )
+                payload = receiver.recv_bytes()
+                request_bytes += len(payload)
+                batches.add(receiver, ForkingPickler.loads(payload), 0)
+            observations.extend(batches.flush(0))
+            for client in clients:
+                assert client.poll(1)
+                assert client.recv() == Answer([str(turn)])
+        assert WireValue.serializations == 8  # Four decisions, one encoding each way.
+        assert sum(client.requests for client in clients) == 4
+        assert sum(client.answers for client in clients) == 4
+        assert sum(client.request_bytes for client in clients) == request_bytes
+        assert sum(client.answer_bytes for client in clients) == 4 * answer_size
+        assert [len(batch.rows) for batch in observations] == [2, 2]
+        assert [batch.forward_calls for batch in observations] == [1, 1]
+        assert [batch.loads for batch in observations] == [1, 0]
+        assert batches.loads == 1
+    finally:
+        for client in clients:
+            client.close()
+        for receiver in receivers:
+            receiver.close()
+
+
+def test_protocol_percentiles_bound_injected_latencies_and_exclude_inference_wait() -> None:
+    parent, child = socket.socketpair()
+    with AgentConnection(parent.detach()) as connection, child:
+        for seconds in (0.001, 0.0015, 0.003):
+            connection.observe(seconds)
+        report = _performance(connection, 1.0, "fixture", "match")
+    assert report.round_trip_p50_seconds == 0.002048
+    assert report.round_trip_p95_seconds == 0.004096
+    assert sum(report.latency_buckets) == 3
+    assert report.round_trip_seconds == pytest.approx(0.0055)
+    assert report.game_seconds == pytest.approx(0.9945)
+    assert report.transport_seconds == 0.0

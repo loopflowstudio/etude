@@ -825,8 +825,27 @@ one on a GPU, or weights too large to hold in every game process.
   saying to move the import to `load`'s.
 - **Kept with the run.** `artifacts/agents/batches.json` below the launched
   run lists each batch's checkpoint and each row's player, tournament and
-  match. The startup import counts are kept beside it. `ETUDE_SCRATCH_DIR` and
-  `TMPDIR` point to temporary scratch (`/dev/shm` when available) in the
+  match, plus `forward_calls`, `forward_seconds` (the loader's `Agent.act`,
+  including materializing its answers), successful `loads` and `load_seconds`.
+  Failed forwards remain counted. Startup import counts are kept beside it.
+  `protocol-WRITER-MATCH.json` records each finished game's request and answer
+  counts, pickled payload bytes (excluding the four-byte framing headers),
+  round-trip seconds and transport seconds. Transport measures request
+  serialization/send and answer receive/deserialization; round trips also
+  include queueing, loading and inference. Batch `transport_seconds` measures
+  the other end: request receive/deserialization and reply serialization/send.
+  `game_seconds` is time inside
+  game-side `build` and `play` minus those round trips, including the author's
+  game bookkeeping.
+  These durations overlap across concurrent games; do not divide their sum
+  by run wall time to claim CPU utilization.
+  Latency p50/p95 are upper bounds from 64 power-of-two microsecond buckets;
+  sum `latency_buckets` across match reports before computing a run percentile.
+  Do not average match percentiles. Reports include ordinary game failures;
+  a killed game process may leave no report. Attempts have distinct writer
+  names, so retries retain their measurements. Empty `act([])` sends nothing.
+  Successful request and reply payloads are each serialized once.
+  `ETUDE_SCRATCH_DIR` and `TMPDIR` point to temporary scratch (`/dev/shm` when available) in the
   game and agent processes.
 - **Results do not depend on it.** A match is its seats, config and game
   count, however it was played: changing `Agents`, or adding or removing

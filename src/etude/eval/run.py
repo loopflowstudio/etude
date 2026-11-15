@@ -44,7 +44,7 @@ from etude.eval.block import (
     seal_abandoned,
     stage,
 )
-from etude.eval.game import Execution, Imports, initialize_game, play_match
+from etude.eval.game import Execution, Imports, Performance, initialize_game, play_match
 from etude.eval.records import (
     ADDED,
     COLUMN_TYPES,
@@ -529,6 +529,20 @@ def play_together(
                     )
                 except OSError as error:
                     raise RetryRequested("game import report could not be retained") from error
+        performance = outcome.performance if isinstance(outcome, Execution) else None
+        if performance is None and isinstance(
+            raw_performance := getattr(outcome, "_etude_performance", None), str
+        ):
+            performance = Performance.model_validate_json(raw_performance)
+        if performance is not None and (artifacts := os.environ.get("ETUDE_AGENTS_DIR")):
+            # The run writer distinguishes retries and tournaments with identical matches.
+            try:
+                DirectoryStorage(Path(artifacts)).put(
+                    f"protocol-{each.run.id}-{match.key}.json",
+                    performance.model_dump_json().encode(),
+                )
+            except OSError as error:
+                raise RetryRequested("game protocol report could not be retained") from error
         if each.agents and imports is not None and imports.warning and not warned_imports:
             print(imports.warning, file=sys.stderr, flush=True)
             warned_imports = True

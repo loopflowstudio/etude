@@ -6,13 +6,12 @@ loads wrapper modules; network model loading remains in the agent process.
 
 import importlib
 from collections.abc import Callable, Mapping, Sequence
-from multiprocessing.connection import Connection
 from typing import cast
 
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
 from etude.call import Function
-from etude.eval.agents import Agent, _RemoteAgent
+from etude.eval.agents import Agent, AgentConnection, _RemoteAgent
 from etude.eval.records import CheckpointPlayer, Composition, Player, player_checkpoints
 
 _PLAYER: TypeAdapter[Player] = TypeAdapter(Player)
@@ -64,7 +63,7 @@ def _restore(value: object) -> object:
 
 def build_agents(
     players: Sequence[Player],
-    connection: Connection,
+    connection: AgentConnection,
     tournament: str,
     match: str,
     build: Function | None,

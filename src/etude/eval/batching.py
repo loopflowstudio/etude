@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import importlib
 import os
-import pickle
 import selectors
 import socket
 import sys
@@ -18,6 +17,7 @@ from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
+from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from typing import cast
 
@@ -36,6 +36,11 @@ class BatchRow(Record):
 class Batch(Record):
     checkpoint: str
     rows: tuple[BatchRow, ...]
+    forward_seconds: float
+    load_seconds: float
+    forward_calls: int
+    loads: int
+    transport_seconds: float
 
 
 @dataclass
@@ -43,6 +48,21 @@ class _Pending:
     connection: Connection
     request: Request
     since: float
+    receive_seconds: float
+
+
+def _responses(answer: Answer, batch: list[_Pending]) -> list[memoryview]:
+    responses: list[memoryview] = []
+    offset = 0
+    for item in batch:
+        size = len(item.request.rows)
+        responses.append(
+            ForkingPickler.dumps(
+                Answer(answer.rows[offset : offset + size], answer.error, answer.retry)
+            )
+        )
+        offset += size
+    return responses
 
 
 class _Batches:
@@ -66,9 +86,11 @@ class _Batches:
         self.loads = 0
         self.rows = 0
 
-    def add(self, connection: Connection, request: Request, now: float) -> None:
+    def add(
+        self, connection: Connection, request: Request, now: float, receive_seconds: float = 0.0
+    ) -> None:
         self.pending.setdefault(request.checkpoint.key, []).append(
-            _Pending(connection, request, now)
+            _Pending(connection, request, now, receive_seconds)
         )
 
     def delay(self, now: float) -> float | None:
@@ -95,6 +117,10 @@ class _Batches:
             del items[: len(batch)]
             if not items:
                 del self.pending[key]
+            forward_seconds = 0.0
+            load_seconds = 0.0
+            forward_calls = 0
+            loads = 0
             answer = self.failed.get(key)
             if answer is None:
                 try:
@@ -104,6 +130,7 @@ class _Batches:
                         if length is None:
                             raise ValueError(f"checkpoint {key} has no byte length")
                         self._evict(length)
+                        started = time.monotonic()
                         try:
                             agent = cast(Agent, self.load(checkpoint))
                         except Exception as error:
@@ -113,21 +140,38 @@ class _Batches:
                                 isinstance(error, RetryRequested),
                             )
                             raise
+                        finally:
+                            load_seconds = time.monotonic() - started
                         self.loaded[key] = (agent, length)
                         self.loads += 1
+                        loads = 1
                         print(f"etude: agents: loaded {key}", file=sys.stderr, flush=True)
                     self.loaded.move_to_end(key)
                     rows = [row for p in batch for row in p.request.rows]
-                    answers = list(self.loaded[key][0].act(rows))
+                    started = time.monotonic()
+                    forward_calls = 1
+                    try:
+                        answers = list(self.loaded[key][0].act(rows))
+                    finally:
+                        forward_seconds = time.monotonic() - started
                     if len(answers) != len(rows):
                         raise ValueError("Agent.act must return one answer per row")
-                    # Validate once before answering any member of the batch.
-                    pickle.dumps(answers)
                     answer = Answer(answers)
                 except Exception as error:
                     answer = self.failed.get(key) or Answer(
                         [], f"agent {key}: {explain(error)}", isinstance(error, RetryRequested)
                     )
+            # Serialize every reply before delivery: an unpicklable answer fails
+            # the whole batch, while successful payloads are encoded only once.
+            started = time.monotonic()
+            try:
+                responses = _responses(answer, batch)
+            except Exception as error:
+                answer = Answer(
+                    [], f"agent {key}: {explain(error)}", isinstance(error, RetryRequested)
+                )
+                responses = _responses(answer, batch)
+            transport_seconds = time.monotonic() - started + sum(p.receive_seconds for p in batch)
             if answer.error is not None and control is not None:
                 control.send(
                     [
@@ -144,20 +188,23 @@ class _Batches:
                 )
                 # Only failure metadata crosses the control pipe; rows stay direct.
                 control.recv()
-            offset = 0
-            for item in batch:
-                size = len(item.request.rows)
-                response = Answer(answer.rows[offset : offset + size], answer.error, answer.retry)
+            started = time.monotonic()
+            for item, response in zip(batch, responses, strict=True):
                 try:
-                    item.connection.send(response)
+                    item.connection.send_bytes(response)
                 except (OSError, EOFError):
                     pass  # The game may have been cancelled at its deadline.
-                offset += size
+            transport_seconds += time.monotonic() - started
             self.rows += count
             self.batches += 1
             observations.append(
                 Batch(
                     checkpoint=key,
+                    forward_seconds=forward_seconds,
+                    load_seconds=load_seconds,
+                    forward_calls=forward_calls,
+                    loads=loads,
+                    transport_seconds=transport_seconds,
                     rows=tuple(
                         BatchRow(
                             player=p.request.player,
@@ -226,6 +273,7 @@ def _run_agents(
                         selector.register(connection, selectors.EVENT_READ)
                     else:
                         connection = cast(Connection, event.fileobj)
+                        started = time.monotonic()
                         try:
                             request = cast(Request, connection.recv())
                         except (EOFError, OSError):
@@ -233,7 +281,8 @@ def _run_agents(
                             connection.close()
                             peers.remove(connection)
                         else:
-                            batches.add(connection, request, time.monotonic())
+                            received = time.monotonic()
+                            batches.add(connection, request, received, received - started)
                 for batch in batches.flush(time.monotonic(), control):
                     if report.tell() > 1:
                         report.write(",")

@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from multiprocessing.connection import Connection, wait
+from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from queue import SimpleQueue
 from typing import TYPE_CHECKING, Protocol, cast
@@ -63,9 +64,52 @@ class AgentFailure:
     loading: bool = False
 
 
+class AgentConnection(Connection):
+    """One game's direct channel; counters exclude the four-byte framing header.
+
+    Latencies use 64 power-of-two microsecond buckets, bounded regardless of
+    game length. Each bucket's upper bound is used for reported percentiles.
+    """
+
+    def __init__(self, handle: int) -> None:
+        super().__init__(handle)
+        self.requests = 0
+        self.answers = 0
+        self.request_bytes = 0
+        self.answer_bytes = 0
+        self.round_trip_seconds = 0.0
+        self.transport_seconds = 0.0
+        self.latencies = [0] * 64
+
+    def send(self, obj: object) -> None:
+        started = time.monotonic()
+        try:
+            payload = ForkingPickler.dumps(obj)
+            self.send_bytes(payload)
+            self.requests += 1
+            self.request_bytes += len(payload)
+        finally:
+            self.transport_seconds += time.monotonic() - started
+
+    def recv(self) -> object:
+        started = time.monotonic()
+        try:
+            payload = self.recv_bytes()
+            self.answers += 1
+            self.answer_bytes += len(payload)
+            return ForkingPickler.loads(payload)
+        finally:
+            self.transport_seconds += time.monotonic() - started
+
+    def observe(self, seconds: float) -> None:
+        self.round_trip_seconds += seconds
+        bucket = min(63, max(0, int(seconds * 1_000_000).bit_length()))
+        self.latencies[bucket] += 1
+
+
 @dataclass(frozen=True)
 class _RemoteAgent:
-    connection: Connection
+    connection: AgentConnection
     checkpoint: CheckpointRef
     tournament: str
     match: str
@@ -74,6 +118,7 @@ class _RemoteAgent:
     def act(self, rows: Sequence[object]) -> Sequence[object]:
         if not rows:
             return []
+        started = time.monotonic()
         try:
             self.connection.send(
                 Request(self.checkpoint, list(rows), self.tournament, self.match, self.player)
@@ -83,6 +128,8 @@ class _RemoteAgent:
             answer = cast(Answer, self.connection.recv())
         except (EOFError, OSError) as error:
             raise RetryRequested("agent process exited before answering") from error
+        finally:
+            self.connection.observe(time.monotonic() - started)
         if answer.error is not None:
             if answer.retry:
                 raise RetryRequested(answer.error)
@@ -98,7 +145,7 @@ def _remaining() -> float | None:
 
 
 @contextmanager
-def connect_agents(address: str) -> Iterator[Connection]:
+def connect_agents(address: str) -> Iterator[AgentConnection]:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
         peer.settimeout(_remaining())
         try:
@@ -106,7 +153,7 @@ def connect_agents(address: str) -> Iterator[Connection]:
         except OSError as error:
             raise RetryRequested("agent process is unavailable") from error
         peer.settimeout(None)
-        with Connection(peer.detach()) as connection:
+        with AgentConnection(peer.detach()) as connection:
             yield connection
 
 
