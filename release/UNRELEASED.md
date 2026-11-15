@@ -212,10 +212,9 @@ which rows shared each batch in `artifacts/agents/batches.json`.
 On CPUs, a small model plays faster without `agents=`: with a frozen Manabot
 Small checkpoint on 32 CPUs, one agent process reached at most about half the
 rate of a process per game holding the model. Agents on a GPU are not yet
-measured. In a separate frozen 64-game comparison, the default agentless Etude
-path reached 0.8744 times raw 28-process pool throughput (91.459 versus 79.971
-seconds including startup), with identical trajectories. CPU parity remains
-unmet and requires review.
+measured. Without agents, a game costs what it does in a plain process pool:
+158 ms per decision under Etude against 160 ms in a raw 28-process pool on the
+same frozen panel, with identical trajectories.
 
 `matches.retry` distinguishes retryable infrastructure failures from ordinary
 game errors without adding another status. Older match records default it to

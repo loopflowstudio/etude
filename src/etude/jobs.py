@@ -739,7 +739,7 @@ def hold_group(
             raise EtudeError("incompatible_eval_agents", 422)
         agent_process: AgentProcess | None = None
         definition = next((spec.agents for spec, _ in pending if spec.agents), None)
-        allocation = divide_cpus(
+        cpus = divide_cpus(
             sum(len(active.matches) - len(active.done) for _, active in pending),
             agents=definition is not None,
             memory_gb=definition.memory_gb if definition else None,
@@ -753,7 +753,7 @@ def hold_group(
                         checkout,
                         artifacts,
                         [spec.tournament.name for spec, _ in pending],
-                        allocation,
+                        cpus,
                     )
                 )
             plays = [
@@ -769,7 +769,7 @@ def hold_group(
             ]
             outcomes = play_together(
                 plays,
-                allocation=allocation,
+                cpus=cpus,
                 agent_process=agent_process,
             )
             if agent_process is not None:

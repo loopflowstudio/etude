@@ -458,7 +458,7 @@ class Playing:
 def play_together(
     plays: Sequence[Playing],
     *,
-    allocation: Cpus | None = None,
+    cpus: Cpus | None = None,
     agent_process: AgentProcess | None = None,
 ) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
     """Play tournaments on one pool; loader failures follow every seated checkpoint.
@@ -574,9 +574,9 @@ def play_together(
                 flush=True,
             )
 
-    if allocation is None:
-        allocation = divide_cpus(sum(len(each.pending) for each in plays), agents=False)
-    workers = allocation.games
+    if cpus is None:
+        cpus = divide_cpus(sum(len(each.pending) for each in plays), agents=False)
+    workers = cpus.games
     try:
         with _terminable():
             if workers > 0:

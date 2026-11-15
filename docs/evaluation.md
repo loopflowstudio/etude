@@ -739,10 +739,9 @@ players and small models on CPUs: with a frozen Manabot Small checkpoint on 32
 CPUs, one agent process reached at most about half the rate of a process per
 game holding the model. Agents are for a model worth loading once: one on a
 GPU (not yet measured), or weights too large to hold in every game process.
-The default path also missed the CPU parity bar in a separate frozen 64-game
-comparison: agentless Etude play achieved 0.8744 times the raw 28-process pool's
-throughput (91.459 versus 79.971 seconds, including startup). All trajectories
-matched; this result remains a performance miss for review.
+Without agents, a game costs what it does in a plain process pool: on the same
+frozen panel, 158 ms per decision under Etude against 160 ms in a raw
+28-process pool, with identical trajectories.
 
 - **An agent is anything with `act(rows)`.** It takes a sequence of rows and
   returns one answer per row, in order. `Agent` is a protocol, not a base

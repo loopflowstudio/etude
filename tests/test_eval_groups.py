@@ -469,7 +469,7 @@ def test_play_arity_and_removed_workers_are_refused() -> None:
         (8, 20, True, 2.0, 1, 7),
     ],
 )
-def test_allocation_respects_cpu_pending_and_memory(
+def test_divide_cpus_respects_cpu_pending_and_memory(
     monkeypatch: pytest.MonkeyPatch,
     cpus: int,
     pending: int,
@@ -482,8 +482,8 @@ def test_allocation_respects_cpu_pending_and_memory(
     monkeypatch.setattr(
         "etude.eval.resources.memory_bytes", lambda: 16 * 1024**3 if cpus >= 16 else 2 * 1024**3
     )
-    allocation = divide_cpus(pending, agents=agents, memory_gb=memory_gb)
-    assert (allocation.games, allocation.threads) == (games, threads)
+    split = divide_cpus(pending, agents=agents, memory_gb=memory_gb)
+    assert (split.games, split.threads) == (games, threads)
 
 
 @pytest.mark.parametrize("cached", [False, True])

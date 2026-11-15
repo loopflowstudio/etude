@@ -209,7 +209,7 @@ def running_agents(
     checkout: str | None,
     artifacts: Path,
     tournaments: Sequence[str],
-    allocation: Cpus,
+    cpus: Cpus,
 ) -> Iterator[AgentProcess]:
     address = str(Path(os.environ["ETUDE_SCRATCH_DIR"], "agents.sock"))
     context = multiprocessing.get_context("spawn")
@@ -229,7 +229,7 @@ def running_agents(
             definition.max_batch,
             definition.max_delay_seconds,
             memory,
-            allocation.threads,
+            cpus.threads,
             child,
             str(artifacts),
         ),
@@ -269,7 +269,7 @@ def running_agents(
             raise RetryRequested("agent process exited during startup") from error
         observer.start()
         print(
-            f"etude: agents: started for {', '.join(tournaments)}; {allocation.games} games at a time; {allocation.threads} inference threads",
+            f"etude: agents: started for {', '.join(tournaments)}; {cpus.games} games at a time; {cpus.threads} inference threads",
             file=sys.stderr,
             flush=True,
         )
