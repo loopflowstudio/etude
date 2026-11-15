@@ -735,8 +735,10 @@ and a bare checkpoint in two tournaments; its second pass plays nothing.
 Declaring agents is optional. An `EvalJob` with no `agents=` calls
 `play(match)`, which does all the playing itself in the same game processes,
 each loading whatever weights it needs. That is the simpler choice for code
-players and small models on CPUs. Agents are for a model worth loading once:
-one on a GPU, or weights too large to hold in every game process.
+players and small models on CPUs: with a frozen Manabot Small checkpoint on 32
+CPUs, one agent process reached at most about half the rate of a process per
+game holding the model. Agents are for a model worth loading once: one on a
+GPU (not yet measured), or weights too large to hold in every game process.
 
 - **An agent is anything with `act(rows)`.** It takes a sequence of rows and
   returns one answer per row, in order. `Agent` is a protocol, not a base
@@ -753,7 +755,8 @@ one on a GPU, or weights too large to hold in every game process.
   one loaded network.
 - **Rows and answers are picklable values**: NumPy arrays, numbers, text,
   and tuples, lists and dicts of them. A type from a model library would make
-  every game process import that library.
+  every game process import that library. Large padded observations can
+  travel as compact rows, with the agent restoring the exact model inputs.
 - **`load` is called on a checkpoint's first use**, in the agent process,
   and again only after eviction. It receives a `CheckpointRef`; its local
   file or folder is `checkpoint.path`. Declare machine setup in the loading
@@ -783,12 +786,7 @@ one on a GPU, or weights too large to hold in every game process.
   and the other model library thread environment variables to the inference
   budget. The loader must honor this budget when configuring its library
   (for Torch, `torch.set_num_threads(int(os.environ["OMP_NUM_THREADS"]))`).
-  An agent can instead spend that budget on concurrent forwards inside `act`,
-  with one library thread per forward. It owns synchronization and must use
-  per-row random generators; mutating a global random generator is unsafe
-  across those forwards. Etude calls `act` serially on each loaded agent.
-  Large padded observations can travel as compact picklable rows, with the
-  agent restoring the exact model inputs before inference.
+  Etude calls `act` serially on each loaded agent.
   Startup reports both active games and inference threads.
 - **Shared by jobs that declare the same agents.** Eval jobs of one pass
   whose `Agents` are equal share a run and its agent process. Jobs with

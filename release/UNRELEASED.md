@@ -209,6 +209,10 @@ Completed matches are sealed and offered to storage individually. Container
 CPU quotas set how many games play and their thread budgets, and
 `ETUDE_SCRATCH_DIR` supplies temporary fast scratch. A run with agents keeps
 which rows shared each batch in `artifacts/agents/batches.json`.
+On CPUs, a small model plays faster without `agents=`: with a frozen Manabot
+Small checkpoint on 32 CPUs, one agent process reached at most about half the
+rate of a process per game holding the model. Agents on a GPU are not yet
+measured.
 
 `matches.retry` distinguishes retryable infrastructure failures from ordinary
 game errors without adding another status. Older match records default it to
