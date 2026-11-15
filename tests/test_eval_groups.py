@@ -6,7 +6,7 @@ import signal
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Sequence
-from concurrent.futures import Future
+from concurrent.futures import Future, wait
 from decimal import Decimal
 from multiprocessing import active_children, get_context
 from pathlib import Path
@@ -437,6 +437,41 @@ def test_active_games_respects_cpu_and_declared_memory(monkeypatch: pytest.Monke
     assert active_games(20, agents=True, memory_gb=1.5) == 2
     assert active_games(1, agents=True) == 1
     assert active_games(0, agents=True) == 0
+
+
+@pytest.mark.parametrize(("memory_gb", "concurrent"), [(None, 3), (1.75, 1)])
+def test_group_execution_respects_declared_agent_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    memory_gb: float | None,
+    concurrent: int,
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
+    outstanding: list[int] = []
+
+    def count_games(
+        fs: Iterable[Future[object]],
+        timeout: float | None = None,
+        return_when: str = "ALL_COMPLETED",
+    ) -> tuple[set[Future[object]], set[Future[object]]]:
+        signals = list(fs)
+        # One signal observes agent exit; the others are dispatched matches.
+        outstanding.append(len(signals) - 1)
+        return wait(signals, timeout=timeout, return_when=return_when)
+
+    monkeypatch.setattr("etude.eval.run.wait", count_games)
+    agents = Agents(load=load, config=Loading(), memory_gb=memory_gb)
+    selected = group(*(job(name, agents) for name in ("one", "two", "three")))
+    assert [result.played for result in hold_group(selected, directory=tmp_path)] == [1, 1, 1]
+    assert max(outstanding) == concurrent
+    assert f"{concurrent} games at a time" in capfd.readouterr().err
+    for spec in selected.evaluations:
+        found = played(
+            spec.tournament, experiment="grouped", enter=spec.entrants, directory=tmp_path
+        )
+        assert len(found.delivered) == 1 and not found.new and not found.failed
 
 
 def test_released_queued_evaluation_discards_workers() -> None:
