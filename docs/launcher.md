@@ -1028,8 +1028,10 @@ It is never advertised as the client's local machine.
 client's own package over SSH, where it and its environment are kept by digest under
 `ETUDE_HOME/programs`, and every later command runs that exact version. The two
 sides therefore cannot be different versions; after the client changes, the
-next command sends the new code first, and that command upgrades the
-server's launcher file ([Upgrading Etude](#upgrading-etude)). The server needs Python 3.12, uv
+next command sends the new code first. Commands never upgrade the server's
+launcher file: when it needs migrations, they refuse and you run
+`etude database upgrade` on the server itself ([Upgrading Etude](#upgrading-etude)).
+The server needs Python 3.12, uv
 and working SSH keys. If it cannot take the program, `server set` fails
 with the reason and the setting is not changed.
 
@@ -1384,8 +1386,8 @@ one, so name the job the same (`TrainingJob(name="ppo", ...)`) and the run is
 recognised as `ppo/ppo@0` or `ppo/ppo@1` rather than trained again. Commands
 go on accepting the stored spelling.
 
-The launcher database is a new version: an older file is refused and left
-untouched, so let its runs finish under the version that made it. A server
+The launcher database needs an explicit `etude database upgrade`
+([Upgrading Etude](#upgrading-etude)); remote workers keep running through it. A server
 selection is not carried over; run `etude server set` again. A stored
 `run.json` that names a cohort still reads.
 
