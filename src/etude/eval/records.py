@@ -226,28 +226,36 @@ class Composition(Record):
     """
 
     kind: Literal["composition"] = "composition"
-    name: str
+    type: str  # "module:QualifiedName" of the author's record
     fields: dict[str, JsonValue]
 
     @property
     def key(self) -> str:
-        if self.name == "etude:configured":
+        if self.type == "etude:configured":
             over = _PLAYER.validate_python(self.fields["over"])
             config = _CONFIG.validate_python(self.fields["config"])
             if not isinstance(over, CheckpointPlayer):
                 raise ValueError("configured checkpoint is unresolved")
             return _encoded(f"checkpoint:{over.checkpoint.key}", config)
-        return "composition:" + digest([self.name, self.config])
+        return "composition:" + digest([self.type, self.config])
+
+    @property
+    def name(self) -> str:
+        """Qualified author type and fields, omitting fields set to None."""
+        fields = ", ".join(
+            f"{key}={_tree_name(value)}" for key, value in self.fields.items() if value is not None
+        )
+        return f"{self.type}({fields})"
 
     @property
     def config(self) -> Config:
-        if self.name == "etude:configured":
+        if self.type == "etude:configured":
             return _CONFIG.validate_python(self.fields["config"])
         return {key: _tree_identity(value) for key, value in self.fields.items()}
 
     @property
     def version(self) -> Version:
-        if self.name == "etude:configured":
+        if self.type == "etude:configured":
             return Version.model_validate(self.fields.get("version", {}))
         return Version()
 
@@ -268,6 +276,21 @@ def _tree_identity(value: JsonValue) -> JsonValue:
     return value
 
 
+def _tree_name(value: JsonValue) -> str:
+    if isinstance(value, dict):
+        kind = value.get("kind")
+        if kind == "mapping":
+            items = _CONFIG.validate_python(value["items"])
+            return "{" + ", ".join(f"{k}: {_tree_name(v)}" for k, v in items.items()) + "}"
+        if kind in ("model", "code", "composition"):
+            return _PLAYER.validate_python(value).name
+        if isinstance(kind, str):
+            return kind
+    if isinstance(value, list):
+        return "[" + ", ".join(_tree_name(each) for each in value) + "]"
+    return json.dumps(value)
+
+
 def _encode_tree(value: object) -> JsonValue:
     if isinstance(value, (CheckpointPlayer, Code, Held, Composition, *_RELATIVE)):
         return _JSON.validate_python(value.model_dump(mode="json"))
@@ -277,7 +300,7 @@ def _encode_tree(value: object) -> JsonValue:
             raise ValueError("player records must be importable module-level types")
         return {
             "kind": "composition",
-            "name": f"{kind.__module__}:{kind.__qualname__}",
+            "type": f"{kind.__module__}:{kind.__qualname__}",
             "fields": {name: _encode_tree(getattr(value, name)) for name in kind.model_fields},
         }
     if isinstance(value, (list, tuple)):
@@ -337,10 +360,13 @@ def _player(data: Any) -> Any:
         config = key.get("config") or {}
         if key.get("checkpoint") is not None:
             ref = {"key": key["checkpoint"], "artifact": data.get("artifact")}
-            inference = {"config": config, "version": version}
-            return _player(
-                {"kind": "model", "name": data["name"], "checkpoint": ref, "inference": inference}
-            )
+            return {
+                "kind": "model",
+                "name": data["name"],
+                "checkpoint": ref,
+                "config": config,
+                "version": version,
+            }
         if key.get("code") is not None:
             return {"kind": "code", "name": key["code"], "config": config, "version": version}
         return data
@@ -358,10 +384,7 @@ def _player(data: Any) -> Any:
             "key": {"address": recorded},
             "artifact": {"uri": data.get("uri") or recorded, "sha256": data.get("artifact")},
         }
-        inference = {"config": config}
-        return _player(
-            {"kind": "model", "name": data["name"], "checkpoint": ref, "inference": inference}
-        )
+        return {"kind": "model", "name": data["name"], "checkpoint": ref, "config": config}
     return data
 
 
@@ -939,7 +962,7 @@ def _seat_definition(seat: Seat) -> JsonValue:
         return ["model", {}]
     if isinstance(seat, _RELATIVE):
         return ["relative", _relative_definition(seat)]
-    if isinstance(seat, Composition) and seat.name == "etude:configured":
+    if isinstance(seat, Composition) and seat.type == "etude:configured":
         over = _SEAT.validate_python(seat.fields["over"])
         config = identifying(_CONFIG.validate_python(seat.fields["config"]))
         if isinstance(over, Held):
@@ -961,7 +984,7 @@ def _seat(
     resolved: Mapping[str, CheckpointRef] | None = None,
 ) -> Player:
     if isinstance(each, Composition):
-        if each.name == "etude:configured":
+        if each.type == "etude:configured":
             over = _seat(_SEAT.validate_python(each.fields["over"]), checkpoint, found, resolved)
             if not isinstance(over, CheckpointPlayer):
                 raise ValueError("stored config needs a checkpoint")
@@ -996,7 +1019,7 @@ def _seat_value(value: object) -> object:
         config = value.get("config", {})
         return {
             "kind": "composition",
-            "name": "etude:configured",
+            "type": "etude:configured",
             "fields": {
                 "over": {"kind": "held"},
                 "config": config,
@@ -1013,7 +1036,7 @@ def _seat_value(value: object) -> object:
         config = inference.get("config", {})
         return {
             "kind": "composition",
-            "name": "etude:configured",
+            "type": "etude:configured",
             "fields": {"over": value, "config": config},
         }
     return value
@@ -1059,7 +1082,7 @@ def _map_fields(
 def seat_leaves(player: Seat) -> list[Seat]:
     if not isinstance(player, Composition):
         return [player]
-    if player.name == "etude:configured":
+    if player.type == "etude:configured":
         return seat_leaves(_SEAT.validate_python(player.fields["over"]))
     found: list[Seat] = []
 
@@ -1303,7 +1326,7 @@ class TournamentRun(Record):
 
 class Scheduled(Record):
     """A match a tournament calls for; a benchmark's also names its seating and, for a
-    seating with an held seat, its checkpoint."""
+    seating with a held seat, its checkpoint."""
 
     match: Match
     seating: str | None = None

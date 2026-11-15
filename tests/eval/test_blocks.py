@@ -20,6 +20,7 @@ from etude.eval.match import environment, evaluate
 from etude.eval.query import read_blobs, statsdb
 from etude.eval.records import Code, ColumnType, Match, MatchRecord, Rollup
 from etude.eval.run import Result
+from etude.eval.tournament import evaluating
 from etude.storage import DirectoryStorage, S3Storage
 from tests.eval.games import play, play_cards, play_with_evidence
 from tests.eval.per_file import write_per_file
@@ -116,9 +117,10 @@ def test_blobs_read_from_a_bucket_are_read_once_per_computer(
         named = [digest for (digest,) in db.sql("select sha256 from blobs").fetchall()]
         before = client.requests
         assert len(dict(read_blobs(db, bucket, named))) == 8
-        assert client.requests == before + 1
+        # Four match packs are read once each, then shared by cache location.
+        assert client.requests == before + 4
         assert len(dict(read_blobs(db, S3Storage("runs", client=client, cache=cache), named))) == 8
-        assert client.requests == before + 1
+        assert client.requests == before + 4
         db.close()
 
 
@@ -259,18 +261,6 @@ WINS = Rollup(
 )
 
 
-class ReadStorage(MeasuredStorage):
-    """A store that remembers which keys were read."""
-
-    def __init__(self, storage: DirectoryStorage) -> None:
-        super().__init__(storage)
-        self.read: list[str] = []
-
-    def get(self, key: str) -> bytes:
-        self.read.append(key)
-        return super().get(key)
-
-
 def totals(db: duckdb.DuckDBPyConnection) -> list[tuple[object, ...]]:
     return db.sql("select run, seat, on_play, rows, won, hits from wins order by all").fetchall()
 
@@ -298,12 +288,12 @@ def test_a_rollup_is_summed_once_per_block_and_a_new_block_adds_only_its_own_tot
 
     evaluate(experiment="cards", environment=DUEL, play=play, matches=matches, run="a",
              directory=tmp_path / "a", storages=[bucket], rollups=[WINS])  # fmt: skip
-    reading = ReadStorage(DirectoryStorage(tmp_path / "bucket"))
+    reading = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
     db = statsdb("cards", reading)
     # Two new blocks, each read once: its index, two tables and its partial totals;
     # and the resumed run's end, written again.
     assert (reading.listings, reading.requests) == (1, 2 * 4 + 1)
-    assert sum(key.endswith("/wins.parquet") for key in reading.read) == 2
+    assert sum(key.endswith("/wins.parquet") for key in reading.got) == 2
     assert totals(db) == from_rows(db)
     assert db.sql("select sum(rows) from wins").fetchone() == (5 * 2 * 2,)
     db.close()
@@ -316,7 +306,7 @@ def test_a_match_two_blocks_hold_counts_once_in_its_rollup(tmp_path: Path) -> No
     root = tmp_path / "cards/a"
     # A seal wrote its block and died before emptying its staging: the next writer
     # seals the same match again, in a later block.
-    (sealed,) = (path for path in (root / "blocks").iterdir() if not path.name.startswith("."))
+    sealed = next(path for path in (root / "blocks").iterdir() if not path.name.startswith("."))
     held = Block.model_validate_json((sealed / "block.json").read_bytes())
     staging = Staging(root, "0123456789ab", [WINS])
     shutil.copy(sealed / "plays.parquet", staging.table("plays", held.matches[0].match.key))
@@ -412,7 +402,7 @@ def test_a_rollup_holds_the_card_page_and_a_catch_up_reads_only_the_new_block(
     evaluate(experiment="cards", environment=DUEL, play=play_cards, matches=matches,
              run="a", directory=tmp_path / "a", storages=[DirectoryStorage(tmp_path / "bucket")],
              rollups=[CARDS])  # fmt: skip
-    reading = ReadStorage(DirectoryStorage(tmp_path / "bucket"))
+    reading = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
     db = statsdb("cards", reading)
     # The new block's index, two tables and partial totals, and the run's end written
     # again: nothing of an earlier block.
@@ -490,9 +480,17 @@ def test_taking_in_a_block_runs_the_same_statements_however_many_matches_and_blo
     statements = []
     for count in (2, 12):
         bucket = tmp_path / f"bucket-{count}"
-        evaluate(experiment="cards", environment=DUEL, play=play_with_evidence,
-                 matches=deals(players, count), run="a", directory=tmp_path / str(count),
-                 storages=[DirectoryStorage(bucket)])  # fmt: skip
+        # Keep the block count fixed while varying its matches and blobs.
+        with evaluating(
+            DUEL,
+            experiment="cards",
+            matches=deals(players, count),
+            run="a",
+            directory=tmp_path / str(count),
+            storages=[DirectoryStorage(bucket)],
+        ) as active:
+            for match in active.matches:
+                active.store(match, play_with_evidence(match))
         with monkeypatch.context() as patched:
             patched.setattr(duckdb, "connect", counted)
             db = statsdb("cards", bucket)
@@ -516,24 +514,24 @@ def test_a_rollup_given_to_statsdb_sums_each_block_once_as_sealing_would(
     sealed = db.sql("select * exclude (run) from card_deals order by all").fetchall()
     db.close()
 
-    reading = ReadStorage(DirectoryStorage(tmp_path / "later-bucket"))
+    reading = MeasuredStorage(DirectoryStorage(tmp_path / "later-bucket"))
     db = statsdb("cards", reading, rollups=[CARDS])
     assert db.sql("select * exclude (run) from card_deals order by all").fetchall() == sealed
     # Each block's two tables are read once, for its rows and its partial totals alike.
-    assert sum(key.endswith(".parquet") for key in reading.read) == 3 * 2
+    assert sum(key.endswith(".parquet") for key in reading.got) == 3 * 2
     assert not list((tmp_path / "later-bucket").rglob("card_deals*"))
     db.close()
 
     # Held from now on: reopening reads nothing, and a new block is summed from its tables.
-    reading.read.clear()
+    reading.got.clear()
     db = statsdb("cards", reading)
-    assert reading.read == []
+    assert reading.got == []
     db.close()
     evaluate(experiment="cards", environment=DUEL, play=play_cards, matches=matches,
              run="later", directory=tmp_path / "later",
              storages=[DirectoryStorage(tmp_path / "later-bucket")])  # fmt: skip
     db = statsdb("cards", reading)
-    assert sum(key.endswith(".parquet") for key in reading.read) == 2
+    assert sum(key.endswith(".parquet") for key in reading.got) == 2
     assert card_rollup(db) == card_page(db)
     db.close()
 

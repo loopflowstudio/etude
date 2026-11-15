@@ -168,11 +168,17 @@ with evaluating(
   its fields identify the player, with each resolved leaf replaced by its
   checkpoint key. A bare network, search over it, and search using another
   belief model are three players. Nesting wrappers and containers works too.
+  Results and reports name a wrapper by its qualified type and fields, such as
+  `search:PUCT(over=small, simulations=64)`, distinguishing same-named types
+  from different modules.
   `Code(name="heuristic", source=[...], config=...)` still names code players.
   Code's version records source provenance without changing its key.
   A checkpoint's key is its training run and file name, or its outside address,
   never its bytes or current location. Released inference-configured players
   remain readable under their original keys, so their matches stay delivered.
+  Resuming a run accepts moved checkpoint files, including leaves inside
+  wrappers, without replaying delivered matches. Their digests and byte lengths
+  must still agree with the stored references.
 - **A checkpoint is a folder or a file.** `play` finds it at the player's
   `checkpoint.path`. A checkpoint a run published from named objects
   (`run.checkpoint(policy=model)`, [Training](training.md#checkpoints)) is a
@@ -374,7 +380,7 @@ with evaluating(
   its `lines`, the experiment's training lines (`observe(source,
   experiment).lines`), held or not; `etude eval` and `etude launch` pass them themselves.
   A seating against a fixed player and one against a relative seat are held,
-  scored and drawn alike. A seating with a relative seat needs an held
+  scored and drawn alike. A seating with a relative seat needs a held
   seat to be relative to. A seating of two fixed players, such as two jobs'
   checkpoints chosen in `eval_jobs(state)`, is drawn at its first seat's checkpoint,
   so `Curve(matches=...)` over such seatings draws each pair once.
@@ -425,12 +431,12 @@ with evaluating(
   split, so that job's points are played again and count only the new one.
 - **Pairs of checkpoints.** A seating with no held seat is played once,
   not per checkpoint, so chosen checkpoints can meet: seat each as
-  `Held().player(ref)`, the player an held seat would make of it.
+  `Held().player(ref)`, the player a held seat would make of it.
   Prefer a relative seat where one says the rule; hand-built pairs suit a
   rule none states. Hold such a benchmark in batch whenever more checkpoints
   appear; each pass plays only the pairs not yet delivered. A hold on the go
   leaves these seatings to batch. Their rows are `schedule` rows with no
-  `checkpoint`; `scores` follows only seatings with an held seat.
+  `checkpoint`; `scores` follows only seatings with a held seat.
 - **Round robins.** `evaluating(round_robin, enter=players)` plays every pair of
   the players given once per config; seat swaps belong inside `play`.
   `evaluating(round_robin)` then plays every pair of every entrant so far that no

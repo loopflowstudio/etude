@@ -36,14 +36,14 @@ def _decode(value: JsonValue) -> object:
 
 def _restore(value: object) -> object:
     if isinstance(value, Composition):
-        if value.name == "etude:configured":
+        if value.type == "etude:configured":
             return value
-        module, name = value.name.split(":", 1)
+        module, name = value.type.split(":", 1)
         kind: object = importlib.import_module(module)
         for part in name.split("."):
             kind = getattr(kind, part)
         if not isinstance(kind, type) or not issubclass(kind, BaseModel):
-            raise TypeError(f"player type {value.name} must be a Pydantic record")
+            raise TypeError(f"player type {value.type} must be a Pydantic record")
         value = kind.model_validate(
             {key: _decode(each) for key, each in value.fields.items()}, by_name=True
         )

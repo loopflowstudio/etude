@@ -216,7 +216,11 @@ imports there produce one warning per run naming their importer.
 Checkpoint seats now play directly: `Held()` replaces a bare inference seat;
 relative seats take no `inference=`. Author records wrap seats to describe
 search or other composition. `compose(record)` preserves the wrapper type and
-fields in identity, replacing every leaf with its resolved checkpoint key.
+fields in identity, replacing every leaf with its resolved checkpoint key, and
+names the player by them, such as `game:Shift(over=small, amount=1)`.
+Qualified type names distinguish wrappers from different modules. Resuming a
+run accepts relocated checkpoints throughout player trees and relative
+pairings, while still checking their fingerprints and authored settings.
 `Agents(load=load, build=build)` calls `load(checkpoint)` in the agent process
 and `build(player, leaves)` in each game. The hook receives the author's tree
 and shared remote checkpoint agents; nested and bare players reuse those

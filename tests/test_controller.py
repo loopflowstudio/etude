@@ -439,7 +439,6 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     measured = MeasuredStorage(source)
     monkeypatch.setattr("etude.storage.storage_from_uri", lambda uri: measured)
     monkeypatch.setattr("etude.run.storage_from_uri", lambda uri: measured)
-    monkeypatch.setattr("etude.run.storage_from_uri", lambda uri: measured)
     try:
         with counts.record():
             assert main([command, str(file), "--source", str(source.root)]) == 0

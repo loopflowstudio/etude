@@ -15,6 +15,7 @@ from etude.eval.records import (
     Aligned,
     Benchmark,
     Code,
+    Composition,
     Held,
     Line,
     Match,
@@ -53,6 +54,119 @@ def test_nested_players_keep_identity_while_sharing_checkpoint_bytes() -> None:
     assert player_checkpoints(moved)[0].artifact.uri == "file:///another/machine/weights"
     assert Match.model_validate_json(match.model_dump_json()) == match
     assert compose(Shift(over=small, amount=2)).key != deeper.key
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_relocated_entrants_resume_without_replaying(tmp_path: Path, wrapped: bool) -> None:
+    small = checkpoint("small")
+    player = compose(Ensemble(members=(small, compose(Shift(over=small))))) if wrapped else small
+    tournament = job("relocated", None).tournament
+    with evaluating(
+        tournament,
+        experiment="trees",
+        enter=(player, Code(name="heuristic")),
+        directory=tmp_path,
+        run="relocated",
+    ) as active:
+        assert active.play(plain).played == 1
+    moved = relocate_player(player, {"small": "file:///another/machine/weights"})
+    with evaluating(
+        tournament,
+        experiment="trees",
+        enter=(moved, Code(name="heuristic")),
+        directory=tmp_path,
+        run="relocated",
+        resume=True,
+    ) as active:
+        assert active.play(plain).played == 0
+
+
+def test_relocated_benchmark_leaves_and_pairings_resume_without_replaying(tmp_path: Path) -> None:
+    small = checkpoint("small").checkpoint
+    other = checkpoint("other")
+
+    def benchmark(opponent: Composition) -> Benchmark:
+        return Benchmark(
+            name="relocated",
+            environment=job("unused", None).tournament.environment,
+            seatings=(
+                Seating(
+                    name="relative",
+                    players=(Held(), opponent),
+                    configs=({},),
+                    games=1,
+                ),
+            ),
+        )
+
+    def lines(player: Composition) -> tuple[Line, ...]:
+        return (Line(name="other", job="other", checkpoints=player_checkpoints(player)),)
+
+    small = small.model_copy(update={"at": {"updates": 1}})
+    other_ref = other.checkpoint.model_copy(update={"at": {"updates": 1}})
+    fixed = compose(Shift(over=Held().player(other_ref)))
+    for uri, expected in ((small.artifact.uri, 1), ("file:///moved/weights", 0)):
+        moved = relocate_player(fixed, {"other": uri})
+        assert isinstance(moved, Composition)
+        tree = compose(Ensemble(members=(moved, Aligned(clock="updates", job="other"))))
+        ref = small.model_copy(update={"artifact": small.artifact.model_copy(update={"uri": uri})})
+        with evaluating(
+            benchmark(tree),
+            experiment="trees",
+            checkpoint=ref,
+            lines=lines(moved),
+            directory=tmp_path,
+            run="relocated",
+            resume=expected == 0,
+        ) as active:
+            assert active.play(plain).played == expected
+
+
+@pytest.mark.parametrize("changed", ["bytes", "author_uri"])
+def test_resume_rejects_changed_checkpoint_bytes_and_author_locations(
+    tmp_path: Path, changed: str
+) -> None:
+    small = checkpoint("small")
+    tree = compose(Ensemble(members=(small,), options={"uri": "file:///authored"}))
+    tournament = job("same", None).tournament
+    with evaluating(
+        tournament,
+        experiment="trees",
+        enter=(tree, Code(name="heuristic")),
+        directory=tmp_path,
+        run="unchanged",
+    ) as active:
+        assert active.play(plain).played == 1
+    changed_data = compose(Ensemble(members=(small,), options={"uri": "file:///different"}))
+    changed_bytes = small.model_copy(
+        update={
+            "checkpoint": small.checkpoint.model_copy(
+                update={
+                    "artifact": small.checkpoint.artifact.model_copy(update={"sha256": "0" * 64})
+                }
+            )
+        }
+    )
+    changed_tree = compose(Ensemble(members=(changed_bytes,), options={"uri": "file:///authored"}))
+    with pytest.raises(EtudeError) as refused:
+        with evaluating(
+            tournament,
+            experiment="trees",
+            enter=(changed_tree if changed == "bytes" else changed_data, Code(name="heuristic")),
+            directory=tmp_path,
+            run="unchanged",
+            resume=True,
+        ):
+            pytest.fail("a changed hold must be refused")
+    assert refused.value.code == "eval_run_tournament_conflict"
+
+
+def test_same_named_author_types_have_distinct_labels_and_keys() -> None:
+    first = Composition(type="one:Search", fields={"simulations": 64})
+    second = Composition(type="two:Search", fields=first.fields)
+    assert first.name == "one:Search(simulations=64)"
+    assert second.name == "two:Search(simulations=64)"
+    assert first.key != second.key
 
 
 def test_distinct_players_share_a_checkpoint_batch() -> None:
@@ -96,7 +210,13 @@ def test_group_builds_nested_players_and_loads_the_shared_leaf_once(
     assert {r["player"] for b in batches for r in b["rows"]} == {small.key, shifted.key, deeper.key}
     db = statsdb("grouped", tmp_path)
     try:
-        assert db.sql("select count(*) from players").fetchone() == (3,)
+        assert sorted(db.sql("select name from players").fetchall()) == [
+            (
+                "examples.agent_game:Shift(over=examples.agent_game:Shift(over=small, amount=1), amount=2)",
+            ),
+            ("examples.agent_game:Shift(over=small, amount=1)",),
+            ("small",),
+        ]
         placements, notes = _players(db, {}, {})
         assert {p.key for p in placements} == {small.key, shifted.key, deeper.key}
         assert all(any(p.name in note for note in notes) for p in placements)

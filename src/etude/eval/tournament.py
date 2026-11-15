@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, JsonValue, ValidationError
+from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from etude.checkpoints import CheckpointRef
 from etude.errors import EtudeError
@@ -53,6 +53,7 @@ from etude.eval.records import (
     IDENTIFIER,
     TOURNAMENT_FILE,
     Benchmark,
+    Composition,
     Environment,
     Line,
     Match,
@@ -63,6 +64,7 @@ from etude.eval.records import (
     Seated,
     Share,
     TournamentRun,
+    _map_fields,
     assemble,
     digest,
     folder_name,
@@ -82,6 +84,7 @@ if TYPE_CHECKING:
 
 # Every eval run's `etude.eval.records.Environment`.
 _ENVIRONMENT_FILE = "environment.json"
+_JSON = TypeAdapter(JsonValue)
 
 
 @contextmanager
@@ -102,7 +105,7 @@ def evaluating(
 ) -> Iterator[EvalRun]:
     """Open one tournament's eval run, or an environment's explicit matches.
 
-    A checkpoint fills benchmark inference seats; entrants fill a round robin.
+    A checkpoint fills benchmark held seats; entrants fill a round robin.
     With neither, plan every missing match of the stored tournament. Relative
     seats use the supplied experiment lines; planned jobs carry these in their
     specification. Explicit matches are checked against the tournament before
@@ -512,12 +515,27 @@ def _record(
         raise EtudeError("eval_run_tournament_conflict", 409)
 
 
-def _resumed(added: TournamentRun) -> dict[str, object]:
-    """What a resumed hold must repeat. A checkpoint is its key: a retry on another
-    attempt finds the same file at another path."""
-    return added.model_dump(
-        mode="json", exclude={"checkpoints": {"__all__": {"artifact": {"uri"}}}}
-    )
+def _resumed(value: object) -> JsonValue:
+    """Compare a hold without checkpoint locations, including leaves in author trees.
+
+    Keep artifact fingerprints and author data: relocation changes only where
+    checkpoint bytes are found, never the contents or the requested game.
+    """
+    if isinstance(value, CheckpointRef):
+        return _JSON.validate_python(value.model_dump(mode="json", exclude={"artifact": {"uri"}}))
+    if isinstance(value, Composition):
+        return {
+            "kind": value.kind,
+            "type": value.type,
+            "fields": _map_fields(value.fields, _resumed),
+        }
+    if isinstance(value, BaseModel):
+        return {name: _resumed(getattr(value, name)) for name in type(value).model_fields}
+    if isinstance(value, dict):
+        return {key: _resumed(each) for key, each in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_resumed(each) for each in value]
+    return _JSON.validate_python(value)
 
 
 @dataclass(frozen=True)
@@ -694,6 +712,7 @@ def scores(
             join schedule s on s.tournament = ? and s.match = r.match
             left join named n on n.checkpoint = s.checkpoint
             left join training_checkpoints t on t.checkpoint = s.checkpoint
+            where s.checkpoint is not null
             group by s.seating, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t."at",
                 r.match
             """,

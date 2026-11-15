@@ -55,7 +55,7 @@ OUTSIDE = CheckpointPlayer(
         key=checkpoint_id(address="hf://lab/outside.pt"),
         artifact=ArtifactRef(uri="hf://lab/outside.pt", sha256="ab" * 32),
     ),
-    config=stored_inference(config={"strength": 5}).config,
+    config={"strength": 5},
 )
 
 
@@ -378,9 +378,7 @@ def outside(
         at=at,
         line=line,
     )
-    return CheckpointPlayer(
-        name=name, checkpoint=ref, config=stored_inference(config=config).config
-    )
+    return CheckpointPlayer(name=name, checkpoint=ref, config={**config})
 
 
 def duel(first: Player, second: Player, deal: int = 0) -> Match:
@@ -1014,9 +1012,10 @@ def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
         "Tournament ladder is drawn as its eval runs recorded it:"
         " eval_jobs(state) now defines it otherwise (tournament_conflict)."
     ]
-    # What the report path lists and reads for one training run and one eval run, pinned;
-    # the eval run's tables come from the cache the first build filled.
-    assert (storage.listings, storage.requests) == (3, 10)
+    # Two completed matches have separate block indices; their tables stay cached.
+    assert sum(key.endswith("/block.json") for key in storage.got) == 2
+    assert not any(key.endswith(".parquet") for key in storage.got)
+    assert (storage.listings, storage.requests) == (3, 11)
     # Scheduling new games still needs the definition to agree.
     with pytest.raises(EtudeError, match="tournament_conflict"):
         advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)

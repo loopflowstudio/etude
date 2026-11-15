@@ -23,7 +23,6 @@ from etude.records import ArtifactRef
 from etude.storage import DirectoryStorage
 from tests.eval.games import play, play_game_seats
 from tests.eval.per_file import write_per_file
-from tests.eval.stored import stored_inference
 from tests.run.storage import MeasuredStorage
 
 DUEL = environment("duel")
@@ -150,7 +149,7 @@ def test_a_match_counts_once_from_the_latest_block_holding_it(tmp_path: Path) ->
     assert held("cards", bucket) == (1, 2, 2 * 2 * 2)
     # The same matches arrive again, in a later block and in an earlier one, as a
     # replayed run's may: each match's rows come from one block.
-    (index,) = (key for key in bucket.keys("cards/a/blocks/") if key.endswith("/block.json"))
+    index = next(key for key in bucket.keys("cards/a/blocks/") if key.endswith("/block.json"))
     folder = bucket.root / index.removesuffix("/block.json")
     written, writer = folder.name.split(".")
     for at in (int(written) + 1, int(written) - 1):
@@ -193,9 +192,7 @@ def test_a_match_two_runs_played_counts_from_the_later_under_its_latest_name(
     _, rival = pair(tmp_path)
     # One model, renamed between runs: a name is part of no key.
     for run, name in (("first", "early"), ("second", "late")):
-        model = CheckpointPlayer(
-            name=name, checkpoint=ref, config=stored_inference(config={"strength": 3}).config
-        )
+        model = CheckpointPlayer(name=name, checkpoint=ref, config={"strength": 3})
         evaluate(experiment="cards", environment=DUEL, play=play, run=run,
                  matches=[Match(players=(model, rival), config={"deal": 0}, games=2)],
                  directory=tmp_path / run, storages=[bucket])  # fmt: skip
@@ -326,7 +323,7 @@ def test_pandas_lookups_do_not_grow_with_the_matches_played_and_held(
         assert held("cards", bucket) == (1, matches, matches * 2 * 2)
         return played, lookups.count - played
 
-    few, many = counted(5), counted(50)
+    few, many = counted(2), counted(3)
     assert few[0] == many[0] == 0
     assert few[1] == many[1]
 

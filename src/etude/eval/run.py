@@ -120,7 +120,6 @@ class EvalRun(Run):
             attempt=os.environ.get("ETUDE_ATTEMPT"),
             commit=os.environ.get("ETUDE_COMMIT"),
         )
-        self.failed = 0  # `fail` is also how `store` refuses a match
         self._failed: set[str] = set()
         self.db: duckdb.DuckDBPyConnection = duckdb.connect()
         try:
@@ -147,7 +146,9 @@ class EvalRun(Run):
         self, play: Callable[[Match[C]], Tables | Result]
     ) -> EvalResult:
         """Play the selected matches once, skipping this run's durable results on resume."""
-        results = play_together((Playing(run=self, play=play),))
+        authored = inspect.unwrap(play)
+        function = Function(module=authored.__module__, name=authored.__qualname__)
+        results = play_together((Playing(run=self, play=function),))
         result = results[0]
         if isinstance(result, (EtudeError, RetryRequested)):
             raise result
@@ -187,32 +188,34 @@ class EvalRun(Run):
         """Mark unfinished matches failed with retry=True before the run fails."""
         for match in self.matches:
             if match.key not in self.done and match.key not in self._failed:
-                self._failed.add(match.key)
-                self.failed += 1
-                self.staging.stage(
-                    MatchRecord(
-                        match=match,
-                        state="failed",
-                        retry=True,
-                        error=sanitize(str(error))[:2000],
-                        wall_ms=_now_ms(),
-                    )
-                )
+                self._stage_failure(match, str(error), retry=True)
         self._seal()
+
+    @property
+    def failed(self) -> int:
+        return len(self._failed)
+
+    def _stage_failure(self, match: Match, detail: str, *, retry: bool = False) -> None:
+        self._failed.add(match.key)
+        self.staging.stage(
+            MatchRecord(
+                match=match,
+                state="failed",
+                error=sanitize(detail)[:2000],
+                retry=retry,
+                wall_ms=_now_ms(),
+            )
+        )
 
     def fail(self, scheduled: Match, error: BaseException) -> NoReturn:
         detail = (
             explain(error)
             if isinstance(error, subprocess.SubprocessError)
-            else sanitize(f"{type(error).__name__}: {error}")
-        )[:2000]
-        self._failed.add(scheduled.key)
-        self.failed += 1
-        self.staging.stage(
-            MatchRecord(match=scheduled, state="failed", error=detail, wall_ms=_now_ms())
+            else f"{type(error).__name__}: {error}"
         )
+        self._stage_failure(scheduled, detail)
         self._seal()
-        raise EtudeError("match_failed", 500) from error
+        raise EtudeError("match_failed", 500, detail=sanitize(detail)) from error
 
     def store(
         self, scheduled: Match, outcome: Tables | Result, *, seconds: float | None = None
@@ -437,7 +440,7 @@ class Playing:
     """A live tournament and its game function and optional agent address."""
 
     run: EvalRun
-    play: Callable[..., Tables | Result] | Function
+    play: Function
     checkout: str | None = None
     tournament: str | None = None
     agents: str | None = None
@@ -503,17 +506,7 @@ def play_together(
                     else EtudeError("match_failed", 500, detail=failure.error)
                 )
                 for match in affected:
-                    each.run._failed.add(match.key)
-                    each.run.failed += 1
-                    each.run.staging.stage(
-                        MatchRecord(
-                            match=match,
-                            state="failed",
-                            error=failure.error[:2000],
-                            retry=failure.retry,
-                            wall_ms=_now_ms(),
-                        )
-                    )
+                    each.run._stage_failure(match, failure.error, retry=failure.retry)
                 each.run._seal()
                 each.pending = deque(
                     match for match in each.pending if match.key not in each.run._failed
@@ -574,7 +567,7 @@ def play_together(
         if stopping or each.run.should_stop:
             stopping = True
             return None
-        return each.pending.popleft() if each.pending else None
+        return each.pending.popleft()
 
     workers = active_games(
         sum(len(each.pending) for each in plays),
@@ -600,12 +593,7 @@ def play_together(
                             running[
                                 pool.submit(
                                     play_match,
-                                    each.play
-                                    if isinstance(each.play, Function)
-                                    else Function(
-                                        module=inspect.unwrap(each.play).__module__,
-                                        name=inspect.unwrap(each.play).__qualname__,
-                                    ),
+                                    each.play,
                                     match,
                                     each.agents,
                                     each.checkout,

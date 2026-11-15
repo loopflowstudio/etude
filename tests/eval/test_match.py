@@ -47,12 +47,12 @@ def roster(tmp_path: Path) -> list[Player]:
         CheckpointPlayer(
             name="deep",
             checkpoint=model,
-            config=stored_inference(config={"strength": 3, "search": {"simulations": 64}}).config,
+            config={"strength": 3, "search": {"simulations": 64}},
         ),
         CheckpointPlayer(
             name="shallow",
             checkpoint=model,
-            config=stored_inference(config={"strength": 2, "search": {"simulations": 8}}).config,
+            config={"strength": 2, "search": {"simulations": 8}},
         ),
         Code(name="scripted", source=[script], config={"strength": 1}),
         Code(name="random", source=[script], config={"strength": 0}),

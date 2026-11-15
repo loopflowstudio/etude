@@ -468,7 +468,9 @@ def _block(
     held = block.model_dump_json(
         exclude={"blobs": True, "replaces": True, "matches": {"__all__": {"blobs"}}}
     )
-    db.execute("insert into kept.blocks values (?, ?, ?)", [run, name, held])
+    # Metadata literals avoid DuckDB probing optional pandas for every bound value
+    # in every match block. Table rows still enter through staged files.
+    db.execute(f"insert into kept.blocks values ({quote(run)}, {quote(name)}, {quote(held)})")
     pack = place + file_key(name, EVAL_BLOCK_PACK)
     _put(
         db,
@@ -487,9 +489,8 @@ def _block(
         [[digest, span.size_bytes] for digest, span in block.blobs.items() if digest not in named],
     )
     db.execute(
-        "insert into blobs select ?, null, a.sha256, a.size_bytes from _unnamed_blobs a"
-        " anti join blobs b on b.run = ? and b.match is null and b.sha256 = a.sha256",
-        [run, run],
+        f"insert into blobs select {quote(run)}, null, a.sha256, a.size_bytes from _unnamed_blobs a"
+        f" anti join blobs b on b.run = {quote(run)} and b.match is null and b.sha256 = a.sha256"
     )
     db.execute("drop table _unnamed_blobs")
     _put(db, "kept.replaced", {"run": "VARCHAR", "name": "VARCHAR"},
@@ -524,20 +525,18 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
     )  # fmt: skip
     db.execute(
         "create or replace temp table _taken as select a.* from _arrived_matches a"
-        " left join matches m on m.run = ? and m.match = a.match"
+        f" left join matches m on m.run = {quote(run)} and m.match = a.match"
         " where m.match is null or (m.state <> 'done' and a.state = 'done')"
-        " or (m.state = 'failed' and a.state = 'failed' and a.wall_ms > m.wall_ms)",
-        [run],
+        " or (m.state = 'failed' and a.state = 'failed' and a.wall_ms > m.wall_ms)"
     )
     for table in ("matches", "seats", '"groups"', "blobs"):
         db.execute(
-            f"delete from {table} t using _taken a where t.run = ? and t.match = a.match", [run]
+            f"delete from {table} t using _taken a where t.run = {quote(run)} and t.match = a.match"
         )
     # `newest` is ranked once everything has arrived (`_summaries`).
     db.execute(
-        "insert into matches select ?, match, config, games, seed, state, retry, error, wall_ms,"
-        " execution, null from _taken order by record",
-        [run],
+        f"insert into matches select {quote(run)}, match, config, games, seed, state, retry, error, wall_ms,"
+        " execution, null from _taken order by record"
     )
     stage(
         db,
@@ -560,9 +559,8 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
         " from _arrived_players s join _taken a using (record)"
     )
     db.execute(
-        'insert into seats select ?, match, seat, player, name, "commit", source, "at", line'
-        " from _arrived_seats order by record, seat",
-        [run],
+        f'insert into seats select {quote(run)}, match, seat, player, name, "commit", source, "at", line'
+        " from _arrived_seats order by record, seat"
     )
     # Every player a held match seats, as first given under each name.
     db.execute(
@@ -579,9 +577,8 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
          for name, seats in record.match.groups.items() for seat in seats],
     )  # fmt: skip
     db.execute(
-        'insert into "groups" select ?, a.match, g."group", g.seat from _arrived_groups g'
-        " join _taken a using (record) order by g.record",
-        [run],
+        f'insert into "groups" select {quote(run)}, a.match, g."group", g.seat from _arrived_groups g'
+        " join _taken a using (record) order by g.record"
     )
     stage(
         db,
@@ -591,9 +588,8 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
          for index, record in enumerate(records) for digest in record.blobs],
     )  # fmt: skip
     db.execute(
-        "insert into blobs select ?, a.match, b.sha256, b.size_bytes from _arrived_blobs b"
-        " join _taken a using (record) order by b.record",
-        [run],
+        f"insert into blobs select {quote(run)}, a.match, b.sha256, b.size_bytes from _arrived_blobs b"
+        " join _taken a using (record) order by b.record"
     )
     for table in ("_taken", "_arrived_seats", "_arrived_matches", "_arrived_players",
                   "_arrived_groups", "_arrived_blobs"):  # fmt: skip
@@ -627,12 +623,11 @@ def _table(db: duckdb.DuckDBPyConnection, run: str, table: str, file: str, path:
         f"create or replace temp table _arrived as select * from read_parquet({quote(path)})"
     )
     db.execute(
-        'delete from _arrived using kept.table_files f where f."table" = ? and f.run = _arrived.run'
-        " and f.match = _arrived.match and f.file > ?",
-        [table, file],
+        f'delete from _arrived using kept.table_files f where f."table" = {quote(table)} and f.run = _arrived.run'
+        f" and f.match = _arrived.match and f.file > {quote(file)}"
     )
     arrived = {column: kind for column, kind, *_ in db.execute("describe _arrived").fetchall()}
-    if db.execute("select 1 from kept.rollups where name = ?", [table]).fetchone():
+    if db.execute(f"select 1 from kept.rollups where name = {quote(table)}").fetchone():
         raise EtudeError("rollup_name_conflict", 409) from ValueError(table)
     if not _exists(db, "main", table):
         db.execute(f'create table "{table}" as select * from _arrived')
@@ -645,11 +640,10 @@ def _table(db: duckdb.DuckDBPyConnection, run: str, table: str, file: str, path:
         db.execute(f'insert into "{table}" by name select * from _arrived')
     db.execute(
         "delete from kept.table_files f using (select distinct run, match from _arrived) a"
-        ' where f."table" = ? and f.run = a.run and f.match = a.match',
-        [table],
+        f' where f."table" = {quote(table)} and f.run = a.run and f.match = a.match'
     )
     db.execute(
-        "insert into kept.table_files select distinct ?, run, match, ? from _arrived", [table, file]
+        f"insert into kept.table_files select distinct {quote(table)}, run, match, {quote(file)} from _arrived"
     )
     db.execute("drop table _arrived")
 
@@ -666,9 +660,8 @@ def _rollup(db: duckdb.DuckDBPyConnection, run: str, rollup: Rollup, file: str, 
         f"create or replace temp table _arrived as select * from read_parquet({quote(path)})"
     )
     db.execute(
-        'delete from _arrived using kept.table_files f where f."table" = ? and f.run = _arrived.run'
-        " and f.match = _arrived.match and f.file > ?",
-        [name, file],
+        f'delete from _arrived using kept.table_files f where f."table" = {quote(name)} and f.run = _arrived.run'
+        f" and f.match = _arrived.match and f.file > {quote(file)}"
     )
     arrived = {column: kind for column, kind, *_ in db.execute("describe _arrived").fetchall()}
     if arrived.get("opponents") == "VARCHAR":
@@ -715,11 +708,10 @@ def _rollup(db: duckdb.DuckDBPyConnection, run: str, rollup: Rollup, file: str, 
     db.execute(f'insert into kept."{name}" by name select * from _arrived')
     db.execute(
         "delete from kept.table_files f using (select distinct run, match from _arrived) a"
-        ' where f."table" = ? and f.run = a.run and f.match = a.match',
-        [name],
+        f' where f."table" = {quote(name)} and f.run = a.run and f.match = a.match'
     )
     db.execute(
-        "insert into kept.table_files select distinct ?, run, match, ? from _arrived", [name, file]
+        f"insert into kept.table_files select distinct {quote(name)}, run, match, {quote(file)} from _arrived"
     )
     db.execute("drop table _arrived")
     db.execute("drop table _delta")
@@ -733,13 +725,15 @@ def _hold(db: duckdb.DuckDBPyConnection, rollup: Rollup) -> None:
     table has, `rollup_name_conflict`.
     """
     identity = rollup.digest
-    held = db.execute("select digest from kept.rollups where name = ?", [rollup.name]).fetchone()
+    held = db.execute(
+        f"select digest from kept.rollups where name = {quote(rollup.name)}"
+    ).fetchone()
     if held is None:
         if _exists(db, "main", rollup.name):
             raise EtudeError("rollup_name_conflict", 409) from ValueError(rollup.name)
         db.execute(
-            "insert into kept.rollups values (?, ?, ?)",
-            [rollup.name, identity, rollup.model_dump_json()],
+            f"insert into kept.rollups values ({quote(rollup.name)}, {quote(identity)},"
+            f" {quote(rollup.model_dump_json())})"
         )
     elif held[0] != identity:
         raise EtudeError("rollup_conflict", 409) from ValueError(rollup.name)
@@ -786,8 +780,8 @@ def _sum_missing(
 def _exists(db: duckdb.DuckDBPyConnection, schema: str, table: str) -> bool:
     return bool(
         db.execute(
-            "select 1 from information_schema.tables where table_schema = ? and table_name = ?",
-            [schema, table],
+            f"select 1 from information_schema.tables where table_schema = {quote(schema)}"
+            f" and table_name = {quote(table)}"
         ).fetchone()
     )
 

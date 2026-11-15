@@ -8,10 +8,9 @@ from pathlib import Path
 
 import duckdb
 
-from etude.checkpoints import CheckpointId, CheckpointRef, checkpoint_id
+from etude.checkpoints import CheckpointRef, checkpoint_id
 from etude.eval.match import environment, evaluate
-from etude.eval.records import CheckpointPlayer, Code, Held, Match
-from etude.eval.run import Tables
+from etude.eval.records import CheckpointPlayer, Code, Held, Match, player_checkpoints
 from etude.eval.schedule import checkpoints, ordered
 from etude.records import ArtifactRef
 from tests.eval.games import play
@@ -19,29 +18,6 @@ from tests.eval.games import play
 WORLD = environment("duel", config={"world": "w6"})
 # The code that plays every player here.
 GAMES = Path(__file__).with_name("games.py")
-
-
-class Runtime:
-    """An author's inference runtime: the two checkpoints used last stay loaded."""
-
-    def __init__(self) -> None:
-        self.resident: list[CheckpointId] = []
-        self.loads = 0
-        self.played: list[str] = []
-
-    def play(self, match: Match) -> Tables:
-        for key in dict.fromkeys(
-            seated.checkpoint.key
-            for seated in match.players
-            if isinstance(seated, CheckpointPlayer)
-        ):
-            if key in self.resident:
-                self.resident.remove(key)
-            else:
-                self.loads += 1
-            self.resident = [*self.resident, key][-2:]
-        self.played.append(match.key)
-        return play(match)
 
 
 def checkpoint(updates: int) -> CheckpointPlayer:
@@ -74,10 +50,19 @@ def rating(checkpoints: int, deals: int, paired: int) -> list[Match]:
 
 
 def loads(matches: Iterable[Match]) -> int:
-    runtime = Runtime()
+    """Count loads with the two most recently used checkpoints kept resident."""
+    resident: list[str] = []
+    count = 0
     for match in matches:
-        runtime.play(match)
-    return runtime.loads
+        for key in dict.fromkeys(
+            ref.key for player in match.players for ref in player_checkpoints(player)
+        ):
+            if key in resident:
+                resident.remove(key)
+            else:
+                count += 1
+            resident = [*resident, key][-2:]
+    return count
 
 
 def rows(directory: Path) -> list[tuple[object, ...]]:

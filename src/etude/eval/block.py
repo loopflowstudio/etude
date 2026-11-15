@@ -565,6 +565,6 @@ def _write(target: Path, body: bytes) -> None:
     partial.replace(target)
 
 
-def quote(path: Path) -> str:
-    """A path as a DuckDB string literal."""
-    return "'" + os.fspath(path).replace("'", "''") + "'"
+def quote(value: Path | str) -> str:
+    """A path or text as a DuckDB string literal."""
+    return "'" + os.fspath(value).replace("'", "''") + "'"

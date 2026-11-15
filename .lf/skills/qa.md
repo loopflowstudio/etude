@@ -314,3 +314,24 @@ single-file checkpoints hide nested input names (`start/checkpoint.json`).
   at it, train `runs()` files (compact `ppo@0`, `solo`) and `etude queue` (makes
   `launcher-19.db`). Repoint the pyproject at this checkout, `uv lock`, rename per
   `release/UNRELEASED.md`, and check stored runs read `finished`.
+
+## Driving Etude
+
+- Isolate each scenario: a fresh `ETUDE_HOME` and a fresh `--source` directory.
+  Eval runs are written under `$ETUDE_HOME/track` and delivered to the source.
+  For recovery, reuse the home and move checkpoint files without changing their
+  keys, digests or lengths: bare and composed players must resume without
+  replaying delivered matches. Changed author fields or checkpoint fingerprints
+  must still raise `eval_run_tournament_conflict`.
+- Evaluations: `uv run etude eval FILE.py --source DIR`, run twice (the second
+  pass must play nothing), then `--retry-failed`. `examples/agents.py` covers
+  grouped tournaments, a shared checkpoint and nested wrappers. To vary the
+  game or loader, copy the example files into a temp folder and run
+  `uv run --project <checkout> etude eval agents.py` from there.
+- Results: `statsdb(experiment, DIR)` from `etude.eval.query`, using the
+  `players`, `seats` and `matches` tables.
+- Report: `uv run etude report FILE.py --source DIR --out OUT`, then look at it with
+  `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new
+  --disable-gpu --screenshot=OUT.png --window-size=1300,800 file://OUT/FILE.html`
+  and read the PNG. The page renders in JavaScript, so grepping the HTML text
+  shows nothing.
