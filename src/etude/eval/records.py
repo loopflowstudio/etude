@@ -211,7 +211,7 @@ def compose(player: BaseModel) -> Composition:
 def checkpoint_player(checkpoint: CheckpointRef) -> CheckpointPlayer:
     """Seat a checkpoint directly, without an inference configuration."""
     return CheckpointPlayer(
-        name=re.sub(r"\s", "_", checkpoint.key.rstrip("/").rsplit("/", 1)[-1]),
+        name=re.sub(r"\s", "_", (checkpoint.name or checkpoint.key).rstrip("/").rsplit("/", 1)[-1]),
         checkpoint=checkpoint,
     )
 

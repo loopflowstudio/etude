@@ -174,7 +174,9 @@ def test_compare_gives_a_rate_with_an_interval_that_resamples_matches(tmp_path: 
 
 def test_a_row_without_seat_or_group_is_refused_and_nothing_of_its_match_is_stored(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     players = roster(tmp_path)
     with pytest.raises(EtudeError) as refused:
         evaluate(

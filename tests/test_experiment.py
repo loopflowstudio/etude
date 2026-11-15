@@ -370,7 +370,9 @@ def test_a_retryable_failure_is_replayed_by_the_next_pass_and_not_counted_failed
 
 def test_a_pass_whose_matches_all_return_no_rows_fails_and_a_retry_replays_them(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     bucket = DirectoryStorage(tmp_path / "bucket")
     training = trainer(bucket, tmp_path)
     save(training, bucket, tmp_path, range(1, 2))

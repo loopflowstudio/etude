@@ -708,7 +708,12 @@ def hold_group(
                     checkpoints=held,
                     enter=spec.entrants,
                     matches=spec.matches,
-                    run=f"{spec.experiment}/{folder_name(spec.tournament.name)}-{identity[:12]}",
+                    # Released queued matches used the tournament-derived run name.
+                    run=(
+                        None
+                        if seated
+                        else f"{spec.experiment}/{folder_name(spec.tournament.name)}-{identity[:12]}"
+                    ),
                     directory=base,
                     storages=storages,
                     lines=spec.lines,
