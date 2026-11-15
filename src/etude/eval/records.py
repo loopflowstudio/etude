@@ -66,7 +66,13 @@ from pydantic import (
 )
 from typing_extensions import TypeVar
 
-from etude.checkpoints import CheckpointId, CheckpointRef, PolicyKey, _checkpoint_id
+from etude.checkpoints import (
+    CheckpointId,
+    CheckpointRef,
+    PolicyKey,
+    _checkpoint_id,
+    seen_from,
+)
 from etude.errors import EtudeError
 from etude.eval.source import digest_files, source_commit
 from etude.records import BUILT_IN_NAMES, Digest, Name, Record
@@ -647,6 +653,12 @@ class Line(Record):
     def policy(self) -> PolicyKey:
         return PolicyKey(experiment=self.experiment, job=self.job, seed=self.seed, role=self.role)
 
+    def seen_from(self, experiment: str) -> Line:
+        """This line as `experiment`'s evaluation seats its checkpoints (`seen_from`)."""
+        return self.model_copy(
+            update={"checkpoints": tuple(seen_from(ref, experiment) for ref in self.checkpoints)}
+        )
+
     @property
     def order(self) -> tuple[bool, int, str]:
         """Lines sort by seed, then name; one with no declared seed after those with one."""
@@ -695,7 +707,10 @@ def select_seat_lines(
     if role is not None:
         candidates = [line for line in candidates if line.role == role]
     elif len(roles := {line.role for line in candidates}) > 1:
-        raise EtudeError("ambiguous_policy", 422, detail=f"choose role from {sorted(roles)}")
+        where = f"{experiment}/{job}" if job else experiment
+        raise EtudeError(
+            "ambiguous_policy", 422, detail=f"{where}: choose role from {sorted(roles)}"
+        )
     return tuple(candidates)
 
 
@@ -711,7 +726,9 @@ def _select_jobs(
     jobs = {line.job for line in candidates}
     if len(jobs) > 1:
         raise EtudeError(
-            "ambiguous_policy", 422, detail=f"choose job from {sorted(str(j) for j in jobs)}"
+            "ambiguous_policy",
+            422,
+            detail=f"{experiment}: choose job from {sorted(str(j) for j in jobs)}",
         )
     return candidates
 
@@ -1206,21 +1223,22 @@ def resolve_checkpoint(
         return ref
     # An explicitly recorded None seed is an unseeded run, not an omitted default.
     if (
-        any(part is None for part in (policy.experiment, policy.job, policy.role))
-        or "seed" not in policy.model_fields_set
+        all(part is not None for part in (policy.experiment, policy.job, policy.role))
+        and "seed" in policy.model_fields_set
     ):
-        if lines:
-            policy = select_policy(lines, policy, experiment=experiment).policy
-        else:
-            # With no lines, only a fully named policy can be seated by hand.
-            if policy.job is None or policy.seed is None:
-                raise EtudeError("checkpoint_policy_needs_lines", 422)
-            policy = policy.model_copy(
-                update={
-                    "experiment": policy.experiment or experiment,
-                    "role": policy.role or "policy",
-                }
-            )
+        return ref
+    if lines:
+        policy = select_policy(lines, policy, experiment=experiment).policy
+    else:
+        # With no lines, only a fully named policy can be seated by hand.
+        if policy.job is None or policy.seed is None:
+            raise EtudeError("checkpoint_policy_needs_lines", 422)
+        policy = policy.model_copy(
+            update={
+                "experiment": policy.experiment or experiment,
+                "role": policy.role or "policy",
+            }
+        )
     return ref.model_copy(update={"policy": policy})
 
 

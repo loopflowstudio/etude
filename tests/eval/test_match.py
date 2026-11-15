@@ -18,7 +18,7 @@ import pytest
 from moto import mock_aws
 from pydantic import BaseModel
 
-from etude.checkpoints import CheckpointRef, _checkpoint_id
+from etude.checkpoints import CheckpointRef
 from etude.errors import EtudeError
 from etude.eval import query
 from etude.eval.match import environment, evaluate
@@ -314,7 +314,7 @@ def test_a_models_inference_code_is_its_version_not_its_key(tmp_path: Path) -> N
 
 def test_where_a_checkpoint_stood_is_carried_by_its_seat_and_is_not_its_identity() -> None:
     file = ArtifactRef(uri="hf://lab/u600.pt", sha256=sha256(b"a").hexdigest())
-    key = _checkpoint_id(address=file.uri)
+    key = file.uri
     seated = Inference().player(CheckpointRef(address=key, artifact=file, at={"updates": 600}))
     corrected = Inference().player(
         CheckpointRef(address=key, artifact=file, at={"updates": 612}, line="seed-2")

@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 import duckdb
 import pytest
 
-from etude.checkpoints import CheckpointRef, _checkpoint_id
+from etude.checkpoints import CheckpointRef, PolicyKey, _checkpoint_id
 from etude.errors import EtudeError
 from etude.eval.match import environment, evaluate
 from etude.eval.query import statsdb
@@ -21,6 +21,7 @@ from etude.eval.records import (
     Benchmark,
     CheckpointPlayer,
     Code,
+    Final,
     Inference,
     Line,
     Match,
@@ -604,6 +605,46 @@ def test_a_seed_added_splits_the_point_again_and_counts_only_the_new_split(
     assert held(two) == 2
     assert point() == (2, 4)
     assert held(two) == 0
+
+
+def test_another_experiments_checkpoints_keep_their_own_learner_line(tmp_path: Path) -> None:
+    """Held in Python with another experiment's lines, as `etude eval` holds them: rival's
+    `small@0` and tla-frontier's `small@0` are two learners on rival's report."""
+    bucket = DirectoryStorage(tmp_path / "bucket")
+
+    def saved(experiment: str, updates: int) -> CheckpointRef:
+        file = tmp_path / experiment / f"updates-{updates}.pt"
+        file.parent.mkdir(exist_ok=True)
+        file.write_bytes(f"{experiment} {updates}".encode())
+        artifact = ArtifactRef(uri=file.as_uri(), sha256=sha256(file.read_bytes()).hexdigest())
+        key = PolicyKey(experiment=experiment, job="small", seed=0)
+        return key.checkpoint(name=file.name, artifact=artifact, at={"updates": updates})
+
+    mine, theirs = saved("rival", 100), saved("tla-frontier", 300)
+    lines = [
+        Line(name="small@0", experiment="rival", seed=0, job="small", checkpoints=(mine,)),
+        Line(name="small@0", experiment="tla-frontier", seed=0, job="small", ended=True,
+             checkpoints=(theirs,)),
+    ]  # fmt: skip
+    frontier = Benchmark(
+        name="frontier",
+        environment=WORLD,
+        seatings=(
+            Seating(
+                name="vs frontier",
+                players=(DIRECT, Final(experiment="tla-frontier", job="small")),
+                configs=DEALS[:1],
+                games=2,
+            ),
+        ),
+    )
+    with evaluating(
+        frontier, experiment="rival", checkpoint=mine, storages=[bucket], lines=lines
+    ) as run:
+        run.play(play)
+    with statsdb("rival", bucket) as db:
+        seated = db.sql("select distinct player, line from seats order by line").fetchall()
+    assert [line for _, line in seated] == ["small@0", "tla-frontier/small@0"]
 
 
 def test_scores_of_checkpoints_no_training_run_recorded_follow_their_names(

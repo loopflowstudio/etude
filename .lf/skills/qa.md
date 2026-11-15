@@ -151,6 +151,16 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    seed). Compare with a main run before calling a replay count a regression.
    Keep helper scripts in their own folder with names that are not stdlib modules:
    a `/tmp/X/inspect.py` beside the script shadows `inspect` and breaks `etude.page`.
+   Drive the Python path as well as the CLI: a script calling `evaluating(bench,
+   experiment=E, checkpoint=ref, directory=SOURCE, storages=[], run="hand-x",
+   lines=observe(SOURCE, E).lines + observe(SOURCE, OTHER).lines)` then `run.play(play)`,
+   run from the lab with `PYTHONPATH=LAB` so `games` imports. Build `ref` each documented
+   way (`PolicyKey(...).checkpoint(name=, artifact=)`, flat `CheckpointRef(job=, seed=,
+   name=, ...)`, `CheckpointRef(address=...)`). `ArtifactRef` needs `sha256` or the ref
+   fails validation. A hand-built ref of a tracked file must give its stored position
+   (`name="out/policy-200.pt"`); `name="policy-200.pt"` keys `.../checkpoints/policy-200.pt`,
+   a second player on the same line. Compare `seats.line` per eval run in `statsdb`
+   with the CLI pass's. In zsh, an unmatched glob aborts the whole `rm`; use `find -exec rm`.
 14. The stats database under `ETUDE_HOME/statsdb` rebuilds its derived tables (`players`,
    `schedule`) only when new data arrives or its `SCHEMA` changes, so after editing
    `etude/eval/query.py` delete that folder before judging the page.

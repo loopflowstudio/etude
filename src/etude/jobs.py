@@ -874,7 +874,7 @@ def _hold(evaluation: Evaluation) -> None:
                 name=given.key if given.key.startswith("out/") else checkpoint_file_name(given.key),
             )
             if given.run is not None
-            else _checkpoint_id(address=given.key)
+            else given.key
         )
         artifact = ArtifactRef(
             uri=(Path(str(folder)) / given.name).as_uri(),

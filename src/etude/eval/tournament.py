@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, JsonValue, ValidationError
 
-from etude.checkpoints import CheckpointRef
+from etude.checkpoints import CheckpointRef, seen_from
 from etude.errors import EtudeError
 from etude.eval.block import Block, run_blocks
 from etude.eval.match import KIND
@@ -115,6 +115,7 @@ def evaluating(
     if experiment is None:
         raise EtudeError("experiment_not_named", detail="give experiment= outside a launch")
     resume = resume or bool(os.environ.get("ETUDE_ATTEMPT"))
+    lines = tuple(line.seen_from(experiment) for line in lines)
     if isinstance(tournament, Environment):
         if matches is None:
             raise EtudeError("evaluation_needs_matches", 422)
@@ -124,8 +125,11 @@ def evaluating(
                     "players": tuple(
                         player.model_copy(
                             update={
-                                "checkpoint": resolve_checkpoint(
-                                    player.checkpoint, lines, experiment=experiment
+                                "checkpoint": seen_from(
+                                    resolve_checkpoint(
+                                        player.checkpoint, lines, experiment=experiment
+                                    ),
+                                    experiment,
                                 )
                             }
                         )
@@ -151,7 +155,10 @@ def evaluating(
         return
     if checkpoint is not None and checkpoints:
         raise EtudeError("hold_one_checkpoint_on_the_go_or_add_checkpoints", 422)
-    given = (checkpoint,) if checkpoint is not None else tuple(checkpoints)
+    given = tuple(
+        seen_from(each, experiment)
+        for each in ((checkpoint,) if checkpoint is not None else checkpoints)
+    )
     added = _added(tournament, given, enter, share).bind(lines, experiment=experiment)
     if matches is not None:
         resolved, _ = assemble([added]).resolve(lines, experiment=experiment)
@@ -284,9 +291,9 @@ def played(
     Asking about several tournaments, pass `runs` (`stored_runs`), read once,
     instead of `directory` and `storages`, which are read on every call.
     """
-    added = _added(tournament, tuple(checkpoints), enter, Share()).bind(
-        lines, experiment=experiment
-    )
+    lines = tuple(line.seen_from(experiment) for line in lines)
+    held = tuple(seen_from(each, experiment) for each in checkpoints)
+    added = _added(tournament, held, enter, Share()).bind(lines, experiment=experiment)
     if runs is None:
         runs = stored_runs(experiment, directory=directory, storages=storages)
     elif runs.experiment != experiment:
