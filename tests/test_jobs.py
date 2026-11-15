@@ -20,15 +20,12 @@ from etude.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, Inference, Match, RoundRobin
-from etude.experiment import observe
-from etude.jobs import EvalJob, JobOptions, TrainingJob, checkpoint_inputs
+from etude.eval.records import Benchmark, Code, RoundRobin
+from etude.jobs import EvalJob, JobOptions, TrainingJob, with_experiment
 from etude.launch.smoke import tiny
 from etude.records import ArtifactRef
 from etude.spec import Input, Job, Preparation, Runtime, SmokeForm, Until, job_id
-from etude.storage import DirectoryStorage
 from etude.train.read import read
-from etude.train.tracking import track
 from tests.eval.games import play
 from tests.experiments import authored
 from tests.launch.counting import job_text
@@ -396,7 +393,6 @@ def arena(config: ArenaConfig) -> Benchmark:
     given = legacy if form == "input" else record
     job = EvalJob(
         tournament=duel.arena(duel.ArenaConfig()),
-        experiment="ppo",
         play=duel.play,
         checkpoint=given,
         max_hours=0.1,
@@ -404,11 +400,12 @@ def arena(config: ArenaConfig) -> Benchmark:
         max_attempts=1,
         runtime=Runtime(python=job_python),
     )
+    executable = with_experiment(job, "ppo")
     assert len(job.plain().inputs) == len(members)
     assert {each.key for each in job.plain().inputs} == {
         "checkpoints/updates-100" + ("/" + name if name else "") for name in members
     }
-    (run,) = c.scheduler.launch(job, rent="l4")
+    (run,) = c.scheduler.launch(executable, rent="l4")
     (status,) = c.scheduler.wait(run, every=0.05, timeout=60)
     assert status.outcome == "succeeded", job_text(c.scheduler.logs(refresh=True, run=run))
     assert c.provider.creates == 1
@@ -424,7 +421,7 @@ def arena(config: ArenaConfig) -> Benchmark:
             (delivered / run / key.removeprefix(folder)).write_bytes(body)
     db = statsdb("ppo", delivered)
     assert db.sql("select distinct checkpoint from players where kind = 'model'").fetchall() == [
-        (record.key,)
+        ("ppo/" + record.key,)
     ]
     assert (
         db.sql(
@@ -441,7 +438,6 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
     with pytest.raises(LauncherError, match="give it checkpoints, no entrants"):
         EvalJob(
             tournament=progress,
-            experiment="ppo",
             play=lambda match: {},
             enter=[entrant],
             max_hours=0.1,
@@ -454,7 +450,6 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
         # The omission under test.
         EvalJob(
             tournament=progress,
-            experiment="ppo",
             play=lambda match: {},
             checkpoint=weights,
             repo=None,
@@ -463,9 +458,7 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
         name="league", environment=environment("duel"), configs=({},), games=1
     )
     with pytest.raises(LauncherError, match="give it entrants"):
-        EvalJob(
-            tournament=league, experiment="ppo", play=lambda match: {}, max_hours=0.1, repo=None
-        )
+        EvalJob(tournament=league, play=lambda match: {}, max_hours=0.1, repo=None)
 
 
 def test_the_job_command_starts_by_importing_no_other_part_of_etude() -> None:
@@ -568,28 +561,6 @@ def write(config: TrainConfig) -> None:
     assert list(points.x) == [1, 2, 3]
     assert list(points.y) == [10, 200, 300]
     assert [writer.first_row for writer in data.writers] == [True, True, False]
-
-
-@pytest.mark.parametrize("declared", [False, True])
-def test_a_seated_artifact_wins_over_a_local_checkpoint_with_the_same_compact_key(
-    tmp_path: Path,
-    declared: bool,
-) -> None:
-    source = DirectoryStorage(tmp_path)
-    for experiment, body in (("producer", b"earlier weights"), ("review", b"local weights")):
-        with track(
-            experiment=experiment, run="base@0", directory=tmp_path, clocks=["updates"], strict=True
-        ) as run:
-            path = run.out / "weights.pt"
-            path.write_bytes(body)
-            run.checkpoint(path, updates=1)
-    checkpoint = observe(source, "producer").runs[0].final
-    assert checkpoint is not None
-    state = observe(source, "review")
-    assert state.checkpoint(checkpoint.key) is not None
-    match = Match(players=(checkpoint.player(Inference()), Code(name="fixed")), games=1)
-    saved = checkpoint_inputs([match], state, [checkpoint] if declared else [])
-    assert saved[checkpoint.key].artifact == checkpoint.artifact
 
 
 def test_typed_jobs_declare_uv_extras(tmp_path: Path) -> None:

@@ -128,11 +128,40 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    and launch with `executablePath` set to the cached
    `~/Library/Caches/ms-playwright/chromium_headless_shell-*/…/chrome-headless-shell`.
    Click `getByRole("button", {name: "Refresh"})` and read `document.body.innerText`.
+   `page.on("pageerror")` and `page.on("console")` show script errors; a blank chart with data
+   in the page JSON is otherwise silent.
    Gap reasons and point values are only in hover text: `page.mouse.move(x, y - scrollY)` on a
    point in a full-page screenshot, then read `innerText` of `.u-legend` and `[class*=tip]`.
    A seating curve's per-checkpoint data is the page JSON's `points`: `selection` indexes
    `selections`; `at` gives its position, `value` its score, and `gap` (an eval `Gap`; its `missing` is `not_yet` or `never`) why it has none.
-13. The stats database under `ETUDE_HOME/statsdb` rebuilds its derived tables (`players`,
+13. Cross-experiment seats (`Final(experiment=...)`, `PolicyKey`): write each experiment's
+   runs with `track(experiment=E, run="small@0", job="small", seed=0, ...)` into one source;
+   two experiments may share a run name. Hold another experiment's checkpoints with
+   `observe(SOURCE, OTHER).policy(PolicyKey(...)).checkpoints`. An experiment with no runs of
+   its own still evaluates ("Evaluation only"). To replay an eval from scratch, delete both
+   `RUNS/E/NAME.*` and `ETUDE_HOME/track/E/NAME.*`: with only the source copy gone, the pass
+   resumes the finished local run and re-ships just `outcome.json`, and the page shows
+   nothing recorded. `etude.page.build` takes `Path`s. The page's legend and
+   `players[].line` show whether foreign checkpoints sit on their own lines. Returning-user
+   check: same file and runs evaluated on a `main` worktree, then `etude eval` here must
+   print `nothing to play`, and hashing `(subject, opponent, value, rows, matches)` over
+   `build(...).cells` must match.
+   Adding a seed to an every-seed seat replays most matches: games are re-split over
+   the new seed pairs, so match keys change (main plays 16, then 28 more for a third
+   seed). Compare with a main run before calling a replay count a regression.
+   Keep helper scripts in their own folder with names that are not stdlib modules:
+   a `/tmp/X/inspect.py` beside the script shadows `inspect` and breaks `etude.page`.
+   Drive the Python path as well as the CLI: a script calling `evaluating(bench,
+   experiment=E, checkpoint=ref, directory=SOURCE, storages=[], run="hand-x",
+   lines=observe(SOURCE, E).lines + observe(SOURCE, OTHER).lines)` then `run.play(play)`,
+   run from the lab with `PYTHONPATH=LAB` so `games` imports. Build `ref` each documented
+   way (`PolicyKey(...).checkpoint(name=, artifact=)`, flat `CheckpointRef(job=, seed=,
+   name=, ...)`, `CheckpointRef(address=...)`). `ArtifactRef` needs `sha256` or the ref
+   fails validation. A hand-built ref of a tracked file must give its stored position
+   (`name="out/policy-200.pt"`); `name="policy-200.pt"` keys `.../checkpoints/policy-200.pt`,
+   a second player on the same line. Compare `seats.line` per eval run in `statsdb`
+   with the CLI pass's. In zsh, an unmatched glob aborts the whole `rm`; use `find -exec rm`.
+14. The stats database under `ETUDE_HOME/statsdb` rebuilds its derived tables (`players`,
    `schedule`) only when new data arrives or its `SCHEMA` changes, so after editing
    `etude/eval/query.py` delete that folder before judging the page.
 
@@ -193,6 +222,10 @@ repo, with an isolated `ETUDE_HOME`:
 - Client jobs submitted directly from Python need `experiment=`
   (`job.model_copy(update=...)`). `etude launch FILE.py` defaults unnamed jobs
   to the file stem; recipes call `track()` without an experiment.
+- Smoke trains each distinct `job_id` once: two jobs differing only in name share one
+  smoke run, so give each lab job its own config.
+- Pass output: unbuffered (`PYTHONUNBUFFERED=1`) to see stdout and stderr in order;
+  a failing pass otherwise shows its error before its state line.
 - A `--keep` smoke folder's `track/` holds a tiny tournament (games=1): as an
   `etude eval --source` it gives `seating_conflict`. Copy only the training run's
   folder out for a clean source.

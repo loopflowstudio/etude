@@ -5,7 +5,7 @@ new runs. The scheduler's public records are the only memory of a hand-down.
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,12 +20,20 @@ from etude.declarations import (
     select_runs,
 )
 from etude.errors import EtudeError, LauncherError
-from etude.eval.records import Match, digest, folder_name
+from etude.eval.records import (
+    Line,
+    Match,
+    TournamentRun,
+    digest,
+    folder_name,
+)
 from etude.eval.tournament import StoredRuns, played
-from etude.experiment import observe
+from etude.experiment import observe, read_tournament_lines
 from etude.jobs import (
+    Checkpoints,
     Evaluation,
     ExperimentState,
+    TrainingRunSummary,
     evaluation_spec,
     fetch_checkpoints,
     hold_evaluation,
@@ -35,6 +43,7 @@ from etude.jobs import (
 from etude.launch import client
 from etude.launch.listing import show_quote
 from etude.launch.server import selected
+from etude.run import located_runs
 from etude.smoke import smoke_file
 from etude.spec import Job, RunRequest, Smoke, Until
 from etude.storage import Storage, default_root
@@ -111,6 +120,21 @@ def _print_lines(lines: dict[str | None, str]) -> None:
     lines.clear()
 
 
+def _queued(request: RunRequest, experiment: str) -> TrainingRunSummary:
+    assert request.id is not None
+    name = request.id.removeprefix(experiment + "/")
+    return TrainingRunSummary(
+        name=name,
+        experiment=experiment,
+        job=request.job.name,
+        launch=request.job.name,
+        line=name,
+        state="queued",
+        checkpoints=Checkpoints(),
+        seed=request.seed,
+    )
+
+
 def advance(
     experiment: Experiment,
     *,
@@ -133,7 +157,8 @@ def advance(
     if max_usd is not None and (not max_usd.is_finite() or max_usd < 0):
         raise LauncherError("--max-usd must be a finite, nonnegative dollar limit")
     listed = source.keys("")
-    state = observe(source, experiment.name, keys=listed)
+    declarations = located_runs(source, listed)
+    state = observe(source, experiment.name, keys=listed, declarations=declarations)
     committed = state.committed_usd
     print(
         f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: "
@@ -174,10 +199,29 @@ def advance(
             new.append(request)
             lines[request.id] = f"{request.id}  new"
             committed += request.job.max_usd or Decimal(0)
-    jobs = (
-        [with_experiment(j, experiment.name) for j in asked(experiment.eval, state)]
-        if experiment.eval is not None and evaluate
-        else []
+    jobs: list[Job] = []
+    if experiment.eval is not None and evaluate:
+        # This pass's new runs have no checkpoints yet, but their policies already exist
+        # for eval_jobs. Selection/resume passes skip evaluation, so every run here is new.
+        asking = replace(state, runs=(*state.runs, *(_queued(r, experiment.name) for r in new)))
+        try:
+            jobs = [with_experiment(j, experiment.name) for j in asked(experiment.eval, asking)]
+        except EtudeError:
+            # A policy of a run this pass left out (`--max-usd`) is missing; say which and why.
+            _print_lines(lines)
+            raise
+    policy_lines = read_tournament_lines(
+        source,
+        state,
+        [
+            TournamentRun(
+                tournament=(spec := evaluation_spec(job)).tournament,
+                checkpoints=spec.held,
+            )
+            for job in jobs
+        ],
+        keys=listed,
+        declarations=declarations,
     )
     smoke = Smoke()
     if smoke_file_first and not quote:
@@ -202,16 +246,20 @@ def advance(
     taken = {f"{experiment.name}/{run.name}" for run in state.eval_runs}
     decisions: list[TournamentDecision] = []
     stopped_runs: set[str] = set()
-    stored = StoredRuns.read(experiment.name, source, keys=listed) if jobs else None
+    stored = (
+        StoredRuns.read(experiment.name, source, keys=listed, declarations=declarations)
+        if jobs
+        else None
+    )
     for executable in jobs:
         spec = evaluation_spec(executable)
         found = played(
             spec.tournament,
             experiment=experiment.name,
-            checkpoints=tuple(each.ref for each in spec.checkpoints),
+            checkpoints=spec.held,
             enter=spec.entrants,
             runs=stored,
-            lines=state.lines,
+            lines=policy_lines,
         )
         wanted = [*found.new, *(found.failed if retry_failed else ())]
         pending = [match for match in wanted if match.key not in running]
@@ -228,10 +276,12 @@ def advance(
             done.stopped = tuple(sorted(stopped))
             pending = [match for match in pending if match.key not in failed]
         if pending and mode == "local":
-            done.played = _play_here(spec, executable, pending, state, source, directory)
+            done.played = _play_here(
+                spec, executable, pending, state, policy_lines, source, directory
+            )
             running.update(m.key for m in pending)
         elif pending:
-            executable = with_matches(executable, pending, state)
+            executable = with_matches(executable, pending, state, policy_lines)
             if _fits(executable, committed, max_usd):
                 stem = f"{experiment.name}/{folder_name(spec.tournament.name)}-{digest(sorted(m.key for m in pending))[:12]}"
                 done.launched = stem
@@ -280,6 +330,7 @@ def _play_here(
     executable: Job,
     pending: Sequence[Match],
     state: ExperimentState,
+    lines: tuple[Line, ...],
     source: Storage,
     directory: Path | str | None,
 ) -> int:
@@ -287,12 +338,7 @@ def _play_here(
     with TemporaryDirectory(prefix="etude-eval-") as folder:
         here = fetch_checkpoints(pending, state, spec.checkpoints, Path(folder))
         held = hold_evaluation(
-            spec.model_copy(
-                update={
-                    "matches": tuple(pending),
-                    "lines": state.lines,
-                }
-            ),
+            spec.model_copy(update={"matches": tuple(pending), "lines": lines}),
             files=here,
             checkout=executable.repo,
             directory=directory,

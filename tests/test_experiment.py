@@ -6,6 +6,7 @@ import shutil
 import time
 from contextlib import nullcontext
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
@@ -23,9 +24,18 @@ from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Inference, Seating
 from etude.eval.tournament import evaluating, scores
 from etude.experiment import observe
-from etude.jobs import EvalJob, ExperimentState, _hold, evaluation_spec
+from etude.jobs import (
+    EvalJob,
+    ExperimentState,
+    OutMembers,
+    _hold,
+    evaluation_spec,
+    with_experiment,
+)
 from etude.launch.records import Outcome, Standing, Status
-from etude.records import Clock, RunRecord, RunSubmission
+from etude.local import _place_inputs
+from etude.out import MEMBERSHIP, OutFile, OutFiles
+from etude.records import Clock, RunCounters, RunOutcome, RunRecord, RunSubmission
 from etude.spec import Job, RunRequest
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage
@@ -34,10 +44,107 @@ from etude.train.tracking import TrainingRun as Run_
 from etude.train.tracking import track
 from tests.eval.games import play, play_catching_errors, play_failing_deal_one
 from tests.experiments import authored
+from tests.run.storage import MeasuredStorage
 
 WORLD = environment("duel", config={"world": "w6"})
 DEALS = tuple({"deal": deal} for deal in range(2))
 DIRECT = Inference(config={"search": 0})
+
+
+def _store_out_members(storage: DirectoryStorage, folder: str) -> OutFiles:
+    storage.put(
+        folder + "/run.json",
+        RunRecord(id=folder, experiment="packs", job="player", seed=0).model_dump_json().encode(),
+    )
+    storage.put(
+        folder + "/outcome.json",
+        RunOutcome(state="finished", counters=RunCounters()).model_dump_json().encode(),
+    )
+    files = []
+    for path in ("packs/0001.pack", "packs/deeper/0002.pack", "model", "removed"):
+        body = path.encode()
+        key = "out/" + path
+        files.append(OutFile(key=key, sha256=sha256(body).hexdigest(), size_bytes=len(body)))
+        if path != "removed":
+            storage.put(folder + "/" + key, body)
+    membership = OutFiles(files=tuple(files))
+    storage.put(folder + "/" + MEMBERSHIP, membership.model_dump_json().encode())
+    storage.put(folder + "/out/unpublished", b"not yet stored in membership")
+    return membership
+
+
+@pytest.mark.parametrize(
+    ("folder", "name", "owner"),
+    [
+        ("packs/player@0", "player@0", "packs/player@0"),
+        ("packs", "packs", "packs"),
+        ("packs@0", "packs@0", "packs@0"),
+        ("packs/packs@0", "packs@0", "packs/packs@0"),
+    ],
+)
+def test_out_members_are_lazy_listed_and_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, folder: str, name: str, owner: str
+) -> None:
+    storage = DirectoryStorage(tmp_path / "bucket")
+    membership = _store_out_members(storage, folder)
+    measured = MeasuredStorage(storage)
+    state = observe(measured, "packs")
+    assert (measured.listings, measured.requests) == (1, 2)
+    summary = state.run(name)
+    members = summary.out
+    assert summary.out is members
+    assert (measured.listings, measured.requests) == (1, 3)
+    assert measured.got == [folder + "/run.json", folder + "/outcome.json", folder + "/out.json"]
+    assert [member.key for member in members] == [file.key for file in membership.files[:-1]]
+    assert [(m.sha256, m.size_bytes) for m in members] == [
+        (file.sha256, file.size_bytes) for file in membership.files[:-1]
+    ]
+    assert all(member.run == owner for member in members)
+    assert all(member.uri == storage.uri(folder + "/" + member.key) for member in members)
+    assert members.file("model") == members[-1]
+    with pytest.raises(EtudeError, match=f"out_file_not_found: absent is not stored in {owner}$"):
+        members.file("absent")
+    packs = members.matching("packs/*.pack")
+    assert isinstance(packs[:1], OutMembers)
+    assert packs[:1].matching("*.pack").file("packs/0001.pack") == packs[0]
+    assert len(packs) == 2
+    assert packs.matching("PACKS/*") == ()
+    inputs = packs.inputs("packs")
+    assert [given.name for given in inputs] == [
+        "packs/packs/0001.pack",
+        "packs/packs/deeper/0002.pack",
+    ]
+    assert all(given.out is None and given.run == owner for given in inputs)
+
+    placed = tmp_path / "inputs"
+    _place_inputs(inputs, placed, tmp_path / "artifacts")
+    monkeypatch.setenv("ETUDE_INPUTS_DIR", str(placed))
+    with track(experiment="consumer", directory=tmp_path / "consumer") as consumer:
+        assert (consumer.input("packs") / "packs/0001.pack").read_bytes() == b"packs/0001.pack"
+    single = members.file("model").input("model")
+    assert single.name == "model" and single.key == "out/model"
+    storage.put(folder + "/out/model", b"replacement")
+    with pytest.raises(EtudeError, match="input_undelivered"):
+        _place_inputs((single,), tmp_path / "changed", tmp_path / "fresh-artifacts")
+
+
+def test_out_members_without_membership_read_no_files(tmp_path: Path) -> None:
+    storage = DirectoryStorage(tmp_path / "bucket")
+    _store_out_members(storage, "packs/player@0")
+    storage.delete("packs/player@0/out.json")
+    measured = MeasuredStorage(storage)
+    summary = observe(measured, "packs").run("player@0")
+    assert summary.out == ()
+    assert (measured.listings, measured.requests) == (1, 2)
+
+
+def test_out_members_listed_but_unreadable_raise(tmp_path: Path) -> None:
+    storage = DirectoryStorage(tmp_path / "bucket")
+    _store_out_members(storage, "packs/player@0")
+    summary = observe(storage, "packs").run("player@0")
+    storage.delete("packs/player@0/out.json")
+    with pytest.raises(FileNotFoundError):
+        _ = summary.out
 
 
 def heuristic(tmp_path: Path) -> Code:
@@ -275,7 +382,7 @@ def test_an_eval_job_belongs_to_the_experiment_of_its_file(tmp_path: Path) -> No
     def elsewhere(state: ExperimentState) -> Job:
         return EvalJob(tournament=progress, experiment="another", play=play, max_hours=0.1)
 
-    with pytest.raises(EtudeError, match="eval_job_of_another_experiment"):
+    with pytest.raises(LauncherError, match="EvalJob belongs to its file"):
         advance(Experiment(name="ppo", eval=elsewhere), source=bucket, directory=tmp_path / "e")
 
 
@@ -732,9 +839,9 @@ def test_saved_eval_outcomes_keep_the_launchers_continuation_state(
         launcher.launched.append(
             RunRequest(
                 id="ppo/ladder",
-                job=EvalJob(
-                    tournament=tournament, play=play, experiment="ppo", repo=None, max_hours=1
-                ).plain(),
+                job=with_experiment(
+                    EvalJob(tournament=tournament, play=play, repo=None, max_hours=1), "ppo"
+                ),
             )
         )
     launcher.queued = phase == "queued"
@@ -841,13 +948,15 @@ def test_unstored_summaries_use_local_names_and_accept_both_lookup_spellings(
             ),
             RunRequest(
                 id="ppo/ladder-123",
-                job=EvalJob(
-                    tournament=Benchmark(name="ladder", environment=WORLD),
-                    play=play,
-                    experiment="ppo",
-                    repo=None,
-                    max_hours=1,
-                ).plain(),
+                job=with_experiment(
+                    EvalJob(
+                        tournament=Benchmark(name="ladder", environment=WORLD),
+                        play=play,
+                        repo=None,
+                        max_hours=1,
+                    ),
+                    "ppo",
+                ),
             ),
         ]
     )
