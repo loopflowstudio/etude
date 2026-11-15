@@ -12,7 +12,7 @@ from etude.cli import main
 from etude.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.launch.client import launch, queue, wait
-from etude.launch.database import launcher_file
+from etude.launch.database import launcher_file, upgrade
 from etude.launch.errors import LaunchError
 from etude.launch.machines import Refused
 from etude.launch.records import Offer, OnDemand, Pool, Stale
@@ -151,6 +151,7 @@ def test_public_queue_functions_run_locally(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    upgrade(tmp_path, development=True)
     (one,) = queue(Job(command="echo queued", max_hours=0.01, max_usd=Decimal(1)))
     assert wait(one, every=0.01, timeout=10)[0].outcome == "succeeded"
     ids = queue(Job(command="true", max_hours=0.01, max_usd=Decimal(1)).runs(1, 2))

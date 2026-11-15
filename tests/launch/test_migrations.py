@@ -28,6 +28,7 @@ from etude.launch.database import (
     upgrade,
 )
 from etude.launch.errors import SchemaAdvanced
+from etude.launch.provenance import frontier
 from etude.launch.providers.package import program_archive
 from etude.launch.records import Pool
 from etude.launch.scheduler import Scheduler
@@ -439,6 +440,38 @@ def test_read_open_uses_two_queries_without_write_lock(
     assert all(sql.startswith("SELECT") for sql in statements)
 
 
+@pytest.mark.parametrize("tracking", [True, False], ids=["clone", "uv-main-pin"])
+def test_source_checkout_frontier_reads_merged_sql_from_main(
+    tmp_path: Path, tracking: bool
+) -> None:
+    def git(*args: str, cwd: Path) -> None:
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+            cwd=cwd,
+            check=True,
+            capture_output=True,
+        )
+
+    upstream = tmp_path / "upstream"
+    folder = upstream / "src" / "etude" / "launch" / "migrations"
+    folder.mkdir(parents=True)
+    (folder / "merged.sql").write_text("CREATE TABLE merged(value TEXT);\n")
+    git("init", "-q", "-b", "main", cwd=upstream)
+    git("add", ".", cwd=upstream)
+    git("commit", "-qm", "merged", cwd=upstream)
+    checkout = tmp_path / "checkout"
+    git("clone", "-q", str(upstream), str(checkout), cwd=tmp_path)
+    if not tracking:  # uv checks a pin out with refs/heads/main and no origin/* refs.
+        git("update-ref", "-d", "refs/remotes/origin/HEAD", cwd=checkout)
+        git("update-ref", "-d", "refs/remotes/origin/main", cwd=checkout)
+    branch = checkout / "src" / "etude" / "launch" / "migrations"
+    (branch / "unmerged.sql").write_text("CREATE TABLE unmerged(value TEXT);\n")
+
+    found = json.loads(frontier(checkout / "src" / "etude"))
+    merged = (branch / "merged.sql").read_bytes()
+    assert found == {"merged": hashlib.sha256(merged).hexdigest()}
+
+
 def test_embedded_main_frontier_upgrades_without_git(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -557,7 +590,7 @@ def test_interrupted_takeover_resumes_all_histories(
     assert upgrade(tmp_path).applied == ()
     records = list((tmp_path / "recovery").glob("*/takeover.json"))
     assert len(records) == 1
-    assert database.Takeover.model_validate_json(records[0].read_text()).published
+    assert database.Takeover.model_validate_json(records[0].read_text()).result == result
 
 
 @pytest.mark.parametrize(

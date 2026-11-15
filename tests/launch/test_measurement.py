@@ -316,6 +316,8 @@ def test_scale_counts(
 def test_counting_covers_physical_transports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Installed archives carry provenance without consulting the checkout's Git history.
+    monkeypatch.setattr("etude.launch.providers.package.frontier", lambda root: b"{}")
     b = bench(tmp_path)
     counting = Counting(b.store, b.service)
 

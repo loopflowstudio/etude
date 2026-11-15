@@ -229,15 +229,6 @@ def _schema(db: sqlite3.Connection) -> tuple[dict[str, frozenset[tuple[object, .
     return columns, indexes
 
 
-def _reference(migrations: Sequence[Migration]) -> sqlite3.Connection:
-    """An empty database holding exactly these migrations."""
-    db = sqlite3.connect(":memory:")
-    for migration in migrations:
-        for statement in _statements(migration):
-            db.execute(statement)
-    return db
-
-
 _ADDITIVE = re.compile(r"^(CREATE TABLE|CREATE INDEX|ALTER TABLE \w+ ADD COLUMN)\b", re.IGNORECASE)
 
 
@@ -257,8 +248,10 @@ def additive(migration: Migration, before: Sequence[Migration]) -> bool:
             r"\b(CHECK|REFERENCES|UNIQUE|PRIMARY|GENERATED)\b", code, re.IGNORECASE
         ):
             return False
-    db = _reference(before)
-    try:
+    with closing(sqlite3.connect(":memory:")) as db:
+        for predecessor in before:
+            for statement in _statements(predecessor):
+                db.execute(statement)
         old_columns, old_indexes = _schema(db)
         for statement in _statements(migration):
             db.execute(statement)
@@ -273,8 +266,6 @@ def additive(migration: Migration, before: Sequence[Migration]) -> bool:
             ):
                 return False
         return old_indexes <= new_indexes
-    finally:
-        db.close()
 
 
 def release(at: str) -> tuple[Released, ...]:
@@ -396,17 +387,15 @@ class Database:
         if not math.isfinite(timeout) or timeout < 0:
             raise ValueError("database timeout must be nonnegative and finite")
         _refuse_takeover(path.parent)
+        if not path.is_file():
+            raise LauncherError(f"{path} is not initialized; run etude database upgrade")
         self._locks: dict[str, tuple[str, Callable[[], datetime]]] = {}
         self._path = path
-        self._db = (
-            sqlite3.connect(
-                path.resolve().as_uri() + "?mode=rw",
-                uri=True,
-                isolation_level=None,
-                timeout=timeout,
-            )
-            if path.is_file()
-            else self._missing(path)
+        self._db = sqlite3.connect(
+            path.resolve().as_uri() + "?mode=rw",
+            uri=True,
+            isolation_level=None,
+            timeout=timeout,
         )
         self._db.row_factory = sqlite3.Row
         try:
@@ -421,10 +410,6 @@ class Database:
         except BaseException:
             self._db.close()
             raise
-
-    @staticmethod
-    def _missing(path: Path) -> sqlite3.Connection:
-        raise LauncherError(f"{path} is not initialized; run etude database upgrade")
 
     def _applied(self) -> tuple[tuple[str, ...], int] | None:
         """The ledger's migrations this etude knows and its row count; None without a ledger.
@@ -597,16 +582,6 @@ class Database:
         self._db.close()
 
     @contextmanager
-    def _transaction(self) -> Iterator[None]:
-        self._db.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-        except BaseException:
-            self._db.execute("ROLLBACK")
-            raise
-        self._db.execute("COMMIT")
-
-    @contextmanager
     def _together(self) -> Iterator[None]:
         """Several statements that land together or not at all, on the schema this process knows.
 
@@ -615,9 +590,14 @@ class Database:
         if self._db.in_transaction:
             yield
             return
-        with self._transaction():
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
             self.check_schema()
             yield
+        except BaseException:
+            self._db.execute("ROLLBACK")
+            raise
+        self._db.execute("COMMIT")
 
     def _write(self, sql: str, parameters: Sequence[Fact] = ()) -> sqlite3.Cursor:
         """One write statement, refused once the schema has moved on."""
@@ -1296,14 +1276,6 @@ def _read_only(path: Path, timeout: float = 5) -> sqlite3.Connection:
     return sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=timeout)
 
 
-def _schema_number(path: Path) -> int:
-    reader = _read_only(path)
-    try:
-        return int(reader.execute("PRAGMA user_version").fetchone()[0])
-    finally:
-        reader.close()
-
-
 def _snapshot(source: Path, target: Path, timeout: float) -> None:
     """Read a consistent WAL snapshot without modifying the source's records."""
     reader = _read_only(source, timeout)
@@ -1407,9 +1379,10 @@ def _sources(home: Path) -> tuple[Path, ...]:
 
 def inspect(home: Path) -> Schema:
     """Read local catalog membership, without database creation, provider keys or network."""
-    path = launcher_file(home.resolve())
-    sources = _sources(home.resolve())
-    if (record := _takeover_path(home.resolve())).exists():
+    home = home.resolve()
+    path = launcher_file(home)
+    sources = _sources(home)
+    if (record := _takeover_path(home)).exists():
         return Schema(
             path=path,
             sources=sources,
@@ -1537,11 +1510,7 @@ def _sync(path: Path) -> None:
     path.chmod(0o600)
     with path.open("rb") as file:
         os.fsync(file.fileno())
-    descriptor = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
+    _sync_directory(path.parent)
 
 
 def _export(db: sqlite3.Connection, migration: Migration, path: Path) -> Path:
@@ -1661,9 +1630,12 @@ def _merge_history(
     ]
     for table in tables:
         remaining()
-        columns = [
-            r[1] for r in source.execute(f"PRAGMA table_info({_quote(table)})") if r[1] != "seq"
-        ]
+        shape = {
+            row["name"]: row
+            for row in source.execute(f"PRAGMA table_info({_quote(table)})")
+            if row["name"] != "seq"
+        }
+        columns = list(shape)
         target_columns = {r[1] for r in target.execute(f"PRAGMA main.table_info({_quote(table)})")}
         if not target_columns:
             sql = source.execute(
@@ -1672,17 +1644,11 @@ def _merge_history(
             target.execute(sql)
             target_columns = set(columns)
         for column in set(columns) - target_columns:
-            shape = next(
-                r for r in source.execute(f"PRAGMA table_info({_quote(table)})") if r[1] == column
-            )
-            if not re.fullmatch(r"[A-Z ]*", shape[2].upper()):
+            kind = shape[column]["type"]
+            if not re.fullmatch(r"[A-Z ]*", kind.upper()):
                 raise LauncherError(f"unsupported historical column {table}.{column}")
-            target.execute(f"ALTER TABLE {_quote(table)} ADD COLUMN {_quote(column)} {shape[2]}")
-        keys = [
-            r[1]
-            for r in source.execute(f"PRAGMA table_info({_quote(table)})")
-            if r[5] and r[1] != "seq"
-        ] or ["id"]
+            target.execute(f"ALTER TABLE {_quote(table)} ADD COLUMN {_quote(column)} {kind}")
+        keys = [name for name, row in shape.items() if row["pk"]] or ["id"]
         match = " AND ".join(f"t.{_quote(k)}=s.{_quote(k)}" for k in keys)
         difference = " OR ".join(f"t.{_quote(c)} IS NOT s.{_quote(c)}" for c in columns)
         table_sql = _quote(table)
@@ -1782,14 +1748,12 @@ class Retirement(Record):
 
 
 class Takeover(Record):
-    """Durable publication intent; progress is reconciled with the named files on retry."""
+    """Durable publication intent; named file identities determine progress on retry."""
 
     result: Upgrade
     target: Evidence
     evidence: tuple[Evidence, ...]
     files: tuple[Retirement, ...]
-    retired: tuple[Path, ...] = ()
-    published: bool = False
 
 
 def _takeover_path(home: Path) -> Path:
@@ -1863,7 +1827,7 @@ def _finish_takeover(home: Path) -> Upgrade:
         tuple(p for p in (*takeover.result.sources, takeover.result.path) if p.exists())
     )
     canonical = takeover.result.path
-    # A rename may have completed before its progress update reached disk.
+    # A prior attempt may have published before archiving the intent.
     published = (
         all(item.retired.exists() for item in takeover.files)
         and canonical.exists()
@@ -1885,10 +1849,6 @@ def _finish_takeover(home: Path) -> Upgrade:
         # Sync both directories even when a prior run performed the rename.
         _sync_directory(item.retired.parent)
         _sync_directory(item.source.parent)
-        takeover = takeover.model_copy(
-            update={"retired": tuple(f.source for f in takeover.files if f.retired.exists())}
-        )
-        _write_takeover(record, takeover)
     if not published:
         publication = takeover.target.path.with_name("publication.sqlite")
         with takeover.target.path.open("rb") as source, publication.open("wb") as target:
@@ -1900,9 +1860,8 @@ def _finish_takeover(home: Path) -> Upgrade:
         publication.replace(canonical)
     _sync(canonical)
     _sync_directory(takeover.target.path.parent)
-    takeover = takeover.model_copy(update={"published": True})
-    _write_takeover(record, takeover)
-    # Retain the completed record with its evidence; removal alone enables opens.
+    # The record stays immutable: file identities recover even interrupted renames.
+    # Archiving it marks completion and enables ordinary opens.
     record.replace(takeover.target.path.parent / "takeover.json")
     _sync_directory(takeover.target.path.parent)
     _sync_directory(home)

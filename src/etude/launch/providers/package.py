@@ -15,7 +15,6 @@ FILES = {
     "launch/__init__.py",
     "launch/errors.py",
     "launch/measurement.py",
-    "launch/provenance.py",
     "launch/providers/__init__.py",
     "launch/providers/bootstrap.py",
     "launch/providers/http.py",

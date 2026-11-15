@@ -143,7 +143,7 @@ with zipfile.ZipFile(io.BytesIO(code)) as archive:
     import types
     for name in ("etude", "etude.launch"):
         sys.modules.setdefault(name, types.ModuleType(name))
-    for name in ("etude.errors", "etude.deadline", "etude.storage_timeout", "etude.launch.logging", "etude.launch.provenance"):
+    for name in ("etude.errors", "etude.deadline", "etude.storage_timeout", "etude.launch.logging"):
         module=types.ModuleType(name)
         exec(compile(archive.read(name.replace('.', '/')+'.py'),name,'exec'),module.__dict__)
         sys.modules[name]=module

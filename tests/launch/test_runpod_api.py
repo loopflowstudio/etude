@@ -242,7 +242,11 @@ def test_bills_are_whole_hours_for_this_pod_only() -> None:
     assert api.bills(fact, datetime(2026, 10, 11, 12, 50, tzinfo=UTC)) == ()
 
 
-def test_stock_create_counts_package_reuse_without_waiting_for_ssh(tmp_path: Path) -> None:
+def test_stock_create_counts_package_reuse_without_waiting_for_ssh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Installed programs carry fixed provenance; counts must not depend on local Git history.
+    monkeypatch.setattr("etude.launch.providers.package.frontier", lambda root: b"{}")
     storage = Storage()
     provider = Provider(
         replies={
@@ -317,8 +321,10 @@ def test_stock_create_counts_package_reuse_without_waiting_for_ssh(tmp_path: Pat
 
 
 def test_one_cpu_rental_quotes_creates_and_deletes_with_pinned_provider_calls(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Installed programs carry fixed provenance; counts must not depend on local Git history.
+    monkeypatch.setattr("etude.launch.providers.package.frontier", lambda root: b"{}")
     cpu_pod = {**POD, "cost": 0.24}
     provider = Provider(
         replies={
