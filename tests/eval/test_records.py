@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import JsonValue, ValidationError
 
-from etude.checkpoints import CheckpointRecord, CheckpointRef, checkpoint_id
+from etude.checkpoints import CheckpointRecord, CheckpointRef, PolicyKey
 from etude.eval.records import (
     Aligned,
     At,
@@ -37,7 +37,7 @@ from etude.records import ArtifactRef
 DIGEST = "0" * 64
 WORLD = Environment(name="world", files="1" * 64)
 U500 = CheckpointRef(
-    key=checkpoint_id(experiment="", run="ppo-1", name="updates-500.pt"),
+    address="ppo-1/checkpoints/updates-500.pt",
     artifact=ArtifactRef(uri="s3://b/updates-500.pt", sha256=DIGEST),
 )
 SEARCH = Inference(config={"sims": 64})
@@ -138,7 +138,9 @@ def test_etude_sdk_0_2_players_load_and_equal_no_player_since() -> None:
     assert model.checkpoint.artifact.uri == "s3://models/updates-100.pt"
     now = Inference(config={"search": 0}).player(
         CheckpointRef(
-            key=checkpoint_id(experiment="", run="ppo-1", name="updates-100.pt"),
+            experiment="",
+            job="ppo-1",
+            name="updates-100.pt",
             artifact=ArtifactRef(uri="s3://models/updates-100.pt", sha256=sha),
         )
     )
@@ -147,15 +149,16 @@ def test_etude_sdk_0_2_players_load_and_equal_no_player_since() -> None:
 
 def test_a_model_needs_its_checkpoint_digest() -> None:
     with pytest.raises(ValidationError, match="model_checkpoint_requires_digest"):
-        CheckpointRef(key=U500.key, artifact=ArtifactRef(uri="s3://b/updates-500.pt"))
+        CheckpointRef(address=U500.key, artifact=ArtifactRef(uri="s3://b/updates-500.pt"))
 
 
 def _ref(run: str, updates: float) -> CheckpointRef:
     return CheckpointRef(
-        key=checkpoint_id(experiment="", run=run, name=f"updates-{updates:g}.pt"),
+        experiment="",
+        job=run,
+        name=f"updates-{updates:g}.pt",
         artifact=ArtifactRef(uri=f"file:///{run}/{updates:g}.pt", sha256=DIGEST),
         at={"updates": updates},
-        line=run,
     )
 
 
@@ -471,8 +474,6 @@ def test_legacy_structured_keys_qualify_only_with_read_context() -> None:
     assert isinstance(qualified.players[0], CheckpointPlayer)
     assert qualified.players[0].checkpoint.key == "frontier/ppo-1/checkpoints/updates-500.pt"
     assert qualified.key != old.key
-    with pytest.raises(ValueError, match="needs experiment="):
-        checkpoint_id(run="small@0", name="updates-100")
 
 
 def test_policy_seat_counts_nondefault_role_line_once() -> None:
@@ -492,3 +493,120 @@ def test_policy_seat_counts_nondefault_role_line_once() -> None:
     found = seating.resolve(mine.checkpoints[0], [mine, other])
     assert isinstance(found, Seated)
     assert found.lines == ("frontier/small@0/roles/exploiter", "rival/mine")
+
+
+def test_checkpoint_reference_identity_is_owned_by_its_policy() -> None:
+    policy = PolicyKey(experiment="ppo", job="base", seed=1, role="exploiter")
+    artifact = U500.artifact
+    ref = CheckpointRef(
+        experiment="ppo",
+        job="base",
+        seed=1,
+        role="exploiter",
+        name="updates-500.pt",
+        artifact=artifact,
+    )
+    assert ref == policy.checkpoint(name="updates-500.pt", artifact=artifact)
+    assert ref.policy == policy
+    assert ref.key == "ppo/base@1/roles/exploiter/checkpoints/updates-500.pt"
+    assert ref.line == "base@1/roles/exploiter"
+    assert "key" not in ref.model_dump()
+    assert CheckpointRef.model_validate_json(ref.model_dump_json()) == ref
+    changed = ref.model_copy(update={"policy": policy.model_copy(update={"seed": 2})})
+    assert changed.key == "ppo/base@2/roles/exploiter/checkpoints/updates-500.pt"
+    assert changed.line == "base@2/roles/exploiter"
+    with pytest.raises(ValidationError, match="flat policy parts"):
+        CheckpointRef.model_validate({"policy": policy, "name": "x", "artifact": artifact})
+    with pytest.raises(ValidationError, match="derives its line"):
+        CheckpointRef(
+            experiment="ppo", job="base", seed=1, name="x", artifact=artifact, line="another"
+        )
+
+
+def test_checkpoint_reference_defaults_resolve_from_lines_before_scheduling() -> None:
+    saved = CheckpointRecord(
+        experiment="ppo",
+        run="base@3",
+        ordinal=1,
+        at={"updates": 500},
+        policy=PolicyKey(experiment="ppo", job="base", seed=3, role="policy"),
+        artifact=ArtifactRef(uri="s3://b/updates-500.pt", sha256=DIGEST),
+    )
+    line = Line(name="base@3", experiment="ppo", job="base", seed=3, checkpoints=(saved.ref,))
+    asked = CheckpointRef(name="updates-500.pt", artifact=saved.artifact)
+    benchmark = Benchmark(
+        name="defaults",
+        environment=WORLD,
+        seatings=(
+            Seating(
+                name="vs heuristic",
+                players=(SEARCH, HEURISTIC),
+                configs=({},),
+                games=2,
+            ),
+        ),
+    )
+    bound = TournamentRun(tournament=benchmark, checkpoints=(asked,)).bind([line], experiment="ppo")
+    assert bound.checkpoints[0].policy == saved.policy
+    assert bound.checkpoints[0].key == saved.key
+    assert CheckpointRef.model_validate_json(asked.model_dump_json()) == asked
+
+
+def test_checkpoint_continuation_positions_keep_distinct_keys_on_one_policy() -> None:
+    policy = PolicyKey(experiment="ppo", job="base", seed=0, role="policy")
+    first = CheckpointRecord(
+        experiment="ppo", run="base@0", policy=policy, ordinal=1, at={}, artifact=U500.artifact
+    )
+    branch = first.model_copy(update={"run": "continued@0", "line": "base@0"})
+    assert first.ref.policy == branch.ref.policy == policy
+    assert first.ref.line == branch.ref.line == "base@0"
+    assert first.ref.key == first.key
+    assert branch.ref.key == branch.key != first.key
+    assert CheckpointRef.model_validate_json(branch.ref.model_dump_json()).key == branch.key
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        Final(),
+        At(clock="updates", value=100),
+        Earlier(clock="updates", by=100),
+        Fraction(clock="updates", value=0.5),
+        Aligned(clock="updates", job="base"),
+    ],
+)
+def test_relative_seat_defaults_preserve_explicit_matches_and_definitions(
+    relative: Relative,
+) -> None:
+    line = _line("base@0", "base", 100, 200, ended=True, seed=0)
+    default: Seating[dict[str, JsonValue]] = Seating(
+        name="compare", players=(SEARCH, relative), configs=({},), games=2
+    )
+    explicit = default.model_copy(
+        update={
+            "players": (
+                SEARCH,
+                relative.model_copy(update={"inference": SEARCH}),
+            )
+        }
+    )
+    seated = default.resolve(line.checkpoints[-1], [line])
+    assert isinstance(seated, Seated)
+    assert default.definition == explicit.definition
+    assert default.matches(line.checkpoints[-1], seated) == explicit.matches(
+        line.checkpoints[-1], seated
+    )
+    override = default.model_copy(
+        update={
+            "players": (
+                SEARCH,
+                relative.model_copy(update={"inference": Inference(config={"sims": 128})}),
+            )
+        }
+    )
+    assert default.definition != override.definition
+    assert (
+        default.matches(line.checkpoints[-1], seated)[0].key
+        != override.matches(line.checkpoints[-1], seated)[0].key
+    )
+    assert Seating.model_validate_json(default.model_dump_json()).definition == explicit.definition

@@ -26,7 +26,7 @@ from etude.eval.records import (
 )
 from etude.eval.tournament import evaluating, scores, standings
 from etude.experiment import observe
-from etude.checkpoints import CheckpointRef, checkpoint_id
+from etude.checkpoints import CheckpointRef
 
 world = environment("allies-vs-lessons", files=["game/"], config={"world": "w6"})
 
@@ -86,7 +86,7 @@ progress = Benchmark(
         # A relative seat: the held checkpoint against its own learner at half its updates.
         Seating(
             name="half-training",
-            players=(direct, Fraction(clock="updates", value=0.5, inference=direct)),
+            players=(direct, Fraction(clock="updates", value=0.5)),
             configs=deals[:10],
             games=4,
         ),
@@ -96,9 +96,7 @@ progress = Benchmark(
 # On the go: as each checkpoint is saved, one small eval run plays every seating.
 # A checkpoint is its key (its experiment, run and file name) with the saved file to read.
 # Relative seats find theirs among the experiment's training lines.
-ref = CheckpointRef(
-    key=checkpoint_id(experiment="ppo", run="base@1", name="updates-500.pt"), artifact=saved
-)
+ref = CheckpointRef(experiment="ppo", job="base", seed=1, name="updates-500.pt", artifact=saved)
 lines = observe(bucket, "ppo").lines
 with evaluating(progress, experiment="ppo", checkpoint=ref, storages=[bucket], lines=lines) as run:
     run.play(play)
@@ -154,6 +152,9 @@ with evaluating(
     run.play(play)
 ```
 
+- **Relative seats use the held checkpoint's play by default.** Write
+  `players=(direct, Final(experiment="tla-frontier", job="small"))`.
+  Give `inference=search` on the relative seat only to compare different play.
 - **Players.** A player is whatever takes a seat: a checkpoint and the code
   that plays it (`Inference`), or `Code` alone, such as a heuristic. "Model"
   is left to mean your network. A checkpoint player's
@@ -166,9 +167,13 @@ with evaluating(
   each evaluated. The experiment is part of the key, so two experiments'
   `base@1` are different checkpoints, and a match seating the same players
   has one key in every experiment that plays it ([Policies](#policies)).
-  `checkpoint_id(experiment=..., run=..., name=...)` spells one by hand; a
-  run without its experiment is refused. An outside player is one whose
-  checkpoint is an address. `Inference(source=["players/net.py"], config=...).player(ref)` and
+  Give the policy parts directly to `CheckpointRef(experiment="ppo", job="base",
+  seed=1, name="updates-500.pt", artifact=saved)`, or use
+  `key.checkpoint(name="updates-500.pt", artifact=saved)`. Its `.policy` owns
+  those parts and `.key` is derived; neither `key=` nor `policy=` is a
+  constructor argument. Omitted parts use `PolicyKey` defaults, resolved from
+  the `lines` supplied to `evaluating` or `played` before scheduling.
+  An outside checkpoint is `CheckpointRef(address="hf://lab/weights.pt", artifact=saved)`. `Inference(source=["players/net.py"], config=...).player(ref)` and
   `Code(name="heuristic", source=[...])` name the code that plays: its commit
   and source digest are its `Version`, recorded with each match
   (`seats.commit`, `seats.source`) but not part of the key, so changed code
@@ -207,22 +212,20 @@ with evaluating(
   in `Inference.config`, `Code.config` or match config, is identity, and
   older configs keep theirs. `execution` on older records reads as `{}`.
 - **Where a checkpoint stood.** A seated checkpoint may say where it stood on
-  its clocks: `CheckpointRef(key=..., artifact=..., at={"updates": 600})`.
+  its clocks: `CheckpointRef(address=..., artifact=..., at={"updates": 600})`.
   A tracked checkpoint's `ref` fills `at` from its run's clocks; give it
   yourself for a checkpoint no Etude run recorded. It is carried to each
   match's seats (`seats.at`, and every distinct one in `players.seated_at`) so
   a report can place the point, and is part of no key: correcting it never
   forks a player or replays a match. Where seats disagree, a report draws the
   latest and notes the earlier.
-- **Which learner it is.** `line` names the learner a checkpoint belongs
-  to, such as a seed or a recipe: `CheckpointRef(..., at={"updates": 600},
-  line="seed-1")`. A report compares a checkpoint with earlier ones, and
-  draws its curve, only within its line. A tracked checkpoint's `ref` fills
-  `line` with the first run of its run's chain of continuations (plus
-  `/roles/ROLE` for a nondefault role), so each continued policy is one
-  line, and `policy` with the complete
-  [`PolicyKey`](#policies) of that line. Like `at`, both are carried to the
-  seats (`seats.line`, `players.lines`) and are part of no key.
+- **Which learner it is.** A policy checkpoint derives `line` from its
+  policy's job, seed and role. Its continuations share that line; foreign
+  checkpoints add their experiment when viewed in another experiment's report.
+  For an outside checkpoint, give `line="seed-1"` to compare it with other
+  checkpoints on that learner's curve. Like `at`, the line is carried to
+  the seats (`seats.line`, `players.lines`) and is part of no key.
+
 - **Source files.** A directory stands for the files below it. In a git
   checkout only tracked files count, named by their path in the checkout, so
   caches and scratch files never change a version; an uncommitted edit does,
@@ -355,21 +358,22 @@ with evaluating(
   |---|---|
   | `Inference(source=net, config=Direct())` | the held checkpoint, playing with that config |
   | `Code(name="heuristic", ...)`, or `Inference(...).player(ref)` | the same fixed player for every checkpoint: code, or one chosen checkpoint such as the initialization or a frozen anchor |
-  | `Earlier(clock="updates", by=400, inference=direct)` | the held checkpoint's line exactly 400 updates before it |
-  | `Fraction(clock="updates", value=0.5, inference=direct)` | its line at exactly half the held checkpoint's updates (3,000 for 6,000) |
-  | `Fraction(clock="running_hours", value=0.5, at_or_before=True, inference=direct)` | its line's latest checkpoint at or before half the held checkpoint's running hours |
-  | `Earlier(clock="running_hours", by=2, at_or_before=True, inference=direct)` | its line's latest checkpoint at or before two running hours before it |
-  | `At(clock="updates", value=200, inference=direct)` | its line at update 200 |
-  | `Final(inference=direct)` | its line's last checkpoint, once its run has ended |
-  | `Aligned(clock="updates", job="small", inference=direct)` | job `small` at exactly the held checkpoint's updates |
-  | `Aligned(clock="running_hours", job="small", at_or_before=True, inference=direct)` | job `small`'s latest checkpoint at or before the held checkpoint's running hours |
-  | `Final(experiment="tla-frontier", job="small", inference=direct)` | the final checkpoint of job `small` of another experiment, `tla-frontier` |
-  | `Final(policy=PolicyKey(experiment="tla-frontier", job="small"), inference=direct)` | the final checkpoint of that one policy: the job's lowest seed |
+  | `Earlier(clock="updates", by=400)` | the held checkpoint's line exactly 400 updates before it |
+  | `Fraction(clock="updates", value=0.5)` | its line at exactly half the held checkpoint's updates (3,000 for 6,000) |
+  | `Fraction(clock="running_hours", value=0.5, at_or_before=True)` | its line's latest checkpoint at or before half the held checkpoint's running hours |
+  | `Earlier(clock="running_hours", by=2, at_or_before=True)` | its line's latest checkpoint at or before two running hours before it |
+  | `At(clock="updates", value=200)` | its line at update 200 |
+  | `Final()` | its line's last checkpoint, once its run has ended |
+  | `Aligned(clock="updates", job="small")` | job `small` at exactly the held checkpoint's updates |
+  | `Aligned(clock="running_hours", job="small", at_or_before=True)` | job `small`'s latest checkpoint at or before the held checkpoint's running hours |
+  | `Final(experiment="tla-frontier", job="small")` | the final checkpoint of job `small` of another experiment, `tla-frontier` |
+  | `Final(policy=PolicyKey(experiment="tla-frontier", job="small"))` | the final checkpoint of that one policy: the job's lowest seed |
 
   The remaining rows are relative seats: each names a checkpoint by where it
-  stands relative to the one held, and plays it with its own `inference`.
+  stands relative to the one held, and uses the held checkpoint's play unless
+  given its own `inference`.
   `Earlier`, `Fraction`, `At` and `Final` look in the held checkpoint's own
-  line unless given a policy selector: `Final(job="small", inference=direct)` seats
+  line unless given a policy selector: `Final(job="small")` seats
   job `small`'s final checkpoint, `At(clock="updates", value=0, job="small",
   ...)` its initial one. `Aligned` uses the held checkpoint's clock value
   on the selected policy. A `job` is named as the report names it
@@ -384,7 +388,7 @@ with evaluating(
   filled as a key's are: this file's experiment, the experiment's only
   training job, the run's only role. The seed is the exception: left out, the
   seat fills from every seed, and `seed=1` keeps it to one. So
-  `Final(experiment="tla-frontier", job="small", inference=direct)` seats the
+  `Final(experiment="tla-frontier", job="small")` seats the
   final checkpoint of each seed of another experiment's job. `policy=` takes
   a `PolicyKey` instead and seats that one policy; a seat given `policy=`
   and any of the four parts is refused when it is built. An experiment with
@@ -611,7 +615,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
             Seating(name="vs heuristic", players=(direct, heuristic), configs=deals, games=8),
             Seating(
                 name="vs previous",
-                players=(direct, Earlier(clock="updates", by=1_000, inference=direct)),
+                players=(direct, Earlier(clock="updates", by=1_000)),
                 configs=deals,
                 games=8,
             ),
@@ -619,7 +623,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
                 name="half-training",
                 players=(
                     direct,
-                    Fraction(clock="running_hours", value=0.5, at_or_before=True, inference=direct),
+                    Fraction(clock="running_hours", value=0.5, at_or_before=True),
                 ),
                 configs=deals,
                 games=8,
@@ -633,13 +637,13 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         seatings=(
             Seating(
                 name="large vs small",
-                players=(direct, Aligned(clock="updates", job="small", inference=direct)),
+                players=(direct, Aligned(clock="updates", job="small")),
                 configs=deals,
                 games=8,
             ),
             Seating(
                 name="large vs final small",
-                players=(direct, Final(job="small", inference=direct)),
+                players=(direct, Final(job="small")),
                 configs=deals,
                 games=8,
             ),
@@ -841,7 +845,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         seatings=(
             Seating(
                 name="vs tla-frontier small",
-                players=(direct, Final(experiment="tla-frontier", job="small", inference=direct)),
+                players=(direct, Final(experiment="tla-frontier", job="small")),
                 configs=deals,
                 games=8,
             ),
@@ -903,7 +907,7 @@ PolicyKey(experiment="tla-frontier", job="small")  # the same policy, by the def
   checkpoint's key is its experiment, run and file
   (`tla-frontier/small@0/checkpoints/updates-00000500`). A nondefault role
   adds `/roles/ROLE` after the run, including when two roles reference the
-  same file; `checkpoint_id(role=...)` spells it. A player is a
+  same file; give `role=` on the reference or its `PolicyKey`. A player is a
   checkpoint and its `Inference`. Results are stored under those keys, so
   the same players meeting under the same config are one match in every
   experiment that seats them, and any query that reads several experiments'

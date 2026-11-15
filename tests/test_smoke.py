@@ -376,7 +376,7 @@ def eval_jobs(state):
         checkpoints=state.policy(PolicyKey()).checkpoints, play=play, repo=None, max_hours=1)
 """)
     measured = MeasuredStorage(DirectoryStorage(source))
-    smoked = smoke_file(file, steps=("eval",), source=measured)
+    smoked = smoke_file(file, steps=["eval"], source=measured)
     assert smoked.rest[0].outcome == "not_smoked"
     assert measured.listings == 1
     # Discovery reads every run declaration; skipped opponents need no other records or bytes.

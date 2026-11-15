@@ -66,7 +66,7 @@ from pydantic import (
 )
 from typing_extensions import TypeVar
 
-from etude.checkpoints import CheckpointId, CheckpointRef, PolicyKey, checkpoint_id
+from etude.checkpoints import CheckpointId, CheckpointRef, PolicyKey, _checkpoint_id
 from etude.errors import EtudeError
 from etude.eval.source import digest_files, source_commit
 from etude.records import BUILT_IN_NAMES, Digest, Name, Record
@@ -213,7 +213,13 @@ class Inference(Record):
     def player(self, checkpoint: CheckpointRef) -> CheckpointPlayer:
         """The player `checkpoint` is when it plays this way, named for its files."""
         return CheckpointPlayer(
-            name=re.sub(r"\s", "_", checkpoint.key.rstrip("/").rsplit("/", 1)[-1]),
+            name=re.sub(
+                r"\s",
+                "_",
+                (checkpoint.name or checkpoint.address or "checkpoint")
+                .rstrip("/")
+                .rsplit("/", 1)[-1],
+            ),
             checkpoint=checkpoint,
             inference=self,
         )
@@ -563,7 +569,7 @@ class _OnClock(_PolicySeat):
     """
 
     clock: str
-    inference: Inference
+    inference: Inference | None = None
     at_or_before: bool = False
     trained: bool = False
 
@@ -596,7 +602,7 @@ class Final(_PolicySeat):
     """The held checkpoint's line's last checkpoint, once its run has ended, finished or failed."""
 
     kind: Literal["final"] = "final"
-    inference: Inference
+    inference: Inference | None = None
 
 
 class Aligned(_OnClock):
@@ -828,7 +834,7 @@ class Seating(Record, Generic[_SeatingConfig]):
         players = [
             ["model", identifying(each.config)]
             if isinstance(each, Inference)
-            else ["relative", _relative_definition(each)]
+            else ["relative", _relative_definition(each, self._inference(each))]
             if isinstance(each, _RELATIVE)
             else each.key
             for each in self.players
@@ -845,6 +851,12 @@ class Seating(Record, Generic[_SeatingConfig]):
                 *seeds,
             ]
         )
+
+    def _inference(self, seat: Relative) -> Inference:
+        if seat.inference is not None:
+            return seat.inference
+        # A seating has exactly two seats; validation requires the other to be inference.
+        return next(each for each in self.players if isinstance(each, Inference))
 
     def matches(
         self, checkpoint: CheckpointRef | None = None, seated: Seated | None = None
@@ -863,7 +875,12 @@ class Seating(Record, Generic[_SeatingConfig]):
         return [
             Match(
                 players=tuple(
-                    _seat(each, checkpoint, found)
+                    _seat(
+                        each,
+                        checkpoint,
+                        found,
+                        self._inference(each) if isinstance(each, _RELATIVE) else None,
+                    )
                     for each, found in zip(self.players, pairing.seats, strict=True)
                 ),
                 config=as_config(given),
@@ -884,17 +901,19 @@ class Seating(Record, Generic[_SeatingConfig]):
         one. A seat that finds the held checkpoint itself seats it: self-play is
         a match like any other.
         """
-        candidates = [
-            line
-            for line in lines
-            if line.name == checkpoint.line
-            and (checkpoint.policy is None or line.policy == checkpoint.policy)
-        ]
         # By key first: another experiment's checkpoint names its experiment in its line.
         held = next(
             (line for line in lines if any(ref.key == checkpoint.key for ref in line.checkpoints)),
-            candidates[0] if len(candidates) == 1 else None,
+            None,
         )
+        if held is None:
+            candidates = [
+                line
+                for line in lines
+                if line.name == checkpoint.line
+                and (checkpoint.policy is None or line.policy == checkpoint.policy)
+            ]
+            held = candidates[0] if len(candidates) == 1 else None
         ordered = sorted(lines, key=lambda line: line.order)
         # The held checkpoint's side: its job's seeds, or its own line with no job.
         mine = (
@@ -981,25 +1000,27 @@ class Seating(Record, Generic[_SeatingConfig]):
         )
 
 
-def _relative_definition(seat: Relative) -> dict[str, JsonValue]:
+def _relative_definition(seat: Relative, inference: Inference) -> dict[str, JsonValue]:
     """A relative seat as a seating's definition takes it: its inference by config, less setup."""
     found = seat.model_dump(mode="json", exclude={"inference"})
     for part in ("experiment", "seed", "role", "policy"):
         if found.get(part) is None:
             found.pop(part, None)
-    return {**found, "inference": {"config": identifying(seat.inference.config)}}
+    return {**found, "inference": {"config": identifying(inference.config)}}
 
 
 def _seat(
     each: Player | Inference | Relative,
     checkpoint: CheckpointRef | None,
     found: CheckpointRef | None,
+    inference: Inference | None,
 ) -> Player:
     """Who takes a seating's seat in one pairing."""
     if isinstance(each, _RELATIVE):
         if found is None:
             raise ValueError("relative_seat_needs_its_checkpoints")
-        return each.inference.player(found)
+        assert inference is not None
+        return inference.player(found)
     if isinstance(each, Inference):
         if checkpoint is None:
             raise ValueError("inference_seat_needs_a_checkpoint")
@@ -1176,6 +1197,33 @@ class Share(Record):
         return self
 
 
+def resolve_checkpoint(
+    ref: CheckpointRef, lines: Sequence[Line], *, experiment: str
+) -> CheckpointRef:
+    """Fill a reference's policy defaults from the same lines relative seats use."""
+    policy = ref.policy
+    if policy is None or policy.experiment == "":
+        return ref
+    # An explicitly recorded None seed is an unseeded run, not an omitted default.
+    if (
+        any(part is None for part in (policy.experiment, policy.job, policy.role))
+        or "seed" not in policy.model_fields_set
+    ):
+        if lines:
+            policy = select_policy(lines, policy, experiment=experiment).policy
+        else:
+            # With no lines, only a fully named policy can be seated by hand.
+            if policy.job is None or policy.seed is None:
+                raise EtudeError("checkpoint_policy_needs_lines", 422)
+            policy = policy.model_copy(
+                update={
+                    "experiment": policy.experiment or experiment,
+                    "role": policy.role or "policy",
+                }
+            )
+    return ref.model_copy(update={"policy": policy})
+
+
 class TournamentRun(Record):
     """`RUN/tournament.json`: the tournament an eval run was held for, and what it added."""
 
@@ -1186,6 +1234,37 @@ class TournamentRun(Record):
     seated: tuple[Seated, ...] = ()
     # The part of the scheduled matches the run plays (`etude.eval.tournament.hold`).
     share: Share = Share()
+
+    def bind(self, lines: Sequence[Line], *, experiment: str) -> TournamentRun:
+        """Resolve author references before comparing or storing their identities."""
+
+        def checkpoint(ref: CheckpointRef) -> CheckpointRef:
+            return resolve_checkpoint(ref, lines, experiment=experiment)
+
+        def player(given: Player | Inference | Relative) -> Player | Inference | Relative:
+            if isinstance(given, CheckpointPlayer):
+                return given.model_copy(update={"checkpoint": checkpoint(given.checkpoint)})
+            return given
+
+        tournament = self.tournament
+        if isinstance(tournament, Benchmark):
+            tournament = tournament.model_copy(
+                update={
+                    "seatings": tuple(
+                        seating.model_copy(
+                            update={"players": tuple(player(p) for p in seating.players)}
+                        )
+                        for seating in tournament.seatings
+                    )
+                }
+            )
+        return self.model_copy(
+            update={
+                "tournament": tournament,
+                "checkpoints": tuple(checkpoint(ref) for ref in self.checkpoints),
+                "entrants": tuple(player(p) for p in self.entrants),
+            }
+        )
 
     @field_validator("share", mode="before")
     @classmethod
@@ -1385,9 +1464,9 @@ def __getattr__(name: str) -> object:
         return CheckpointPlayer
     if name == "CheckpointKey":
         warnings.warn(
-            "CheckpointKey is now checkpoint_id from etude.checkpoints; removed in 0.5",
+            "CheckpointKey is now CheckpointRef; removed in 0.5",
             DeprecationWarning,
             stacklevel=2,
         )
-        return checkpoint_id
+        return _checkpoint_id
     raise AttributeError(name)

@@ -82,7 +82,7 @@ import numpy.typing as npt
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from etude.carriage import EVAL_BLOCK_INDEX, EVAL_BLOCK_PACK
-from etude.checkpoints import CheckpointRecord, checkpoint_id
+from etude.checkpoints import CheckpointRecord
 from etude.errors import EtudeError
 from etude.eval.block import (
     BLOCK_FILE,
@@ -422,7 +422,7 @@ def _training_checkpoints(
         stored = CheckpointRecord.model_validate_json(storage.get(located[name] + name))
         rows.append(
             [run, experiment, stored.ordinal,
-             checkpoint_id(experiment=experiment, run=run, name=stored.name, role=stored.role),
+             stored.model_copy(update={"experiment": experiment, "run": run}).key,
              stored.artifact.sha256, stored.wall_ms, json.dumps(stored.at)]
         )  # fmt: skip
     stage(
@@ -673,12 +673,12 @@ def _qualify_arrived(db: duckdb.DuckDBPyConnection, *, players: bool = False) ->
     """Translate released table identities with the block's own match and player records."""
     if not db.execute("select 1 from _qualified_matches limit 1").fetchone():
         return
-    columns = {column: kind for column, kind, *_ in db.execute("describe _arrived").fetchall()}
     db.execute(
         "update _arrived set match = q.qualified from _qualified_matches q where match = q.stored"
     )
     if not players:
         return
+    columns = {column: kind for column, kind, *_ in db.execute("describe _arrived").fetchall()}
     if columns.get("player") == "VARCHAR":
         db.execute(
             "update _arrived set player = q.qualified from _qualified_players q where player = q.stored"

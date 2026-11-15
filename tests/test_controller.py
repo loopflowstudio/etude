@@ -481,7 +481,7 @@ from tests.eval.games import play
 from hashlib import sha256
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
-    checkpoint = CheckpointRef(key="producer/base@0/out/weights.pt", artifact=ArtifactRef(
+    checkpoint = CheckpointRef(address="producer/base@0/out/weights.pt", artifact=ArtifactRef(
         uri={weights.as_uri()!r}, sha256=sha256(b"right bytes").hexdigest(), size_bytes=11))
     return [EvalJob(tournament=RoundRobin(name="ladder", environment=environment("duel"),
                         configs=({{}},), games=1),
@@ -831,7 +831,7 @@ from tests.eval.games import play
 def eval_jobs(state):
     direct = Inference(config={"strength": 1})
     tournament = Benchmark(name="frontier", environment=environment("duel"), seatings=(
-        Seating(name="vs frontier", players=(direct, Final(experiment="tla-frontier", job="small", inference=direct)),
+        Seating(name="vs frontier", players=(direct, Final(experiment="tla-frontier", job="small")),
                 configs=({},), games=8),))
     return EvalJob(tournament=tournament, checkpoints=state.policy(PolicyKey()).checkpoints,
                    play=play, repo=None, max_hours=1)

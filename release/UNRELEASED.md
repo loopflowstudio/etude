@@ -127,8 +127,8 @@ from etude.checkpoints import PolicyKey
 PolicyKey(experiment="tla-frontier", job="small", seed=0, role="policy")
 PolicyKey(experiment="tla-frontier", job="small")  # the same policy, by the defaults
 
-Final(experiment="tla-frontier", job="small", inference=direct)  # every seed of the job
-Final(policy=PolicyKey(experiment="tla-frontier", job="small"), inference=direct)  # one
+Final(experiment="tla-frontier", job="small")  # every seed of the job
+Final(policy=PolicyKey(experiment="tla-frontier", job="small"))  # one
 ```
 
 Every part of a key has a default: this file's experiment, the experiment's
@@ -149,11 +149,18 @@ after the run). Two experiments' `base@0` are different
 checkpoints and are seated together, and the same players meeting under the
 same config are one match in every experiment that seats them.
 
+Use `key.checkpoint(name=n, artifact=saved)` to name a checkpoint from a
+`PolicyKey`. References take the key's fields flat, with the same defaults;
+`policy=` and `key=` are no longer constructor arguments. Outside references
+may supply `line=`; policy references derive it. Released records stay readable.
+
 ### Upgrade
 
 | Before | Now |
 | --- | --- |
-| `checkpoint_id(run="base@1", name=n)` | `checkpoint_id(experiment="ppo", run="base@1", name=n)`; a run without its experiment is refused |
+| `CheckpointRef(key=checkpoint_id(...), artifact=saved)` | `CheckpointRef(experiment="ppo", job="base", seed=1, name=n, artifact=saved)`; `.policy` owns identity and `.key` is derived |
+| `CheckpointRef(key=checkpoint_id(address=url), artifact=saved)` | `CheckpointRef(address=url, artifact=saved)` |
+| `Final(job="small", inference=direct)` beside `direct` | `Final(job="small")`; give `inference=` only to compare different play |
 | `EvalJob(..., experiment="other")` | removed and refused; seat the other experiment's runs with `experiment=` or `policy=` on a seat, or with checkpoints read by `observe` |
 | `evaluating(..., lines=observe(source, e).lines)` | the same, plus the lines of every other experiment a seat names |
 

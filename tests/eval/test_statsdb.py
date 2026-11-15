@@ -12,7 +12,7 @@ import duckdb
 import pytest
 
 from etude.call import Function
-from etude.checkpoints import CheckpointRecord, CheckpointRef, checkpoint_id
+from etude.checkpoints import CheckpointRecord, CheckpointRef
 from etude.errors import EtudeError
 from etude.eval import query
 from etude.eval.convert import convert
@@ -188,7 +188,7 @@ def test_a_match_two_runs_played_counts_from_the_later_under_its_latest_name(
 ) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     ref = CheckpointRef(
-        key=checkpoint_id(address="hf://lab/a.pt"),
+        address="hf://lab/a.pt",
         artifact=ArtifactRef(uri="hf://lab/a.pt", sha256="ab" * 32),
     )
     _, rival = pair(tmp_path)
@@ -360,7 +360,7 @@ def test_legacy_checkpoint_keys_keep_matches_tables_and_rollups_together(
 ) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     legacy = CheckpointRef(
-        key="base@0/checkpoints/updates-100.pt",
+        address="base@0/checkpoints/updates-100.pt",
         artifact=ArtifactRef(uri="s3://weights/updates-100.pt", sha256="0" * 64),
     )
     direct = Inference(config={"strength": 1})
@@ -419,7 +419,7 @@ def test_legacy_queued_evaluation_keeps_its_workers_original_checkpoint_identity
     tmp_path: Path,
 ) -> None:
     legacy = CheckpointRef(
-        key="base@0/checkpoints/updates-100.pt",
+        address="base@0/checkpoints/updates-100.pt",
         artifact=ArtifactRef(uri="s3://weights/updates-100.pt", sha256="0" * 64),
     )
     direct = Inference(config={"strength": 1})

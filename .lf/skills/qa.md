@@ -146,6 +146,11 @@ Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
    check: same file and runs evaluated on a `main` worktree, then `etude eval` here must
    print `nothing to play`, and hashing `(subject, opponent, value, rows, matches)` over
    `build(...).cells` must match.
+   Adding a seed to an every-seed seat replays most matches: games are re-split over
+   the new seed pairs, so match keys change (main plays 16, then 28 more for a third
+   seed). Compare with a main run before calling a replay count a regression.
+   Keep helper scripts in their own folder with names that are not stdlib modules:
+   a `/tmp/X/inspect.py` beside the script shadows `inspect` and breaks `etude.page`.
 14. The stats database under `ETUDE_HOME/statsdb` rebuilds its derived tables (`players`,
    `schedule`) only when new data arrives or its `SCHEMA` changes, so after editing
    `etude/eval/query.py` delete that folder before judging the page.

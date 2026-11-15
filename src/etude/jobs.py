@@ -32,7 +32,7 @@ from etude.checkpoints import (
     CheckpointRecord,
     CheckpointRef,
     PolicyKey,
-    checkpoint_id,
+    _checkpoint_id,
     in_role,
     qualified,
     seen_from,
@@ -46,8 +46,6 @@ from etude.eval.records import (
     Match,
     Player,
     RoundRobin,
-    TournamentRun,
-    assemble,
     digest,
     select_policy,
 )
@@ -439,15 +437,6 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
             checkpoints=tuple(self.checkpoints),
             entrants=tuple(self.enter),
             workers=self.workers,
-        )
-        assemble(
-            [
-                TournamentRun(
-                    tournament=self.tournament,
-                    checkpoints=spec.held,
-                    entrants=spec.entrants,
-                )
-            ]
         )
         return _job(
             _hold,
@@ -879,20 +868,20 @@ def _hold(evaluation: Evaluation) -> None:
     elif given is not None:
         # A training run's file is keyed by its run and name; any other, by where it lies.
         key = (
-            checkpoint_id(
+            _checkpoint_id(
                 experiment="",
                 run=given.run,
                 name=given.key if given.key.startswith("out/") else checkpoint_file_name(given.key),
             )
             if given.run is not None
-            else checkpoint_id(address=given.key)
+            else _checkpoint_id(address=given.key)
         )
         artifact = ArtifactRef(
             uri=(Path(str(folder)) / given.name).as_uri(),
             sha256=given.sha256,
             size_bytes=given.size_bytes,
         )
-        checkpoint = CheckpointRef(key=key, artifact=artifact)
+        checkpoint = CheckpointRef(address=key, artifact=artifact)
     if evaluation.matches is not None:
         here = {key: (Path(str(folder)) / name).as_uri() for key, name in evaluation.files.items()}
     else:

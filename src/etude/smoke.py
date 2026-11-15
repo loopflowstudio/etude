@@ -173,12 +173,9 @@ def _smoke_evaluation(
     lines: tuple[Line, ...],
 ) -> SmokeStep:
     """One evaluation job `eval_jobs(state)` returned, held tiny into `store`."""
-    spec = evaluation_spec(job)
+    spec = evaluation_spec(with_experiment(job, experiment))
     name = spec.tournament.name
-    job = with_experiment(job, experiment)
-    tiny = evaluation_spec(job).model_copy(
-        update={"tournament": _tiny_tournament(spec.tournament), "lines": lines}
-    )
+    tiny = spec.model_copy(update={"tournament": _tiny_tournament(spec.tournament), "lines": lines})
     started = time.monotonic()
     matches = played(
         tiny.tournament,

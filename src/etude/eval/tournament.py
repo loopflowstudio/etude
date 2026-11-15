@@ -68,6 +68,7 @@ from etude.eval.records import (
     digest,
     folder_name,
     outcomes,
+    resolve_checkpoint,
     validate_checkpoints,
 )
 from etude.eval.run import ETUDE_TABLES, EvalResult, EvalRun, Result, Tables, _evaluating_matches
@@ -117,6 +118,25 @@ def evaluating(
     if isinstance(tournament, Environment):
         if matches is None:
             raise EtudeError("evaluation_needs_matches", 422)
+        matches = tuple(
+            match.model_copy(
+                update={
+                    "players": tuple(
+                        player.model_copy(
+                            update={
+                                "checkpoint": resolve_checkpoint(
+                                    player.checkpoint, lines, experiment=experiment
+                                )
+                            }
+                        )
+                        if isinstance(player, CheckpointPlayer)
+                        else player
+                        for player in match.players
+                    )
+                }
+            )
+            for match in matches
+        )
         with _evaluating_matches(
             experiment=experiment,
             environment=tournament,
@@ -132,7 +152,7 @@ def evaluating(
     if checkpoint is not None and checkpoints:
         raise EtudeError("hold_one_checkpoint_on_the_go_or_add_checkpoints", 422)
     given = (checkpoint,) if checkpoint is not None else tuple(checkpoints)
-    added = _added(tournament, given, enter, share)
+    added = _added(tournament, given, enter, share).bind(lines, experiment=experiment)
     if matches is not None:
         resolved, _ = assemble([added]).resolve(lines, experiment=experiment)
         added = added.model_copy(update={"seated": resolved.seated})
@@ -264,7 +284,9 @@ def played(
     Asking about several tournaments, pass `runs` (`stored_runs`), read once,
     instead of `directory` and `storages`, which are read on every call.
     """
-    added = _added(tournament, tuple(checkpoints), enter, Share())
+    added = _added(tournament, tuple(checkpoints), enter, Share()).bind(
+        lines, experiment=experiment
+    )
     if runs is None:
         runs = stored_runs(experiment, directory=directory, storages=storages)
     elif runs.experiment != experiment:
