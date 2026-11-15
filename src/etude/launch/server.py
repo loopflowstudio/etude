@@ -83,7 +83,7 @@ class FetchRequest(Record):
 
 
 class SubmissionRequest(Record):
-    operation: Literal["launch", "prepare_launch", "quote", "room"]
+    operation: Literal["launch", "prepare_launch", "quote"]
     submission: LaunchInput
     api: bool = False  # a launch replies with its run ids instead of printing the runs
 
@@ -482,17 +482,6 @@ class PythonClient:
             self._request(SubmissionRequest(operation="quote", submission=submission))
         )
 
-    def room(
-        self, runs: Sequence[RunRequest], pool: str | None = None, *, rent: str | None = None
-    ) -> tuple[str, ...]:
-        return TypeAdapter(tuple[str, ...]).validate_json(
-            self._request(
-                SubmissionRequest(
-                    operation="room", submission=LaunchInput(runs=tuple(runs), pool=pool, rent=rent)
-                )
-            )
-        )
-
     def availability(self, rent: str, *, timeout: float | None = None) -> Availability:
         return Availability.model_validate_json(
             self._request(AvailabilityRequest(ondemand=rent, timeout=timeout))
@@ -589,8 +578,6 @@ def receive(scheduler: Scheduler) -> int:
                 show_runs(scheduler, ids)
                 return 0
             response = tuple(ids)
-        case SubmissionRequest(operation="room", submission=submission):
-            response = scheduler.room(submission.runs, submission.pool, rent=submission.rent)
         case SubmissionRequest(operation="quote", submission=submission):
             response = quote(scheduler, submission)
         case FailLaunchRequest():

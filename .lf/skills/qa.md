@@ -421,6 +421,24 @@ out of game imports and sets shared inference threads. Code-only builds start
 no loading process and run no hardware probe. Use the unchanged frozen panel, retain its whole-arm timer
 before querying reports, and compare complete action sequences.
 
+Use distinct tournament configs such as `configs=({"lane": name},)`: identical
+configs produce identical match keys, so a later tournament sees those matches
+in flight. Compare the `seats.player`/`scores` results after eviction, interruption
+and retries with an unconstrained run. `etude smoke FILE` checks grouping too.
+
+Placement errors: `etude pool add owned` (no machines), then `etude launch FILE
+--pool owned --quote` gives "no free machine"; `etude pool off owned` gives "is
+turned off". Both need pending matches: after `etude queue` plus `etude cancel`,
+the cancelled matches read as failed and need `--retry-failed`. Ignore every
+`ETUDE_HOME` in the lab's `.gitignore`, or runs say "plus uncommitted changes".
+
+For protocol intervals, sort `started_monotonic`/`finished_monotonic` endpoints
+and count starts minus finishes; compare the peak with the reported game capacity.
+Standalone runs retain reports under their own `artifacts/agents/` and ship them
+with results. Their scripts need an `if __name__ == "__main__":` guard.
+For an upgrade check, create results on a detached `main` checkout using `Code`
+players and an unannotated `play`, then read them here.
+
 ## Etude: explicit launcher upgrades
 
 Use an empty lab `ETUDE_HOME` and explicitly run `etude database upgrade
@@ -479,35 +497,3 @@ When a pinned `Counts(database=N)` moves, compare statements with main. Use a
 temporary trace in `tests/launch/counting.py` to record normalized statements
 in a file named by an environment variable, then remove the trace. Fenced
 writes add `BEGIN IMMEDIATE`, `PRAGMA user_version` and `COMMIT`.
-
-## Etude: grouped evals with agents
-
-1. Lab: copy `examples/agents.py`, `agent_game.py`, `agent_models.py`, `agent.txt` into a
-   git-committed folder; `uv run --project REPO etude eval agents.py --source RUNS` twice
-   (second pass: `nothing to play`). For failure knobs, wrap `play` and `load` in lab
-   modules reading env vars (fail when a match's JSON names a player; raise from `load`
-   for one checkpoint key; sleep for one wrapper) and declare two `RoundRobin`s with
-   distinct `configs=({"lane": name},)`: identical configs give identical match keys, and
-   the second tournament then reads `0 new, N running` until the next pass (also on main).
-2. Compare outcomes by hashing `seats.player` joined to the `scores` rollup table from
-   `etude.eval.query.statsdb(EXPERIMENT, Path(RUNS))` (`matches` has `state`, `retry`);
-   memory-evicted, interrupted and retried runs must hash equal to an unconstrained one.
-3. Interrupt with a Python driver that reads the CLI's stdout with `PYTHONUNBUFFERED=1`
-   and sends SIGTERM after N `matches played` lines; then `pgrep -fl "etude (eval|worker)"`.
-4. `etude smoke FILE` exercises the smoke grouping without `--source`.
-5. Launch on the local pool without renting: a uv project lab (`package = false`,
-   `etude-sdk[eval]` editable from REPO, `.gitignore` with `.venv`), committed;
-   `uv run etude database upgrade --development`, `uv run etude launch FILE`,
-   `etude wait --experiment E`, `etude logs --run E/evals-…`. Results land under
-   `ETUDE_HOME/track`.
-6. Protocol intervals: each match leaves `protocol-WRITER-MATCH.json` under
-   `ETUDE_HOME/track/E/artifacts/agents/` (`etude eval`), the launched run's
-   `artifacts/agents/`, or a standalone run's own `artifacts/agents/` (also shipped to its
-   storage). Sort `started_monotonic`/`finished_monotonic` endpoints and count
-   starts minus finishes; the peak should equal the "N games at a time" line. A standalone
-   script is `from etude.eval.tournament import evaluating`, with `Code(name=...)`
-   players, `DirectoryStorage` and `PYTHONPATH=LAB`; it needs an `if __name__ ==
-   "__main__":` guard (games spawn and re-import it; `main` played in process).
-7. Returning user: `main` lacks `Held`, `Agents` and `etude.eval.result`; use `Code`
-   players and a `play` without annotations, play on a `git worktree add --detach … main`
-   checkout, then here.

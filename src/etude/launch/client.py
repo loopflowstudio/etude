@@ -190,13 +190,6 @@ def quote(
     return _client().quote(runs, pool, rent=rent)
 
 
-def room(
-    runs: Sequence[RunRequest], pool: str | None = None, *, rent: str | None = None
-) -> tuple[str, ...]:
-    """Read which proposed runs fit machines already present, after queued work."""
-    return _client().room(runs, pool, rent=rent)
-
-
 def availability(rent: str, *, timeout: float | None = None) -> Availability:
     """Ask an on-demand's provider what it would rent now, at what price; rents nothing."""
     return _client().availability(rent, timeout=timeout)

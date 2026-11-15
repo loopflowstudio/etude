@@ -718,14 +718,11 @@ wrapper classes, so games can import them by name. The runnable
 [`examples/agents.py`](../examples/agents.py) compares two sampled players
 and a bare greedy checkpoint in two tournaments; its second pass plays nothing.
 
-Every game uses `play(match, agents)`. CPU game processes load checkpoints
-directly; visible NVIDIA hardware selects shared inference. Checkpoint loading is declared with
-`Agents(load=load, build=build)`. A code or API player can use just
-`Agents(build=build)`; if no checkpoint leaves are seated, no agent process
-starts. Etude chooses inference placement, not the author. The CPU forward comparison selected direct loading: 46.36 s against
-66.67 s for the best shared (seven-process) arm on the 64-game panel.
-Every arm matched 10,044 decisions. One host and one pass per cell limit this
-result; the earlier GPU comparisons describe shared inference before this cut.
+Code and API players can use `Agents(build=build)` without a loader.
+The CPU forward comparison selected direct loading: 46.36 s against 66.67 s
+for the best shared (seven-process) arm on the 64-game panel. Every arm matched
+10,044 decisions. One host and one pass per cell limit this result; the earlier
+GPU comparisons describe shared inference before this cut.
 
 - **A forward is a callable.** It takes a list of inputs and returns a list
   of outputs (such as logits and values), one per input, in order. `Forward`
@@ -817,10 +814,11 @@ result; the earlier GPU comparisons describe shared inference before this cut.
   for a refusal that is the machine's fault, such as a device out of memory.
   Rows saying a game was invalid remain rows: raise instead of returning
   them. A run with a failed match is never recorded as succeeded.
-- **Light game modules.** A game process imports the module that defines
-  `play`, not the experiment file (unless `play` is defined there) and not
-  `load`'s module. Keep the game in a small module, as `arena_game.py`
-  above. For a job with agents, Etude counts what each game process imported
+- **Light game modules for shared GPU inference.** A game process imports the
+  module that defines `play`, not the experiment file (unless `play` is defined
+  there) or `load`'s module. CPU games intentionally import the loader too.
+  Keep the game in a small module, as `arena_game.py` above. On the shared path,
+  Etude counts what each game process imported
   at startup and warns once per run if that includes `torch`, `jax` or
   `tensorflow`, or exceeds 256 modules, naming the importing module and
   saying to move the import to `load`'s.

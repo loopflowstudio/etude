@@ -218,7 +218,7 @@ match duration. Without a rental target, the run waits in the pool's queue
   is `retry=False` and waits for `--retry-failed`, as before.
 - **`etude.jobs.with_matches` is removed.** The pass builds the run itself.
 
-Match records now retain execution seconds for later machine-time estimates.
+Match records retain execution seconds for reports.
 Completed matches are sealed and offered to storage individually. Container
 CPU quotas set CPU game capacity and model thread budgets; a visible NVIDIA
 GPU selects batch-sized game capacity instead. The loader selects its device, and

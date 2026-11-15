@@ -62,7 +62,7 @@ from etude.storage import DirectoryStorage, default_root
 from etude.train.tracking import track
 from tests.eval.arithmetic import checkpoint, load, play
 from tests.eval.thread_budget import load_checkpoint
-from tests.launch.counting import Counting, Counts, job_text
+from tests.launch.counting import Counting, job_text
 from tests.launch.fake import bench
 from tests.run.storage import MeasuredStorage
 from tests.test_jobs import checkout
@@ -327,34 +327,6 @@ def test_group_admission_skips_deliveries_and_preserves_retry_rules(
     assert pending.isdisjoint(delivered)
 
 
-def test_room_reads_existing_capacity_after_queued_work_without_remote_calls(
-    tmp_path: Path,
-) -> None:
-    b = bench(tmp_path)
-    candidate = RunRequest(
-        id="evals", job=Job(command="true", repo=None, max_hours=0.1, max_usd=Decimal(1))
-    )
-    counts = Counting(b.store, b.service)
-    with counts.record():
-        assert b.scheduler.room([candidate], rent="l4") == ()
-    assert counts.snapshot().provider == 0
-    assert b.service.creates == 0
-
-
-def test_room_reserves_free_owned_slots_for_already_queued_work(tmp_path: Path) -> None:
-    b = bench(tmp_path)
-    b.scheduler.add_pool(Pool(name="owned", slots=1))
-    b.scheduler.add_machine("cpu", "fixture-host", pool="owned")
-    request = RunRequest(id="next", job=Job(command="true", repo=None, max_hours=0.1))
-    counts = Counting(b.store, b.service)
-    with counts.record():
-        assert b.scheduler.room([request], "owned") == ("next",)
-    observed = counts.snapshot()
-    assert observed.provider == observed.bucket == observed.ssh == observed.git == 0
-    b.scheduler.queue(request.model_copy(update={"id": "first"}), "owned")
-    assert b.scheduler.room([request], "owned") == ()
-
-
 def test_retained_single_eval_records_are_read_and_finished_groups_stop_being_in_flight(
     tmp_path: Path,
 ) -> None:
@@ -414,34 +386,6 @@ def test_unknown_durations_rent_instead_of_stranding_new_tournaments(
         )
         assert decisions[0].launched is not None
         assert len(b.scheduler.runs()) == 1
-
-
-def test_room_does_not_assign_another_targets_queued_job_to_the_wrong_pool(tmp_path: Path) -> None:
-    b = bench(tmp_path)
-    b.scheduler.add_pool(Pool(name="first"))
-    b.scheduler.add_pool(Pool(name="other"))
-    b.scheduler.add_machine("cpu", "fixture-host", pool="first")
-    command = Job(command="true", repo=None, max_hours=0.1, max_usd=Decimal(1))
-    b.scheduler.queue(RunRequest(id="before", job=command), "other", rent="l4")
-    counts = Counting(b.store, b.service)
-    with counts.record():
-        assert b.scheduler.room([RunRequest(id="next", job=command)], "first", rent="l4") == (
-            "next",
-        )
-    assert counts.snapshot().provider == 0
-
-
-def test_room_cost_does_not_grow_with_other_targets_backlogs(tmp_path: Path) -> None:
-    b = bench(tmp_path)
-    b.scheduler.add_pool(Pool(name="room"))
-    b.scheduler.add_pool(Pool(name="elsewhere"))
-    b.scheduler.add_machine("cpu", "fixture-host", pool="room")
-    command = Job(command="true", repo=None, max_hours=0.1, max_usd=Decimal(1))
-    b.scheduler.queue([RunRequest(id=f"other-{i}", job=command) for i in range(1000)], "elsewhere")
-    counts = Counting(b.store, b.service)
-    with counts.record():
-        assert b.scheduler.room([RunRequest(id="next", job=command)], "room") == ("next",)
-    assert counts.snapshot() == Counts(database=6)
 
 
 def test_an_execution_deadline_is_a_retryable_failure_not_a_success(
