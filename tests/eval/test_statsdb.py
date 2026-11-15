@@ -11,14 +11,17 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from etude.checkpoints import CheckpointRef, checkpoint_id
+from etude.call import Function
+from etude.checkpoints import CheckpointRecord, CheckpointRef
 from etude.errors import EtudeError
 from etude.eval import query
 from etude.eval.convert import convert
 from etude.eval.match import environment, evaluate
 from etude.eval.query import compare, statsdb
-from etude.eval.records import CheckpointPlayer, Code, Inference, Match
+from etude.eval.records import Benchmark, CheckpointPlayer, Code, Inference, Match, Rollup, Seating
 from etude.eval.run import Tables
+from etude.eval.tournament import evaluating, played, scores
+from etude.jobs import Evaluation, hold_evaluation
 from etude.records import ArtifactRef
 from etude.storage import DirectoryStorage
 from tests.eval.games import play, play_game_seats
@@ -185,7 +188,7 @@ def test_a_match_two_runs_played_counts_from_the_later_under_its_latest_name(
 ) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     ref = CheckpointRef(
-        key=checkpoint_id(address="hf://lab/a.pt"),
+        address="hf://lab/a.pt",
         artifact=ArtifactRef(uri="hf://lab/a.pt", sha256="ab" * 32),
     )
     _, rival = pair(tmp_path)
@@ -349,3 +352,103 @@ def test_same_named_eval_runs_keep_each_experiments_results(tmp_path: Path) -> N
         measured = MeasuredStorage(source)
         statsdb(experiment, measured).close()
         assert (measured.listings, measured.requests) == (1, 0)
+
+
+@pytest.mark.parametrize("sealed_rollup", [False, True])
+def test_legacy_checkpoint_keys_keep_matches_tables_and_rollups_together(
+    tmp_path: Path, sealed_rollup: bool
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    legacy = CheckpointRef(
+        address="base@0/checkpoints/updates-100.pt",
+        artifact=ArtifactRef(uri="s3://weights/updates-100.pt", sha256="0" * 64),
+    )
+    direct = Inference(config={"strength": 1})
+    tournament = Benchmark(
+        name="legacy",
+        environment=DUEL,
+        seatings=(
+            Seating(
+                name="anchor",
+                players=(direct, Code(name="fixed", config={"strength": 0})),
+                configs=({},),
+                games=2,
+            ),
+        ),
+        rollups=(
+            Rollup(name="wins", table="plays", by=("player", "opponents"), sums={"won": "won"}),
+        )
+        if sealed_rollup
+        else (),
+    )
+    with evaluating(
+        tournament,
+        experiment="cards",
+        checkpoint=legacy,
+        run="before",
+        directory=tmp_path / "evals",
+        storages=[bucket],
+    ) as active:
+        active.play(play)
+    qualified = CheckpointRef.model_validate(legacy.model_dump(), context={"experiment": "cards"})
+    now = tournament.model_copy(update={"rollups": ()})
+    result = played(now, experiment="cards", checkpoints=(qualified,), storages=[bucket])
+    assert not result.new and len(result.delivered) == 1
+    requested = Rollup(name="wins", table="plays", by=("player", "opponents"), sums={"won": "won"})
+    with statsdb("cards", bucket, rollups=[requested]) as db:
+        assert db.sql(
+            "select distinct checkpoint from players where checkpoint is not null"
+        ).fetchall() == [(qualified.key,)]
+        assert db.sql("select count(*) from plays join matches using (run, match)").fetchone() == (
+            4,
+        )
+        assert db.sql("select player from wins where player like 'checkpoint:%'").fetchall() == [
+            (direct.player(qualified).key,)
+        ]
+        assert db.execute(
+            "select opponents from wins where player = ?",
+            [Code(name="fixed", config={"strength": 0}).key],
+        ).fetchone() == ([direct.player(qualified).key],)
+        assert (
+            scores(db, "legacy", table="plays", value="won")[0].points[0].checkpoint
+            == qualified.key
+        )
+
+
+def test_legacy_queued_evaluation_keeps_its_workers_original_checkpoint_identity(
+    tmp_path: Path,
+) -> None:
+    legacy = CheckpointRef(
+        address="base@0/checkpoints/updates-100.pt",
+        artifact=ArtifactRef(uri="s3://weights/updates-100.pt", sha256="0" * 64),
+    )
+    direct = Inference(config={"strength": 1})
+    tournament = Benchmark(
+        name="queued",
+        environment=DUEL,
+        seatings=(
+            Seating(
+                name="anchor",
+                players=(direct, Code(name="fixed", config={"strength": 0})),
+                configs=({},),
+                games=2,
+            ),
+        ),
+    )
+    with evaluating(
+        tournament, experiment="cards", checkpoint=legacy, directory=tmp_path
+    ) as active:
+        assert active.play(play).played == 1
+    spec = Evaluation(
+        tournament=tournament,
+        experiment="cards",
+        play=Function(module="tests.eval.games", name="play"),
+        checkpoints=(
+            CheckpointRecord(
+                run="base@0", experiment="cards", ordinal=1, at={}, artifact=legacy.artifact
+            ),
+        ),
+        matches=tuple(tournament.seatings[0].matches(legacy)),
+    )
+    result = hold_evaluation(spec, directory=tmp_path)
+    assert result.played == 0 and result.skipped == 1

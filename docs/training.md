@@ -527,6 +527,33 @@ as an x-axis and give the others when you log: `run.log(metrics,
 player_updates=n)`. `run.steps` drives one clock, the one that decides when
 the run is done. Loops nested inside it are plain Python.
 
+### Several policies
+
+A run that trains policies an evaluation should seat apart, such as a main
+agent and the exploiter trained against it, publishes each under a role:
+
+```python
+run.checkpoint(policy=main)
+run.checkpoint(policy=exploiter, role="exploiter")
+```
+
+```text
+out/checkpoints/
+  updates-00000100/             role "policy", the default
+  exploiter.updates-00000100/   role "exploiter"
+```
+
+Each role is its own line of checkpoints: its own curve in a report, and its
+own policy to an evaluation, named `PolicyKey(job="league",
+role="exploiter")` ([Evaluation](evaluation.md#policies)). A seat that looks
+back along the held checkpoint's line (`Earlier`, `Fraction`) stays within
+its role.
+
+A checkpoint saved without `role` has the role `"policy"`, and a run with
+that one role never needs to name it. Use roles for policies that play
+separately. Models that play together, such as a drafter and a player, are
+[one checkpoint](#several-models): one role, several files.
+
 ### Earlier checkpoints
 
 Self-play often trains against its own past. The run lists what it has
@@ -769,7 +796,7 @@ EXPERIMENT/JOB@SEED/         a plain train(config) file's run is EXPERIMENT/
         model.pt           torch.save(model.state_dict())
         optimizer.pt
     checkpoints/
-      updates-00000100/    never changes
+      updates-00000100/    never changes; ROLE.updates-00000100/ for a role given by name
         checkpoint.json    {"at": {"updates": 100}, "files": {"policy": "policy.pt"}}, written last
         policy.pt
 ```

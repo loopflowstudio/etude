@@ -29,10 +29,10 @@ from tempfile import TemporaryDirectory
 from typing import Literal
 
 from etude.declarations import asked, read_experiment, read_training_jobs
-from etude.errors import EtudeError, LauncherError
-from etude.eval.records import Benchmark, RoundRobin
+from etude.errors import LauncherError
+from etude.eval.records import Benchmark, Line, RoundRobin, TournamentRun
 from etude.eval.tournament import played
-from etude.experiment import observe
+from etude.experiment import observe, read_tournament_lines
 from etude.experiment_file import defined_functions, experiment_named, refuse_renamed
 from etude.jobs import (
     ExperimentState,
@@ -43,6 +43,7 @@ from etude.jobs import (
 )
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.page import build, render, write
+from etude.run import located_runs
 from etude.spec import Job, RunRequest, SmokeStep
 from etude.storage import DirectoryStorage, Storage, default_root
 
@@ -122,7 +123,9 @@ def _evaluate(
         return [
             SmokeStep(step="eval", name="eval", outcome="skipped", detail="no eval_jobs(state)")
         ]
-    state = observe(source, experiment)
+    keys = source.keys("")
+    declarations = located_runs(source, keys)
+    state = observe(source, experiment, keys=keys, declarations=declarations)
     function = read_experiment(path).eval
     assert function is not None
     jobs = _try_step("eval", "eval", lambda: asked(function, state))
@@ -130,31 +133,56 @@ def _evaluate(
         return [
             SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="eval returned none")
         ]
-    return [_smoke_evaluation(job, experiment, store, state) for job in jobs]
+    specs = [evaluation_spec(job) for job in jobs]
+    # Smoke plays this file's runs only; another experiment's lines are not read.
+    outside = [
+        spec.tournament.experiments - {experiment}
+        if isinstance(spec.tournament, Benchmark)
+        else frozenset[str]()
+        for spec in specs
+    ]
+    lines = read_tournament_lines(
+        source,
+        state,
+        [
+            TournamentRun(tournament=s.tournament, checkpoints=s.held)
+            for s, others in zip(specs, outside, strict=True)
+            if not others
+        ],
+        keys=keys,
+        declarations=declarations,
+    )
+    return [
+        SmokeStep(
+            step="eval",
+            name=spec.tournament.name,
+            outcome="not_smoked",
+            detail="cross-experiment seats: " + ", ".join(sorted(others)),
+        )
+        if others
+        else _smoke_evaluation(job, experiment, store, state, lines)
+        for job, spec, others in zip(jobs, specs, outside, strict=True)
+    ]
 
 
 def _smoke_evaluation(
-    job: Job, experiment: str, store: DirectoryStorage, state: ExperimentState
+    job: Job,
+    experiment: str,
+    store: DirectoryStorage,
+    state: ExperimentState,
+    lines: tuple[Line, ...],
 ) -> SmokeStep:
     """One evaluation job `eval_jobs(state)` returned, held tiny into `store`."""
-    spec = evaluation_spec(job)
+    spec = evaluation_spec(with_experiment(job, experiment))
     name = spec.tournament.name
-    try:
-        job = with_experiment(job, experiment)
-    except EtudeError as error:
-        raise LauncherError(
-            f"smoke eval {name}: a job of experiment {spec.experiment!r}"
-        ) from error
-    tiny = evaluation_spec(job).model_copy(
-        update={"tournament": _tiny_tournament(spec.tournament), "lines": state.lines}
-    )
+    tiny = spec.model_copy(update={"tournament": _tiny_tournament(spec.tournament), "lines": lines})
     started = time.monotonic()
     matches = played(
         tiny.tournament,
         experiment=experiment,
-        checkpoints=tuple(c.ref for c in tiny.checkpoints),
+        checkpoints=tiny.held,
         enter=tiny.entrants,
-        lines=state.lines,
+        lines=lines,
         storages=[store],
     ).new
     if not matches:

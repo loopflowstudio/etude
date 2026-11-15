@@ -25,7 +25,14 @@ from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Inference, Seating
 from etude.eval.tournament import evaluating, scores
 from etude.experiment import observe
-from etude.jobs import EvalJob, ExperimentState, OutMembers, _hold, evaluation_spec
+from etude.jobs import (
+    EvalJob,
+    ExperimentState,
+    OutMembers,
+    _hold,
+    evaluation_spec,
+    with_experiment,
+)
 from etude.launch.records import Outcome, Standing, Status
 from etude.launch.source import home
 from etude.local import _place_inputs
@@ -377,7 +384,7 @@ def test_an_eval_job_belongs_to_the_experiment_of_its_file(tmp_path: Path) -> No
     def elsewhere(state: ExperimentState) -> Job:
         return EvalJob(tournament=progress, experiment="another", play=play, max_hours=0.1)
 
-    with pytest.raises(EtudeError, match="eval_job_of_another_experiment"):
+    with pytest.raises(LauncherError, match="EvalJob belongs to its file"):
         advance(Experiment(name="ppo", eval=elsewhere), source=bucket, directory=tmp_path / "e")
 
 
@@ -857,9 +864,9 @@ def test_saved_eval_outcomes_keep_the_launchers_continuation_state(
         launcher.launched.append(
             RunRequest(
                 id="ppo/ladder",
-                job=EvalJob(
-                    tournament=tournament, play=play, experiment="ppo", repo=None, max_hours=1
-                ).plain(),
+                job=with_experiment(
+                    EvalJob(tournament=tournament, play=play, repo=None, max_hours=1), "ppo"
+                ),
             )
         )
     launcher.queued = phase == "queued"
@@ -966,13 +973,15 @@ def test_unstored_summaries_use_local_names_and_accept_both_lookup_spellings(
             ),
             RunRequest(
                 id="ppo/ladder-123",
-                job=EvalJob(
-                    tournament=Benchmark(name="ladder", environment=WORLD),
-                    play=play,
-                    experiment="ppo",
-                    repo=None,
-                    max_hours=1,
-                ).plain(),
+                job=with_experiment(
+                    EvalJob(
+                        tournament=Benchmark(name="ladder", environment=WORLD),
+                        play=play,
+                        repo=None,
+                        max_hours=1,
+                    ),
+                    "ppo",
+                ),
             ),
         ]
     )

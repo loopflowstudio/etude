@@ -39,8 +39,10 @@ const {T, R, JOBS, marks, markOf, jobPoints, cellOf, placed, fixedPlayers, jobOf
 const TRAINED = T.runs.length > 0;
 
 // The view lives in the URL, so a reload or a rewritten page shows the same thing. The x axis
-// offers the clocks training declared or positions use, then Etude's hours where training ran.
-const clockNames = [...new Set([...T.clocks.map(c => c.name).filter(c => !BUILT_IN.includes(c)), ...M.atClocks]), ...(TRAINED || !M.atClocks.length ? BUILT_IN : [])];
+// offers the clocks training declared or positions use, then Etude's hours where training ran
+// or positions use them.
+const ownClock = c => !BUILT_IN.includes(c);
+const clockNames = [...new Set([...T.clocks.map(c => c.name).filter(ownClock), ...M.atClocks.filter(ownClock), ...BUILT_IN.filter(c => TRAINED || !M.atClocks.length || M.atClocks.includes(c))])];
 const firstClock = clockNames.includes(R.clock) ? R.clock : clockNames[0];
 const S = Object.assign({hide: "", filter: "{}", eclock: firstClock, pclock: firstClock, mlclock: firstClock, opp: "first", score: "0", sel: "", lines: "on", mjob: "", mkey: "", xline: "", smooth: "on", fpath: "", fscale: "share", live: "1"},
   Object.fromEntries(new URLSearchParams(location.hash.slice(1))), {commit: COMMIT});

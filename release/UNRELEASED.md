@@ -115,3 +115,63 @@ experiment; cohorts, which sat between, are removed.
 Unchanged: `Job.runs(...)`, `ExperimentState.runs`, the `etude runs` command,
 `report()`, `play(match)`, typed flags on `training_jobs`, a job's command and
 identity, and everything already stored.
+
+## Policies by name
+
+A policy, what one run of a job trained, has a name, and a seat can name one
+in any experiment:
+
+```python
+from etude.checkpoints import PolicyKey
+
+PolicyKey(experiment="tla-frontier", job="small", seed=0, role="policy")
+PolicyKey(experiment="tla-frontier", job="small")  # the same policy, by the defaults
+
+Final(experiment="tla-frontier", job="small")  # every seed of the job
+Final(policy=PolicyKey(experiment="tla-frontier", job="small"))  # one
+```
+
+Every part of a key has a default: this file's experiment, the experiment's
+only training job, the job's lowest seed, the run's only role. Relative seats
+(`Final`, `At`, `Earlier`, `Aligned`, `Fraction`) take `experiment=`, `seed=`
+and `role=` beside `job=`, or `policy=` a key; with no seed a seat still fills
+from every seed. `state.policy(key).checkpoints` is `Checkpoints` of records,
+with the same `every`, `at`, `tagged` and `last` selectors as a run.
+`EvalJob(checkpoints=...)` takes records; held records without an experiment
+are refused. Reports resolve other experiments' seats from the same source;
+smoke names those seats as not smoked. A run publishes a second policy with
+`run.checkpoint(..., role="exploiter")`.
+See [Policies](../docs/evaluation.md#policies).
+
+A checkpoint's key now includes its experiment:
+`EXPERIMENT/RUN/checkpoints/NAME` (nondefault roles add `/roles/ROLE`
+after the run). Two experiments' `base@0` are different
+checkpoints and are seated together, and the same players meeting under the
+same config are one match in every experiment that seats them.
+
+Use `key.checkpoint(name=n, artifact=saved)` to name a checkpoint from a
+`PolicyKey`. References take the key's fields flat, with the same defaults;
+`policy=` and `key=` are no longer constructor arguments. Outside references
+may supply `line=`; policy references derive it. Released records stay readable.
+
+### Upgrade
+
+| Before | Now |
+| --- | --- |
+| `CheckpointRef(key=checkpoint_id(...), artifact=saved)` | `CheckpointRef(experiment="ppo", job="base", seed=1, name=n, artifact=saved)`; `.policy` owns identity and `.key` is derived |
+| `CheckpointRef(key=checkpoint_id(address=url), artifact=saved)` | `CheckpointRef(address=url, artifact=saved)` |
+| `Final(job="small", inference=direct)` beside `direct` | `Final(job="small")`; give `inference=` only to compare different play |
+| `EvalJob(..., experiment="other")` | removed and refused; seat the other experiment's runs with `experiment=` or `policy=` on a seat, or with checkpoints read by `observe` |
+| `evaluating(..., lines=observe(source, e).lines)` | the same, plus the lines of every other experiment a seat names |
+
+- **Stored results keep counting.** Eval runs that recorded keys without an
+  experiment are read as their own experiment's runs: the same points, and
+  the next pass plays nothing again. Nothing stored is rewritten.
+- **A kept `statsdb` database rebuilds once** from storage on its first
+  read.
+- **Queries that match on the key text** (`players.player`, `seats.player`
+  or a checkpoint key compared with a literal) see the longer spelling for
+  every checkpoint, old or new.
+- **A hand-built key for a run of another experiment**, seated before this
+  change, is read as the evaluating experiment's run. Seat it again by its
+  full key if that matters.
