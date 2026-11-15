@@ -18,8 +18,12 @@ def strength(player: Player) -> int:
     config = player.config
     if "strength" in config:
         return int(str(config["strength"]))
-    # The test trainer saves at updates 100, 200 and 300, named `updates-N`: 1, 3 and 5.
-    updates = int(re.sub(r"\D", "", player.name))
+    # Training clocks survive arbitrary checkpoint filenames such as weights.pt.
+    updates = (
+        int(player.checkpoint.at["updates"])
+        if isinstance(player, CheckpointPlayer) and "updates" in player.checkpoint.at
+        else int(re.sub(r"\D", "", player.name))
+    )
     return updates // 50 - 1 + int(str(config.get("search", 0)))
 
 

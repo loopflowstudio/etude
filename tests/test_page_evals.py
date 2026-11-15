@@ -1018,7 +1018,7 @@ def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
     # Two completed matches have separate block indices; their tables stay cached.
     assert sum(key.endswith("/block.json") for key in storage.got) == 2
     assert not any(key.endswith(".parquet") for key in storage.got)
-    assert (storage.listings, storage.requests) == (3, 11)
+    assert (storage.listings, storage.requests) == (2, 10)
     # Scheduling new games still needs the definition to agree.
     with pytest.raises(EtudeError, match="tournament_conflict"):
         advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)

@@ -69,7 +69,6 @@ import json
 from pathlib import Path
 
 from etude.eval.match import Tables
-from tests.eval.stored import stored_inference, stored_relative
 from etude.eval.records import Held, Match, CheckpointPlayer
 
 
@@ -341,7 +340,6 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
         {
             f"arena_duel_{form}.py": """from pydantic import BaseModel
 from etude.eval.match import environment
-from tests.eval.stored import stored_inference, stored_relative
 from etude.eval.records import Held, Benchmark, Code, Seating
 """
             + PLAY
@@ -351,7 +349,7 @@ class ArenaConfig(BaseModel):
 
 def arena(config: ArenaConfig) -> Benchmark:
     return Benchmark(name="anchors", environment=environment("duel"), seatings=(
-        Seating(name="model vs fixed", players=(stored_inference(config={"search": 0}), Code(name="fixed")),
+        Seating(name="model vs fixed", players=(Held(), Code(name="fixed")),
                 configs=({"deal": 1}, {"deal": 2}), games=config.games),))
 """
         },
