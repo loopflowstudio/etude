@@ -26,7 +26,7 @@ from typing import cast
 from pydantic import BaseModel
 
 from etude.errors import RetryRequested, explain
-from etude.eval.agents import Agent, Answer, Request
+from etude.eval.agents import Agent, AgentFailure, Answer, Request
 from etude.eval.resources import THREAD_VARIABLES
 from etude.records import Record
 
@@ -79,7 +79,7 @@ class _Batches:
             return None
         return max(0, min(items[0].since + self.max_delay for items in self.pending.values()) - now)
 
-    def flush(self, now: float) -> list[Batch]:
+    def flush(self, now: float, control: Connection | None = None) -> list[Batch]:
         observations: list[Batch] = []
         for key, items in list(self.pending.items()):
             if (
@@ -132,6 +132,21 @@ class _Batches:
                     answer = self.failed.get(key) or Answer(
                         [], f"agent {key}: {explain(error)}", isinstance(error, RetryRequested)
                     )
+            if answer.error is not None and control is not None:
+                control.send(
+                    [
+                        AgentFailure(
+                            player=key,
+                            tournament=p.request.tournament,
+                            match=p.request.match,
+                            error=answer.error,
+                            retry=answer.retry,
+                        )
+                        for p in batch
+                    ]
+                )
+                # Only failure metadata crosses the control pipe; rows stay direct.
+                control.recv()
             offset = 0
             for item in batch:
                 size = len(item.request.rows)
@@ -219,7 +234,7 @@ def _run_agents(
                             peers.remove(connection)
                         else:
                             batches.add(connection, request, time.monotonic())
-                for batch in batches.flush(time.monotonic()):
+                for batch in batches.flush(time.monotonic(), control):
                     if report.tell() > 1:
                         report.write(",")
                     report.write(batch.model_dump_json())

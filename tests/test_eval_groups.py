@@ -5,7 +5,7 @@ import os
 import signal
 import subprocess
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import Future
 from decimal import Decimal
 from multiprocessing import active_children, get_context
@@ -843,3 +843,53 @@ def test_agent_startup_failure_reports_retryable_matches(
     assert json.loads((outputs / "etude-result.json").read_text())["tally"]["failed"] == 1
     found = played(spec.tournament, experiment="grouped", enter=spec.entrants, directory=tmp_path)
     assert len(found.new) == len(found.retry) == len(found.failed) == 1
+
+
+def catches_agent_error(match: Match, agents: Sequence[Agent]) -> Tables:
+    try:
+        agents[0].act([1])
+    except Exception:
+        pass
+    return {"scores": [{"seat": 0, "score": 99}]}
+
+
+class RaisingAgent:
+    def act(self, rows: Sequence[object]) -> Sequence[object]:
+        raise ValueError("fixture acting error")
+
+
+def raises_act(player: Player, config: Loading) -> Agent:
+    return RaisingAgent()
+
+
+def retry_load(player: Player, config: Loading) -> Agent:
+    raise RetryRequested("fixture transient loading error")
+
+
+@pytest.mark.parametrize("loader", [raises_load, raises_act, wrong_answers, retry_load])
+def test_caught_agent_errors_fail_matches_without_publishing_returned_rows(
+    tmp_path: Path, loader: Callable[[Player, Loading], Agent]
+) -> None:
+    agents = Agents(load=loader, config=Loading(), max_delay_seconds=0.25)
+    jobs = [
+        job(name, agents).model_copy(update={"play": catches_agent_error})
+        for name in ("one", "two")
+    ]
+    with pytest.raises(RetryRequested if loader is retry_load else EtudeError):
+        hold_group(group(*jobs), directory=tmp_path)
+    for active in jobs:
+        found = played(
+            active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path
+        )
+        assert len(found.failed) == 1 and not found.delivered
+        assert len(found.retry) == int(loader is retry_load)
+    db = statsdb("grouped", tmp_path)
+    try:
+        assert db.sql("select state from runs").fetchall() == [("failed",)] * 2
+        assert (
+            db.sql("select state, retry from matches").fetchall()
+            == [("failed", loader is retry_load)] * 2
+        )
+        assert "scores" not in {row[0] for row in db.sql("show tables").fetchall()}
+    finally:
+        db.close()

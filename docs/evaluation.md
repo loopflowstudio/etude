@@ -727,7 +727,9 @@ one on a GPU, or weights too large to hold in every game process.
 - **Stopped whatever happens.** Etude stops the agent process after the last
   game, after a failure, and when the run is stopped or cancelled (SIGTERM).
 - **Failures.** A game never has to notice a dead agent process: `act`
-  raises for it, and Etude records the match.
+  raises for it, and Etude records the match. An agent operation that fails
+  marks its asking matches failed even if game code catches the exception
+  and returns rows. Failed matches publish no result rows.
 
   | What happened | Matches | Run |
   | --- | --- | --- |

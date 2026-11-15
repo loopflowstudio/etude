@@ -486,6 +486,14 @@ def play_together(
         if each.agents and imports is not None and imports.warning and not warned_imports:
             print(imports.warning, file=sys.stderr, flush=True)
             warned_imports = True
+        if agent_process is not None:
+            failure = agent_process.failures.pop(
+                (each.tournament or each.run.name, match.key), None
+            )
+            if failure is not None:
+                outcome = (
+                    RetryRequested(failure.error) if failure.retry else RuntimeError(failure.error)
+                )
         try:
             each.run._store_played(match, outcome)
         except EtudeError as error:

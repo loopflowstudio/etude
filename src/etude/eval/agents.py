@@ -16,7 +16,7 @@ import time
 from collections.abc import Iterator, Sequence
 from concurrent.futures import Future
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from multiprocessing.connection import Connection, wait
 from pathlib import Path
@@ -49,6 +49,15 @@ class Answer:
     rows: list[object]
     error: str | None = None
     retry: bool = False
+
+
+@dataclass(frozen=True)
+class AgentFailure:
+    player: str
+    tournament: str
+    match: str
+    error: str
+    retry: bool
 
 
 @dataclass(frozen=True)
@@ -102,6 +111,7 @@ class AgentProcess:
     address: str
     process: multiprocessing.context.SpawnProcess
     exited: Future[None]
+    failures: dict[tuple[str, str], AgentFailure] = field(default_factory=dict)
 
     def check(self) -> None:
         if self.process.exitcode is not None:
@@ -184,12 +194,25 @@ def running_agents(
     exited: Future[None] = Future()
     sentinel = process.sentinel
 
+    failures: dict[tuple[str, str], AgentFailure] = {}
+
     def observe_exit() -> None:
-        wait([sentinel])
-        exited.set_result(None)
+        try:
+            while True:
+                ready = wait([parent, sentinel])
+                if parent in ready:
+                    for failure in cast(list[AgentFailure], parent.recv()):
+                        failures.setdefault((failure.tournament, failure.match), failure)
+                    # Register failures before a game can catch its exception and return.
+                    parent.send(None)
+                if sentinel in ready:
+                    break
+        except (EOFError, OSError):
+            wait([sentinel])
+        finally:
+            exited.set_result(None)
 
     observer = threading.Thread(target=observe_exit, name="etude-agents")
-    observer.start()
     try:
         ready = wait([parent, process.sentinel], timeout=_remaining())
         if parent not in ready:
@@ -198,13 +221,14 @@ def running_agents(
             parent.recv()
         except EOFError as error:
             raise RetryRequested("agent process exited during startup") from error
+        observer.start()
         print(
             f"etude: agents: started for {', '.join(tournaments)}; "
             f"{active_games(pending, agents=True, memory_gb=definition.memory_gb)} games at a time",
             file=sys.stderr,
             flush=True,
         )
-        yield AgentProcess(address=address, process=process, exited=exited)
+        yield AgentProcess(address=address, process=process, exited=exited, failures=failures)
     finally:
         failed = sys.exc_info()[0] is not None
         if failed and process.is_alive():
@@ -218,7 +242,8 @@ def running_agents(
         if process.is_alive():
             process.terminate()
             process.join()
-        observer.join()
+        if observer.ident is not None:
+            observer.join()
         parent.close()
         exitcode = process.exitcode
         process.close()
