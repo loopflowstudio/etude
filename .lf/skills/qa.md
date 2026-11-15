@@ -372,3 +372,14 @@ Never point a branch build at `~/.etude`. Work in `mktemp -d /tmp/qa-NAME.XXXX`
 6. Compare fact counts with `sqlite3 "file:DB?mode=ro"` (`runs`, `sessions`,
    `rentals`, `attempts`, `cohorts`, `transfers`). The published file's hash differs
    between runs: `migrations.applied_at` holds the time. Delete the lab afterwards.
+7. Before QA, read the PR's CI (`gh pr checks N`, `gh run view RUN --log-failed`):
+   "launcher.sqlite is not initialized" there is a fixture that sets its own
+   `ETUDE_HOME` (or calls `client._open(path)`) without `upgrade(path,
+   development=True)`; conftest only initializes its autouse home. `etude smoke`
+   needs no initialized home (it upgrades its own folder).
+8. When a pinned `Counts(database=N)` moves, diff the statements against main:
+   temporarily make `tests/launch/counting.py`'s `statement` append
+   `" ".join(sql.split())[:160]` to a file named by an env var, run the test in
+   this checkout and in a `git worktree add --detach` of main, `diff` the traces,
+   then `git checkout tests/launch/counting.py`. Each fenced write on this branch
+   adds `BEGIN IMMEDIATE`, `PRAGMA user_version` and `COMMIT`.

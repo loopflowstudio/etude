@@ -17,7 +17,7 @@ import pytest
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch.client import _open
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import Database, launcher_file, upgrade
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Execution, Executor
 from etude.launch.machines import MachineRequest, Refused
@@ -355,6 +355,7 @@ def test_offline_configuration_and_safeguards(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("LIUM_API_KEY", raising=False)
+    upgrade(tmp_path, development=True)
     scheduler = _open(tmp_path)
     try:
         scheduler.add_storage(
@@ -534,6 +535,7 @@ def test_failed_ssh_reply_can_recover_without_renting_again(
 
 def test_lium_cli_configuration_is_offline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    upgrade(tmp_path, development=True)
     monkeypatch.delenv("LIUM_API_KEY", raising=False)
     assert (
         main(

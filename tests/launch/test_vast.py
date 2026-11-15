@@ -20,7 +20,7 @@ import pytest
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch.client import _open
-from etude.launch.database import Database, launcher_file
+from etude.launch.database import Database, launcher_file, upgrade
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Executor
 from etude.launch.machines import MachineRequest, Refused
@@ -498,6 +498,7 @@ def test_configured_vast_reads_need_no_provider_credentials(
 ) -> None:
     monkeypatch.delenv("VAST_API_KEY", raising=False)
     monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
+    upgrade(tmp_path, development=True)
     scheduler = _open(tmp_path)
     scheduler.add_storage(
         Place(name="evidence", bucket="fixture", prefix="test", provider="s3", region="us-west-2")
@@ -714,6 +715,7 @@ def test_vast_cli_configuration_is_local(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    upgrade(tmp_path, development=True)
     monkeypatch.delenv("VAST_API_KEY", raising=False)
     assert (
         main(

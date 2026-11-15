@@ -1386,7 +1386,7 @@ accept run addresses, `--experiment` and `--job` select several.
 | `etude status COHORT`, `wait`, `cancel`, `logs --cohort` | `--experiment E`, `--job J`, or run addresses |
 | `etude continue --run COHORT --cohort NEXT` | `etude continue --run RUN`, one run at a time |
 | `ETUDE_COHORT`, `track(cohort=...)` | removed |
-| `etude controller`, `server set`, `unset`, `run` | `etude server`, `server set`, `unset`, `run` |
+| `etude controller`, `controller set`, `unset`, `run` | `etude server`, `server set`, `unset`, `run` |
 
 Every command that reads the file refuses an old declaration whose
 replacement is absent, before anything runs or is stored:

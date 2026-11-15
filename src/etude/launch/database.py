@@ -655,7 +655,7 @@ class Database:
         if changed.rowcount != 1:
             raise Stale(f"{supply!r} placement lock expired")
 
-    def _change(self, table: str, id: str | str | str, version: int, **facts: Fact) -> None:
+    def _change(self, table: str, id: str, version: int, **facts: Fact) -> None:
         sets = "".join(f"{name} = ?, " for name in facts)
         done = self._write(
             f"UPDATE {table} SET {sets}version = version + 1 WHERE id = ? AND version = ?",
@@ -1283,6 +1283,14 @@ def _read_only(path: Path, timeout: float = 5) -> sqlite3.Connection:
     return sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=timeout)
 
 
+def _copy_file(source: Path, target: Path) -> None:
+    """Copy closed or signature-checked bytes within the caller's remaining allowance."""
+    with source.open("rb") as reader, target.open("wb") as writer:
+        while chunk := reader.read(1024 * 1024):
+            remaining()
+            writer.write(chunk)
+
+
 @contextmanager
 def _inspection(path: Path) -> Iterator[sqlite3.Connection]:
     """Read stable evidence without letting SQLite create or update source sidecars."""
@@ -1300,13 +1308,7 @@ def _inspection(path: Path) -> Iterator[sqlite3.Connection]:
                 )
                 target = Path(temporary) / path.name
                 for source in (path, wal):
-                    with (
-                        source.open("rb") as reader,
-                        (target.parent / source.name).open("wb") as writer,
-                    ):
-                        while chunk := reader.read(1024 * 1024):
-                            remaining()
-                            writer.write(chunk)
+                    _copy_file(source, target.parent / source.name)
                 connection = _read_only(target, timeout=0)
             else:
                 connection = sqlite3.connect(
@@ -1485,7 +1487,8 @@ def _upgrade_lock(home: Path) -> Iterator[None]:
 def _floor(migration: Migration) -> str | None:
     if migration.floor is not None:
         return migration.floor
-    before = list(migrations())[: list(migrations()).index(migration)]
+    catalog = migrations()
+    before = catalog[: catalog.index(migration)]
     if not additive(migration, before):
         return None
     floors = [m.floor for m in before if m.floor is not None]
@@ -1510,8 +1513,7 @@ class Snapshot(Record):
 
 def _retain_snapshot(source: Path, target: Path) -> None:
     _snapshot(source, target, remaining() or 0)
-    db = _read_only(target)
-    try:
+    with closing(_read_only(target)) as db:
         generation = int(db.execute("PRAGMA user_version").fetchone()[0])
         rows = (
             db.execute("SELECT * FROM migrations ORDER BY rowid").fetchall()
@@ -1529,8 +1531,6 @@ def _retain_snapshot(source: Path, target: Path) -> None:
             if rows
             else None,
         )
-    finally:
-        db.close()
     manifest = target.with_name(target.name + ".json")
     manifest.write_text(identity.model_dump_json() + "\n")
     _sync(target)
@@ -1552,7 +1552,8 @@ def _sync(path: Path) -> None:
 
 
 def _export(db: sqlite3.Connection, migration: Migration, path: Path) -> Path:
-    before = list(migrations())[: list(migrations()).index(migration)]
+    catalog = migrations()
+    before = catalog[: catalog.index(migration)]
     if migration.expansion not in {m.name for m in before} or not migration.exports:
         raise LauncherError(
             f"destructive migration {migration.name} must name its expansion and export tables"
@@ -1887,10 +1888,7 @@ def _finish_takeover(home: Path) -> Upgrade:
         _sync_directory(item.source.parent)
     if not published:
         publication = takeover.target.path.with_name("publication.sqlite")
-        with takeover.target.path.open("rb") as source, publication.open("wb") as target:
-            while chunk := source.read(1024 * 1024):
-                remaining()
-                target.write(chunk)
+        _copy_file(takeover.target.path, publication)
         remaining()
         _sync(publication)
         publication.replace(canonical)
@@ -1965,14 +1963,15 @@ def _takeover(home: Path, state: Schema) -> Upgrade:
                 f"legacy files changed during validation; no cutover performed; recovery snapshots: {recovery}"
             )
         floors = [m.floor for m in migrations() if m.floor is not None]
+        required = _required()
         result = Upgrade(
             path=state.path,
             sources=sources,
             backups=tuple(snapshots),
             exports=tuple(exports),
             applied=tuple(m.name for m in migrations()),
-            floor=max(floors, key=_version) if floors and not _required() else None,
-            required=_required(),
+            floor=max(floors, key=_version) if floors and not required else None,
+            required=required,
         )
         files = tuple(
             Retirement(
@@ -2044,7 +2043,6 @@ def _mark_abandoned_recovery(home: Path) -> None:
             if not marker.exists():
                 marker.touch(mode=0o600)
                 _sync(marker)
-                _sync_directory(recovery)
 
 
 def upgrade(home: Path, *, timeout: float | None = None, development: bool = False) -> Upgrade:
@@ -2121,12 +2119,13 @@ def upgrade(home: Path, *, timeout: float | None = None, development: bool = Fal
                     target.replace(path)
                     _sync(path)
             floors = [m.floor for m in migrations() if m.floor is not None]
+            required = _required()
             return Upgrade(
                 path=path,
                 sources=(),
                 backups=backups,
                 applied=applied,
                 exports=tuple(exports),
-                floor=max(floors, key=_version) if floors and not _required() else None,
-                required=_required(),
+                floor=max(floors, key=_version) if floors and not required else None,
+                required=required,
             )
