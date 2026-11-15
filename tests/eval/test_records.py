@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic import JsonValue, ValidationError
 
+import etude.eval.records as records
 from etude.checkpoints import CheckpointRecord, CheckpointRef, PolicyKey
 from etude.eval.records import (
     Aligned,
@@ -42,6 +45,15 @@ U500 = CheckpointRef(
 )
 SEARCH = Inference(config={"sims": 64})
 HEURISTIC = Code(name="heuristic")
+
+
+def test_published_checkpoint_key_still_names_a_run_checkpoint() -> None:
+    with pytest.warns(DeprecationWarning):
+        checkpoint_key = cast(Callable[..., str], getattr(records, "CheckpointKey"))
+    assert checkpoint_key(run="ppo-1", name="updates-500.pt") == (
+        "ppo-1/checkpoints/updates-500.pt"
+    )
+
 
 # Written by etude-sdk at 2eb32d5, before players were named.
 OLD_MODEL = (

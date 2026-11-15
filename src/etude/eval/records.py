@@ -45,6 +45,7 @@ import json
 import re
 import warnings
 from collections.abc import Iterable, Mapping, Sequence
+from functools import partial
 from hashlib import sha256
 from itertools import combinations
 from pathlib import Path
@@ -1486,5 +1487,5 @@ def __getattr__(name: str) -> object:
             DeprecationWarning,
             stacklevel=2,
         )
-        return _checkpoint_id
+        return partial(_checkpoint_id, experiment="")
     raise AttributeError(name)
