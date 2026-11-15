@@ -20,7 +20,8 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from etude.launch.logging import Console, explain, write_log
+from etude.errors import explain
+from etude.launch.logging import Console, write_log
 
 
 def startup_timeout() -> float | None:

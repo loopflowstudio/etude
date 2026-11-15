@@ -36,13 +36,13 @@ import json
 import os
 import re
 import warnings
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, JsonValue, ValidationError
+from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 
 from etude.checkpoints import CheckpointRef, seen_from
 from etude.errors import EtudeError
@@ -53,7 +53,7 @@ from etude.eval.records import (
     IDENTIFIER,
     TOURNAMENT_FILE,
     Benchmark,
-    CheckpointPlayer,
+    Composition,
     Environment,
     Line,
     Match,
@@ -64,14 +64,17 @@ from etude.eval.records import (
     Seated,
     Share,
     TournamentRun,
+    _map_fields,
     assemble,
     digest,
     folder_name,
     outcomes,
-    resolve_checkpoint,
+    player_checkpoints,
+    resolve_player,
     validate_checkpoints,
 )
-from etude.eval.run import ETUDE_TABLES, EvalResult, EvalRun, Result, Tables, _evaluating_matches
+from etude.eval.result import EvalResult, Result, Tables
+from etude.eval.run import ETUDE_TABLES, EvalRun, _evaluating_matches
 from etude.eval.schedule import ordered
 from etude.records import Digest, Record, RunRecord
 from etude.run import LocatedRun, declare, run_folders, under
@@ -80,8 +83,11 @@ from etude.storage import DirectoryStorage, Storage, default_root
 if TYPE_CHECKING:
     import duckdb
 
+    from etude.jobs import Agents
+
 # Every eval run's `etude.eval.records.Environment`.
 _ENVIRONMENT_FILE = "environment.json"
+_JSON = TypeAdapter(JsonValue)
 
 
 @contextmanager
@@ -93,7 +99,6 @@ def evaluating(
     checkpoints: Sequence[CheckpointRef] = (),
     enter: Sequence[Player] = (),
     matches: Sequence[Match] | None = None,
-    workers: int = 1,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
     share: Share = Share(),
@@ -103,7 +108,7 @@ def evaluating(
 ) -> Iterator[EvalRun]:
     """Open one tournament's eval run, or an environment's explicit matches.
 
-    A checkpoint fills benchmark inference seats; entrants fill a round robin.
+    A checkpoint fills benchmark held seats; entrants fill a round robin.
     With neither, plan every missing match of the stored tournament. Relative
     seats use the supplied experiment lines; planned jobs carry these in their
     specification. Explicit matches are checked against the tournament before
@@ -123,18 +128,7 @@ def evaluating(
             match.model_copy(
                 update={
                     "players": tuple(
-                        player.model_copy(
-                            update={
-                                "checkpoint": seen_from(
-                                    resolve_checkpoint(
-                                        player.checkpoint, lines, experiment=experiment
-                                    ),
-                                    experiment,
-                                )
-                            }
-                        )
-                        if isinstance(player, CheckpointPlayer)
-                        else player
+                        resolve_player(player, lines, experiment=experiment)
                         for player in match.players
                     )
                 }
@@ -145,7 +139,6 @@ def evaluating(
             experiment=experiment,
             environment=tournament,
             matches=matches,
-            workers=workers,
             run=run,
             directory=directory,
             storages=storages,
@@ -177,7 +170,9 @@ def evaluating(
         added, so_far = asked.recorded, asked.played
         every = [*(each.match for each in so_far.delivered), *so_far.failed, *so_far.new]
         # Contiguous runs of the play order, so each share seats fewer checkpoints.
-        order = list(ordered(sorted(every, key=lambda match: match.key)))
+        order = list(
+            ordered(sorted({m.key: m for m in every}.values(), key=lambda match: match.key))
+        )
         size, larger = divmod(len(order), share.count)
         start = share.index * size + min(share.index, larger)
         delivered = {each.match.key for each in so_far.delivered}
@@ -196,7 +191,6 @@ def evaluating(
         experiment=experiment,
         environment=tournament.environment,
         matches=pending,
-        workers=workers,
         run=run,
         directory=directory,
         storages=storages,
@@ -206,11 +200,12 @@ def evaluating(
         yield active
 
 
-def hold[C: BaseModel | Mapping[str, JsonValue]](
+def hold(
     tournament: Benchmark | RoundRobin,
     *,
     experiment: str,
-    play: Callable[[Match[C]], Tables | Result],
+    play: Callable[..., Tables | Result],
+    agents: Agents | None = None,
     checkpoint: CheckpointRef | None = None,
     checkpoints: Sequence[CheckpointRef] = (),
     enter: Sequence[Player] = (),
@@ -237,14 +232,13 @@ def hold[C: BaseModel | Mapping[str, JsonValue]](
         checkpoints=checkpoints,
         enter=enter,
         matches=matches,
-        workers=workers,
         directory=directory,
         storages=storages,
         share=share,
         lines=lines,
         resume=True,
     ) as active:
-        return active.play(play)
+        return active.play(play, agents=agents)
 
 
 class Delivered(Record):
@@ -263,6 +257,8 @@ class Played(Record):
     failed: tuple[Match, ...]
     # Never attempted.
     new: tuple[Match, ...]
+    # Failed matches carrying retry=True, also included in new.
+    retry: tuple[Match, ...] = ()
 
 
 def played(
@@ -479,7 +475,7 @@ def _called(
     it is not the checkpoint's. `wanted_only` calls for what `added` defines
     alone, still refusing a definition the stored eval runs conflict with.
     """
-    stored = _Stored(held=(), delivered={}, failed=set())
+    stored = _Stored(held=(), delivered={}, failed={})
     if runs is not None:
         stored = _stored(added.tournament, runs)
     tournament = assemble([*stored.held, added])
@@ -494,9 +490,7 @@ def _called(
         for each in tournament.schedule()
         if not on_the_go or each.checkpoint is not None or not added.checkpoints
     }
-    seated = tuple(
-        p.checkpoint for m in matches.values() for p in m.players if isinstance(p, CheckpointPlayer)
-    )
+    seated = tuple(c for m in matches.values() for p in m.players for c in player_checkpoints(p))
     keys = {c.key for c in seated}
     validate_checkpoints((*seated, *(c for c in stored.checkpoints if c.key in keys)))
     ordered_keys = sorted(matches)
@@ -507,10 +501,11 @@ def _called(
             if key in stored.delivered
         ),
         failed=tuple(matches[key] for key in ordered_keys if key in stored.failed),
+        retry=tuple(matches[key] for key in ordered_keys if stored.failed.get(key, False)),
         new=tuple(
             matches[key]
             for key in ordered_keys
-            if key not in stored.delivered and key not in stored.failed
+            if key not in stored.delivered and (key not in stored.failed or stored.failed[key])
         ),
     )
     return _Called(
@@ -521,7 +516,11 @@ def _called(
 def _found(seated: Seated) -> tuple[str, str, tuple[tuple[tuple[str | None, ...], int], ...]]:
     """What a `Seated` plays, by key: equal for one found again at another file."""
     pairings = tuple(
-        (tuple(None if ref is None else str(ref.key) for ref in each.seats), each.games)
+        (
+            tuple(None if ref is None else str(ref.key) for ref in each.seats)
+            + tuple(f"{key}:{ref.key}" for key, ref in sorted(each.resolved.items())),
+            each.games,
+        )
         for each in seated.pairings
     )
     return seated.seating, str(seated.checkpoint), pairings
@@ -543,12 +542,27 @@ def _record(
         raise EtudeError("eval_run_tournament_conflict", 409)
 
 
-def _resumed(added: TournamentRun) -> dict[str, object]:
-    """What a resumed hold must repeat. A checkpoint is its key: a retry on another
-    attempt finds the same file at another path."""
-    return added.model_dump(
-        mode="json", exclude={"checkpoints": {"__all__": {"artifact": {"uri"}}}}
-    )
+def _resumed(value: object) -> JsonValue:
+    """Compare a hold without checkpoint locations, including leaves in author trees.
+
+    Keep artifact fingerprints and author data: relocation changes only where
+    checkpoint bytes are found, never the contents or the requested game.
+    """
+    if isinstance(value, CheckpointRef):
+        return _JSON.validate_python(value.model_dump(mode="json", exclude={"artifact": {"uri"}}))
+    if isinstance(value, Composition):
+        return {
+            "kind": value.kind,
+            "type": value.type,
+            "fields": _map_fields(value.fields, _resumed),
+        }
+    if isinstance(value, BaseModel):
+        return {name: _resumed(getattr(value, name)) for name in type(value).model_fields}
+    if isinstance(value, dict):
+        return {key: _resumed(each) for key, each in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_resumed(each) for each in value]
+    return _JSON.validate_python(value)
 
 
 @dataclass(frozen=True)
@@ -562,7 +576,7 @@ class _Stored:
     # ranks `matches.newest`.
     delivered: dict[Digest, str]
     # Each match that failed there, with no done record anywhere.
-    failed: set[Digest]
+    failed: dict[Digest, bool]
     checkpoints: tuple[CheckpointRef, ...] = ()
 
 
@@ -584,23 +598,25 @@ def _stored(tournament: Benchmark | RoundRobin, runs: StoredRuns) -> _Stored:
         if alike:
             records.setdefault(each.run, []).extend(runs.records(each))
     newest: dict[Digest, tuple[int, str]] = {}
-    failed: set[Digest] = set()
+    failures: dict[Digest, tuple[int, str, bool]] = {}
     for run, held_records in records.items():
         for key, record in outcomes(held_records).items():
             if record.state == "failed":
-                failed.add(key)
+                previous = failures.get(key)
+                if previous is None or (record.wall_ms, run) > previous[:2]:
+                    failures[key] = (record.wall_ms, run, record.retry)
             elif (record.wall_ms, run) > newest.get(key, (-1, "")):
                 newest[key] = (record.wall_ms, run)
     return _Stored(
         held=tuple(held[run] for run in sorted(held)),
         delivered={key: run for key, (_, run) in newest.items()},
-        failed=failed - newest.keys(),
+        failed={key: retry for key, (_, _, retry) in failures.items() if key not in newest},
         checkpoints=tuple(
-            p.checkpoint
+            c
             for items in records.values()
             for record in items
             for p in record.match.players
-            if isinstance(p, CheckpointPlayer)
+            for c in player_checkpoints(p)
         ),
     )
 
@@ -654,7 +670,7 @@ class ScorePoint(Record):
     # Its key (`etude.eval.records.CheckpointId`), encoded.
     checkpoint: str
     # What the checkpoint's players are called: the latest name its seats give, the least of
-    # several players'. A benchmark's inference seat names it for its file (`Inference.model`).
+    # several players'. A benchmark's held seat names it for its checkpoint file.
     name: str
     # None for a checkpoint no training run under the source recorded.
     ordinal: int | None
@@ -717,12 +733,13 @@ def scores(
                 select checkpoint, min(name) as name from players where checkpoint is not null
                 group by checkpoint
             )
-            select s.seating, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t."at",
+            select s.seating, t.run, t.experiment, s.checkpoint, coalesce(n.name, s.checkpoint), t.ordinal, t."at",
                 r.match, sum(r._value), sum(r._per), count(*)
             from r join _held using (run, match)
             join schedule s on s.tournament = ? and s.match = r.match
-            join named n on n.checkpoint = s.checkpoint
+            left join named n on n.checkpoint = s.checkpoint
             left join training_checkpoints t on t.checkpoint = s.checkpoint
+            where s.checkpoint is not null
             group by s.seating, t.run, t.experiment, s.checkpoint, n.name, t.ordinal, t."at",
                 r.match
             """,

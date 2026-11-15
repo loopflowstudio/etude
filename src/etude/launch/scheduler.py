@@ -35,13 +35,13 @@ from pydantic import Field
 
 from etude.carriage import RecordMismatch
 from etude.deadline import limit_time, remaining
-from etude.errors import LauncherError
+from etude.errors import LauncherError, explain, sanitize
 from etude.identity import resume_conflicts, run_address
 from etude.launch import source
 from etude.launch.database import Database
 from etude.launch.errors import LaunchError
 from etude.launch.executor import Execution
-from etude.launch.logging import bounded, explain, sanitize
+from etude.launch.logging import bounded
 from etude.launch.machines import Refused, Safeguards, creation_guard
 from etude.launch.records import (
     RETRYABLE,
@@ -927,6 +927,7 @@ class Scheduler:
         with free slots come first, then the pool's free machines, then rentals
         from the on-demand, up to its remaining machine capacity.
         Runs left over wait in the queue. Nothing is claimed here.
+        Both quote and admission pass records for one pool/on-demand target.
         """
         placements: list[Placement] = []
         target = Target(pool=records[0].launch.pool, rent=records[0].launch.rent)

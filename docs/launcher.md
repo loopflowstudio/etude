@@ -224,7 +224,7 @@ base = TrainingJob(
     max_usd=Decimal(30),
 )
 wide = base.model_copy(update={"name": "wide", "config": TrainConfig(lr=1e-3, hidden=1024)})
-check = EvalJob(play=play, tournament=progress, checkpoints=saved, workers=8, max_hours=0.5)
+check = EvalJob(play=play, tournament=progress, checkpoints=saved, max_hours=0.5)
 ```
 
 A **job** is one function called with one Pydantic value, with a name, limits,
@@ -234,13 +234,13 @@ experiment file declares:
 | | Calls | With | Named by | Varies by |
 | --- | --- | --- | --- | --- |
 | `TrainingJob` | one training function, `train(config)` | one config | `name=`, required | seed: each seed is one run |
-| `EvalJob` | one play function, `play(match)` | one tournament and the checkpoints to play it for | its tournament | match: checkpoint, seating and config |
+| `EvalJob` | one play function, `play(match, agents)` | one tournament and the checkpoints to play it for | its tournament | match: checkpoint, seating and config |
 
 A job says what to run and its limits. Which machine runs it, and how many
 runs share one, belong to the launch command and its pools and on-demands
 ([Several runs on one machine](#several-runs-on-one-machine)); a job has no
-field for either. `EvalJob.workers`, the parallel processes that play its
-matches, is the one setting of that kind.
+field for either. How many games an eval job plays at once is Etude's to
+decide from the machine it lands on ([Agents](evaluation.md#agents)).
 
 A typed job keeps its config's type, so a variant is a copy with a new name:
 `wide` above runs the same function under the same limits with another
@@ -293,13 +293,14 @@ imports nothing else of Etude before the function's own module.
   import its module. When it imports training libraries at its top, launch
   from the project's environment: `uv run etude launch job.py`.
 - **An eval job** holds a [tournament](evaluation.md#tournaments) as one eval
-  run, which is the launched run. A benchmark's `checkpoints` are
+  run. A pass launches compatible eval jobs together as one run on one
+  machine. CPU games load forwards directly; GPU games share an agent process
+  ([Agents](evaluation.md#agents)). A benchmark's `checkpoints` are
   `CheckpointRecord`s, read from the experiment's state
   ([Evaluation jobs](evaluation.md#evaluation-jobs)). Each member reaches
-  the machine verified by digest; the checkpoint fills every inference seat, where
+  the machine verified by digest; the checkpoint fills every held seat, where
   `play` finds the folder or file at the player's `checkpoint.path`. A round robin
-  takes `enter=` players. A single-file `Input` is also accepted. `workers=`
-  plays matches in parallel processes. The job's environment needs
+  takes `enter=` players. A single-file `Input` is also accepted. The job's environment needs
   `etude-sdk[eval]`.
 - **Commands are for work that is not Python**:
   `Job(command="./simulate --games 1000", max_hours=1)` runs by `sh` in the
@@ -330,7 +331,7 @@ two: state from /home/me/.etude/track: 2 training runs, 0 eval runs; $0.00 of $2
 two/base@0  finished
 two/base@1  finished
 two/fine@0  new, running
-eval ladder: 4 new, 0 running, 0 failed, queued two/ladder-1a2b3c4d5e6f
+eval ladder: 4 new, 0 running, 0 failed, queued two/evals-1a2b3c4d5e6f
 $ etude launch two.py --max-usd 20         # again, straight away
 two: state from /home/me/.etude/track: 3 training runs, 1 eval run; $0.00 of $20.00 committed
 two/base@0  finished
@@ -378,11 +379,19 @@ Three levels do the work, each built only on the one below it:
   `new, queued` when it waits for room (always, under `etude queue`), or
   `new, not queued` with the limit that held it back. A tournament's line
   counts its matches that are new, in flight and failed, and names the eval
-  run handed down for the new ones.
+  run handed down for the new ones, or says that they wait and why.
+- **Eval jobs go down as one run.** Jobs that can run together, declaring
+  the same agents or none, share a run, `two/evals-1a2b3c4d5e6f`, on one
+  machine. Its `max_hours` and `max_usd` are the sums of its jobs'.
+- **Pending eval work is admitted within the budget.** Training activity and
+  historical game durations do not delay admission. Existing capacity is
+  reused; with a rental target, lack of room permits renting within `--max-usd`.
+  Above, `two/fine@0` took the local pool's one slot, so the eval run is queued
+  until it has room. A pass admits at most one run per compatible group.
 - **A queued run needs no later pass.** The scheduler starts it as soon as a
   machine has room: when `two/base@0` leaves the one slot above, `two/base@1`
-  starts. A later pass is needed only for work that does not exist yet, such
-  as `two/fine`.
+  starts. A later pass is needed for work that does not exist yet, such
+  as `two/fine`, and for newly declared eval matches.
 - **Room is the machines'.** How many runs go at once is what the pool and
   on-demand allow: a pool's machines, an on-demand's `--max` machines, and
   `--slots` runs on each
@@ -421,7 +430,7 @@ Three levels do the work, each built only on the one below it:
   read, so runs already stored by another launcher are left alone.
 - **`--quote`** prints the same lines with `new, would launch`, then the
   machines and planned rental costs for what the pass would hand down, and
-  submits nothing.
+  submits nothing. Eval matches that would wait say so, as in a real pass.
 - **`--job`, `--seed`, `--resume` and `--until` name training work**, so a
   command that gives one skips the eval stage.
 - **An experiment's runs are selected by name.** `etude status --experiment
@@ -486,7 +495,12 @@ thing, only small, in order:
    so a job with three seeds is smoked once.
 2. **Evaluate.** `eval_jobs(state)` is called on the smoke's runs and checkpoints.
    Each match it calls for plays one game here, under every condition, so a
-   game that breaks under only one deal is still caught.
+   game that breaks under only one deal is still caught. The jobs are held
+   together as a pass would launch them, and the
+   [checkpoint forwards](evaluation.md#agents) they declare are loaded here:
+   directly in CPU game processes or through shared GPU inference, as on the
+   target machine. A `load` that raises, or a shared input that does not pickle,
+   fails the smoke before anything is rented.
 3. **Report.** `report()` (or the default `Report()`) is drawn from those tiny
    results.
 
@@ -880,6 +894,12 @@ alone, so a run never outspends its `max_usd`. `status` says `shared by K runs`
 when K ran together, and `--quote` lists each run's machine, its slots and the
 runs placed with it, splitting a new rental's planned cost among them.
 
+A pass's eval jobs are one run and take one slot, whatever their number. A
+free slot on a machine training has rented is room for them, so with
+`--slots 2` evals start beside training without another rental. Each eval
+run using shared GPU inference starts its own agent process: two eval runs
+sharing a machine do not share one. CPU game processes cache forwards directly.
+
 ## The worker and its bucket
 
 The worker is the one command a machine runs, whether started locally, over
@@ -1180,6 +1200,8 @@ defines it, by its full path, and relative imports are a lint error:
 | Import | What it is |
 | --- | --- |
 | `from etude.jobs import TrainingJob, EvalJob` | typed jobs: Etude decides the command |
+| `from etude.jobs import Agents` | how an eval job's players are loaded, and how their inputs are batched |
+| `from etude.eval.agents import Forward` | a callable taking a list of inputs and returning a list of outputs |
 | `from etude.jobs import ExperimentState` | what an experiment's runs have stored, as declarations are given it |
 | `from etude.spec import Job, RunRequest` | a command job, and one run of any job |
 | `from etude.launch.client import queue, launch, status, wait, ...` | the calls a script makes; they go to the server when one is set |
@@ -1372,7 +1394,7 @@ capacity.py: rename eval() to eval_jobs()
 There is no alias or warning period, and `from etude.jobs import training`
 is an ordinary `ImportError`. If both an old and a new declaration exist,
 only the new one is used. Keep a declaration's parameters. `Job.runs(...)`,
-`ExperimentState.runs`, `report()`, `play(match)` and the `etude runs` command
+`ExperimentState.runs`, `report()`, `play(match, agents)` and the `etude runs` command
 keep their names. A job's identity, its command and what is stored for it do
 not change, and nothing in a bucket is rewritten.
 
@@ -1682,7 +1704,8 @@ output directory; `etude status` shows it:
 ```
 
 A job that counts its work adds a `tally`, and `status` gives the fraction, the
-recent pace and the time left. An eval run reports one by itself:
+recent pace and the time left. An eval run reports one by itself, counting
+the matches of every tournament it plays:
 
 ```json
 {"tally":{"unit":"matches","done":412,"total":1800,"failed":0,"per_hour":940.0}}

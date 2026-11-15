@@ -7,7 +7,7 @@
    form on a throwaway local launcher (`etude.launch.smoke.smoke_train`).
 2. Eval: the file's `eval_jobs(state)` on what training stored, each tournament it
    returns cut to one game per match, every condition kept, and held here, through
-   `etude.jobs.hold_evaluation` as `etude eval` holds it.
+   `etude.jobs.hold_group` as `etude eval` holds it.
 3. Report: `report()`, or the default, drawn from those results by `etude.page`.
 
 Everything goes to a temporary ETUDE_HOME (`smoke_home`). Without the train
@@ -24,21 +24,24 @@ from __future__ import annotations
 import time
 import traceback
 from collections.abc import Callable, Collection, Sequence
+from concurrent.futures.process import _RemoteTraceback
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
 from etude.declarations import asked, read_experiment, read_training_jobs
 from etude.errors import LauncherError
-from etude.eval.records import Benchmark, Line, RoundRobin, TournamentRun
+from etude.eval.records import Benchmark, RoundRobin, TournamentRun
 from etude.eval.tournament import played
 from etude.experiment import observe, read_tournament_lines
 from etude.experiment_file import defined_functions, experiment_named, refuse_renamed
 from etude.jobs import (
-    ExperimentState,
-    evaluation_spec,
+    EvalGroup,
+    Evaluation,
+    _group_key,
+    evaluation_group,
     fetch_checkpoints,
-    hold_evaluation,
+    hold_group,
     with_experiment,
 )
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
@@ -126,89 +129,97 @@ def _evaluate(
     keys = source.keys("")
     declarations = located_runs(source, keys)
     state = observe(source, experiment, keys=keys, declarations=declarations)
-    function = read_experiment(path).eval
+    definition = read_experiment(path)
+    function = definition.eval
     assert function is not None
     jobs = _try_step("eval", "eval", lambda: asked(function, state))
     if not jobs:
         return [
             SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="eval returned none")
         ]
-    specs = [evaluation_spec(job) for job in jobs]
-    # Smoke plays this file's runs only; another experiment's lines are not read.
-    outside = [
-        spec.tournament.experiments - {experiment}
-        if isinstance(spec.tournament, Benchmark)
-        else frozenset[str]()
-        for spec in specs
-    ]
+    batches: dict[str, list[Job]] = {}
+    steps: list[SmokeStep] = []
+    for job in jobs:
+        spec = evaluation_group(job).evaluations[0]
+        outside = (
+            spec.tournament.experiments - {experiment}
+            if isinstance(spec.tournament, Benchmark)
+            else frozenset()
+        )
+        if outside:
+            steps.append(
+                SmokeStep(
+                    step="eval",
+                    name=spec.tournament.name,
+                    outcome="not_smoked",
+                    detail="cross-experiment seats: " + ", ".join(sorted(outside)),
+                )
+            )
+        else:
+            batches.setdefault(_group_key(job, spec), []).append(job)
     lines = read_tournament_lines(
         source,
         state,
         [
-            TournamentRun(tournament=s.tournament, checkpoints=s.held)
-            for s, others in zip(specs, outside, strict=True)
-            if not others
+            TournamentRun(tournament=spec.tournament, checkpoints=spec.held)
+            for batch in batches.values()
+            for job in batch
+            for spec in evaluation_group(job).evaluations
         ],
         keys=keys,
         declarations=declarations,
     )
-    return [
-        SmokeStep(
-            step="eval",
-            name=spec.tournament.name,
-            outcome="not_smoked",
-            detail="cross-experiment seats: " + ", ".join(sorted(others)),
-        )
-        if others
-        else _smoke_evaluation(job, experiment, store, state, lines)
-        for job, spec, others in zip(jobs, specs, outside, strict=True)
-    ]
-
-
-def _smoke_evaluation(
-    job: Job,
-    experiment: str,
-    store: DirectoryStorage,
-    state: ExperimentState,
-    lines: tuple[Line, ...],
-) -> SmokeStep:
-    """One evaluation job `eval_jobs(state)` returned, held tiny into `store`."""
-    spec = evaluation_spec(with_experiment(job, experiment))
-    name = spec.tournament.name
-    tiny = spec.model_copy(update={"tournament": _tiny_tournament(spec.tournament), "lines": lines})
-    started = time.monotonic()
-    matches = played(
-        tiny.tournament,
-        experiment=experiment,
-        checkpoints=tiny.held,
-        enter=tiny.entrants,
-        lines=lines,
-        storages=[store],
-    ).new
-    if not matches:
-        return SmokeStep(step="eval", name="eval", outcome="not_smoked", detail="no checkpoints")
-    with TemporaryDirectory(prefix="etude-smoke-inputs-") as folder:
-        files = _try_step(
-            "eval", name, lambda: fetch_checkpoints(matches, state, tiny.checkpoints, Path(folder))
-        )
-        held = _try_step(
-            "eval",
-            name,
-            lambda: hold_evaluation(
-                tiny.model_copy(update={"matches": tuple(matches)}),
-                files=files,
-                checkout=job.repo,
-                storages=[store],
-            ),
-        )
-    plural = "" if held.played == 1 else "es"
-    return SmokeStep(
-        step="eval",
-        name=name,
-        outcome="passed",
-        seconds=time.monotonic() - started,
-        detail=f"{held.played} match{plural}, 1 game each",
-    )
+    for batch in batches.values():
+        started = time.monotonic()
+        tiny: list[Evaluation] = []
+        for job in batch:
+            for spec in evaluation_group(with_experiment(job, experiment)).evaluations:
+                spec = spec.model_copy(
+                    update={"tournament": _tiny_tournament(spec.tournament), "lines": lines}
+                )
+                pending = played(
+                    spec.tournament,
+                    experiment=experiment,
+                    checkpoints=spec.held,
+                    enter=spec.entrants,
+                    lines=lines,
+                    storages=[store],
+                ).new
+                tiny.append(spec.model_copy(update={"matches": pending}))
+        name = tiny[0].tournament.name if len(tiny) == 1 else "eval"
+        with TemporaryDirectory(prefix="etude-smoke-inputs-") as folder:
+            files = _try_step(
+                "eval",
+                name,
+                lambda: fetch_checkpoints(
+                    tuple(match for spec in tiny for match in spec.matches or ()),
+                    state,
+                    tuple(c for spec in tiny for c in spec.checkpoints),
+                    Path(folder),
+                ),
+            )
+            held = _try_step(
+                "eval",
+                name,
+                lambda: hold_group(
+                    EvalGroup(evaluations=tuple(spec.relocate(files) for spec in tiny)),
+                    checkout=batch[0].repo,
+                    storages=[store],
+                ),
+            )
+        for spec, result in zip(tiny, held, strict=True):
+            steps.append(
+                SmokeStep(
+                    step="eval",
+                    name=spec.tournament.name if result.played else "eval",
+                    outcome="passed" if result.played else "not_smoked",
+                    seconds=time.monotonic() - started,
+                    detail=f"{result.played} match{'' if result.played == 1 else 'es'}, 1 game each"
+                    if result.played
+                    else "no checkpoints",
+                )
+            )
+    return steps
 
 
 def _tiny_tournament(tournament: Benchmark | RoundRobin) -> Benchmark | RoundRobin:
@@ -250,7 +261,8 @@ def _try_step[T](step: Step, name: str, work: Callable[[], T]) -> T:
         traceback.print_exc()
         # Name the first error, not a wrapper such as eval's `match_failed`.
         first: BaseException = error
-        while first.__cause__ is not None:
+        # ProcessPoolExecutor attaches traceback transport metadata below the real error.
+        while first.__cause__ is not None and not isinstance(first.__cause__, _RemoteTraceback):
             first = first.__cause__
         raise LauncherError(
             f"smoke {step}{'' if name == step else ' ' + name}: failed after"

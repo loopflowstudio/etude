@@ -1,6 +1,6 @@
 """The author-facing experiment model: typed jobs and the state declarations read.
 
-`TrainingJob`, `EvalJob` and `ExperimentState` are defined here. Typed jobs
+`TrainingJob`, `EvalJob`, `Agents` and `ExperimentState` are defined here. Typed jobs
 lower to `spec.Job` for storage, transport and identity, deriving their command
 and JSON config afresh after a copy. State is observed, never stored.
 The worker calls `_hold` only when executing an evaluation; worker startup
@@ -16,6 +16,7 @@ import shlex
 import sys
 import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from decimal import Decimal
 from fnmatch import fnmatchcase
@@ -24,7 +25,7 @@ from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Literal, SupportsIndex, TypedDict, cast, overload
 
-from pydantic import BaseModel, Field, JsonValue, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from etude.cache import Artifact, Content, ContentMismatch, Corrupt
 from etude.call import Function, changed_config, config_type
@@ -39,19 +40,32 @@ from etude.checkpoints import (
     qualified,
     seen_from,
 )
-from etude.errors import EtudeError, LauncherError
-from etude.eval.match import EvalResult
+from etude.errors import EtudeError, LauncherError, RetryRequested
+from etude.eval.agents import AgentProcess, running_agents
+from etude.eval.game import _match_type
 from etude.eval.records import (
     Benchmark,
     CheckpointPlayer,
+    Code,
+    Composition,
     Line,
     Match,
     Player,
     RoundRobin,
     digest,
+    folder_name,
+    player_checkpoints,
+    relocate_player,
     select_policy,
 )
-from etude.eval.run import Result, Tables
+from etude.eval.resources import agent_bytes, divide_cpus, resources
+from etude.eval.result import EvalResult, Result, Tables
+from etude.eval.run import (
+    EvalRun,
+    Playing,
+    _terminable,
+    play_together,
+)
 from etude.eval.tournament import evaluating
 from etude.identity import stored_owner
 from etude.out import MEMBERSHIP, OutFile, OutFiles, OutMember
@@ -68,7 +82,7 @@ from etude.spec import (
     Variable,
     number,
 )
-from etude.storage import Storage, place_artifact
+from etude.storage import Storage, default_root, place_artifact
 from etude.train.read import RunData, read
 from etude.train.records import ParentRun
 
@@ -256,11 +270,13 @@ def checkpoint_inputs(
     declared = {each.key: each for each in checkpoints}
     found: dict[str, CheckpointRecord | CheckpointRef] = {}
     for match in matches:
-        for player in match.players:
-            if not isinstance(player, CheckpointPlayer) or player.checkpoint.key in found:
+        for ref in (c for player in match.players for c in player_checkpoints(player)):
+            if ref.key in found:
                 continue
-            ref = player.checkpoint
-            saved = declared.get(ref.key) or state.checkpoint(ref.key) or ref
+            record = declared.get(ref.key) or state.checkpoint(ref.key)
+            # Compact checkpoint keys can coincide across experiments. The
+            # seated artifact, not this experiment's matching spelling, owns the bytes.
+            saved = record if record is not None and record.artifact == ref.artifact else ref
             if saved.artifact.sha256 is None or saved.artifact.size_bytes is None:
                 raise EtudeError("checkpoint_not_stored", 404, detail=ref.key)
             found[ref.key] = saved
@@ -324,6 +340,44 @@ class JobOptions(TypedDict, total=False):
 _BENCHMARK_CHECKPOINT = "checkpoint"
 
 
+class AgentLoader(Record):
+    """Portable loading declaration; batching never enters scientific identity."""
+
+    load: Function | None = None
+    build: Function | None = None
+    max_batch: int = Field(default=32, ge=1)
+    max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
+    memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+
+class Agents(BaseModel):
+    """Checkpoint forwards and optional game-side player construction."""
+
+    model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
+    load: Callable[..., object] | None = None
+    build: Callable[..., object] | None = None
+    max_batch: int = Field(default=32, ge=1)
+    max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
+    memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _validate_loading(self) -> Agents:
+        if self.load is not None and len(inspect.signature(self.load).parameters) != 1:
+            raise TypeError("load must take one checkpoint")
+        if self.build is not None and len(inspect.signature(self.build).parameters) != 2:
+            raise TypeError("build must take player and leaves")
+        return self
+
+    def plain(self, repo: Path | None) -> AgentLoader:
+        return AgentLoader(
+            load=None if self.load is None else _function(self.load, repo),
+            build=None if self.build is None else _function(self.build, repo),
+            max_batch=self.max_batch,
+            max_delay_seconds=self.max_delay_seconds,
+            memory_gb=self.memory_gb,
+        )
+
+
 class Evaluation(Record):
     """An evaluation job's config: what `_hold` holds, with what, on the machine."""
 
@@ -332,23 +386,63 @@ class Evaluation(Record):
     experiment: str | None
     play: Function
     # A benchmark's checkpoint; released single-file inputs remain readable.
-    checkpoint: CheckpointRecord | Input | None = None
+    checkpoint: CheckpointRecord | CheckpointRef | Input | None = None
     # Checkpoints an experiment's eval chose to hold the benchmark for.
     checkpoints: tuple[CheckpointRecord, ...] = ()
     # A round robin's entrants.
     entrants: tuple[Player, ...] = ()
-    workers: int = Field(default=1, ge=1)
     # The matches a pass found new (`etude.controller.advance`), and the
     # job input holding each checkpoint they seat, by its key encoded.
     matches: tuple[Match, ...] | None = None
     files: dict[str, str] = {}
     # The experiment's training lines that pass saw, where relative seats find checkpoints.
     lines: tuple[Line, ...] = ()
+    agents: AgentLoader = Field(default_factory=AgentLoader)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _released(cls, value: object) -> object:
+        # Released queued evaluations carried an explicit process count.
+        if isinstance(value, dict):
+            return {
+                **{key: item for key, item in value.items() if key != "workers"},
+                "agents": value.get("agents") or {},
+            }
+        return value
 
     @property
     def held(self) -> tuple[CheckpointRef, ...]:
         """The checkpoints as this experiment's evaluation seats them (`seen_from`)."""
         return tuple(seen_from(each.ref, self.experiment) for each in self.checkpoints)
+
+    def relocate(self, files: Mapping[str, str]) -> Evaluation:
+        """Locate scheduled checkpoint leaves without changing match identity."""
+        if self.matches is None:
+            return self
+        return self.model_copy(
+            update={
+                "matches": tuple(
+                    match.model_copy(
+                        update={"players": tuple(relocate_player(p, files) for p in match.players)}
+                    )
+                    for match in self.matches
+                )
+            }
+        )
+
+
+class EvalGroup(Record):
+    """The tournaments one run plays, in declaration order."""
+
+    evaluations: tuple[Evaluation, ...]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _retained(cls, value: object) -> object:
+        # Released launcher records stored one Evaluation, including queued work.
+        if isinstance(value, dict) and "tournament" in value:
+            return {"evaluations": (value,)}
+        return value
 
 
 class TrainingJob[C: BaseModel](Job):
@@ -405,16 +499,16 @@ class TrainingJob[C: BaseModel](Job):
         return job
 
 
-class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
+class EvalJob(Job):
     """A play function, a tournament and the checkpoints or entrants it seats."""
 
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
-    play: Callable[[Match[M]], Tables | Result] = Field(exclude=True)
+    play: Callable[..., Tables | Result] = Field(exclude=True)
     tournament: Benchmark | RoundRobin = Field(exclude=True)
     checkpoint: CheckpointRecord | Input | None = Field(default=None, exclude=True)
     checkpoints: Sequence[CheckpointRecord] = Field(default=(), exclude=True)
     enter: Sequence[Player] = Field(default=(), exclude=True)
-    workers: int = Field(default=1, ge=1, exclude=True)
+    agents: Agents = Field(default_factory=Agents, exclude=True)
     extras: tuple[str, ...] = Field(default=(), exclude=True)
     command: str = ""
 
@@ -428,7 +522,7 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
         return value
 
     @model_validator(mode="after")
-    def _validate_evaluation(self) -> EvalJob[M]:
+    def _validate_evaluation(self) -> EvalJob:
         if self.experiment is not None:
             raise LauncherError(
                 "EvalJob belongs to its file's experiment; use experiment= or policy= on a seat"
@@ -467,6 +561,11 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
                 else (self.checkpoint,)
             )
             options["inputs"] = (*self.inputs, *inputs)
+        try:
+            _match_type(self.play)
+        except TypeError as error:
+            raise LauncherError(str(error)) from None
+        repo = _repo(self.play, options)
         spec = Evaluation(
             tournament=self.tournament,
             experiment=self.experiment,
@@ -474,11 +573,25 @@ class EvalJob[M: BaseModel | Mapping[str, JsonValue]](Job):
             checkpoint=self.checkpoint,
             checkpoints=tuple(self.checkpoints),
             entrants=tuple(self.enter),
-            workers=self.workers,
+            agents=self.agents.plain(repo),
         )
+        if spec.agents.load is not None and spec.agents.build is None:
+            players = list(spec.entrants)
+            if isinstance(spec.tournament, Benchmark):
+                players.extend(
+                    p
+                    for seating in spec.tournament.seatings
+                    for p in seating.players
+                    if isinstance(p, (CheckpointPlayer, Code, Composition))
+                )
+            if any(
+                isinstance(p, (Code, Composition)) or (isinstance(p, CheckpointPlayer) and p.config)
+                for p in players
+            ):
+                raise LauncherError("composed and code players need Agents(build=)")
         return _job(
             _hold,
-            spec,
+            EvalGroup(evaluations=(spec,)),
             origin=self.play,
             options=options,
             experiment=self.experiment,
@@ -498,123 +611,251 @@ def _options(job: Job) -> JobOptions:
     )
 
 
-def evaluation_spec(job: Job) -> Evaluation:
-    """What an evaluation job holds; raises `EtudeError` for any other job.
-
-    An evaluation job is one whose command calls `_hold` (`_called`).
-    """
+def evaluation_group(job: Job) -> EvalGroup:
+    """Read an eval command, including retained single-tournament launcher records."""
     job = job.plain()
     if job.config is None or _called(_function(_hold, None)) not in job.command:
         raise EtudeError("not_an_evaluation_job", 422)
-    return Evaluation.model_validate_json(job.config)
+    return EvalGroup.model_validate_json(job.config)
 
 
 def with_experiment(job: Job, experiment: str) -> Job:
-    """The evaluation job an experiment's `eval_jobs(state)` returned, as one of `experiment`.
-
-    Raises `EtudeError("not_an_evaluation_job")` for a non-evaluation job.
-    """
     job = job.plain()
-    spec = evaluation_spec(job)
-    if any(not checkpoint.experiment for checkpoint in spec.checkpoints):
-        raise EtudeError(
-            "checkpoint_names_no_experiment",
-            422,
-            detail="Hold checkpoints from an experiment; unlabelled runs have legacy identities",
+    group = evaluation_group(job)
+    for spec in group.evaluations:
+        if any(not checkpoint.experiment for checkpoint in spec.checkpoints):
+            raise EtudeError(
+                "checkpoint_names_no_experiment",
+                422,
+                detail="Hold checkpoints from an experiment; unlabelled runs have legacy identities",
+            )
+    group = EvalGroup(
+        evaluations=tuple(
+            spec.model_copy(update={"experiment": experiment}) for spec in group.evaluations
         )
-    spec = spec.model_copy(update={"experiment": experiment})
-    return job.model_copy(update={"config": spec.model_dump_json(), "experiment": experiment})
+    )
+    return job.model_copy(update={"config": group.model_dump_json(), "experiment": experiment})
 
 
-def hold_evaluation(
-    spec: Evaluation,
+def _group_key(job: Job, spec: Evaluation) -> str:
+    """Launch compatibility, independent of scientific match identity and job limits."""
+    shared = {
+        "repo",
+        "revision",
+        "runtime",
+        "prepare",
+        "setup",
+        "cleanup",
+        "environment",
+        "stop_seconds",
+        "cleanup_seconds",
+        "max_attempts",
+    }
+    return job.model_dump_json(include=shared) + (
+        spec.agents.model_dump_json() if spec.agents else ""
+    )
+
+
+def hold_group(
+    group: EvalGroup,
     *,
     checkout: str | None = None,
-    checkpoint: CheckpointRef | None = None,
-    files: Mapping[str, str] = {},
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
-) -> EvalResult:
-    """Hold what an evaluation job's config describes (`etude.eval.tournament.hold`).
+) -> tuple[EvalResult, ...]:
+    """Start agents once, play every tournament, then raise any match failure.
 
-    `play` is imported from `checkout`, the job's source, or the working
-    directory as on the job's machine. `files` maps checkpoint keys to their
-    verified local URIs for explicit matches. `checkpoint` is a benchmark's one
-    checkpoint where it lies here. Raises `EtudeError("evaluation_names_no_experiment")`
-    for a config whose experiment is not yet named (`with_experiment`).
+    Each member owns its stored run and failure outcome. The outer SIGTERM
+    scope includes agent startup and shutdown as well as games.
     """
-    experiment = spec.experiment
-    if experiment is None:
-        raise EtudeError("evaluation_names_no_experiment", 422)
-    if spec.matches is not None:
-        spec = spec.model_copy(
-            update={"matches": tuple(_relocated(m, files) for m in spec.matches)}
-        )
-    checkpoints = spec.held
-    if spec.matches is not None:
-        # A queued job may predate experiment-qualified identity. Its explicit
-        # matches own the spelling used by that worker and its earlier blocks.
-        seated = {
-            qualified(player.checkpoint.key, experiment): player.checkpoint
-            for match in spec.matches
-            for player in match.players
-            if isinstance(player, CheckpointPlayer)
-            and qualified(player.checkpoint.key, experiment) != player.checkpoint.key
-        }
-        if seated:
-            checkpoints = tuple(
-                seated.get(ref.key, ref).model_copy(update={"artifact": ref.artifact})
-                for ref in checkpoints
+    results: list[EvalResult] = []
+    failures: list[EtudeError | RetryRequested] = []
+    # A launched attempt's courier collects only below its assigned track folder.
+    launched = os.environ.get("ETUDE_RUN_ADDRESS") or os.environ.get("ETUDE_RUN")
+    base = Path(directory) if directory is not None else default_root()
+    if launched is not None:
+        base = base / launched
+    artifacts = (
+        base / "artifacts" / "agents"
+        if launched
+        else base / (group.evaluations[0].experiment or "eval") / "artifacts" / "agents"
+        if group.evaluations
+        else base / "artifacts" / "agents"
+    )
+    with _terminable(), resources(artifacts) as owned, ExitStack() as lifetime:
+        opened: list[tuple[Evaluation, EvalRun, ExitStack]] = []
+        for spec in group.evaluations:
+            if spec.experiment is None:
+                raise EtudeError("evaluation_names_no_experiment", 422)
+            held = spec.held
+            checkpoint = (
+                spec.checkpoint.ref
+                if isinstance(spec.checkpoint, CheckpointRecord)
+                else spec.checkpoint
+                if isinstance(spec.checkpoint, CheckpointRef)
+                else None
             )
-            if checkpoint is not None:
-                checkpoint = seated.get(checkpoint.key, checkpoint).model_copy(
-                    update={"artifact": checkpoint.artifact}
+            seated = {
+                qualified(ref.key, spec.experiment): ref
+                for match in spec.matches or ()
+                for player in match.players
+                for ref in player_checkpoints(player)
+                if qualified(ref.key, spec.experiment) != ref.key
+            }
+            if seated:
+                held = tuple(
+                    seated.get(ref.key, ref).model_copy(update={"artifact": ref.artifact})
+                    for ref in held
                 )
-    # Loaded by import path: the function `evaluation` was given, typed there.
-    play = cast(Callable[[Match], Tables | Result], spec.play.load(checkout))
-    with evaluating(
-        spec.tournament,
-        experiment=experiment,
-        checkpoint=checkpoint,
-        checkpoints=checkpoints,
-        enter=spec.entrants,
-        matches=spec.matches,
-        workers=spec.workers,
-        directory=directory,
-        storages=storages,
-        lines=spec.lines,
-        resume=True,
-    ) as active:
-        return active.play(play)
+                if checkpoint is not None:
+                    checkpoint = seated.get(checkpoint.key, checkpoint).model_copy(
+                        update={"artifact": checkpoint.artifact}
+                    )
+            member = lifetime.enter_context(ExitStack())
+            # The match digest survives relocation: checkpoint paths are transport only.
+            identity = (
+                digest(sorted(m.key for m in spec.matches))
+                if spec.matches is not None
+                else digest(spec.model_dump(mode="json", exclude={"agents", "play", "files"}))
+            )
+            active = member.enter_context(
+                evaluating(
+                    spec.tournament,
+                    experiment=spec.experiment,
+                    checkpoint=checkpoint,
+                    checkpoints=held,
+                    enter=spec.entrants,
+                    matches=spec.matches,
+                    # Released queued matches used the tournament-derived run name.
+                    run=(
+                        None
+                        if seated
+                        else f"{spec.experiment}/{folder_name(spec.tournament.name)}-{identity[:12]}"
+                    ),
+                    directory=base,
+                    storages=storages,
+                    lines=spec.lines,
+                    resume=True,
+                )
+            )
+            opened.append((spec, active, member))
+        if not opened:
+            return ()
+        report = opened[0][1]._report
+        report.total = sum(len(active.matches) for _, active, _ in opened)
+        report.done = sum(active._report.done for _, active, _ in opened)
+        for _, active, _ in opened:
+            active._report = report
+        report.write()
+        pending = [
+            (spec, active)
+            for spec, active, _ in opened
+            if any(m.key not in active.done for m in active.matches)
+        ]
+        definition = pending[0][0].agents if pending else None
+        if any(spec.agents != definition for spec, _ in pending):
+            raise EtudeError("incompatible_eval_agents", 422)
+        has_checkpoints = any(
+            player_checkpoints(player)
+            for _, active in pending
+            for match in active.matches
+            if match.key not in active.done
+            for player in match.players
+        )
+        needs_loading = definition is not None and definition.load is not None and has_checkpoints
+        agent_process: AgentProcess | None = None
+        cpus = divide_cpus(
+            sum(match.key not in active.done for _, active in pending for match in active.matches),
+            agents=needs_loading,
+            memory_gb=definition.memory_gb if definition else None,
+            batch_inputs=definition.max_batch if definition else 32,
+        )
+        agent_lifetime = lifetime.enter_context(ExitStack())
+        try:
+            if needs_loading and definition is not None and cpus.threads:
+                agent_process = agent_lifetime.enter_context(
+                    running_agents(
+                        definition,
+                        checkout,
+                        owned,
+                        [spec.tournament.name for spec, _ in pending],
+                        cpus,
+                    )
+                )
+            plays = [
+                Playing(
+                    run=active,
+                    play=spec.play,
+                    checkout=checkout,
+                    tournament=spec.tournament.name,
+                    agents=agent_process.address if agent_process and spec.agents else None,
+                    build=spec.agents.build,
+                    load=spec.agents.load if needs_loading and agent_process is None else None,
+                    memory=agent_bytes(spec.agents.memory_gb) // max(1, cpus.games),
+                )
+                for spec, active, _ in opened
+            ]
+            outcomes = play_together(
+                plays,
+                resources=owned,
+                cpus=cpus,
+                agent_process=agent_process,
+            )
+            if agent_process is not None:
+                agent_process.check()
+            agent_lifetime.close()
+        except RetryRequested as error:
+            for _, active, _ in opened:
+                active.fail_pending(error)
+            report.failed = sum(active.failed for _, active, _ in opened)
+            report.write()
+            raise
+        for (_, _, member), outcome in zip(opened, outcomes, strict=True):
+            if isinstance(outcome, (EtudeError, RetryRequested)):
+                member.__exit__(type(outcome), outcome, outcome.__traceback__)
+                failures.append(outcome)
+            else:
+                member.close()
+                results.append(outcome)
+        if failures:
+            raise failures[0]
+    return tuple(results)
 
 
-def with_matches(
-    job: Job, matches: Sequence[Match], state: ExperimentState, lines: Sequence[Line]
+def group_evaluations(
+    jobs: Sequence[Job], evaluations: Sequence[Evaluation], state: ExperimentState
 ) -> Job:
-    """The job playing exactly `matches` among `lines`, with each checkpoint they seat as an input.
-
-    A checkpoint is a file of the training run that saved it, so the launcher
-    fetches it from that run's bucket folder or relays it from its last
-    machine, verified by digest.
-    """
-    job = job.plain()
-    spec = evaluation_spec(job)
-    saved = checkpoint_inputs(matches, state, spec.checkpoints)
-    # One input per checkpoint key, even where two keys hold the same bytes.
-    files = {
-        key: f"checkpoint-{digest(key)[:16]}{PurePosixPath(checkpoint_file_name(each.artifact.uri)).suffix}"
-        for key, each in saved.items()
-    }
-    inputs = tuple(
-        given
-        for key, each in sorted(saved.items())
-        for given in checkpoint_inputs_for(each, files[key])
-    )
-    spec = spec.model_copy(
-        update={"matches": tuple(matches), "files": files, "lines": tuple(lines)}
-    )
-    return job.model_copy(
-        update={"config": spec.model_dump_json(), "inputs": (*job.inputs, *inputs)}
+    """One compatible machine job, with checkpoint inputs deduplicated by key."""
+    first = jobs[0].plain()
+    inputs: dict[str, Input] = {}
+    for job in jobs:
+        for given in job.inputs:
+            if given.name in inputs and inputs[given.name] != given:
+                raise EtudeError("eval_input_conflict", 422, detail=given.name)
+            inputs[given.name] = given
+    members: list[Evaluation] = []
+    for spec in evaluations:
+        saved = checkpoint_inputs(spec.matches or (), state, spec.checkpoints)
+        files = {
+            key: f"checkpoint-{digest(key)[:16]}{PurePosixPath(checkpoint_file_name(each.artifact.uri)).suffix}"
+            for key, each in saved.items()
+        }
+        for key, each in sorted(saved.items()):
+            for given in checkpoint_inputs_for(each, files[key]):
+                if given.name in inputs and inputs[given.name] != given:
+                    raise EtudeError("eval_input_conflict", 422, detail=given.name)
+                inputs[given.name] = given
+        members.append(spec.model_copy(update={"files": files}))
+    return first.model_copy(
+        update={
+            "name": "evals",
+            "config": EvalGroup(evaluations=tuple(members)).model_dump_json(),
+            "inputs": tuple(inputs.values()),
+            "max_hours": sum(job.require_hours() for job in jobs),
+            "max_usd": None
+            if any(job.max_usd is None for job in jobs)
+            else sum((job.max_usd or Decimal(0) for job in jobs), Decimal(0)),
+        }
     )
 
 
@@ -866,11 +1107,12 @@ def continued_config(parent: RunRecord, changes: str) -> BaseModel:
         raise LauncherError(str(error)) from None
 
 
-def _hold(evaluation: Evaluation) -> None:
-    """On the machine: hold the tournament, with the checkpoint inputs in their seats.
+def _hold(group: EvalGroup) -> None:
+    """On the machine, relocate inputs and hold all tournaments below its track folder."""
+    hold_group(EvalGroup(evaluations=tuple(_received(spec) for spec in group.evaluations)))
 
-    Eval job commands name it as `etude.jobs:_hold`, so its name and module stay.
-    """
+
+def _received(evaluation: Evaluation) -> Evaluation:
     if evaluation.experiment is None or (evaluation.checkpoints and evaluation.matches is None):
         raise SystemExit("etude: an experiment's evaluation job is launched by `etude eval`")
     folder = os.environ.get("ETUDE_INPUTS_DIR")
@@ -889,7 +1131,7 @@ def _hold(evaluation: Evaluation) -> None:
         checkpoint = ref.model_copy(
             update={"artifact": given.artifact.model_copy(update={"uri": uri})}
         )
-    elif given is not None:
+    elif isinstance(given, Input):
         # A training run's file is keyed by its run and name; any other, by where it lies.
         key = (
             _checkpoint_id(
@@ -906,28 +1148,12 @@ def _hold(evaluation: Evaluation) -> None:
             size_bytes=given.size_bytes,
         )
         checkpoint = CheckpointRef(address=key, artifact=artifact)
+    if checkpoint is not None:
+        evaluation = evaluation.model_copy(update={"checkpoint": checkpoint})
     if evaluation.matches is not None:
         here = {key: (Path(str(folder)) / name).as_uri() for key, name in evaluation.files.items()}
-    else:
-        here = {}
-    hold_evaluation(evaluation, checkpoint=checkpoint, files=here)
-
-
-def _relocated(match: Match, here: Mapping[str, str]) -> Match:
-    """The match with each model's checkpoint file where it lies on this machine."""
-    players: list[Player] = []
-    for player in match.players:
-        if not isinstance(player, CheckpointPlayer) or str(player.checkpoint.key) not in here:
-            players.append(player)
-            continue
-        checkpoint = player.checkpoint
-        moved = checkpoint.artifact.model_copy(update={"uri": here[str(checkpoint.key)]})
-        players.append(
-            player.model_copy(
-                update={"checkpoint": checkpoint.model_copy(update={"artifact": moved})}
-            )
-        )
-    return match.model_copy(update={"players": tuple(players)})
+        evaluation = evaluation.relocate(here)
+    return evaluation
 
 
 def _require_hours(options: JobOptions) -> None:
@@ -1047,7 +1273,7 @@ def _repo(origin: Callable[..., object], options: JobOptions) -> Path | None:
     if "repo" in options:
         given = options["repo"]
         return None if given is None else Path(given).resolve()
-    file = Path(inspect.getfile(origin)).resolve()
+    file = Path(inspect.getfile(inspect.unwrap(origin))).resolve()
     for folder in file.parents:
         if (folder / ".git").exists():
             return folder
@@ -1068,7 +1294,7 @@ def _function(function: Callable[..., object], repo: Path | None) -> Function:
     if module == "<run_path>" and "<" not in name:
         # CLI files are executed by runpy. Their top-level functions are still
         # importable from the source checkout under the actual file's name.
-        where = Path(inspect.getfile(function)).resolve()
+        where = Path(inspect.getfile(inspect.unwrap(function))).resolve()
         if repo is not None and where.is_relative_to(repo) and where.stem.isidentifier():
             return Function(
                 module=where.stem,

@@ -1,4 +1,4 @@
-"""Eval runs end to end: play matches in workers, resume from storage, query with DuckDB."""
+"""Eval runs end to end: play matches in game processes, resume from storage, query with DuckDB."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from etude.errors import EtudeError
 from etude.eval import query
 from etude.eval.match import environment, evaluate
 from etude.eval.query import Estimate, compare, estimate, statsdb
-from etude.eval.records import CheckpointPlayer, Code, Config, Inference, Match, Player
+from etude.eval.records import CheckpointPlayer, Code, Config, Held, Match, Player
 from etude.launch.storage.files import read_result
 from etude.records import ArtifactRef
 from etude.storage import DirectoryStorage, S3Storage
@@ -34,6 +34,7 @@ from tests.eval.games import (
     play_text_hits,
     play_unkeyed,
 )
+from tests.eval.stored import stored_inference
 from tests.run.storage import CountedClient, MeasuredStorage
 
 
@@ -46,12 +47,12 @@ def roster(tmp_path: Path) -> list[Player]:
         CheckpointPlayer(
             name="deep",
             checkpoint=model,
-            inference=Inference(config={"strength": 3, "search": {"simulations": 64}}),
+            config={"strength": 3, "search": {"simulations": 64}},
         ),
         CheckpointPlayer(
             name="shallow",
             checkpoint=model,
-            inference=Inference(config={"strength": 2, "search": {"simulations": 8}}),
+            config={"strength": 2, "search": {"simulations": 8}},
         ),
         Code(name="scripted", source=[script], config={"strength": 1}),
         Code(name="random", source=[script], config={"strength": 0}),
@@ -67,7 +68,7 @@ def seatings(players: Sequence[Player], *, configs: Sequence[Config], games: int
     ]
 
 
-def test_matches_in_two_workers_resumes_from_storage_without_replaying(
+def test_matches_in_the_shared_pool_resume_from_storage_without_replaying(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     players = roster(tmp_path)
@@ -86,12 +87,14 @@ def test_matches_in_two_workers_resumes_from_storage_without_replaying(
     progress = [line for line in capsys.readouterr().err.splitlines() if "matches played" in line]
     assert len(progress) == 24
     assert progress[-1].startswith("etude: league-1: 24/24 matches played, ")
-    # One block: each table merged into one file, then the index; nothing per match.
-    (index,) = (key for key in bucket.keys("league/league-1/blocks/") if key.endswith("block.json"))
-    folder = index.removesuffix("block.json")
-    assert sorted(bucket.keys(folder)) == [
-        folder + name for name in ("block.json", "games.parquet", "plays.parquet")
-    ]
+    # Every completed match is sealed and available before the run ends.
+    indices = [key for key in bucket.keys("league/league-1/blocks/") if key.endswith("block.json")]
+    assert len(indices) == 24
+    for index in indices:
+        folder = index.removesuffix("block.json")
+        assert sorted(bucket.keys(folder)) == [
+            folder + name for name in ("block.json", "games.parquet", "plays.parquet")
+        ]
 
     shutil.rmtree(tmp_path / "local")
     measured = MeasuredStorage(bucket)
@@ -100,8 +103,8 @@ def test_matches_in_two_workers_resumes_from_storage_without_replaying(
         run="league-1", directory=tmp_path / "local", storages=[measured],
     )  # fmt: skip
     assert (again.played, again.skipped) == (0, 24)
-    # One listing of the run and one read of its block's index.
-    assert (measured.listings, measured.requests) == (1, 1)
+    # One listing and one index read for each completed match.
+    assert (measured.listings, measured.requests) == (1, 24)
 
     db = statsdb("league", bucket)
     assert db.sql("select count(*) from plays").fetchone() == (24 * 4 * 2,)
@@ -171,7 +174,9 @@ def test_compare_gives_a_rate_with_an_interval_that_resamples_matches(tmp_path: 
 
 def test_a_row_without_seat_or_group_is_refused_and_nothing_of_its_match_is_stored(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     players = roster(tmp_path)
     with pytest.raises(EtudeError) as refused:
         evaluate(
@@ -300,23 +305,23 @@ def test_a_models_inference_code_is_its_version_not_its_key(tmp_path: Path) -> N
     checkpoint = CheckpointRef(experiment="", job="ppo-1", name="updates-100.pt", artifact=file)
     inference = tmp_path / "inference.py"
     inference.write_text("def act(state): return 0\n")
-    before = Inference(source=[inference], config=Direct()).player(checkpoint)
+    before = stored_inference(source=[inference], config=Direct()).player(checkpoint)
     assert before.key == 'checkpoint:ppo-1/checkpoints/updates-100.pt {"search":0}'
     assert before.name == "updates-100.pt"
     inference.write_text("def act(state): return 1\n")
-    changed = Inference(source=[inference], config=Direct()).player(checkpoint)
+    changed = stored_inference(source=[inference], config=Direct()).player(checkpoint)
     assert changed.key == before.key
     assert changed.version.source != before.version.source
     # The same bytes under another key are another model.
     copied = CheckpointRef(experiment="", job="ppo-2", name="updates-100.pt", artifact=file)
-    assert Inference(config=Direct()).player(copied).key != before.key
+    assert stored_inference(config=Direct()).player(copied).key != before.key
 
 
 def test_where_a_checkpoint_stood_is_carried_by_its_seat_and_is_not_its_identity() -> None:
     file = ArtifactRef(uri="hf://lab/u600.pt", sha256=sha256(b"a").hexdigest())
     key = file.uri
-    seated = Inference().player(CheckpointRef(address=key, artifact=file, at={"updates": 600}))
-    corrected = Inference().player(
+    seated = Held().player(CheckpointRef(address=key, artifact=file, at={"updates": 600}))
+    corrected = Held().player(
         CheckpointRef(address=key, artifact=file, at={"updates": 612}, line="seed-2")
     )
     rival = Code(name="rival", source=[__file__])
@@ -512,6 +517,7 @@ def test_a_launched_eval_run_reports_its_tally_a_few_times_not_once_per_match(
 def test_a_launched_eval_run_that_fails_reports_what_it_played_and_what_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
@@ -522,4 +528,4 @@ def test_a_launched_eval_run_that_fails_reports_what_it_played_and_what_failed(
             matches=matches, directory=tmp_path,
         )  # fmt: skip
     tally = read_result(outputs).tally
-    assert tally is not None and (tally.done, tally.failed) == (0, 1)
+    assert tally is not None and (tally.done, tally.failed) == (0, len(matches))

@@ -6,6 +6,7 @@ import json
 import re
 from hashlib import sha256
 
+from etude.errors import RetryRequested
 from etude.eval.records import CheckpointPlayer, Config, Match, Player
 from etude.eval.run import Result, Tables
 
@@ -17,12 +18,16 @@ def strength(player: Player) -> int:
     config = player.config
     if "strength" in config:
         return int(str(config["strength"]))
-    # The test trainer saves at updates 100, 200 and 300, named `updates-N`: 1, 3 and 5.
-    updates = int(re.sub(r"\D", "", player.name))
+    # Training clocks survive arbitrary checkpoint filenames such as weights.pt.
+    updates = (
+        int(player.checkpoint.at["updates"])
+        if isinstance(player, CheckpointPlayer) and "updates" in player.checkpoint.at
+        else int(re.sub(r"\D", "", player.name))
+    )
     return updates // 50 - 1 + int(str(config.get("search", 0)))
 
 
-def play(match: Match) -> Tables:
+def play(match: Match, agents: list[object]) -> Tables:
     """A duel: the stronger player wins, except the game's first player wins every third game."""
     strengths = [strength(player) for player in match.players]
     plays: Rows = []
@@ -45,9 +50,9 @@ def play(match: Match) -> Tables:
     return {"plays": plays, "games": games}
 
 
-def play_game_seats(match: Match) -> Tables:
+def play_game_seats(match: Match, agents: list[object]) -> Tables:
     """`play`, with the game's own seat: the players sit the other way round in odd games."""
-    tables = play(match)
+    tables = play(match, agents)
     plays = [
         {**row, "game_seat": (int(str(row["seat"])) + int(str(row["game"]))) % 2}
         for row in tables["plays"]
@@ -55,21 +60,21 @@ def play_game_seats(match: Match) -> Tables:
     return {**tables, "plays": plays}
 
 
-def play_unkeyed(match: Match) -> Tables:
+def play_unkeyed(match: Match, agents: list[object]) -> Tables:
     """A row naming its seat as published etude-sdk did, `player`, names no seat."""
     return {"plays": [{"game": 0, "seat": 0, "won": True}, {"game": 0, "player": 1, "won": False}]}
 
 
-def play_seat_and_player(match: Match) -> Tables:
+def play_seat_and_player(match: Match, agents: list[object]) -> Tables:
     """A row with a column `player`, the seat's name in older stored tables."""
     return {"plays": [{"game": 0, "seat": 0, "player": 1, "won": True}]}
 
 
-def play_text_hits(match: Match) -> Tables:
+def play_text_hits(match: Match, agents: list[object]) -> Tables:
     return {"plays": [{"game": 0, "seat": 0, "hits": "three"}]}
 
 
-def play_teams(match: Match) -> Tables:
+def play_teams(match: Match, agents: list[object]) -> Tables:
     return {
         "teams": [
             {"game": game, "group": team, "won": (team == "north") == (game < 3)}
@@ -79,21 +84,28 @@ def play_teams(match: Match) -> Tables:
     }
 
 
-def play_failing_deal_one(match: Match[Config]) -> Tables:
+def play_failing_deal_one(match: Match[Config], agents: list[object]) -> Tables:
     """`play`, except that deal 1 raises, as a game with a bug in one deal would."""
     if match.config.get("deal") == 1:
         raise RuntimeError("deal 1 crashed")
-    return play(match)
+    return play(match, agents)
 
 
-def play_catching_errors(match: Match) -> Tables:
+def play_interrupted_deal_one(match: Match[Config], agents: list[object]) -> Tables:
+    """`play`, except that deal 1 asks to be played again, as a transient outage would."""
+    if match.config.get("deal") == 1:
+        raise RetryRequested("deal 1 lost its connection")
+    return play(match, agents)
+
+
+def play_catching_errors(match: Match, agents: list[object]) -> Tables:
     """A runtime that catches its inference error and returns empty tables, as manabot's did."""
     return {"plays": [], "games": []}
 
 
-def play_with_evidence(match: Match) -> Result:
+def play_with_evidence(match: Match, agents: list[object]) -> Result:
     """`play`, keeping each game's evidence as a blob that its `games` row names."""
-    tables = play(match)
+    tables = play(match, agents)
     evidence = [f"{match.key} game {row['game']}".encode() * 40 for row in tables["games"]]
     games = [
         {**row, "evidence_sha256": sha256(blob).hexdigest()}
@@ -102,7 +114,7 @@ def play_with_evidence(match: Match) -> Result:
     return Result(tables={"plays": tables["plays"], "games": games}, blobs=evidence)
 
 
-def play_cards(match: Match[Config]) -> Tables:
+def play_cards(match: Match[Config], agents: list[object]) -> Tables:
     """manabot's card tables: one `card_plays` row per game and seat, `card_counts` per card.
 
     Deal 2's games have no winner, so no row of that match gives `win`.
@@ -143,7 +155,7 @@ def play_cards(match: Match[Config]) -> Tables:
     return {"card_plays": plays, "card_counts": counts}
 
 
-def play_checkpoint_folder(match: Match) -> Tables:
+def play_checkpoint_folder(match: Match, agents: list[object]) -> Tables:
     """Read both models of a folder checkpoint as playing code would."""
     rows: Rows = []
     for seat, player in enumerate(match.players):

@@ -29,8 +29,8 @@ A second Ctrl-C interrupts immediately. Resume with no `--config` uses the
 stored config, including any overrides from the first command.
 
 `arena(config: ArenaConfig) -> Benchmark` is pure. It seats the checkpoint as
-both teammates, then with a random teammate. `play(match: Match[Deal])` gets
-an author-owned Pydantic config and loads each checkpoint folder's `policy.pt`.
+both teammates, then with a random teammate. `play(match, agents)` gets an author-owned Pydantic config and uses checkpoint
+forwards loaded by `load`. Its build hook supplies the random teammate.
 Its rows name group `all`, the cooperative team, rather than claiming that one
 seat won. Evaluation chooses the first and final checkpoint of each run and
 plays only matches not yet stored. A repeated eval pass prints zero new matches.

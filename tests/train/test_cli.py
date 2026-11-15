@@ -34,7 +34,7 @@ EVAL_READERS = tuple(
         # recognises experiment files as `etude launch` does (`etude.experiment_file`).
         (
             ["report", "{directory}/pilot.py", "--source", "{directory}"],
-            32,  # shared run identity, delivery and job specification: the checkpoint records runs and evals share
+            31,  # shared run identity, delivery and job specification: the checkpoint records runs and evals share
             ("boto3", "duckdb", *EVAL_READERS, "etude.train.tracking"),
         ),
         (
@@ -83,13 +83,11 @@ def test_tracking_command_import_counts(
         for name in modules
         if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)
     ]
-    # The launcher contributes its command table and the standard-library
-    # sanitizer shared by report errors; no compute client is needed.
+    # The launcher contributes its command table; report errors use etude.errors.
     assert {name for name in loaded if name.startswith("etude.launch")} <= {
         "etude.launch",
         "etude.launch.cli",
         "etude.launch.commands",
-        "etude.launch.logging",
     }
     assert not launcher_file(tmp_path / "home").exists()
 
@@ -192,7 +190,7 @@ def test_serving_an_index_loads_no_evaluation_launcher_or_bucket_client(tmp_path
     loaded = [name for name in modules if name.startswith("etude")]
     # Neither experiment has eval runs or eval(): the index reads training files alone,
     # and recognises experiment files as `etude launch` does (`etude.experiment_file`).
-    assert len(loaded) == 32, loaded
+    assert len(loaded) == 31, loaded
     forbidden = (
         "boto3",
         "duckdb",

@@ -20,12 +20,15 @@ from etude.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, RoundRobin
-from etude.jobs import EvalJob, JobOptions, TrainingJob, with_experiment
+from etude.eval.records import Benchmark, Code, Held, Match, RoundRobin
+from etude.experiment import observe
+from etude.jobs import EvalJob, JobOptions, TrainingJob, checkpoint_inputs, with_experiment
 from etude.launch.smoke import tiny
 from etude.records import ArtifactRef
 from etude.spec import Input, Job, Preparation, Runtime, SmokeForm, Until, job_id
+from etude.storage import DirectoryStorage
 from etude.train.read import read
+from etude.train.tracking import track
 from tests.eval.games import play
 from tests.experiments import authored
 from tests.launch.counting import job_text
@@ -66,7 +69,7 @@ import json
 from pathlib import Path
 
 from etude.eval.match import Tables
-from etude.eval.records import Match, CheckpointPlayer
+from etude.eval.records import Held, Match, CheckpointPlayer
 
 
 def weights(checkpoint: Path) -> bytes:
@@ -76,7 +79,7 @@ def weights(checkpoint: Path) -> bytes:
     return checkpoint.read_bytes()
 
 
-def play(match: Match) -> Tables:
+def play(match: Match, agents: list[object]) -> Tables:
     # A model's checkpoint is on this machine; the row says how big its weights are.
     sizes = [
         len(weights(seated.checkpoint.path)) if isinstance(seated, CheckpointPlayer) else 0
@@ -337,7 +340,7 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
         {
             f"arena_duel_{form}.py": """from pydantic import BaseModel
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.eval.records import Held, Benchmark, Code, Seating
 """
             + PLAY
             + """
@@ -346,7 +349,7 @@ class ArenaConfig(BaseModel):
 
 def arena(config: ArenaConfig) -> Benchmark:
     return Benchmark(name="anchors", environment=environment("duel"), seatings=(
-        Seating(name="model vs fixed", players=(Inference(config={"search": 0}), Code(name="fixed")),
+        Seating(name="model vs fixed", players=(Held(), Code(name="fixed")),
                 configs=({"deal": 1}, {"deal": 2}), games=config.games),))
 """
         },
@@ -561,6 +564,28 @@ def write(config: TrainConfig) -> None:
     assert list(points.x) == [1, 2, 3]
     assert list(points.y) == [10, 200, 300]
     assert [writer.first_row for writer in data.writers] == [True, True, False]
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_a_seated_artifact_keeps_its_experiment_when_a_local_run_has_the_same_name(
+    tmp_path: Path,
+    declared: bool,
+) -> None:
+    source = DirectoryStorage(tmp_path)
+    for experiment, body in (("producer", b"earlier weights"), ("review", b"local weights")):
+        with track(
+            experiment=experiment, run="base@0", directory=tmp_path, clocks=["updates"], strict=True
+        ) as run:
+            path = run.out / "weights.pt"
+            path.write_bytes(body)
+            run.checkpoint(path, updates=1)
+    checkpoint = observe(source, "producer").runs[0].final
+    assert checkpoint is not None
+    state = observe(source, "review")
+    assert state.checkpoint(checkpoint.key) is None
+    match = Match(players=(checkpoint.player(Held()), Code(name="fixed")), games=1)
+    saved = checkpoint_inputs([match], state, [checkpoint] if declared else [])
+    assert saved[checkpoint.key].artifact == checkpoint.artifact
 
 
 def test_typed_jobs_declare_uv_extras(tmp_path: Path) -> None:

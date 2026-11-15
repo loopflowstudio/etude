@@ -7,7 +7,6 @@ Author-facing types are defined in `etude.jobs`.
 
 from __future__ import annotations
 
-import json
 import warnings
 from collections.abc import Sequence
 from dataclasses import replace
@@ -18,6 +17,7 @@ from typing import Literal
 
 import etude.jobs as jobs
 from etude.checkpoints import CheckpointRecord, PolicyKey
+from etude.errors import EtudeError
 from etude.eval.records import Benchmark, Line, Match, TournamentRun
 from etude.launch import client
 from etude.launch.records import Standing
@@ -152,16 +152,21 @@ def state_of(
     ]
     committed = Decimal(0)
     for item in retained:
-        record = item.record
+        record, status = item.record, item.status
         committed += item.committed_usd
         name = record.id.removeprefix(experiment + "/")
         # Evaluation matches are part of the executable job's public config.
-        text = record.launch.spec.config
-        config = json.loads(text) if text else {}
-        if "tournament" in config and "matches" in config:
+        try:
+            group = jobs.evaluation_group(record.launch.spec)
+        except EtudeError as error:
+            if error.code != "not_an_evaluation_job":
+                raise
+            group = None
+        if group is not None:
             matches = tuple(
-                Match.model_validate(m, context={"experiment": experiment}).key
-                for m in config.get("matches") or ()
+                Match.model_validate(m.model_dump(), context={"experiment": experiment}).key
+                for spec in group.evaluations
+                for m in spec.matches or ()
             )
             prior = next((r for r in eval_runs if r.name == name), None)
             if prior is not None:
@@ -169,7 +174,14 @@ def state_of(
             eval_runs.append(
                 jobs.EvalRunSummary(
                     name=name,
-                    state=_launcher_state(prior.state if prior else "running", item),
+                    state=_launcher_state(
+                        prior.state
+                        if prior
+                        else "finished"
+                        if status.done and status.outcome == "succeeded"
+                        else "running",
+                        item,
+                    ),
                     matches=matches,
                 )
             )

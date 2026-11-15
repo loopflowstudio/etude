@@ -19,7 +19,7 @@ from collections import deque
 from collections.abc import Iterator, Sequence
 
 from etude.checkpoints import CheckpointId
-from etude.eval.records import CheckpointPlayer, Match
+from etude.eval.records import Match, player_checkpoints
 
 
 def checkpoints(match: Match) -> frozenset[CheckpointId]:
@@ -29,9 +29,7 @@ def checkpoints(match: Match) -> frozenset[CheckpointId]:
 
 def _find_checkpoints(match: Match) -> list[CheckpointId]:
     """The checkpoints seated by a match, in seat order."""
-    return [
-        player.checkpoint.key for player in match.players if isinstance(player, CheckpointPlayer)
-    ]
+    return [checkpoint.key for player in match.players for checkpoint in player_checkpoints(player)]
 
 
 def ordered(matches: Sequence[Match]) -> Iterator[Match]:

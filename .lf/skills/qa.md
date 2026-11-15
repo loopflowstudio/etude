@@ -212,7 +212,7 @@ repo, with an isolated `ETUDE_HOME`:
   `uv lock`, add `.gitignore` with `.venv/` and `__pycache__/`, and commit, or every
   run says "plus uncommitted changes".
 - `train.py` with a Pydantic config whose real size raises, so a passing smoke shows
-  its smoke form ran; `games.py` with `play(match)`; `ppo.py` with `training_jobs()`, `eval_jobs(state)`
+  its smoke form ran; `games.py` with `play(match, agents)`; `ppo.py` with `training_jobs()`, `eval_jobs(state)`
   and `report()`. A job's `max_usd` must be more than zero or omitted.
 - `uv run etude smoke ppo.py`, `uv run etude launch ppo.py`, then
   `etude status`. Nothing runs the scheduler's loop here: cancel what you queued
@@ -350,6 +350,94 @@ single-file checkpoints hide nested input names (`start/checkpoint.json`).
   at it, train `runs()` files (compact `ppo@0`, `solo`) and `etude queue` (makes
   `launcher-19.db`). Repoint the pyproject at this checkout, `uv lock`, rename per
   `release/UNRELEASED.md`, and check stored runs read `finished`.
+
+## Driving Etude
+
+- Isolate each scenario: a fresh `ETUDE_HOME` and a fresh `--source` directory.
+  Eval runs are written under `$ETUDE_HOME/track` and delivered to the source.
+  For recovery, reuse the home and move checkpoint files without changing their
+  keys, digests or lengths: bare and composed players must resume without
+  replaying delivered matches. Changed author fields or checkpoint fingerprints
+  must still raise `eval_run_tournament_conflict`.
+- Evaluations: `uv run etude eval FILE.py --source DIR`, run twice (the second
+  pass must play nothing), then `--retry-failed`. `examples/agents.py` covers
+  grouped tournaments, a shared checkpoint and nested wrappers. To vary the
+  game or loader, copy the example files into a temp folder and run
+  `uv run --project <checkout> etude eval agents.py` from there.
+- Results: `statsdb(experiment, DIR)` from `etude.eval.query`, using the
+  `players`, `seats` and `matches` tables.
+- Report: `uv run etude report FILE.py --source DIR --out OUT`, then look at it with
+  `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new
+  --disable-gpu --screenshot=OUT.png --window-size=1300,800 file://OUT/FILE.html`
+  and read the PNG. The page renders in JavaScript, so grepping the HTML text
+  shows nothing.
+- Failure paths: copy the example into a git lab and edit `agent_models.py`
+  (`raise RuntimeError(...)` for a bad checkpoint, `raise RetryRequested(...)`
+  from `etude.errors` for a transient one) or `play` (raise in one lane). Each
+  needs a fresh `ETUDE_HOME` and source; run three passes to see what is
+  replayed, held for `--retry-failed`, or settled.
+- To interrupt a pass at a known point, read its output from a Python driver
+  (`Popen(..., stdout=PIPE, stderr=STDOUT)`) and send SIGTERM after the line
+  `K/N matches played`; a fixed sleep misses because this Mac runs ~16 games
+  at a time. The next pass should play only the interrupted matches.
+
+## Etude: grouped evals with agents
+
+Copy `examples/{agents.py,agent_game.py,agent_models.py,agent.txt}` into a git lab
+and run `uv run --project REPO etude eval agents.py --source RUNS` with a fresh
+`ETUDE_HOME`. Drive scenarios with environment knobs read inside the lab's own
+modules: a `play` wrapper that raises when `QA_FAIL` appears in a player's JSON or
+sleeps for `QA_SLOW` (make one player's matches ten times longer, or every match
+finishes before a SIGTERM lands), a loader that raises when `QA_BAD` names a
+checkpoint key, and `Agents(memory_gb=float(os.environ["QA_MEM"]))` (`3e-9` fits
+one two-byte checkpoint and forces eviction). Send each pass's output to its own file:
+`grep -v` in a pipe buffers until exit, so a slow pass looks hung, and several passes
+in one tool call can exceed its timeout on a busy Mac. Judge a suspected hang from the
+timestamps under `ETUDE_HOME/track/NAME/artifacts/agents/` and the run's `blocks/`,
+not from `ps` elapsed times.
+
+Launched grouping without renting: put the same lab files in a uv lab (as in
+"launching an experiment file on this computer"), `etude database upgrade
+--development`, `etude launch two.py`; every tournament should report the same
+`running two/evals-*` run. `etude wait --experiment two` drives the local pool;
+`etude logs --run two/evals-*` shows one allocation: on CPU, `agents: CPU inference
+in N game processes` (each game loads its forwards directly); on visible NVIDIA
+hardware, one shared `agents: started ...` process. `QA_*` knobs do not reach the
+launched worker, so drive failures through `etude eval`.
+
+Retain the startup game count and inference thread count with protocol comparison
+results. On NVIDIA hardware, verify batch-sized game capacity with pending and
+host-memory bounds; hide the GPU to verify the CPU allocation. Hardware probing
+must not import the loading library or run for agentless games. Keep model
+placement separate from the loader's device choice. Exercise cross-job batches,
+multiple checkpoint leaves, partial-batch drain, loader failure propagation and
+fresh-host resume. Keep per-decision and whole-arm metrics separate; CPU results
+do not select GPU placement, or conversely.
+Controlled CPU/memory checks cover one CPU, fewer pending games than
+CPUs, memory-limited games, agentless games, code-only builds and multiple
+tournaments; verify one allocation reaches dispatch. CPU games import the
+loader and keep one thread each; only the shared GPU path keeps model loading
+out of game imports and sets shared inference threads. Code-only builds start
+no loading process and run no hardware probe. Use the unchanged frozen panel, retain its whole-arm timer
+before querying reports, and compare complete action sequences.
+
+Use distinct tournament configs such as `configs=({"lane": name},)`: identical
+configs produce identical match keys, so a later tournament sees those matches
+in flight. Compare the `seats.player`/`scores` results after eviction, interruption
+and retries with an unconstrained run. `etude smoke FILE` checks grouping too.
+
+Placement errors: `etude pool add owned` (no machines), then `etude launch FILE
+--pool owned --quote` gives "no free machine"; `etude pool off owned` gives "is
+turned off". Both need pending matches: after `etude queue` plus `etude cancel`,
+the cancelled matches read as failed and need `--retry-failed`. Ignore every
+`ETUDE_HOME` in the lab's `.gitignore`, or runs say "plus uncommitted changes".
+
+For protocol intervals, sort `started_monotonic`/`finished_monotonic` endpoints
+and count starts minus finishes; compare the peak with the reported game capacity.
+Standalone runs retain reports under their own `artifacts/agents/` and ship them
+with results. Their scripts need an `if __name__ == "__main__":` guard.
+For an upgrade check, create results on a detached `main` checkout using `Code`
+players and an unannotated `play`, then read them here.
 
 ## Etude: explicit launcher upgrades
 

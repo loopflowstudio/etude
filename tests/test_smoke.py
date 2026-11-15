@@ -46,7 +46,7 @@ EXPERIMENT = """
 from pathlib import Path
 
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.eval.records import Held, Benchmark, Code, Seating
 from etude.jobs import ExperimentState
 from etude.jobs import EvalJob, TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
@@ -69,7 +69,7 @@ def training_jobs(seeds: int = 1, tiny: str = "1", bare: bool = False) -> list:
 def eval_jobs(state: ExperimentState) -> Job:
     chosen = [saved for run in state.runs for saved in run.checkpoints]
     anchor = Code(name="heuristic", source=[__file__], config={{"strength": 0}})
-    vs = Seating(name="vs heuristic", players=(Inference(config={{"search": 0}}), anchor),
+    vs = Seating(name="vs heuristic", players=(Held(), anchor),
                  configs=({{"deal": 0}}, {{"deal": 1}}), games=4)
     ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(vs,))
     return EvalJob(tournament=ladder, play={play}, checkpoints=chosen, max_hours=0.1,
@@ -316,10 +316,10 @@ def test_eval_only_smoke_uses_outside_checkpoints_and_this_computers_environment
 import os
 from etude.experiment import observe
 from etude.jobs import EvalJob
-from etude.eval.records import RoundRobin, Inference, Code
+from etude.eval.records import Held, RoundRobin, Code
 from etude.eval.match import environment
 
-def play(match):
+def play(match, agents):
     assert os.environ["EVAL_TEST_KEY"] == "local fixture credential"
     model = next(p for p in match.players if hasattr(p, "checkpoint"))
     assert model.checkpoint.path.read_bytes() == b"outside weights"
@@ -328,7 +328,7 @@ def play(match):
 def eval_jobs(state):
     checkpoint = observe({str(source)!r}, "producer").runs[0].final
     return EvalJob(tournament=RoundRobin(name="outside", environment=environment("game"),
-        configs=({{}},), games=3), enter=(checkpoint.player(Inference()), Code(name="fixed")),
+        configs=({{}},), games=3), enter=(checkpoint.player(Held()), Code(name="fixed")),
         play=play, max_hours=0.1)
 """)
     before = sorted(source.rglob("*"))
@@ -364,15 +364,14 @@ def test_policy_key_smoke_names_cross_experiment_seat(
     file.write_text("""
 from etude.checkpoints import PolicyKey
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Final, Inference, Seating
+from etude.eval.records import Benchmark, Final, Held, Seating
 from etude.jobs import EvalJob
 from tests.eval.games import play
 
 def eval_jobs(state):
-    direct = Inference()
     return EvalJob(tournament=Benchmark(name="frontier", environment=environment("duel"),
-        seatings=(Seating(name="vs frontier", players=(direct,
-            Final(experiment="tla-frontier", inference=direct)), configs=({},), games=8),)),
+        seatings=(Seating(name="vs frontier", players=(Held(),
+            Final(experiment="tla-frontier")), configs=({},), games=8),)),
         checkpoints=state.policy(PolicyKey()).checkpoints, play=play, repo=None, max_hours=1)
 """)
     measured = MeasuredStorage(DirectoryStorage(source))

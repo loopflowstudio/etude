@@ -20,25 +20,22 @@ from etude.declarations import (
     select_runs,
 )
 from etude.errors import EtudeError, LauncherError
-from etude.eval.records import (
-    Line,
-    Match,
-    TournamentRun,
-    digest,
-    folder_name,
-)
+from etude.eval.records import TournamentRun, digest
+from etude.eval.result import EvalResult
 from etude.eval.tournament import StoredRuns, played
 from etude.experiment import observe, read_tournament_lines
 from etude.jobs import (
     Checkpoints,
+    EvalGroup,
     Evaluation,
     ExperimentState,
     TrainingRunSummary,
-    evaluation_spec,
+    _group_key,
+    evaluation_group,
     fetch_checkpoints,
-    hold_evaluation,
+    group_evaluations,
+    hold_group,
     with_experiment,
-    with_matches,
 )
 from etude.launch import client
 from etude.launch.listing import show_quote
@@ -62,6 +59,13 @@ class TournamentDecision:
     state: Literal["queued", "running", "would launch", "not queued"] | None = None
     reason: str | None = None
     stopped: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _PendingEvaluation:
+    job: Job
+    spec: Evaluation
+    decision: TournamentDecision
 
 
 def source_for(pool: str | None, rent: str | None, source: str | None = None) -> str:
@@ -143,6 +147,7 @@ def advance(
     rent: str | None = None,
     directory: Path | str | None = None,
     retry_failed: bool = False,
+    smoke: Smoke = Smoke(),
     mode: Literal["local", "launch", "queue"] = "local",
     max_usd: Decimal | None = None,
     quote: bool = False,
@@ -215,7 +220,7 @@ def advance(
         state,
         [
             TournamentRun(
-                tournament=(spec := evaluation_spec(job)).tournament,
+                tournament=(spec := evaluation_group(job).evaluations[0]).tournament,
                 checkpoints=spec.held,
             )
             for job in jobs
@@ -223,7 +228,6 @@ def advance(
         keys=listed,
         declarations=declarations,
     )
-    smoke = Smoke()
     if smoke_file_first and not quote:
         assert experiment.file is not None
         before = (
@@ -251,8 +255,9 @@ def advance(
         if jobs
         else None
     )
+    groups: dict[str, list[_PendingEvaluation]] = {}
     for executable in jobs:
-        spec = evaluation_spec(executable)
+        spec = evaluation_group(executable).evaluations[0]
         found = played(
             spec.tournament,
             experiment=experiment.name,
@@ -261,42 +266,64 @@ def advance(
             runs=stored,
             lines=policy_lines,
         )
-        wanted = [*found.new, *(found.failed if retry_failed else ())]
-        pending = [match for match in wanted if match.key not in running]
+        new_matches = list(
+            {m.key: m for m in (*found.new, *(found.failed if retry_failed else ()))}.values()
+        )
+        pending = [match for match in new_matches if match.key not in running]
         done = TournamentDecision(
             tournament=spec.tournament.name,
             new=len(pending),
-            running=len(wanted) - len(pending),
-            failed=0 if retry_failed else len(found.failed),
+            running=len(new_matches) - len(pending),
+            # Retryable failures are replayed with the new matches, not counted twice.
+            failed=0 if retry_failed else len(found.failed) - len(found.retry),
         )
-        if not retry_failed:
-            # A failed run's undelivered matches wait for an explicit retry.
-            stopped = {failed[m.key] for m in pending if m.key in failed}
+        retryable = {m.key for m in found.retry}
+        stopped = {failed[m.key] for m in pending if m.key in failed and m.key not in retryable}
+        if stopped and not retry_failed:
             stopped_runs.update(stopped)
             done.stopped = tuple(sorted(stopped))
-            pending = [match for match in pending if match.key not in failed]
-        if pending and mode == "local":
-            done.played = _play_here(
-                spec, executable, pending, state, policy_lines, source, directory
+            pending = [
+                match for match in pending if match.key not in failed or match.key in retryable
+            ]
+        if pending:
+            groups.setdefault(_group_key(executable, spec), []).append(
+                _PendingEvaluation(
+                    job=executable,
+                    spec=spec.model_copy(update={"matches": tuple(pending), "lines": policy_lines}),
+                    decision=done,
+                )
             )
             running.update(m.key for m in pending)
-        elif pending:
-            executable = with_matches(executable, pending, state, policy_lines)
-            if _fits(executable, committed, max_usd):
-                stem = f"{experiment.name}/{folder_name(spec.tournament.name)}-{digest(sorted(m.key for m in pending))[:12]}"
-                done.launched = stem
-                number = 2
-                while done.launched in taken:
-                    done.launched = f"{stem}-{number}"
-                    number += 1
-                planned.append(RunRequest(id=done.launched, job=executable, smoke=smoke))
-                running.update(m.key for m in pending)
-                taken.add(done.launched)
-                committed += executable.max_usd or Decimal(0)
-            else:
-                done.state = "not queued"
-                done.reason = f"--max-usd {max_usd} (${committed:.2f} committed)"
         decisions.append(done)
+    for group in groups.values():
+        members = [each.spec for each in group]
+        executables = [each.job for each in group]
+        if mode == "local":
+            held = _play_here(members, executables[0], state, source, directory)
+            for each, result in zip(group, held, strict=True):
+                each.decision.played = result.played
+            continue
+        executable = group_evaluations(executables, members, state)
+        keys = sorted(m.key for spec in members for m in spec.matches or ())
+        stem = f"{experiment.name}/evals-{digest(keys)[:12]}"
+        identity = stem
+        number = 2
+        while identity in taken:
+            identity = f"{stem}-{number}"
+            number += 1
+        request = RunRequest(id=identity, job=executable, smoke=smoke)
+        held_back: Literal["not queued"] | None = None
+        reason: str | None = None
+        if not _fits(executable, committed, max_usd):
+            held_back = "not queued"
+            reason = f"--max-usd {max_usd} (${committed:.2f} committed)"
+        else:
+            planned.append(request)
+            taken.add(identity)
+            committed += executable.max_usd or Decimal(0)
+        for each in group:
+            each.decision.state, each.decision.reason = held_back, reason
+            each.decision.launched = identity if held_back is None else None
     if planned:
         if quote:
             for request in new:
@@ -326,25 +353,26 @@ def advance(
 
 
 def _play_here(
-    spec: Evaluation,
+    specs: Sequence[Evaluation],
     executable: Job,
-    pending: Sequence[Match],
     state: ExperimentState,
-    lines: tuple[Line, ...],
     source: Storage,
     directory: Path | str | None,
-) -> int:
+) -> tuple[EvalResult, ...]:
     """Play with the same verified artifacts a launched run receives as inputs."""
     with TemporaryDirectory(prefix="etude-eval-") as folder:
-        here = fetch_checkpoints(pending, state, spec.checkpoints, Path(folder))
-        held = hold_evaluation(
-            spec.model_copy(update={"matches": tuple(pending), "lines": lines}),
-            files=here,
+        here = fetch_checkpoints(
+            tuple(match for spec in specs for match in spec.matches or ()),
+            state,
+            tuple(checkpoint for spec in specs for checkpoint in spec.checkpoints),
+            Path(folder),
+        )
+        return hold_group(
+            EvalGroup(evaluations=tuple(spec.relocate(here) for spec in specs)),
             checkout=executable.repo,
             directory=directory,
             storages=[source],
         )
-        return held.played
 
 
 def _show_tournament(done: TournamentDecision) -> None:

@@ -18,10 +18,10 @@ import etude.launch.client as client
 from etude.checkpoints import CheckpointRecord
 from etude.controller import advance
 from etude.declarations import Experiment, read_experiment
-from etude.errors import EtudeError, LauncherError
+from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.eval.records import Benchmark, Code, Held, Seating
 from etude.eval.tournament import evaluating, scores
 from etude.experiment import observe
 from etude.jobs import (
@@ -29,7 +29,7 @@ from etude.jobs import (
     ExperimentState,
     OutMembers,
     _hold,
-    evaluation_spec,
+    evaluation_group,
     with_experiment,
 )
 from etude.launch.records import Outcome, Standing, Status
@@ -42,13 +42,18 @@ from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.tracking import TrainingRun as Run_
 from etude.train.tracking import track
-from tests.eval.games import play, play_catching_errors, play_failing_deal_one
+from tests.eval.games import (
+    play,
+    play_catching_errors,
+    play_failing_deal_one,
+    play_interrupted_deal_one,
+)
 from tests.experiments import authored
 from tests.run.storage import MeasuredStorage
 
 WORLD = environment("duel", config={"world": "w6"})
 DEALS = tuple({"deal": deal} for deal in range(2))
-DIRECT = Inference(config={"search": 0})
+HELD = Held()
 
 
 def _store_out_members(storage: DirectoryStorage, folder: str) -> OutFiles:
@@ -201,7 +206,7 @@ def design(tmp_path: Path) -> Experiment:
         rated = run.checkpoints.every(2)
         pairs = [
             Seating(name=f"{new.name} vs {old.name}", tags=("consecutive",),
-                    players=(new.player(DIRECT), old.player(DIRECT)), configs=DEALS, games=2)
+                    players=(new.player(HELD), old.player(HELD)), configs=DEALS, games=2)
             for old, new in zip(rated, rated[1:])
         ]  # fmt: skip
         if run.final is not None and run.checkpoints:
@@ -209,12 +214,12 @@ def design(tmp_path: Path) -> Experiment:
             pairs.append(
                 Seating(
                     name="final vs first",
-                    players=(run.final.player(DIRECT), first.player(DIRECT)),
+                    players=(run.final.player(HELD), first.player(HELD)),
                     configs=DEALS,
                     games=2,
                 )  # fmt: skip
             )
-        anchors = Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS,
+        anchors = Seating(name="vs heuristic", players=(HELD, anchor), configs=DEALS,
                           games=2)  # fmt: skip
         return EvalJob(
             tournament=arena(ArenaConfig(seatings=(anchors, *pairs))),
@@ -265,7 +270,7 @@ def test_each_pass_plays_what_the_checkpoints_saved_so_far_call_for(tmp_path: Pa
     anchor = heuristic(tmp_path)
 
     def post_hoc(state: ExperimentState) -> Job:
-        every = Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS, games=2)
+        every = Seating(name="vs heuristic", players=(HELD, anchor), configs=DEALS, games=2)
         sweep = Benchmark(name="sweep", environment=WORLD, seatings=(every,))
         return EvalJob(tournament=sweep, play=play, checkpoints=state.run("ppo-1").checkpoints,
                           max_hours=0.1)  # fmt: skip
@@ -286,8 +291,8 @@ def test_a_pass_plays_only_what_eval_returns_now(tmp_path: Path) -> None:
         name="greedy", source=[tmp_path / "players" / "heuristic.py"], config={"strength": 4}
     )
     both = (
-        Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS, games=2),
-        Seating(name="vs greedy", players=(DIRECT, greedy), configs=DEALS, games=2),
+        Seating(name="vs heuristic", players=(HELD, anchor), configs=DEALS, games=2),
+        Seating(name="vs greedy", players=(HELD, greedy), configs=DEALS, games=2),
     )
 
     def design(seatings: tuple[Seating, ...]) -> Experiment:
@@ -307,14 +312,17 @@ def test_a_pass_plays_only_what_eval_returns_now(tmp_path: Path) -> None:
     assert (second.new, second.played) == (len(DEALS), len(DEALS))
 
 
-def test_a_failed_match_is_counted_and_not_replayed_unless_asked(tmp_path: Path) -> None:
+def test_a_failed_match_is_counted_and_not_replayed_unless_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
     bucket = DirectoryStorage(tmp_path / "bucket")
     training = trainer(bucket, tmp_path)
     save(training, bucket, tmp_path, range(1, 2))
     anchor = heuristic(tmp_path)
 
     def eval_(state: ExperimentState) -> Job:
-        vs = Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS, games=2)
+        vs = Seating(name="vs heuristic", players=(HELD, anchor), configs=DEALS, games=2)
         ladder = Benchmark(name="ladder", environment=WORLD, seatings=(vs,))
         return EvalJob(tournament=ladder, play=play_failing_deal_one,
                           checkpoints=state.run("ppo-1").checkpoints, max_hours=0.1)  # fmt: skip
@@ -324,16 +332,44 @@ def test_a_failed_match_is_counted_and_not_replayed_unless_asked(tmp_path: Path)
         advance(ppo, source=bucket, directory=local)
     # Deal 1 is counted as failed and left alone; the rest is played.
     (counted,) = advance(ppo, source=bucket, directory=local)
-    assert counted.failed == 1 and counted.played == counted.new
+    assert (counted.failed, counted.played, counted.new) == (1, 0, 0)
     (settled,) = advance(ppo, source=bucket, directory=local)
     assert (settled.new, settled.failed, settled.played) == (0, 1, 0)
     with pytest.raises(EtudeError, match="match_failed"):
         advance(ppo, source=bucket, directory=local, retry_failed=True)
 
 
-def test_a_pass_whose_matches_all_return_no_rows_fails_and_a_retry_replays_them(
+def test_a_retryable_failure_is_replayed_by_the_next_pass_and_not_counted_failed(
     tmp_path: Path,
 ) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    training = trainer(bucket, tmp_path)
+    save(training, bucket, tmp_path, range(1, 2))
+    anchor = heuristic(tmp_path)
+    games = {"play": play_interrupted_deal_one}
+
+    def eval_(state: ExperimentState) -> Job:
+        vs = Seating(name="vs heuristic", players=(HELD, anchor), configs=DEALS, games=2)
+        ladder = Benchmark(name="ladder", environment=WORLD, seatings=(vs,))
+        return EvalJob(tournament=ladder, play=games["play"], checkpoints=state.run("ppo-1").checkpoints,
+                          max_hours=0.1)  # fmt: skip
+
+    ppo, local = Experiment(name="ppo", eval=eval_), tmp_path / "evaluator"
+    with pytest.raises(RetryRequested):
+        advance(ppo, source=bucket, directory=local)
+    games["play"] = play
+    # The pass summary counts them once, as new, not also as failed.
+    (replayed,) = advance(ppo, source=bucket, directory=local)
+    assert replayed.failed == 0 and replayed.new == replayed.played > 0
+    (done,) = advance(ppo, source=bucket, directory=local)
+    assert (done.new, done.failed, done.played) == (0, 0, 0)
+
+
+def test_a_pass_whose_matches_all_return_no_rows_fails_and_a_retry_replays_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     bucket = DirectoryStorage(tmp_path / "bucket")
     training = trainer(bucket, tmp_path)
     save(training, bucket, tmp_path, range(1, 2))
@@ -341,7 +377,7 @@ def test_a_pass_whose_matches_all_return_no_rows_fails_and_a_retry_replays_them(
     games = {"play": play_catching_errors}
 
     def eval_(state: ExperimentState) -> Job:
-        vs = Seating(name="vs heuristic", players=(DIRECT, anchor), configs=DEALS, games=2)
+        vs = Seating(name="vs heuristic", players=(HELD, anchor), configs=DEALS, games=2)
         ladder = Benchmark(name="ladder", environment=WORLD, seatings=(vs,))
         return EvalJob(tournament=ladder, play=games["play"], checkpoints=state.run("ppo-1").checkpoints,
                           max_hours=0.1)  # fmt: skip
@@ -366,16 +402,16 @@ def test_a_pass_whose_matches_all_return_no_rows_fails_and_a_retry_replays_them(
     assert (retried.new, retried.played) == (len(DEALS), len(DEALS))
     (done,) = advance(ppo, source=bucket, directory=local)
     assert (done.new, done.failed, done.played) == (0, 0, 0)
-    # The kept database that read the failed end reads the retried run's new one.
+    # A retry's match set can differ from an earlier partial run; its results supersede it.
     db = statsdb("ppo", bucket)
-    assert db.sql("select distinct state from runs").fetchall() == [("finished",)]
-    assert db.sql("select distinct state from matches").fetchall() == [("done",)]
+    assert set(db.sql("select distinct state from runs").fetchall()) == {("failed",), ("finished",)}
+    assert db.sql("select distinct state from matches where newest = 1").fetchall() == [("done",)]
     db.close()
 
 
 def test_an_eval_job_belongs_to_the_experiment_of_its_file(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
-    anchors = Seating(name="vs heuristic", players=(DIRECT, heuristic(tmp_path)), configs=DEALS,
+    anchors = Seating(name="vs heuristic", players=(HELD, heuristic(tmp_path)), configs=DEALS,
                       games=2)  # fmt: skip
     progress = Benchmark(name="ladder", environment=WORLD, seatings=(anchors,))
 
@@ -503,7 +539,7 @@ def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
     monkeypatch.setenv("ETUDE_INPUTS_DIR", str(inputs))
     monkeypatch.setenv("ETUDE_RUN", str(run.id))
     monkeypatch.setenv("ETUDE_TRACK_DIR", str(tmp_path / "machine" / "track"))
-    spec = evaluation_spec(run.job)
+    spec = evaluation_group(run.job)
     _hold(spec)
     shutil.copytree(tmp_path / "machine" / "track", tmp_path / "bucket" / "delivered")
     db = statsdb("ppo", bucket)
@@ -544,7 +580,12 @@ def test_a_failed_launched_pass_stops_only_a_pass_wanting_its_matches(
     with pytest.raises(EtudeError, match="launched_pass_failed"):
         advance(eval_, source=bucket, mode="launch", rent="cpu8", directory=local)
     (again,) = advance(
-        eval_, source=bucket, mode="launch", rent="cpu8", directory=local, retry_failed=True
+        eval_,
+        source=bucket,
+        mode="launch",
+        rent="cpu8",
+        directory=local,
+        retry_failed=True,
     )
     assert again.launched == f"{first.launched}-2"
     assert [str(run.id) for run in launcher.launched] == [first.launched, again.launched]
@@ -563,7 +604,7 @@ def test_queued_passes_retain_every_job_while_capacity_is_unavailable(
     benchmark = Benchmark(
         name="queued",
         environment=WORLD,
-        seatings=(Seating(name="anchor", players=(DIRECT, anchor), configs=DEALS, games=2),),
+        seatings=(Seating(name="anchor", players=(HELD, anchor), configs=DEALS, games=2),),
     )
 
     def choose(state: ExperimentState) -> list[Job]:
@@ -574,12 +615,24 @@ def test_queued_passes_retain_every_job_while_capacity_is_unavailable(
 
     experiment = Experiment(name="ppo", eval=choose)
     local = tmp_path / "evaluator"
-    first = advance(experiment, source=bucket, pool="occupied", directory=local, mode="queue")
+    first = advance(
+        experiment,
+        source=bucket,
+        pool="occupied",
+        directory=local,
+        mode="queue",
+    )
     assert len(first) == 2 and all(p.launched is not None for p in first)
     assert all(launcher.status(str(run.id)).phase == "queued" for run in launcher.launched)
-    again = advance(experiment, source=bucket, pool="occupied", directory=local, mode="queue")
+    again = advance(
+        experiment,
+        source=bucket,
+        pool="occupied",
+        directory=local,
+        mode="queue",
+    )
     assert all((p.running, p.launched) == (len(DEALS), None) for p in again)
-    assert len(launcher.launched) == 2
+    assert len(launcher.launched) == 1
     training.finish(timeout=30)
 
 
@@ -593,7 +646,7 @@ def test_a_pass_job_launched_as_given_is_refused_on_the_machine(tmp_path: Path) 
     job = definition.eval(observe(bucket, "ppo"))
     assert isinstance(job, Job)
     with pytest.raises(SystemExit, match="etude eval"):
-        _hold(evaluation_spec(job))
+        _hold(evaluation_group(job))
 
 
 def test_a_tracked_checkpoints_seat_says_where_its_run_stood_and_its_line(tmp_path: Path) -> None:
@@ -603,8 +656,9 @@ def test_a_tracked_checkpoints_seat_says_where_its_run_stood_and_its_line(tmp_pa
     run.finish(timeout=30)
     (saved,) = observe(bucket, "ppo").run("ppo-1").checkpoints
     assert saved.ref.at == saved.at
-    assert authored(saved.at) == authored(saved.player(DIRECT).checkpoint.at) == {"updates": 100}
-    assert saved.ref.line == saved.player(DIRECT).checkpoint.line == "ppo-1"
+    player = saved.player(Held())
+    assert authored(saved.at) == authored(player.checkpoint.at) == {"updates": 100}
+    assert saved.ref.line == player.checkpoint.line == "ppo-1"
 
 
 def test_a_checkpoint_carries_the_wall_time_its_record_stored(tmp_path: Path) -> None:
@@ -661,12 +715,12 @@ def test_a_finished_run_without_checkpoints_has_no_final(tmp_path: Path) -> None
 
 CAPACITY = """
 from etude.eval.match import environment
-from etude.eval.records import Aligned, Benchmark, Fraction, Inference, Seating
+from etude.eval.records import Aligned, Benchmark, Fraction, Held, Seating
 from etude.jobs import EvalJob
 from etude.report import Curve, Matches, Report, Score
 from tests.eval.games import play
 
-DIRECT = Inference(config={"search": 0})
+HELD = Held()
 DEALS = ({"deal": 0},)
 
 
@@ -674,13 +728,13 @@ def eval_jobs(state):
     seatings = (
         Seating(
             name="half-training",
-            players=(DIRECT, Fraction(clock="updates", value=0.5, inference=DIRECT)),
+            players=(HELD, Fraction(clock="updates", value=0.5)),
             configs=DEALS,
             games=2,
         ),
         Seating(
             name="large vs small",
-            players=(DIRECT, Aligned(clock="updates", job="small", inference=DIRECT)),
+            players=(HELD, Aligned(clock="updates", job="small")),
             configs=DEALS,
             games=2,
         ),
@@ -798,13 +852,18 @@ def test_a_failed_eval_holds_only_its_matches_within_the_same_tournament(
         save(training, bucket, tmp_path, range(1, 3))
         advance(experiment, source=bucket, mode="launch")
         (first,) = launcher.launched
-        first_keys = {match.key for match in evaluation_spec(first.job).matches or ()}
+        first_keys = {
+            match.key for match in evaluation_group(first.job).evaluations[0].matches or ()
+        }
         launcher.outcome = "failed"
         save(training, bucket, tmp_path, range(3, 5))
         with pytest.raises(EtudeError, match="launched_pass_failed"):
             advance(experiment, source=bucket, mode="launch")
         assert len(launcher.launched) == 2
-        new_keys = {match.key for match in evaluation_spec(launcher.launched[1].job).matches or ()}
+        new_keys = {
+            match.key
+            for match in evaluation_group(launcher.launched[1].job).evaluations[0].matches or ()
+        }
         assert new_keys and new_keys.isdisjoint(first_keys)
         assert len(new_keys) == 2 * len(DEALS)
     finally:
@@ -871,7 +930,7 @@ def test_stopped_eval_undelivered_matches_are_new_on_the_next_pass(
         save(training, bucket, tmp_path, range(1, 3))
         advance(experiment, source=bucket, mode="launch")
         (first,) = launcher.launched
-        spec = evaluation_spec(first.job)
+        spec = evaluation_group(first.job).evaluations[0]
         with (
             pytest.raises(Stopped),
             evaluating(
@@ -893,7 +952,7 @@ def test_stopped_eval_undelivered_matches_are_new_on_the_next_pass(
         assert decision.new == len(spec.matches or ()) > 0
         assert decision.running == decision.failed == 0
         assert decision.launched != first.id
-        assert evaluation_spec(launcher.launched[-1].job).matches == spec.matches
+        assert evaluation_group(launcher.launched[-1].job).evaluations[0].matches == spec.matches
     finally:
         training.finish(timeout=30)
 

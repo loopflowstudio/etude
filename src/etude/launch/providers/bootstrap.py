@@ -22,17 +22,10 @@ from pathlib import Path
 from typing import Protocol
 
 from etude.deadline import call, limit_time
+from etude.errors import explain
 from etude.launch.environment import install, startup_timeout
 from etude.launch.errors import ProviderUnavailable
-from etude.launch.logging import (
-    CLOSED,
-    Console,
-    explain,
-    log_to,
-    publish,
-    start_publication,
-    write_log,
-)
+from etude.launch.logging import CLOSED, Console, log_to, publish, start_publication, write_log
 from etude.launch.storage.transport import attribute, send
 
 

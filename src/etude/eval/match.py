@@ -9,8 +9,9 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel
 
 from etude.eval.records import (
     Environment,
@@ -18,10 +19,10 @@ from etude.eval.records import (
     Rollup,
     as_config,
 )
+from etude.eval.result import EvalResult as EvalResult
+from etude.eval.result import Result as Result
+from etude.eval.result import Tables as Tables
 from etude.eval.run import ETUDE_TABLES as ETUDE_TABLES
-from etude.eval.run import EvalResult as EvalResult
-from etude.eval.run import Result as Result
-from etude.eval.run import Tables as Tables
 from etude.eval.run import _evaluating_matches
 from etude.eval.source import digest_files
 from etude.storage import Storage
@@ -39,19 +40,22 @@ def environment(
     return Environment(name=name, files=digest_files(files), config=as_config(config))
 
 
-def evaluate[C: BaseModel | Mapping[str, JsonValue]](
+def evaluate(
     *,
     experiment: str,
     environment: Environment,
     matches: Sequence[Match],
-    play: Callable[[Match[C]], Tables | Result],
+    play: Callable[..., Tables | Result],
+    agents: Agents | None = None,
     workers: int = 1,
     run: str | None = None,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
     rollups: Sequence[Rollup] = (),
 ) -> EvalResult:
-    """Play every match not already stored in this eval run, `workers` at a time.
+    """Play every match not already stored in this eval run.
+
+    The deprecated workers option is ignored; Etude sizes the game pool.
 
     Matches start in the order `etude.eval.schedule.ordered` gives, so
     consecutive matches reuse the checkpoints the author's runtime keeps loaded.
@@ -62,10 +66,10 @@ def evaluate[C: BaseModel | Mapping[str, JsonValue]](
     totals are never taken again. Prints one line to
     stderr as each match is stored: how many of the pending are, and since
     when. Raises
-    `EtudeError("match_failed")` after recording the first match that raised,
-    returned no rows or returned rows Etude refuses. Delivery failures do not
-    raise: the files stay in the run's directory for `etude sync`, and stderr
-    says so.
+    `EtudeError("match_failed")` when a match raised, returned no rows or
+    returned rows Etude refuses, after retaining all in-flight outcomes.
+    Delivery failures raise RetryRequested; files stay in the run's directory
+    for `etude sync`.
     """
     warnings.warn(
         "evaluate is now evaluating(...), then run.play(play); removed in 0.5",
@@ -76,14 +80,13 @@ def evaluate[C: BaseModel | Mapping[str, JsonValue]](
         experiment=experiment,
         environment=environment,
         matches=matches,
-        workers=workers,
         run=run,
         directory=directory,
         storages=storages,
         rollups=rollups,
         resume=True,
     ) as active:
-        return active.play(play)
+        return active.play(play, agents=agents)
 
 
 def __getattr__(name: str) -> object:
@@ -96,3 +99,7 @@ def __getattr__(name: str) -> object:
         )
         return EvalResult
     raise AttributeError(name)
+
+
+if TYPE_CHECKING:
+    from etude.jobs import Agents

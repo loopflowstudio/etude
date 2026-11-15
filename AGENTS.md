@@ -98,6 +98,11 @@ short execution window used to test partial-output retention.
 Server fixtures call the CLI entry point in process and pass its explicit
 startup allowance: the installer must own its deadline and child cleanup, rather
 than an outer test timeout killing the client while installation continues.
+Scopes that change `TMPDIR` must restore `tempfile.tempdir` with the environment:
+Python caches its first temporary directory, which may be deleted on scope exit.
+Eval scratch and thread environments are configured only in dedicated child
+processes; pass their paths explicitly, since concurrent evals share the parent
+environment and tempfile cache.
 
 Commit messages say what changed and why in a sentence to a paragraph, not a
 list of edits. Never add Co-Authored-By or other AI attribution footers.
@@ -119,7 +124,7 @@ client dependency installation. The client and each job use separate environment
 `logging.py` and top-level `storage_timeout.py` are also in the standard-library
 bootstrap subset. New bootstrap imports must be present in both the guardian
 archive (`providers/package.py`) and SSH's pre-install loader (`ssh.py`). Operational errors
-use its sanitizer before retention; subprocess diagnostics omit argv and traceback
+use the shared sanitizer in `etude.errors` before retention; subprocess diagnostics omit argv and traceback
 locals. Journal log reads return `LogStream`, preserving missing versus silent
 output, and share the caller's monotonic deadline through `deadline.py`.
 HTTP body reads may run in a deadline-bounded thread; emit transfer observations
@@ -234,7 +239,32 @@ another machine comes with a counting test.
 
 Experiment declarations import `TrainingJob`, `EvalJob` and `ExperimentState`
 from `etude.jobs`, where they are defined. `etude.experiment` reads state; the
-worker startup path must not import either module.
+worker startup path must not import either module. Resolve an authored callable's
+source through `inspect.unwrap` before locating its file: a decorator is
+implemented in its own library, while the wrapped function belongs to the
+author's module.
+
+Experiment files import sibling game and loading modules by their top-level
+names; the declaration reader adds the file's directory to the import path.
+Game functions are importable top-level functions, including fixtures: the game
+pool imports their defining module and cannot inherit a parent closure.
+
+Eval vocabulary: `load(checkpoint)` returns a deterministic callable from a list
+of inputs to a list of outputs. `Agents` declares it and an optional game-side
+`build(player, leaves)`, whose return value belongs to the author and is never
+called by Etude. Sampling belongs in game code, seeded from `match.seed`. Player
+wrappers are frozen author records; checkpoint leaves share loading and batches.
+The shared agent process or each CPU game process holds checkpoint forwards;
+game processes build wrappers and play; say neither "server", "worker" nor "policy"
+for any of these ("policy" is reserved for policy keys).
+Etude sets the model-library thread environment before importing the checkpoint
+loading module. CPU game processes load through the same cache/eviction owner
+as shared GPU inference and report failures to the parent even when play catches them. Loaders must honor that inference budget when configuring
+their library; each game process keeps one thread.
+On visible NVIDIA hardware, active games fill the declared batch, bounded by
+pending matches and host memory. Probe hardware without importing the loader;
+code-only games keep CPU capacity and perform no GPU probe. Hardware capacity
+does not select the author's model device or promise GPU memory residency.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any

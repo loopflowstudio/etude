@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Iterator
 from hashlib import sha256
@@ -19,7 +20,7 @@ from etude.declarations import read_experiment
 from etude.errors import EtudeError
 from etude.eval.match import environment, evaluate
 from etude.eval.query import compare, statsdb
-from etude.eval.records import Benchmark, CheckpointPlayer, Code, Inference, Match, Player, Seating
+from etude.eval.records import Benchmark, CheckpointPlayer, Code, Held, Match, Player, Seating
 from etude.eval.run import Result
 from etude.eval.tournament import hold
 from etude.experiment import observe
@@ -29,12 +30,14 @@ from etude.report import Matches
 from etude.storage import DirectoryStorage, S3Storage, Storage
 from etude.train.tracking import TrainingRun, track
 from tests.eval.games import play, play_failing_deal_one, play_teams, play_with_evidence
+from tests.eval.stored import stored_inference
 from tests.experiments import authored, experiment_file
 from tests.run.storage import CountedClient, MeasuredStorage
 
 LAB = """
 from etude.eval.match import environment
-from etude.eval.records import (Benchmark, Code, Inference, Seating, CheckpointPlayer)
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import (Held,Benchmark, Code, Seating, CheckpointPlayer)
 from etude.checkpoints import CheckpointId, CheckpointRef
 from etude.records import ArtifactRef
 from etude.jobs import EvalJob
@@ -42,7 +45,7 @@ from etude.report import Anchors, Curve, Matches, Report, Score
 from tests.eval.games import play, play_failing_deal_one
 
 DUEL = environment("duel")
-DIRECT = Inference(config={"search": 0})
+DIRECT = stored_inference(config={"search": 0})
 DEALS = ({"deal": 0}, {"deal": 1})
 WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
 STRONG = Code(name="strong", source=[__file__], config={"strength": 9})
@@ -52,7 +55,7 @@ OUTSIDE = CheckpointPlayer(
         address="hf://lab/outside.pt",
         artifact=ArtifactRef(uri="hf://lab/outside.pt", sha256="ab" * 32),
     ),
-    inference=Inference(config={"strength": 5}),
+    config={"strength": 5},
 )
 
 
@@ -291,11 +294,12 @@ def test_a_report_reads_no_checkpoint_bytes(lab: tuple[Path, Path], page: Page) 
 
 VERSIONED = """
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Inference, Seating
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import Held, Benchmark, Code, Seating
 from etude.jobs import EvalJob
 from tests.eval.games import play
 
-DIRECT = Inference(config={"search": 0})
+DIRECT = stored_inference(config={"search": 0})
 WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
 
 
@@ -374,11 +378,21 @@ def outside(
         at=at,
         line=line,
     )
-    return CheckpointPlayer(name=name, checkpoint=ref, inference=Inference(config=config))
+    return CheckpointPlayer(name=name, checkpoint=ref, config={**config})
 
 
 def duel(first: Player, second: Player, deal: int = 0) -> Match:
     return Match(players=(first, second), config={"deal": deal}, games=2)
+
+
+def recorded_execution(match: Match, agents: list[object]) -> Result:
+    return Result(
+        tables=play(match, agents),
+        execution={
+            "device": os.environ["ETUDE_TEST_DEVICE"],
+            "compute": os.environ["ETUDE_TEST_COMPUTE"],
+        },
+    )
 
 
 def test_mixed_execution_fills_requested_games_and_replays_count_once(
@@ -391,18 +405,17 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
     monkeypatch.setattr(sys, "path", list(sys.path))
     checkpoint = outside("u100", {"updates": 100}, "learner").checkpoint
 
-    def recorded(match: Match) -> Result:
-        return Result(tables=play(match), execution={"device": device, "compute": compute})
-
     for run, device, compute, commit in (
         ("cpu", "cpu", "serial", "a" * 40),
         ("cuda", "cuda:0", "shared-eval-v2", "b" * 40),
     ):
+        monkeypatch.setenv("ETUDE_TEST_DEVICE", device)
+        monkeypatch.setenv("ETUDE_TEST_COMPUTE", compute)
         monkeypatch.setenv("ETUDE_COMMIT", commit)
         monkeypatch.setenv("ETUDE_RUN", run)
         seating = Seating(
             name="vs heuristic",
-            players=(Inference(source=[file], config={"search": 0}), HEURISTIC),
+            players=(stored_inference(source=[file], config={"search": 0}), HEURISTIC),
             configs=({"deal": 0}, {"deal": 1}),
             games=2,
         )
@@ -413,7 +426,7 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
             experiment="lab",
             checkpoints=[checkpoint],
             matches=matches[:1] if run == "cpu" else None,
-            play=recorded,
+            play=recorded_execution,
             directory=runs,
         )
         assert held.played == 1
@@ -424,12 +437,13 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
             )
 
     # A replay on another setup still names the same requested games and seed.
-    device, compute = "mps", "serial"
+    monkeypatch.setenv("ETUDE_TEST_DEVICE", "mps")
+    monkeypatch.setenv("ETUDE_TEST_COMPUTE", "serial")
     evaluate(
         experiment="lab",
         environment=DUEL,
         matches=matches[:1],
-        play=recorded,
+        play=recorded_execution,
         run="z-replay",
         directory=runs,
     )
@@ -439,7 +453,7 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
             benchmark,
             experiment="lab",
             checkpoints=[checkpoint],
-            play=recorded,
+            play=recorded_execution,
             directory=runs,
         ).played
         == 0
@@ -461,6 +475,7 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
             " using (run, match) where s.seat = 0 order by m.run"
         ).fetchall()
         # A schema-8 cache has no execution column; rebuilding must recover provenance.
+        db.execute("drop index matches_identity")
         db.execute("alter table matches drop column execution")
         db.execute("update kept.statsdb set schema = 8")
     with statsdb("lab", runs) as db:
@@ -693,8 +708,8 @@ def test_a_tracked_checkpoint_is_placed_by_its_seat_first_and_its_training_recor
         experiment="seated",
         environment=DUEL,
         matches=[
-            duel(Inference().player(bare), HEURISTIC),
-            duel(Inference().player(moved), HEURISTIC),
+            duel(Held().player(bare), HEURISTIC),
+            duel(Held().player(moved), HEURISTIC),
         ],
         play=play,
         run="plain",
@@ -770,7 +785,7 @@ def test_a_continued_run_is_one_line_with_the_run_it_continues(
     # Seated with no line, as matches recorded before seats carried one: each checkpoint's
     # line is its training run's, the first run of its chain.
     unlined = [
-        Inference().player(CheckpointRef(address=each.key, artifact=each.artifact, at=each.at))
+        Held().player(CheckpointRef(address=each.key, artifact=each.artifact, at=each.at))
         for each in saved
     ]
     evaluate(
@@ -949,14 +964,15 @@ def _attempt(key: str) -> bool:
 
 REVISED = """
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Inference, Seating
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import Held, Benchmark, Code, Seating
 from etude.jobs import EvalJob
 from etude.report import Curve, Matches, Report, Score
 from tests.eval.games import play
 
 # A later revision of the file: its environment carries another source digest.
 DUEL = environment("duel", config={"source": SOURCE})
-DIRECT = Inference(config={"search": 0})
+DIRECT = stored_inference(config={"search": 0})
 WEAK = Code(name="weak", source=[__file__], config={"strength": 0})
 
 
@@ -999,11 +1015,10 @@ def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
         "Tournament ladder is drawn as its eval runs recorded it:"
         " eval_jobs(state) now defines it otherwise (tournament_conflict)."
     ]
-    # What the report path lists and reads for one training run and one eval run, pinned:
-    # its eval runs share the page's one discovery, so each file is read once. The eval
-    # run's tables come from the cache the first build filled.
-    assert (storage.listings, storage.requests) == (2, 9)
-    assert len(storage.got) == len(set(storage.got))
+    # Two completed matches have separate block indices; their tables stay cached.
+    assert sum(key.endswith("/block.json") for key in storage.got) == 2
+    assert not any(key.endswith(".parquet") for key in storage.got)
+    assert (storage.listings, storage.requests) == (2, 10)
     # Scheduling new games still needs the definition to agree.
     with pytest.raises(EtudeError, match="tournament_conflict"):
         advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)
@@ -1011,7 +1026,8 @@ def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
 
 SETUPS = """
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Inference, Seating
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import Held, Benchmark, Code, Seating
 from etude.jobs import EvalJob
 from etude.report import Curve, Matches, Report, Score
 from tests.eval.games import play
@@ -1020,7 +1036,7 @@ from tests.eval.games import play
 def ladder(name, device):
     # How it runs is setup: the CUDA ladder is the CPU one's environment and players.
     duel = environment("duel", config={"world": "w6", "setup": {"device": device}})
-    direct = Inference(config={"search": 0, "setup": {"device": device}})
+    direct = stored_inference(config={"search": 0, "setup": {"device": device}})
     weak = Code(name="weak", config={"strength": 0, "setup": {"device": device}})
     seating = Seating(name="vs weak", players=(direct, weak), configs=({"deal": 0},), games=2)
     return Benchmark(name=name, environment=duel, seatings=(seating,))

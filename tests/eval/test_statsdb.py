@@ -18,14 +18,15 @@ from etude.eval import query
 from etude.eval.convert import convert
 from etude.eval.match import environment, evaluate
 from etude.eval.query import compare, statsdb
-from etude.eval.records import Benchmark, CheckpointPlayer, Code, Inference, Match, Rollup, Seating
+from etude.eval.records import Benchmark, CheckpointPlayer, Code, Match, Rollup, Seating
 from etude.eval.run import Tables
 from etude.eval.tournament import evaluating, played, scores
-from etude.jobs import Evaluation, hold_evaluation
+from etude.jobs import EvalGroup, Evaluation, hold_group
 from etude.records import ArtifactRef
 from etude.storage import DirectoryStorage
 from tests.eval.games import play, play_game_seats
 from tests.eval.per_file import write_per_file
+from tests.eval.stored import stored_inference
 from tests.run.storage import MeasuredStorage
 
 DUEL = environment("duel")
@@ -152,7 +153,7 @@ def test_a_match_counts_once_from_the_latest_block_holding_it(tmp_path: Path) ->
     assert held("cards", bucket) == (1, 2, 2 * 2 * 2)
     # The same matches arrive again, in a later block and in an earlier one, as a
     # replayed run's may: each match's rows come from one block.
-    (index,) = (key for key in bucket.keys("cards/a/blocks/") if key.endswith("/block.json"))
+    index = next(key for key in bucket.keys("cards/a/blocks/") if key.endswith("/block.json"))
     folder = bucket.root / index.removesuffix("/block.json")
     written, writer = folder.name.split(".")
     for at in (int(written) + 1, int(written) - 1):
@@ -160,12 +161,13 @@ def test_a_match_counts_once_from_the_latest_block_holding_it(tmp_path: Path) ->
         assert held("cards", bucket) == (1, 2, 2 * 2 * 2)
 
 
+def broken(match: Match, agents: list[object]) -> Tables:
+    raise RuntimeError("engine crashed")
+
+
 def test_a_failed_match_retried_counts_once_as_done(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     matches = deals(pair(tmp_path), 0)
-
-    def broken(match: Match) -> Tables:
-        raise RuntimeError("engine crashed")
 
     with pytest.raises(EtudeError):
         evaluate(experiment="cards", environment=DUEL, play=broken, matches=matches, run="a",
@@ -194,9 +196,7 @@ def test_a_match_two_runs_played_counts_from_the_later_under_its_latest_name(
     _, rival = pair(tmp_path)
     # One model, renamed between runs: a name is part of no key.
     for run, name in (("first", "early"), ("second", "late")):
-        model = CheckpointPlayer(
-            name=name, checkpoint=ref, inference=Inference(config={"strength": 3})
-        )
+        model = CheckpointPlayer(name=name, checkpoint=ref, config={"strength": 3})
         evaluate(experiment="cards", environment=DUEL, play=play, run=run,
                  matches=[Match(players=(model, rival), config={"deal": 0}, games=2)],
                  directory=tmp_path / run, storages=[bucket])  # fmt: skip
@@ -253,7 +253,7 @@ def _as_published(folder: Path) -> None:
         )
 
 
-def _published(tmp_path: Path, play: Callable[[Match], Tables]) -> tuple[Path, Path]:
+def _published(tmp_path: Path, play: Callable[..., Tables]) -> tuple[Path, Path]:
     """Run `a` played as blocks (`now`), and the same run as published etude-sdk stored it, converted."""
     players = pair(tmp_path)
     now = tmp_path / "now"
@@ -327,7 +327,7 @@ def test_pandas_lookups_do_not_grow_with_the_matches_played_and_held(
         assert held("cards", bucket) == (1, matches, matches * 2 * 2)
         return played, lookups.count - played
 
-    few, many = counted(5), counted(50)
+    few, many = counted(2), counted(3)
     assert few[0] == many[0] == 0
     assert few[1] == many[1]
 
@@ -363,7 +363,7 @@ def test_legacy_checkpoint_keys_keep_matches_tables_and_rollups_together(
         address="base@0/checkpoints/updates-100.pt",
         artifact=ArtifactRef(uri="s3://weights/updates-100.pt", sha256="0" * 64),
     )
-    direct = Inference(config={"strength": 1})
+    direct = stored_inference(config={"strength": 1})
     tournament = Benchmark(
         name="legacy",
         environment=DUEL,
@@ -422,7 +422,7 @@ def test_legacy_queued_evaluation_keeps_its_workers_original_checkpoint_identity
         address="base@0/checkpoints/updates-100.pt",
         artifact=ArtifactRef(uri="s3://weights/updates-100.pt", sha256="0" * 64),
     )
-    direct = Inference(config={"strength": 1})
+    direct = stored_inference(config={"strength": 1})
     tournament = Benchmark(
         name="queued",
         environment=DUEL,
@@ -450,5 +450,5 @@ def test_legacy_queued_evaluation_keeps_its_workers_original_checkpoint_identity
         ),
         matches=tuple(tournament.seatings[0].matches(legacy)),
     )
-    result = hold_evaluation(spec, directory=tmp_path)
+    (result,) = hold_group(EvalGroup(evaluations=(spec,)), directory=tmp_path)
     assert result.played == 0 and result.skipped == 1

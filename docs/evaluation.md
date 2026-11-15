@@ -1,6 +1,6 @@
 # Evaluation
 
-Play players against each other in parallel workers, hand Etude whatever tables
+Play players against each other in parallel game processes, hand Etude whatever tables
 your game code produces, and query each experiment's results as one DuckDB
 database. Tournaments decide which matches to play: each checkpoint of a run
 through a benchmark's seatings as it trains, or hand-picked players in a round
@@ -19,14 +19,17 @@ from etude.eval.records import (
     Benchmark,
     Code,
     Fraction,
-    Inference,
+    Held,
+    Seat,
+    compose,
     Match,
     RoundRobin,
     Seating,
 )
 from etude.eval.tournament import evaluating, scores, standings
 from etude.experiment import observe
-from etude.checkpoints import CheckpointRef
+from etude.checkpoints import CheckpointRef, PolicyKey
+from etude.records import Record
 
 world = environment("allies-vs-lessons", files=["game/"], config={"world": "w6"})
 
@@ -40,7 +43,9 @@ heuristic = Code(name="heuristic", source=["players/heuristic.py"])
 greedy = Code(name="greedy", source=["players/greedy.py"])
 
 
-def play(match: Match[Deal]) -> Tables:  # importable by name: workers are fresh processes
+def play(
+    match: Match[Deal], agents: list[object]
+) -> Tables:  # importable by name: games play in fresh processes
     results = play_deal(match.players, deal=match.config.deal, games=match.games, seed=match.seed)
     return {
         "plays": [
@@ -57,10 +62,15 @@ def play(match: Match[Deal]) -> Tables:  # importable by name: workers are fresh
     }
 
 
-# An Inference seat is filled by the checkpoint being held, run by your inference code
-# and playing with your config (a Pydantic model or JSON): together, a player.
-net = ["players/net.py"]
-direct = Inference(source=net, config=Direct())
+# A bare checkpoint is the default player. Wrappers are your records.
+class PUCT(Record):
+    over: Seat
+    belief: Seat | None = None
+    simulations: int = 64
+
+
+direct = Held()
+search = compose(PUCT(over=direct))
 progress = Benchmark(
     name="anchors",
     environment=world,
@@ -79,7 +89,7 @@ progress = Benchmark(
         ),
         Seating(
             name="search vs no search",
-            players=(Inference(source=net, config=PUCT(simulations=64)), direct),
+            players=(search, direct),
             configs=deals[:10],
             games=4,
         ),
@@ -103,12 +113,12 @@ with evaluating(progress, experiment="ppo", checkpoint=ref, storages=[bucket], l
 
 # Batch: add a seating to the definition; holding with no checkpoint plays every
 # missing match, so the new seating is played for every checkpoint held so far.
-with evaluating(progress, experiment="ppo", workers=8, storages=[bucket], lines=lines) as run:
+with evaluating(progress, experiment="ppo", storages=[bucket], lines=lines) as run:
     run.play(play)
 
 # Batch: hand-picked players, each against every other.
 league = RoundRobin(name="finals-1", environment=world, configs=deals, games=8)
-with evaluating(league, experiment="ppo", enter=finals, workers=8, storages=[bucket]) as run:
+with evaluating(league, experiment="ppo", enter=finals, storages=[bucket]) as run:
     run.play(play)
 
 db = statsdb("ppo", bucket)  # or "s3://my-bucket/runs", a directory, or nothing: ~/.etude/track
@@ -131,6 +141,8 @@ an explicit match list; `run.play(play)` plays its unstored matches.
 Outside a launch, give `experiment=`. `run.should_stop` checks
 stop requests between matches; a planned stop seals completed tables and
 raises `Stopped`. `hold` and `evaluate` are warning wrappers until 0.5.
+Games play in fresh `multiprocessing` spawn processes, which import the calling
+script again: a script keeps `run.play` under `if __name__ == "__main__":`.
 
 ```python
 from etude.eval.tournament import evaluating
@@ -146,40 +158,35 @@ with evaluating(
             games=4,
         )
     ],
-    workers=4,
     storages=[bucket],
 ) as run:
     run.play(play)
 ```
 
-- **Relative seats use the held checkpoint's play by default.** Write
-  `players=(direct, Final(experiment="tla-frontier", job="small"))`.
-  Give `inference=search` on the relative seat only to compare different play.
-- **Players.** A player is whatever takes a seat: a checkpoint and the code
-  that plays it (`Inference`), or `Code` alone, such as a heuristic. "Model"
-  is left to mean your network. A checkpoint player's
-  key is the checkpoint's own key plus its inference config; code's is its
-  name plus its config. A config is free JSON or a Pydantic model. One
-  checkpoint at two search budgets is two players. A checkpoint's key
-  (`CheckpointRef.key`) is its experiment, training run and name
-  (`ppo/base@1/checkpoints/updates-00000500`) or, for any other, its address;
-  never its bytes, so two runs started from one file hold two checkpoints,
-  each evaluated. The experiment is part of the key, so two experiments'
-  `base@1` are different checkpoints, and a match seating the same players
-  has one key in every experiment that plays it ([Policies](#policies)).
-  Give the policy parts directly to `CheckpointRef(experiment="ppo", job="base",
-  seed=1, name="updates-500.pt", artifact=saved)`, or use
-  `key.checkpoint(name="updates-500.pt", artifact=saved)`. Its `.policy` owns
-  those parts and `.key` is derived; neither `key=` nor `policy=` is a
-  constructor argument. Omitted parts use `PolicyKey` defaults, resolved from
-  the `lines` supplied to `evaluating` or `played` before scheduling.
-  An outside checkpoint is `CheckpointRef(address="hf://lab/weights.pt", artifact=saved)`. `Inference(source=["players/net.py"], config=...).player(ref)` and
-  `Code(name="heuristic", source=[...])` name the code that plays: its commit
-  and source digest are its `Version`, recorded with each match
-  (`seats.commit`, `seats.source`) but not part of the key, so changed code
-  reuses what was played. Joins use the key, encoded (`players.player`,
-  `seats.player`). Eval runs stored before this wording keep `"kind":
-  "model"` and read the same.
+- **Players.** A checkpoint seat is a player: `Held()` for the checkpoint
+  being evaluated, `Held().player(ref)` for a fixed checkpoint, or a relative
+  seat below. Wrap seats in your own frozen Pydantic records to describe search,
+  belief models or other composition; Etude interprets only their checkpoint
+  leaves. `compose(record)` makes the record portable and gives it a key; a
+  seating also accepts the author record directly. The whole wrapper type and
+  its fields identify the player, with each resolved leaf replaced by its
+  checkpoint key. A bare network, search over it, and search using another
+  belief model are three players. Nesting wrappers and containers works too.
+  Results and reports name a wrapper by its qualified type and fields, such as
+  `search:PUCT(over=small, simulations=64)`, distinguishing same-named types
+  from different modules.
+  `Code(name="heuristic", source=[...], config=...)` still names code players.
+  Code's version records source provenance without changing its key.
+  A checkpoint's key includes its experiment, training run and file name, or its outside address,
+  never its bytes or current location. Released inference-configured players
+  remain readable under their original keys, so their matches stay delivered.
+  Give policy parts to `CheckpointRef(experiment="ppo", job="base", seed=1,
+  name="updates-500.pt", artifact=saved)`, or use
+  `key.checkpoint(name="updates-500.pt", artifact=saved)`. An outside checkpoint
+  uses `CheckpointRef(address="hf://lab/weights.pt", artifact=saved)`.
+  Resuming a run accepts moved checkpoint files, including leaves inside
+  wrappers, without replaying delivered matches. Their digests and byte lengths
+  must still agree with the stored references.
 - **A checkpoint is a folder or a file.** `play` finds it at the player's
   `checkpoint.path`. A checkpoint a run published from named objects
   (`run.checkpoint(policy=model)`, [Training](training.md#checkpoints)) is a
@@ -192,10 +199,9 @@ with evaluating(
   policy.load_state_dict(torch.load(folder / files["policy"]))
   ```
 
-  One checkpoint holding several models is still one checkpoint. Two
-  `Inference` seats with different source seat it as two players: one that
-  loads every file to draft, build and play, and one that loads only
-  `player.pt`. A checkpoint recorded as a single file is that file.
+  One checkpoint holding several models is still one checkpoint. An author's
+  wrappers select how to use its loaded agent. A checkpoint recorded as a
+  single file is that file.
 - **Setup.** How a game is run, such as the device or dtype, is provenance,
   like the seed, and is said in two places. What `play` is asked to run with
   goes under a `setup` key of the environment's or a player's config:
@@ -209,7 +215,7 @@ with evaluating(
   counts for both, and their games pool. Requested games may finish across
   any setups; a replay's latest delivered result counts once in reports.
   Etude never guesses which fields are setup: anything outside `setup`,
-  in `Inference.config`, `Code.config` or match config, is identity, and
+  in a wrapper, `Code.config` or match config, is identity, and
   older configs keep theirs. `execution` on older records reads as `{}`.
 - **Where a checkpoint stood.** A seated checkpoint may say where it stood on
   its clocks: `CheckpointRef(address=..., artifact=..., at={"updates": 600})`.
@@ -242,7 +248,7 @@ with evaluating(
   them as played.
 - **Match config.** Your Pydantic model, such as `Deal`, describes one
   match's settings. `Seating(configs=(Deal(deal=7), ...))` makes a match for
-  each config. Annotate `play(match: Match[Deal])` to receive that type,
+  each config. Annotate `play(match: Match[Deal], agents: list[object])` to receive that type,
   including in worker processes. Etude defines no match config base class.
   The JSON values identify the match; the Python class name does not. Stored
   `conditions` still reads, and the old keyword/property warns until 0.5.
@@ -250,12 +256,15 @@ with evaluating(
   `games`: the unit Etude schedules, resumes and resamples. A tournament's
   `Seating` makes one match per config. Seat swaps belong
   inside `play`. Group `all` holds every seat; a player may sit in two seats.
-- **Order.** Matches start, `workers` at a time, in the order
-  `etude.eval.schedule.ordered` gives, so consecutive matches reuse the
-  checkpoints your inference runtime keeps loaded: first those loading the
-  fewest checkpoints not yet used, then those reusing the most recently used.
-  Ties, and queues of code players only, keep your order. Order changes no
-  result. Your runtime counts its loads; Etude does not.
+- **Game processes.** Matches are played in fresh processes, as many at once
+  as the run has CPUs, by affinity and container quota, and never more than
+  there are matches. `evaluating` has no setting for the number; a job that
+  declares [agents](#agents) has it sized for them too.
+- **Order.** Matches start in the order `etude.eval.schedule.ordered` gives,
+  so consecutive matches reuse the checkpoints kept loaded: first those
+  loading the fewest checkpoints not yet used, then those reusing the most
+  recently used. Ties, and queues of code players only, keep your order.
+  Order changes no result.
 - **Rows are yours.** `play` returns any tables. Each row names a `seat`
   (its position in `match.players`) or a `group` of its match; Etude adds `run` and `match`. Values are
   numbers, text, booleans or nulls. A game's own seat numbering, when it
@@ -310,8 +319,9 @@ with evaluating(
   `seat` and `group`, a seat or group the match lacks, a column named
   `player`, or a column whose type changes during a run is refused. A refused
   or raising match is recorded as failed with its error, nothing else of it
-  is stored, and the run stops and ends failed. When a match cannot be
-  played, let `play` raise: an error caught and returned as empty tables is
+  is stored. The run stops starting matches, retains in-flight outcomes and
+  ends failed. When a match cannot be played, let `play` raise: an error
+  caught and returned as empty tables is
   still refused (`match_has_no_rows`), never stored as a result.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each value from one environment.
@@ -356,8 +366,8 @@ with evaluating(
 
   | Seat | Seats |
   |---|---|
-  | `Inference(source=net, config=Direct())` | the held checkpoint, playing with that config |
-  | `Code(name="heuristic", ...)`, or `Inference(...).player(ref)` | the same fixed player for every checkpoint: code, or one chosen checkpoint such as the initialization or a frozen anchor |
+  | `Held()` | the held checkpoint, played directly |
+  | `Code(name="heuristic", ...)`, or `Held().player(ref)` | the same fixed player for every checkpoint: code, or one chosen checkpoint such as the initialization or a frozen anchor |
   | `Earlier(clock="updates", by=400)` | the held checkpoint's line exactly 400 updates before it |
   | `Fraction(clock="updates", value=0.5)` | its line at exactly half the held checkpoint's updates (3,000 for 6,000) |
   | `Fraction(clock="running_hours", value=0.5, at_or_before=True)` | its line's latest checkpoint at or before half the held checkpoint's running hours |
@@ -366,12 +376,11 @@ with evaluating(
   | `Final()` | its line's last checkpoint, once its run has ended |
   | `Aligned(clock="updates", job="small")` | job `small` at exactly the held checkpoint's updates |
   | `Aligned(clock="running_hours", job="small", at_or_before=True)` | job `small`'s latest checkpoint at or before the held checkpoint's running hours |
-  | `Final(experiment="tla-frontier", job="small")` | the final checkpoint of job `small` of another experiment, `tla-frontier` |
-  | `Final(policy=PolicyKey(experiment="tla-frontier", job="small"))` | the final checkpoint of that one policy: the job's lowest seed |
+  | `Final(experiment="tla-frontier", job="small")` | every seed of another experiment's job |
+  | `Final(policy=PolicyKey(experiment="tla-frontier", job="small"))` | one policy, using its lowest seed by default |
 
   The remaining rows are relative seats: each names a checkpoint by where it
-  stands relative to the one held, and uses the held checkpoint's play unless
-  given its own `inference`.
+  stands relative to the one held, and supplies that checkpoint as a leaf. Wrap a relative seat in the same author records as a held or fixed seat.
   `Earlier`, `Fraction`, `At` and `Final` look in the held checkpoint's own
   line unless given a policy selector: `Final(job="small")` seats
   job `small`'s final checkpoint, `At(clock="updates", value=0, job="small",
@@ -399,7 +408,7 @@ with evaluating(
   (`observe(source, experiment).lines` for each), held or not; `etude eval`
   and `etude launch` pass them themselves.
   A seating against a fixed player and one against a relative seat are held,
-  scored and drawn alike. A seating with a relative seat needs an inference
+  scored and drawn alike. A seating with a relative seat needs a held
   seat to be relative to. A seating of two fixed players, such as two jobs'
   checkpoints chosen in `eval_jobs(state)`, is drawn at its first seat's checkpoint,
   so `Curve(matches=...)` over such seatings draws each pair once.
@@ -449,14 +458,14 @@ with evaluating(
   and the seed sets, the same pair at every point: faster, but the curve
   shows one pair of seeds, not the jobs. A seed added later changes the
   split, so that job's points are played again and count only the new one.
-- **Pairs of checkpoints.** A seating with no inference seat is played once,
+- **Pairs of checkpoints.** A seating with no held seat is played once,
   not per checkpoint, so chosen checkpoints can meet: seat each as
-  `Inference(...).player(ref)`, the player an inference seat would make of it.
+  `Held().player(ref)`, the player a held seat would make of it.
   Prefer a relative seat where one says the rule; hand-built pairs suit a
   rule none states. Hold such a benchmark in batch whenever more checkpoints
   appear; each pass plays only the pairs not yet delivered. A hold on the go
   leaves these seatings to batch. Their rows are `schedule` rows with no
-  `checkpoint`; `scores` follows only seatings with an inference seat.
+  `checkpoint`; `scores` follows only seatings with a held seat.
 - **Round robins.** `evaluating(round_robin, enter=players)` plays every pair of
   the players given once per config; seat swaps belong inside `play`.
   `evaluating(round_robin)` then plays every pair of every entrant so far that no
@@ -483,10 +492,10 @@ with evaluating(
   not refused: where a later revision of an experiment file defines a
   tournament otherwise than its eval runs were held with, `etude report`
   draws what they recorded and says so.
-- **Run names.** Under `etude launch` the eval run is the launched run
-  (`ETUDE_RUN`), so `etude logs` and `status` lead to it and a retry resumes
-  it, finding the same checkpoint (by its key) wherever the retry put it.
-  Elsewhere it is named for the tournament and what is given.
+- **Run names.** An eval run is named for the tournament and what is given,
+  or, played by an [evaluation job](#evaluation-jobs), for the tournament and
+  its matches, so a retry reopens and resumes it, finding the same checkpoint
+  (by its key) wherever the retry put it.
 - **Splitting.** `share=Share(index=k, count=n)` plays part k (from 0) of
   n disjoint parts, for n machines: contiguous runs of the scheduled matches
   in play order, so parts differ by at most one match and each seats only
@@ -522,7 +531,7 @@ from decimal import Decimal
 
 from etude.jobs import EvalJob, ExperimentState
 
-from arena import play, progress  # play(match) -> Tables; progress is a Benchmark
+from arena import play, progress  # play(match, agents) -> Tables; progress is a Benchmark
 
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
@@ -532,7 +541,6 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
             play=play,
             tournament=progress,
             checkpoints=finals,
-            workers=8,
             max_hours=0.5,
             max_usd=Decimal(1),
         )
@@ -570,13 +578,290 @@ On the machine Etude opens `evaluating(tournament)` and calls `run.play(play)`,
 with `play` imported by name from your checkout and every checkpoint member
 delivered as an input verified by digest. The record keeps its checkpoint key,
 and its delivered folder or file is each player's `checkpoint.path`, which `play`
-opens. A single-file `Input` is also accepted. The eval run is the launched
-run, so its tables reach the
-machine's storage with the run's other files and `statsdb` finds them there.
-A launched eval run reads no other eval run: the pass that launched it decided
-which matches are new and gave it exactly those ([Experiments](#experiments)).
-The job's environment needs `etude-sdk[eval]`; the rest is as for any
-[typed job](launcher.md#typed-jobs).
+opens. A single-file `Input` is also accepted. The job's environment needs
+`etude-sdk[eval]`; the rest is as for any [typed job](launcher.md#typed-jobs).
+
+Eval jobs that can run together share a launched run
+([Experiments](#experiments)). Its tournaments play at once in one set of
+game processes, and Etude decides how many games are active
+([Agents](#agents)); an eval job has no setting for it.
+Each writes its own eval run below the launched run's folder
+(`capacity/evals-1a2b3c4d5e6f/capacity/ladder-3c4d5e6f7a8b/`). Their tables
+reach the machine's storage with the run's other files and `statsdb` finds
+them there, by tournament and match as before. A launched run reads no other
+eval run: the pass that launched it decided which matches are new and gave it
+exactly those.
+
+### Agents
+
+```python
+# arena_game.py: the game. It imports no model library.
+from collections.abc import Sequence
+from random import Random
+
+from etude.eval.agents import Forward
+from etude.eval.records import Match
+from etude.eval.result import Tables
+
+
+def play(match: Match[Deal], agents: Sequence[Forward]) -> Tables:
+    random = Random(match.seed)
+    plays = []
+    for game in range(match.games):
+        state = deal(match.config.deal, seed=match.seed + game)  # your game
+        while not state.over:
+            [logits] = agents[state.seat]([state.view()])
+            action = choose(logits, random)  # your sampling or greedy choice
+            state = state.step(action)
+        plays += [
+            {"game": game, "seat": seat, "score": state.score(seat)}
+            for seat in range(len(match.players))
+        ]
+    return {"plays": plays}
+```
+
+```python
+# arena_models.py: how a checkpoint is loaded. It may import Torch.
+import os
+
+import numpy as np
+import torch
+
+from etude.eval.agents import Forward
+from etude.checkpoints import CheckpointRef
+
+
+class Net:
+    def __init__(self, checkpoint: CheckpointRef, device: str) -> None:
+        self.device = device
+        self.model = read_model(checkpoint.path).to(device).eval()  # your code
+
+    def __call__(self, inputs: list[object]) -> list[object]:
+        views = torch.from_numpy(np.stack(inputs)).to(self.device)
+        with torch.no_grad():
+            logits, values = self.model(views)
+        return list(logits.cpu().numpy())
+
+
+def load(checkpoint: CheckpointRef) -> Forward:
+    torch.set_num_threads(int(os.environ["OMP_NUM_THREADS"]))
+    return Net(checkpoint, device="cuda")
+```
+
+```python
+# capacity.py, the experiment file under Experiments below, its two jobs declaring agents
+from etude.jobs import Agents, EvalJob, ExperimentState
+
+from arena_game import play
+from arena_models import load
+
+
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    ...
+    net = Agents(load=load)
+    return [
+        EvalJob(play=play, tournament=ladder, checkpoints=rated, agents=net, max_hours=1),
+        EvalJob(play=play, tournament=against_small, checkpoints=large, agents=net, max_hours=1),
+    ]
+```
+
+```text
+$ etude eval capacity.py --source s3://bucket/etude/launch  # on a visible NVIDIA GPU
+capacity: state from s3://bucket/etude/launch: 6 training runs, 2 eval runs
+etude: agents: started for ladder, against small; 32 games at a time; 4 inference threads
+etude: agents: loaded large@0/updates-00001000
+...
+etude: agents: stopped; 9 checkpoints loaded, 41280 inputs in 1612 batches
+eval ladder: 48 new, 0 running, 0 failed, 48 played
+eval against small: 24 new, 0 running, 0 failed, 24 played
+```
+
+You write the game and `load(checkpoint)`. On visible NVIDIA hardware, Etude
+starts light game processes and one agent process, which loads checkpoint
+leaves and batches inputs across games and tournaments. On CPUs, each game
+process loads and calls forwards directly. A bare checkpoint seat is its loaded
+forward. Code and wrapped players use `Agents(build=build)`: an importable hook
+run in the game process, receiving the reconstructed author record and a mapping
+from checkpoint key to forward.
+
+```python
+# arena_game.py: this module may import wrapper types, never the model loader.
+from collections.abc import Mapping
+
+from etude.eval.agents import Forward
+from etude.eval.records import CheckpointPlayer
+
+
+def build(player: object, leaves: Mapping[str, Forward]) -> object:
+    if isinstance(player, CheckpointPlayer):
+        return leaves[player.checkpoint.key]
+    if isinstance(player, PUCT):
+        return SearchAgent(
+            over=build(player.over, leaves),
+            belief=None if player.belief is None else build(player.belief, leaves),
+            simulations=player.simulations,
+        )  # your search implementation
+    if isinstance(player, Code):
+        return Heuristic(player.name)
+    raise TypeError(f"unknown player {type(player).__name__}")
+
+
+net = Agents(load=load, build=build)
+# Nested search and its bare network share one loaded checkpoint.
+deep_search = compose(PUCT(over=compose(PUCT(over=Held())), simulations=256))
+```
+
+The hook runs once per seat per match. Search runs in that game process;
+network calls through `leaves` use local forwards on CPUs and shared batching on GPUs. Etude
+delivers and verifies all checkpoint leaves before games start. Use module-level
+wrapper classes, so games can import them by name. The runnable
+[`examples/agents.py`](../examples/agents.py) compares two sampled players
+and a bare greedy checkpoint in two tournaments; its second pass plays nothing.
+
+Code and API players can use `Agents(build=build)` without a loader.
+The CPU forward comparison selected direct loading: 46.36 s against 66.67 s
+for the best shared (seven-process) arm on the 64-game panel. Every arm matched
+10,044 decisions. One host and one pass per cell limit this result; the earlier
+GPU comparisons describe shared inference before this cut.
+
+- **A forward is a callable.** It takes a list of inputs and returns a list
+  of outputs (such as logits and values), one per input, in order. `Forward`
+  is a callable type alias, not a base class. Outputs must be deterministic
+  and independent of the other inputs sharing a batch.
+- **`agents` has one value per seat**, in the order of `match.players`.
+  Without `build`, each bare checkpoint is its forward:
+  `agents[seat](inputs)` calls it locally on CPUs or sends inputs to the shared
+  agent process on GPUs and waits for outputs. With `build`, each value is whatever your hook returns; Etude
+  never calls that object. Your game chooses its interface.
+- **Search can send a whole list.** Magic Mirror Descent can advance all
+  world/action branches in lockstep, sending their observations together
+  once per ply, rather than making one call per branch per ply. The game
+  process owns search and final action selection. Put greedy/sample choice,
+  temperature and other player behavior in your frozen player record so they
+  enter player identity. Seed game-side randomness from `match.seed`; the
+  transport carries inputs and outputs, without sampling seeds supplied by Etude.
+- **Inputs and outputs are picklable values**: NumPy arrays, numbers, text,
+  and tuples, lists and dicts of them. A type from a model library would make
+  GPU game processes import that library. Large padded observations can
+  travel compactly, with the forward restoring exact model inputs.
+- **`load` is called on a checkpoint's first use**, in each CPU game process
+  or the shared GPU agent process,
+  and again only after eviction. It receives a `CheckpointRef`; its local
+  file or folder is `checkpoint.path`. Declare machine setup in the loading
+  module; `Agents` has no `config` parameter. Setup, batching and the build
+  hook are execution choices, outside scientific player identity.
+- **Test a game without Etude.** Load each checkpoint into a local `leaves`
+  mapping and call your build hook, then `play(match, agents)`. A bare
+  checkpoint needs only `load(checkpoint)`.
+- **Shared GPU batching is per checkpoint.** Inputs from a bare network, search over it,
+  and nested search over it share batches. A batch is answered at `max_batch`
+  inputs (default 32) or `max_delay_seconds` (default 0.005). One call's inputs
+  always arrive together, even above `max_batch`. Set either on `Agents(...)`.
+- **Memory.** `memory_gb` on `Agents(...)` bounds what the loaded agents may
+  hold, counting each checkpoint once by its size on disk. Game-side code and
+  wrappers do not consume this checkpoint allowance. The default is half the memory the run may use, split across CPU game caches. Over the bound,
+  the least recently used agent with no input waiting is dropped, and loaded
+  again if a game asks for it. Matches are ordered so those sharing
+  checkpoints are played together (see "Order" above). Checkpoint-file bytes
+  do not measure GPU residency; the loader owns its model's device allocation.
+- **Active games are Etude's to decide.** CPU game concurrency is bounded by
+  available CPUs (affinity and container quota), pending matches and host memory
+  (256 MiB per game beside checkpoint caches). Each CPU game has one model thread.
+  When `nvidia-smi` reports a visible NVIDIA GPU, games instead fill `max_batch`
+  (default 32), bounded by pending matches and memory. `CUDA_VISIBLE_DEVICES=""`
+  or `-1` disables this GPU capacity. The loader still selects its model's device.
+  Before importing the loader, Etude sets `OMP_NUM_THREADS`, `MKL_NUM_THREADS`
+  and the other model-library thread environment variables to the inference
+  budget. The loader must honor it when configuring its library (for Torch,
+  `torch.set_num_threads(int(os.environ["OMP_NUM_THREADS"]))`). A shared GPU
+  agent process calls each loaded forward serially; CPU games call their own
+  cached forwards. Code-only groups perform no GPU probe and start no agent process.
+- **Shared by compatible jobs.** Eval jobs of one pass whose `Agents` are equal
+  share a run and, on GPUs, its agent process. Different declarations form
+  separate groups. CPU games may reuse their cached forwards across tournaments.
+- **One game signature.** `play(match, agents)` is required regardless of
+  whether the seats have checkpoint leaves.
+- **Started only when needed.** A run with nothing to play starts no agent
+  process. Each shared GPU run starts its own: a second eval run placed later
+  on the same machine does not reuse the first's.
+- **Stopped whatever happens.** Etude stops the agent process after the last
+  game, after a failure, and when the run is stopped or cancelled (SIGTERM).
+- **Failures.** A game never has to notice a dead agent process: the forward
+  raises for it, and Etude records the match. An agent operation that fails
+  marks its asking matches failed even if game code catches the exception
+  and returns rows. Failed matches publish no result rows.
+
+  | What happened | Matches | Run |
+  | --- | --- | --- |
+  | the agent process exits | unfinished ones failed with `retry=True` | failed |
+  | `load` raises | every undelivered scheduled match containing that checkpoint, across tournaments, failed with `retry=False`; the checkpoint is not loaded again in this run | failed |
+  | the forward raises, returns the wrong number of answers, or one that does not pickle | the matches with inputs in that batch failed with `retry=False` | failed |
+  | `load` or the forward raises `etude.errors.RetryRequested` | failed with `retry=True` | failed |
+  | `play` raises | failed with `retry=False` | failed |
+  | the run's time limit, SIGTERM, or a failed delivery | unfinished ones failed with `retry=True` | failed |
+
+  The next pass plays `retry=True` matches again by itself; `retry=False`
+  ones wait for `--retry-failed`. A loader failure reaches every undelivered
+  scheduled match containing that checkpoint in the group, including matches never
+  dispatched or games that never call the forward. Those matches retain the load
+  error and publish no rows; delivered results stay unchanged. Matches without
+  that checkpoint carry on, including in the same tournament. A load raising
+  `RetryRequested` applies the same scope with `retry=True`. Other match
+  failures stop new matches in their tournament while the others finish.
+  Matches already in flight still publish their outcomes; successes are not
+  replayed, and each failure keeps its own retry flag
+  ([Experiments](#experiments)). Raise `RetryRequested`
+  for a refusal that is the machine's fault, such as a device out of memory.
+  Rows saying a game was invalid remain rows: raise instead of returning
+  them. A run with a failed match is never recorded as succeeded.
+- **Light game modules for shared GPU inference.** A game process imports the
+  module that defines `play`, not the experiment file (unless `play` is defined
+  there) or `load`'s module. CPU games intentionally import the loader too.
+  Keep the game in a small module, as `arena_game.py` above. On the shared path,
+  Etude counts what each game process imported
+  at startup and warns once per run if that includes `torch`, `jax` or
+  `tensorflow`, or exceeds 256 modules, naming the importing module and
+  saying to move the import to `load`'s.
+- **Kept with the run.** `artifacts/agents/batches.json` below the launched
+  run lists each batch's checkpoint and each input's player, tournament and
+  match, plus `forward_calls`, `forward_seconds` (the loader's forward,
+  including materializing its answers), successful `loads` and `load_seconds`.
+  Failed forwards remain counted. Startup import counts are kept beside it.
+  `protocol-WRITER-MATCH.json` records each finished game's request and answer
+  counts, pickled payload bytes (excluding the four-byte framing headers),
+  round-trip seconds and transport seconds. Transport measures request
+  serialization/send and answer receive/deserialization; round trips also
+  include queueing, loading and inference. Batch `transport_seconds` measures
+  the other end: request receive/deserialization and reply serialization/send.
+  `game_seconds` is time inside
+  game-side `build` and `play` minus those round trips, including the author's
+  game bookkeeping. Local CPU reports instead subtract `local_forward_seconds`
+  and `local_load_seconds`; `local_forward_calls`, `local_inputs` and `local_loads`
+  count direct inference. CPU caches split the host checkpoint-byte allowance.
+  These durations overlap across concurrent games; do not divide their sum
+  by run wall time to claim CPU utilization.
+  `started_monotonic` and `finished_monotonic` locate each game's `build` and
+  `play` interval on the same host's monotonic clock. Sort interval endpoints
+  across the group's reports and count starts minus finishes to see games in
+  play over time and the final tail. These coordinates cannot be compared
+  across hosts; older reports lack them, and killed processes may leave no
+  interval.
+  Games without `agents=` retain these intervals too, with zero inference
+  counters and no latency percentiles.
+  A standalone Python evaluation keeps reports in its own run's
+  `artifacts/agents/` folder.
+  Latency p50/p95 are upper bounds from 64 power-of-two microsecond buckets;
+  sum `latency_buckets` across match reports before computing a run percentile.
+  Do not average match percentiles. Reports include ordinary game failures;
+  a killed game process may leave no report. Attempts have distinct writer
+  names, so retries retain their measurements. Empty `forward([])` sends nothing.
+  Successful request and reply payloads are each serialized once.
+  `ETUDE_SCRATCH_DIR` and `TMPDIR` point to temporary scratch (`/dev/shm` when available) in the
+  game and agent processes.
+- **Results do not depend on it.** A match is its seats, config and game
+  count, however it was played: changing `Agents`, or adding or removing
+  them, plays no delivered match again. Return what played a game in
+  `Result(execution=...)` to keep it with the result.
 
 ## Experiments
 
@@ -602,7 +887,7 @@ declares those training runs, so `track()` in the training code needs no
 from etude.eval.records import Aligned, Benchmark, Earlier, Final, Fraction, Seating
 from etude.jobs import EvalJob, ExperimentState
 
-# direct is an Inference, heuristic Code, deals the configs
+# direct is Held(), heuristic Code, deals the configs
 from arena import deals, direct, heuristic, play, world
 
 
@@ -651,8 +936,8 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     )
     large = [c for run in state.runs if run.job == "large" for c in run.checkpoints.every(5)]
     return [
-        EvalJob(play=play, tournament=ladder, checkpoints=rated, workers=8, max_hours=1),
-        EvalJob(play=play, tournament=against_small, checkpoints=large, workers=8, max_hours=1),
+        EvalJob(play=play, tournament=ladder, checkpoints=rated, max_hours=1),
+        EvalJob(play=play, tournament=against_small, checkpoints=large, max_hours=1),
     ]
 ```
 
@@ -670,8 +955,8 @@ capacity: state from s3://bucket/etude/launch: 6 training runs, 2 eval runs
 capacity/small@0  finished
 capacity/large@0  running
 ...
-eval ladder: 48 new, 120 running, 0 failed, running capacity/ladder-1a2b3c4d5e6f
-eval against small: 0 new, 0 running, 0 failed
+eval ladder: 48 new, 120 running, 0 failed, running capacity/evals-1a2b3c4d5e6f
+eval against small: 24 new, 0 running, 0 failed, running capacity/evals-1a2b3c4d5e6f
 ```
 
 The commands divide by who does the work:
@@ -696,12 +981,12 @@ before they spend ([Smoke before you spend](launcher.md#smoke-before-you-spend))
 Smoke reports a cross-experiment relative seat as `not smoked`, naming the
 experiment it needs; its temporary training store holds only this file's runs.
 
-`etude queue` records eval runs even when the selected pool or on-demand is
-busy. Queued matches stay in flight, so later passes do not submit them again.
-The scheduler starts them when a machine has room, with no later pass: keep
-`etude server run` or `etude wait` running so its loop does. A queued run
-that fails stops a later pass that wants its matches, as a launched one
-does, unless `--retry-failed`.
+`etude queue` records the eval run a pass hands down even when the selected
+pool or on-demand is busy. Queued matches stay in flight, so later passes do
+not submit them again. The scheduler starts them when a machine has room,
+with no later pass: keep `etude server run` or `etude wait` running so its
+loop does. A queued run that fails stops a later pass that wants its
+matches, as a launched one does, unless `--retry-failed`.
 
 - **Where state is read.** `--source` when given. Otherwise where the work is
   delivered: this computer's runs directory for `etude eval`, `etude train`
@@ -743,13 +1028,13 @@ does, unless `--retry-failed`.
   out what is left to play. A relative seat finds its checkpoint among every
   run under the source, held or not: `Earlier(by=1_000)` above seats the
   checkpoint 1,000 updates back whether or not `every(5)` chose it. Seat a
-  chosen checkpoint with `checkpoint.player(inference)` to make a seating of
+  chosen checkpoint with `checkpoint.player(Held())` to make a seating of
   fixed players, played once rather than per checkpoint. `tags` mark
   seatings for readers, such as pairs a rating fit leaves out.
 - **Other experiments' checkpoints.** A file may define only `eval_jobs`.
   Read a producer with `observe(source, "producer")` and give its checkpoint
   records to a benchmark's `checkpoints=`, or use
-  `checkpoint.player(inference)` in a round robin's `enter=`.
+  `checkpoint.player(Held())` in a round robin's `enter=`.
 
   ```python
   def eval_jobs(state):
@@ -773,12 +1058,29 @@ does, unless `--retry-failed`.
   for, the seatings it gave for the checkpoints it gave, that no eval run of
   the experiment in its environment delivered. `etude eval` plays them here
   and delivers them to the source. `etude launch` and `etude queue` submit
-  one eval run per tournament to play exactly those, with each checkpoint
-  they seat as an input from its training run's folder.
+  one eval run to play exactly those, with each checkpoint they seat as an
+  input from its training run's folder.
+- **One run for the pass.** The new matches of eval jobs that can run
+  together go to one machine as one run, `capacity/evals-1a2b3c4d5e6f`, so a
+  pass with a few matches for each of several tournaments rents once, and the
+  jobs share their game processes and their [agents](#agents). Every
+  tournament's line names that run. The run's `max_hours` and `max_usd` are
+  the sums of its jobs', giving the concurrent tournaments a conservative
+  combined allowance. Jobs that could not run together get a run each: those
+  that differ in `agents`, checkout or revision, `runtime`, `prepare`,
+  `setup`, `cleanup`, environment variables, stop or cleanup allowance, or
+  `max_attempts`.
+- **Pending matches are admitted within the budget.** `etude eval` plays
+  locally. `etude launch` and `etude queue` submit each compatible group with
+  pending matches, regardless of historical game duration or active training.
+  Existing capacity is reused; a rental target permits renting when it has
+  no room, within `--max-usd`. Without a rental target, the run waits in the
+  pool's queue. `queue` records the request and returns; the scheduler obtains
+  capacity. `--quote` reports the plan without submitting or spending.
 - **Not twice.** A pass decides from two places only: the state, and the
   launcher's own records of the experiment's runs, the ones `etude runs` and
   `etude status` show. A launched eval run is named for its matches
-  (`capacity/ladder-1a2b3c4d5e6f`) and its record carries them, so a later
+  (`capacity/evals-1a2b3c4d5e6f`) and its record carries them, so a later
   pass neither launches it again nor plays its matches while it is queued or
   running. Nothing else remembers a pass: there is no file to lose or repair.
   A pass leaves a failed run's undelivered matches alone, hands down
@@ -786,17 +1088,27 @@ does, unless `--retry-failed`.
   stopping with `launched_pass_failed`. A watch ends there; look, then
   `--retry-failed`. What the failed run delivered is kept. `--quote` shows
   the held run and retry flag without failing.
-- **While it runs.** `etude status RUN` gives the matches played, the recent
-  pace and the time left; `etude logs --run RUN` the job's recent output.
-  Sealed blocks reach storage every few minutes, so `etude report` and
+- **While it runs.** `etude status RUN` gives the matches played, over all
+  of the run's tournaments, the recent pace and the time left;
+  `etude logs --run RUN` the job's recent output.
+  Each completed match is sealed and offered to storage immediately, so `etude report` and
   `statsdb` read what a running pass has played and mark it partial (the
   report says so; `statsdb`'s `runs.state` is null until the run ends). A
   killed pass keeps every block it delivered and stays partial.
 - **Failures.** A match that raised, was refused or stored no rows is
   failed, never played: `etude status RUN` counts it (`12/80 matches (1
-  failed)`), its run ends failed, and every later pass counts it (`ladder: 0
-  new, 1 failed`) and does not play it again, so a result is never quietly
-  replaced. `--retry-failed` plays the failed matches again. A match an
+  failed)`), its tournament stops starting matches, and every later pass
+  counts it (`ladder: 0 new, 1 failed`) and does not play it again, so a result is
+  never quietly replaced. The other tournaments keep playing; the run then
+  ends failed. Matches already in flight still publish their successes or
+  failures, so a later pass does not replay their successes. A
+  [loader failure](#agents) instead fails every undelivered
+  scheduled match containing that checkpoint across the group's tournaments, while
+  matches without it continue. `--retry-failed` plays the failed matches again.
+  A match the machine failed rather than the game, such as one unfinished at the run's
+  time limit or when its [agent process](#agents) exited, is failed with
+  `retry=True` (`matches.retry`) and the next pass plays it again without
+  the flag. A match an
   older run stored as done with no rows counts as failed too, so its games
   are asked for again rather than silently missing.
 - **Without playing.** `etude.eval.tournament.played` answers what a pass
@@ -912,10 +1224,11 @@ PolicyKey(experiment="tla-frontier", job="small")  # the same policy, by the def
   (`tla-frontier/small@0/checkpoints/updates-00000500`). A nondefault role
   adds `/roles/ROLE` after the run, including when two roles reference the
   same file; give `role=` on the reference or its `PolicyKey`. A player is a
-  checkpoint and its `Inference`. Results are stored under those keys, so
-  the same players meeting under the same config are one match in every
-  experiment that seats them, and any query that reads several experiments'
-  eval runs pools them. Each experiment's pass and its database still read
+  checkpoint or an author's composition of players; its key includes the
+  wrapper's type and fields with resolved checkpoint keys. Results are stored
+  under those keys, so the same players meeting under the same config are one
+  match in every experiment that seats them, and any query that reads several
+  experiments' eval runs pools them. Each experiment's pass and its database still read
   only that experiment's eval runs: a match another experiment delivered is
   played again here.
 - **Runs of two experiments never collide.** `tla-frontier/small@0` and

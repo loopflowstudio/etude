@@ -7,8 +7,8 @@ beside Etude's own tables:
 | table | columns |
 |---|---|
 | `runs` | run, experiment, environment (identity), environment_name, environment_config, tournament, state (`finished` or `failed` from its `outcome.json`; null while it has not ended, so its results are partial) |
-| `players` | player (its key, encoded), name (the latest its seats give), names (every one, the latest first), kind (`model` or `code`), checkpoint (its key), artifact (digest), uri, config, seated_at, lines, and `config.KEY` per scalar config key |
-| `matches` | run, match, config, games, seed, state, error, wall_ms, execution (result provenance), newest (of the match's done records in its environment, 1 for the latest recorded, the one that counts; null for a failure) |
+| `players` | player (its key, encoded), name (the latest its seats give), names (every one, the latest first), kind (`model`, `composition` or `code`), checkpoint (its key), artifact (digest), uri, config, seated_at, lines, and `config.KEY` per scalar config key |
+| `matches` | run, match, config, games, seed, state, retry, error, wall_ms, execution (result provenance), newest (of the match's done records in its environment, 1 for the latest recorded, the one that counts; null for a failure) |
 | `seats` | run, match, seat, player, name (what the record calls it), the version that played: commit, source (digest), at (where its checkpoint stood, or null) and line (the learner it belongs to, or null) |
 | `groups` | run, match, group, seat |
 | `tournaments` | tournament, format (`benchmark` or `round_robin`), environment, conflict |
@@ -102,7 +102,6 @@ from etude.eval.records import (
     ROLLUP_ROWS,
     TOURNAMENT_FILE,
     Benchmark,
-    CheckpointPlayer,
     ColumnType,
     Environment,
     Player,
@@ -112,6 +111,7 @@ from etude.eval.records import (
     as_config,
     assemble,
     outcomes,
+    player_checkpoint,
 )
 from etude.eval.run import ETUDE_TABLES
 from etude.identity import SAFE_NAME
@@ -134,7 +134,7 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 # Keys and coordinates of an author table's rows: never a value.
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
-SCHEMA = 15
+SCHEMA = 16
 
 # How a match's records order, newest first: by when each was recorded, then by run name.
 # `matches.newest` ranks done records so; `etude.eval.tournament.played` orders runs alike.
@@ -243,9 +243,12 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     db.execute("create table blobs (run VARCHAR, match VARCHAR, sha256 VARCHAR, size_bytes BIGINT)")
     db.execute(
         "create table matches (run VARCHAR, match VARCHAR, config JSON, games BIGINT,"
-        " seed BIGINT, state VARCHAR, error VARCHAR, wall_ms BIGINT, execution JSON,"
+        " seed BIGINT, state VARCHAR, retry BOOLEAN, error VARCHAR, wall_ms BIGINT, execution JSON,"
         " newest BIGINT)"
     )
+    # DuckDB keeps deleted unique keys until commit; reconciliation deletes and
+    # inserts in one transaction.
+    db.execute("create index matches_identity on matches(run, match)")
     db.execute(
         "create table seats (run VARCHAR, match VARCHAR, seat BIGINT, player VARCHAR,"
         ' name VARCHAR, commit VARCHAR, source VARCHAR, "at" JSON, line VARCHAR)'
@@ -481,7 +484,7 @@ def _block(
     held = original.model_dump_json(
         exclude={"blobs": True, "replaces": True, "matches": {"__all__": {"blobs"}}}
     )
-    db.execute("insert into kept.blocks values (?, ?, ?)", [run, name, held])
+    db.execute(f"insert into kept.blocks values ({quote(run)}, {quote(name)}, {quote(held)})")
     with _qualified(db, experiment, original) as block:
         pack = place + file_key(name, EVAL_BLOCK_PACK)
         _put(
@@ -505,9 +508,8 @@ def _block(
             ],
         )
         db.execute(
-            "insert into blobs select ?, null, a.sha256, a.size_bytes from _unnamed_blobs a"
-            " anti join blobs b on b.run = ? and b.match is null and b.sha256 = a.sha256",
-            [run, run],
+            f"insert into blobs select {quote(run)}, null, a.sha256, a.size_bytes from _unnamed_blobs a"
+            f" anti join blobs b on b.run = {quote(run)} and b.match is null and b.sha256 = a.sha256",
         )
         db.execute("drop table _unnamed_blobs")
         _put(db, "kept.replaced", {"run": "VARCHAR", "name": "VARCHAR"},
@@ -561,35 +563,34 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
     """Hold the block's standing record of each match (`outcomes`), unless one held is done.
 
     So across the run's blocks, in the order they are read, a done record
-    replaces a failure and the first done one stays, as `outcomes` keeps them.
+    replaces a failure and the first done one stays; newer failures update the retry decision.
     """
     records = list(outcomes(block.matches).values())
     stage(
         db,
         "_arrived_matches",
         {"record": "BIGINT", "match": "VARCHAR", "config": "VARCHAR", "games": "BIGINT",
-         "seed": "BIGINT", "state": "VARCHAR", "error": "VARCHAR", "wall_ms": "BIGINT",
+         "seed": "BIGINT", "state": "VARCHAR", "retry": "BOOLEAN", "error": "VARCHAR", "wall_ms": "BIGINT",
          "execution": "VARCHAR"},
         [[index, record.match.key, json.dumps(as_config(record.match.config)), record.match.games,
-          record.match.seed, record.state, record.error, record.wall_ms,
+          record.match.seed, record.state, record.retry, record.error, record.wall_ms,
           json.dumps(record.execution)]
          for index, record in enumerate(records)],
     )  # fmt: skip
     db.execute(
         "create or replace temp table _taken as select a.* from _arrived_matches a"
-        " left join matches m on m.run = ? and m.match = a.match"
-        " where m.match is null or (m.state <> 'done' and a.state = 'done')",
-        [run],
+        f" left join matches m on m.run = {quote(run)} and m.match = a.match"
+        " where m.match is null or (m.state <> 'done' and a.state = 'done')"
+        " or (m.state = 'failed' and a.state = 'failed' and a.wall_ms > m.wall_ms)"
     )
     for table in ("matches", "seats", '"groups"', "blobs"):
         db.execute(
-            f"delete from {table} t using _taken a where t.run = ? and t.match = a.match", [run]
+            f"delete from {table} t using _taken a where t.run = {quote(run)} and t.match = a.match"
         )
     # `newest` is ranked once everything has arrived (`_summaries`).
     db.execute(
-        "insert into matches select ?, match, config, games, seed, state, error, wall_ms,"
-        " execution, null from _taken order by record",
-        [run],
+        f"insert into matches select {quote(run)}, match, config, games, seed, state, retry, error, wall_ms,"
+        " execution, null from _taken order by record"
     )
     stage(
         db,
@@ -600,11 +601,11 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
         [
             [index, seat, player.key, player.name, player.model_dump_json(),
              player.version.commit, player.version.source,
-             _canonical(player.checkpoint.at)
-             if isinstance(player, CheckpointPlayer) and player.checkpoint.at else None,
-             player.checkpoint.line if isinstance(player, CheckpointPlayer) else None]
+             _canonical(checkpoint.at) if checkpoint is not None and checkpoint.at else None,
+             checkpoint.line if checkpoint is not None else None]
             for index, record in enumerate(records)
             for seat, player in enumerate(record.match.players)
+            for checkpoint in (player_checkpoint(player),)
         ],
     )  # fmt: skip
     db.execute(
@@ -612,9 +613,8 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
         " from _arrived_players s join _taken a using (record)"
     )
     db.execute(
-        'insert into seats select ?, match, seat, player, name, "commit", source, "at", line'
-        " from _arrived_seats order by record, seat",
-        [run],
+        f'insert into seats select {quote(run)}, match, seat, player, name, "commit", source, "at", line'
+        " from _arrived_seats order by record, seat"
     )
     # Every player a held match seats, as first given under each name.
     db.execute(
@@ -631,9 +631,8 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
          for name, seats in record.match.groups.items() for seat in seats],
     )  # fmt: skip
     db.execute(
-        'insert into "groups" select ?, a.match, g."group", g.seat from _arrived_groups g'
-        " join _taken a using (record) order by g.record",
-        [run],
+        f'insert into "groups" select {quote(run)}, a.match, g."group", g.seat from _arrived_groups g'
+        " join _taken a using (record) order by g.record"
     )
     stage(
         db,
@@ -643,9 +642,8 @@ def _matches(db: duckdb.DuckDBPyConnection, run: str, block: Block) -> None:
          for index, record in enumerate(records) for digest in record.blobs],
     )  # fmt: skip
     db.execute(
-        "insert into blobs select ?, a.match, b.sha256, b.size_bytes from _arrived_blobs b"
-        " join _taken a using (record) order by b.record",
-        [run],
+        f"insert into blobs select {quote(run)}, a.match, b.sha256, b.size_bytes from _arrived_blobs b"
+        " join _taken a using (record) order by b.record"
     )
     for table in ("_taken", "_arrived_seats", "_arrived_matches", "_arrived_players",
                   "_arrived_groups", "_arrived_blobs"):  # fmt: skip
@@ -707,12 +705,11 @@ def _table(db: duckdb.DuckDBPyConnection, run: str, table: str, file: str, path:
     )
     _qualify_arrived(db)
     db.execute(
-        'delete from _arrived using kept.table_files f where f."table" = ? and f.run = _arrived.run'
-        " and f.match = _arrived.match and f.file > ?",
-        [table, file],
+        f'delete from _arrived using kept.table_files f where f."table" = {quote(table)} and f.run = _arrived.run'
+        f" and f.match = _arrived.match and f.file > {quote(file)}"
     )
     arrived = {column: kind for column, kind, *_ in db.execute("describe _arrived").fetchall()}
-    if db.execute("select 1 from kept.rollups where name = ?", [table]).fetchone():
+    if db.execute(f"select 1 from kept.rollups where name = {quote(table)}").fetchone():
         raise EtudeError("rollup_name_conflict", 409) from ValueError(table)
     if not _exists(db, "main", table):
         db.execute(f'create table "{table}" as select * from _arrived')
@@ -725,11 +722,10 @@ def _table(db: duckdb.DuckDBPyConnection, run: str, table: str, file: str, path:
         db.execute(f'insert into "{table}" by name select * from _arrived')
     db.execute(
         "delete from kept.table_files f using (select distinct run, match from _arrived) a"
-        ' where f."table" = ? and f.run = a.run and f.match = a.match',
-        [table],
+        f' where f."table" = {quote(table)} and f.run = a.run and f.match = a.match'
     )
     db.execute(
-        "insert into kept.table_files select distinct ?, run, match, ? from _arrived", [table, file]
+        f"insert into kept.table_files select distinct {quote(table)}, run, match, {quote(file)} from _arrived"
     )
     db.execute("drop table _arrived")
 
@@ -747,9 +743,8 @@ def _rollup(db: duckdb.DuckDBPyConnection, run: str, rollup: Rollup, file: str, 
     )
     _qualify_arrived(db, players=True)
     db.execute(
-        'delete from _arrived using kept.table_files f where f."table" = ? and f.run = _arrived.run'
-        " and f.match = _arrived.match and f.file > ?",
-        [name, file],
+        f'delete from _arrived using kept.table_files f where f."table" = {quote(name)} and f.run = _arrived.run'
+        f" and f.match = _arrived.match and f.file > {quote(file)}"
     )
     arrived = {column: kind for column, kind, *_ in db.execute("describe _arrived").fetchall()}
     if arrived.get("opponents") == "VARCHAR":
@@ -796,11 +791,10 @@ def _rollup(db: duckdb.DuckDBPyConnection, run: str, rollup: Rollup, file: str, 
     db.execute(f'insert into kept."{name}" by name select * from _arrived')
     db.execute(
         "delete from kept.table_files f using (select distinct run, match from _arrived) a"
-        ' where f."table" = ? and f.run = a.run and f.match = a.match',
-        [name],
+        f' where f."table" = {quote(name)} and f.run = a.run and f.match = a.match'
     )
     db.execute(
-        "insert into kept.table_files select distinct ?, run, match, ? from _arrived", [name, file]
+        f"insert into kept.table_files select distinct {quote(name)}, run, match, {quote(file)} from _arrived"
     )
     db.execute("drop table _arrived")
     db.execute("drop table _delta")
@@ -814,13 +808,15 @@ def _hold(db: duckdb.DuckDBPyConnection, rollup: Rollup) -> None:
     table has, `rollup_name_conflict`.
     """
     identity = rollup.digest
-    held = db.execute("select digest from kept.rollups where name = ?", [rollup.name]).fetchone()
+    held = db.execute(
+        f"select digest from kept.rollups where name = {quote(rollup.name)}"
+    ).fetchone()
     if held is None:
         if _exists(db, "main", rollup.name):
             raise EtudeError("rollup_name_conflict", 409) from ValueError(rollup.name)
         db.execute(
-            "insert into kept.rollups values (?, ?, ?)",
-            [rollup.name, identity, rollup.model_dump_json()],
+            f"insert into kept.rollups values ({quote(rollup.name)}, {quote(identity)},"
+            f" {quote(rollup.model_dump_json())})"
         )
     elif held[0] != identity:
         raise EtudeError("rollup_conflict", 409) from ValueError(rollup.name)
@@ -870,8 +866,8 @@ def _sum_missing(
 def _exists(db: duckdb.DuckDBPyConnection, schema: str, table: str) -> bool:
     return bool(
         db.execute(
-            "select 1 from information_schema.tables where table_schema = ? and table_name = ?",
-            [schema, table],
+            f"select 1 from information_schema.tables where table_schema = {quote(schema)}"
+            f" and table_name = {quote(table)}"
         ).fetchone()
     )
 
@@ -1114,9 +1110,9 @@ def _players_table(db: duckdb.DuckDBPyConnection, players: dict[str, list[Player
 
 def _checkpoint(player: Player) -> tuple[str | None, str | None, str | None]:
     """A model's checkpoint key, digest and file; nothing for code."""
-    if not isinstance(player, CheckpointPlayer):
+    checkpoint = player_checkpoint(player)
+    if checkpoint is None:
         return None, None, None
-    checkpoint = player.checkpoint
     return str(checkpoint.key), checkpoint.artifact.sha256, checkpoint.artifact.uri
 
 

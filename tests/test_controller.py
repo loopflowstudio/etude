@@ -17,7 +17,7 @@ from etude.eval.match import environment
 from etude.eval.records import Benchmark, CheckpointPlayer
 from etude.eval.tournament import StoredRuns
 from etude.experiment import observe
-from etude.jobs import EvalJob, Evaluation, ExperimentState, TrainingJob, with_experiment
+from etude.jobs import EvalGroup, EvalJob, Evaluation, ExperimentState, TrainingJob, with_experiment
 from etude.launch import client
 from etude.launch.database import upgrade
 from etude.launch.records import Pool
@@ -292,7 +292,8 @@ from etude.jobs import TrainingJob, EvalJob, ExperimentState
 from etude.spec import Runtime
 from etude.train.tracking import track
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Seating, Inference, Code
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import Held, Benchmark, Seating, Code
 from tests.eval.games import play
 
 RUNTIME = Runtime(python={command_python!r})
@@ -315,7 +316,7 @@ def training_jobs(state: ExperimentState) -> list[TrainingJob]:
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     ladder = Benchmark(name="ladder", environment=environment("duel", config={{"world": "w6"}}),
-        seatings=(Seating(name="anchor", players=(Inference(config={{"search": 0}}),
+        seatings=(Seating(name="anchor", players=(stored_inference(config={{"search": 0}}),
                    Code(name="fixed", source=[__file__], config={{"strength": 0}})),
                    configs=({{"deal": 0}},), games=1),))
     return [EvalJob(tournament=ladder, play=play, checkpoints=[r.final for r in state.runs if r.final],
@@ -336,7 +337,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         assert main(["launch", str(file)]) == 0
         second = capsys.readouterr().out
         assert "two/fine@0  new, running" in second
-        assert "queued two/ladder-" in second
+        assert "queued two/evals-" in second
         scheduler.wait(every=0.05, timeout=30)
         assert all(scheduler.read(r.id).outcome == "succeeded" for r in scheduler.runs(done=True))
         assert main(["launch", str(file)]) == 0
@@ -358,18 +359,17 @@ def test_declaration_types_are_defined_in_one_module() -> None:
 
 def test_eval_job_lowering_preserves_the_executable_record() -> None:
     tournament = Benchmark(name="ladder", environment=environment("duel"))
-    typed = EvalJob(tournament=tournament, play=play, workers=2, repo=None, max_hours=1)
+    typed = EvalJob(tournament=tournament, play=play, repo=None, max_hours=1)
     executable = with_experiment(typed, "two")
     config = Evaluation(
         tournament=tournament,
         experiment="two",
         play=Function(module="tests.eval.games", name="play"),
-        workers=2,
     )
     plain = Job(
         name="ladder",
         command="uv run python -m etude.call --function etude.jobs:_hold",
-        config=config.model_dump_json(),
+        config=EvalGroup(evaluations=(config,)).model_dump_json(),
         repo=None,
         experiment="two",
         max_hours=1,
@@ -423,7 +423,8 @@ def test_cli_hands_down_unaffected_work_before_reporting_failed_eval(
     file.write_text("""
 from etude.jobs import TrainingJob, EvalJob, ExperimentState
 from etude.eval.match import environment
-from etude.eval.records import RoundRobin, Code
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import Held, RoundRobin, Code
 from tests.eval.games import play
 from tests.launch.tasks import Command, train_command
 
@@ -442,7 +443,14 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     measured = MeasuredStorage(source)
     monkeypatch.setattr("etude.storage.storage_from_uri", lambda uri: measured)
     monkeypatch.setattr("etude.run.storage_from_uri", lambda uri: measured)
-    args = ["queue", str(file), "--pool", "waiting", "--source", str(source.root)]
+    args = [
+        "queue",
+        str(file),
+        "--pool",
+        "waiting",
+        "--source",
+        str(source.root),
+    ]
     assert main(args) == 0
     (held,) = b.scheduler.runs()
     b.scheduler.cancel(held.id)
@@ -456,7 +464,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     first = capsys.readouterr()
     assert "two/fine@0  new, queued" in first.out
     assert f"failed runs {held.id} (--retry-failed" in first.out
-    assert "eval free:" in first.out and ", queued two/free-" in first.out
+    assert "eval free:" in first.out and ", queued two/evals-" in first.out
     assert "launched_pass_failed" in first.err
     assert len(b.scheduler.runs(done=True)) == 3
     measured.listings = 0
@@ -508,11 +516,12 @@ from etude.experiment import observe
 from etude.jobs import EvalJob, ExperimentState
 from etude.spec import Runtime
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, RoundRobin, Seating, Inference, Code, CheckpointPlayer, Match
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import Held, Benchmark, RoundRobin, Seating, Code, CheckpointPlayer, Match
 from etude.eval.run import Tables
 
 
-def play(match: Match) -> Tables:
+def play(match: Match, agents: list[object]) -> Tables:
     players = [p for p in match.players if isinstance(p, CheckpointPlayer)]
     assert players
     if {command!r} == "eval":
@@ -527,13 +536,13 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     fixed = Code(name="fixed", source=[__file__], config={{"strength": 0}})
     if {format!r} == "benchmark":
         tournament = Benchmark(name="ladder", environment=environment("duel"),
-            seatings=(Seating(name="anchor", players=(Inference(config={{}}), fixed),
+            seatings=(Seating(name="anchor", players=(stored_inference(config={{}}), fixed),
                               configs=({{}},), games=1),))
         return [EvalJob(tournament=tournament, checkpoints=(CHECKPOINT,), play=play,
                         max_hours=0.05, runtime=Runtime(python={command_python!r}),
                         repo=str(Path(__file__).parent))]
     tournament = RoundRobin(name="ladder", environment=environment("duel"), configs=({{}},), games=1)
-    return [EvalJob(tournament=tournament, enter=(CHECKPOINT.player(Inference(config={{}})), fixed),
+    return [EvalJob(tournament=tournament, enter=(CHECKPOINT.player(stored_inference(config={{}})), fixed),
                     play=play, max_hours=0.05, runtime=Runtime(python={command_python!r}),
                     repo=str(Path(__file__).parent))]
 """
@@ -566,6 +575,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         if command == "eval":
             assert observed_counts == Counts(git=2, database=2)
         elif command == "queue":
+            # Admission no longer reads target CPUs to estimate game duration.
             assert observed_counts == Counts(git=12, database=44)
         else:
             assert observed_counts.model_copy(update={"database": 0}) == Counts(git=13)
@@ -591,7 +601,8 @@ def test_local_eval_names_a_missing_or_changed_checkpoint(
 from etude.checkpoints import CheckpointRef
 from etude.records import ArtifactRef
 from etude.eval.match import environment
-from etude.eval.records import RoundRobin, Inference, Code
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import Held, RoundRobin, Code
 from etude.jobs import EvalJob, ExperimentState
 from tests.eval.games import play
 from hashlib import sha256
@@ -601,7 +612,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         uri={weights.as_uri()!r}, sha256=sha256(b"right bytes").hexdigest(), size_bytes=11))
     return [EvalJob(tournament=RoundRobin(name="ladder", environment=environment("duel"),
                         configs=({{}},), games=1),
-                    enter=(Inference().player(checkpoint), Code(name="fixed", source=[__file__])),
+                    enter=(Held().player(checkpoint), Code(name="fixed", source=[__file__])),
                     play=play, repo=None, max_hours=1)]
 """)
     assert main(["eval", str(file), "--source", str(tmp_path / "source")]) == 1
@@ -628,17 +639,19 @@ def test_eval_refuses_different_artifacts_with_one_checkpoint_key(
 from etude.experiment import observe
 from etude.jobs import EvalJob
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, RoundRobin, Inference, Code, Seating
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import Held, Benchmark, RoundRobin, Code, Seating
+from tests.eval.stored import stored_inference
 from tests.eval.games import play
 
 def eval_jobs(state):
     checkpoints = tuple(observe({str(source.root)!r}, name).runs[0].final.model_copy(update={{"experiment": "a"}}) for name in ("a", "b"))
     if {format!r} == "benchmark":
         tournament = Benchmark(name="ladder", environment=environment("duel"),
-            seatings=(Seating(name="anchor", players=(Inference(), Code(name="fixed")), configs=({{}},), games=1),))
+            seatings=(Seating(name="anchor", players=(stored_inference(), Code(name="fixed")), configs=({{}},), games=1),))
         return EvalJob(tournament=tournament, checkpoints=checkpoints, play=play, max_hours=0.1)
     return EvalJob(tournament=RoundRobin(name="ladder", environment=environment("duel"),
-        configs=({{}},), games=1), enter=tuple(c.player(Inference()) for c in checkpoints),
+        configs=({{}},), games=1), enter=tuple(c.player(Held()) for c in checkpoints),
         play=play, max_hours=0.1)
 """)
     assert main([command, str(file), "--source", str(source.root)]) == 1
@@ -665,13 +678,14 @@ def test_a_delivered_match_cannot_hide_another_artifact_under_its_key(
 from etude.experiment import observe
 from etude.jobs import EvalJob
 from etude.eval.match import environment
-from etude.eval.records import RoundRobin, Inference, Code
+from tests.eval.stored import stored_inference, stored_relative
+from etude.eval.records import Held, RoundRobin, Code
 from tests.eval.games import play
 
 def eval_jobs(state):
     checkpoint = observe({str(source.root)!r}, "a").runs[0].final.model_copy(update={{"experiment": "a"}})
     return EvalJob(tournament=RoundRobin(name="first", environment=environment("duel"),
-        configs=({{}},), games=1), enter=(checkpoint.player(Inference(config={{"strength": 1}})), Code(name="fixed", config={{"strength": 0}})),
+        configs=({{}},), games=1), enter=(checkpoint.player(stored_inference(config={{"strength": 1}})), Code(name="fixed", config={{"strength": 0}})),
         play=play, max_hours=0.1)
 """
     file.write_text(text)
@@ -795,7 +809,8 @@ def test_policy_key_fresh_experiment_submits_training_then_evaluates(
     file.write_text("""
 from etude.checkpoints import PolicyKey
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.eval.records import Benchmark, Code, Seating
+from tests.eval.stored import stored_inference
 from etude.jobs import EvalJob, ExperimentState, TrainingJob
 from tests.eval.games import play
 from tests.launch.tasks import Command, train_command
@@ -806,7 +821,7 @@ def training_jobs(state: ExperimentState) -> list[TrainingJob]:
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     tournament = Benchmark(name="progress", environment=environment("duel"), seatings=(
-        Seating(name="vs fixed", players=(Inference(config={"strength": 1}),
+        Seating(name="vs fixed", players=(stored_inference(config={"strength": 1}),
                 Code(name="fixed", config={"strength": 0})), configs=({},), games=1),))
     mine = state.policy(PolicyKey()).checkpoints
     return [EvalJob(tournament=tournament, checkpoints=mine, play=play, repo=None, max_hours=1)]
@@ -849,7 +864,8 @@ def test_policy_key_of_a_job_added_to_a_started_experiment_is_queued(
     jobs = """
 from etude.checkpoints import PolicyKey
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.eval.records import Benchmark, Code, Seating
+from tests.eval.stored import stored_inference
 from etude.jobs import EvalJob, ExperimentState, TrainingJob
 from tests.eval.games import play
 from tests.launch.tasks import Command, train_command
@@ -866,7 +882,7 @@ def training_jobs(state: ExperimentState) -> list[TrainingJob]:
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     tournament = Benchmark(name="progress", environment=environment("duel"), seatings=(
-        Seating(name="vs fixed", players=(Inference(config={"strength": 1}),
+        Seating(name="vs fixed", players=(stored_inference(config={"strength": 1}),
                 Code(name="fixed", config={"strength": 0})), configs=({},), games=1),))
     large = state.policy(PolicyKey(job="large")).checkpoints
     return [EvalJob(tournament=tournament, checkpoints=large, play=play, repo=None, max_hours=1)]
@@ -891,7 +907,8 @@ def test_policy_key_of_a_run_over_budget_says_why_it_is_missing(
     file.write_text("""
 from etude.checkpoints import PolicyKey
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Code, Inference, Seating
+from etude.eval.records import Benchmark, Code, Seating
+from tests.eval.stored import stored_inference
 from etude.jobs import EvalJob, ExperimentState, TrainingJob
 from tests.eval.games import play
 from tests.launch.tasks import Command, train_command
@@ -902,7 +919,7 @@ def training_jobs(state: ExperimentState) -> list[TrainingJob]:
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     tournament = Benchmark(name="progress", environment=environment("duel"), seatings=(
-        Seating(name="vs fixed", players=(Inference(config={"strength": 1}),
+        Seating(name="vs fixed", players=(stored_inference(config={"strength": 1}),
                 Code(name="fixed", config={"strength": 0})), configs=({},), games=1),))
     large = state.policy(PolicyKey(job="large")).checkpoints
     return [EvalJob(tournament=tournament, checkpoints=large, play=play, repo=None, max_hours=1)]
@@ -941,12 +958,13 @@ def test_policy_key_cross_experiment_seats_split_seeds_and_do_not_replay(
     file.write_text("""
 from etude.checkpoints import PolicyKey
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Final, Inference, Seating
+from etude.eval.records import Benchmark, Final, Seating
+from tests.eval.stored import stored_inference
 from etude.jobs import EvalJob
 from tests.eval.games import play
 
 def eval_jobs(state):
-    direct = Inference(config={"strength": 1})
+    direct = stored_inference(config={"strength": 1})
     tournament = Benchmark(name="frontier", environment=environment("duel"), seatings=(
         Seating(name="vs frontier", players=(direct, Final(experiment="tla-frontier", job="small")),
                 configs=({},), games=8),))

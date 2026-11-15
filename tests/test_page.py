@@ -158,7 +158,7 @@ def test_a_folder_holds_the_files_that_define_eval_or_report_and_none_is_run(
     experiment_file(folder, "lab", REPORTED)
     experiment_file(folder / "more", "ladder", "def eval_jobs(state):\n    return []\n")
     # A helper module and an experiment file are no experiments, and are never run to find out.
-    experiment_file(folder, "games", "raise SystemExit('run')\n\ndef play(match): ...\n")
+    experiment_file(folder, "games", "raise SystemExit('run')\n\ndef play(match, agents): ...\n")
     experiment_file(folder, "job", "raise SystemExit('run')\n\ndef train(config): ...\n")
     experiment_file(folder / ".venv", "vendored", REPORTED)
     assert [f.relative_to(folder) for f in experiment_files(folder)] == [
@@ -620,15 +620,16 @@ def test_policy_key_report_resolves_cross_experiment_seats_once(tmp_path: Path) 
     file.write_text("""
 from etude.checkpoints import PolicyKey
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, Final, Inference, Seating
+from etude.eval.records import Benchmark, Final, Seating
+from tests.eval.stored import stored_inference
 from etude.jobs import EvalJob
 from tests.eval.games import play
 
 def eval_jobs(state):
-    direct = Inference()
+    direct = stored_inference()
     return [EvalJob(tournament=Benchmark(name=name, environment=environment("duel"),
         seatings=(Seating(name="vs frontier", players=(direct,
-            Final(experiment="frontier", job="small", inference=direct)), configs=({},), games=8),)),
+            Final(experiment="frontier", job="small")), configs=({},), games=8),)),
         checkpoints=state.policy(PolicyKey()).checkpoints, play=play, repo=None, max_hours=1)
         for name in ("first", "second")]
 """)

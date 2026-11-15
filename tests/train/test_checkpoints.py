@@ -11,7 +11,7 @@ from etude.checkpoints import CheckpointRecord, PolicyKey
 from etude.errors import EtudeError
 from etude.eval.match import environment, evaluate
 from etude.eval.query import statsdb
-from etude.eval.records import Code, Inference, Match
+from etude.eval.records import Code, Held, Match
 from etude.experiment import observe
 from etude.jobs import Checkpoints, TrainingJob, checkpoint_inputs_for
 from etude.records import Continuation, SourceKey
@@ -66,13 +66,13 @@ def test_two_models_publish_one_checkpoint_and_read_the_same_record(
     assert observed is not None
     assert observed.artifact.sha256 == first.sha256
     assert observed.path == tmp_path / "bucket/tiny/seed-0/out/checkpoints/updates-00000002"
-    assert observed.player(Inference()).checkpoint == observed.ref
+    assert observed.player(Held()).checkpoint == observed.ref
     assert {given.name for given in checkpoint_inputs_for(observed, "start")} == {
         "start/checkpoint.json",
         "start/policy.pt",
         "start/value.pt",
     }
-    seated = Match(players=(observed.player(Inference()), Code(name="opponent")), games=1)
+    seated = Match(players=(observed.player(Held()), Code(name="opponent")), games=1)
     result = evaluate(
         experiment="tiny",
         environment=environment("tiny-game"),
@@ -88,7 +88,9 @@ def test_two_models_publish_one_checkpoint_and_read_the_same_record(
         assert db.sql(
             "select checkpoint from training_checkpoints join players using(checkpoint)"
         ).fetchall() == [(observed.key,)]
-    job = TrainingJob(name="base", train=train, config=Config(), start=observed, max_hours=1)
+    job = TrainingJob(
+        name="base", train=train, config=Config(), start=observed, max_hours=1
+    ).plain()
     assert len(job.inputs) == 3
     for variable in job.environment:
         monkeypatch.setenv(variable.name, variable.value)

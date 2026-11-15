@@ -19,16 +19,19 @@ class MeasuredStorage:
         self.uploads = 0
         self.written = 0  # bytes uploaded, replaced objects included
         self.listings = 0
+        self.uploaded: list[str] = []
         self.got: list[str] = []  # keys asked for, a missing one included
 
     def put(self, key: str, data: bytes) -> None:
         self.storage.put(key, data)
+        self.uploaded.append(key)
         self.uploads += 1
         self.written += len(data)
 
     def put_file(self, key: str, path: Path) -> None:
         size = path.stat().st_size
         self.storage.put_file(key, path)
+        self.uploaded.append(key)
         self.uploads += 1
         self.written += size
 

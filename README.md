@@ -83,7 +83,7 @@ names, chosen from what the experiment's runs have stored so far:
 # job.py, continued
 from etude.jobs import EvalJob, ExperimentState
 
-from arena import play, progress  # play(match) -> Tables; progress is a Benchmark
+from arena import play, progress  # play(match, agents) -> Tables; progress is a Benchmark
 
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
@@ -104,6 +104,17 @@ by now. `etude launch job.py` reads both and gets machines for what has not
 been run, so the same command launches training first and, typed again as
 checkpoints arrive, the matches nobody has played. `etude eval job.py` plays
 them on this computer instead.
+
+Eval jobs that can run together share one machine. Pending matches are submitted
+within `--max-usd`; existing capacity is reused and a rental target permits
+renting when no machine has room. Training activity and historical game durations
+do not delay admission. Write `load(checkpoint)` returning a deterministic
+list-in/list-out forward (`EvalJob(..., agents=Agents(load=load))`). Every game
+uses `play(match, agents)` and owns action selection and randomness. On visible
+NVIDIA hardware, Etude batches calls across games through one agent process;
+CPU games cache and call forwards directly. Author records compose players;
+`build(player, leaves)` returns the objects the game uses
+([agents](docs/evaluation.md#agents)).
 
 Everything a run records goes to your own directory or S3 bucket. Saved state and checkpoints are JSON
 and your framework's own files, [readable without Etude](docs/training.md#what-is-on-disk).

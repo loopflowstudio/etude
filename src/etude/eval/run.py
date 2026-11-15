@@ -1,6 +1,6 @@
 """A live evaluation run: match validation, staging, rollups and outcome publication.
 
-EvalRun owns match execution, worker processes and its local DuckDB connection
+EvalRun owns match execution, game processes and its local DuckDB connection
 until finish. Result is the playing code's returned data; EvalResult counts
 what play completed. Tournament scheduling lives in eval.tournament.
 """
@@ -13,24 +13,25 @@ import os
 import secrets
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
-import typing
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
-from contextlib import contextmanager
+from concurrent.futures.process import BrokenProcessPool
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
-from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
+from queue import Empty
 from types import FrameType
 from typing import TYPE_CHECKING, Literal, NoReturn, cast
 
-from pydantic import BaseModel, JsonValue
-
-from etude.errors import EtudeError
+from etude.call import Function
+from etude.errors import EtudeError, RetryRequested, explain, sanitize
+from etude.eval.agents import AgentFailure, AgentProcess, running_agents
 from etude.eval.block import (
     Block,
     Staging,
@@ -40,28 +41,36 @@ from etude.eval.block import (
     seal_abandoned,
     stage,
 )
+from etude.eval.game import Execution, Imports, Performance, initialize_game, play_match
 from etude.eval.records import (
     ADDED,
     COLUMN_TYPES,
     IDENTIFIER,
     NO_ROWS,
     ColumnType,
-    Config,
     Environment,
     Match,
     MatchRecord,
     Rollup,
     as_config,
     outcomes,
+    player_checkpoints,
 )
+from etude.eval.resources import Cpus, Resources, agent_bytes, divide_cpus, resources, seconds_left
+from etude.eval.result import EvalResult as EvalResult
+from etude.eval.result import Result as Result
+from etude.eval.result import Row
+from etude.eval.result import Tables as Tables
 from etude.eval.schedule import ordered
-from etude.records import Record, RunCounters, RunWriter, Tally
+from etude.records import RunCounters, RunWriter, Tally
 from etude.run import Run, StorageDestination, declare, destinations, report_progress
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage, Storage, run_prefix
 
 if TYPE_CHECKING:
     import duckdb
+
+    from etude.jobs import Agents
 
 # Etude's own tables, which `etude.eval.query.statsdb` keeps beside the author's.
 ETUDE_TABLES = (
@@ -79,25 +88,6 @@ ETUDE_TABLES = (
 # a `player` column is an older one (`etude.eval.query` reads it as such).
 OLD_SEAT = "player"
 
-type Value = bool | int | float | str | None
-type Row = Mapping[str, Value]
-type Tables = Mapping[str, Sequence[Row]]
-
-
-@dataclass(frozen=True)
-class Result:
-    """What `play` returns with tables, optional blobs and execution provenance.
-
-    Rows name a blob by its SHA256 (`hashlib.sha256(blob).hexdigest()`);
-    `etude.eval.query.read_blobs` gives its bytes back.
-    `execution` records the actual device and runtime settings. It changes
-    neither the requested match nor whether its games have already been played.
-    """
-
-    tables: Tables = field(default_factory=dict)
-    blobs: Sequence[bytes] = ()
-    execution: Config = field(default_factory=dict)
-
 
 class EvalRun(Run):
     """One process's matches of an eval run: staged, sealed into blocks and delivered."""
@@ -112,7 +102,6 @@ class EvalRun(Run):
         experiment: str,
         environment: Environment,
         matches: Sequence[Match],
-        workers: int,
     ) -> None:
         # Imported here: DuckDB is the optional `eval` extra.
         import duckdb  # noqa: PLC0415
@@ -120,7 +109,6 @@ class EvalRun(Run):
         super().__init__(experiment=experiment, name=name, root=root, targets=targets)
         self.environment = environment
         self.matches = tuple(matches)
-        self.workers = workers
         self.rollups = rollups
         self.id = secrets.token_hex(6)
         self.writer = RunWriter(
@@ -131,7 +119,7 @@ class EvalRun(Run):
             attempt=os.environ.get("ETUDE_ATTEMPT"),
             commit=os.environ.get("ETUDE_COMMIT"),
         )
-        self.failed = 0  # `fail` is also how `store` refuses a match
+        self._failed: set[str] = set()
         self.db: duckdb.DuckDBPyConnection = duckdb.connect()
         try:
             seal_abandoned(root, self.db)
@@ -153,46 +141,69 @@ class EvalRun(Run):
         )
         self._report.write()
 
-    def play[C: BaseModel | Mapping[str, JsonValue]](
-        self, play: Callable[[Match[C]], Tables | Result]
+    def play(
+        self, play: Callable[..., Tables | Result], *, agents: Agents | None = None
     ) -> EvalResult:
-        """Play the selected matches once, skipping this run's durable results on resume."""
-        pending = [match for match in self.matches if match.key not in self.done]
-        skipped = len(self.matches) - len(pending)
-        played = 0
-        report = self._report
-
-        def pending_matches() -> Iterator[Match]:
-            for match in pending:
-                if self.should_stop:
-                    raise Stopped()
-                yield match
-
-        started = time.monotonic()
-        try:
-            with _terminable():
-                for scheduled, outcome in _played(pending_matches(), play, self.workers):
-                    if isinstance(outcome, BaseException):
-                        self.fail(scheduled, outcome)
-                    self.store(scheduled, outcome)
-                    self.done.add(scheduled.key)
-                    played += 1
-                    report.played()
-                    print(
-                        f"etude: {self.name}: {played}/{len(pending)} matches played, "
-                        f"{time.monotonic() - started:.0f}s elapsed",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-        finally:
-            report.write(failed=self.failed)
-        return EvalResult(
-            experiment=self.experiment,
-            name=self.name,
-            environment=self.environment,
-            played=played,
-            skipped=skipped,
+        """Play selected matches with constructed seats, skipping durable results on resume."""
+        authored = inspect.unwrap(play)
+        function = Function(module=authored.__module__, name=authored.__qualname__)
+        definition = agents.plain(None) if agents is not None else None
+        artifacts = self.files.root / "artifacts" / "agents"
+        needs_loading = (
+            definition is not None
+            and definition.load is not None
+            and any(
+                player_checkpoints(player)
+                for match in self.matches
+                if match.key not in self.done
+                for player in match.players
+            )
         )
+        with _terminable(), resources(artifacts) as owned, ExitStack() as lifetime:
+            cpus = divide_cpus(
+                sum(match.key not in self.done for match in self.matches),
+                agents=needs_loading,
+                memory_gb=definition.memory_gb if definition else None,
+                batch_inputs=definition.max_batch if definition else 32,
+            )
+            process = (
+                lifetime.enter_context(running_agents(definition, None, owned, (self.name,), cpus))
+                if needs_loading and definition is not None and cpus.games and cpus.threads
+                else None
+            )
+            results = play_together(
+                (
+                    Playing(
+                        run=self,
+                        play=function,
+                        agents=process.address if process else None,
+                        build=definition.build if definition else None,
+                        load=definition.load
+                        if definition and needs_loading and not process
+                        else None,
+                        memory=agent_bytes(definition.memory_gb) // max(1, cpus.games)
+                        if definition
+                        else None,
+                    ),
+                ),
+                resources=owned,
+                cpus=cpus,
+                agent_process=process,
+            )
+            result = results[0]
+            if isinstance(result, (EtudeError, RetryRequested)):
+                raise result
+            return result
+
+    def _store_played(self, scheduled: Match, outcome: Execution | BaseException) -> None:
+        if isinstance(outcome, RetryRequested):
+            raise outcome
+        if isinstance(outcome, BaseException):
+            self.fail(scheduled, outcome)
+        self.store(scheduled, outcome.result, seconds=outcome.seconds)
+        self.done.add(scheduled.key)
+        self._report.played()
+        self._seal()
 
     def _stored(self) -> dict[str, MatchRecord]:
         """Each match's standing record (`outcomes`) of the blocks here and at every destination.
@@ -214,16 +225,42 @@ class EvalRun(Run):
                 found += block.matches
         return outcomes(found)
 
-    def fail(self, scheduled: Match, error: BaseException) -> NoReturn:
-        detail = f"{type(error).__name__}: {error}"[:2000]
-        self.failed += 1
-        self.staging.stage(
-            MatchRecord(match=scheduled, state="failed", error=detail, wall_ms=_now_ms())
-        )
+    def fail_pending(self, error: RetryRequested) -> None:
+        """Mark unfinished matches failed with retry=True before the run fails."""
+        for match in self.matches:
+            if match.key not in self.done and match.key not in self._failed:
+                self._stage_failure(match, str(error), retry=True)
         self._seal()
-        raise EtudeError("match_failed", 500) from error
 
-    def store(self, scheduled: Match, outcome: Tables | Result) -> None:
+    @property
+    def failed(self) -> int:
+        return len(self._failed)
+
+    def _stage_failure(self, match: Match, detail: str, *, retry: bool = False) -> None:
+        self._failed.add(match.key)
+        self.staging.stage(
+            MatchRecord(
+                match=match,
+                state="failed",
+                error=sanitize(detail)[:2000],
+                retry=retry,
+                wall_ms=_now_ms(),
+            )
+        )
+
+    def fail(self, scheduled: Match, error: BaseException) -> NoReturn:
+        detail = (
+            explain(error)
+            if isinstance(error, subprocess.SubprocessError)
+            else f"{type(error).__name__}: {error}"
+        )
+        self._stage_failure(scheduled, detail)
+        self._seal()
+        raise EtudeError("match_failed", 500, detail=sanitize(detail)) from error
+
+    def store(
+        self, scheduled: Match, outcome: Tables | Result, *, seconds: float | None = None
+    ) -> None:
         """Check every table, then stage them, the blobs and the match's record; nothing on refusal."""
         result = outcome if isinstance(outcome, Result) else Result(tables=outcome)
         try:
@@ -263,6 +300,7 @@ class EvalRun(Run):
             wall_ms=_now_ms(),
             blobs=digests,
             execution=execution,
+            seconds=seconds,
         )
         self.staging.stage(record, result.blobs)
         if self.staging.due():
@@ -287,7 +325,8 @@ class EvalRun(Run):
         """Seal what is staged into a block and offer it to every destination."""
         with self.files.lock:
             self.staging.seal(self.db)
-        self.ship()
+        if not self.ship():
+            raise RetryRequested("evaluation delivery failed; results remain in the local run")
 
     def finish(self, state: Literal["finished", "failed", "stopped"]) -> None:
         with self.files.lock:
@@ -296,11 +335,13 @@ class EvalRun(Run):
         self._write_outcome(state, counters=RunCounters(), writer=self.id)
         self.db.close()
         if not self.ship():
+            self._write_outcome("failed", counters=RunCounters(), writer=self.id)
             print(
                 f"etude: not delivered: {self.problems}. Files are in {self.files.root}; "
                 "deliver them with `etude sync`.",
                 file=sys.stderr,
             )
+            raise RetryRequested("evaluation delivery failed; results remain in the local run")
 
 
 def _now_ms() -> int:
@@ -386,6 +427,7 @@ class _Report:
     def __init__(self, *, total: int, done: int, writer: RunWriter) -> None:
         self.writer = writer
         self.total, self.done = total, done
+        self.failed = 0
         self.outputs = os.environ.get("ETUDE_OUTPUT_DIR")
         self.recent: deque[float] = deque(maxlen=_PACE_MATCHES)
         self.written = time.monotonic()
@@ -398,7 +440,7 @@ class _Report:
         if now - self.written >= _REPORT_SECONDS:
             self.write()
 
-    def write(self, *, failed: int = 0) -> None:
+    def write(self) -> None:
         if self.outputs is None:
             return
         elapsed = self.recent[-1] - self.recent[0] if self.recent else 0.0
@@ -406,14 +448,14 @@ class _Report:
             unit="matches",
             done=self.done,
             total=self.total,
-            failed=failed,
+            failed=self.failed,
             per_hour=(len(self.recent) - 1) / elapsed * 3600 if elapsed > 0 else None,
         )
         report_progress(writer=self.writer, clocks={}, tally=tally)
         self.written = time.monotonic()
 
 
-class Terminated(Exception):
+class Terminated(RetryRequested):
     """SIGTERM reached an eval run: what is staged is sealed before it ends."""
 
 
@@ -425,7 +467,7 @@ def _terminable() -> Iterator[None]:
         return
 
     def terminated(signum: int, frame: FrameType | None) -> NoReturn:
-        raise Terminated()
+        raise Terminated("evaluation received SIGTERM")
 
     before = signal.signal(signal.SIGTERM, terminated)
     try:
@@ -434,54 +476,268 @@ def _terminable() -> Iterator[None]:
         signal.signal(signal.SIGTERM, before)
 
 
-def _played[C: BaseModel | Mapping[str, JsonValue]](
-    pending: Iterator[Match], play: Callable[[Match[C]], Tables | Result], workers: int
-) -> Iterator[tuple[Match, Tables | Result | BaseException]]:
-    """Each match with its tables or what it raised, in the order they finish.
+@dataclass
+class Playing:
+    """A live tournament and its game function and optional agent address."""
 
-    Matches start in `etude.eval.schedule` order, at most `workers` at once, so
-    the order they start in is the order an author's runtime loads checkpoints in.
+    run: EvalRun
+    play: Function
+    checkout: str | None = None
+    tournament: str | None = None
+    agents: str | None = None
+    build: Function | None = None
+    load: Function | None = None
+    memory: int | None = None
+    pending: deque[Match] = field(init=False)
+    skipped: int = field(init=False)
+    played: int = 0
+    failure: EtudeError | RetryRequested | None = None
+
+    def __post_init__(self) -> None:
+        self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
+        self.skipped = len(self.run.matches) - len(self.pending)
+
+
+def _retain(name: str, report: Imports | Performance, directory: Path) -> None:
+    """Keep reports beside group batches, or under a standalone run's artifacts."""
+    try:
+        DirectoryStorage(directory).put(name, report.model_dump_json().encode())
+    except OSError as error:
+        raise RetryRequested(f"game report {name} could not be retained") from error
+
+
+def play_together(
+    plays: Sequence[Playing],
+    *,
+    resources: Resources,
+    cpus: Cpus | None = None,
+    agent_process: AgentProcess | None = None,
+) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
+    """Play tournaments on one pool; loader failures follow every seated checkpoint.
+
+    Other match failures stop dispatch for their tournament; in-flight outcomes
+    are still delivered. Tournaments share the available game processes.
+    Storage and reporting stay on the invoking thread; only the author's play
+    crosses into a child.
     """
-    if workers == 1:
-        for scheduled in pending:
-            try:
-                yield scheduled, _play(play, scheduled)
-            except Exception as error:  # noqa: BLE001 - recorded with the match, then raised
-                yield scheduled, error
-        return
-    # Fresh processes everywhere, so an eval run behaves alike on Linux and macOS.
-    context = multiprocessing.get_context("spawn")
-    with ProcessPoolExecutor(workers, mp_context=context) as pool:
-        running: dict[Future[Tables | Result], Match] = {}
+    started = time.monotonic()
+    order = deque(plays)
+    stopping = False
+    warned_imports = False
+    reported_imports: set[int] = set()
+    failed_checkpoints: set[str] = set()
 
-        def start() -> None:
-            scheduled = next(pending, None)
-            if scheduled is not None:
-                running[pool.submit(_play, play, scheduled)] = scheduled
+    def fail_checkpoints(local_failures: Sequence[AgentFailure] = ()) -> None:
+        failures = list(local_failures)
+        if agent_process is not None:
+            while True:
+                try:
+                    failures.append(agent_process.checkpoint_failures.get_nowait())
+                except Empty:
+                    break
+        for failure in failures:
+            if not failure.loading:
+                continue
+            if failure.checkpoint in failed_checkpoints:
+                continue
+            failed_checkpoints.add(failure.checkpoint)
+            for each in plays:
+                affected = [
+                    match
+                    for match in each.run.matches
+                    if match.key not in each.run.done
+                    and match.key not in each.run._failed
+                    and any(
+                        c.key == failure.checkpoint
+                        for player in match.players
+                        for c in player_checkpoints(player)
+                    )
+                ]
+                if not affected:
+                    continue
+                each.failure = (
+                    RetryRequested(failure.error)
+                    if failure.retry
+                    else EtudeError("match_failed", 500, detail=failure.error)
+                )
+                for match in affected:
+                    each.run._stage_failure(match, failure.error, retry=failure.retry)
+                each.run._seal()
+                each.pending = deque(
+                    match for match in each.pending if match.key not in each.run._failed
+                )
 
-        for _ in range(workers):
-            start()
+    def accept(each: Playing, match: Match, outcome: Execution | BaseException) -> None:
+        nonlocal warned_imports
+        imports: Imports | None
+        performance: Performance | None
+        if isinstance(outcome, Execution):
+            imports, performance = outcome.imports, outcome.performance
+        else:
+            # Validate metadata once at the exception transport boundary.
+            raw: object = getattr(outcome, "_etude_imports", None)
+            imports = Imports.model_validate_json(raw) if isinstance(raw, str) else None
+            raw = getattr(outcome, "_etude_performance", None)
+            performance = Performance.model_validate_json(raw) if isinstance(raw, str) else None
+        if imports is not None and imports.pid not in reported_imports:
+            reported_imports.add(imports.pid)
+            _retain(f"game-imports-{imports.pid}.json", imports, resources.artifacts)
+        if performance is not None:
+            # The run writer distinguishes retries and tournaments with identical matches.
+            _retain(f"protocol-{each.run.id}-{match.key}.json", performance, resources.artifacts)
+        if each.agents and imports is not None and imports.warning and not warned_imports:
+            print(imports.warning, file=sys.stderr, flush=True)
+            warned_imports = True
+        if isinstance(outcome, BaseException):
+            local_failures: object = getattr(outcome, "_etude_agent_failures", ())
+            if not isinstance(local_failures, tuple) or not all(
+                isinstance(f, AgentFailure) for f in local_failures
+            ):
+                raise TypeError("invalid local checkpoint failure metadata")
+            fail_checkpoints(cast(tuple[AgentFailure, ...], local_failures))
+        fail_checkpoints()
+        if match.key in each.run._failed:
+            return
+        if agent_process is not None:
+            failure = agent_process.failures.pop(
+                (each.tournament or each.run.name, match.key), None
+            )
+            if failure is not None:
+                outcome = (
+                    RetryRequested(failure.error) if failure.retry else RuntimeError(failure.error)
+                )
         try:
-            while running:
-                finished, _ = wait(running, return_when=FIRST_COMPLETED)
-                for future in finished:
-                    raised = future.exception()
-                    yield running.pop(future), raised if raised is not None else future.result()
-                    # Started only once the last is stored: a failure stops the run.
-                    start()
-        finally:
-            pool.shutdown(cancel_futures=True)
+            each.run._store_played(match, outcome)
+        except EtudeError as error:
+            if error.code != "match_failed":
+                raise
+            each.failure = error
+            # Empty the dispatch queue; already-running matches still reach accept.
+            each.pending.clear()
+        else:
+            each.played += 1
+            print(
+                f"etude: {each.run.name}: {each.played}/{len(each.run.matches) - each.skipped} matches played, "
+                f"{time.monotonic() - started:.0f}s elapsed",
+                file=sys.stderr,
+                flush=True,
+            )
 
+    if cpus is None:
+        cpus = divide_cpus(sum(len(each.pending) for each in plays), agents=False)
+    workers = cpus.games
+    if workers and any(each.load is not None for each in plays):
+        print(
+            f"etude: agents: CPU inference in {workers} game processes; 1 thread each",
+            file=sys.stderr,
+            flush=True,
+        )
+    try:
+        with _terminable():
+            if workers > 0:
+                context = multiprocessing.get_context("spawn")
+                pool = ProcessPoolExecutor(
+                    workers, mp_context=context, initializer=initialize_game, initargs=(resources,)
+                )
+                running: dict[Future[Execution], tuple[Playing, Match]] = {}
 
-class EvalResult(Record):
-    """What one `EvalRun.play` did."""
+                def start() -> None:
+                    nonlocal stopping
+                    fail_checkpoints()
+                    for _ in range(len(order)):
+                        each = order.popleft()
+                        order.append(each)
+                        if not each.pending:
+                            continue
+                        if stopping or each.run.should_stop:
+                            stopping = True
+                            return
+                        match = each.pending.popleft()
+                        running[
+                            pool.submit(
+                                play_match,
+                                each.play,
+                                match,
+                                each.agents,
+                                each.checkout,
+                                each.tournament or each.run.name,
+                                each.build,
+                                each.load,
+                                each.memory,
+                            )
+                        ] = (each, match)
+                        return
 
-    experiment: str
-    name: str
-    environment: Environment
-    played: int
-    # Matches already stored by an earlier attempt.
-    skipped: int
+                try:
+                    for _ in range(workers):
+                        start()
+                    while running:
+                        left = seconds_left()
+                        allowance = (
+                            None
+                            if left is None
+                            else max(0.0, left - max(each.run._slowest for each in plays))
+                        )
+                        # Future is invariant; wait observes completion, never result values.
+                        signals = cast(
+                            list[Future[object]],
+                            [*running, *([agent_process.exited] if agent_process else [])],
+                        )
+                        finished, _ = wait(
+                            signals,
+                            timeout=allowance,
+                            return_when=FIRST_COMPLETED,
+                        )
+                        if agent_process is not None:
+                            agent_process.check()
+                            if agent_process.exited in finished:
+                                raise RetryRequested("agent process exited before games finished")
+                        if not finished:
+                            raise RetryRequested(
+                                "evaluation deadline reached before a match completed"
+                            )
+                        for future in list(running):
+                            if future not in finished:
+                                continue
+                            each, match = running.pop(future)
+                            raised = future.exception()
+                            if isinstance(raised, BrokenProcessPool):
+                                raise RetryRequested(
+                                    "game process exited before returning its match"
+                                ) from raised
+                            accept(each, match, raised if raised is not None else future.result())
+                            start()
+                finally:
+                    # Python 3.12 has no public terminate_workers. Reap children on
+                    # cancellation before the agent process is stopped.
+                    if sys.exc_info()[0] is not None:
+                        processes = pool._processes  # Python 3.12 executor-owned children.
+                        for process in processes.values():
+                            process.terminate()
+                    pool.shutdown(wait=True, cancel_futures=True)
+            if stopping:
+                raise RetryRequested("evaluation stopped before its execution deadline")
+    except RetryRequested as error:
+        for each in plays:
+            each.run.fail_pending(error)
+        raise
+    finally:
+        for each in plays:
+            each.run._report.failed += each.run.failed
+        for each in plays:
+            each.run._report.write()
+    return tuple(
+        each.failure
+        if each.failure is not None
+        else EvalResult(
+            experiment=each.run.experiment,
+            name=each.run.name,
+            environment=each.run.environment,
+            played=each.played,
+            skipped=each.skipped,
+        )
+        for each in plays
+    )
 
 
 @contextmanager
@@ -490,15 +746,12 @@ def _evaluating_matches(
     experiment: str,
     environment: Environment,
     matches: Sequence[Match],
-    workers: int = 1,
     run: str | None = None,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
     rollups: Sequence[Rollup] = (),
     resume: bool = False,
 ) -> Iterator[EvalRun]:
-    if workers < 1:
-        raise EtudeError("workers_must_be_positive", 422)
     if len({scheduled.key for scheduled in matches}) != len(matches):
         raise EtudeError("duplicate_match", 422)
     names = [rollup.name for rollup in rollups]
@@ -529,7 +782,6 @@ def _evaluating_matches(
         experiment=experiment,
         environment=environment,
         matches=list(ordered(matches)),
-        workers=workers,
     )
     try:
         yield writer
@@ -541,24 +793,3 @@ def _evaluating_matches(
         raise
     else:
         writer.finish("finished")
-
-
-@lru_cache(maxsize=128)
-def _match_type(play: Callable[..., object]) -> type[Match]:
-    parameters = list(inspect.signature(play).parameters.values())
-    if len(parameters) != 1:
-        raise TypeError("play must take exactly one Match parameter")
-    kind = typing.get_type_hints(play).get(parameters[0].name, Match)
-    if not isinstance(kind, type) or not issubclass(kind, Match):
-        raise TypeError("play's parameter must be annotated with Match[YourConfig]")
-    return kind
-
-
-def _play[C: BaseModel | Mapping[str, JsonValue]](
-    play: Callable[[Match[C]], Tables | Result], match: Match
-) -> Tables | Result:
-    kind = _match_type(play)
-    # The author's generic annotation is the validation boundary, just as the
-    # config parameter is for etude.call. Stored matches retain portable JSON.
-    checked = kind.model_validate_json(match.model_dump_json()) if kind is not Match else match
-    return play(cast(Match[C], checked))

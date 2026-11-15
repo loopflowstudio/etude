@@ -8,10 +8,9 @@ from pathlib import Path
 
 import duckdb
 
-from etude.checkpoints import CheckpointId, CheckpointRef
+from etude.checkpoints import CheckpointRef
 from etude.eval.match import environment, evaluate
-from etude.eval.records import CheckpointPlayer, Code, Inference, Match
-from etude.eval.run import Tables
+from etude.eval.records import CheckpointPlayer, Code, Held, Match, player_checkpoints
 from etude.eval.schedule import checkpoints, ordered
 from etude.records import ArtifactRef
 from tests.eval.games import play
@@ -21,34 +20,11 @@ WORLD = environment("duel", config={"world": "w6"})
 GAMES = Path(__file__).with_name("games.py")
 
 
-class Runtime:
-    """An author's inference runtime: the two checkpoints used last stay loaded."""
-
-    def __init__(self) -> None:
-        self.resident: list[CheckpointId] = []
-        self.loads = 0
-        self.played: list[str] = []
-
-    def play(self, match: Match) -> Tables:
-        for key in dict.fromkeys(
-            seated.checkpoint.key
-            for seated in match.players
-            if isinstance(seated, CheckpointPlayer)
-        ):
-            if key in self.resident:
-                self.resident.remove(key)
-            else:
-                self.loads += 1
-            self.resident = [*self.resident, key][-2:]
-        self.played.append(match.key)
-        return play(match)
-
-
 def checkpoint(updates: int) -> CheckpointPlayer:
     name = f"updates-{updates}.pt"
     artifact = ArtifactRef(uri=f"s3://models/{name}", sha256=sha256(name.encode()).hexdigest())
     ref = CheckpointRef(experiment="", job="ppo-1", name=name, artifact=artifact)
-    return Inference().player(ref)
+    return Held().player(ref)
 
 
 def code(name: str, strength: int) -> Code:
@@ -74,10 +50,19 @@ def rating(checkpoints: int, deals: int, paired: int) -> list[Match]:
 
 
 def loads(matches: Iterable[Match]) -> int:
-    runtime = Runtime()
+    """Count loads with the two most recently used checkpoints kept resident."""
+    resident: list[str] = []
+    count = 0
     for match in matches:
-        runtime.play(match)
-    return runtime.loads
+        for key in dict.fromkeys(
+            ref.key for player in match.players for ref in player_checkpoints(player)
+        ):
+            if key in resident:
+                resident.remove(key)
+            else:
+                count += 1
+            resident = [*resident, key][-2:]
+    return count
 
 
 def rows(directory: Path) -> list[tuple[object, ...]]:
@@ -96,20 +81,19 @@ def test_a_rating_benchmark_in_scheduled_order_loads_each_checkpoint_about_once(
 
 def test_evaluate_plays_in_scheduled_order_and_order_changes_no_row(tmp_path: Path) -> None:
     matches = rating(4, deals=5, paired=2)
-    runtime = Runtime()
     run = evaluate(experiment="rating", environment=WORLD, matches=matches,
-                   play=runtime.play, directory=tmp_path)  # fmt: skip
-    assert (run.played, loads(matches), runtime.loads) == (26, 24, 5)
+                   play=play, directory=tmp_path)  # fmt: skip
+    assert (run.played, loads(matches), loads(ordered(matches))) == (26, 24, 5)
     # The same results, row for row, as playing in key order.
     expected = sorted(
         (match.key, row["seat"], row["game"], row["won"], row["hits"])
         for match in matches
-        for row in play(match)["plays"]
+        for row in play(match, [])["plays"]
     )
     assert rows(tmp_path) == expected
 
 
-def test_a_queue_of_code_players_plays_in_the_callers_order(tmp_path: Path) -> None:
+def test_a_queue_of_code_players_plays_in_the_callers_order() -> None:
     field = [code(f"script{strength}", strength) for strength in range(4)]
     given: Sequence[Match] = [
         Match(players=(field[a], field[b]), config={"deal": deal})
@@ -118,16 +102,13 @@ def test_a_queue_of_code_players_plays_in_the_callers_order(tmp_path: Path) -> N
         for b in range(4)
         if a != b
     ]
-    runtime = Runtime()
-    evaluate(experiment="league", environment=WORLD, matches=given, play=runtime.play,
-             directory=tmp_path)  # fmt: skip
-    assert runtime.played == [match.key for match in given]
+    assert list(ordered(given)) == list(given)
 
 
 def test_two_checkpoint_keys_holding_the_same_bytes_are_two_checkpoints() -> None:
     file = ArtifactRef(uri="s3://models/init.pt", sha256=sha256(b"init").hexdigest())
     starts = [
-        Inference().player(CheckpointRef(
+        Held().player(CheckpointRef(
             experiment="", job=run, name="updates-100.pt", artifact=file))
         for run in ("ppo-1", "ppo-2")
     ]  # fmt: skip
