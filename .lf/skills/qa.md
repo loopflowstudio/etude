@@ -367,6 +367,21 @@ Inspect with a compatible writer holding committed WAL data; status must read
 it without copying the database. Normal SQLite sidecar coordination is allowed.
 Read-only inspection must not change scientific or operational records.
 
+Working route on the installed wheel: `uv build --wheel`, `uv venv --python 3.12`,
+`uv pip install` it, then drive `VENV/bin/etude` with `ETUDE_HOME` per scenario.
+Before merge, non-development `database upgrade` correctly refuses
+(`unmerged or unproven migrations: …`): `merged.json` is `{}` in a branch wheel,
+so upgrading an existing home and the backup/rollback path stay test-only until merge.
+A newer etude's migration, simulated by a fixture, must insert the ledger row
+(`name, sha256, floor, program, applied_at`) **and** set `PRAGMA user_version` to the
+row count, as `_apply` does; without the pragma an open writer's fence never sees it.
+For a returning user, `cp -c` (APFS clone) the retained consolidated snapshot into a
+lab home, and deny the network with
+`sandbox-exec -p '(version 1)(allow default)(deny network-outbound (remote ip))' CMD`.
+Copy a live old file only with `sqlite3 "file:SRC?mode=ro" ".backup DST"`.
+Old QA folders under `/tmp` can hold read-only prepared venvs; use a new folder.
+`etude usage` with no filter reads every transfer (about 135 s on 1.77 M rows); run it once.
+
 ## Etude: rehearsing a launcher database upgrade on this machine's data
 
 The one-time conversion of this machine's pre-ledger files is separate from the

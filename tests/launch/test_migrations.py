@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -84,12 +85,20 @@ def test_inspection_preserves_records_and_reads_wal(
         state = inspect(home)
         assert state.applied == tuple(m.name for m in migrations())
         assert state.problem == (
-            None if journal == "checkpointed" else "applied migration content differs: run_names"
+            None
+            if journal == "checkpointed"
+            else "applied migration content differs: run_names; "
+            "restore the newest launcher.sqlite.backup-* or move the file away"
         )
         monkeypatch.setenv("ETUDE_HOME", str(home))
         assert main(["database", "status"]) == 0
         assert (state.problem or "compatible") in capsys.readouterr().out
         assert inspected.read_bytes() == before
+        if state.problem:
+            with pytest.raises(LauncherError, match=re.escape(state.problem)):
+                open_home(home)
+        else:
+            open_home(home).close()
 
 
 def test_inspection_uses_one_snapshot_while_compatible_writer_commits(
@@ -120,7 +129,9 @@ def test_inspection_uses_one_snapshot_while_compatible_writer_commits(
         assert len(statements) == 3
         assert statements[0] == "BEGIN"
         assert all(sql.startswith("SELECT") for sql in statements[1:])
-        assert inspect(tmp_path).problem == "applied migration content differs: run_names"
+        assert (inspect(tmp_path).problem or "").startswith(
+            "applied migration content differs: run_names;"
+        )
 
 
 def test_explicit_initialization_and_idempotent_upgrade(tmp_path: Path) -> None:

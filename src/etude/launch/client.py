@@ -28,7 +28,7 @@ from functools import cache
 from pathlib import Path
 
 from etude.errors import LauncherError
-from etude.launch.database import has_launcher, open_home
+from etude.launch.database import launcher_file, open_home
 from etude.launch.executor import Execution, Executor, local
 from etude.launch.machines import Machines, OwnedMachine, Safeguards
 from etude.launch.providers.lium.api import LiumAPI
@@ -248,7 +248,7 @@ def standing(
     address = None if local else selected()
     if address:
         return PythonClient(address).standing(experiment, job=job)
-    if not has_launcher(home()):
+    if not launcher_file(home()).exists():
         return ()
     store = open_home(home())
     try:

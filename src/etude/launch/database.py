@@ -188,9 +188,17 @@ def _version(text: str) -> tuple[int, ...]:
     return tuple(int(part) for part in found.group().split("."))
 
 
-def _too_new(rows: Sequence[sqlite3.Row], file: str) -> str | None:
-    """Why ledger rows this etude does not know keep it from the file, or None if they are
-    all additive changes it can still read and write."""
+def _ledger_problem(rows: Sequence[sqlite3.Row], file: str) -> str | None:
+    """Reject changed SQL and incompatible newer migrations; allow additive changes."""
+    known = {m.name: m.sha256 for m in migrations()}
+    if changed := [
+        r["name"] for r in rows if r["name"] in known and r["sha256"] != known[r["name"]]
+    ]:
+        return (
+            f"applied migration content differs: {', '.join(changed)}; "
+            f"restore the newest {file}.backup-* or move the file away"
+        )
+    rows = [r for r in rows if r["name"] not in known]
     if unreleased := [f"{r['name']}@{r['sha256'][:12]}" for r in rows if r["floor"] is None]:
         return f"{file} requires a build containing migrations: {', '.join(unreleased)}"
     if not rows:
@@ -388,41 +396,17 @@ class Database:
         )
         self._db.row_factory = sqlite3.Row
         try:
-            held = self._applied()
-            pending = [m.name for m in migrations() if held is None or m.name not in held[0]]
-            if pending:
+            state = _inspect(self._db, path)
+            if state.problem:
+                raise LauncherError(f"{path}: {state.problem}")
+            if state.pending:
                 raise LauncherError(
-                    f"{path} needs etude database upgrade (missing: {', '.join(pending)})"
+                    f"{path} needs etude database upgrade (missing: {', '.join(state.pending)})"
                 )
-            assert held is not None
-            self._generation = held[1]
+            self._generation = len(state.applied)
         except BaseException:
             self._db.close()
             raise
-
-    def _applied(self) -> tuple[tuple[str, ...], int] | None:
-        """The ledger's migrations this etude knows and its row count; None without a ledger.
-
-        The rest are a newer etude's additive changes, which this one reads and writes
-        past. Raises LauncherError when they raise the floor past this etude, or when
-        a known migration's file changed after it was applied.
-        """
-        if not self._db.execute("SELECT 1 FROM sqlite_master WHERE name='migrations'").fetchone():
-            return None
-        rows = self._db.execute(
-            "SELECT name, sha256, floor FROM migrations ORDER BY rowid"
-        ).fetchall()
-        known = {m.name: m.sha256 for m in migrations()}
-        file = self._path.name
-        if reason := _too_new([r for r in rows if r["name"] not in known], file):
-            raise LauncherError(reason)
-        for row in rows:
-            if known.get(row["name"], row["sha256"]) != row["sha256"]:
-                raise LauncherError(
-                    f"migration {row['name']} changed after it was applied to {self._path}; "
-                    f"restore the newest {file}.backup-* or move the file away"
-                )
-        return tuple(r["name"] for r in rows if r["name"] in known), len(rows)
 
     def check_schema(self) -> None:
         """Raise SchemaAdvanced if another etude raised the file's floor past this one since it
@@ -434,10 +418,7 @@ class Database:
             "SELECT name, sha256, floor, program FROM migrations WHERE rowid > ? ORDER BY rowid",
             (self._generation,),
         ).fetchall()
-        known = {m.name: m.sha256 for m in migrations()}
-        if any(r["name"] in known and r["sha256"] != known[r["name"]] for r in rows) or _too_new(
-            [r for r in rows if r["name"] not in known], self._path.name
-        ):
+        if _ledger_problem(rows, self._path.name):
             raise SchemaAdvanced(rows[-1]["program"] if rows else None)
         self._generation = generation
 
@@ -1265,14 +1246,6 @@ def _read_only(path: Path, timeout: float = 5) -> sqlite3.Connection:
     return sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=timeout)
 
 
-@contextmanager
-def _inspection(path: Path) -> Iterator[sqlite3.Connection]:
-    """Read one committed SQLite snapshot, including compatible writers' WAL rows."""
-    with closing(_read_only(path, timeout=0)) as db:
-        db.execute("BEGIN")
-        yield db
-
-
 def _snapshot(source: Path, target: Path, timeout: float) -> None:
     """Read a consistent WAL snapshot without modifying the source's records."""
     with closing(_read_only(source, timeout)) as reader:
@@ -1355,37 +1328,32 @@ def _merged() -> dict[str, str]:
     return result
 
 
-def inspect(home: Path) -> Schema:
-    """Read local catalog membership, without database creation, provider keys or network."""
-    home = home.resolve()
-    path = launcher_file(home)
+def _inspect(db: sqlite3.Connection, path: Path) -> Schema:
+    """Opening and status share the same ledger and compatibility rules."""
     applied: tuple[str, ...] = ()
     problem: str | None = None
-    if path.exists():
-        with _inspection(path) as db:
-            db.row_factory = sqlite3.Row
-            if db.execute("SELECT 1 FROM sqlite_master WHERE name='migrations'").fetchone():
-                rows = db.execute(
-                    "SELECT name,sha256,floor FROM migrations ORDER BY rowid"
-                ).fetchall()
-                applied = tuple(r["name"] for r in rows)
-                known = {m.name: m for m in migrations()}
-                problem = _too_new([r for r in rows if r["name"] not in known], path.name)
-                if changed := [
-                    r["name"]
-                    for r in rows
-                    if r["name"] in known and r["sha256"] != known[r["name"]].sha256
-                ]:
-                    problem = "applied migration content differs: " + ", ".join(changed)
-            else:
-                problem = "canonical file has no migration ledger"
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='migrations'").fetchone():
+        rows = db.execute("SELECT name,sha256,floor FROM migrations ORDER BY rowid").fetchall()
+        applied = tuple(r["name"] for r in rows)
+        problem = _ledger_problem(rows, path.name)
+    else:
+        problem = "canonical file has no migration ledger"
     pending = tuple(m.name for m in migrations() if m.name not in applied)
     return Schema(path=path, applied=applied, pending=pending, problem=problem)
 
 
-def has_launcher(home: Path) -> bool:
-    """Whether the canonical launcher file exists."""
-    return launcher_file(home).exists()
+def inspect(home: Path) -> Schema:
+    """Read local schema evidence, without database creation, provider keys or network."""
+    path = launcher_file(home.resolve())
+    if not path.exists():
+        return Schema(
+            path=path, applied=(), pending=tuple(m.name for m in migrations()), problem=None
+        )
+    with closing(_read_only(path, timeout=0)) as db:
+        db.row_factory = sqlite3.Row
+        # Keep both ledger queries on one committed snapshot, including live WAL rows.
+        db.execute("BEGIN")
+        return _inspect(db, path)
 
 
 def open_home(home: Path, *, timeout: float = 30) -> Database:
