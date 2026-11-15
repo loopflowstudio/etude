@@ -88,7 +88,9 @@ def test_two_models_publish_one_checkpoint_and_read_the_same_record(
         assert db.sql(
             "select checkpoint from training_checkpoints join players using(checkpoint)"
         ).fetchall() == [(observed.key,)]
-    job = TrainingJob(name="base", train=train, config=Config(), start=observed, max_hours=1)
+    job = TrainingJob(
+        name="base", train=train, config=Config(), start=observed, max_hours=1
+    ).plain()
     assert len(job.inputs) == 3
     for variable in job.environment:
         monkeypatch.setenv(variable.name, variable.value)
