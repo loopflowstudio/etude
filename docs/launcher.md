@@ -1409,6 +1409,10 @@ and recorded checkpoint digests. A file the job rewrites in place can be
 newer than its membership if delivery stopped between the file and the
 index; recovery keeps that newer file. Continuation instead uses the
 published fingerprints and verifies them when delivering the child's inputs.
+A declaration sees the same membership as a run's `out` in the experiment's
+state: only keys `out.json` lists and the source still holds, never a file
+that is not yet indexed
+([Files from another run](training.md#files-from-another-run)).
 
 State kept with `run.save()` never recovers as a mixture of two saves. Each
 save is a folder of files that are written once and complete in itself
@@ -1500,6 +1504,21 @@ as `run.input("start")`: a checkpoint folder arrives whole, each member verified
 against its digest in the record,
 and the run records the checkpoint it started from
 ([Training](training.md#starting-from-another-run)).
+
+A declaration rarely writes an `Input` by hand. Another run's stored out
+files make them, with the key, digest, length, producer run and locator read
+from that run's `out.json`
+([Files from another run](training.md#files-from-another-run)):
+
+```python
+packs = state.run("player@0").out.matching("packs/*.pack")
+job = TrainingJob(
+    name="belief", train=fit, config=FitConfig(), inputs=packs.inputs("source"), max_hours=2
+)
+```
+
+Each member arrives at `ETUDE_INPUTS_DIR/source/PATH`, as one verified file.
+It does not seed the consumer's `out`.
 
 `key` names an object in the bucket of the storage the machine keeps its
 records in (the on-demand's, or an owned host's `--storage`). The launcher gives

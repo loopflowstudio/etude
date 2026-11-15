@@ -691,7 +691,11 @@ does, unless `--retry-failed`.
   are new on the next pass and play in a new run, without `--resume`.
   `Checkpoints` is a tuple, so a slice works too; `every(n)`, `at(clock,
   *values)` and `tagged(tag)` choose by ordinal, clock value or tag, and
-  `final` is the last checkpoint once a run has finished.
+  `final` is the last checkpoint once a run has finished. A training run's
+  `out` is the other files it stored, chosen with `matching(pattern)` or
+  `file(path)` and given to a training job as inputs
+  ([Files from another run](training.md#files-from-another-run)); it is read
+  from the run's `out.json` only when a declaration uses it.
 - **What `eval_jobs` returns.** Every evaluation job the experiment should
   have run or can run by now, each holding a benchmark for the checkpoints it
   chose: the whole list on every call, not only what is new. The pass works

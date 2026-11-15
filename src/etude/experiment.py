@@ -20,6 +20,7 @@ from etude.checkpoints import CheckpointRecord
 from etude.eval.records import Match
 from etude.launch import client
 from etude.launch.records import Standing
+from etude.out import OutMember
 from etude.records import RunOutcome
 from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
@@ -62,6 +63,10 @@ def state_of(
     retained = client.standing(experiment, local=True) if retained is None else retained
     runs = []
     for data in ours:
+
+        def _read_out(data: RunData = data) -> tuple[OutMember, ...]:
+            return data.out
+
         saved = jobs.Checkpoints(
             record.model_copy(
                 update={"run": data.name, "experiment": data.experiment, "line": line[data.name]}
@@ -79,6 +84,7 @@ def state_of(
                 state=_stored_state(data.outcome),
                 checkpoints=saved,
                 seed=data.file.seed if data.file else None,
+                _read_out=_read_out,
             )
         )
     eval_runs = [

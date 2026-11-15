@@ -41,6 +41,64 @@ def training_jobs(state):
 """
 
 
+def test_out_member_inputs_queue_after_a_producer_stores_its_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    b = bench(tmp_path)
+    b.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    file = tmp_path / "packs.py"
+    file.write_text("""from decimal import Decimal
+from etude.jobs import ExperimentState, TrainingJob
+from tests.launch.tasks import Command, train_command
+
+def training_jobs(state: ExperimentState) -> list[TrainingJob]:
+    jobs = [TrainingJob(name="player", train=train_command, config=Command(command="true"),
+                        repo=None, max_hours=1, max_usd=Decimal(1))]
+    player = next((r for r in state.runs if r.launch == "player" and r.state == "finished"), None)
+    if player is not None:
+        packs = player.out.matching("packs/*.pack")
+        if packs:
+            jobs.append(TrainingJob(name="belief", train=train_command,
+                config=Command(command="true"), repo=None, max_hours=1, max_usd=Decimal(1),
+                inputs=packs.inputs("source")))
+    return jobs
+""")
+    definition = read_experiment(file)
+    source = DirectoryStorage(tmp_path / "source")
+    advance(definition, source=source, pool="waiting", mode="queue")
+    assert [r.id for r in b.scheduler.runs()] == ["packs/player@0"]
+    queued = MeasuredStorage(source)
+    assert observe(queued, "packs").run("player@0").out == ()
+    assert (queued.listings, queued.requests) == (1, 0)
+    with track(
+        experiment="packs",
+        run="player@0",
+        job="player",
+        seed=0,
+        directory=tmp_path / "producer",
+        storages=[source],
+    ) as run:
+        (run.out / "packs").mkdir()
+        (run.out / "packs/0001.pack").write_bytes(b"games")
+    baseline = MeasuredStorage(source)
+    state = observe(baseline, "packs")
+    assert baseline.requests == 3
+    measured = MeasuredStorage(source)
+    counts = Counting(b.store, b.service)
+    with counts.record():
+        advance(definition, source=measured, pool="waiting", mode="queue")
+    assert counts.snapshot().provider == 0
+    assert counts.snapshot().ssh == 0
+    assert [r.id for r in b.scheduler.runs()] == ["packs/player@0", "packs/belief@0"]
+    consumer = b.scheduler.runs()[-1]
+    assert (measured.listings, measured.requests) == (1, baseline.requests + 1)
+    assert consumer.launch.spec.inputs == state.run("player@0").out.inputs("source")
+    assert measured.got.count("packs/player@0/out.json") == 1
+    assert not any("/out/" in key for key in measured.got)
+
+
 def test_a_pass_leaves_known_runs_alone_and_queues_only_a_new_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

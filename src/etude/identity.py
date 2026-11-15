@@ -61,3 +61,17 @@ def run_address(run: str, experiment: str | None) -> str:
     if name == experiment or name.startswith(experiment + "@"):
         return name
     return prefix + name
+
+
+def _stored_owner(run: str, experiment: str | None, folder: str | None) -> str:
+    """The producer address, preserving the spelling of its stored folder."""
+    owner = run_address(run, experiment)
+    if folder is not None:
+        # Folders distinguish a compact sole job from an explicitly qualified
+        # job bearing the experiment's name, including historical copies.
+        qualified = f"{experiment}/{run}"
+        if experiment and (folder == qualified or folder.endswith("/" + qualified)):
+            return qualified
+        if folder != owner and not folder.endswith("/" + owner):
+            return run
+    return owner
