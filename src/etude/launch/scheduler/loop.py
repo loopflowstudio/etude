@@ -42,6 +42,7 @@ from etude.launch.executor import Execution
 from etude.launch.logging import bounded
 from etude.launch.provisioner.machines import Refused, Safeguards, creation_guard
 from etude.launch.records import (
+    CAPACITY_REFUSED,
     RETRYABLE,
     STOCK_IMAGE,
     Availability,
@@ -124,9 +125,9 @@ def _refused(session: Session) -> str:
     )
 
 
-def _count_attempts(attempts: Sequence[RunAttempt]) -> int:
+def _budgeted_attempts(attempts: Sequence[RunAttempt]) -> tuple[RunAttempt, ...]:
     """Budgeted attempts: a definite refusal acquired no machine and spends no try."""
-    return sum(attempt.cause != "capacity_refused" for attempt in attempts)
+    return tuple(attempt for attempt in attempts if attempt.cause != CAPACITY_REFUSED)
 
 
 def _new_session(id: str, supply: Supply, machine: Machine, now: datetime) -> Session:
@@ -1235,7 +1236,9 @@ class Scheduler:
         now = self._clock()
         record = self._store.run(run)
         attempts = self._store.attempts(run=run)
+        budgeted = _budgeted_attempts(attempts)
         last = attempts[-1] if attempts else None
+        refused = last is not None and last.cause == CAPACITY_REFUSED
         session = None if last is None else self._store.session(last.session)
         rental = None if session is None else self._store.rental_for(session)
         delivery_age: float | None = None
@@ -1254,14 +1257,14 @@ class Scheduler:
             until=record.launch.spec.until,
             clocks={} if last is None else last.clocks,
             tally=None if last is None else last.tally,
-            usd=sum((self._attempt_usd(a, now) for a in attempts), Decimal(0)),
-            attempts=_count_attempts(attempts),
-            machine=None if last is None else last.machine,
-            hardware=None if session is None else session.hardware,
+            usd=sum((self._attempt_usd(a, now) for a in budgeted), Decimal(0)),
+            attempts=len(budgeted),
+            machine=None if last is None or refused else last.machine,
+            hardware=None if session is None or refused else session.hardware,
             rental_ended=None
             if rental is None
             else self._store.machine(rental.machine).deleted_at is not None,
-            estimated=any(self._estimated(self._store.session(a.session), now) for a in attempts),
+            estimated=any(self._estimated(self._store.session(a.session), now) for a in budgeted),
             shared=1
             if last is None or session is None
             else self._shared(last, session, rental, now),
@@ -1307,7 +1310,7 @@ class Scheduler:
         if last is not None and session is not None:
             if superseded:
                 reason = "explicit resume"
-            elif last.cause == "capacity_refused":
+            elif last.cause == CAPACITY_REFUSED:
                 reason = _refused(session)
             else:
                 reason = f"retrying after {last.cause or last.outcome}"
@@ -1765,7 +1768,7 @@ class Scheduler:
             )
             self._store.record_refusal(session, now, sanitize(str(error)) or "no reason given")
             for attempt in self._store.attempts(session=session.id):
-                self._store.fail_before_start(attempt, "capacity_refused", now)
+                self._store.fail_before_start(attempt, CAPACITY_REFUSED, now)
             return
         except Exception as error:  # noqa: BLE001
             self._diagnose(
@@ -2282,7 +2285,11 @@ class Scheduler:
             update={"submission": prior.launch.model_copy(update={"spec": job})}
         )
         left = self._remaining(candidate, self._clock())
-        if _count_attempts(attempts) >= job.max_attempts or left.seconds < 1 or left.usd <= 0:
+        if (
+            len(_budgeted_attempts(attempts)) >= job.max_attempts
+            or left.seconds < 1
+            or left.usd <= 0
+        ):
             raise LauncherError(
                 "run has no remaining hours, dollars or attempts; raise its job limits"
             )
@@ -2350,7 +2357,7 @@ class Scheduler:
         )
 
     def _remaining(self, run: RunRecord, now: datetime) -> Budget:
-        attempts = self._store.attempts(run=run.id)
+        attempts = _budgeted_attempts(self._store.attempts(run=run.id))
         seconds = sum(
             max(0, ((a.finished_at or now) - a.started_at).total_seconds())
             for a in attempts

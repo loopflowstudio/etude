@@ -124,7 +124,7 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
     assert wait == Counts(provider=4, bucket=1, database=107)  # known debt: wait advances work
 
 
-@pytest.mark.parametrize("history", [0, 4096])
+@pytest.mark.parametrize("history", [1, 4096])
 def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> None:
     b = bench(tmp_path)
     b.service.refuse = 1
@@ -135,17 +135,14 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
     old = (b.clock() - timedelta(days=1)).isoformat()
     b.store._db.executemany(
         "INSERT INTO sessions(id, machine, planned_at, refused_at, refusal) VALUES (?, ?, ?, ?, 'no capacity')",
-        [(f"history-{index}", "history", old, old) for index in range(history)],
+        [(f"history-{index}", "history", old, old) for index in range(history - 1)],
     )
-    (previous,) = b.scheduler.queue(
-        Job(command="true", max_hours=1, max_usd=Decimal(1)).runs(1), rent="l4"
-    )
-    b.scheduler.cancel(previous)
+    b.store._db.execute("UPDATE attempts SET number = ? WHERE run = ?", (history, run))
     b.store._db.executemany(
         """INSERT INTO attempts(id, run, session, machine, number, position,
                limit_seconds, limit_kind, outcome, cause)
-           VALUES (?, ?, ?, 'history', ?, 0, 3600, 'hours', 'lost', 'capacity_refused')""",
-        [(f"old-{index}", previous, f"history-{index}", index + 1) for index in range(history)],
+           VALUES (?, ?, ?, 'history', ?, 0, 3600, 'out_of_time', 'lost', 'capacity_refused')""",
+        [(f"old-{index}", run, f"history-{index}", index + 1) for index in range(history - 1)],
     )
     restarted = Scheduler(b.store, {}, clock=b.clock)
     counting = Counting(b.store, b.service)
@@ -159,9 +156,21 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
         assert [record.id for record in b.store.waiting("l4")] == [run]
         waiting = counting.snapshot()
     assert refused is not None and refused.refusal == "no capacity"
-    assert status == Counts(database=14)
+    assert status == Counts(database=7)
     assert pause == Counts(database=1)
     assert waiting == Counts(database=1)
+    with counting.record():
+        b.scheduler.tick()
+        planning = counting.snapshot()
+    assert planning == Counts(database=49)
+    assert b.service.creates == 1
+    b.clock.advance(60)
+    with counting.record():
+        b.scheduler.tick()
+        admission = counting.snapshot()
+    assert admission == Counts(provider=4, bucket=1, database=113), admission.model_dump()
+    assert b.scheduler.attempts(run)[-1].number == history + 1
+    assert b.scheduler.read(run).attempts == 1
     statements: list[str] = []
     b.store._db.set_trace_callback(statements.append)
     try:

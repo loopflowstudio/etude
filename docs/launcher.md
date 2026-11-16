@@ -85,9 +85,10 @@ $ uv run etude launch experiment.py --rent gpu --max-usd 2
 etude: launch 215b6457f928 for experiment/base@0: cannot launch on 'gpu': provider refused: There are no longer any instances available with the requested specifications. Please refresh and try again.; etude queue would wait
 ```
 
-Nothing was rented and nothing needs cleaning up: `etude machines` lists the
-refused machine as `unavailable`, it does not count toward `--max`, and the same
-run can be launched again at once, on this on-demand or another. A queued run
+Nothing was rented and nothing needs cleaning up: `etude machines --all` lists the
+refused machine as `unavailable, refused DATE TIME UTC`. Default listings omit it;
+it does not count toward `--max`, and the same run can be launched again at once,
+on this on-demand or another. A queued run
 keeps the reason in `etude status` and its on-demand is asked again no sooner
 than a minute later. Capacity refusals do not count toward the job's `max_attempts`.
 While its hours and dollars remain, the run stays queued until capacity is

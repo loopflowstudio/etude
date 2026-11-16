@@ -108,6 +108,15 @@ def show_machines(scheduler: Scheduler, *, ended: bool) -> None:
             )
     for ondemand in scheduler.ondemands():
         for machine in scheduler.machines(ondemand.name):
+            if machine.refused_at is not None:
+                if ended:
+                    print(
+                        machine.name,
+                        ondemand.name,
+                        f"unavailable, refused {machine.refused_at:%Y-%m-%d %H:%M} UTC",
+                        sep="  ",
+                    )
+                continue
             if machine.name not in windows or (machine.deleted_at is not None and not ended):
                 continue
             spent = windows[machine.name]

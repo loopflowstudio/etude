@@ -78,10 +78,12 @@ Cause = Literal[
     "machine_lost",
     "create_unconfirmed",
 ]
+# A definite refusal acquired no machine and spends no attempt budget.
+CAPACITY_REFUSED: Cause = "capacity_refused"
 # Confirmed machine loss permits a new attempt; an uncertain start does not, nor
 # an input the machine was not given, which a retry would not be given either.
 RETRYABLE: frozenset[str] = frozenset(
-    {"capacity_refused", "setup_failed", "machine_lost_before_start", "machine_lost"}
+    {CAPACITY_REFUSED, "setup_failed", "machine_lost_before_start", "machine_lost"}
 )
 # Which of a run's two limits ends it first on the rental it was given.
 Limit = Literal["over_budget", "out_of_time"]

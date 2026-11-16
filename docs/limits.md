@@ -35,7 +35,9 @@ failure recovery requires.
 - `availability` and `--quote` report a provider's stock signal, not a
   reservation. A provider can call hardware `rentable now` and refuse the
   create seconds later; the launch then fails with the provider's reason and
-  rents nothing.
+  rents nothing. Queued refusals retry once a minute without an attempt limit,
+  retaining one machine, rental, session and attempt record per refusal
+  (up to 1,440 asks and 5,760 records per on-demand per day).
 - Logging uses a bounded queue. Check incomplete-row counters and warnings.
   Reports reading a bucket see only delivered files, and list the bucket on
   every build: a report from `--source s3://...` or `r2://...` needs the

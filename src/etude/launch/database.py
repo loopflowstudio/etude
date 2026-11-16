@@ -35,6 +35,7 @@ from etude.errors import LauncherError
 from etude.launch.errors import SchemaAdvanced
 from etude.launch.provenance import frontier
 from etude.launch.records import (
+    CAPACITY_REFUSED,
     RETRYABLE,
     Cause,
     Diagnostic,
@@ -932,7 +933,7 @@ class Database:
         marks = ", ".join("?" for _ in RETRYABLE)
         rows = self._db.execute(
             f"""SELECT r.*, (SELECT count(*) FROM attempts a WHERE a.run = r.id
-                  AND (a.cause IS NULL OR a.cause != 'capacity_refused')) AS tries
+                  AND (a.cause IS NULL OR a.cause != ?)) AS tries
                 FROM runs r
                 WHERE r.id IN (
                   SELECT id FROM runs WHERE pool = ? UNION SELECT id FROM runs WHERE rent = ?
@@ -941,7 +942,7 @@ class Database:
                   a.outcome IS NULL OR (a.outcome != 'stopped' AND
                   (a.outcome != 'lost' OR a.cause NOT IN ({marks})))))
                 ORDER BY r.seq""",
-            (supply, supply, *sorted(RETRYABLE)),
+            (CAPACITY_REFUSED, supply, supply, *sorted(RETRYABLE)),
         ).fetchall()
         return tuple(
             run

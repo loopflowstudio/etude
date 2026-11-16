@@ -15,8 +15,10 @@ import pytest
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch.database import launcher_file
+from etude.launch.listing import show_machines, show_runs
 from etude.launch.provisioner.machines import Refused
 from etude.launch.records import (
+    GPU,
     LogStream,
     Machine,
     MachineTemplate,
@@ -187,6 +189,8 @@ def test_repeated_capacity_refusals_preserve_the_attempt_budget_until_admission(
         status = Scheduler(b.store, {}, clock=b.clock).read(one)
         assert str(status) == "queued (provider refused: no capacity), $0.00"
         assert status.attempts == 0 and status.usd == 0
+        assert status.machine is None and status.hardware is None
+        assert not status.estimated
         assert b.service.creates == creates
         assert not b.store.unsettled_sessions()
         assert [a.number for a in b.scheduler.attempts(one)] == list(range(1, creates + 1))
@@ -211,6 +215,32 @@ def test_repeated_capacity_refusals_preserve_the_attempt_budget_until_admission(
     assert status.outcome == ("lost" if lost else "succeeded")
     assert status.cause == ("machine_lost" if lost else None)
     assert status.attempts == 1 and b.service.creates == 6
+    assert status.usd > 0 and status.estimated
+    assert status.machine == admitted.machine
+
+
+def test_refused_machine_is_only_listed_as_refused_with_all(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    b = bench(tmp_path)
+    b.service.refuse = 1
+    (run,) = b.scheduler.queue(job(), rent="l4")
+    b.scheduler.tick()
+    (attempt,) = b.scheduler.attempts(run)
+    b.store.record_hardware(
+        b.store.session(attempt.session), GPU(id="NVIDIA L4", min_vcpus=6, min_memory_gb=48)
+    )
+    assert b.scheduler.read(run).hardware is None
+    show_machines(b.scheduler, ended=False)
+    assert capsys.readouterr().out == ""
+    show_machines(b.scheduler, ended=True)
+    assert capsys.readouterr().out == (
+        f"{attempt.machine}  l4  unavailable, refused {b.clock():%Y-%m-%d %H:%M} UTC\n"
+    )
+    show_runs(b.scheduler, [run])
+    output = capsys.readouterr().out
+    assert "queued (provider refused: no capacity), $0.00" in output
+    assert "machine " not in output
 
 
 @pytest.mark.parametrize("elapsed", [0, 59, 61])
