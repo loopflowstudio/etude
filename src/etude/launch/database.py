@@ -1146,7 +1146,7 @@ class Database:
     def recent_refusal(self, supply: str, since: datetime) -> Session | None:
         """The newest refusal in this supply's retry pause, across scheduler starts."""
         row = self._db.execute(
-            f"""{_SESSIONS} WHERE w.refused_at > ? AND m.ondemand = ?
+            f"""{_SESSIONS} WHERE w.refusal IS NOT NULL AND w.refused_at > ? AND m.ondemand = ?
                 ORDER BY w.refused_at DESC LIMIT 1""",
             (since.isoformat(), supply),
         ).fetchone()

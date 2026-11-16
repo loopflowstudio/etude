@@ -739,8 +739,11 @@ else its text; at most 2 KiB of an error body is read and at most 300
 characters kept, through the shared sanitizer. A launch reports it as
 `provider refused: REASON`; a queued run's status reads its latest attempt's
 session, keeping that reason across scheduler restarts and after the retry pause.
-Diagnostics are evidence, not scheduling inputs. The scheduler does not ask that on-demand for queued work again within 60 seconds of the
-refusal. Refusals still count toward `max_attempts`. An explicit `launch` is not paused. Timeouts, no reply, 408, 5xx and
+Diagnostics are evidence, not scheduling inputs. The scheduler does not ask that
+on-demand for queued work again within 60 seconds of a provider's refusal of a
+create. Releasing a claim that never reached the provider does not pause queued
+work. An empty refusal reason is recorded as `no reason given`. Refusals still
+count toward `max_attempts`. An explicit `launch` is not paused. Timeouts, no reply, 408, 5xx and
 unreadable or mismatched replies stay unknown. A remote start has an
 exclusive claim; a lost SSH reply cannot start another process. An unreachable
 machine is unknown. A lost attempt requires evidence that its process or

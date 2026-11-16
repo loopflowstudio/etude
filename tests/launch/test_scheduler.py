@@ -18,10 +18,13 @@ from etude.launch.database import launcher_file
 from etude.launch.provisioner.machines import Refused
 from etude.launch.records import (
     LogStream,
+    Machine,
     MachineTemplate,
     Offer,
     OnDemand,
     Pool,
+    Rental,
+    Session,
     Stale,
     Storage,
     Tally,
@@ -103,6 +106,8 @@ def test_a_create_that_never_appears_is_lost_after_the_rental_deadline_and_frees
     )
     assert status.attempts == 1 and status.usd == 0  # no machine existed, so none was paid for
     assert held not in {s.id for s in b.store.unsettled_sessions()}
+    assert b.service.creates == 2
+    assert b.scheduler.read(two).phase == "setting_up"
     b.run(1)
     assert b.scheduler.read(two).phase == "running" and b.service.creates == 2
 
@@ -116,8 +121,56 @@ def test_terminate_releases_a_rental_whose_lost_create_left_no_machine(tmp_path:
     ended = b.scheduler.terminate(machine)
     assert ended.refused_at is not None and ended.deleted_at is None
     assert b.scheduler.rentals()[0].usd == 0
-    b.scheduler.rent("l4", hours=1)  # the pool's one machine is free again
+    (one,) = b.scheduler.queue(job(), rent="l4")
+    b.scheduler.tick()  # a released claim does not pause queued work
+    assert b.scheduler.read(one).phase == "setting_up"
     assert b.service.creates == 2
+
+
+def test_crashed_admission_releases_its_claim_without_pausing_queued_work(tmp_path: Path) -> None:
+    b = bench(tmp_path, max_machines=1)
+    machine = Machine(name="unclaimed", kind="rented", ondemand="l4", provider="fake")
+    session = Session(
+        id="unclaimed",
+        supply="l4",
+        machine=machine.name,
+        planned_at=b.clock(),
+        claimed_at=None,
+        provider_id=None,
+        started_at=None,
+        refused_at=None,
+        ended_at=None,
+        version=1,
+        autorun=True,
+    )
+    rental = Rental(
+        machine=machine.name,
+        usd_per_hour=Decimal("0.59"),
+        cap_usd=Decimal(1),
+        deadline=b.clock() + timedelta(hours=1),
+    )
+    with b.store.lock("l4", b.clock) as acquired:
+        assert acquired
+        b.store.plan(session, rented=machine, rental=rental)
+    (one,) = b.scheduler.queue(job(), rent="l4")
+    b.scheduler.tick()
+    released = b.store.session(session.id)
+    assert released.refused_at == b.clock() and released.refusal is None
+    assert b.service.creates == 1
+    assert b.scheduler.read(one).phase == "setting_up"
+
+
+def test_failed_admission_cleanup_does_not_pause_queued_work(tmp_path: Path) -> None:
+    b = bench(tmp_path, max_machines=1)
+    with patch.object(b.scheduler, "_create", side_effect=RuntimeError("before claim")):
+        with pytest.raises(LauncherError, match="before claim"):
+            b.scheduler.launch(job(), rent="l4")
+    (released,) = b.store.sessions()
+    assert released.refused_at == b.clock() and released.refusal is None
+    (one,) = b.scheduler.queue(job(), rent="l4")
+    b.scheduler.tick()
+    assert b.service.creates == 1
+    assert b.scheduler.read(one).phase == "setting_up"
 
 
 def test_refused_capacity_is_retried_up_to_the_jobs_allowed_attempts(tmp_path: Path) -> None:
@@ -165,16 +218,28 @@ def test_refused_status_keeps_each_runs_own_reason_after_restart(
     assert str(restarted.read(two)) == "queued (provider refused: second capacity refusal), $0.00"
 
 
-@pytest.mark.parametrize("reason", [None, ""])
-def test_refused_status_without_a_recorded_reason(tmp_path: Path, reason: str | None) -> None:
+def test_refused_status_without_a_recorded_reason(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.service.refuse = 1
     (one,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
     session = b.store.session(b.scheduler.attempts(one)[-1].session)
-    b.store.record_refusal(session, b.clock(), reason)
+    b.store.record_refusal(session, b.clock(), None)
     restarted = Scheduler(b.store, {}, clock=b.clock)
     assert str(restarted.read(one)) == "queued (provider refused capacity), $0.00"
+
+
+def test_empty_refusal_records_a_reason_for_status_and_admission(tmp_path: Path) -> None:
+    b = bench(tmp_path)
+    (one,) = b.scheduler.queue(job(), rent="l4")
+    with patch.object(b.service, "create", side_effect=Refused("")):
+        b.scheduler.tick()
+        with pytest.raises(LauncherError, match="provider refused: no reason given"):
+            b.scheduler.launch(job(), rent="l4")
+    restarted = Scheduler(b.store, {}, clock=b.clock)
+    assert str(restarted.read(one)) == "queued (provider refused: no reason given), $0.00"
+    refused = b.store.recent_refusal("l4", b.clock() - timedelta(seconds=60))
+    assert refused is not None and refused.refusal == "no reason given"
 
 
 def test_refusal_pause_survives_restart_without_diagnostics(tmp_path: Path) -> None:

@@ -135,7 +135,7 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
     b.store.add_machine(Machine(name="history", kind="ssh", pool="history", address="fixture"))
     old = (b.clock() - timedelta(days=1)).isoformat()
     b.store._db.executemany(
-        "INSERT INTO sessions(id, machine, planned_at, refused_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO sessions(id, machine, planned_at, refused_at, refusal) VALUES (?, ?, ?, ?, 'no capacity')",
         [(f"history-{index}", "history", old, old) for index in range(history)],
     )
     restarted = Scheduler(b.store, {}, clock=b.clock)

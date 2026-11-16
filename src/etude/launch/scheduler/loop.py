@@ -116,6 +116,14 @@ def _id() -> str:
     return uuid4().hex[:12]
 
 
+def _refused(session: Session) -> str:
+    return (
+        f"provider refused: {session.refusal}"
+        if session.refusal is not None
+        else "provider refused capacity"
+    )
+
+
 def _new_session(id: str, supply: Supply, machine: Machine, now: datetime) -> Session:
     """A session not yet claimed; only a rented machine's starts by itself."""
     return Session(
@@ -781,11 +789,7 @@ class Scheduler:
                                     break  # keep confirmed placements; later runs stay queued
                                 reason = "create reply unknown"
                                 if session.refused_at is not None:
-                                    reason = (
-                                        f"provider refused: {session.refusal}"
-                                        if session.refusal
-                                        else "provider refused capacity"
-                                    )
+                                    reason = _refused(session)
                                 raise LauncherError(
                                     f"cannot launch on {placement.supply!r}: {reason};"
                                     " etude queue would wait"
@@ -1301,13 +1305,7 @@ class Scheduler:
             and not superseded
             and session is not None
         ):
-            return seen.model_copy(
-                update={
-                    "reason": f"provider refused: {session.refusal}"
-                    if session.refusal
-                    else "provider refused capacity"
-                }
-            )
+            return seen.model_copy(update={"reason": _refused(session)})
         if last is not None:
             return seen.model_copy(
                 update={
@@ -1770,7 +1768,7 @@ class Scheduler:
             self._diagnose(
                 "machine create", "provider refused; no machine acquired", error, session=session.id
             )
-            self._store.record_refusal(session, now, sanitize(str(error)))
+            self._store.record_refusal(session, now, sanitize(str(error)) or "no reason given")
             for attempt in self._store.attempts(session=session.id):
                 self._store.fail_before_start(attempt, "capacity_refused", now)
             return
