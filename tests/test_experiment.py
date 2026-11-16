@@ -22,17 +22,10 @@ from etude.controller.local import _place_inputs
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, Held, Seating
+from etude.eval.records import Benchmark, CheckpointSlot, Code, Seating, checkpoint_player
 from etude.eval.tournament import evaluating, scores
 from etude.experiment import observe
-from etude.jobs import (
-    EvalJob,
-    ExperimentState,
-    OutMembers,
-    _hold,
-    evaluation_group,
-    with_experiment,
-)
+from etude.jobs import EvalJob, ExperimentState, OutMembers, _hold, evaluation_group
 from etude.launch.records import Outcome, Standing, Status
 from etude.out import MEMBERSHIP, OutFile, OutFiles
 from etude.records import Clock, RunCounters, RunOutcome, RunRecord, RunSubmission
@@ -41,7 +34,6 @@ from etude.stopping import Stopped
 from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.tracking import TrainingRun as Run_
-from etude.train.tracking import track
 from tests.eval.games import (
     play,
     play_catching_errors,
@@ -50,10 +42,11 @@ from tests.eval.games import (
 )
 from tests.experiments import authored
 from tests.run.storage import MeasuredStorage
+from tests.train.tracking import open_run
 
 WORLD = environment("duel", config={"world": "w6"})
 DEALS = tuple({"deal": deal} for deal in range(2))
-HELD = Held()
+HELD = CheckpointSlot()
 
 
 def _store_out_members(storage: DirectoryStorage, folder: str) -> OutFiles:
@@ -124,7 +117,7 @@ def test_out_members_are_lazy_listed_and_verified(
     placed = tmp_path / "inputs"
     _place_inputs(inputs, placed, tmp_path / "artifacts")
     monkeypatch.setenv("ETUDE_INPUTS_DIR", str(placed))
-    with track(experiment="consumer", directory=tmp_path / "consumer") as consumer:
+    with open_run(experiment="consumer", directory=tmp_path / "consumer") as consumer:
         assert (consumer.input("packs") / "packs/0001.pack").read_bytes() == b"packs/0001.pack"
     single = members.file("model").input("model")
     assert single.name == "model" and single.key == "out/model"
@@ -160,7 +153,7 @@ def heuristic(tmp_path: Path) -> Code:
 
 
 def trainer(bucket: DirectoryStorage, tmp_path: Path) -> Run_:
-    return track(
+    return open_run(
         experiment="ppo",
         run="ppo-1",
         clocks=[Clock(name="updates", kind="step", meaning="optimizer updates")],
@@ -206,7 +199,7 @@ def design(tmp_path: Path) -> Experiment:
         rated = run.checkpoints.every(2)
         pairs = [
             Seating(name=f"{new.name} vs {old.name}", tags=("consecutive",),
-                    players=(new.player(HELD), old.player(HELD)), configs=DEALS, games=2)
+                    players=(checkpoint_player(new.ref), checkpoint_player(old.ref)), configs=DEALS, games=2)
             for old, new in zip(rated, rated[1:])
         ]  # fmt: skip
         if run.final is not None and run.checkpoints:
@@ -214,7 +207,7 @@ def design(tmp_path: Path) -> Experiment:
             pairs.append(
                 Seating(
                     name="final vs first",
-                    players=(run.final.player(HELD), first.player(HELD)),
+                    players=(checkpoint_player(run.final.ref), checkpoint_player(first.ref)),
                     configs=DEALS,
                     games=2,
                 )  # fmt: skip
@@ -656,7 +649,7 @@ def test_a_tracked_checkpoints_seat_says_where_its_run_stood_and_its_line(tmp_pa
     run.finish(timeout=30)
     (saved,) = observe(bucket, "ppo").run("ppo-1").checkpoints
     assert saved.ref.at == saved.at
-    player = saved.player(Held())
+    player = checkpoint_player(saved.ref)
     assert authored(saved.at) == authored(player.checkpoint.at) == {"updates": 100}
     assert saved.ref.line == player.checkpoint.line == "ppo-1"
 
@@ -715,12 +708,12 @@ def test_a_finished_run_without_checkpoints_has_no_final(tmp_path: Path) -> None
 
 CAPACITY = """
 from etude.eval.match import environment
-from etude.eval.records import Aligned, Benchmark, Fraction, Held, Seating
+from etude.eval.records import Aligned, Benchmark, Fraction, CheckpointSlot, Seating, checkpoint_player
 from etude.jobs import EvalJob
 from etude.report import Curve, Matches, Report, Score
 from tests.eval.games import play
 
-HELD = Held()
+HELD = CheckpointSlot()
 DEALS = ({"deal": 0},)
 
 
@@ -769,7 +762,7 @@ def test_relative_seats_fill_in_as_their_jobs_save_and_the_report_says_what_is_m
     file.write_text(CAPACITY)
     clocks = [Clock(name="updates", kind="step", meaning="optimizer updates")]
     runs = {
-        job: track(experiment="capacity", run=f"{job}-1", job=job, clocks=clocks,
+        job: open_run(experiment="capacity", run=f"{job}-1", job=job, clocks=clocks,
                    directory=tmp_path / job, storages=[bucket])
         for job in ("small", "large")
     }  # fmt: skip
@@ -898,8 +891,8 @@ def test_saved_eval_outcomes_keep_the_launchers_continuation_state(
         launcher.launched.append(
             RunRequest(
                 id="ppo/ladder",
-                job=with_experiment(
-                    EvalJob(tournament=tournament, play=play, repo=None, max_hours=1), "ppo"
+                job=EvalJob(tournament=tournament, play=play, repo=None, max_hours=1).lower(
+                    ExperimentState(experiment="ppo")
                 ),
             )
         )
@@ -934,7 +927,7 @@ def test_stopped_eval_undelivered_matches_are_new_on_the_next_pass(
         with (
             pytest.raises(Stopped),
             evaluating(
-                spec.tournament,
+                spec.definition,
                 experiment="ppo",
                 run=str(first.id).removeprefix("ppo/"),
                 directory=tmp_path / "eval",
@@ -966,7 +959,7 @@ def test_launcher_phase_preserves_compact_training_addresses_and_terminal_outcom
     outcome: Literal["stopped", "finished", "failed"],
 ) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
-    training = track(
+    training = open_run(
         experiment="ppo",
         run="ppo@0",
         job="base",
@@ -1007,15 +1000,12 @@ def test_unstored_summaries_use_local_names_and_accept_both_lookup_spellings(
             ),
             RunRequest(
                 id="ppo/ladder-123",
-                job=with_experiment(
-                    EvalJob(
-                        tournament=Benchmark(name="ladder", environment=WORLD),
-                        play=play,
-                        repo=None,
-                        max_hours=1,
-                    ),
-                    "ppo",
-                ),
+                job=EvalJob(
+                    tournament=Benchmark(name="ladder", environment=WORLD),
+                    play=play,
+                    repo=None,
+                    max_hours=1,
+                ).lower(ExperimentState(experiment="ppo")),
             ),
         ]
     )

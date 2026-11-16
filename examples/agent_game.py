@@ -11,7 +11,7 @@ from pydantic import Field
 
 from etude.checkpoints import CheckpointRef
 from etude.eval.agents import Forward
-from etude.eval.records import CheckpointPlayer, Held, Match, Seat
+from etude.eval.records import CheckpointPlayer, Match, Seat, checkpoint_player
 from etude.eval.result import Tables
 from etude.records import ArtifactRef, Record
 
@@ -52,8 +52,7 @@ def play(match: Match, agents: Sequence[Forward | Sampler]) -> Tables:
     # A two-action bandit: action 1 earns a reward, action 0 does not.
     return {
         "scores": [
-            {"game": game, "seat": seat, "score": player.choose(None, random)}
-            for game in range(match.games)
+            {"seat": seat, "score": player.choose(None, random)}
             for seat, player in enumerate(players)
         ]
     }
@@ -62,7 +61,7 @@ def play(match: Match, agents: Sequence[Forward | Sampler]) -> Tables:
 def checkpoint(name: str) -> CheckpointPlayer:
     path = Path(__file__).with_name("agent.txt").resolve()
     data = path.read_bytes()
-    return Held().player(
+    return checkpoint_player(
         CheckpointRef(
             address=name,
             artifact=ArtifactRef(

@@ -12,11 +12,11 @@ import pytest
 from etude.cli import main
 from etude.eval.query import statsdb
 from etude.launch.database import launcher_file
+from etude.records import Clock
 from etude.run import sync
 from etude.storage import DirectoryStorage
-from etude.train.records import Step
-from etude.train.tracking import track
 from tests.experiments import experiment_file
+from tests.train.tracking import open_run
 
 # What reads, schedules or plays evaluations, beside the records a page carries.
 EVAL_READERS = tuple(
@@ -96,7 +96,12 @@ def test_checkpoints_are_listed_at_their_storage_address_while_the_run_goes_on(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     local, bucket = tmp_path / "local", tmp_path / "bucket"
-    run = track(experiment="e", run="r", clocks=[Step("step", "steps")], directory=local)
+    run = open_run(
+        experiment="e",
+        run="r",
+        clocks=[Clock(name="step", kind="step", meaning="steps")],
+        directory=local,
+    )
     model = tmp_path / "model.pt"
     for step in (1, 2, 3):
         model.write_bytes(f"weights at {step}".encode())
@@ -128,7 +133,9 @@ def test_checkpoints_default_to_this_computers_runs(
     monkeypatch.setenv("ETUDE_HOME", str(home))
     model = tmp_path / "model.pt"
     model.write_bytes(b"weights")
-    with track(experiment="e", run="r", clocks=[Step("step", "steps")]) as run:
+    with open_run(
+        experiment="e", run="r", clocks=[Clock(name="step", kind="step", meaning="steps")]
+    ) as run:
         run.checkpoint(model, step=3)
     assert main(["checkpoints"]) == 0
     (listed,) = capsys.readouterr().out.splitlines()
@@ -145,7 +152,9 @@ def test_checkpoints_explains_an_empty_selection(
     monkeypatch.setenv("ETUDE_HOME", str(home))
     assert main(["checkpoints"]) == 1
     assert f"no runs in {home / 'track'}" in capsys.readouterr().err
-    with track(experiment="e", run="r", clocks=[Step("step", "steps")]):
+    with open_run(
+        experiment="e", run="r", clocks=[Clock(name="step", kind="step", meaning="steps")]
+    ):
         pass
     assert main(["checkpoints", "--experiment", "missing"]) == 1
     assert f"no runs for experiment 'missing' in {home / 'track'}" in capsys.readouterr().err
@@ -169,8 +178,11 @@ print(json.dumps(sorted(sys.modules)))
 def test_serving_an_index_loads_no_evaluation_launcher_or_bucket_client(tmp_path: Path) -> None:
     runs, experiments = tmp_path / "runs", tmp_path / "experiments"
     for name in ("pilot", "sweep"):
-        with track(
-            experiment=name, run=f"{name}-1", clocks=[Step("step", "steps")], directory=runs
+        with open_run(
+            experiment=name,
+            run=f"{name}-1",
+            clocks=[Clock(name="step", kind="step", meaning="steps")],
+            directory=runs,
         ) as run:
             run.log({"loss": 1.0}, step=1)
         experiment_file(

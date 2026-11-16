@@ -21,7 +21,6 @@ reader of checkpoints, or of an eval run, reads no metric data.
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from functools import cached_property
@@ -122,26 +121,6 @@ class RunData(Arrays):
     def out(self) -> tuple[OutMember, ...]:
         """Stored membership read once, without reading any out bytes."""
         return self._read_out()
-
-    @property
-    def attempts(self) -> tuple[RunWriter, ...]:
-        """Deprecated writer accessor, removed in 0.5; allocations own attempts."""
-        warnings.warn(
-            "RunData.attempts is now RunData.writers; removed in 0.5",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.writers
-
-    @property
-    def state(self) -> RunOutcome | None:
-        """Deprecated outcome name, removed in 0.5."""
-        warnings.warn(
-            "RunData.state is now RunData.outcome; removed in 0.5",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.outcome
 
     @cached_property
     def blocks(self) -> tuple[StoredBlock, ...]:

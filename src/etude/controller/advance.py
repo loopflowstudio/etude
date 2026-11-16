@@ -21,13 +21,14 @@ from etude.controller.declarations import (
 )
 from etude.controller.smoke import smoke_file
 from etude.errors import EtudeError, LauncherError
-from etude.eval.records import TournamentRun, digest
+from etude.eval.records import digest
 from etude.eval.result import EvalResult
 from etude.eval.tournament import StoredRuns, played
 from etude.experiment import observe, read_tournament_lines
 from etude.jobs import (
     Checkpoints,
     EvalGroup,
+    EvalJob,
     Evaluation,
     ExperimentState,
     TrainingRunSummary,
@@ -36,7 +37,6 @@ from etude.jobs import (
     fetch_checkpoints,
     group_evaluations,
     hold_group,
-    with_experiment,
 )
 from etude.launch import client
 from etude.launch.listing import show_quote
@@ -204,13 +204,13 @@ def advance(
             new.append(request)
             lines[request.id] = f"{request.id}  new"
             committed += request.job.max_usd or Decimal(0)
-    jobs: list[Job] = []
+    jobs: list[EvalJob] = []
     if experiment.eval is not None and evaluate:
         # This pass's new runs have no checkpoints yet, but their policies already exist
         # for eval_jobs. Selection/resume passes skip evaluation, so every run here is new.
         asking = replace(state, runs=(*state.runs, *(_queued(r, experiment.name) for r in new)))
         try:
-            jobs = [with_experiment(j, experiment.name) for j in asked(experiment.eval, asking)]
+            jobs = asked(experiment.eval, asking)
         except EtudeError:
             # A policy of a run this pass left out (`--max-usd`) is missing; say which and why.
             _print_lines(lines)
@@ -218,13 +218,7 @@ def advance(
     policy_lines = read_tournament_lines(
         source,
         state,
-        [
-            TournamentRun(
-                tournament=(spec := evaluation_group(job).evaluations[0]).tournament,
-                checkpoints=spec.held,
-            )
-            for job in jobs
-        ],
+        [job.recorded() for job in jobs],
         keys=listed,
         declarations=declarations,
     )
@@ -256,13 +250,13 @@ def advance(
         else None
     )
     groups: dict[str, list[_PendingEvaluation]] = {}
-    for executable in jobs:
-        spec = evaluation_group(executable).evaluations[0]
+    for declaration in jobs:
+        recorded = declaration.recorded()
         found = played(
-            spec.tournament,
+            declaration.tournament,
             experiment=experiment.name,
-            checkpoints=spec.held,
-            enter=spec.entrants,
+            checkpoints=recorded.checkpoints,
+            enter=recorded.entrants,
             runs=stored,
             lines=policy_lines,
         )
@@ -271,7 +265,7 @@ def advance(
         )
         pending = [match for match in new_matches if match.key not in running]
         done = TournamentDecision(
-            tournament=spec.tournament.name,
+            tournament=declaration.tournament.name,
             new=len(pending),
             running=len(new_matches) - len(pending),
             # Retryable failures are replayed with the new matches, not counted twice.
@@ -286,10 +280,12 @@ def advance(
                 match for match in pending if match.key not in failed or match.key in retryable
             ]
         if pending:
+            executable = declaration.lower(state, pending, policy_lines)
+            spec = evaluation_group(executable).evaluations[0]
             groups.setdefault(_group_key(executable, spec), []).append(
                 _PendingEvaluation(
                     job=executable,
-                    spec=spec.model_copy(update={"matches": tuple(pending), "lines": policy_lines}),
+                    spec=spec,
                     decision=done,
                 )
             )
@@ -303,7 +299,7 @@ def advance(
             for each, result in zip(group, held, strict=True):
                 each.decision.played = result.played
             continue
-        executable = group_evaluations(executables, members, state)
+        executable = group_evaluations(executables, members)
         keys = sorted(m.key for spec in members for m in spec.matches or ())
         stem = f"{experiment.name}/evals-{digest(keys)[:12]}"
         identity = stem
@@ -364,7 +360,7 @@ def _play_here(
         here = fetch_checkpoints(
             tuple(match for spec in specs for match in spec.matches or ()),
             state,
-            tuple(checkpoint for spec in specs for checkpoint in spec.checkpoints),
+            (),
             Path(folder),
         )
         return hold_group(

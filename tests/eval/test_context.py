@@ -10,7 +10,7 @@ from etude.errors import EtudeError, RetryRequested
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Match, Rollup, Seating
-from etude.eval.run import Tables
+from etude.eval.result import Tables
 from etude.eval.tournament import evaluating
 from etude.records import RunOutcome
 
@@ -137,13 +137,3 @@ def test_author_match_config_reaches_play_and_keeps_its_historical_key(tmp_path:
         assert run.play(play_typed).played == 2
     db = statsdb("typed", tmp_path)
     assert db.sql("select score from scores order by score").fetchall() == [(7,), (9,)]
-
-
-def test_old_condition_keyword_warns_but_keeps_the_same_match() -> None:
-    players = (Code(name="a"), Code(name="b"))
-    with pytest.warns(DeprecationWarning, match="conditions is now config"):
-        old = Match(players=players, conditions={"deal": 7})  # type: ignore[call-arg]  # released keyword alias
-    current = Match(players=players, config=Deal(deal=7))
-    assert old.key == current.key
-    with pytest.warns(DeprecationWarning, match="Match.conditions is now Match.config"):
-        assert old.conditions == {"deal": 7}

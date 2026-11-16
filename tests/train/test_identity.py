@@ -10,23 +10,22 @@ from pydantic import ValidationError
 
 from etude.experiment import observe, state_of
 from etude.page import Pages
-from etude.records import Continuation, RunRecord, SourceKey
+from etude.records import Clock, Continuation, RunRecord, SourceKey
 from etude.run import runs, sync
 from etude.storage import DirectoryStorage
 from etude.train.read import read, read_all, read_batches
-from etude.train.records import Step
-from etude.train.tracking import track
 from tests.experiments import experiment_file
 from tests.run.storage import MeasuredStorage
+from tests.train.tracking import open_run
 
 
 def test_same_run_name_in_two_experiments_has_distinct_rows_and_lineage(tmp_path: Path) -> None:
     source = tmp_path / "runs"
     for experiment, score in (("one", 10), ("two", 20)):
-        with track(
+        with open_run(
             experiment=experiment,
             run="baseline-seed-0",
-            clocks=[Step("updates", "updates")],
+            clocks=[Clock(name="updates", kind="step", meaning="updates")],
             directory=source / experiment,
         ) as run:
             run.log({"score": score}, updates=1)
@@ -54,8 +53,11 @@ def test_same_run_name_in_two_experiments_has_distinct_rows_and_lineage(tmp_path
 
 def test_copies_of_a_historical_flat_run_still_join_once(tmp_path: Path) -> None:
     source = tmp_path / "runs"
-    with track(
-        experiment="one", run="r", clocks=[Step("updates", "updates")], directory=source
+    with open_run(
+        experiment="one",
+        run="r",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=source,
     ) as run:
         run.log({"score": 10}, updates=1)
     copytree(source / "one/r", source / "r")
@@ -63,7 +65,7 @@ def test_copies_of_a_historical_flat_run_still_join_once(tmp_path: Path) -> None
     every = read_all(source)
     assert len(every) == 1
     assert every[0].points("score", "updates").y.tolist() == [10]
-    assert len(every[0].attempts) == 1
+    assert len(every[0].writers) == 1
     assert runs(source) == [("one", "r")]
 
 
@@ -71,10 +73,10 @@ def test_report_refresh_tracks_same_named_runs_in_each_experiment(tmp_path: Path
     source = tmp_path / "runs"
     files = tmp_path / "experiments"
     for experiment in ("one", "two"):
-        with track(
+        with open_run(
             experiment=experiment,
             run="r",
-            clocks=[Step("updates", "updates")],
+            clocks=[Clock(name="updates", kind="step", meaning="updates")],
             directory=source / experiment,
         ):
             pass
@@ -95,11 +97,11 @@ def test_report_refresh_tracks_same_named_runs_in_each_experiment(tmp_path: Path
         }
 
     assert rows() == {"one": [0], "two": [0]}
-    with track(
+    with open_run(
         resume=True,
         experiment="two",
         run="r",
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         directory=source / "two",
     ) as run:
         run.log({"score": 7}, updates=1)
@@ -108,10 +110,10 @@ def test_report_refresh_tracks_same_named_runs_in_each_experiment(tmp_path: Path
 
 def test_continuation_in_another_experiment_cannot_assign_a_runs_lineage(tmp_path: Path) -> None:
     for experiment in ("one", "two"):
-        with track(
+        with open_run(
             experiment=experiment,
             run="r",
-            clocks=[Step("updates", "updates")],
+            clocks=[Clock(name="updates", kind="step", meaning="updates")],
             directory=tmp_path / experiment,
             continues=Continuation(
                 parent=SourceKey(namespace="local", kind="run", source_id="parent"),
@@ -128,8 +130,11 @@ def test_continuation_in_another_experiment_cannot_assign_a_runs_lineage(tmp_pat
 
 
 def test_reading_another_experiment_does_not_return_a_flat_runs_rows(tmp_path: Path) -> None:
-    with track(
-        experiment="one", run="r", clocks=[Step("updates", "updates")], directory=tmp_path
+    with open_run(
+        experiment="one",
+        run="r",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=tmp_path,
     ) as run:
         run.log({"score": 10}, updates=1)
     data = read(tmp_path, "two", "r")
@@ -166,8 +171,11 @@ def test_run_record_reads_historical_identity_and_round_trips_the_exact_config()
 def test_a_run_json_in_out_is_carried_as_data_and_never_discovered_as_a_run(tmp_path: Path) -> None:
     from_json = RunRecord(id="pretend/nested", experiment="pretend").model_dump_json()
     source = tmp_path / "source"
-    with track(
-        experiment="real", run="r", clocks=[Step("updates", "updates")], directory=source
+    with open_run(
+        experiment="real",
+        run="r",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=source,
     ) as live:
         nested = live.out / "model"
         nested.mkdir()
@@ -192,12 +200,12 @@ def test_new_run_json_contains_only_declared_facts(
             "ETUDE_SEED": "7",
         }.items():
             monkeypatch.setenv(key, value)
-    with track(
+    with open_run(
         experiment="pilot",
         run="baseline-seed-7",
         job="digest",
         seed=7,
-        clocks=[Step("updates", "optimizer updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="optimizer updates")],
         config='{ "lr": 0.1 }',
         directory=tmp_path,
     ) as run:

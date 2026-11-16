@@ -27,7 +27,7 @@ some rows carries the row numbers where it is present.
 from __future__ import annotations
 
 import zlib
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -475,8 +475,3 @@ def decode(block: bytes) -> Columns:
             for column in described.series
         },
     )
-
-
-def rows(columns: Columns) -> Iterator[LoggedRow]:
-    """Every row as logged, in write order."""
-    return (columns.row(index) for index in range(columns.rows))

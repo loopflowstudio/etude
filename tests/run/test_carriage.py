@@ -17,15 +17,18 @@ from etude.carriage import (
     resume_file,
     taken,
 )
+from etude.records import Clock
 from etude.run import sync
 from etude.storage import DirectoryStorage
-from etude.train.records import Step
-from etude.train.tracking import track
+from tests.train.tracking import open_run
 
 
 def _recorded(tmp_path: Path) -> Path:
-    run = track(
-        experiment="pin", clocks=[Step("steps", "training steps")], run="r", directory=tmp_path
+    run = open_run(
+        experiment="pin",
+        clocks=[Clock(name="steps", kind="step", meaning="training steps")],
+        run="r",
+        directory=tmp_path,
     )
     weights = tmp_path / "weights.pt"
     for step in (1, 2):
@@ -87,8 +90,11 @@ def test_an_author_s_artifacts_are_sent_once_and_never_read_again(tmp_path: Path
     assert immutable("artifacts/evidence/ab.json.gz")
     assert immutable("r/artifacts/x")
     assert not immutable("evidence/ab.json.gz")
-    run = track(
-        experiment="e", clocks=[Step("steps", "steps")], run="r", directory=tmp_path / "src"
+    run = open_run(
+        experiment="e",
+        clocks=[Clock(name="steps", kind="step", meaning="steps")],
+        run="r",
+        directory=tmp_path / "src",
     )
     run.finish()
     folder = tmp_path / "src/e/r"

@@ -13,19 +13,19 @@ from etude.controller.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.jobs import continue_from, continued_config
 from etude.out import MEMBERSHIP, OutFiles
-from etude.records import RunWriter
+from etude.records import Clock, RunWriter
 from etude.run import sync
 from etude.spec import Input, Job
 from etude.storage import DirectoryStorage
 from etude.train.read import read
-from etude.train.records import ParentRun, Step, Time
+from etude.train.records import ParentRun, Time
 from etude.train.report import training
-from etude.train.tracking import track
 from tests.experiments import authored
 from tests.launch.counting import job_text
 from tests.launch.test_worker_attempts import local
 from tests.run.storage import MeasuredStorage
 from tests.test_jobs import checkout, job_python
+from tests.train.tracking import open_run
 
 __all__ = ["job_python"]  # fixture shared with typed-job tests
 
@@ -33,14 +33,14 @@ RECIPE = """
 from pydantic import BaseModel
 from etude.stopping import Stopped
 from etude.train.tracking import track
-from etude.train.records import Step
+from etude.records import Clock
 
 class Config(BaseModel):
     updates: int = 2
     rate: float = 0.125
 
 def train(config: Config) -> None:
-    with track(clocks=[Step("updates", "updates")], config=config.model_dump()) as run:
+    with track(clocks=[Clock(name='updates', kind='step', meaning='updates')], config=config.model_dump()) as run:
         updates = int(run.until("updates", default=config.updates))
         state = run.out / "state.json"
         if not state.exists():
@@ -63,7 +63,7 @@ def test_implicit_continuation_keeps_clock_kinds_and_can_add_clocks(
     scheduler = local(tmp_path)
     (parent,) = scheduler.queue(Job(command="train", max_hours=1, experiment="recipe"), "local")
     source = tmp_path / "track"
-    with track(
+    with open_run(
         experiment="recipe",
         run=parent,
         directory=source,
@@ -74,9 +74,9 @@ def test_implicit_continuation_keeps_clock_kinds_and_can_add_clocks(
     child = continue_from(scheduler.record(parent), "updates=2", source=source)
     for variable in child.job.environment:
         monkeypatch.setenv(variable.name, variable.value)
-    with track(experiment="recipe", run="child", directory=source) as run:
+    with open_run(experiment="recipe", run="child", directory=source) as run:
         run.log({"loss": 0.5}, updates=2, simulation_seconds=4, frames=10)
-    with track(experiment="recipe", run="child", directory=source, resume=True) as run:
+    with open_run(experiment="recipe", run="child", directory=source, resume=True) as run:
         run.log({"loss": 0.25}, updates=3, simulation_seconds=5, frames=20)
     data = read(source, "recipe", "child")
     assert [(clock.name, clock.kind, clock.meaning) for clock in data.clocks] == [
@@ -96,8 +96,11 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
     (parent,) = scheduler.queue(Job(command="train", max_hours=1, experiment="recipe"), "local")
     source = tmp_path / "track"
     monkeypatch.setenv("ETUDE_OUT", str(source / parent / "out"))
-    with track(
-        experiment="recipe", run=parent, clocks=[Step("updates", "updates")], directory=source
+    with open_run(
+        experiment="recipe",
+        run=parent,
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=source,
     ) as run:
         (run.out / "state").write_bytes(b"optimizer state")
         (run.out / "model").write_bytes(b"weights")
@@ -108,7 +111,7 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
     attempt = RunWriter(
         writer="abcdef123456",
         host="fixture",
-        started_ms=data.attempts[-1].started_ms + 1,
+        started_ms=data.writers[-1].started_ms + 1,
         resumed_at={"updates": 4} if historical else {},
         first_row=not historical,
     )
@@ -137,8 +140,12 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
     (child_out / "model").write_bytes(b"weights")
     monkeypatch.setenv("ETUDE_CONTINUES", lineage.value)
     monkeypatch.setenv("ETUDE_OUT", str(child_out))
-    with track(experiment="recipe", run="child", directory=source) as resumed:
-        checkpoint = resumed.latest_checkpoint()
+    with open_run(experiment="recipe", run="child", directory=source) as resumed:
+        checkpoint = (
+            resumed._checkpoint_here(_saved_checkpoint)
+            if (_saved_checkpoint := resumed._latest_record()) is not None
+            else None
+        )
         assert checkpoint is not None
         assert authored(checkpoint.at) == {"updates": 6} and checkpoint.tags == ()
         assert checkpoint.path == child_out / "model"
@@ -163,8 +170,11 @@ def test_out_carries_copied_latest_checkpoint(
     monkeypatch.setenv("ETUDE_OUT", str(source / parent / "out"))
     weights = tmp_path / "weights.pt"
     weights.write_bytes(b"saved at 2")
-    with track(
-        experiment="recipe", run=parent, clocks=[Step("updates", "updates")], directory=source
+    with open_run(
+        experiment="recipe",
+        run=parent,
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=source,
     ) as run:
         if populated:
             (run.out / "samples.txt").write_bytes(b"samples")
@@ -230,10 +240,17 @@ def test_out_carries_copied_latest_checkpoint(
     monkeypatch.setenv("ETUDE_CONTINUES", lineage.value)
     monkeypatch.setenv("ETUDE_OUT", str(child_out))
     monkeypatch.setenv("ETUDE_INPUTS_DIR", str(inputs))
-    with track(
-        experiment="recipe", run="child", clocks=[Step("updates", "updates")], directory=source
+    with open_run(
+        experiment="recipe",
+        run="child",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=source,
     ) as resumed:
-        checkpoint = resumed.latest_checkpoint()
+        checkpoint = (
+            resumed._checkpoint_here(_saved_checkpoint)
+            if (_saved_checkpoint := resumed._latest_record()) is not None
+            else None
+        )
         assert checkpoint is not None and authored(checkpoint.at) == {"updates": 2}
         assert checkpoint.path.read_bytes() == b"saved at 2"
         if populated:
@@ -258,8 +275,11 @@ def test_continuation_requires_saved_out_or_its_latest_checkpoint(
     source = tmp_path / "track"
     monkeypatch.setenv("ETUDE_OUT", str(source / parent / "out"))
     position = 2 if removed_checkpoint else 5
-    with track(
-        experiment="recipe", run=parent, clocks=[Step("updates", "updates")], directory=source
+    with open_run(
+        experiment="recipe",
+        run=parent,
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=source,
     ) as run:
         if removed_checkpoint:
             older = tmp_path / "older.pt"
@@ -466,10 +486,10 @@ def test_an_explicit_folder_checkpoint_continuation_names_every_member(tmp_path:
     scheduler = local(tmp_path)
     (parent,) = scheduler.queue(Job(command="train", max_hours=1, experiment="recipe"), "local")
     source = tmp_path / "track"
-    with track(
+    with open_run(
         experiment="recipe",
         run=parent,
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         directory=source,
         strict=True,
     ) as run:

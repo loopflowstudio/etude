@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from contextlib import redirect_stdout
 from decimal import Decimal
 from pathlib import Path
 
@@ -28,11 +30,52 @@ from etude.launch.client import (
 )
 from etude.launch.database import launcher_file, upgrade
 from etude.launch.records import Pool
-from etude.launch.server import FetchRequest, PythonClient, forward, warning
+from etude.launch.server import PythonClient, _freshness, receive
 from etude.spec import Job, RunRequest, Runtime, Until
 from tests.launch.counting import job_text
+from tests.launch.fake import bench
 from tests.launch.test_source import git
 from tests.launch.test_source import repository as repository
+
+
+def test_cli_and_python_use_one_typed_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    backend = bench(tmp_path / "backend")
+    requests = 0
+
+    def exchange(
+        address: str, argv: Sequence[str], **options: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        nonlocal requests
+        requests += 1
+        body = options["input"]
+        if not isinstance(body, bytes):
+            raise TypeError("typed requests contain serialized bytes")
+        output = io.StringIO()
+        with (
+            io.TextIOWrapper(io.BytesIO(body), encoding="utf-8") as incoming,
+            monkeypatch.context() as scope,
+            redirect_stdout(output),
+        ):
+            scope.setattr(sys, "stdin", incoming)
+            code = receive(backend.scheduler)
+        return subprocess.CompletedProcess(argv, code, output.getvalue().encode(), b"")
+
+    monkeypatch.setattr("etude.launch.server._ssh", exchange)
+    (Path(os.environ["ETUDE_HOME"]) / "server").write_text("typed-fixture")
+    assert main(["pool", "add", "lab"]) == 0
+    assert "lab" in capsys.readouterr().out
+    assert requests == 4  # write, pools, machines, default target
+    assert main(["pools"]) == 0
+    assert "lab" in capsys.readouterr().out
+    assert requests == 7
+    assert [pool.name for pool in PythonClient("typed-fixture").pools()] == ["lab"]
+    assert requests == 8
+    assert main(["status"]) == 0
+    assert "last loop: never" in capsys.readouterr().out
+    assert requests == 10
+    assert backend.service.creates == 0
 
 
 @pytest.fixture(autouse=True)
@@ -45,10 +88,10 @@ def _command_environment(command_python: str, monkeypatch: pytest.MonkeyPatch) -
 TRACKED = """
 import os
 from pathlib import Path
-from etude.train.records import Step
+from etude.records import Clock
 from etude.train.tracking import track
-run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
-latest = run.latest_checkpoint()
+run = track(clocks=[Clock(name='steps', kind='step', meaning='training steps')])
+latest = (run._checkpoint_here(_saved_checkpoint) if (_saved_checkpoint := run._latest_record()) is not None else None)
 start = 0 if latest is None else int(latest.at["steps"])
 target = int(os.environ["ETUDE_UNTIL_VALUE"])
 weights = Path(os.environ["ETUDE_OUTPUT_DIR"]) / "weights.pt"
@@ -232,7 +275,7 @@ def test_waiting_work_warns_when_loop_is_absent_or_stale(
     scheduler.add_pool(Pool(name="waiting"))
     scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), pool="waiting")
     scheduler.tick()
-    assert warning(scheduler) is not None
+    assert _freshness(scheduler).warning is not None
     assert main(["server"]) == 0
     assert "no server loop" in capsys.readouterr().err
     (tmp_path / "server-heartbeat").write_text("2000-01-01T00:00:00+00:00")
@@ -253,7 +296,7 @@ def test_fetch_checks_digest_before_replacing_client_file(
     target.write_text("old")
     monkeypatch.setattr(subprocess, "run", bad_reply)
     with pytest.raises(LauncherError, match="digest mismatch"):
-        forward("alias", [], fetch=FetchRequest(run="run", name="result", destination=tmp_path))
+        PythonClient("alias").fetch("run", "result", tmp_path)
     assert target.read_text() == "old"
 
 

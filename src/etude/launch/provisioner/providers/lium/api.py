@@ -35,7 +35,6 @@ class Node(Record):
 
 class _Nodes(Record):
     count: int = Field(ge=0)
-    generated_at: AwareDatetime
     nodes: tuple[Node, ...]
 
 

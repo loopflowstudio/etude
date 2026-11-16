@@ -7,7 +7,6 @@ role and portable name, or an outside address. Its digest verifies bytes and nam
 
 from __future__ import annotations
 
-import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self
 from urllib.parse import unquote, urlparse
@@ -246,7 +245,7 @@ class CheckpointRef(Record):
 
 
 class _Seat[P](Protocol):
-    """A checkpoint seat (`etude.eval.records.Held`); evaluation is not imported here."""
+    """Released configured checkpoint seats; evaluation is not imported here."""
 
     def player(self, checkpoint: CheckpointRef) -> P: ...
 
@@ -323,13 +322,6 @@ class CheckpointRecord(Record):
 
     def player[P](self, seat: _Seat[P]) -> P:
         return seat.player(self.ref)
-
-    def model[P](self, seat: _Seat[P]) -> P:
-        """Released spelling; use player()."""
-        warnings.warn(
-            "Checkpoint.model() is now player(); removed in 0.5", DeprecationWarning, stacklevel=2
-        )
-        return self.player(seat)
 
     @field_validator("file")
     @classmethod

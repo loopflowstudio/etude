@@ -10,153 +10,54 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Changing support is a deliberate API decision, separate from adding a definition.
 SURFACE: dict[str, tuple[str, ...]] = {
-    "etude.jobs": (
-        "TrainingJob",
-        "EvalJob",
-        "Agents",
-        "ExperimentState",
-        "continue_from",
-        "TrainingRunSummary",
-        "EvalRunSummary",
-        "Policy",
-        "Checkpoints",
-        "OutMembers",
+    "etude.jobs": tuple(
+        "TrainingJob EvalJob Agents ExperimentState continue_from TrainingRunSummary "
+        "EvalRunSummary Policy Checkpoints OutMembers".split()
     ),
     "etude.experiment": ("observe",),
-    "etude.train.tracking": ("EtudeWarning", "TrainingRun", "local_launch", "seal_runs", "track"),
-    "etude.train.records": ("Time", "Step"),
-    "etude.train.read": (
-        "read",
-        "read_all",
-        "read_batches",
-        "RunData",
-        "Batch",
-        "Points",
-        "buckets",
-        "Buckets",
-        "lines",
+    "etude.train.tracking": tuple("EtudeWarning TrainingRun seal_runs track".split()),
+    "etude.train.records": ("Time",),
+    "etude.train.read": tuple(
+        "read read_all read_batches RunData Batch Points buckets Buckets lines".split()
     ),
-    "etude.checkpoints": ("CheckpointRef", "CheckpointRecord", "PolicyKey"),
-    "etude.records": ("Record", "ArtifactRef", "Clock", "SourceKey"),
-    "etude.storage": (
-        "default_root",
-        "storage_from_uri",
-        "Storage",
-        "DirectoryStorage",
-        "S3Storage",
+    "etude.checkpoints": tuple("CheckpointRef CheckpointRecord PolicyKey".split()),
+    "etude.records": tuple("Record ArtifactRef Clock SourceKey".split()),
+    "etude.storage": tuple(
+        "default_root storage_from_uri Storage DirectoryStorage S3Storage".split()
     ),
     "etude.stopping": ("Stopped",),
-    "etude.errors": ("EtudeError", "LauncherError"),
+    "etude.errors": tuple("EtudeError LauncherError".split()),
     "etude.deadline": ("limit_time",),
     "etude.eval.agents": ("Forward",),
-    "etude.eval.records": (
-        "CheckpointPlayer",
-        "Code",
-        "Held",
-        "Composition",
-        "compose",
-        "Benchmark",
-        "RoundRobin",
-        "Seating",
-        "Seat",
-        "Earlier",
-        "Fraction",
-        "At",
-        "Final",
-        "Aligned",
-        "Match",
-        "Environment",
-        "Player",
-        "Rollup",
+    "etude.eval.records": tuple(
+        "CheckpointPlayer Code CheckpointSlot checkpoint_player Composition compose Benchmark RoundRobin Seating Seat Earlier "
+        "Fraction At Final Aligned Match Environment Player Rollup".split()
     ),
     "etude.eval.match": ("environment",),
-    "etude.eval.result": ("Tables", "Row", "Value"),
-    "etude.eval.tournament": (
-        "evaluating",
-        "scores",
-        "standings",
-        "ScorePoint",
-        "Scores",
-        "Standing",
-        "Standings",
+    "etude.eval.result": tuple("Tables Row Value".split()),
+    "etude.eval.tournament": tuple(
+        "evaluating scores standings ScorePoint Scores Standing Standings".split()
     ),
-    "etude.eval.query": ("statsdb", "read_blobs", "estimate", "compare", "Estimate", "Comparison"),
-    "etude.report": (
-        "Report",
-        "Score",
-        "Matches",
-        "Curve",
-        "Matrix",
-        "Ranking",
-        "Anchors",
-        "Planned",
-        "PlannedPoint",
-        "ML",
-        "Crosstable",
-        "Series",
-        "Counters",
-        "Flame",
-        "Pace",
-        "Elapsed",
-        "Attempts",
+    "etude.eval.query": tuple("statsdb read_blobs estimate compare Estimate Comparison".split()),
+    "etude.report": tuple(
+        "Report Score Matches Curve Matrix Ranking Anchors Planned PlannedPoint ML Crosstable "
+        "Series Counters Flame Pace Elapsed Attempts".split()
     ),
-    "etude.spec": (
-        "Job",
-        "RunRequest",
-        "Until",
-        "Input",
-        "Variable",
-        "Runtime",
-        "Preparation",
-        "SmokeForm",
+    "etude.spec": tuple(
+        "Job RunRequest Until Input Variable Runtime Preparation SmokeForm".split()
     ),
-    "etude.launch.client": (
-        "queue",
-        "launch",
-        "quote",
-        "availability",
-        "status",
-        "wait",
-        "cancel",
-        "diagnostics",
-        "logs",
-        "fetch",
-        "default",
-        "rent",
-        "terminate",
-        "usage",
-        "standing",
+    "etude.launch.client": tuple(
+        "queue launch quote availability status wait cancel diagnostics logs fetch default rent "
+        "terminate usage standing".split()
     ),
-    "etude.launch.records": (
-        "MachineTemplate",
-        "OnDemand",
-        "Provider",
-        "Pool",
-        "Storage",
-        "Image",
-        "GPU",
-        "CPU",
-        "Availability",
-        "Offer",
-        "Status",
-        "Quote",
-        "Diagnostic",
-        "Machine",
-        "RentalCost",
-        "LogStream",
-        "Standing",
+    "etude.launch.records": tuple(
+        "MachineTemplate OnDemand Provider Pool Storage Image GPU CPU Availability Offer Status "
+        "Quote Diagnostic Machine RentalCost LogStream Standing".split()
     ),
-    "etude.launch.database": ("Database", "inspect", "upgrade", "Schema", "Upgrade"),
-    "etude.launch.provisioner.images": ("resolve_image", "prepare_pytorch"),
-    "etude.launch.usage": (
-        "Usage",
-        "R2",
-        "S3_US_WEST_2",
-        "Access",
-        "reconcile",
-        "Rates",
-        "Transfer",
-        "Reconciliation",
+    "etude.launch.database": tuple("Database inspect upgrade Schema Upgrade".split()),
+    "etude.launch.provisioner.images": tuple("resolve_image prepare_pytorch".split()),
+    "etude.launch.usage": tuple(
+        "Usage R2 S3_US_WEST_2 Access reconcile Rates Transfer Reconciliation".split()
     ),
 }
 

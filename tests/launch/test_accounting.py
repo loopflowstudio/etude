@@ -42,7 +42,7 @@ def test_bills_cover_only_their_hours_and_do_not_change_admission(tmp_path: Path
     assert abs(b.scheduler.read(run).usd - Decimal("1.6") * 5000 / 5100) < Decimal("0.00001")
     # Idle time between completion and server cleanup belongs to the rental.
     assert b.scheduler.rentals()[0].usd == Decimal("1.6")
-    assert b.store.rental(held.machine).cap_usd == Decimal(2)
+    assert next(r for r in b.store.rentals() if r.machine == held.machine).cap_usd == Decimal(2)
 
 
 def test_unstarted_machine_is_deleted_after_configured_startup_allowance(tmp_path: Path) -> None:
@@ -72,8 +72,12 @@ def test_actual_create_price_replaces_quote_without_raising_cap(tmp_path: Path) 
     )
     (run,) = b.scheduler.launch(Job(command="train", max_hours=1, max_usd=Decimal(1)), rent="l4")
     held = b.store.session(b.scheduler.attempts(run)[0].session)
-    assert b.store.rental(held.machine).usd_per_hour == Decimal("0.7")
-    assert b.store.rental(held.machine).cap_usd == Decimal("0.59")
+    assert next(r for r in b.store.rentals() if r.machine == held.machine).usd_per_hour == Decimal(
+        "0.7"
+    )
+    assert next(r for r in b.store.rentals() if r.machine == held.machine).cap_usd == Decimal(
+        "0.59"
+    )
 
 
 def test_rented_machine_requires_storage_but_not_a_private_image(tmp_path: Path) -> None:

@@ -1,7 +1,7 @@
 """Optional SSH server: command transport, frozen inputs and a standing loop.
 
-SSH supplies authentication and streams ordinary command output. Only launch
-inputs and fetched files need a wire envelope. Provider/storage keys stay in the
+SSH supplies authentication. CLI and Python clients use the same typed requests;
+rendering stays with the caller. Provider/storage keys stay in the
 server's environment. The local setting never opens the launcher database.
 """
 
@@ -28,18 +28,24 @@ from pydantic import Field, RootModel, TypeAdapter
 from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError, explain
 from etude.launch.errors import LaunchError, SchemaAdvanced
-from etude.launch.listing import show_runs
 from etude.launch.measurement import timed
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import (
     Availability,
     Diagnostic,
+    Image,
     Launch,
     LogSnapshot,
     Machine,
+    OnDemand,
+    Pool,
+    Provider,
     Quote,
+    RentalCost,
     Standing,
+    StartPhase,
     Status,
+    Storage,
     Target,
 )
 from etude.launch.scheduler.loop import Scheduler
@@ -85,7 +91,6 @@ class FetchRequest(Record):
 class SubmissionRequest(Record):
     operation: Literal["launch", "prepare_launch", "quote"]
     submission: LaunchInput
-    api: bool = False  # a launch replies with its run ids instead of printing the runs
 
 
 class FailLaunchRequest(Record):
@@ -101,7 +106,7 @@ class OutputRequest(Record):
 
 
 class RunOperation(Record):
-    operation: Literal["record", "status", "cancel"]
+    operation: Literal["record", "status", "read", "cancel", "start_phases"]
     run: str
 
 
@@ -150,6 +155,123 @@ class AvailabilityRequest(Record):
     timeout: float | None = None
 
 
+class InventoryRequest(Record):
+    operation: Literal[
+        "pools",
+        "providers",
+        "storages",
+        "ondemands",
+        "rentals",
+        "default_target",
+        "now",
+        "freshness",
+    ]
+
+
+class RunsRequest(Record):
+    operation: Literal["runs"] = "runs"
+    done: bool = False
+    pool: str | None = None
+    rent: str | None = None
+    job: str | None = None
+    contains: str | None = None
+    experiment: str | None = None
+
+
+class MachinesRequest(Record):
+    operation: Literal["machines"] = "machines"
+    supply: str
+
+
+class SafeguardsRequest(Record):
+    operation: Literal["safeguards"] = "safeguards"
+    ondemand: str
+
+
+class ProviderRequest(Record):
+    operation: Literal["set_provider"] = "set_provider"
+    provider: Provider
+
+
+class StorageRequest(Record):
+    operation: Literal["add_storage"] = "add_storage"
+    storage: Storage
+
+
+class PoolRequest(Record):
+    operation: Literal["add_pool"] = "add_pool"
+    pool: Pool
+
+
+class OnDemandRequest(Record):
+    operation: Literal["add_ondemand"] = "add_ondemand"
+    ondemand: OnDemand
+
+
+class StartupRequest(Record):
+    operation: Literal["set_startup"] = "set_startup"
+    name: str
+    seconds: float | None
+
+
+class MaximumRequest(Record):
+    operation: Literal["set_ondemand_max"] = "set_ondemand_max"
+    name: str
+    maximum: int
+
+
+class ImageSelectionRequest(Record):
+    operation: Literal["set_ondemand_image"] = "set_ondemand_image"
+    name: str
+    image: Image | str
+
+
+class TargetRequest(Record):
+    operation: Literal["set_default"] = "set_default"
+    target: Target
+
+
+class PoolStateRequest(Record):
+    operation: Literal["turn_pool"] = "turn_pool"
+    name: str
+    off: bool
+
+
+class MachineRequest(Record):
+    operation: Literal["add_machine"] = "add_machine"
+    name: str
+    address: str
+    pool: str | None = None
+    storage: str | None = None
+    cost_usd: Decimal = Decimal(0)
+    expires_at: datetime | None = None
+
+
+class RunFilesRequest(Record):
+    operation: Literal["held"] = "held"
+    run: str
+
+
+class EncodedFiles(Record):
+    files: dict[str, str] | None
+
+
+class ImageRequest(Record):
+    operation: Literal["resolve_image"] = "resolve_image"
+    reference: str
+    platform: str = "linux/amd64"
+    timeout: float | None = None
+
+
+class LoopRequest(Record):
+    operation: Literal["loop"] = "loop"
+
+
+class Freshness(Record):
+    last_loop: datetime | None
+    warning: str | None
+
+
 type Request = Annotated[
     SubmissionRequest
     | FailLaunchRequest
@@ -161,7 +283,24 @@ type Request = Annotated[
     | LogsRequest
     | RentRequest
     | TerminateRequest
-    | AvailabilityRequest,
+    | AvailabilityRequest
+    | InventoryRequest
+    | RunsRequest
+    | MachinesRequest
+    | SafeguardsRequest
+    | ProviderRequest
+    | StorageRequest
+    | PoolRequest
+    | OnDemandRequest
+    | StartupRequest
+    | MaximumRequest
+    | ImageSelectionRequest
+    | TargetRequest
+    | PoolStateRequest
+    | MachineRequest
+    | RunFilesRequest
+    | ImageRequest
+    | LoopRequest,
     Field(discriminator="operation"),
 ]
 _REQUEST: TypeAdapter[Request] = TypeAdapter(Request)
@@ -184,6 +323,18 @@ type Response = (
     | Quote
     | Availability
     | str
+    | datetime
+    | Target
+    | Freshness
+    | EncodedFiles
+    | Image
+    | tuple[Pool, ...]
+    | tuple[Provider, ...]
+    | tuple[Storage, ...]
+    | tuple[OnDemand, ...]
+    | tuple[Machine, ...]
+    | tuple[RentalCost, ...]
+    | tuple[StartPhase, ...]
 )
 
 
@@ -331,49 +482,6 @@ def _with_sources(submission: LaunchInput) -> LaunchInput:
     return submission.model_copy(update={"sources": tuple(sources.values())})
 
 
-def submit(scheduler: Scheduler, submission: LaunchInput) -> Sequence[str]:
-    if submission.launch is not None:
-        return scheduler.submit_launch(
-            submission.launch,
-            submission.runs,
-            Target(pool=submission.pool, rent=submission.rent),
-            queued=submission.queued,
-        )
-    send = scheduler.queue if submission.queued else scheduler.launch
-    return send(submission.runs, submission.pool, rent=submission.rent)
-
-
-def quote(scheduler: Scheduler | PythonClient, submission: LaunchInput) -> Quote:
-    return scheduler.quote(submission.runs, submission.pool, rent=submission.rent)
-
-
-def forward(
-    address: str,
-    argv: Sequence[str],
-    submission: LaunchInput | None = None,
-    fetch: FetchRequest | None = None,
-) -> int:
-    if submission is None and fetch is None:
-        return _ssh(address, argv).returncode
-    request: Request
-    if submission is not None:
-        request = SubmissionRequest(operation="launch", submission=prepare(address, submission))
-    else:
-        assert fetch is not None
-        request = OutputRequest(run=fetch.run, output=fetch.name)
-    done = _ssh(
-        address,
-        ["--server-request"],
-        input=_REQUEST.dump_json(request),
-        stdout=subprocess.PIPE if fetch is not None else None,
-    )
-    if done.returncode:
-        return done.returncode  # a lost reply never retries a launch
-    if fetch is not None:
-        print(_save_output(EncodedOutput.model_validate_json(done.stdout), fetch))
-    return 0
-
-
 def _retain(sources: Sequence[Source]) -> None:
     for source in sources:
         body = base64.b64decode(source.body, validate=True)
@@ -399,7 +507,7 @@ class PythonClient:
     """Typed Python calls over the same SSH server protocol as the CLI.
 
     Each request is sent once. In particular a lost launch reply never resubmits.
-    Explicit Launcher instances continue to own only their local database.
+    Explicit Scheduler instances continue to own only their local database.
     """
 
     def __init__(self, address: str) -> None:
@@ -440,9 +548,7 @@ class PythonClient:
         )
         try:
             return TypeAdapter(tuple[str, ...]).validate_json(
-                self._request(
-                    SubmissionRequest(operation="launch", submission=submission, api=True)
-                )
+                self._request(SubmissionRequest(operation="launch", submission=submission))
             )
         except Exception as error:
             assert submission.launch is not None
@@ -501,6 +607,149 @@ class PythonClient:
 
     def status(self, run: str) -> Status:
         return Status.model_validate_json(self._request(RunOperation(operation="status", run=run)))
+
+    def read(self, run: str) -> Status:
+        return Status.model_validate_json(self._request(RunOperation(operation="read", run=run)))
+
+    def start_phases(self, run: str) -> tuple[StartPhase, ...]:
+        return TypeAdapter(tuple[StartPhase, ...]).validate_json(
+            self._request(RunOperation(operation="start_phases", run=run))
+        )
+
+    def runs(
+        self,
+        *,
+        done: bool = False,
+        pool: str | None = None,
+        rent: str | None = None,
+        job: str | None = None,
+        contains: str | None = None,
+        experiment: str | None = None,
+    ) -> tuple[RunRecord, ...]:
+        return TypeAdapter(tuple[RunRecord, ...]).validate_json(
+            self._request(
+                RunsRequest(
+                    done=done,
+                    pool=pool,
+                    rent=rent,
+                    job=job,
+                    contains=contains,
+                    experiment=experiment,
+                )
+            )
+        )
+
+    def machines(self, supply: str) -> tuple[Machine, ...]:
+        return TypeAdapter(tuple[Machine, ...]).validate_json(
+            self._request(MachinesRequest(supply=supply))
+        )
+
+    def safeguards(self, ondemand: str) -> tuple[str, ...]:
+        return TypeAdapter(tuple[str, ...]).validate_json(
+            self._request(SafeguardsRequest(ondemand=ondemand))
+        )
+
+    def held(self, run: str) -> dict[str, bytes] | None:
+        files = EncodedFiles.model_validate_json(self._request(RunFilesRequest(run=run))).files
+        return (
+            None
+            if files is None
+            else {key: base64.b64decode(body, validate=True) for key, body in files.items()}
+        )
+
+    def resolve_image(
+        self, reference: str, *, platform: str = "linux/amd64", timeout: float | None = None
+    ) -> Image:
+        return Image.model_validate_json(
+            self._request(ImageRequest(reference=reference, platform=platform, timeout=timeout))
+        )
+
+    def run_loop(self) -> None:
+        self._request(LoopRequest())
+
+    def freshness(self) -> Freshness:
+        return Freshness.model_validate_json(self._request(InventoryRequest(operation="freshness")))
+
+    def pools(self) -> tuple[Pool, ...]:
+        return TypeAdapter(tuple[Pool, ...]).validate_json(
+            self._request(InventoryRequest(operation="pools"))
+        )
+
+    def providers(self) -> tuple[Provider, ...]:
+        return TypeAdapter(tuple[Provider, ...]).validate_json(
+            self._request(InventoryRequest(operation="providers"))
+        )
+
+    def storages(self) -> tuple[Storage, ...]:
+        return TypeAdapter(tuple[Storage, ...]).validate_json(
+            self._request(InventoryRequest(operation="storages"))
+        )
+
+    def ondemands(self) -> tuple[OnDemand, ...]:
+        return TypeAdapter(tuple[OnDemand, ...]).validate_json(
+            self._request(InventoryRequest(operation="ondemands"))
+        )
+
+    def rentals(self) -> tuple[RentalCost, ...]:
+        return TypeAdapter(tuple[RentalCost, ...]).validate_json(
+            self._request(InventoryRequest(operation="rentals"))
+        )
+
+    def default_target(self) -> Target:
+        return TypeAdapter(Target).validate_json(
+            self._request(InventoryRequest(operation="default_target"))
+        )
+
+    def now(self) -> datetime:
+        return TypeAdapter(datetime).validate_json(self._request(InventoryRequest(operation="now")))
+
+    def set_provider(self, provider: Provider) -> None:
+        self._request(ProviderRequest(provider=provider))
+
+    def add_storage(self, storage: Storage) -> None:
+        self._request(StorageRequest(storage=storage))
+
+    def add_pool(self, pool: Pool) -> None:
+        self._request(PoolRequest(pool=pool))
+
+    def add_ondemand(self, ondemand: OnDemand) -> None:
+        self._request(OnDemandRequest(ondemand=ondemand))
+
+    def set_startup(self, name: str, seconds: float | None) -> None:
+        self._request(StartupRequest(name=name, seconds=seconds))
+
+    def set_ondemand_max(self, name: str, maximum: int) -> None:
+        self._request(MaximumRequest(name=name, maximum=maximum))
+
+    def set_ondemand_image(self, name: str, image: Image | str) -> None:
+        self._request(ImageSelectionRequest(name=name, image=image))
+
+    def set_default(self, pool: str | None = None, *, rent: str | None = None) -> None:
+        self._request(TargetRequest(target=Target(pool=pool, rent=rent)))
+
+    def turn_pool(self, name: str, *, off: bool) -> None:
+        self._request(PoolStateRequest(name=name, off=off))
+
+    def add_machine(
+        self,
+        name: str,
+        address: str,
+        *,
+        pool: str | None = None,
+        storage: str | None = None,
+        cost_usd: Decimal = Decimal(0),
+        expires_at: datetime | None = None,
+    ) -> None:
+        self._request(
+            MachineRequest(
+                name=name,
+                address=address,
+                pool=pool,
+                storage=storage,
+                cost_usd=cost_usd,
+                expires_at=expires_at,
+            )
+        )
 
     def wait(self, *runs: str, every: float = 1.0, timeout: float | None = None) -> list[Status]:
         return TypeAdapter(list[Status]).validate_json(
@@ -573,13 +822,19 @@ def receive(scheduler: Scheduler) -> int:
                 if submission.launch is not None:
                     scheduler.fail_launch(submission.launch, explain(error))
                 raise
-            ids = submit(scheduler, submission)
-            if not request.api:
-                show_runs(scheduler, ids)
-                return 0
+            if submission.launch is not None:
+                ids = scheduler.submit_launch(
+                    submission.launch,
+                    submission.runs,
+                    Target(pool=submission.pool, rent=submission.rent),
+                    queued=submission.queued,
+                )
+            else:
+                send = scheduler.queue if submission.queued else scheduler.launch
+                ids = send(submission.runs, submission.pool, rent=submission.rent)
             response = tuple(ids)
         case SubmissionRequest(operation="quote", submission=submission):
-            response = quote(scheduler, submission)
+            response = scheduler.quote(submission.runs, submission.pool, rent=submission.rent)
         case FailLaunchRequest():
             scheduler.fail_launch(request.launch, request.message)
             response = "failed; no run admitted"
@@ -617,18 +872,108 @@ def receive(scheduler: Scheduler) -> int:
             response = scheduler.availability(request.ondemand, timeout=request.timeout)
         case TerminateRequest():
             response = scheduler.terminate(request.machine)
+        case RunOperation(operation="read"):
+            response = scheduler.read(request.run)
+        case RunOperation(operation="start_phases"):
+            response = scheduler.start_phases(request.run)
+        case RunsRequest():
+            response = scheduler.runs(
+                done=request.done,
+                pool=request.pool,
+                rent=request.rent,
+                job=request.job,
+                contains=request.contains,
+                experiment=request.experiment,
+            )
+        case MachinesRequest():
+            response = scheduler.machines(request.supply)
+        case SafeguardsRequest():
+            response = scheduler.safeguards(request.ondemand)
+        case ProviderRequest():
+            scheduler.set_provider(request.provider)
+            response = "configured"
+        case StorageRequest():
+            scheduler.add_storage(request.storage)
+            response = "configured"
+        case PoolRequest():
+            scheduler.add_pool(request.pool)
+            response = "configured"
+        case OnDemandRequest():
+            scheduler.add_ondemand(request.ondemand)
+            response = "configured"
+        case StartupRequest():
+            scheduler.set_startup(request.name, request.seconds)
+            response = "configured"
+        case MaximumRequest():
+            scheduler.set_ondemand_max(request.name, request.maximum)
+            response = "configured"
+        case ImageSelectionRequest():
+            scheduler.set_ondemand_image(request.name, request.image)
+            response = "configured"
+        case TargetRequest():
+            scheduler.set_default(request.target.pool, rent=request.target.rent)
+            response = "configured"
+        case PoolStateRequest():
+            scheduler.turn_pool(request.name, off=request.off)
+            response = "configured"
+        case MachineRequest():
+            scheduler.add_machine(
+                request.name,
+                request.address,
+                pool=request.pool,
+                storage=request.storage,
+                cost_usd=request.cost_usd,
+                expires_at=request.expires_at,
+            )
+            response = "configured"
+        case RunFilesRequest():
+            files = scheduler.held(request.run)
+            response = EncodedFiles(
+                files=None
+                if files is None
+                else {key: base64.b64encode(body).decode() for key, body in files.items()}
+            )
+        case ImageRequest():
+            # Server command entry point: registry code belongs only to this request.
+            from etude.launch.provisioner.images import resolve_image  # noqa: PLC0415
+
+            response = resolve_image(
+                request.reference, platform=request.platform, timeout=request.timeout
+            )
+        case LoopRequest():
+            loop(scheduler)
+            return 0
+        case InventoryRequest(operation="pools"):
+            response = scheduler.pools()
+        case InventoryRequest(operation="providers"):
+            response = scheduler.providers()
+        case InventoryRequest(operation="storages"):
+            response = scheduler.storages()
+        case InventoryRequest(operation="ondemands"):
+            response = scheduler.ondemands()
+        case InventoryRequest(operation="rentals"):
+            response = scheduler.rentals()
+        case InventoryRequest(operation="default_target"):
+            response = scheduler.default_target()
+        case InventoryRequest(operation="now"):
+            response = scheduler.now()
+        case InventoryRequest(operation="freshness"):
+            response = _freshness(scheduler)
         case _:
             raise LauncherError(f"unknown server operation {request.operation!r}")
     print(ServerReply(response).model_dump_json())
     return 0
 
 
-def loop(scheduler: Scheduler, every: float = 1.0) -> None:
+def loop(scheduler: Scheduler | PythonClient, every: float = 1.0) -> None:
     """Keep matching even when the queue empties; heartbeat means a completed tick.
 
     When a newer etude migrates the database, this loop replaces itself with that
     program's loop, so running rentals keep a server through an upgrade.
     """
+    if isinstance(scheduler, PythonClient):
+        scheduler.run_loop()
+        return
     while True:
         try:
             scheduler.tick()
@@ -663,33 +1008,41 @@ def _hand_over(program: str | None) -> NoReturn:
     os.execv(str(python), [str(python), "-m", "etude", "server", "run"])
 
 
-def warning(scheduler: Scheduler) -> str | None:
-    path = home() / "server-heartbeat"
+def _freshness(scheduler: Scheduler) -> Freshness:
     try:
-        at = datetime.fromisoformat(path.read_text())
+        at = datetime.fromisoformat((home() / "server-heartbeat").read_text().strip())
         age = (datetime.now(UTC) - at).total_seconds()
         recent = 0 <= age < 30
     except (OSError, ValueError, TypeError):
-        recent = False
-    if not recent and any(scheduler.read(run.id).phase == "queued" for run in scheduler.runs()):
-        return "work is waiting; no server loop has run recently (etude server run)"
-    return None
+        at, recent = None, False
+    waiting = not recent and any(
+        scheduler.read(run.id).phase == "queued" for run in scheduler.runs()
+    )
+    return Freshness(
+        last_loop=at,
+        warning="work is waiting; no server loop has run recently (etude server run)"
+        if waiting
+        else None,
+    )
 
 
-def show_freshness(scheduler: Scheduler) -> None:
-    """Print when the server loop last passed: how fresh the database's answers are."""
-    try:
-        at = datetime.fromisoformat((home() / "server-heartbeat").read_text().strip())
+def show_freshness(scheduler: Scheduler | PythonClient) -> None:
+    """Print the selected server's retained loop evidence without polling workers or providers."""
+    state = scheduler.freshness() if isinstance(scheduler, PythonClient) else _freshness(scheduler)
+    at = state.last_loop
+    if at is None:
+        said = "never"
+    else:
         age = int((datetime.now(UTC) - at).total_seconds())
         said = f"{age} seconds ago" if 0 <= age < 120 else f"{at:%Y-%m-%d %H:%M} UTC"
-    except (OSError, ValueError, TypeError):
-        said = "never"
     print("last loop: " + said)
-    if problem := warning(scheduler):
-        print("warning: " + problem, file=sys.stderr)
+    if state.warning:
+        print("warning: " + state.warning, file=sys.stderr)
 
 
-def show(scheduler: Scheduler) -> None:
-    if not os.environ.get("ETUDE_SERVER_LOCAL"):
+def show(scheduler: Scheduler | PythonClient) -> None:
+    if isinstance(scheduler, PythonClient):
+        print("server: " + scheduler.address)
+    elif not os.environ.get("ETUDE_SERVER_LOCAL"):
         print("server: this machine")  # a client has already named the server
     show_freshness(scheduler)

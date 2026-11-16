@@ -13,14 +13,16 @@ import typer
 from etude.launch.commands import Kind, kind
 
 if TYPE_CHECKING:
+    from etude.launch.records import Image
     from etude.launch.scheduler.loop import Scheduler
+    from etude.launch.server import PythonClient
 
 # Entry points import only the command being run (AGENTS.md): help must not load
 # the scheduler, worker or tracking stack. Imports below these entries stay at top.
 
 
-def default() -> Scheduler:
-    from etude.launch.client import default as open_scheduler
+def default() -> Scheduler | PythonClient:
+    from etude.launch.client import _client as open_scheduler
 
     return open_scheduler()
 
@@ -152,11 +154,9 @@ def source(
     ] = None,
 ) -> None:
     """Fetch the exact source a run used from git and check it out."""
-    from etude.launch import server
     from etude.launch.source import checkout
 
-    address = server.selected()
-    client = server.PythonClient(address) if address else default()
+    client = default()
     record = client.record(run)
     print(checkout(record, directory or Path(f"etude-source-{record.id}")))
 
@@ -273,17 +273,6 @@ def fetch(
     directory: Annotated[Path, typer.Argument(help="where to copy it")] = Path("."),
 ) -> None:
     """Copy one of a run's output files here and check it against its digest."""
-    from etude.launch import server
-
-    address = server.selected()
-    if address:
-        raise typer.Exit(
-            server.forward(
-                address,
-                [],
-                fetch=server.FetchRequest(run=run, name=name, destination=directory),
-            )
-        )
     print(default().fetch(run, name, directory))
 
 
@@ -565,9 +554,20 @@ def image_prepare(
     ] = 0,
 ) -> None:
     """Wait for registry metadata and print the immutable selection; never rent."""
+    print(_resolve_image(reference, platform=platform, timeout=timeout or None).model_dump_json())
+
+
+def _resolve_image(
+    reference: str, *, platform: str = "linux/amd64", timeout: float | None = None
+) -> Image:
+    # Command entry point: resolve on the selected host without opening a local database.
+    from etude.launch.server import PythonClient, selected
+
+    if address := selected():
+        return PythonClient(address).resolve_image(reference, platform=platform, timeout=timeout)
     from etude.launch.provisioner.images import resolve_image
 
-    print(resolve_image(reference, platform=platform, timeout=timeout or None).model_dump_json())
+    return resolve_image(reference, platform=platform, timeout=timeout)
 
 
 @ondemand_app.command("image")
@@ -580,13 +580,12 @@ def ondemand_image(
     ] = 0,
 ) -> None:
     """Resolve an image within timeout, then select it for future machines."""
-    from etude.launch.provisioner.images import resolve_image
     from etude.launch.records import Image
 
     selected = (
         Image(requested=image, resolved=image)
         if "@sha256:" in image
-        else resolve_image(image, timeout=timeout or None)
+        else _resolve_image(image, timeout=timeout or None)
     )
     default().set_ondemand_image(name, selected)
     print(selected.model_dump_json())

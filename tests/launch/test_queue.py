@@ -18,11 +18,12 @@ from etude.launch.provisioner.machines import Refused
 from etude.launch.records import Offer, OnDemand, Pool, Stale
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet, Work
+from etude.records import Clock
 from etude.spec import Job, RunRequest, Until
-from etude.train.records import ParentRun, Step
-from etude.train.tracking import track
+from etude.train.records import ParentRun
 from tests.experiments import authored
 from tests.launch.fake import L4, bench, open_database
+from tests.train.tracking import open_run
 
 
 def job() -> Job:
@@ -240,8 +241,11 @@ def test_cli_continue_waits_without_capacity(
     # What the parent's job recorded, as tracking keeps it in its runs directory.
     weights = tmp_path / "weights.pt"
     weights.write_bytes(b"weights")
-    tracked = track(
-        experiment="capacity", clocks=[Step("steps", "steps")], run=parent, directory=tmp_path
+    tracked = open_run(
+        experiment="capacity",
+        clocks=[Clock(name="steps", kind="step", meaning="steps")],
+        run=parent,
+        directory=tmp_path,
     )
     tracked.checkpoint(weights, steps=3)
     tracked.finish()

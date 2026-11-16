@@ -173,7 +173,7 @@ code-only group starts no agent process
 run within `--max-usd`. Existing capacity is reused; a rental target permits
 renting when no machine has room, regardless of training activity or historical
 match duration. Without a rental target, the run waits in the pool's queue
-([Experiments](../docs/evaluation.md#experiments)).
+([Experiments](../docs/evaluation.md)).
 
 ### Upgrade
 
@@ -183,8 +183,7 @@ match duration. Without a rental target, the run waits in the pool's queue
 - **Remove `workers=`** from `EvalJob(...)` and `evaluating(...)`; it is
   refused. Etude owns game concurrency: CPU and memory allowances bound CPU
   games; on a visible NVIDIA GPU, games fill the declared batch, bounded by
-  pending work and memory. The deprecated `evaluate(workers=)` accepts and
-  ignores it until 0.5. Eval jobs already queued with `workers` still run.
+  pending work and memory. The one-call `evaluate(workers=)` adapter is removed. Eval jobs already queued with `workers` still run.
 - **Guard Python scripts that play.** `evaluating(...)` without `workers=`
   played in its own process; its games now play in fresh processes, which
   import the script again. Put `run.play` under `if __name__ == "__main__":`.
@@ -243,7 +242,7 @@ false. The derived statsdb cache rebuilds from schema 14 or 15 to 16 automatical
 Game processes load play's defining module; for a job using shared inference, heavy
 imports there produce one warning per run naming their importer.
 
-Checkpoint seats now play directly: `Held()` replaces a bare inference seat;
+Checkpoint seats now play directly: `CheckpointSlot()` replaces a bare inference seat;
 relative seats take no `inference=`. Author records wrap seats to describe
 search or other composition. `compose(record)` preserves the wrapper type and
 fields in identity, replacing every leaf with its resolved checkpoint key, and
@@ -282,7 +281,7 @@ with the same `every`, `at`, `tagged` and `last` selectors as a run.
 are refused. Reports resolve other experiments' seats from the same source;
 smoke names those seats as not smoked. A run publishes a second policy with
 `run.checkpoint(..., role="exploiter")`.
-See [Policies](../docs/evaluation.md#policies).
+See [Policies](../docs/evaluation.md#players-and-composition).
 
 A checkpoint's key now includes its experiment:
 `EXPERIMENT/RUN/checkpoints/NAME` (nondefault roles add `/roles/ROLE`
@@ -328,8 +327,7 @@ from etude.launch.client import launch, queue
 
 Experiment declarations keep their defining module, `etude.jobs`. Supported
 modules mark their supported names with `__all__`; names outside those tuples
-are implementation details. Use the [Python import reference](../docs/python.md)
-to find the defining module for each task. Import `Tables` from
+are implementation details. The [author guides](../docs/getting-started.md) show defining-module imports. Import `Tables` from
 `etude.eval.result` rather than through `etude.eval.match` or `etude.eval.run`.
 
 Scripts using moved implementation modules must update their imports directly:
@@ -348,10 +346,58 @@ Scripts using moved implementation modules must update their imports directly:
 There are no forwarding aliases at replaced paths. If an import fails after
 upgrading, update that source import, including module names in your own scripts
 or test fixtures. `Scheduler`, executor and controller helpers remain internal;
-image preparation functions are listed in the supported reference. See
-[launcher ownership](../docs/launcher.md#ownership-and-failure-behavior) for the
+image preparation functions remain supported in `etude.launch.provisioner.images`. See
+[launcher ownership](../docs/dev/launcher.md#ownership-and-failure-behavior) for the
 four boundaries and shared modules.
 
 This reorganization changes Python source paths, not CLI spellings, run
 identities, stored records or database schemas. It requires no data conversion.
 `etude.call` and the job commands retain their entry paths.
+
+## Indexed evaluation matches
+
+Use `Seating(config=..., base_seed=42, games=100)` to generate one match per
+seed index. Seeds depend only on the base and index, shared across players and
+seat orders. Increasing the count preserves completed match keys. Existing
+multi-game/config-panel records remain readable under their original keys; use
+a fresh tournament name when changing those panels to the indexed format.
+
+`CheckpointSlot()` replaces `Held()` for generator placeholders. Use
+`checkpoint_player(ref)` to seat a fixed checkpoint. Composed players retain
+whole-player result identity; checkpoint leaves are loading details.
+
+The [first experiment](../docs/getting-started.md) now runs training, eval and
+reporting from one complete file. Author guides cover usage and limits;
+implementation and persistence references live under `docs/dev/`.
+
+## Removed transitional Python APIs
+
+The adapters previously marked for 0.5 removal are deleted now. Import training
+from `etude.train.tracking`; `etude.train.run` and `local_launch` are gone.
+Use `evaluating(...)` and `run.play(...)` instead of `evaluate` or `hold`.
+Import `Tables`, `Result` and `EvalResult` from `etude.eval.result`.
+Use `CheckpointPlayer`, `CheckpointRef` and `RunRequest` from their defining
+modules, `TrainingRunSummary` from `etude.jobs`, `RunData.writers` and
+`RunData.outcome`, `checkpoint.player(...)`, and `run.checkpoints()` for this run's published models.
+Continuation code restores registered state or reads its assigned start input;
+checkpoints() does not claim the parent's models as newly published by the child.
+Count clocks are declared by use (or explicit `Clock` records); `Step` is gone.
+Use config/configs fields directly instead of conditions properties.
+Readers for released record formats remain, including conditions, legacy player
+keys, old worker journals and already queued evaluations.
+
+`track` now records only an Etude-assigned run inside train(config). Run identity,
+seed, source, continuation and paths come from `etude train` or the launcher;
+standalone `track(experiment=..., run=...)` is removed.
+
+Eval declarations stay as Python objects through match selection. Only the
+selected matches, tournament provenance and verified artifact inputs enter the
+worker payload. Grouping combines those payloads rather than resolving another
+checkpoint/entrant selection on the worker. Previously queued payloads normalize
+at their reader boundary. CLI operations use the same typed client as Python;
+there is no argv-forwarding command path. All providers and the optional SSH
+scheduler remain supported.
+
+Tracking's queue/block sizing and metric-name limit are implementation policy;
+`track` no longer exposes those tuning parameters. Rental attribution always
+uses retained billed coverage; its unused alternate arithmetic switch is gone.

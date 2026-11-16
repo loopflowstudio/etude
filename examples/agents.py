@@ -17,7 +17,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     return [
         EvalJob(
             tournament=RoundRobin(
-                name=name, environment=environment("agents"), configs=({"lane": name},), games=1
+                name=name, environment=environment("agents"), config={"lane": name}, games=1
             ),
             enter=(
                 small,

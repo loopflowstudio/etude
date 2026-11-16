@@ -129,11 +129,11 @@ def test_cli_resume_runs_current_source_over_the_same_saved_state(
     recipe = """import json, os
 from pathlib import Path
 from pydantic import BaseModel
-from etude.train.records import Step
+from etude.records import Clock
 from etude.train.tracking import track
 class State(BaseModel):
     steps: int = 0
-with track(clocks=[Step("steps", "training steps")], config=json.loads(Path(os.environ["ETUDE_CONFIG"]).read_text())) as run:
+with track(clocks=[Clock(name='steps', kind='step', meaning='training steps')], config=json.loads(Path(os.environ['ETUDE_CONFIG']).read_text())) as run:
     state = run.resume(extra=State())
     for step in run.steps("steps", to=2, save_every=1):
         state.steps = step
@@ -163,7 +163,7 @@ with track(clocks=[Step("steps", "training steps")], config=json.loads(Path(os.e
     assert main(["launch", str(file), "--resume", "--until", "steps=4"]) == 0
     assert scheduler.wait(identity, every=0.01, timeout=10)[0].outcome == "succeeded"
     data = read(default_root(), "job", identity)
-    assert [attempt.commit for attempt in data.attempts] == [first_commit, next_commit]
+    assert [attempt.commit for attempt in data.writers] == [first_commit, next_commit]
     points = data.points("revision", "steps")
     assert points.x.tolist() == [1, 2, 3, 4]
     assert points.y.tolist() == [1, 1, 2, 2]

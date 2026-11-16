@@ -587,40 +587,15 @@ def continue_run(
 app.command()(kind(Kind.wait)(checkpoints))
 app.command()(kind(Kind.wait)(sync))
 
-# Commands that run on this computer even when a server is chosen: they read
-# local files or a bucket, run a machine's worker, or submit through the server
-# themselves. Every other command is sent to a chosen server.
-_HERE = (
-    "launch",
-    "queue",
-    "smoke",
-    "database",
-    "source",
-    "fetch",
-    "worker",
-    "logs",
-    "report",
-    "checkpoints",
-    "sync",
-    "convert-eval",
-    "delete-eval-files",
-)
-
 
 def _main(argv: list[str]) -> int:
     try:
-        if argv and argv[0] not in _HERE and not {"--help", "-h"} & set(argv):
-            # Entry points import only the command being run (AGENTS.md).
-            from etude.launch import server
+        if argv == ["--server-request"]:
+            # Transport dispatch is internal; ordinary CLI commands use the typed client.
+            from etude.launch.client import default
+            from etude.launch.server import receive
 
-            if argv == ["--server-request"]:
-                return server.receive(launch_cli.default())
-            # The server command chooses the server, so `set` and `unset` run here.
-            local = argv[:2] in (["server", "set"], ["server", "unset"])
-            if not local and (address := server.selected()):
-                if argv[0] == "server":
-                    print(f"server: {address}", flush=True)
-                return server.forward(address, argv)
+            return receive(default())
         result = app(args=argv, prog_name="etude", standalone_mode=False)
         return result if isinstance(result, int) else 0
     except typer.Exit as error:
