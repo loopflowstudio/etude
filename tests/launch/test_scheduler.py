@@ -15,7 +15,7 @@ import pytest
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch.database import launcher_file
-from etude.launch.listing import show_machines, show_runs
+from etude.launch.listing import show_machines, show_ondemands, show_runs
 from etude.launch.provisioner.machines import Refused
 from etude.launch.records import (
     GPU,
@@ -219,7 +219,7 @@ def test_repeated_capacity_refusals_preserve_the_attempt_budget_until_admission(
     assert status.machine == admitted.machine
 
 
-def test_refused_machine_is_only_listed_as_refused_with_all(
+def test_refused_machine_is_only_listed_with_all(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     b = bench(tmp_path)
@@ -235,12 +235,19 @@ def test_refused_machine_is_only_listed_as_refused_with_all(
     assert capsys.readouterr().out == ""
     show_machines(b.scheduler, ended=True)
     assert capsys.readouterr().out == (
-        f"{attempt.machine}  l4  unavailable, refused {b.clock():%Y-%m-%d %H:%M} UTC\n"
+        f"{attempt.machine}  l4  unavailable, nothing rented {b.clock():%Y-%m-%d %H:%M} UTC\n"
     )
     show_runs(b.scheduler, [run])
     output = capsys.readouterr().out
     assert "queued (provider refused: no capacity), $0.00" in output
     assert "machine " not in output
+    show_ondemands(b.scheduler)
+    assert "rented:" not in capsys.readouterr().out
+    b.clock.advance(61)
+    b.scheduler.tick()
+    rented = b.scheduler.attempts(run)[-1].machine
+    show_ondemands(b.scheduler)
+    assert f"rented: {rented};" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("elapsed", [0, 59, 61])

@@ -86,7 +86,8 @@ etude: launch 215b6457f928 for experiment/base@0: cannot launch on 'gpu': provid
 ```
 
 Nothing was rented and nothing needs cleaning up: `etude machines --all` lists the
-refused machine as `unavailable, refused DATE TIME UTC`. Default listings omit it;
+refused machine as `unavailable, nothing rented DATE TIME UTC`. Default listings and
+`etude ondemands` omit it;
 it does not count toward `--max`, and the same run can be launched again at once,
 on this on-demand or another. A queued run
 keeps the reason in `etude status` and its on-demand is asked again no sooner

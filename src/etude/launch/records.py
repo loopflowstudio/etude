@@ -356,6 +356,11 @@ class Machine(Record):
     def expired(self, now: datetime) -> bool:
         return self.expires_at is not None and now >= self.expires_at
 
+    @property
+    def held(self) -> bool:
+        """Someone holds this machine now: neither deleted nor released with nothing rented."""
+        return self.deleted_at is None and self.refused_at is None
+
 
 class Output(Record):
     name: str  # path below the run's output directory
