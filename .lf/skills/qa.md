@@ -235,3 +235,30 @@ When a pinned `Counts(database=N)` moves, compare statements with main. Use a
 temporary trace in `tests/launch/counting.py` to record normalized statements
 in a file named by an environment variable, then remove the trace. Fenced
 writes add `BEGIN IMMEDIATE`, `PRAGMA user_version` and `COMMIT`.
+
+## Etude: a live RunPod check, when a Task authorizes spend
+
+Clone the checkout into `scratch/qa/repo` (commit first; a clone misses
+uncommitted edits), `git remote remove origin` so nothing is pushed to GitHub,
+and `uv sync` there. Drive `repo/.venv/bin/etude` from `repo` with an isolated
+`ETUDE_HOME`; wrap it in `doppler run -p etude -c prd --only-secrets RUNPOD_API_KEY
+-- doppler run -p manabot -c prd --only-secrets R2_ACCOUNT_ID --only-secrets
+R2_ACCESS_KEY_ID --only-secrets R2_SECRET_ACCESS_KEY --only-secrets R2_API_TOKEN --`.
+
+```sh
+etude database upgrade --development     # a branch build refuses without it
+etude storage add r2 --bucket manabot --prefix launch/etude-r2-smoke-DATE-TASK --provider r2
+etude provider set runpod --kind runpod --storage r2
+etude ondemand add demo-cpu --provider runpod --vcpus 2 --memory-gb 4 --max 1 --max-usd-per-hour 0.20
+etude ondemand add demo-gpu --provider runpod --gpu "NVIDIA RTX A6000" --vcpus 4 --memory-gb 16 --max 1 --max-usd-per-hour 0.75
+etude launch examples/prototype.py --rent demo-cpu --max-usd 0.50 && etude wait
+etude machines --all                     # ended rentals read `deleted, …, ended`
+```
+
+The CPU pod is cpu3c at $0.06/hour, about a minute per run. The prototype's
+eval budget (`max_usd=0.10`) does not cover a GPU hour; raise it in the clone
+(0.30 quotes $0.18 on an A6000) and raise `games` so the eval has new matches.
+RunPod's catalog can say `rentable now` while every create is refused with 400.
+List pods with `curl -H "Authorization: Bearer $RUNPOD_API_KEY"
+https://api.runpod.io/v2/pods` (`.pods[]`); `rest.runpod.io` does not resolve
+here. Other sessions' `etude-*` pods may be present; touch only your own.
