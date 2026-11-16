@@ -15,7 +15,7 @@ from etude.launch.database import upgrade
 from etude.spec import RunRequest, Runtime, Until
 from etude.storage import default_root
 from etude.train.read import read
-from tests.launch.counting import Counting
+from tests.launch.counting import Counting, query_plan
 from tests.launch.fake import bench
 from tests.launch.tasks import Command, train_command
 from tests.launch.test_scheduler import job
@@ -221,13 +221,8 @@ def test_resumed_waiting_query_indexes_supply_and_allocation_number(tmp_path: Pa
     (identity,) = b.scheduler.launch(spec, rent="l4")
     b.run(601)
     b.scheduler.queue(RunRequest(job=spec, id=identity, seed=0, resume=True), rent="l4")
-    statements: list[str] = []
-    b.store._db.set_trace_callback(statements.append)
-    try:
-        assert [run.id for run in b.store.waiting("l4")] == [identity]
-    finally:
-        b.store._db.set_trace_callback(None)
-    plan = [row[3] for row in b.store._db.execute("EXPLAIN QUERY PLAN " + statements[0])]
+    assert [run.id for run in b.store.waiting("l4")] == [identity]
+    plan = query_plan(b.store, lambda: b.store.waiting("l4"))
     assert any("USING INDEX runs_pool" in step for step in plan)
     assert any("USING INDEX runs_rent" in step for step in plan)
     assert any("USING INDEX attempts_run (run=? AND number>?)" in step for step in plan)

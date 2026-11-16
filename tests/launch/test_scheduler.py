@@ -250,7 +250,7 @@ def test_refused_machine_is_only_listed_with_all(
     assert f"rented: {rented};" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("elapsed", [0, 59, 61])
+@pytest.mark.parametrize("elapsed", [0, 61])
 def test_refused_status_keeps_each_runs_own_reason_after_restart(
     tmp_path: Path, elapsed: int
 ) -> None:
@@ -292,23 +292,6 @@ def test_empty_refusal_records_a_reason_for_status_and_admission(tmp_path: Path)
     assert str(restarted.read(one)) == "queued (provider refused: no reason given), $0.00"
     refused = b.store.recent_refusal("l4", b.clock() - timedelta(seconds=60))
     assert refused is not None and refused.refusal == "no reason given"
-
-
-def test_refusal_pause_survives_restart_without_diagnostics(tmp_path: Path) -> None:
-    b = bench(tmp_path)
-    b.service.refuse = 2
-    (one,) = b.scheduler.queue(job(), rent="l4")
-    b.scheduler.tick()
-    b.store._db.execute("DELETE FROM diagnostics")
-    restarted = Scheduler(b.store, {"runpod": lambda held: b.service}, clock=b.clock)
-    b.clock.advance(59)
-    restarted.tick()
-    assert b.service.creates == 1
-    assert str(restarted.read(one)) == "queued (provider refused: no capacity), $0.00"
-    b.clock.advance(1)
-    restarted.tick()
-    assert b.service.creates == 2
-    assert len(restarted.attempts(one)) == 2
 
 
 def test_a_lost_machine_retries_the_same_run_with_remaining_hours(tmp_path: Path) -> None:

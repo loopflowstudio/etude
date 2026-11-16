@@ -31,7 +31,7 @@ from etude.launch.ssh import SSH, SessionRequest
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
 from etude.spec import Job
-from tests.launch.counting import Counting, Counts
+from tests.launch.counting import Counting, Counts, query_plan
 from tests.launch.fake import Bench, bench
 from tests.launch.test_source import repository  # noqa: F401
 
@@ -171,23 +171,11 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
     assert admission == Counts(provider=4, bucket=1, database=113), admission.model_dump()
     assert b.scheduler.attempts(run)[-1].number == history + 1
     assert b.scheduler.read(run).attempts == 1
-    statements: list[str] = []
-    b.store._db.set_trace_callback(statements.append)
-    try:
-        b.store.recent_refusal("l4", b.clock() - timedelta(seconds=60))
-    finally:
-        b.store._db.set_trace_callback(None)
-    plan = [row[3] for row in b.store._db.execute("EXPLAIN QUERY PLAN " + statements[0])]
+    since = b.clock() - timedelta(seconds=60)
+    plan = query_plan(b.store, lambda: b.store.recent_refusal("l4", since))
     assert any("sessions_refused" in step for step in plan), plan
     assert not any("SCAN" in step for step in plan), plan
-
-    statements.clear()
-    b.store._db.set_trace_callback(statements.append)
-    try:
-        b.store.waiting("l4")
-    finally:
-        b.store._db.set_trace_callback(None)
-    plan = [row[3] for row in b.store._db.execute("EXPLAIN QUERY PLAN " + statements[0])]
+    plan = query_plan(b.store, lambda: b.store.waiting("l4"))
     assert sum("SEARCH a USING INDEX attempts_run" in step for step in plan) == 2, plan
     assert not any("SCAN a" in step or "SCAN r" in step for step in plan), plan
 

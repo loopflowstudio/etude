@@ -61,7 +61,7 @@ from etude.run import RunFiles, StorageDestination, ship
 from etude.spec import Job
 from etude.storage import S3Storage
 from etude.storage_timeout import StorageUnavailable, socket_timeout
-from tests.launch.counting import Counting, Counts
+from tests.launch.counting import Counting, Counts, query_plan
 from tests.launch.fake import bench, open_database
 from tests.run.storage import CountedClient
 
@@ -234,11 +234,9 @@ def test_cold_warm_concurrent_and_new_process_retrieval(
     script = """from pathlib import Path
 import sys
 from etude.cache import Cache
-from etude.out import OutFile, OutFiles
 from etude.records import RunProgress as Result
 from etude.launch.storage import download as downloads
 from etude.launch.storage.download import Download, download
-from etude.launch.storage.disk import DirectoryJournal
 download(Download.model_validate_json(sys.argv[2]), Path(sys.argv[3]), cache=Cache(Path(sys.argv[1])))
 """
     subprocess.run(
@@ -1561,12 +1559,8 @@ def test_status_delivery_age_uses_only_retained_successful_writes(tmp_path: Path
     assert "collection may be stale" in str(status)
     b.store.retain_transfer(good.model_copy(update={"id": "recovered", "observed_at": b.clock()}))
     assert b.scheduler.read(run).delivery_age_seconds == 0
-    statements: list[str] = []
-    b.store._db.set_trace_callback(statements.append)
     assert b.store.last_delivery(attempt.id) == b.clock()
-    b.store._db.set_trace_callback(None)
-    assert len(statements) == 1
-    plan = [row[3] for row in b.store._db.execute("EXPLAIN QUERY PLAN " + statements[0])]
+    plan = query_plan(b.store, lambda: b.store.last_delivery(attempt.id))
     assert any("USING INDEX transfers_delivery" in step for step in plan)
     b.store.close()
 

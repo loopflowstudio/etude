@@ -29,8 +29,7 @@ def _reason(body: bytes) -> str:
         detail = value.get("detail") or value.get("title")
         if isinstance(detail, str):
             text = detail
-    text = "".join(c for c in sanitize(text) if c.isprintable())[:300].strip()
-    return text or "request refused"
+    return "".join(c for c in sanitize(text) if c.isprintable())[:300].strip()
 
 
 class PodHTTP:

@@ -1310,7 +1310,7 @@ class Scheduler:
         if last is not None and session is not None:
             if superseded:
                 reason = "explicit resume"
-            elif last.cause == CAPACITY_REFUSED:
+            elif refused:
                 reason = _refused(session)
             else:
                 reason = f"retrying after {last.cause or last.outcome}"
