@@ -8,22 +8,27 @@ import json
 import subprocess
 from pathlib import Path
 
-from etude.launch.provisioner.images import prepare_pytorch
+from etude.deadline import limit_time
+from etude.launch.provisioner.images import resolve_image
 from etude.launch.runtime import PROBE, select_runtime
+from etude.spec import Runtime
 
 IMAGE = "pytorch/pytorch@sha256:b85566342b86d13a67712e9315d40cdc2dad7f8d86df1aff3831f80835edbcca"
 
 
 def main() -> None:
-    prepared = prepare_pytorch(torch="2.10.0", cuda="12.8", timeout=120)
-    assert prepared.image.resolved == IMAGE
+    with limit_time(120):
+        image = resolve_image("pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime")
+    assert image.resolved == IMAGE
+    python = "python"
+    runtime = Runtime(python=python, packages={"torch": "2.10.0+cu128"}, cuda="12.8")
     subprocess.run(["docker", "pull", "--platform", "linux/amd64", IMAGE], check=True)
     base = ["docker", "run", "--rm", "--platform", "linux/amd64", "--network", "none"]
     probe = subprocess.run(
         [
             *base,
             "--entrypoint",
-            prepared.runtime.python,
+            python,
             IMAGE,
             "-I",
             "-c",
@@ -37,7 +42,7 @@ def main() -> None:
     )
     environment: dict[str, str] = {}
     info = select_runtime(
-        prepared.runtime,
+        runtime,
         probe.stdout,
         environment,
     )
