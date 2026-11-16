@@ -64,6 +64,7 @@ from etude.storage_timeout import StorageUnavailable
 from etude.train.tracking import TrainingRun as TrackedRun
 from tests.experiments import authored
 from tests.launch.counting import Counting, Counts, job_text
+from tests.launch.fake import Clock as TestClock
 from tests.launch.fake import open_database
 from tests.train.tracking import open_run
 
@@ -198,6 +199,7 @@ class RunPod:
     pods: dict[str, dict[str, Any]] = field(default_factory=dict)
     creates: int = 0
     lose_reply: bool = False
+    refusal: str | None = None
     available: str = "HIGH"
     envs: list[dict[str, str]] = field(default_factory=list)
     # Pods delete themselves from their own threads while the client reads them.
@@ -238,6 +240,8 @@ class RunPod:
             asked = json.loads(body or b"{}")
             assert asked["dataCenterIds"] == ["EU-RO-1"]  # the pool's place is the one asked for
             self.creates += 1
+            if self.refusal is not None:
+                return HTTPReply(400, json.dumps({"detail": self.refusal}).encode())
             with self.storage.lock:  # one timeline of storage requests and pod creates
                 self.storage.asked.append(("CREATE", asked["name"]))
             id = f"pod{self.creates}"
@@ -1579,3 +1583,41 @@ def _finished() -> str:
         outputs=(),
         exit_code=0,
     ).model_dump_json()
+
+
+def test_create_400_frees_admission_and_the_queue_pauses_across_scheduler_starts(
+    tmp_path: Path,
+) -> None:
+    c = cloud(tmp_path)
+    c.provider.refusal = "There are no longer any instances available"
+    wanted = Job(experiment="refused", command="true", max_hours=0.05, max_usd=Decimal(1))
+    with pytest.raises(LauncherError, match="provider refused: There are no longer any instances"):
+        c.scheduler.launch(wanted, rent="l4")
+    assert not c.scheduler.runs(done=True)
+    assert not c.store.unsettled_sessions()
+    assert c.store.sessions()[-1].refused_at is not None
+    # Explicit launches bypass the queue pause and are not fenced by the refused request.
+    with pytest.raises(LauncherError, match="provider refused: There are no longer any instances"):
+        c.scheduler.launch(wanted, rent="l4")
+    assert c.provider.creates == 2
+    clock = TestClock()
+    clock.now = datetime.now(UTC)
+    scheduler = Scheduler(
+        c.store, {"runpod": lambda held: c.service}, clock=clock, sleep=clock.advance
+    )
+    (run,) = scheduler.queue(wanted, rent="l4")
+    scheduler.tick()
+    assert c.provider.creates == 2
+    clock.advance(60)
+    scheduler.tick()
+    assert c.provider.creates == 3
+    assert "There are no longer any instances available" in str(scheduler.read(run))
+    scheduler = Scheduler(
+        c.store, {"runpod": lambda held: c.service}, clock=clock, sleep=clock.advance
+    )
+    scheduler.tick()
+    assert c.provider.creates == 3
+    clock.advance(60)
+    scheduler.tick()
+    assert c.provider.creates == 4
+    assert not c.provider.pods and not c.store.unsettled_sessions()

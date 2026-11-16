@@ -27,6 +27,7 @@ from moto import mock_aws
 from etude import cache as engine
 from etude.cache import Artifact, Cache, Content, Fetched
 from etude.deadline import limit_time, remaining
+from etude.errors import LauncherError
 from etude.launch import client
 from etude.launch.database import launcher_file
 from etude.launch.logging import log_to
@@ -46,12 +47,14 @@ from etude.launch.schemas import (
 )
 from etude.launch.storage import download as downloads
 from etude.launch.storage.bucket import BucketJournal
+from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.download import Download, download
-from etude.launch.storage.files import RESULT
+from etude.launch.storage.files import RESULT, select_output
 from etude.launch.storage.s3 import Bucket, Grant, Keys, PostForm, _send, read
 from etude.launch.storage.transport import HTTPReply, attribute, observe
 from etude.launch.usage import Transfer, Usage
 from etude.launch.worker.courier import Courier
+from etude.out import OutFile, OutFiles
 from etude.records import RunProgress as Result
 from etude.records import RunRecord
 from etude.run import RunFiles, StorageDestination, ship
@@ -231,9 +234,11 @@ def test_cold_warm_concurrent_and_new_process_retrieval(
     script = """from pathlib import Path
 import sys
 from etude.cache import Cache
+from etude.out import OutFile, OutFiles
 from etude.records import RunProgress as Result
 from etude.launch.storage import download as downloads
 from etude.launch.storage.download import Download, download
+from etude.launch.storage.disk import DirectoryJournal
 download(Download.model_validate_json(sys.argv[2]), Path(sys.argv[3]), cache=Cache(Path(sys.argv[1])))
 """
     subprocess.run(
@@ -846,6 +851,30 @@ def test_the_launcher_fetches_a_multipart_output_and_retains_each_part(
     assert sorted(e.range_start or 0 for e in parts) == [0, 16, 32]
     assert sum(e.received_bytes for e in parts) == len(payload)
     assert {(e.run, e.attempt) for e in parts} == {(run, attempt.id)}
+    out_payload = b"published checkpoint"
+    member = OutFile(
+        key="out/coin.json",
+        sha256=hashlib.sha256(out_payload).hexdigest(),
+        size_bytes=len(out_payload),
+    )
+    http.objects[f"/prefix/{run}/out.json"] = OutFiles(files=(member,)).model_dump_json().encode()
+    http.objects[f"/prefix/{run}/out/coin.json"] = out_payload
+    monkeypatch.setattr(downloads, "PART_BYTES", 1024)
+    scheduler = client._open(tmp_path)
+    # Warm control records, then count just membership and file retrieval.
+    scheduler.fetch(run, "checkpoint.pt", tmp_path / "again")
+    before_requests = http.requests
+    assert scheduler.fetch(run, "coin.json", tmp_path / "out-member").read_bytes() == out_payload
+    # Two control freshness checks, one membership read and one object read.
+    assert http.requests - before_requests == 4
+    with pytest.raises(
+        LauncherError, match="has no output 'missing'; it has: checkpoint.pt, coin.json"
+    ):
+        scheduler.fetch(run, "missing", tmp_path / "missing")
+    http.objects[f"/prefix/{run}/out/coin.json"] = b"wrong"
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "empty-cache"))
+    with pytest.raises(StorageUnavailable):
+        scheduler.fetch(run, "coin.json", tmp_path / "wrong")
 
 
 def test_active_cache_capacity_streams_another_digest_without_overfilling(
@@ -1540,3 +1569,50 @@ def test_status_delivery_age_uses_only_retained_successful_writes(tmp_path: Path
     plan = [row[3] for row in b.store._db.execute("EXPLAIN QUERY PLAN " + statements[0])]
     assert any("USING INDEX transfers_delivery" in step for step in plan)
     b.store.close()
+
+
+def test_directory_fetch_verifies_out_members_and_prefers_attempt_outputs(tmp_path: Path) -> None:
+    journal = DirectoryJournal(tmp_path / "sessions")
+    attempt = tmp_path / "sessions/s/attempts/a"
+    outputs = attempt / "outputs"
+    outputs.mkdir(parents=True)
+    (attempt / "run").write_text("experiment/train@0")
+    output = Output(name="same.json", sha256=hashlib.sha256(b"attempt").hexdigest(), size_bytes=7)
+    (outputs / output.name).write_bytes(b"attempt")
+    (attempt / "finished.json").write_text(
+        Finished(
+            finished_at=datetime.now(UTC),
+            outcome="succeeded",
+            cause=None,
+            clocks={},
+            outputs=(output,),
+            exit_code=0,
+        ).model_dump_json()
+    )
+    folder = tmp_path / "track/experiment/train@0"
+    (folder / "out").mkdir(parents=True)
+    members = tuple(
+        OutFile(key=f"out/{name}", sha256=hashlib.sha256(b"out").hexdigest(), size_bytes=3)
+        for name in ("same.json", "coin.json")
+    )
+    for member in members:
+        (folder / member.key).write_bytes(b"out")
+    (folder / "out.json").write_text(OutFiles(files=members).model_dump_json())
+    assert journal.fetch("s", "a", "same.json", tmp_path / "fetched").read_bytes() == b"attempt"
+    assert journal.fetch("s", "a", "coin.json", tmp_path / "fetched").read_bytes() == b"out"
+    with pytest.raises(
+        LauncherError, match="has no output 'missing'; it has: same.json, coin.json"
+    ):
+        journal.fetch("s", "a", "missing", tmp_path / "fetched")
+    (folder / "out/coin.json").write_bytes(b"bad")
+    with pytest.raises(LauncherError, match="no longer matches"):
+        journal.fetch("s", "a", "coin.json", tmp_path / "corrupted")
+    assert not (tmp_path / "corrupted/coin.json").exists()
+
+
+def test_unknown_fetch_lists_at_most_twenty_names(tmp_path: Path) -> None:
+    members = tuple(OutFile(key=f"out/file{i}", sha256="a" * 64, size_bytes=0) for i in range(23))
+    with pytest.raises(LauncherError) as failure:
+        select_output("run", "missing", (), lambda: OutFiles(files=members))
+    assert str(failure.value).endswith("file19, and 3 more")
+    assert "file20" not in str(failure.value)

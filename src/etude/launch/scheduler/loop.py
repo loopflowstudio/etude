@@ -491,6 +491,11 @@ class Scheduler:
             raise LauncherError("a launch needs at least one run")
         quoted = []
         pending = list(records)
+        for name in (target.pool, target.rent):
+            if name is not None:
+                with self._store.lock(name, self._clock) as acquired:
+                    if acquired:
+                        self._confirm_ends(self._store.supply(name))
         for placement in self._capacity(records):
             price = placement.price
             share = None
@@ -740,6 +745,8 @@ class Scheduler:
                     raise LauncherError(
                         f"cannot launch on {name!r}: it is busy; etude queue would wait"
                     )
+            for name in names:
+                self._confirm_ends(self._store.supply(name))
             placements = self._capacity(records)
             made: list[Session] = []
             attempts: list[RunAttempt] = []
@@ -773,7 +780,7 @@ class Scheduler:
                                 if attempts:
                                     break  # keep confirmed placements; later runs stay queued
                                 reason = (
-                                    "provider refused capacity"
+                                    self._trouble.get(placement.supply, "provider refused capacity")
                                     if session.refused_at
                                     else "create reply unknown"
                                 )
@@ -999,7 +1006,7 @@ class Scheduler:
         )
 
     def wait(self, *runs: str, every: float = 1.0, timeout: float | None = None) -> list[Status]:
-        """Work until every named run is done, then return their statuses in order.
+        """Work until the selected runs and their requested machine shutdowns settle.
 
         With no runs named, work until nothing launched is left unfinished. That
         is the loop to leave running so a queue keeps moving.
@@ -1011,9 +1018,14 @@ class Scheduler:
             unfinished = not all(status.done for status in statuses)
             if not runs:
                 unfinished = bool(self.runs())
-            if not unfinished:
+            ending = self._store.finishing_sessions(runs)
+            if not unfinished and not ending:
                 return statuses
             if give_up is not None and self._clock() >= give_up:
+                if ending:
+                    raise TimeoutError(
+                        "machines still ending: " + ", ".join(s.machine for s in ending)
+                    )
                 raise TimeoutError("runs still running: " + ", ".join(runs))
             self._sleep(every)
 
@@ -1173,10 +1185,8 @@ class Scheduler:
         return stream
 
     def fetch(self, run: str, name: str, destination: Path) -> Path:
-        """Copy one recorded output into a directory and check it against its digest."""
+        """Copy an attempt output or out member, verified against its recorded fingerprint."""
         attempt, session = self._latest(run)
-        if not any(output.name == name for output in attempt.outputs):
-            raise LauncherError(f"run {run} recorded no output {name!r}")
         with (
             observe(self._store.retain_transfer_json),
             attribute(session=session.id, machine=session.machine, run=run, attempt=attempt.id),
@@ -1283,6 +1293,14 @@ class Scheduler:
             )
         if last is not None and not retry:
             return seen.model_copy(update={"phase": "done", "outcome": last.outcome})
+        if last is not None and last.cause == "capacity_refused" and not superseded:
+            refused = (
+                self._store.recent_refusal(session.supply, now - timedelta(seconds=60))
+                if session
+                else None
+            )
+            if refused is not None:
+                return seen.model_copy(update={"reason": refused.message})
         if last is not None:
             return seen.model_copy(
                 update={
@@ -1367,13 +1385,24 @@ class Scheduler:
                     # might end at any moment, so it is placed no more work.
                     self._store.record_finish(idle, now)
                     idle = self._store.session(idle.id)
-                if not rented or self._service(idle).finish(idle.id) is not None:
+                if not rented:
                     self._end_session(idle)
             except (OSError, LauncherError, StorageUnavailable):
                 continue  # cleanup retained its error and remains unconfirmed
+        self._confirm_ends(supply)
         for session in self._store.unsettled_sessions():
             if session.supply == supply.name and session.claimed_at is None:
                 self._create(session, now)
+
+    def _confirm_ends(self, supply: Supply) -> None:
+        """Settle only shutdowns already requested; never place work or decide to end a rental."""
+        for session in self._store.finishing_sessions(supply=supply.name):
+            self._store.check_lock(supply.name)
+            try:
+                if self._service(session).finish(session.id) is not None:
+                    self._end_session(session)
+            except (OSError, LauncherError, StorageUnavailable):
+                continue  # the existing cleanup path retains uncertainty for a later pass
 
     def _estimated(self, record: Session | Rental, now: datetime) -> bool:
         rental = self._store.rental_for(record) if isinstance(record, Session) else record
@@ -1451,6 +1480,10 @@ class Scheduler:
                 session = _new_session(_id(), supply, owned, now)
                 rented, rental = None, None
             else:
+                refused = self._store.recent_refusal(supply.name, now - timedelta(seconds=60))
+                if refused is not None:
+                    self._trouble[supply.name] = refused.message
+                    return
                 offer = self._rentable(supply)
                 if offer is None:
                     return
@@ -1534,6 +1567,10 @@ class Scheduler:
                 self._trouble[ondemand.name] = str(trouble) or type(trouble).__name__
                 return None
             problem = refusal(ondemand, in_use, offer, manual=manual)
+        if problem == "at its machine limit":
+            ending = [s.machine for s in self._store.finishing_sessions(supply=ondemand.name)]
+            if ending:
+                problem += f" ({', '.join(ending)} is finishing)"
         if problem is not None:
             self._trouble[ondemand.name] = problem
             return None
@@ -1724,6 +1761,7 @@ class Scheduler:
                     packet.model_copy(update={"kept": True}) if idle else packet
                 )
         except Refused as error:
+            self._trouble[session.supply] = "provider refused: " + sanitize(str(error))
             self._diagnose(
                 "machine create", "provider refused; no machine acquired", error, session=session.id
             )

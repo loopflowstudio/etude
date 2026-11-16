@@ -124,7 +124,10 @@ def test_refused_capacity_is_retried_up_to_the_jobs_allowed_attempts(tmp_path: P
     b.service.refuse = 1
     (one,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
-    assert str(b.scheduler.read(one)) == "queued (retrying after capacity_refused), $0.00"
+    assert "provider refused" in str(b.scheduler.read(one))
+    b.run(59)
+    assert len(b.scheduler.attempts(one)) == 1
+    b.run(1)
     b.run(1)
     b.run(601)
     status = b.scheduler.read(one)
@@ -133,7 +136,8 @@ def test_refused_capacity_is_retried_up_to_the_jobs_allowed_attempts(tmp_path: P
     b.service.refuse = 9
     (two,) = b.scheduler.queue(job(max_attempts=2), rent="l4")
     b.scheduler.tick()
-    b.run(1)
+    b.run(59)
+    assert len(b.scheduler.attempts(two)) == 1
     b.run(1)
     status = b.scheduler.read(two)
     assert (status.phase, status.outcome, status.cause) == ("done", "lost", "capacity_refused")
@@ -967,3 +971,35 @@ def test_unassigned_hand_built_requests_have_seeded_quote_labels_and_opaque_ids(
     (unnamed,) = b.scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
     assert b.scheduler.record(unnamed).name == unnamed
     assert b.service.creates == 0
+
+
+def test_wait_settles_delayed_shutdown_before_the_next_launch(tmp_path: Path) -> None:
+    b = bench(tmp_path, max_machines=1)
+    b.service.finish_seconds = 5
+    (one,) = b.scheduler.launch(job(), rent="l4")
+    (status,) = b.scheduler.wait(one, every=1, timeout=700)
+    assert status.outcome == "succeeded" and status.rental_ended
+    assert not b.store.finishing_sessions()
+    assert b.scheduler.logs(run=one).streams
+    (two,) = b.scheduler.launch(job(), rent="l4")
+    assert b.scheduler.read(two).phase != "queued"
+    b.scheduler.wait(two, every=1, timeout=700)
+    assert b.service.creates == 2
+
+
+def test_launch_names_the_machine_still_finishing_and_quote_settles_its_receipt(
+    tmp_path: Path,
+) -> None:
+    b = bench(tmp_path, max_machines=1)
+    b.service.finish_seconds = 5
+    (one,) = b.scheduler.launch(job(), rent="l4")
+    b.run(601)
+    machine = b.scheduler.read(one).machine
+    with pytest.raises(LauncherError, match=f"{machine} is finishing"):
+        b.scheduler.launch(job(), rent="l4")
+    with pytest.raises(TimeoutError, match=f"machines still ending: {machine}"):
+        b.scheduler.wait(one, timeout=0)
+    b.clock.advance(5)
+    quote = b.scheduler.quote([RunRequest(job=job())], rent="l4")
+    assert quote.machines and b.service.creates == 1
+    assert b.scheduler.read(one).rental_ended

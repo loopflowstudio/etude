@@ -76,6 +76,23 @@ Quotes rent nothing. A rental has an independent deadline guardian, but a
 provider outage can delay deletion and billing can exceed admission estimates.
 Storage charges are separate. See [limits](limits.md).
 
+`availability` reports the provider's stock signal; it reserves nothing. When
+the provider then declines to make the machine, launch fails with the
+provider's own words and records no run:
+
+```text
+$ uv run etude launch experiment.py --rent gpu --max-usd 2
+etude: launch 215b6457f928 for experiment/base@0: cannot launch on 'gpu': provider refused: There are no longer any instances available with the requested specifications. Please refresh and try again.; etude queue would wait
+```
+
+Nothing was rented and nothing needs cleaning up: `etude machines` lists the
+refused machine as `unavailable`, it does not count toward `--max`, and the same
+run can be launched again at once, on this on-demand or another. A queued run
+keeps the reason in `etude status` and its on-demand is asked again no sooner
+than a minute later. Refusals count toward the job's `max_attempts`. A reply that does not settle whether a machine was made
+(a timeout, a dropped connection, a provider error) is not a refusal: Etude
+looks that machine up before asking for another.
+
 ## Queue, launch and wait
 
 | Command | What it does |
@@ -84,15 +101,38 @@ Storage charges are separate. See [limits](limits.md).
 | `launch FILE.py` | Acquires capacity, starts what fits and queues the rest; fails with no runs recorded if none fit. |
 | `launch FILE.py --quote` | Plans without submitting or renting. |
 | `status`, `machines`, `logs` | Reads retained evidence; prints freshness/incompleteness. |
-| `wait` | Advances work until the selected runs finish. |
+| `wait` | Advances work until the selected runs finish and the machines rented for them are deleted. |
 | `logs --run RUN --follow --timeout SECONDS` | Collects new logs and follows them. |
 | `cancel RUN` | Requests cancellation and cleanup. |
-| `fetch RUN FILE DIRECTORY` | Retrieves an output and verifies its fingerprint. |
+| `fetch RUN FILE DIRECTORY` | Copies one file the run wrote into `DIRECTORY` and verifies its fingerprint. |
 
 Queued work needs a scheduling loop: `wait`, a later scheduling command, or the
 optional server. An unattended queue does not run itself without one.
 `rent NAME --hours H --max-usd D` explicitly rents capacity;
 `terminate MACHINE` explicitly ends an idle rental. Both affect billing.
+
+When `wait` returns, each machine rented for its runs reads `deleted` in
+`etude machines`, its final logs are collected, and the on-demand's `--max` is
+free for the next launch, so `launch; wait; launch; wait` needs nothing in
+between. A machine rented by hand with `etude rent` is kept and does not hold
+`wait`. A launch issued while a machine is still ending says which one:
+`at its machine limit (gpu-41840a01c3b1 is finishing)`; `etude wait` clears it.
+
+## Fetching a run's files
+
+```text
+$ uv run etude fetch experiment/base@0 model.json fetched
+fetched/model.json
+$ uv run etude fetch experiment/base@0 nope.json fetched
+etude: run experiment/base@0 has no output 'nope.json'; it has: model.json, summary.json
+```
+
+`FILE` names a file the run kept: one its latest attempt wrote to
+`ETUDE_OUTPUT_DIR`, or one in `run.out`, by its path below that folder (the
+prototype's `coin.json`, for example). A name in both is
+the attempt's file. Bytes are checked against the SHA256 and length the run
+recorded before the file appears in `DIRECTORY`. A wrong name lists up to 20
+of the names that exist. A storage failure is one line and exit status 1.
 
 ## Inputs and continuation
 
@@ -137,4 +177,5 @@ For module ownership and dependencies, use the
 [developer reference](dev/launcher.md#layout-and-dependency-rules).
 
 For a bounded wait from Python, call `etude.launch.client.wait(timeout=120)`;
-the CLI `etude wait` waits until its selected runs finish.
+the CLI `etude wait` waits until its selected runs finish and their rented
+machines are deleted.

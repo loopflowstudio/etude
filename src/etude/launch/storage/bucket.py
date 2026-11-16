@@ -27,7 +27,7 @@ from etude.carriage import (
 from etude.errors import LauncherError
 from etude.launch.logging import parse_log_line
 from etude.launch.logs import snapshot_stream
-from etude.launch.records import BootstrapLinks, LogStream, Storage
+from etude.launch.records import BootstrapLinks, LogStream, Output, Storage
 from etude.launch.schemas import (
     AttemptRecord,
     Bootstrap,
@@ -43,6 +43,7 @@ from etude.launch.schemas import (
 )
 from etude.launch.source import source_archive
 from etude.launch.storage.download import Download, download
+from etude.launch.storage.files import select_output
 from etude.launch.storage.s3 import Bucket, Grant, Version
 from etude.launch.storage.transport import attribute
 from etude.launch.usage import Transfer
@@ -525,10 +526,14 @@ class BucketJournal:
         record = None if run is None else self._record(session_id, run, attempt)
         if run is None or record is None or record.exited is None or not record.delivered:
             raise LauncherError(f"attempt {attempt} recorded no output {name!r}")
-        expected = next((o for o in record.exited.outputs if o.name == name), None)
-        if expected is None:
-            raise LauncherError(f"attempt {attempt} recorded no output {name!r}")
-        key = f"{self._run_prefix(run)}attempts/{attempt}/{name}"
+
+        def read_out() -> OutFiles | None:
+            raw = self._bucket.get(self._run_prefix(run) + MEMBERSHIP)
+            return None if raw is None else OutFiles.model_validate_json(raw)
+
+        expected = select_output(run, name, record.exited.outputs, read_out)
+        relative = f"attempts/{attempt}/{name}" if isinstance(expected, Output) else expected.key
+        key = self._run_prefix(run) + relative
         with attribute(run=run, attempt=attempt, purpose="result"):
             return download(
                 Download(

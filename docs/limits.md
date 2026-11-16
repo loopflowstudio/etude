@@ -32,8 +32,15 @@ failure recovery requires.
   Outages can delay deletion. External storage/transfer/API costs are excluded.
   Rental windows cannot outlast scoped storage grants (7 days on R2, 36 hours
   on S3). Queues require a scheduling loop to keep advancing.
+- `availability` and `--quote` report a provider's stock signal, not a
+  reservation. A provider can call hardware `rentable now` and refuse the
+  create seconds later; the launch then fails with the provider's reason and
+  rents nothing.
 - Logging uses a bounded queue. Check incomplete-row counters and warnings.
-  Reports reading a bucket see only delivered files. A final delivery wait
+  Reports reading a bucket see only delivered files, and list the bucket on
+  every build: a report from `--source s3://...` or `r2://...` needs the
+  network and credentials even when its data is cached. A report from a local
+  runs directory needs neither. A final delivery wait
   can expire while a network library still has active transfer threads.
 - Released config panels and multi-game keys remain readable, alongside
   older player formats. Switching a stored tournament to indexed matches

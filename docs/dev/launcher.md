@@ -456,8 +456,8 @@ Training code reads `ETUDE_OUT`, `ETUDE_OUTPUT_DIR`, `ETUDE_STOP_FILE`,
 
 | Variable | What it is | Tracked code uses |
 | --- | --- | --- |
-| `ETUDE_OUT` | Out, the same on every attempt, carried to storage as it is written and restored before each attempt. | `run.resume`, `run.save`, `run.checkpoint`; `run.out` |
-| `ETUDE_OUTPUT_DIR` | This attempt's output directory: `etude-result.json` and files to keep under `attempts/ATTEMPT/`. A later attempt does not see it. | nothing; tracking reports progress |
+| `ETUDE_OUT` | Out, the same on every attempt, carried to storage as it is written and restored before each attempt. `etude fetch` reaches its files by their path below it. | `run.resume`, `run.save`, `run.checkpoint`; `run.out` |
+| `ETUDE_OUTPUT_DIR` | This attempt's output directory: files to keep under `attempts/ATTEMPT/`, recorded as the attempt's outputs for `etude fetch`. A later attempt does not see it. Etude's own `etude-result.json` is written here; it is not an output and is not stored. | nothing; tracking reports progress |
 | `ETUDE_STOP_FILE` | Appears when the attempt should stop. | `run.steps`; `run.should_stop` |
 | `ETUDE_DEADLINE` | When the attempt's window ends, as an ISO time. The process is killed then. | `run.steps`; `run.should_stop` |
 | `ETUDE_UNTIL_CLOCK`, `ETUDE_UNTIL_VALUE` | The launch's absolute target on a named clock. | `run.steps("updates", to=config.updates)`; `run.until` |
@@ -730,7 +730,17 @@ across releases by migrations; see [Upgrading Etude](#upgrading-etude). Versione
 writes claim each session once. A lost create reply is looked up, never
 repeated; if the provider still has no such machine at the rental's deadline,
 or when it is terminated, it is recorded as never acquired: it costs nothing and
-no longer counts toward the on-demand's machine limit. A remote start has an
+no longer counts toward the on-demand's machine limit. A 4xx reply to a create
+(except 408) is an answer, not a lost reply: nothing was made, so the session
+is recorded refused at once with the provider's reason, its attempts fail
+before start as `capacity_refused`, and nothing is left `starting` or fenced.
+The reason is the reply's `detail` or `title` field when the body is JSON,
+else its text; at most 2 KiB of an error body is read and at most 300
+characters kept, through the shared sanitizer. A launch reports it as
+`provider refused: REASON`; a queued run's status shows it, and the scheduler
+does not ask that on-demand for queued work again within 60 seconds of the
+refusal. Refusals still count toward `max_attempts`. An explicit `launch` is not paused. Timeouts, no reply, 408, 5xx and
+unreadable or mismatched replies stay unknown. A remote start has an
 exclusive claim; a lost SSH reply cannot start another process. An unreachable
 machine is unknown. A lost attempt requires evidence that its process or
 provider machine is gone. Infrastructure losses retry up to `max_attempts`,
@@ -745,7 +755,17 @@ name says what it refers to.
 
 A session on a machine you added has no deadline; every run still enforces its hour limit.
 
-`etude wait` without names keeps looking until queued work finishes. Started
+`etude wait` returns when its runs are done and no session that ran them has
+been told to finish without its end confirmed; without names, when queued work
+is finished and no such session remains. Confirming an end records the
+session's `ended_at` and the machine's deletion together and collects its final
+logs, so `etude machines` and `etude logs` are settled when `wait` returns. A
+kept rental (`etude rent`) is never told to finish and does not hold `wait`. A
+`wait` that times out there names the machines still ending. `launch` and
+`--quote` confirm ends whose receipt has arrived before they count an
+on-demand's machines; they run no other part of a scheduling pass and rent for
+no other run. A machine still ending counts toward the limit, and the refusal
+names it: `at its machine limit (demo-cpu-d96e90953e46 is finishing)`. Started
 workers execute their delivered work independently; a launched machine with
 an inbox is cleaned up on the next scheduling pass or at its own deadline.
 `launch` first acquires machines for the runs it can place. Each machine
@@ -1352,6 +1372,15 @@ for event in (*report.events, *report.shared_events):
         event.received_bytes,
     )
 ```
+
+`fetch(run, name, directory)` and `etude fetch RUN NAME DIRECTORY` resolve
+`name` in one place, the session's journal: first among the latest attempt's
+recorded outputs (`RUN/attempts/ATTEMPT/NAME`), then among the run's out
+members (`RUN/out/NAME`, fingerprinted in `RUN/out.json`). Both download
+through the same verified path; an out member costs one membership read and
+one object read. An unknown name raises with the names that exist, outputs
+then out members, at most 20 followed by `and N more`. The CLI prints
+`StorageUnavailable` as one line, here and for `report --source`.
 
 `etude usage --run RUN` reads the same retained evidence. `observed_at` is the
 latest included event timestamp, not a claim that remote evidence is current.

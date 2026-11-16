@@ -46,10 +46,11 @@ def baseline(count: int) -> dict[str, Counts]:
     shared it (2026-11-06). Storage-backed active attempts read their storage
     selection and one indexed delivery timestamp (2026-11-11).
     """
+    # One indexed finishing-session read per supply settles already requested ends.
     return {
         "status": Counts(database=49 * count + 1),
         "runs": Counts(database=17 * count + 1),
-        "tick": Counts(provider=2 * count, bucket=count, database=31 * count + 21),
+        "tick": Counts(provider=2 * count, bucket=count, database=31 * count + 22),
     }
 
 
@@ -119,7 +120,8 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
     assert ask == Counts(database=37)  # target: ask records intent without remote effects
     # Creation also reads provider safeguards for affordable time and the reserved budget,
     # and the status it returns reads the machine's attempts for how many shared it.
-    assert wait == Counts(provider=4, bucket=1, database=104)  # known debt: wait advances work
+    # Refusal pause and shutdown settlement add three indexed local reads.
+    assert wait == Counts(provider=4, bucket=1, database=107)  # known debt: wait advances work
 
 
 def test_several_run_git_and_database_counts(

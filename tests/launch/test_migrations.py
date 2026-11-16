@@ -484,3 +484,24 @@ def test_handover_without_usable_program_exits_with_restart_instruction(
 ) -> None:
     with pytest.raises(LauncherError, match="restart etude server run"):
         _hand_over(program)
+
+
+def test_refusal_lookup_upgrade_from_the_released_schema_preserves_facts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    known = migrations()
+    released = tuple(m for m in known if m.floor is not None)
+    with monkeypatch.context() as old:
+        old.setattr(database, "migrations", lambda: released)
+        upgrade(tmp_path)
+        store = open_home(tmp_path)
+        store.add_pool(Pool(name="preserved"))
+        store.close()
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in known})
+    result = upgrade(tmp_path)
+    assert "provider_refusal_lookup" in result.applied
+    store = open_home(tmp_path)
+    assert store.pool("preserved").name == "preserved"
+    assert store.finishing_sessions() == ()
+    assert store.recent_refusal("missing", datetime.now(UTC)) is None
+    store.close()

@@ -16,11 +16,12 @@ from pathlib import Path
 from etude.carriage import put_back, recorded_file, restore_set
 from etude.errors import LauncherError
 from etude.launch.logs import snapshot_stream
-from etude.launch.records import BootstrapLinks, LogStream
+from etude.launch.records import BootstrapLinks, LogStream, Output
 from etude.launch.schemas import Finished, Observation, Packet, Progress, Work
 from etude.launch.source import source_archive
-from etude.launch.storage.files import digest, read_result, write
+from etude.launch.storage.files import digest, read_result, select_output, write
 from etude.launch.usage import Transfer
+from etude.out import MEMBERSHIP, OutFiles
 
 
 class DirectoryJournal:
@@ -141,13 +142,19 @@ class DirectoryJournal:
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
         home = self._root / session_id / "attempts" / attempt
         recorded = Finished.model_validate_json((home / "finished.json").read_text()).outputs
-        expected = next((o.sha256 for o in recorded if o.name == name), None)
-        if expected is None:
-            raise LauncherError(f"attempt {attempt} recorded no output {name!r}")
+        run = (home / "run").read_text()
+        folder = self._folder(run)
+
+        def read_out() -> OutFiles | None:
+            path = folder / MEMBERSHIP
+            return OutFiles.model_validate_json(path.read_bytes()) if path.exists() else None
+
+        expected = select_output(run, name, recorded, read_out)
+        source = home / "outputs" / name if isinstance(expected, Output) else folder / expected.key
         destination.mkdir(parents=True, exist_ok=True)
         copy = destination / Path(name).name
-        shutil.copyfile(home / "outputs" / name, copy)
-        if digest(copy) != expected:
+        shutil.copyfile(source, copy)
+        if digest(copy) != expected.sha256 or copy.stat().st_size != expected.size_bytes:
             copy.unlink()
             raise LauncherError(f"output {name!r} no longer matches its recorded digest")
         return copy

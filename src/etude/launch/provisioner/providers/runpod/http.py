@@ -9,8 +9,13 @@ from decimal import Decimal
 from typing import Any
 
 from etude.deadline import call
-from etude.launch.errors import ProviderUnavailable
-from etude.launch.provisioner.providers.http import MAX_REPLY_BYTES, send_to_provider
+from etude.errors import sanitize
+from etude.launch.errors import ProviderRejected, ProviderUnavailable
+from etude.launch.provisioner.providers.http import (
+    MAX_ERROR_BYTES,
+    MAX_REPLY_BYTES,
+    send_to_provider,
+)
 from etude.launch.storage.transport import Send
 
 BASE = "https://api.runpod.io/v2/"
@@ -50,6 +55,19 @@ class PodHTTP:
             raise ProviderUnavailable(f"{method} {path}: no reply") from None
         if absent_ok and reply.status == 404:
             return None
+        if 400 <= reply.status < 500:
+            text = reply.body[:MAX_ERROR_BYTES].decode(errors="replace")
+            try:
+                value = json.loads(text)
+            except ValueError:
+                value = None
+            if isinstance(value, dict):
+                detail = value.get("detail") or value.get("title")
+                if isinstance(detail, str):
+                    text = detail
+            text = sanitize(text)
+            text = "".join(c for c in text if c.isprintable())[:300].strip()
+            raise ProviderRejected(reply.status, text or "request refused")
         if not 200 <= reply.status < 300 or len(reply.body) > MAX_REPLY_BYTES:
             raise ProviderUnavailable(f"{method} {path}: status {reply.status}")
         try:
