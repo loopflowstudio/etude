@@ -49,7 +49,7 @@ from etude.launch.records import (
     Target,
 )
 from etude.launch.scheduler.loop import Scheduler
-from etude.launch.source import freeze, home, retain, source_archive
+from etude.launch.source import freeze, home, retain, source_archive, stored
 from etude.launch.ssh import (
     _INSTALL_CODE,
     EncodedOutput,
@@ -89,7 +89,7 @@ class FetchRequest(Record):
 
 
 class SubmissionRequest(Record):
-    operation: Literal["launch", "prepare_launch", "quote"]
+    operation: Literal["launch", "prepare_launch", "quote", "missing_sources"]
     submission: LaunchInput
 
 
@@ -450,7 +450,8 @@ def prepare(address: str, submission: LaunchInput) -> LaunchInput:
         return _with_sources(
             submission.model_copy(
                 update={"launch": launch.id, "runs": tuple(freeze(run) for run in requested)}
-            )
+            ),
+            client,
         )
     except Exception as error:
         message = explain(error)
@@ -461,12 +462,17 @@ def prepare(address: str, submission: LaunchInput) -> LaunchInput:
         raise LaunchError(launch.id, tuple(r.run for r in launch.requests), message) from error
 
 
-def _with_sources(submission: LaunchInput) -> LaunchInput:
+def _with_sources(submission: LaunchInput, client: PythonClient) -> LaunchInput:
     """Attach transport bytes to already frozen intent, without submitting a new run."""
+    missing = set(
+        TypeAdapter(tuple[str, ...]).validate_json(
+            client._request(SubmissionRequest(operation="missing_sources", submission=submission))
+        )
+    )
     sources: dict[tuple[str, str], Source] = {}
     for run in submission.runs:
         job = run.job
-        if job.repo is not None:
+        if run.id in missing and job.repo is not None:
             repo = job.repo
             assert job.revision is not None
             commit = job.revision
@@ -814,6 +820,15 @@ def receive(scheduler: Scheduler) -> int:
         case SubmissionRequest(operation="prepare_launch", submission=submission):
             response = scheduler.prepare_launch(
                 submission.runs, submission.pool, rent=submission.rent
+            )
+        case SubmissionRequest(operation="missing_sources", submission=submission):
+            response = tuple(
+                run.id
+                for run in submission.runs
+                if run.id is not None
+                and run.job.repo is not None
+                and run.job.revision is not None
+                and not stored(run.job.repo, run.job.revision).is_file()
             )
         case SubmissionRequest(operation="launch", submission=submission):
             try:

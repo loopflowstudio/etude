@@ -1271,7 +1271,7 @@ def asks_or_returns(match: Match[dict[str, str]], agents: Sequence[Forward]) -> 
 def test_loader_failure_reaches_undispatched_matches_across_tournaments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry: bool, in_flight: bool
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4 if in_flight else 2)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4 if in_flight else 1)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     agents = Agents(load=selective_retry_load if retry else selective_load)
     jobs = [
@@ -1283,8 +1283,30 @@ def test_loader_failure_reaches_undispatched_matches_across_tournaments(
         )
         for name in ("one", "two")
     ]
+    selected = group(*jobs)
+    # Attempt the broken leaf before a no-forward game can deliver success.
+    # The separate earlier-delivery test pins the opposite ordering.
+    selected = selected.model_copy(
+        update={
+            "evaluations": tuple(
+                spec.model_copy(
+                    update={
+                        "matches": tuple(
+                            sorted(
+                                spec.matches,
+                                key=lambda match: (
+                                    {p.name for p in match.players} != {"broken", "right"}
+                                ),
+                            )
+                        )
+                    }
+                )
+                for spec in selected.evaluations
+            )
+        }
+    )
     with pytest.raises(RetryRequested if retry else EtudeError):
-        hold_group(group(*jobs), directory=tmp_path)
+        hold_group(selected, directory=tmp_path)
     for active in jobs:
         found = played(
             active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path
@@ -1319,7 +1341,7 @@ def test_loader_failure_preserves_previously_delivered_matches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     agents = Agents(load=selective_load)
     jobs = [

@@ -129,10 +129,17 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]
     ssh = scripts / "ssh"
     ssh.write_text(
         f"#!{sys.executable}\n"
-        "import os, subprocess, sys\n"
+        "import json, os, subprocess, sys\n"
         "assert sys.argv[1:3] == ['--', 'server-alias']\n"
         f"os.environ['ETUDE_HOME'] = {str(remote)!r}\n"
         f"os.chdir({str(remote)!r})\n"
+        "if '--server-request' in sys.argv[3]:\n"
+        "    body = sys.stdin.buffer.read()\n"
+        "    request = json.loads(body)\n"
+        "    sources = request.get('submission', {}).get('sources', [])\n"
+        f"    with open({str(remote / 'source-transfers')!r}, 'a') as log:\n"
+        "        log.write(str(sum(len(s['body']) for s in sources)) + '\\n')\n"
+        "    raise SystemExit(subprocess.run(sys.argv[3], shell=True, input=body).returncode)\n"
         "raise SystemExit(subprocess.call(sys.argv[3], shell=True))\n"
     )
     ssh.chmod(0o700)
@@ -203,6 +210,9 @@ def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, co
     assert continued.returncode == 0, continued.stderr
     next_id = continued.stdout.split()[0]
     assert command("wait", next_id).returncode == 0
+    transfers = [int(line) for line in (remote / "source-transfers").read_text().splitlines()]
+    assert sum(size > 0 for size in transfers) == 1
+    assert not (client / "sources").exists()
     destination = tmp_path / "fetched files"
     fetched = command("fetch", next_id, "weights.pt", str(destination))
     assert fetched.returncode == 0, fetched.stderr
