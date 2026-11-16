@@ -28,7 +28,6 @@ from pydantic import Field, RootModel, TypeAdapter
 from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError, explain
 from etude.launch.errors import LaunchError, SchemaAdvanced
-from etude.launch.measurement import timed
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import (
     Availability,
@@ -238,7 +237,6 @@ def _command(address: str, argv: Sequence[str]) -> list[str]:
     ]
 
 
-@timed("ssh.server.install")
 def install(address: str, *, startup_seconds: float | None = None) -> None:
     """Send this client's code to the server. Safe to repeat."""
     if startup_seconds is not None and (not math.isfinite(startup_seconds) or startup_seconds <= 0):
@@ -268,7 +266,6 @@ def install(address: str, *, startup_seconds: float | None = None) -> None:
         )
 
 
-@timed("ssh.server.command")
 def _ssh(address: str, argv: Sequence[str], **options: Any) -> subprocess.CompletedProcess[bytes]:
     """Run one command on the server, sending the program first if it is not there.
 

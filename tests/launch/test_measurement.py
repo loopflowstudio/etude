@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import os
-import pstats
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -24,7 +23,6 @@ from etude.launch import cli, client
 from etude.launch.commands import Kind
 from etude.launch.database import launcher_file, upgrade
 from etude.launch.executor import Execution
-from etude.launch.measurement import span
 from etude.launch.provisioner.providers.runpod.http import PodHTTP
 from etude.launch.records import Machine, OnDemand
 from etude.launch.scheduler.loop import Scheduler
@@ -155,12 +153,12 @@ def test_several_run_git_and_database_counts(
         ),
         # Client composition includes four modules each for Vast and Lium, the
         # request every provider shares, the storage socket policy it forwards
-        # to workers, its smoke of jobs, and shared run-identity validation.
+        # to workers, and shared run-identity validation.
         # The layout adds provisioner/scheduler packages and two scheduler leaves.
-        (["pools"], 62, ("numpy", "boto3", "etude.launch.worker")),
+        (["pools"], 60, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            35,  # includes the empty provisioner package for generic cleanup
+            34,  # includes the empty provisioner package for generic cleanup
             (
                 "numpy",
                 "boto3",
@@ -223,21 +221,6 @@ def test_command_import_counts(
         assert not launcher_file(tmp_path / "home").exists()
 
 
-def test_phases_reads_only_retained_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    b, ids, counting = sessions(tmp_path, 1)
-    monkeypatch.setattr(cli, "default", lambda: b.scheduler)
-    with counting.record():
-        cli.status(list(ids), phases=True)
-        result = counting.snapshot()
-    output = capsys.readouterr().out
-    assert "queued" in output and "machine asked for" in output and "code started" in output
-    assert "finished not recorded" in output
-    assert "machine confirmed not recorded (receipt retained)" in output
-    assert result == Counts(database=7)  # one evidence selection; no external calls
-
-
 def test_reads_need_no_provider_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -259,7 +242,7 @@ def test_reads_need_no_provider_key(
         "history": ["runs"],
         "pools": ["pools"],
         "ondemands": ["ondemands"],
-        "machines": ["machines", "--all", "--images"],
+        "machines": ["machines", "--all"],
         "providers": ["providers"],
         "storages": ["storages"],
         "server_show": ["server"],
@@ -283,26 +266,6 @@ def test_reads_need_no_provider_key(
     assert (result.provider, result.bucket, result.ssh, result.git) == (0, 0, 0, 0)
     assert "last loop: never" in output and "[job machine=" in output
     assert "--follow collects new evidence from machines" in output
-
-
-def test_profile_and_opt_in_spans(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    profile = tmp_path / "help.pstats"
-    assert main(["--profile", str(profile), "--help"]) == 0
-    assert "track what they record" in capsys.readouterr().out
-    assert "_main" in pstats.Stats(str(profile)).get_stats_profile().func_profiles
-    destination = tmp_path / "spans.log"
-    monkeypatch.setenv("ETUDE_SPANS", str(destination))
-    values = iter([10.0, 10.25])
-    monkeypatch.setattr("etude.launch.measurement.time.perf_counter", lambda: next(values))
-    with pytest.raises(ValueError), span("ssh.call"):
-        raise ValueError("secret payload")
-    assert destination.read_text() == "ssh.call seconds=0.250000000\n"
-    monkeypatch.delenv("ETUDE_SPANS")
-    with span("bucket.read"):
-        pass
-    assert destination.read_text() == "ssh.call seconds=0.250000000\n"
 
 
 @pytest.mark.scale

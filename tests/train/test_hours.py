@@ -75,9 +75,7 @@ def test_hours_continue_across_a_resume_and_a_continuation(
     clock.run(0.5)
     first.log({"loss": 1.0}, step=5)
     clock.run(0.5)
-    assert first.checkpoint_due(1)
     first.checkpoint("s3://models/10.pt", step=10)
-    assert not first.checkpoint_due(1)
     clock.run(0.5)
     first.log({"loss": 9.0}, step=15)  # past the checkpoint: a resume discards it
     first.finish("failed")
@@ -113,10 +111,8 @@ def test_hours_continue_across_a_resume_and_a_continuation(
     monkeypatch.setenv("ETUDE_UNTIL_VALUE", "3")
     continued = _start(tmp_path, "c")
     clock.run(0.5)
-    assert not continued.checkpoint_due(1)  # 1.75 hours: the hour after 1.25 is not over
     continued.checkpoint("s3://models/30.pt", step=30)
     clock.run(0.3)
-    assert continued.checkpoint_due(1)
     continued.finish()
 
     child = read(tmp_path, "e", "c")

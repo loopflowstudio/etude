@@ -22,7 +22,6 @@ from pydantic import Field
 from etude.deadline import remaining
 from etude.errors import LauncherError
 from etude.launch.logs import snapshot_stream
-from etude.launch.measurement import timed
 from etude.launch.provisioner.machines import Allocation
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import BootstrapLinks, LogProducer, LogStream
@@ -276,7 +275,6 @@ class SSH:
         self.address, self.root = address, root
         self._program = base64.b64encode(program_archive()).decode()
 
-    @timed("ssh.call")
     def call(self, request: RemoteRequest) -> RemoteReply:
         start = isinstance(request, StartRequest)
         startup_deadline = (

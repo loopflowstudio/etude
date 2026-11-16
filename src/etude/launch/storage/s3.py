@@ -33,7 +33,6 @@ from pydantic import model_validator
 
 from etude.deadline import remaining
 from etude.launch.logging import write_log
-from etude.launch.measurement import timed
 from etude.launch.records import Storage
 from etude.launch.storage.transport import HTTPReply, Send, attribute, request
 from etude.spec import Record
@@ -260,7 +259,6 @@ class Bucket:
     def _stamp(self) -> str:
         return self._clock().astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
 
-    @timed("bucket.ask")
     def _ask(
         self,
         method: str,
@@ -613,7 +611,6 @@ def _xml_text(body: bytes, name: str) -> str | None:
     return None
 
 
-@timed("bucket.post")
 def post(form: PostForm, key: str, body: bytes, send: Send = _send) -> None:
     """Write one object with a form. Storage refuses a key outside the form's prefix."""
     boundary = "etude" + hashlib.sha256(key.encode()).hexdigest()[:24]
@@ -647,7 +644,6 @@ def read(url: str, send: Send = _send) -> bytes | None:
     return None if found is None else found.body
 
 
-@timed("bucket.read")
 def read_version(url: str, kept: Version | None, send: Send = _send) -> Version | None:
     """Follow a reading link for the object's current version; `kept` when unchanged."""
     try:

@@ -11,7 +11,7 @@ from etude.errors import LauncherError
 from etude.launch.client import _open, default
 from etude.launch.database import upgrade
 from etude.launch.records import Pool
-from etude.launch.source import checkout, contains, line, retain, source_archive, stored
+from etude.launch.source import checkout, line, retain, source_archive, stored
 from etude.spec import Job, SourcePosition
 
 
@@ -90,7 +90,6 @@ def test_position_snapshot_publication_and_checkout(repository: tuple[Path, Path
     assert (repo / ".git/index").read_bytes() == index
     assert git(origin, "rev-parse", f"refs/etude/runs/{first}") == position.commit
     assert not git(origin, "for-each-ref", f"refs/etude/runs/{second}")
-    assert contains(run, parent)
     assert git(repo, "show", position.commit + ":train") == "working"
     assert "ignored" not in git(repo, "ls-tree", "--name-only", position.commit).splitlines()
     repo.rename(repo.with_name("moved"))
@@ -100,7 +99,6 @@ def test_position_snapshot_publication_and_checkout(repository: tuple[Path, Path
     assert git(recovered, "rev-parse", "HEAD") == position.commit
     with pytest.raises(LauncherError, match="already exists"):
         checkout(run, recovered)
-    assert contains(run, head)
     assert _open(repo.parent / "launcher").record(first).launch.source == position
 
 
@@ -157,20 +155,7 @@ def test_runs_filters_and_source_cli_are_read_only(
     scheduler.cancel(first)
     # This queued local job would execute if history commands ticked the scheduler.
     (local,) = scheduler.queue(Job(command="true", max_hours=1))
-    assert (
-        main(
-            [
-                "runs",
-                "--pool",
-                "waiting",
-                "--job",
-                "training",
-                "--contains",
-                head,
-            ]
-        )
-        == 0
-    )
+    assert main(["runs", "--job", "training"]) == 0
     output = capsys.readouterr().out
     assert first in output and second in output and local not in output
     assert "source:" in output and "main@" in output and "Base training" in output
@@ -179,29 +164,24 @@ def test_runs_filters_and_source_cli_are_read_only(
     assert digest is not None
     assert main(["runs", "--job", digest]) == 0
     assert first in capsys.readouterr().out
-    assert main(["runs", "--contains", "no-such-revision"]) == 1
-    assert "not a commit" in capsys.readouterr().err
     destination = repo.parent / "cli-copy"
     assert main(["source", first, str(destination)]) == 0
     assert git(destination, "rev-parse", "HEAD") == head
     assert scheduler.read(local).phase == "queued"
 
 
-def test_containment_distinguishes_squashed_history(repository: tuple[Path, Path]) -> None:
+def test_a_local_only_tag_is_not_publication_on_origin(repository: tuple[Path, Path]) -> None:
     repo, _ = repository
     git(repo, "switch", "-c", "feature")
     (repo / "train").write_text("feature\n")
     git(repo, "commit", "-am", "Feature")
-    feature = git(repo, "rev-parse", "HEAD")
     scheduler = _open(repo.parent / "launcher")
     scheduler.add_pool(Pool(name="waiting"))
-    (id,) = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
-    run = scheduler.record(id)
+    scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")
     git(repo, "switch", "main")
     git(repo, "merge", "--squash", "feature")
     git(repo, "commit", "-m", "Squashed feature")
     squash = git(repo, "rev-parse", "HEAD")
-    assert contains(run, feature) and not contains(run, squash)
     # A local-only tag must not be mistaken for publication on origin.
     git(repo, "tag", "unpublished")
     (new,) = scheduler.queue(Job(command="true", max_hours=1, repo=str(repo)), "waiting")

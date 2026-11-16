@@ -356,15 +356,15 @@ with evaluating(
   it, so a hold on a rented machine delivers its part like any other run, and
   many eval runs can grow one tournament at once.
 - **Reuse.** A match is the same wherever it is played, so within one
-  experiment and environment its results are reused by key: `scores`,
-  `standings` and a batch hold count a scheduled match that any of the
+  experiment and environment its results are reused by key: `scores`
+  and a batch hold count a scheduled match that any of the
   experiment's eval runs in the environment holds, whether held for this
   tournament, another, or none. Each counts once, from the eval run that
   recorded it last.
 - **Conflicts.** Another format, environment or round-robin rules under one
   name (`tournament_conflict`), or a seating name defined two ways
-  (`seating_conflict`), is refused by a batch hold, a pass, and `scores` and
-  `standings`; `statsdb` reports it in the `tournaments` table. Reading is
+  (`seating_conflict`), is refused by a batch hold, a pass and `scores`;
+  `statsdb` reports it in the `tournaments` table. Reading is
   not refused: where a later revision of an experiment file defines a
   tournament otherwise than its eval runs were held with, `etude report`
   draws what they recorded and says so.
@@ -372,13 +372,9 @@ with evaluating(
   or, played by an [evaluation job](../evaluation.md), for the tournament and
   its matches, so a retry reopens and resumes it, finding the same checkpoint
   (by its key) wherever the retry put it.
-- **Splitting.** `share=Share(index=k, count=n)` plays part k (from 0) of
-  n disjoint parts, for n machines: contiguous runs of the scheduled matches
-  in play order, so parts differ by at most one match and each seats only
-  some of the checkpoints. The cut covers delivered matches too, so a
-  retried share keeps its part. `tournament.json` stores it as
-  `{"index": k, "count": n}`; an `[k, n]` pair written by etude 0.3.0
-  still reads.
+- **Stored shares.** Eval runs held as one part of a split hold (etude 0.4.0
+  and earlier) still read, including the `[k, n]` pair written by etude 0.3.0;
+  new runs play the whole hold.
 - **Cost.** Holding a checkpoint or entrants reads nothing of the
   tournament: it plays their matches. Holding nothing new (batch) lists each
   place once and reads each eval run's `run.json` and, for the experiment's,
@@ -395,9 +391,6 @@ with evaluating(
   draws it. Checkpoints no training run under the
   source recorded make one `Scores` per seating,
   ordered by name, numbers in order (`updates-900` before `updates-1000`).
-- **`standings`** gives a round robin's payoff matrix, best first, each entry
-  naming its player and opponent; `complete` says whether every scheduled
-  match is held.
 
 ## Querying
 

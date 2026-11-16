@@ -14,7 +14,6 @@ import pytest
 
 from etude.checkpoints import CheckpointRef, PolicyKey, _checkpoint_id
 from etude.errors import EtudeError
-from etude.eval.block import Block
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import (
@@ -27,10 +26,9 @@ from etude.eval.records import (
     Match,
     RoundRobin,
     Seating,
-    Share,
     TournamentRun,
 )
-from etude.eval.tournament import evaluating, played, scores, standings, stored_runs
+from etude.eval.tournament import evaluating, played, scores, stored_runs
 from etude.records import ArtifactRef, Clock
 from etude.storage import DirectoryStorage
 from tests.eval.games import play, play_failing_deal_one
@@ -453,43 +451,6 @@ def test_a_retried_hold_finds_its_checkpoint_by_digest_wherever_it_lies(
     assert (again.name, again.played, again.skipped) == ("anchors-eval", 0, first.played)
 
 
-def test_a_round_robin_held_as_two_shares_stands_as_one(tmp_path: Path) -> None:
-    finals = [scripted(tmp_path, f"final{strength}", strength) for strength in range(4)]
-    league = RoundRobin(name="finals", environment=WORLD, configs=DEALS, games=4)
-    split, whole = DirectoryStorage(tmp_path / "split"), DirectoryStorage(tmp_path / "whole")
-    halves = [
-        play_tournament(
-            league,
-            experiment=EXPERIMENT,
-            enter=finals,
-            play=play,
-            share=Share(index=k, count=2),
-            storages=[split],
-            directory=tmp_path / f"machine-{k}",
-        )  # fmt: skip
-        for k in (0, 1)
-    ]
-    one = play_tournament(league, experiment=EXPERIMENT, enter=finals, play=play, storages=[whole],
-               directory=tmp_path / "machine")  # fmt: skip
-    assert halves[0].name != halves[1].name
-    # Every unordered pair once per deal.
-    assert sum(half.played for half in halves) == one.played == 6 * len(DEALS)
-
-    def table(storage: DirectoryStorage) -> list[tuple[str, str | None, float, int]]:
-        found = standings(statsdb(EXPERIMENT, storage), "finals", table="plays", value="won")
-        assert found.complete
-        return [(e.name, e.opponent_name, e.value, e.matches) for e in found.entries]
-
-    assert table(split) == table(whole)
-    # Ordered by value against the field, best first.
-    assert [name for name, opponent, *_ in table(whole) if opponent is None] == [
-        "final3",
-        "final2",
-        "final1",
-        "final0",
-    ]
-
-
 def test_a_tournament_of_the_same_name_with_other_rules_is_refused(tmp_path: Path) -> None:
     entrant = scripted(tmp_path, "s", 1)
     play_tournament(RoundRobin(name="finals", environment=WORLD, configs=DEALS, games=4),
@@ -502,72 +463,6 @@ def test_a_tournament_of_the_same_name_with_other_rules_is_refused(tmp_path: Pat
         with pytest.raises(EtudeError) as refused:
             play_tournament(other, experiment=EXPERIMENT, play=play, directory=tmp_path)
         assert refused.value.code == "tournament_conflict"
-
-
-def test_round_robin_shares_differ_by_at_most_one_and_count_matches_any_run_held(
-    tmp_path: Path,
-) -> None:
-    finals = [scripted(tmp_path, f"final{strength}", strength) for strength in range(4)]
-    league = RoundRobin(name="finals", environment=WORLD, configs=DEALS, games=4)
-    bucket = DirectoryStorage(tmp_path / "bucket")
-
-    def share(k: int) -> int:
-        return play_tournament(league, experiment=EXPERIMENT, enter=finals, play=play, share=Share(index=k, count=4), storages=[bucket],
-                    directory=tmp_path / f"machine-{k}").played  # fmt: skip
-
-    # 18 matches dealt four ways; the fourth share is not played yet.
-    assert [share(k) for k in range(3)] == [5, 5, 4]
-    # A retry of a share deals it alike, and finds its part delivered.
-    assert share(1) == 0
-    assert not standings(statsdb(EXPERIMENT, bucket), "finals", table="plays", value="won").complete
-    # Another tournament in the same environment plays the same matches...
-    rematch = league.model_copy(update={"name": "rematch"})
-    play_tournament(
-        rematch,
-        experiment=EXPERIMENT,
-        enter=finals,
-        play=play,
-        storages=[bucket],
-        directory=tmp_path / "rematch",
-    )
-    # ...so the first is complete, each match counted once.
-    found = standings(statsdb(EXPERIMENT, bucket), "finals", table="plays", value="won")
-    assert (found.complete, found.scheduled) == (True, 18)
-    assert {e.matches for e in found.entries if e.opponent is not None} == {len(DEALS)}
-
-
-def test_each_share_of_a_checkpoint_benchmark_seats_fewer_checkpoints_than_a_round_deal(
-    tmp_path: Path,
-) -> None:
-    bucket = DirectoryStorage(tmp_path / "bucket")
-    checkpoints = trained(tmp_path, bucket)
-    shares: list[list[Match]] = [[], []]
-    for k, share in enumerate(shares):
-        result = play_tournament(anchors(tmp_path), experiment=EXPERIMENT, checkpoints=checkpoints, play=play,
-             share=Share(index=k, count=2), storages=[bucket], directory=tmp_path / f"machine-{k}")  # fmt: skip
-        for key in bucket.keys(f"{EXPERIMENT}/{result.name}/blocks/"):
-            if key.endswith("/block.json"):
-                share.extend(
-                    record.match
-                    for record in Block.model_validate_json(bucket.get(key)).matches
-                    if record.state == "done"
-                )
-
-    def seated(matches: Sequence[Match]) -> int:
-        return len(
-            {
-                each.checkpoint.key
-                for match in matches
-                for each in match.players
-                if isinstance(each, CheckpointPlayer)
-            }
-        )
-
-    # Each checkpoint calls for 3 + 2 + 1 matches.
-    assert [len(share) for share in shares] == [9, 9]
-    every = sorted((match for share in shares for match in share), key=lambda match: match.key)
-    round_deal = [seated(every[k::2]) for k in (0, 1)]
-    assert [seated(share) for share in shares] == [2, 2] and round_deal == [3, 3]
 
 
 def test_a_seed_added_splits_the_point_again_and_counts_only_the_new_split(

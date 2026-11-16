@@ -610,7 +610,8 @@ _HERE = (
 )
 
 
-def _main(argv: list[str]) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
     try:
         if argv and argv[0] not in _HERE and not {"--help", "-h"} & set(argv):
             # Entry points import only the command being run (AGENTS.md).
@@ -642,21 +643,3 @@ def _main(argv: list[str]) -> int:
             error.show()
             raise SystemExit(error.exit_code) from None
         raise
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    """Profile a whole invocation with `etude --profile FILE COMMAND ...`."""
-    args = list(sys.argv[1:] if argv is None else argv)
-    if not args or args[0] != "--profile":
-        return _main(args)
-    if len(args) < 3:
-        print("etude: --profile needs a file and a command", file=sys.stderr)
-        return 1
-
-    import cProfile
-
-    profile = cProfile.Profile()
-    try:
-        return int(profile.runcall(_main, args[2:]))
-    finally:
-        profile.dump_stats(args[1])

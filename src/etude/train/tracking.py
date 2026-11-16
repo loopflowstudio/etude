@@ -765,18 +765,6 @@ class TrainingRun(Run):
         self._offer(kept)
         return record.artifact
 
-    def checkpoint_due(self, every: float, clock: str = RUNNING_HOURS) -> bool:
-        """Whether `clock` has crossed a multiple of `every` since the latest checkpoint.
-
-        `if run.checkpoint_due(1): run.checkpoint(...)` saves every running hour,
-        counted from zero and continuing across resumes and continuations.
-        """
-        if every <= 0 or not math.isfinite(every):
-            raise ValueError("every must be positive")
-        here, latest = self.at(clock), self._latest_record()
-        there = 0.0 if latest is None else latest.at.get(clock, 0.0)
-        return here // every > there // every
-
     def _now(self) -> tuple[int, dict[str, float]]:
         """The wall time in milliseconds, and where Etude's clocks stand."""
         wall_ms = time.time_ns() // 1_000_000
@@ -925,14 +913,6 @@ class TrainingRun(Run):
 
     def tag(self, checkpoint: ArtifactRef | int, *tags: str) -> None:
         """Add labels to a checkpoint this run recorded, by reference or ordinal."""
-        self._retag(checkpoint, tags, ())
-
-    def untag(self, checkpoint: ArtifactRef | int, *tags: str) -> None:
-        self._retag(checkpoint, (), tags)
-
-    def _retag(
-        self, checkpoint: ArtifactRef | int, add: Sequence[str], remove: Sequence[str]
-    ) -> None:
         try:
             kept = (
                 self._checkpoints.get(checkpoint)
@@ -949,8 +929,9 @@ class TrainingRun(Run):
             if kept is None:
                 raise EtudeError("checkpoint_not_recorded", 404)
             record = kept.record
-            tags = tuple(t for t in dict.fromkeys((*record.tags, *add)) if t not in remove)
-            changed = CheckpointRecord.model_validate(record.model_dump() | {"tags": tags})
+            changed = CheckpointRecord.model_validate(
+                record.model_dump() | {"tags": tuple(dict.fromkeys((*record.tags, *tags)))}
+            )
         except (ValidationError, EtudeError) as error:
             if self.strict:
                 raise

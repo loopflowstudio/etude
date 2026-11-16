@@ -65,7 +65,7 @@ for run in runs:
     print(run.name, run.reached, len(run.checkpoints))
 ```
 
-`read`, `read_all` and `read_batches` read directories or buckets directly;
+`read` and `read_all` read directories or buckets directly;
 there is no launcher in this path. A later attempt replaces earlier metrics
 from its first resumed coordinate, while old files remain inspectable.
 `etude.experiment.observe(storage, experiment)` supplies the `ExperimentState`

@@ -13,7 +13,7 @@ from etude.page import Pages
 from etude.records import Clock, Continuation, RunRecord, SourceKey
 from etude.run import runs, sync
 from etude.storage import DirectoryStorage
-from etude.train.read import read, read_all, read_batches
+from etude.train.read import read, read_all
 from tests.experiments import experiment_file
 from tests.run.storage import MeasuredStorage
 from tests.train.tracking import open_run
@@ -42,10 +42,6 @@ def test_same_run_name_in_two_experiments_has_distinct_rows_and_lineage(tmp_path
         assert read(source, experiment, "baseline-seed-0").points(
             "score", "updates"
         ).y.tolist() == [score]
-        batches = list(
-            read_batches(source, experiment, "baseline-seed-0", clock="updates", metrics=["score"])
-        )
-        assert [value for batch in batches for value in batch.points["score"].y] == [score]
         state = state_of(every, experiment)
         assert state == observe(source, experiment)
         assert len(state.runs) == 1 and state.runs[0].experiment == experiment

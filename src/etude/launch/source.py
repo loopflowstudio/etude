@@ -19,7 +19,6 @@ from uuid import uuid4
 
 from etude.errors import LauncherError
 from etude.identity import run_address
-from etude.launch.measurement import timed
 from etude.records import RunRecord
 from etude.spec import RunRequest, SourcePosition
 
@@ -47,7 +46,6 @@ def retain(repo: str, commit: str, body: bytes) -> None:
                 raise LauncherError("frozen source archive conflict") from None
 
 
-@timed("git.resolve")
 def resolve(repo: str, revision: str) -> str:
     if stored(repo, revision).is_file():
         return revision
@@ -61,7 +59,6 @@ def resolve(repo: str, revision: str) -> str:
     return found.stdout.strip()
 
 
-@timed("git.source_archive")
 def source_archive(repo: str, commit: str) -> bytes:
     cached = stored(repo, commit)
     if cached.is_file():
@@ -74,7 +71,6 @@ def source_archive(repo: str, commit: str) -> bytes:
     return done.stdout
 
 
-@timed("git.command")
 def _git(repo: str, *args: str, env: dict[str, str] | None = None) -> str:
     done = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, env=env)
     if done.returncode:
@@ -83,7 +79,6 @@ def _git(repo: str, *args: str, env: dict[str, str] | None = None) -> str:
     return done.stdout.strip()
 
 
-@timed("git.optional")
 def _optional(repo: str, *args: str) -> str | None:
     done = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
     return done.stdout.strip() if done.returncode == 0 else None
@@ -297,28 +292,3 @@ def checkout(run: RunRecord, destination: Path) -> Path:
         # Rename only the finished checkout. Never use the tar cache as source truth.
         os.rename(temporary, destination)
     return destination
-
-
-def contains(run: RunRecord, revision: str) -> bool:
-    """Ancestry, not feature activation. Unknown revisions fail rather than mean false."""
-    if run.launch.spec.repo is None or run.launch.spec.revision is None:
-        return False
-    repo = run.launch.spec.repo
-    if Path(repo).is_dir():
-        ancestor = resolve(repo, revision)
-        return _ancestor(repo, ancestor, run.launch.spec.revision)
-    if run.launch.source is None or run.launch.source.origin is None:
-        raise LauncherError(f"source history for local-only run {run.id} is unavailable")
-    with _history(run.launch.source.origin) as history:
-        _git(history, "fetch", "--quiet", "--", run.launch.source.origin, run.launch.spec.revision)
-        return _ancestor(history, resolve(history, revision), run.launch.spec.revision)
-
-
-@timed("git.ancestor")
-def _ancestor(repo: str, ancestor: str, commit: str) -> bool:
-    done = subprocess.run(
-        ["git", "-C", repo, "merge-base", "--is-ancestor", ancestor, commit], capture_output=True
-    )
-    if done.returncode not in (0, 1):
-        raise LauncherError("cannot read run source ancestry")
-    return done.returncode == 0

@@ -12,10 +12,8 @@
 Each function uses the selected SSH server, or a launcher under ETUDE_HOME
 (default ~/.etude) with an initial pool, "local", holding this computer. A
 call names a pool (`pool=`), an on-demand to rent from (`rent=`), or both.
-With `smoke=True`, `queue` and `launch` first
-run each job's smoke form here (`etude.launch.smoke`) and submit nothing if one
-fails; each run records what its smoke did. `etude.controller.smoke.smoke_file` smokes a
-whole experiment file, evaluation and report too.
+`etude launch FILE --smoke` first smokes a whole experiment file here
+(`etude.controller.smoke.smoke_file`).
 """
 
 from __future__ import annotations
@@ -49,7 +47,6 @@ from etude.launch.records import (
 )
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.server import PythonClient, selected
-from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.launch.source import home
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
 from etude.launch.storage.bucket import BucketJournal
@@ -166,16 +163,8 @@ def _client() -> Scheduler | PythonClient:
     return PythonClient(address) if address else default()
 
 
-def _smoked(runs: RunRequest | Job | Sequence[RunRequest | Job], smoke: bool) -> list[RunRequest]:
-    given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
-    each = expand_runs(given)
-    if not smoke:
-        return each
-    with smoke_home() as folder:
-        trained = smoke_train(each, folder)
-    for one in trained:
-        show(one.step)
-    return Smoked(train={one.job: one.step for one in trained}).stamp(each)
+def _runs(runs: RunRequest | Job | Sequence[RunRequest | Job]) -> list[RunRequest]:
+    return expand_runs([runs] if isinstance(runs, (Job, RunRequest)) else runs)
 
 
 def queue(
@@ -183,9 +172,8 @@ def queue(
     pool: str | None = None,
     *,
     rent: str | None = None,
-    smoke: bool = False,
 ) -> tuple[str, ...]:
-    return _client().queue(_smoked(runs, smoke), pool, rent=rent)
+    return _client().queue(_runs(runs), pool, rent=rent)
 
 
 def launch(
@@ -193,9 +181,8 @@ def launch(
     pool: str | None = None,
     *,
     rent: str | None = None,
-    smoke: bool = False,
 ) -> tuple[str, ...]:
-    return _client().launch(_smoked(runs, smoke), pool, rent=rent)
+    return _client().launch(_runs(runs), pool, rent=rent)
 
 
 def quote(

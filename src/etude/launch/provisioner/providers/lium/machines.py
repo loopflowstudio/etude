@@ -16,7 +16,6 @@ from decimal import Decimal
 
 from etude.deadline import limit_time, remaining
 from etude.launch.errors import ProviderUnavailable
-from etude.launch.measurement import timed
 from etude.launch.provisioner.machines import (
     Allocation,
     Bill,
@@ -57,7 +56,6 @@ exec(payload['code'])
 """
 
 
-@timed("ssh.call")
 def _start(pod: Pod, env: dict[str, str]) -> None:
     address = pod.address
     if address is None:

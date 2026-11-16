@@ -50,7 +50,7 @@ from etude.launch.storage.download import Download, download
 from etude.launch.storage.files import RESULT
 from etude.launch.storage.s3 import Bucket, Grant, Keys, PostForm, _send, read
 from etude.launch.storage.transport import HTTPReply, attribute, observe
-from etude.launch.usage import R2, S3_US_WEST_2, Transfer, Usage
+from etude.launch.usage import Transfer, Usage
 from etude.launch.worker.courier import Courier
 from etude.records import RunProgress as Result
 from etude.records import RunRecord
@@ -492,7 +492,7 @@ def test_transient_range_retries_share_one_budget(
     assert not target.exists()
 
 
-def test_cold_and_warm_download_cost_estimates(
+def test_a_warm_download_makes_no_request(
     http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(engine, "_RANGE_BYTES", 4)
@@ -508,10 +508,6 @@ def test_cold_and_warm_download_cost_estimates(
         download(http.source(), tmp_path / "warm", cache=cache)
     warm = Usage(events=tuple(events), observed_at=datetime.now(UTC))
     assert (cold.received_bytes, cold.requests, warm.received_bytes, warm.requests) == (12, 3, 0, 0)
-    # Three reads and 12 bytes out: S3 bills the egress, R2 only the reads.
-    assert cold.estimate(S3_US_WEST_2) == Decimal("0.00000120108")
-    assert cold.estimate(R2) == Decimal("0.00000108")
-    assert warm.estimate(S3_US_WEST_2) == warm.estimate(R2) == 0
 
 
 def test_runtime_bootstrap_failure_reaches_retained_session_usage(
@@ -757,8 +753,6 @@ def test_completed_workload_before_and_after(
         http.objects["/source"]
     ) + 1024**2 + 3 * len(payload)
     assert (before.requests, after.requests) == (62, 58)
-    saved = before.estimate(S3_US_WEST_2) - after.estimate(S3_US_WEST_2)
-    assert saved == Decimal("0.00707948782")
     assert after.requests == control.requests + bulk.requests
     own = [b.scheduler.usage(run=run) for run in runs]
     shared = {e.id: e for report in own for e in report.shared_events}

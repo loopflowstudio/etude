@@ -1576,7 +1576,8 @@ class TournamentRun(Record):
     entrants: tuple[Player, ...] = ()
     # What relative seats found for the checkpoints it scheduled (`Seating.resolve`).
     seated: tuple[Seated, ...] = ()
-    # The part of the scheduled matches the run plays (`etude.eval.tournament.hold`).
+    # Released runs could play one part of a split hold; new runs play the whole of it.
+    # The field stays in the record so stored holds read and run names keep their digests.
     share: Share = Share()
 
     def bind(self, lines: Sequence[Line], *, experiment: str) -> TournamentRun:

@@ -401,3 +401,25 @@ envelopes. All providers and the optional SSH scheduler remain supported.
 Tracking's queue/block sizing and metric-name limit are implementation policy;
 `track` no longer exposes those tuning parameters. Rental attribution always
 uses retained billed coverage; its unused alternate arithmetic switch is gone.
+
+## Removed commands, options and helpers
+
+These had no caller in Etude and are outside what the guides teach. Each line
+names what to use now.
+
+| Removed | Use |
+| --- | --- |
+| `etude --profile FILE COMMAND`, `ETUDE_SPANS` | `uv run python -m cProfile -m etude COMMAND` |
+| `etude status RUN --phases` | `etude logs --run RUN`; a prepared environment's outcome is on the attempt record |
+| `etude runs --contains REV`, `--pool`, `--rent` | `etude runs --experiment E --job J` |
+| `etude machines --images` | the image selection is in the machine's bootstrap log |
+| `etude image prepare REF` | `etude ondemand image NAME REF`, or `resolve_image(REF)` |
+| `prepare_pytorch(...)`, `PreparedRuntime` | `resolve_image("pytorch/pytorch:TAG")` and an explicit `Runtime(...)` |
+| `Usage.estimate(rates)`, `Rates`, `S3_US_WEST_2`, `R2` | price `Usage.received_bytes` and `Usage.requests` yourself |
+| `standings(db, ...)`, `Standing`, `Standings` | `compare(db, table=..., value=...)` |
+| `evaluating(..., share=Share(...))` | removed; eval runs play a whole hold. Stored shares still read |
+| `read_batches(...)`, `Batch` | `read(source, experiment, run).points(metric, clock)` |
+| `launch(..., smoke=True)`, `queue(..., smoke=True)` in Python | `etude launch FILE --smoke` |
+| `run.untag(checkpoint, ...)` | tags are added with `run.tag` and at `run.checkpoint(tags=...)` |
+| `run.checkpoint_due(every)` | compare `run.at("running_hours")` with your own next mark |
+

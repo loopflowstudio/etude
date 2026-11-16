@@ -467,7 +467,7 @@ def test_follow_positions_survive_truncation_without_repeating_text() -> None:
     assert len(kept.opening) + len(kept.tail) + kept.omitted == len(initial)
 
 
-def test_log_reads_and_phases_never_drive_execution(tmp_path: Path) -> None:
+def test_log_reads_never_drive_execution(tmp_path: Path) -> None:
     b = bench(tmp_path)
     (run,) = b.scheduler.launch(job(), rent="l4")
     counting = Counting(b.store, b.service)
@@ -477,7 +477,6 @@ def test_log_reads_and_phases_never_drive_execution(tmp_path: Path) -> None:
     assert count == Counts(bucket=3, database=26)
     with counting.record():
         assert b.scheduler.diagnostics(run=run)
-        assert b.scheduler.start_phases(run)
         count = counting.snapshot()
     assert (
         Counts(provider=count.provider, bucket=count.bucket, ssh=count.ssh, git=count.git)
@@ -790,10 +789,6 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
     assert (expected in fresh) is not storage_denied
     if earlier and not storage_denied:
         assert "starting installed client" in earlier and "starting installed client" not in fresh
-    assert (
-        any(expected in (phase.evidence or "") for phase in scheduler.start_phases(identity))
-        is not storage_denied
-    )
     assert b.service.creates == 1
 
 

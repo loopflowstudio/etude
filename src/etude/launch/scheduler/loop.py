@@ -58,7 +58,6 @@ from etude.launch.records import (
     Offer,
     OnDemand,
     Pool,
-    Prepared,
     Provider,
     Quote,
     QuotedMachine,
@@ -68,7 +67,6 @@ from etude.launch.records import (
     Session,
     Stale,
     Standing,
-    StartPhase,
     Status,
     Storage,
     Supply,
@@ -112,16 +110,6 @@ def _limit_usd(job: Job) -> Decimal:
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
-
-
-def _preparation(prepared: Prepared) -> str:
-    """The `--phases` evidence for a preparation: its key, time, size and why."""
-    said = [prepared.key[:12], f"{prepared.seconds:.1f} s"]
-    if prepared.size_bytes is not None:
-        said.append(f"{prepared.size_bytes} bytes")
-    if prepared.cause is not None:
-        said.append(prepared.cause)
-    return ", ".join(said)
 
 
 def _id() -> str:
@@ -983,62 +971,6 @@ class Scheduler:
             raise LauncherError(f"cannot launch on {label}: {reason}; etude queue would wait")
         return placements
 
-    def start_phases(self, run: str) -> tuple[StartPhase, ...]:
-        """Read retained timestamps only; never tick or ask a machine for freshness."""
-        selection = self._log_selection(run, None)
-        phases = [
-            StartPhase(name=f"launch {launch.id} {launch.state}", at=launch.created_at)
-            for launch in selection.launches
-        ]
-        if not selection.launches or any(
-            launch.state == "admitted" for launch in selection.launches
-        ):
-            phases.append(StartPhase(name="queued", at=self._store.run(run).launch.created_at))
-        phases.extend(
-            StartPhase(name=d.operation, at=d.observed_at, attempt=d.attempt, evidence=d.message)
-            for d in self._diagnostics(selection)
-        )
-        sessions = {session.id: session for session in selection.sessions}
-        seen_sessions: set[str] = set()
-        for attempt in selection.attempts:
-            session = sessions[attempt.session]
-            if session.id not in seen_sessions:
-                seen_sessions.add(session.id)
-                startup = self._store.log(f"{session.id}/bootstrap")
-                if startup is not None and startup.received:
-                    phases.append(
-                        StartPhase(
-                            name="retained bootstrap output",
-                            at=startup.observed_at,
-                            evidence=startup.text[-1000:],
-                            attempt=attempt.id,
-                        )
-                    )
-            phases.extend(
-                StartPhase(name=name, at=at, attempt=attempt.id, evidence=evidence)
-                for name, at, evidence in (
-                    ("machine asked for", session.claimed_at, None),
-                    (
-                        "machine confirmed",
-                        None,
-                        "receipt retained" if session.provider_id else None,
-                    ),
-                    ("worker up", session.started_at, None),
-                    ("code started", attempt.started_at, None),
-                )
-            )
-            if (prepared := attempt.prepared) is not None:
-                phases.append(
-                    StartPhase(
-                        name=f"prepared ({prepared.outcome})",
-                        at=prepared.finished_at,
-                        attempt=attempt.id,
-                        evidence=_preparation(prepared),
-                    )
-                )
-            phases.append(StartPhase(name="finished", at=attempt.finished_at, attempt=attempt.id))
-        return tuple(phases)
-
     def status(self, run: str) -> Status:
         """Look once at everything, then say where this run stands."""
         self.tick()
@@ -1057,20 +989,14 @@ class Scheduler:
         self,
         *,
         done: bool = False,
-        pool: str | None = None,
-        rent: str | None = None,
         job: str | None = None,
-        contains: str | None = None,
         experiment: str | None = None,
     ) -> tuple[RunRecord, ...]:
         """Runs oldest first, filtered without advancing execution. `done` includes history."""
         return tuple(
             r
             for r in self._store.runs(experiment=experiment, job=job)
-            if (done or not self.read(r.id).done)
-            and (pool is None or r.launch.pool == pool)
-            and (rent is None or r.launch.rent == rent)
-            and (contains is None or source.contains(r, contains))
+            if done or not self.read(r.id).done
         )
 
     def wait(self, *runs: str, every: float = 1.0, timeout: float | None = None) -> list[Status]:

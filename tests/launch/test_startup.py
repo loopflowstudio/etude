@@ -117,7 +117,8 @@ def test_detached_ssh_install_is_readable_cancellable_and_not_replayed(
     ssh_script.chmod(0o700)
     monkeypatch.setattr("etude.launch.ssh.login_shell", lambda command: command)
     root = tmp_path / "remote"
-    ssh = SSH("fixture", str(root), str(ssh_script), sys.executable)
+    monkeypatch.setenv("ETUDE_REMOTE_PYTHON", sys.executable)
+    ssh = SSH("fixture", str(root))
     packet = Packet(
         session="slow",
         deadline=None,

@@ -33,7 +33,6 @@ etude logs --run sweep/baseline@7                     # retained evidence, from 
 etude logs --run sweep/baseline@7 --follow --timeout 60
 etude logs --run sweep/baseline@7 --job-only     # the job's output alone
 etude logs --machine MACHINE
-etude status sweep/baseline@7 --phases
 ```
 
 A run log includes launch preparation, shared machine startup, every execution
@@ -113,7 +112,7 @@ for event in diagnostics(run="sweep/baseline@7"):
     print(event.observed_at, event.operation, event.message)
 ```
 
-Diagnostics and `status --phases` read retained database facts without provider or
+Diagnostics read retained database facts without provider or
 bucket calls. With a server selected, those facts live on the server.
 Preparation intent is recorded there before the submitting client publishes its
 source. A disconnected submitting client can leave a preparing launch; it is
@@ -768,7 +767,7 @@ etude/
   launch/
     client.py  server.py  cli.py  commands.py
     records.py  schemas.py  database.py  executor.py  source.py
-    ssh.py  startup.py  environment.py  errors.py  measurement.py
+    ssh.py  startup.py  environment.py  errors.py
     scheduler/    loop.py  costs.py  placement.py
     provisioner/  machines.py  images.py  providers/
     worker/       main.py  attempts.py  courier.py  remote.py
@@ -901,40 +900,6 @@ or receipt write. Recovering a lost create reply uses 1 bucket read, the provide
 inventory (1 call per page), and 1 receipt write when found. Health checks remain
 separate from receipt lookup; no path waits for a rented machine's SSH address.
 
-Profile any invocation, including help, into a standard cProfile file:
-
-```sh
-etude --profile /tmp/status.pstats status
-uv run python -m pstats /tmp/status.pstats
-ETUDE_SPANS=/tmp/etude-spans.log etude status
-```
-
-`--profile FILE` precedes the command and profiles this process, including server
-forwarding when selected. It does not activate profiling in a remote worker.
-`ETUDE_SPANS` enables named elapsed-second lines around provider HTTP, bucket calls,
-SSH (including server commands) and git waits in the process where it is set.
-Nested spans may overlap; do not sum them as total runtime. Names are fixed and
-exclude arguments and payloads. Unset means no span file or timing calls. A failed
-span write never changes execution. Timing is diagnostic evidence, not a test
-threshold; machine load makes duration assertions unreliable.
-
-Read a run's retained start milestones:
-
-```sh
-etude status RUN_ID --phases
-```
-
-This opt-in view reads the database without a scheduling pass or machine refresh.
-It shows queued, machine asked for, machine confirmed, worker up, code started,
-`prepared (built|reused|rejected)` for a job with `prepare`, and finished, for every
-retained attempt. The preparation's evidence is its key, time and size, and any
-rejection cause. Missing timestamps say `not recorded`.
-The existing database has a provider receipt but no timestamp for its confirmation;
-the confirmation phase therefore has no timestamp and says `receipt retained`
-when that evidence exists. It never borrows another phase's
-clock. Times are UTC observations retained by the scheduler, with their existing
-precision. They are historical evidence, not a claim of current machine freshness.
-
 ## Checks
 
 ```sh
@@ -995,11 +960,11 @@ finished ones included, and replaces `status --all`. Runs started with
 `etude train` are files outside the launcher database; read them with
 `etude report FILE` or `etude checkpoints`.
 Filters combine with AND; `--job` accepts a
-job digest or display name. An unknown revision is an error.
+job digest or display name.
 
 ```sh
 etude runs
-etude runs --contains v0.3.0 --experiment capacity --rent l4
+etude runs --experiment capacity
 etude runs --job JOB_ID
 etude source RUN_ID recovered-source
 etude source RUN_ID                     # creates etude-source-RUN_ID
@@ -1064,16 +1029,17 @@ and guardian readiness inherit this budget without separate 30/60-second caps.
 <!-- implementation-reference -->
 ```python
 from etude.jobs import TrainingJob
-from etude.launch.provisioner.images import prepare_pytorch, resolve_image
+from etude.launch.provisioner.images import resolve_image
 from etude.launch.records import MachineTemplate
+from etude.spec import Runtime
 
-prepared = prepare_pytorch(torch="2.10.0", cuda="12.8")
-template = MachineTemplate(provider="runpod", gpu="NVIDIA L4", image=prepared.image)
+image = resolve_image("pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime")
+template = MachineTemplate(provider="runpod", gpu="NVIDIA L4", image=image)
 job = TrainingJob(
     name="base",
     train=train,
     config=TrainConfig(),
-    runtime=prepared.runtime,
+    runtime=Runtime(python="python", packages={"torch": "2.10.0+cu128"}, cuda="12.8"),
     setup='"$ETUDE_PYTHON" -m pip install etude-sdk',  # the stock image has no Etude
     max_hours=1,
 )
@@ -1082,9 +1048,8 @@ custom = resolve_image("registry.example/team/training:release", timeout=30)
 ```
 
 ```sh
-etude image prepare pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime
 etude ondemand image gpu pytorch/pytorch:2.10.0-cuda12.8-cudnn9-runtime
-etude machines --all --images
+etude machines --all
 ```
 
 Preparation waits for registry metadata with `timeout=None` by default. A positive
@@ -1094,18 +1059,15 @@ image build or machine rental is performed. The default platform is `linux/amd64
 The output records the requested reference, immutable platform manifest and
 verified OS/architecture. Unsupported or ambiguous platforms fail before rental.
 
-`prepare_pytorch(kind="devel", ...)` selects the official development variant for
-jobs that compile CUDA extensions; the default runtime variant omits that toolkit.
-The recipe returns a `PreparedRuntime` containing the immutable image and matching
-Python/Torch/CUDA requirements. The job probes `python` in that image and checks
-the exact Torch CUDA distribution before user code. It installs nothing. Custom
-images use `resolve_image` plus an explicit `Runtime`.
+Pair the image with an explicit `Runtime` naming its Python/Torch/CUDA
+requirements. The job probes `python` in that image and checks the exact Torch
+CUDA distribution before user code. It installs nothing.
 Version combinations must exist in the upstream registry. Resolution establishes
 artifact identity and platform, not framework ABI compatibility or a speedup.
 
 Each acquired machine retains its selection across on-demand edits and scheduler
-restarts; `machines --images` reads those facts without registry access. Bootstrap
-logs include the same selection. `ondemand add --image` and existing digest strings
+restarts. Bootstrap
+logs include the selection. `ondemand add --image` and existing digest strings
 remain available when resolution has already happened; their platform is unchecked.
 Typed Python callers can construct `Image(requested=..., resolved=...)` for these
 pre-pinned artifacts. Private provider pulls still require the provider's registry
@@ -1365,7 +1327,6 @@ limit. Tracking's separate `Run.finish(timeout=10)` remains independently config
 from pathlib import Path
 
 from etude.launch.client import fetch, usage
-from etude.launch.usage import R2, S3_US_WEST_2, Usage
 
 # Wait: fetch verifies the retained transport SHA256 and length before publication.
 first = fetch(run, "checkpoint.pt", Path("results/first"))
@@ -1390,13 +1351,6 @@ for event in (*report.events, *report.shared_events):
         event.request_id,
         event.received_bytes,
     )
-
-# A download/request scenario at dated list prices, not an invoice or a rental cap.
-outputs = Usage(
-    observed_at=report.observed_at,
-    events=tuple(e for e in report.events if e.purpose == "result"),
-)
-print(outputs.estimate(S3_US_WEST_2), outputs.estimate(R2))
 ```
 
 `etude usage --run RUN` reads the same retained evidence. `observed_at` is the
@@ -1475,8 +1429,7 @@ logical input/result reads without reuse. This counterfactual keeps the measured
 control/upload trace fixed; it does not execute an old SDK. Including the one
 failed request, runtime, source/checkpoint inputs, checkpoint uploads and 47
 control requests, the comparison has 59 requests before and 56 after, saves
-78,643,198 response bytes, and reduces the illustrative download/request estimate
-by USD 0.00707908782 at the rates above. Control bytes are measured from their
+78,643,198 response bytes. Control bytes are measured from their
 actual bodies, including journal JSON and multipart framing; they are not assumed
 free. Upload body counts remain supplied bytes, separate from response bytes.
 

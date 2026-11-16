@@ -543,19 +543,6 @@ class Quote(Record):
         return sum((machine.max_usd for machine in self.machines), Decimal(0))
 
 
-class StartPhase(Record):
-    """A recorded start milestone, or an explicitly unavailable timestamp.
-
-    The database retains no provider reply timestamp. That milestone remains
-    unavailable rather than borrowing the session readiness timestamp.
-    """
-
-    name: str
-    at: datetime | None
-    attempt: str | None = None
-    evidence: str | None = None
-
-
 class LaunchRequest(Record):
     run: str
     fingerprint: str

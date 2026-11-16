@@ -968,6 +968,8 @@ def run(
     bootstrap_url: str,
     delete_self: Callable[[], None],
     root: Path = ROOT,
+    send: Send = _send,  # the bucket transport: the boundary fixtures replace
+    every: float = 3.0,
 ) -> None:
     session = os.environ.get("ETUDE_SESSION")
     log = root / session / "worker.log" if session else root / "worker.log"
@@ -975,7 +977,7 @@ def run(
     with log_to(log):
         try:
             write_log("worker entry", "client ready")
-            _serve(bootstrap_url, root, _send, time.sleep, 3.0, log, url)
+            _serve(bootstrap_url, root, send, time.sleep, every, log, url)
         finally:
             original_error = sys.exception()
             try:

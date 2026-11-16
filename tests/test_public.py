@@ -17,9 +17,7 @@ SURFACE: dict[str, tuple[str, ...]] = {
     "etude.experiment": ("observe",),
     "etude.train.tracking": tuple("EtudeWarning TrainingRun seal_runs track".split()),
     "etude.train.records": ("Time",),
-    "etude.train.read": tuple(
-        "read read_all read_batches RunData Batch Points buckets Buckets lines".split()
-    ),
+    "etude.train.read": tuple("read read_all RunData Points buckets Buckets lines".split()),
     "etude.checkpoints": tuple("CheckpointRef CheckpointRecord PolicyKey".split()),
     "etude.records": tuple("Record ArtifactRef Clock SourceKey".split()),
     "etude.storage": tuple(
@@ -35,9 +33,7 @@ SURFACE: dict[str, tuple[str, ...]] = {
     ),
     "etude.eval.match": ("environment",),
     "etude.eval.result": tuple("Tables Row Value".split()),
-    "etude.eval.tournament": tuple(
-        "evaluating scores standings ScorePoint Scores Standing Standings".split()
-    ),
+    "etude.eval.tournament": tuple("evaluating scores ScorePoint Scores".split()),
     "etude.eval.query": tuple("statsdb read_blobs estimate compare Estimate Comparison".split()),
     "etude.report": tuple(
         "Report Score Matches Curve Matrix Ranking Anchors Planned PlannedPoint ML Crosstable "
@@ -55,8 +51,8 @@ SURFACE: dict[str, tuple[str, ...]] = {
         "Quote Diagnostic Machine RentalCost LogStream Standing".split()
     ),
     "etude.launch.database": tuple("Database inspect upgrade Schema Upgrade".split()),
-    "etude.launch.provisioner.images": tuple("resolve_image prepare_pytorch".split()),
-    "etude.launch.usage": tuple("Usage R2 S3_US_WEST_2 Rates Transfer".split()),
+    "etude.launch.provisioner.images": ("resolve_image",),
+    "etude.launch.usage": tuple("Usage Transfer".split()),
 }
 
 

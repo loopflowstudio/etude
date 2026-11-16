@@ -10,10 +10,8 @@ A later write at the same clock value replaces an earlier one.
 Superseded rows stay on disk. Buckets keep their extremes.
 
 Rows are read by column (`etude.train.block`), so a chart costs two arrays.
-`read` holds a whole run; `read_batches` streams selected metrics a
-stretch of overlapping blocks at a time, planned from headers (`_stretches`),
-so it holds one stretch's arrays plus a few numbers per block.
-`RunData.points` is the same plan read all at once.
+`read` holds a whole run; `RunData.points` reads a metric one stretch of
+overlapping blocks at a time, planned from headers (`_stretches`).
 A run's records (declaration, outcome, writers, checkpoints) are read when it
 is read; its metric blocks only the first time `RunData.blocks` is used, so a
 reader of checkpoints, or of an eval run, reads no metric data.
@@ -21,7 +19,7 @@ reader of checkpoints, or of an eval run, reads no metric data.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from functools import cached_property
 from hashlib import sha256
@@ -68,9 +66,7 @@ from etude.train.records import RowTable, TablePoint
 __all__ = (
     "read",
     "read_all",
-    "read_batches",
     "RunData",
-    "Batch",
     "Points",
     "buckets",
     "Buckets",
@@ -95,12 +91,6 @@ class Points(Arrays):
 
     def __len__(self) -> int:
         return len(self.x)
-
-
-class Batch(Arrays):
-    """One stretch of a run's history on one clock: each selected metric's points in it."""
-
-    points: dict[str, Points]
 
 
 class RunData(Arrays):
@@ -198,7 +188,7 @@ class RunData(Arrays):
         located = {block.key: block for block in self.blocks}
         placed = [_place(block, clock) for block in self.blocks]
         parts = [
-            _batch(stretch, located.__getitem__, (metric,), clock).points[metric]
+            _stretch_points(stretch, located.__getitem__, metric, clock)
             for stretch in _stretches(placed, self.writers, clock)
         ]
         return _latest_writes([p.x for p in parts], [p.y for p in parts])
@@ -583,31 +573,22 @@ def _stretches(
     return [sorted(stretch, key=lambda extent: extent.order) for stretch in stretches]
 
 
-def _batch(
-    stretch: Sequence[_Extent],
-    blocks: Callable[[str], StoredBlock],
-    metrics: Sequence[str],
-    clock: str,
-    after: float | None = None,
-) -> Batch:
-    """The metrics' points within one stretch, above `after` when given."""
-    xs: dict[str, list[Floats]] = {metric: [] for metric in metrics}
-    ys: dict[str, list[Floats]] = {metric: [] for metric in metrics}
+def _stretch_points(
+    stretch: Sequence[_Extent], blocks: Callable[[str], StoredBlock], metric: str, clock: str
+) -> Points:
+    """One metric's points within one stretch."""
+    xs: list[Floats] = []
+    ys: list[Floats] = []
     for extent in stretch:
         block = blocks(extent.key)
-        columns = [
-            column
-            for column in block.header.series
-            if column.kind == "metric" and column.name in xs
-        ]
-        if not columns:
-            continue
-        logged = _clock(block, clock)
-        for column in columns:
-            x, keep = _counted(block, column, logged, extent, after)
-            xs[column.name].append(x[keep])
-            ys[column.name].append(block.array(column.data, "<f8")[keep])
-    return Batch(points={metric: _latest_writes(xs[metric], ys[metric]) for metric in xs})
+        logged: Floats | None = None
+        for column in block.header.series:
+            if column.kind == "metric" and column.name == metric:
+                logged = _clock(block, clock) if logged is None else logged
+                x, keep = _counted(block, column, logged, extent)
+                xs.append(x[keep])
+                ys.append(block.array(column.data, "<f8")[keep])
+    return _latest_writes(xs, ys)
 
 
 def _latest_writes(xs: Sequence[Floats], ys: Sequence[Floats]) -> Points:
@@ -632,15 +613,12 @@ def _counted(
     column: SeriesColumn,
     logged: Floats,
     extent: _Extent,
-    after: float | None = None,
 ) -> tuple[Floats, npt.NDArray[np.bool_]]:
-    """A column's clock values, and which of its rows count in the extent (above `after`)."""
+    """A column's clock values, and which of its rows count in the extent."""
     x = logged if column.rows is None else logged[block.array(column.rows, "<u4")]
     keep = ~np.isnan(x)
     if extent.cutoff is not None:
         keep &= x <= extent.cutoff
-    if after is not None:
-        keep &= x > after
     return x, keep
 
 
@@ -797,76 +775,6 @@ def _located(
     if identities:
         return None, ()
     return None, run_folders(keys).get(run, [run_prefix(run)])
-
-
-def read_batches(
-    source: Storage | Path | str,
-    experiment: str,
-    run: str,
-    *,
-    clock: str = HOURS_SINCE_START,
-    metrics: Sequence[str],
-) -> Iterator[Batch]:
-    """A run's history on one clock, one stretch at a time.
-
-    Memory is one stretch's selected arrays plus a few numbers per block.
-
-    One metric's points concatenated across the batches are exactly
-    `read(...).points(metric, clock)`. A first pass reads each block and keeps
-    those numbers; each batch reads its blocks again for their selected arrays. No metric index is loaded. A block a compaction
-    replaced is found again from a fresh listing, resuming after the last batch
-    yielded; a block still missing after fresh listings, a sequence gap or a
-    damaged array raises during iteration. A writer's newest blocks missing
-    from storage cannot be told from a run still being delivered.
-
-    `metrics` is a list of names: a name no block logged as a metric raises
-    `EtudeError("metric_not_logged")` before the first batch, so a misspelt
-    name is not mistaken for an empty history.
-    """
-    if isinstance(metrics, str):
-        raise TypeError(f"metrics is a list of names; pass [{metrics!r}]")
-    storage = as_storage(source)
-    _, folders = _located(storage, sorted(storage.keys("")), experiment, run)
-    selected = frozenset(metrics)
-
-    def block(key: str) -> StoredBlock:
-        return StoredBlock(storage, key, describe(storage, "", key, metrics=selected))
-
-    done: float | None = None  # the highest clock value already yielded
-    failures = 0  # fresh listings in a row that yielded nothing new
-    while True:
-        try:
-            keys = _listing(storage, folders)
-            writers = _records(storage, keys).writers
-            logged: set[str] = set()
-            placed: list[_Placed] = []
-            for chosen in _selected(storage, keys, indexes=False):
-                # The whole header plans the block and says which metrics it logged.
-                key = chosen.file.key
-                whole = StoredBlock(
-                    storage, chosen.folder + key, describe(storage, chosen.folder, key)
-                )
-                logged.update(c.name for c in whole.header.series if c.kind == "metric")
-                placed.append(_place(whole, clock))
-            if missing := sorted(selected - logged):
-                raise EtudeError("metric_not_logged", 404) from KeyError(", ".join(missing))
-            starts = _writer_starts(writers, ((p.writer, p.wall_first) for p in placed))
-            placed.sort(key=lambda p: (starts[p.writer], p.sequence))
-            for stretch in _stretches(placed, writers, clock):
-                high = max(extent.high for extent in stretch)
-                if done is not None and high <= done:
-                    continue
-                yield _batch(stretch, block, metrics, clock, after=done)
-                done = high
-                failures = 0
-            return
-        except FileNotFoundError:
-            # A live writer replaces blocks every few seconds, so a slow
-            # consumer may meet several; only a listing that cannot make
-            # progress three times is a missing block.
-            failures += 1
-            if failures == 3:
-                raise
 
 
 def _named(keys: Sequence[str], folders: Sequence[str]) -> list[tuple[str, str]]:

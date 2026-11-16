@@ -4,8 +4,8 @@ A `Benchmark` (`etude.eval.records`) is named seatings a training run's
 checkpoints are held for; a `RoundRobin` is hand-picked players, every two of
 them once.
 `evaluating` opens one EvalRun for the matches a tournament adds; its
-`play` executes them. `scores` follows each seating over training; `standings`
-ranks a round robin. Both read an experiment's database (`etude.eval.query.statsdb`).
+`play` executes them. `scores` follows each seating over training, reading an
+experiment's database (`etude.eval.query.statsdb`).
 
 A tournament is stored nowhere but in its eval runs: each keeps, in its own
 folder, `tournament.json` (`TournamentRun`), the definition it was held with
@@ -47,7 +47,7 @@ from etude.checkpoints import CheckpointRef, seen_from
 from etude.errors import EtudeError
 from etude.eval.block import Block, run_blocks
 from etude.eval.match import KIND
-from etude.eval.query import compare, estimate
+from etude.eval.query import estimate
 from etude.eval.records import (
     IDENTIFIER,
     TOURNAMENT_FILE,
@@ -60,7 +60,6 @@ from etude.eval.records import (
     Player,
     RoundRobin,
     Seated,
-    Share,
     TournamentRun,
     _map_fields,
     assemble,
@@ -77,7 +76,7 @@ from etude.records import Digest, Record, RunRecord
 from etude.run import LocatedRun, declare, run_folders, under
 from etude.storage import DirectoryStorage, Storage, default_root
 
-__all__ = ("evaluating", "scores", "standings", "ScorePoint", "Scores", "Standing", "Standings")
+__all__ = ("evaluating", "scores", "ScorePoint", "Scores")
 
 
 if TYPE_CHECKING:
@@ -100,7 +99,6 @@ def evaluating(
     matches: Sequence[Match] | None = None,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
-    share: Share = Share(),
     resume: bool = False,
     run: str | None = None,
     lines: Sequence[Line] = (),
@@ -111,7 +109,7 @@ def evaluating(
     With neither, plan every missing match of the stored tournament. Relative
     seats use the supplied experiment lines; planned jobs carry these in their
     specification. Explicit matches are checked against the tournament before
-    opening. Share partitions its ordered schedule into disjoint parts.
+    opening.
     Outside a launched attempt, resume must be explicit. Environment, rollups
     and tournament definitions must agree with the run already stored.
     """
@@ -151,7 +149,7 @@ def evaluating(
         seen_from(each, experiment)
         for each in ((checkpoint,) if checkpoint is not None else checkpoints)
     )
-    added = _added(tournament, given, enter, share).bind(lines, experiment=experiment)
+    added = _added(tournament, given, enter).bind(lines, experiment=experiment)
     if matches is not None:
         resolved, _ = assemble([added]).resolve(lines, experiment=experiment)
         added = added.model_copy(update={"seated": resolved.seated})
@@ -168,16 +166,12 @@ def evaluating(
         asked = _called(added, experiment=experiment, on_the_go=on_the_go, lines=lines, runs=runs)
         added, so_far = asked.recorded, asked.played
         every = [*(each.match for each in so_far.delivered), *so_far.failed, *so_far.new]
-        # Contiguous runs of the play order, so each share seats fewer checkpoints.
-        order = list(
-            ordered(sorted({m.key: m for m in every}.values(), key=lambda match: match.key))
-        )
-        size, larger = divmod(len(order), share.count)
-        start = share.index * size + min(share.index, larger)
         delivered = {each.match.key for each in so_far.delivered}
         pending = [
             match
-            for match in order[start : start + size + (share.index < larger)]
+            for match in ordered(
+                sorted({m.key: m for m in every}.values(), key=lambda match: match.key)
+            )
             if match.key not in delivered
         ]
     run = (
@@ -270,7 +264,7 @@ def played(
     """
     lines = tuple(line.seen_from(experiment) for line in lines)
     held = tuple(seen_from(each, experiment) for each in checkpoints)
-    added = _added(tournament, held, enter, Share()).bind(lines, experiment=experiment)
+    added = _added(tournament, held, enter).bind(lines, experiment=experiment)
     if runs is None:
         runs = stored_runs(experiment, directory=directory, storages=storages)
     elif runs.experiment != experiment:
@@ -407,15 +401,12 @@ def _added(
     tournament: Benchmark | RoundRobin,
     checkpoints: tuple[CheckpointRef, ...],
     enter: Sequence[Player],
-    share: Share,
 ) -> TournamentRun:
     if isinstance(tournament, Benchmark) and enter:
         raise EtudeError("benchmark_holds_checkpoints_not_entrants", 422)
     if isinstance(tournament, RoundRobin) and checkpoints:
         raise EtudeError("round_robin_holds_entrants_not_checkpoints", 422)
-    return TournamentRun(
-        tournament=tournament, checkpoints=checkpoints, entrants=tuple(enter), share=share
-    )
+    return TournamentRun(tournament=tournament, checkpoints=checkpoints, entrants=tuple(enter))
 
 
 @dataclass(frozen=True)
@@ -600,8 +591,8 @@ def _experiment(place: Storage, folder: str) -> str | None:
 
 
 @contextmanager
-def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int, int]]:
-    """Temp table `_held` (run, match) of each scheduled match held; yields (scheduled, held).
+def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[None]:
+    """Temp table `_held` (run, match) of each scheduled match held.
 
     Each scheduled match counts once, from whichever eval run of the
     tournament's environment recorded it last (`matches.newest`).
@@ -623,13 +614,7 @@ def _held(db: duckdb.DuckDBPyConnection, tournament: str) -> Iterator[tuple[int,
         [tournament],
     )
     try:
-        counted = db.execute(
-            "select (select count(distinct match) from schedule where tournament = ?),"
-            " (select count(*) from _held)",
-            [tournament],
-        ).fetchone()
-        assert counted is not None
-        yield counted[0], counted[1]
+        yield
     finally:
         db.execute("drop table _held")
 
@@ -773,96 +758,3 @@ def _training_order(point: ScorePoint) -> tuple[bool, int, list[str | int], str]
     # Digit runs compare as numbers, so `updates-900` comes before `updates-1000`.
     named = [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", point.name)]
     return point.ordinal is None, point.ordinal or 0, named, point.checkpoint
-
-
-class Standing(Record):
-    """An entrant's value against one opponent in a round robin, or against the field (`opponent` None)."""
-
-    # Its key, encoded.
-    player: str
-    name: str
-    opponent: str | None
-    opponent_name: str | None
-    value: float
-    # A 95% interval resampling whole matches; None with fewer than two.
-    interval: tuple[float, float] | None
-    rows: int
-    matches: int
-
-
-class Standings(Record):
-    """A round robin's payoff matrix so far, entrants by their value against the field, best first."""
-
-    tournament: str
-    # Matches its entrants call for, and how many of them an eval run holds.
-    scheduled: int
-    held: int
-    entries: tuple[Standing, ...]
-
-    @property
-    def complete(self) -> bool:
-        return self.held == self.scheduled
-
-
-def standings(
-    db: duckdb.DuckDBPyConnection,
-    round_robin: str,
-    *,
-    table: str,
-    value: str,
-    per: str | None = None,
-    where: str | None = None,
-) -> Standings:
-    """The round robin's entrants on `table`'s `value`, as `etude.eval.query.compare` measures it.
-
-    Only the tournament's scheduled matches count, each once, from the eval
-    run that recorded it last.
-    """
-    found = db.execute(
-        "select format from tournaments where tournament = ?", [round_robin]
-    ).fetchone()
-    if found is not None and found[0] != "round_robin":
-        raise EtudeError("standings_rank_round_robins", 422)
-    with _held(db, round_robin) as (scheduled, held):
-        compared = compare(
-            db,
-            table=table,
-            value=value,
-            per=per,
-            where="(run, match) in (select run, match from _held)"
-            + (f" and ({where})" if where else ""),
-        )
-    # Every name a player was seated under, the latest first.
-    names: dict[str, str] = {
-        player: "/".join(json.loads(named))
-        for player, named in db.sql("select player, names from players").fetchall()
-    }
-    # Seats only: a group's row has a team for its subject.
-    entries = [
-        Standing(
-            player=c.subject[0],
-            name=names[c.subject[0]],
-            opponent=None if c.opponent is None else c.opponent[0],
-            opponent_name=None if c.opponent is None else names[c.opponent[0]],
-            value=c.value,
-            interval=c.interval,
-            rows=c.rows,
-            matches=c.matches,
-        )
-        for c in compared
-        if len(c.subject) == 1 and (c.opponent is None or len(c.opponent) == 1)
-    ]
-    field = {e.player: e.value for e in entries if e.opponent is None}
-
-    def rank(player: str | None) -> tuple[float, str]:
-        # Against the field first, then opponents best first.
-        if player is None:
-            return float("-inf"), ""
-        return -field.get(player, float("-inf")), names[player]
-
-    return Standings(
-        tournament=round_robin,
-        scheduled=scheduled,
-        held=held,
-        entries=tuple(sorted(entries, key=lambda e: (rank(e.player), rank(e.opponent)))),
-    )

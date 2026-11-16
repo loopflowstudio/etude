@@ -317,7 +317,6 @@ def test_metrics_and_checkpoints_reach_an_s3_bucket_and_read_back(
         model.write_bytes(b"the trainer saved over the same path")
         second = run.checkpoint(model, {**AT, "progress/updates": 60})
         run.tag(first, "best")
-        run.untag(first, "periodic")
         run.finish(timeout=30)
         assert run.problems == {} and run.incomplete == 0
 
@@ -331,14 +330,14 @@ def test_metrics_and_checkpoints_reach_an_s3_bucket_and_read_back(
         # Everything reads back from the bucket alone.
         data = read(bucket, "pilot", "s3")
         assert data.rows == 50 and data.outcome is not None
-        assert [c.tags for c in data.checkpoints] == [("best",), ()]
+        assert [c.tags for c in data.checkpoints] == [("periodic", "best"), ()]
         assert data.checkpoints[0].artifact == first and authored(data.checkpoints[0].at) == AT
         pilot = experiment_file(tmp_path / "experiments", "pilot")
         assert build(bucket, pilot).training.runs == build(tmp_path / "local", pilot).training.runs
         assert sync(tmp_path / "local", storages=[bucket]) == {}
         assert main(["checkpoints", "--source", "s3://runs/team/a"]) == 0
         listed = capsys.readouterr().out.splitlines()
-        assert len(listed) == 2 and "\tbest\t" in listed[0] and first.uri in listed[0]
+        assert len(listed) == 2 and "\tperiodic,best\t" in listed[0] and first.uri in listed[0]
 
 
 def test_checkpoints_are_stored_locally_and_tagged_after_a_resume(

@@ -432,7 +432,7 @@ def test_server_keeps_source_history_and_checks_out_on_client(
     assert record.launch.source.origin == str(origin)
     assert git(origin, "rev-parse", f"refs/etude/runs/{id}") == record.launch.spec.revision
     repo.rename(repo.with_name("unavailable"))
-    listed = command("runs", "--contains", "v1", "--pool", "waiting")
+    listed = command("runs", "--experiment", record.experiment)
     assert listed.returncode == 0 and id in listed.stdout, listed.stderr
     destination = client / "recovered"
     result = command("source", id, str(destination))

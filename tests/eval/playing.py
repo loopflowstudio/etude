@@ -12,7 +12,6 @@ from etude.eval.records import (
     Player,
     Rollup,
     RoundRobin,
-    Share,
 )
 from etude.eval.result import EvalResult, Result, Tables
 from etude.eval.run import _evaluating_matches
@@ -59,7 +58,6 @@ def play_tournament(
     matches: Sequence[Match] | None = None,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
-    share: Share = Share(),
     rollups: Sequence[Rollup] = (),
     lines: Sequence[Line] = (),
 ) -> EvalResult:
@@ -74,7 +72,6 @@ def play_tournament(
         matches=matches,
         directory=directory,
         storages=storages,
-        share=share,
         lines=lines,
         resume=True,
     ) as active:

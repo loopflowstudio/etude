@@ -9,10 +9,9 @@ import pytest
 
 from etude.cli import main
 from etude.controller.smoke import smoke_file
-from etude.errors import LauncherError
-from etude.launch.client import default, queue
+from etude.launch.client import default
 from etude.records import Clock
-from etude.spec import Job, Runtime, SmokeForm
+from etude.spec import Runtime
 from etude.storage import DirectoryStorage, default_root
 from tests.run.storage import MeasuredStorage
 from tests.train.tracking import open_run
@@ -282,18 +281,6 @@ def test_a_launched_eval_run_records_its_smoke(
     smoke = default().record(launched.id).launch.smoke
     assert smoke.outcome == outcome
     assert [step.step for step in smoke.steps] == (["eval", "report"] if flags else [])
-
-
-def test_the_python_client_smokes_when_asked(tmp_path: Path) -> None:
-    broken = Job(command="true", name="broken", max_hours=0.1, smoke=SmokeForm(command="exit 3"))
-    with pytest.raises(LauncherError, match="smoke train broken: .*nothing was submitted"):
-        queue(broken.runs(1, 2), "local", smoke=True)
-    assert default().runs(done=True) == ()
-    (plain,) = queue(broken.runs(1), "local")
-    assert default().record(plain).launch.smoke.outcome == "not_smoked"
-    fine = broken.model_copy(update={"smoke": SmokeForm(command="true")})
-    (smoked,) = queue(fine.runs(1), "local", smoke=True)
-    assert default().record(smoked).launch.smoke.outcome == "passed"
 
 
 @pytest.mark.parametrize("steps", [[], ["--step", "eval", "--step", "report"]])

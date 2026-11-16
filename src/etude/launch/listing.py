@@ -87,7 +87,7 @@ def show_ondemands(scheduler: Scheduler) -> None:
         print(each.name, "; ".join(parts) + _marks(scheduler, each.name), sep="  ")
 
 
-def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) -> None:
+def show_machines(scheduler: Scheduler, *, ended: bool) -> None:
     """One line per machine: owned with its cost and expiry, or rented with its window and cost."""
     windows = {cost.rental.machine: cost for cost in scheduler.rentals()}
     now = scheduler.now()
@@ -128,11 +128,6 @@ def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) ->
                 f"{machine.state(now)}, {hardware}{window}, {cost}",
                 sep="  ",
             )
-            if images and machine.image is not None:
-                image = machine.image
-                print(
-                    f"  image: {image.requested} -> {image.resolved} ({image.platform or 'platform unchecked'})"
-                )
             if spent.over_cap:
                 print(f"warning: {machine.name} bill exceeds its ${rental.cap_usd:.4f} cap")
 

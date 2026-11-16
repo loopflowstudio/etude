@@ -6,7 +6,6 @@ import urllib.parse
 
 from etude.deadline import call
 from etude.launch.errors import ProviderUnavailable
-from etude.launch.measurement import timed
 from etude.launch.provisioner.providers.http import MAX_REPLY_BYTES, send_to_provider
 from etude.launch.storage.transport import Send
 
@@ -24,7 +23,6 @@ class LiumHTTP:
         }
         self._send = send
 
-    @timed("provider.http.ask")
     def ask(
         self,
         method: str,
