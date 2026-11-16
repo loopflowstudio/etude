@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, FiniteFloat, model_validator
+from pydantic import Field, model_validator
 
 from etude.records import Record
 
@@ -45,8 +45,6 @@ __all__ = (
     "Matrix",
     "Ranking",
     "Anchors",
-    "Planned",
-    "PlannedPoint",
     "ML",
     "Crosstable",
     "Series",
@@ -185,36 +183,6 @@ class Counters(Record):
     keys: tuple[str, ...]
 
 
-class PlannedPoint(Record):
-    """One planned value where its panel's clock stands at `at`, an absolute value."""
-
-    at: FiniteFloat
-    value: FiniteFloat
-
-
-class Planned(Record):
-    """Planned hyperparameter values per job, linearly interpolated between sampled points.
-
-    These are plans, not observations. Markers use each run's recorded clock;
-    no value is extrapolated beyond the supplied points. `jobs` is keyed by a
-    job's full name or by its launch name, which covers every config launched
-    under it; the full name wins.
-    """
-
-    kind: Literal["planned"] = "planned"
-    title: str
-    clock: str
-    jobs: dict[str, tuple[PlannedPoint, ...]]
-    unit: str = ""
-
-    @model_validator(mode="after")
-    def ordered_points(self) -> Self:
-        for job, points in self.jobs.items():
-            if not points or any(a.at >= b.at for a, b in zip(points, points[1:])):
-                raise ValueError(f"planned_points_must_increase: {job}")
-        return self
-
-
 class Flame(Record):
     """Where the time went: an icicle of the seconds logged under `prefix`, per job.
 
@@ -254,7 +222,7 @@ type EvalPanel = Annotated[
     Curve | Matrix | Ranking | Crosstable | Anchors, Field(discriminator="kind")
 ]
 type MetricPanel = Annotated[
-    Series | Counters | Planned | Flame | Pace | Elapsed | Attempts, Field(discriminator="kind")
+    Series | Counters | Flame | Pace | Elapsed | Attempts, Field(discriminator="kind")
 ]
 
 PERF: tuple[MetricPanel, ...] = (Pace(), Elapsed(), Attempts(), Flame())

@@ -29,7 +29,6 @@ def open_run(
     continues: Continuation | None = None,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
-    namespace: str = "local",
     queue_size: int = 10_000,
     segment_seconds: float = 2.0,
     segment_rows: int = 5_000,
@@ -45,27 +44,31 @@ def open_run(
         until = os.environ.get("ETUDE_UNTIL_CLOCK")
         clock = until if until in at else next(iter(at))
         continues = Continuation(parent=handed.parent, clock=clock, value=at[clock])
-    declared = declare(
-        experiment=experiment,
-        clocks=None
-        if clocks is None
-        else tuple(
-            Clock(name=clock, kind="step", meaning=clock) if isinstance(clock, str) else clock
-            for clock in clocks
-        ),
-        run=run,
-        job=job,
-        seed=seed,
-        kind=kind,
-        config=config.model_dump(mode="json") if isinstance(config, BaseModel) else config,
-        continues=continues,
-        inherited_clocks=() if handed is None else handed.clocks,
-        directory=directory,
-        namespace=namespace,
-        resume=resume
-        or os.environ.get("ETUDE_RESUME") == "1"
-        or bool(os.environ.get("ETUDE_ATTEMPT")),
-    )
+    assigned = {
+        name: str(value)
+        for name, value in (("ETUDE_JOB", job), ("ETUDE_SEED", seed))
+        if value is not None
+    }
+    # The launcher assigns a run's job and seed through its environment.
+    with patch.dict(os.environ, assigned):
+        declared = declare(
+            experiment=experiment,
+            clocks=None
+            if clocks is None
+            else tuple(
+                Clock(name=clock, kind="step", meaning=clock) if isinstance(clock, str) else clock
+                for clock in clocks
+            ),
+            run=run,
+            kind=kind,
+            config=config.model_dump(mode="json") if isinstance(config, BaseModel) else config,
+            continues=continues,
+            inherited_clocks=() if handed is None else handed.clocks,
+            directory=directory,
+            resume=resume
+            or os.environ.get("ETUDE_RESUME") == "1"
+            or bool(os.environ.get("ETUDE_ATTEMPT")),
+        )
     # Keep production policy fixed; scale the fixture's queue and sealing windows.
     with (
         patch("etude.train.tracking._QUEUE_SIZE", queue_size),

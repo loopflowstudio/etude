@@ -102,13 +102,13 @@ hundred pieces. The last piece goes with the attempt's ending.
 
 <!-- implementation-reference -->
 ```python
-from etude.launch.client import diagnostics, logs
+from etude.launch.client import logs
 
 snapshot = logs(run="sweep/baseline@7", refresh=True, timeout=30)
 for stream in snapshot.streams:
     print(stream.producer, stream.attempt, stream.received, stream.complete)
     print(stream.text)
-for event in diagnostics(run="sweep/baseline@7"):
+for event in snapshot.diagnostics:
     print(event.observed_at, event.operation, event.message)
 ```
 

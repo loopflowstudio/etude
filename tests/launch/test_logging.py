@@ -611,7 +611,7 @@ def test_bootstrap_publication_is_one_bounded_request_and_keeps_local_evidence(
         raise OSError("storage unavailable")
 
     monkeypatch.setattr(logging, "urlopen", denied)
-    logging.publish(path, "https://fixture/write-only", timeout=2)
+    logging.publish(path, "https://fixture/write-only")
     assert received == [b"install failed\n"]
     assert len(allowances) == 1 and 0 < allowances[0] <= 2
     assert path.read_text() == "install failed\n"

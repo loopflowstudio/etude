@@ -36,15 +36,14 @@ SURFACE: dict[str, tuple[str, ...]] = {
     "etude.eval.tournament": tuple("evaluating scores ScorePoint Scores".split()),
     "etude.eval.query": tuple("statsdb read_blobs estimate compare Estimate Comparison".split()),
     "etude.report": tuple(
-        "Report Score Matches Curve Matrix Ranking Anchors Planned PlannedPoint ML Crosstable "
+        "Report Score Matches Curve Matrix Ranking Anchors ML Crosstable "
         "Series Counters Flame Pace Elapsed Attempts".split()
     ),
     "etude.spec": tuple(
         "Job RunRequest Until Input Variable Runtime Preparation SmokeForm".split()
     ),
     "etude.launch.client": tuple(
-        "queue launch quote availability status wait cancel diagnostics logs fetch default rent "
-        "terminate usage standing".split()
+        "queue launch quote status wait cancel logs fetch default usage standing".split()
     ),
     "etude.launch.records": tuple(
         "MachineTemplate OnDemand Provider Pool Storage Image GPU CPU Availability Offer Status "

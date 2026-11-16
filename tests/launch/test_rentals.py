@@ -9,10 +9,7 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.launch import cli, client
-from etude.launch.database import launcher_file
-from etude.launch.records import Machine
-from etude.launch.server import PythonClient, RentRequest, Request, TerminateRequest
+from etude.launch import cli
 from etude.spec import Job
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import bench
@@ -54,28 +51,6 @@ def test_commands_rent_and_terminate_by_machine_name(
     assert b.store.machine(machine.name).deleted_at is not None
     assert b.store.rentals()[0].deadline > b.clock.now
     assert not b.store.machine_busy(machine.name)
-
-
-def test_python_rental_calls_use_selected_server(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    requests: list[Request] = []
-    machine = Machine(name="remote-pod", ondemand="gpu", kind="rented", provider="account")
-
-    def request(self: PythonClient, value: Request) -> bytes:
-        requests.append(value)
-        return b'"remote-pod"' if value.operation == "rent" else machine.model_dump_json().encode()
-
-    monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
-    monkeypatch.setattr(client, "selected", lambda: "fixture-server")
-    monkeypatch.setattr(PythonClient, "_request", request)
-    assert client.rent("gpu", 1, Decimal(2)) == "remote-pod"
-    assert client.terminate("remote-pod") == machine
-    assert requests == [
-        RentRequest(ondemand="gpu", hours=1, max_usd=Decimal(2)),
-        TerminateRequest(machine="remote-pod"),
-    ]
-    assert not (launcher_file(tmp_path)).exists()
 
 
 def test_machine_allocation_outlives_its_session(tmp_path: Path) -> None:

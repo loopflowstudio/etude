@@ -22,8 +22,6 @@ from etude.report import (
     Curve,
     Matches,
     Matrix,
-    Planned,
-    PlannedPoint,
     Ranking,
     Report,
     Series,
@@ -383,21 +381,6 @@ def test_served_folder_index_reuses_output_until_refresh(tmp_path: Path) -> None
         assert failed is not None and "broken token=[redacted]" in failed
         assert "fixture-credential" not in failed
         assert server.page("/lab") == detail
-
-
-def test_planned_values_round_trip_and_reject_ambiguous_points() -> None:
-    planned = Planned(
-        title="Learning rate",
-        clock="updates",
-        jobs={"large": (PlannedPoint(at=1000, value=0.1), PlannedPoint(at=2000, value=0.01))},
-    )
-    report = Report(ml=(planned,))
-    assert Report.model_validate_json(report.model_dump_json()) == report
-    for points in ((), (PlannedPoint(at=1000, value=1), PlannedPoint(at=1000, value=2))):
-        with pytest.raises(ValueError, match="planned_points_must_increase"):
-            Planned(title="Bad plan", clock="updates", jobs={"large": points})
-    with pytest.raises(ValueError):
-        PlannedPoint(at=float("nan"), value=1)
 
 
 def test_http_folder_refresh_keeps_syntax_failures_and_recovers(tmp_path: Path) -> None:

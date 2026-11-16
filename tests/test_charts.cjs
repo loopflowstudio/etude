@@ -228,10 +228,6 @@ test("a launch name addresses every config job launched under it; a full name ad
   assert.equal(m.JOBS[2].label, "DQN · 1 seed");
   data.report.labels = {ppo: "PPO", "ppo 4d5e6f": "High learning rate"};
   assert.equal(context.model(data).JOBS[1].label, "High learning rate · 1 seed");
-  const plan = value => [{at: 0, value}];
-  const planned = {clock: "updates", jobs: {ppo: plan(1), "ppo 4d5e6f": plan(2)}};
-  assert.deepEqual(Array.from(m.plannedSeries(planned), s => [s.job.name, s.points[0].y]),
-    [["ppo 1a2b3c", 1], ["ppo 4d5e6f", 2]]);
 });
 
 test("score tooltips name the interval and row unit without changing values", () => {
@@ -254,22 +250,6 @@ test("score tooltips name the interval and row unit without changing values", ()
     {members: ["a", "b", "c"].map(context.runMember)}, "updates", () => ({y: 0.625}), true,
   )[0];
   assert.equal(context.pointMeta(partial, context.scoreFormat), "2 of 3 seeds evaluated");
-});
-
-test("configured curves interpolate at recorded absolute clocks without extrapolation", () => {
-  const training = {jobs: [{name: "large", launch: "large", runs: ["a", "b"]}],
-    runs: [{name: "a", at: {updates: 1200}}, {name: "b", at: {updates: 900}}], checkpoints: [], clocks: []};
-  const data = page([], [], training);
-  const planned = {clock: "updates", jobs: {large: [{at: 1000, value: 1}, {at: 1400, value: 0.2}]}};
-  const [s] = context.model(data).plannedSeries(planned);
-  assert.deepEqual(Array.from(s.points, p => p.x), [1000, 1400]);
-  assert.equal(s.markers.length, 1); assert.equal(s.markers[0].x, 1200);
-  assert.ok(Math.abs(s.markers[0].y - 0.6) < 1e-10);
-  assert.match(s.markers[0].meta, /recorded updates/);
-  training.runs[0].at.updates = 1400;
-  assert.equal(context.model(data).plannedSeries(planned)[0].markers[0].y, 0.2);
-  delete training.runs[0].at.updates;
-  assert.equal(context.model(data).plannedSeries(planned)[0].markers.length, 0);
 });
 
 test("refresh failure leaves the page visible and a later success reloads once", async () => {

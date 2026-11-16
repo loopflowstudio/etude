@@ -21,7 +21,6 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Sequence
-from decimal import Decimal
 from functools import cache
 from pathlib import Path
 
@@ -36,8 +35,6 @@ from etude.launch.provisioner.providers.runpod.machines import RunPodMachines
 from etude.launch.provisioner.providers.vast.api import VastAPI
 from etude.launch.provisioner.providers.vast.machines import VastMachines
 from etude.launch.records import (
-    Availability,
-    Diagnostic,
     LogSnapshot,
     Machine,
     OnDemand,
@@ -59,16 +56,12 @@ __all__ = (
     "queue",
     "launch",
     "quote",
-    "availability",
     "status",
     "wait",
     "cancel",
-    "diagnostics",
     "logs",
     "fetch",
     "default",
-    "rent",
-    "terminate",
     "usage",
     "standing",
 )
@@ -195,11 +188,6 @@ def quote(
     return _client().quote(runs, pool, rent=rent)
 
 
-def availability(rent: str, *, timeout: float | None = None) -> Availability:
-    """Ask an on-demand's provider what it would rent now, at what price; rents nothing."""
-    return _client().availability(rent, timeout=timeout)
-
-
 def status(run: str) -> Status:
     return _client().status(run)
 
@@ -210,10 +198,6 @@ def wait(*runs: str, every: float = 1.0, timeout: float | None = None) -> list[S
 
 def cancel(run: str) -> Status:
     return _client().cancel(run)
-
-
-def diagnostics(*, run: str | None = None, machine: str | None = None) -> tuple[Diagnostic, ...]:
-    return _client().diagnostics(run=run, machine=machine)
 
 
 def logs(
@@ -229,16 +213,6 @@ def logs(
 
 def fetch(run: str, name: str, destination: Path) -> Path:
     return _client().fetch(run, name, destination)
-
-
-def rent(ondemand: str, hours: float, max_usd: Decimal | None = None) -> str:
-    """Rent a machine from an on-demand for a window and return its name."""
-    return _client().rent(ondemand, hours, max_usd)
-
-
-def terminate(machine: str) -> Machine:
-    """Delete an idle rented machine and return its acquisition record."""
-    return _client().terminate(machine)
 
 
 def usage(*, run: str | None = None, machine: str | None = None) -> Usage:

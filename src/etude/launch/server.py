@@ -18,7 +18,6 @@ import tempfile
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from functools import cache
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn
@@ -30,11 +29,8 @@ from etude.errors import LauncherError, explain
 from etude.launch.errors import LaunchError, SchemaAdvanced
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import (
-    Availability,
-    Diagnostic,
     Launch,
     LogSnapshot,
-    Machine,
     Quote,
     Standing,
     Status,
@@ -116,7 +112,7 @@ class WaitRequest(Record):
 
 
 class EvidenceRequest(Record):
-    operation: Literal["diagnostics", "usage"]
+    operation: Literal["usage"] = "usage"
     run: str | None = None
     machine: str | None = None
 
@@ -129,24 +125,6 @@ class LogsRequest(Record):
     timeout: float | None = None
 
 
-class RentRequest(Record):
-    operation: Literal["rent"] = "rent"
-    ondemand: str
-    hours: float
-    max_usd: Decimal | None = None
-
-
-class TerminateRequest(Record):
-    operation: Literal["terminate"] = "terminate"
-    machine: str
-
-
-class AvailabilityRequest(Record):
-    operation: Literal["availability"] = "availability"
-    ondemand: str
-    timeout: float | None = None
-
-
 type Request = Annotated[
     SubmissionRequest
     | FailLaunchRequest
@@ -155,10 +133,7 @@ type Request = Annotated[
     | StandingRequest
     | WaitRequest
     | EvidenceRequest
-    | LogsRequest
-    | RentRequest
-    | TerminateRequest
-    | AvailabilityRequest,
+    | LogsRequest,
     Field(discriminator="operation"),
 ]
 _REQUEST: TypeAdapter[Request] = TypeAdapter(Request)
@@ -171,15 +146,12 @@ type Response = (
     | Status
     | LaunchInput
     | EncodedOutput
-    | Machine
     | Usage
     | LogSnapshot
-    | tuple[Diagnostic, ...]
     | tuple[RunRecord, ...]
     | tuple[Standing, ...]
     | Launch
     | Quote
-    | Availability
     | str
 )
 
@@ -374,11 +346,7 @@ class PythonClient:
             ["--server-request"],
             input=_REQUEST.dump_json(request),
             capture_output=True,
-            **(
-                {"timeout": remaining(request.timeout)}
-                if isinstance(request, LogsRequest | AvailabilityRequest)
-                else {}
-            ),
+            **({"timeout": remaining(request.timeout)} if isinstance(request, LogsRequest) else {}),
         )
         if done.returncode:
             raise LauncherError(
@@ -443,11 +411,6 @@ class PythonClient:
             self._request(SubmissionRequest(operation="quote", submission=submission))
         )
 
-    def availability(self, rent: str, *, timeout: float | None = None) -> Availability:
-        return Availability.model_validate_json(
-            self._request(AvailabilityRequest(ondemand=rent, timeout=timeout))
-        )
-
     def standing(
         self, experiment: str | None = None, *, job: str | None = None
     ) -> tuple[Standing, ...]:
@@ -474,13 +437,6 @@ class PythonClient:
     def cancel(self, run: str) -> Status:
         return Status.model_validate_json(self._request(RunOperation(operation="cancel", run=run)))
 
-    def diagnostics(
-        self, *, run: str | None = None, machine: str | None = None
-    ) -> tuple[Diagnostic, ...]:
-        return TypeAdapter(tuple[Diagnostic, ...]).validate_json(
-            self._request(EvidenceRequest(operation="diagnostics", run=run, machine=machine))
-        )
-
     def logs(
         self,
         *,
@@ -503,23 +459,13 @@ class PythonClient:
             ) from None
 
     def usage(self, *, run: str | None = None, machine: str | None = None) -> Usage:
-        return Usage.model_validate_json(
-            self._request(EvidenceRequest(operation="usage", run=run, machine=machine))
-        )
+        return Usage.model_validate_json(self._request(EvidenceRequest(run=run, machine=machine)))
 
     def fetch(self, run: str, name: str, destination: Path) -> Path:
         return _save_output(
             EncodedOutput.model_validate_json(self._request(OutputRequest(run=run, output=name))),
             FetchRequest(run=run, name=name, destination=destination),
         )
-
-    def rent(self, ondemand: str, hours: float, max_usd: Decimal | None = None) -> str:
-        return TypeAdapter(str).validate_json(
-            self._request(RentRequest(ondemand=ondemand, hours=hours, max_usd=max_usd))
-        )
-
-    def terminate(self, machine: str) -> Machine:
-        return Machine.model_validate_json(self._request(TerminateRequest(machine=machine)))
 
 
 def receive(scheduler: Scheduler) -> int:
@@ -579,10 +525,8 @@ def receive(scheduler: Scheduler) -> int:
             response = scheduler.standing(request.experiment, job=request.job)
         case WaitRequest():
             response = scheduler.wait(*request.runs, every=request.every, timeout=request.timeout)
-        case EvidenceRequest(operation="usage"):
+        case EvidenceRequest():
             response = scheduler.usage(run=request.run, machine=request.machine)
-        case EvidenceRequest(operation="diagnostics"):
-            response = scheduler.diagnostics(run=request.run, machine=request.machine)
         case LogsRequest():
             response = scheduler.logs(
                 run=request.run,
@@ -590,12 +534,6 @@ def receive(scheduler: Scheduler) -> int:
                 refresh=request.refresh,
                 timeout=request.timeout,
             )
-        case RentRequest():
-            response = scheduler.rent(request.ondemand, request.hours, request.max_usd)
-        case AvailabilityRequest():
-            response = scheduler.availability(request.ondemand, timeout=request.timeout)
-        case TerminateRequest():
-            response = scheduler.terminate(request.machine)
         case RunOperation(operation="read"):
             response = scheduler.read(request.run)
         case _:

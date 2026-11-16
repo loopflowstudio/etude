@@ -422,4 +422,5 @@ names what to use now.
 | `launch(..., smoke=True)`, `queue(..., smoke=True)` in Python | `etude launch FILE --smoke` |
 | `run.untag(checkpoint, ...)` | tags are added with `run.tag` and at `run.checkpoint(tags=...)` |
 | `run.checkpoint_due(every)` | compare `run.at("running_hours")` with your own next mark |
-
+| `rent`, `terminate`, `availability`, `diagnostics` in `etude.launch.client` | the `etude rent`, `terminate` and `availability` commands; `logs(...).diagnostics` |
+| `Planned`, `PlannedPoint` report panels | removed; plot a schedule as a logged metric with `Series` |

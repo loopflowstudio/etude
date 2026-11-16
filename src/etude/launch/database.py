@@ -1348,9 +1348,9 @@ def inspect(home: Path) -> Schema:
         return _inspect(db, path)
 
 
-def open_home(home: Path, *, timeout: float = 30) -> Database:
+def open_home(home: Path) -> Database:
     """Open only the canonical file; missing state requires explicit upgrade."""
-    return Database(launcher_file(home.resolve()), timeout=timeout)
+    return Database(launcher_file(home.resolve()))
 
 
 @contextmanager
