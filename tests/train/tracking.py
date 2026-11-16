@@ -7,6 +7,7 @@ construct its declaration and live resource directly to inject bounded inputs.
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from unittest.mock import patch
 
 from pydantic import BaseModel
 
@@ -33,7 +34,7 @@ def open_run(
     segment_seconds: float = 2.0,
     segment_rows: int = 5_000,
     strict: bool = False,
-    metric_name_limit: int | None = 1000,
+    metric_name_limit: int = 1000,
     resume: bool = False,
 ) -> TrainingRun:
     """A fixture declaration and the real training writer, without another public entry."""
@@ -65,18 +66,21 @@ def open_run(
         or os.environ.get("ETUDE_RESUME") == "1"
         or bool(os.environ.get("ETUDE_ATTEMPT")),
     )
-    return TrainingRun(
-        experiment=experiment,
-        name=declared.name,
-        root=declared.root,
-        clocks=declared.record.clocks,
-        destinations=destinations(declared.base, storages),
-        queue_size=queue_size,
-        segment_seconds=segment_seconds,
-        segment_rows=segment_rows,
-        strict=strict,
-        closed_clocks=clocks is not None,
-        metric_name_limit=metric_name_limit,
-        inherited=None if handed is None else handed.checkpoint,
-        seed=declared.record.seed or 0,
-    )
+    # Keep production policy fixed; scale the fixture's queue and sealing windows.
+    with (
+        patch("etude.train.tracking._QUEUE_SIZE", queue_size),
+        patch("etude.train.tracking._SEGMENT_SECONDS", segment_seconds),
+        patch("etude.train.tracking._SEGMENT_ROWS", segment_rows),
+        patch("etude.train.tracking._METRIC_NAME_LIMIT", metric_name_limit),
+    ):
+        return TrainingRun(
+            experiment=experiment,
+            name=declared.name,
+            root=declared.root,
+            clocks=declared.record.clocks,
+            destinations=destinations(declared.base, storages),
+            strict=strict,
+            closed_clocks=clocks is not None,
+            inherited=None if handed is None else handed.checkpoint,
+            seed=declared.record.seed or 0,
+        )

@@ -211,6 +211,11 @@ class EtudeWarning(UserWarning):
     """Logging needs attention: lost rows, invalid clocks or excessive metric names."""
 
 
+_QUEUE_SIZE = 10_000
+_SEGMENT_SECONDS = 2.0
+_SEGMENT_ROWS = 5_000
+_METRIC_NAME_LIMIT = 1000
+
 _STOP = object()
 
 
@@ -246,17 +251,11 @@ class TrainingRun(Run):
         root: Path,
         clocks: tuple[Clock, ...],
         destinations: Sequence[StorageDestination],
-        queue_size: int = 10_000,
-        segment_seconds: float = 2.0,
-        segment_rows: int = 5_000,
         strict: bool,
         closed_clocks: bool,
-        metric_name_limit: int | None = 1000,
         inherited: CheckpointRecord | None = None,
         seed: int = 0,
     ) -> None:
-        if metric_name_limit is not None and metric_name_limit < 0:
-            raise ValueError("metric_name_limit must be nonnegative or None")
         self.seed = seed
         super().__init__(experiment=experiment, name=name, root=root, targets=destinations)
         self.clocks = clocks
@@ -302,9 +301,9 @@ class TrainingRun(Run):
             )
             self._checkpoints[known.ordinal] = _Kept(path.stem, known)
         self._inherited = inherited
-        self._segment_seconds = segment_seconds
+        self._segment_seconds = _SEGMENT_SECONDS
         self._finish_deadline: float | None = None
-        self._segment_rows = segment_rows
+        self._segment_rows = _SEGMENT_ROWS
         self._writer_id = secrets.token_hex(6)
         # Etude's clocks continue from the saved state an attempt restores;
         # without one, from the latest checkpoint, this run's or the parent's
@@ -339,8 +338,8 @@ class TrainingRun(Run):
         self._save("metrics", self._writer_id, self._writer_record)
         seal_logs(self.files.root, self._columns)  # what an earlier process left unsealed
         self._index = Index(root, self._writer_id)
-        self._metric_name_limit = metric_name_limit
-        self._metric_names = metric_names(root) if metric_name_limit is not None else set()
+        self._metric_name_limit = _METRIC_NAME_LIMIT
+        self._metric_names = metric_names(root)
         self._sequence = 0
         # Only the current compaction window stays in memory.
         self._tails: list[Columns] = []
@@ -348,7 +347,7 @@ class TrainingRun(Run):
         self._recent: list[Columns] = []
         self._recent_bytes = 0
         self._folded_at = time.monotonic()
-        self._queue: queue.Queue[object] = queue.Queue(maxsize=queue_size)
+        self._queue: queue.Queue[object] = queue.Queue(maxsize=_QUEUE_SIZE)
         self._wake = threading.Event()
         self._stopping = threading.Event()
         self._finished = False
@@ -1123,7 +1122,7 @@ class TrainingRun(Run):
         if len(at) != len(columns):
             # Charted against the clocks it does give, and wall time; counted.
             self.incomplete += 1
-        if self._metric_name_limit is not None and "metric_names" not in self._warned:
+        if "metric_names" not in self._warned:
             self._metric_names.update(
                 name
                 for name, value in values.items()
@@ -1133,7 +1132,7 @@ class TrainingRun(Run):
                 self._warn(
                     "metric_names",
                     f"{len(self._metric_names)} distinct metric names exceed "
-                    f"metric_name_limit={self._metric_name_limit}; use log_table for "
+                    f"the {self._metric_name_limit}-name limit; use log_table for "
                     "per-update collections instead of encoding dimensions in metric names",
                 )
                 # The one-time warning needs no growing name registry afterward.

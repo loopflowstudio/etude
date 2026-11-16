@@ -550,7 +550,7 @@ class Bucket:
         signature = self._signature(stamp, canonical)
         return f"https://{self.host}{path}?{text_query}&X-Amz-Signature={signature}"
 
-    def post_form(self, prefix: str, seconds: int, max_bytes: int = 5 * 1024**3) -> PostForm:
+    def post_form(self, prefix: str, seconds: int) -> PostForm:
         """A form that writes objects under `prefix` for `seconds`, and nowhere else."""
         stamp = self._stamp()
         fields = {
@@ -566,7 +566,7 @@ class Bucket:
             "conditions": [
                 {"bucket": self.name},
                 ["starts-with", "$key", prefix],
-                ["content-length-range", 0, max_bytes],
+                ["content-length-range", 0, 5 * 1024**3],
                 *({name: value} for name, value in fields.items()),
             ],
         }

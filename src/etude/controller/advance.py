@@ -147,7 +147,6 @@ def advance(
     rent: str | None = None,
     directory: Path | str | None = None,
     retry_failed: bool = False,
-    smoke: Smoke = Smoke(),
     mode: Literal["local", "launch", "queue"] = "local",
     max_usd: Decimal | None = None,
     quote: bool = False,
@@ -222,6 +221,7 @@ def advance(
         keys=listed,
         declarations=declarations,
     )
+    smoke = Smoke()
     if smoke_file_first and not quote:
         assert experiment.file is not None
         before = (

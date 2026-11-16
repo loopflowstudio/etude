@@ -1494,16 +1494,6 @@ the projection. Do not add it to a rental total and label it a full experiment
 cost. Tiny objects can cost more in request charges when chunked unusually small;
 include requests as well as bytes when choosing a route.
 
-For provider reconciliation, project private access logs into frozen
-`Access(backend, request_id, key, response_bytes, status)` records from
-`etude.launch.usage`, then call `reconcile(report, rows)`. Use the event's
-backend hostname and decoded absolute object path. Duplicate request IDs count
-once; conflicting rows fail. `matched`, `unmatched_provider` and
-`unmatched_client` remain separate. Keep request URIs, signatures and credentials
-out of exports. Provider log delivery may omit or duplicate requests, and a GET
-is not by itself proof of billable internet egress. Reconciliation does not
-change observed transport totals or turn them into billed amounts.
-
 Adoption requires the SDK revision containing these APIs on both launcher
 and worker; generated archives include the same revision automatically.
 Use a fresh `ETUDE_HOME` for offline integration proof and install the reviewed

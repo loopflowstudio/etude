@@ -4,7 +4,6 @@ Transport events are not invoices. Shared session events stay shared rather
 than being multiplied by the number of runs. Missing coverage remains unknown.
 """
 
-from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Literal
@@ -17,11 +16,8 @@ __all__ = (
     "Usage",
     "R2",
     "S3_US_WEST_2",
-    "Access",
-    "reconcile",
     "Rates",
     "Transfer",
-    "Reconciliation",
 )
 
 
@@ -151,39 +147,3 @@ class Usage(Record):
             + Decimal(writes) / 10**6 * rates.write_usd_per_million
             + Decimal(reads) / 10**6 * rates.read_usd_per_million
         )
-
-
-class Access(Record):
-    """Safe projection of a provider access-log row; omit its raw request URI."""
-
-    backend: str
-    request_id: str
-    key: str
-    response_bytes: int = Field(ge=0)
-    status: int
-
-
-class Reconciliation(Record):
-    matched: tuple[Access, ...]
-    unmatched_provider: tuple[Access, ...]
-    unmatched_client: tuple[Transfer, ...]
-
-
-def reconcile(usage: Usage, records: Sequence[Access]) -> Reconciliation:
-    """Deduplicate request IDs; conflicting provider rows are evidence errors."""
-    unique: dict[tuple[str, str], Access] = {}
-    for row in records:
-        identity = (row.backend, row.request_id)
-        if identity in unique and unique[identity] != row:
-            raise ValueError("conflicting access records for one request")
-        unique[identity] = row
-    client = {(e.backend, e.request_id) for e in usage.events if e.request_id}
-    return Reconciliation(
-        matched=tuple(row for key, row in unique.items() if key in client),
-        unmatched_provider=tuple(row for key, row in unique.items() if key not in client),
-        unmatched_client=tuple(
-            e
-            for e in usage.events
-            if e.operation != "REUSE" and (e.backend, e.request_id) not in unique
-        ),
-    )

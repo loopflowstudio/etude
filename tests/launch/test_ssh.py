@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from collections import Counter
 from decimal import Decimal
@@ -23,6 +24,12 @@ from tests.launch.fake import open_database
 from tests.train.tracking import open_run
 
 
+@pytest.fixture(autouse=True)
+def ssh_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("ETUDE_REMOTE_PYTHON", sys.executable)
+
+
 def test_remote_host_runs_kept_work_logs_outputs_and_stops(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -31,7 +38,7 @@ def test_remote_host_runs_kept_work_logs_outputs_and_stops(
     executable = tmp_path / "ssh"
     executable.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
     executable.chmod(0o755)
-    ssh = SSH("bench", str(tmp_path / "remote"), str(executable), sys.executable)
+    ssh = SSH("bench", str(tmp_path / "remote"))
     journal = SSHJournal(ssh)
     service = Executor(OwnedMachine("bench"), SSHStart(ssh), journal)
     scheduler = Scheduler(open_database(tmp_path / "state.db"), {"ssh": lambda held: service})
@@ -73,7 +80,7 @@ def test_runs_move_between_local_and_remote_disk_including_kept_work(tmp_path: P
     executable = tmp_path / "ssh"
     executable.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
     executable.chmod(0o755)
-    ssh = SSH("bench", str(tmp_path / "remote"), str(executable), sys.executable)
+    ssh = SSH("bench", str(tmp_path / "remote"))
     remote = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
     here = local(tmp_path / "local")
     store = open_database(tmp_path / "state.db")
@@ -139,7 +146,7 @@ def test_continuation_moves_between_local_and_remote_disk(
     executable = tmp_path / "ssh"
     executable.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
     executable.chmod(0o755)
-    ssh = CountedSSH("bench", str(tmp_path / "bench/sessions"), str(executable), sys.executable)
+    ssh = CountedSSH("bench", str(tmp_path / "bench/sessions"))
     ssh.asks = Counter()
     remote = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
     here = local(tmp_path / "here/sessions")
@@ -225,10 +232,7 @@ def test_a_runs_folder_relays_between_hosts_over_ssh(tmp_path: Path) -> None:
     weights.write_bytes(b"weights at 1")
     run.checkpoint(weights, steps=1)
     run.finish()
-    hosts = [
-        SSHJournal(SSH(name, str(tmp_path / name / "sessions"), str(executable), sys.executable))
-        for name in ("a", "b")
-    ]
+    hosts = [SSHJournal(SSH(name, str(tmp_path / name / "sessions"))) for name in ("a", "b")]
     hosts[1].hold("lab/r", hosts[0].held("lab/r"))
     there = tmp_path / "b/track/lab/r"
     assert (there / "checkpoints/steps-1.pt").read_bytes() == b"weights at 1"

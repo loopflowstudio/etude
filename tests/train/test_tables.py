@@ -196,17 +196,5 @@ def test_metric_name_warning_counts_numeric_names_across_attempts(tmp_path: Path
             resumed.log({"fourth": 4}, updates=4, seconds=4)
     assert len(said) == 1
     assert "3 distinct metric names" in str(said[0].message)
-    assert "metric_name_limit=2" in str(said[0].message) and "log_table" in str(said[0].message)
+    assert "2-name limit" in str(said[0].message) and "log_table" in str(said[0].message)
     assert read(tmp_path, "e", "r").points("fourth", "updates").y.tolist() == [4]
-    with warnings.catch_warnings(record=True) as disabled:
-        warnings.simplefilter("always", EtudeWarning)
-        with open_run(
-            resume=True,
-            experiment="e",
-            run="r",
-            clocks=CLOCKS,
-            directory=tmp_path,
-            metric_name_limit=None,
-        ) as run:
-            run.log({"fifth": 5}, updates=5, seconds=5)
-    assert disabled == []

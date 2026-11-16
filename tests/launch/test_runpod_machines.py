@@ -897,7 +897,9 @@ def test_a_rented_sessions_grants_last_until_its_deadline(tmp_path: Path) -> Non
     assert all(30 * 3600 - 60 <= seconds <= 30 * 3600 for seconds in storage.durations)
 
 
-def test_lost_start_receipt_reply_cannot_leave_unreported_running_code(tmp_path: Path) -> None:
+def test_lost_start_receipt_reply_cannot_leave_unreported_running_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     class LostReceipt(Storage):
         def __call__(
             self, method: str, url: str, body: bytes | None, headers: dict[str, str]
@@ -927,8 +929,9 @@ def test_lost_start_receipt_reply_cannot_leave_unreported_running_code(tmp_path:
     )
     packet = Packet(session="r", deadline=datetime.now(UTC) + timedelta(minutes=1), work=(work,))
     bootstrap = journal.prepare(packet)
+    monkeypatch.setattr("etude.launch.worker.courier._send", storage)
     with pytest.raises(StorageUnavailable):
-        run_in_pod(bootstrap.url, lambda: None, tmp_path, send=storage, every=0.01)
+        run_in_pod(bootstrap.url, lambda: None, tmp_path)
     assert "test/sessions/r/out/receipt" in storage.objects
     assert not (tmp_path / "r" / "attempts").exists()
 

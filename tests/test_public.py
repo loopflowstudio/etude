@@ -56,9 +56,7 @@ SURFACE: dict[str, tuple[str, ...]] = {
     ),
     "etude.launch.database": tuple("Database inspect upgrade Schema Upgrade".split()),
     "etude.launch.provisioner.images": tuple("resolve_image prepare_pytorch".split()),
-    "etude.launch.usage": tuple(
-        "Usage R2 S3_US_WEST_2 Access reconcile Rates Transfer Reconciliation".split()
-    ),
+    "etude.launch.usage": tuple("Usage R2 S3_US_WEST_2 Rates Transfer".split()),
 }
 
 
