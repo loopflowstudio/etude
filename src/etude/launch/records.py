@@ -407,6 +407,7 @@ class Session(Record):
     provider_id: str | None
     started_at: datetime | None
     refused_at: datetime | None
+    refusal: str | None = None
     ended_at: datetime | None
     # When it was told no more work will come; it is given none after.
     finish_requested_at: datetime | None = None

@@ -496,6 +496,10 @@ def test_refusal_lookup_upgrade_from_the_released_schema_preserves_facts(
         upgrade(tmp_path)
         store = open_home(tmp_path)
         store.add_pool(Pool(name="preserved"))
+        store._db.execute(
+            "INSERT INTO sessions(id, machine, planned_at, refused_at) VALUES (?, ?, ?, ?)",
+            ("old-refusal", "local", datetime.now(UTC).isoformat(), datetime.now(UTC).isoformat()),
+        )
         store.close()
     monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in known})
     result = upgrade(tmp_path)
@@ -503,5 +507,7 @@ def test_refusal_lookup_upgrade_from_the_released_schema_preserves_facts(
     store = open_home(tmp_path)
     assert store.pool("preserved").name == "preserved"
     assert store.finishing_sessions() == ()
+    assert store.session("old-refusal").refusal is None
+    assert store.session("old-refusal").refused_at is not None
     assert store.recent_refusal("missing", datetime.now(UTC)) is None
     store.close()

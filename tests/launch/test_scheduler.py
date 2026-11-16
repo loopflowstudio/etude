@@ -15,6 +15,7 @@ import pytest
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch.database import launcher_file
+from etude.launch.provisioner.machines import Refused
 from etude.launch.records import (
     LogStream,
     MachineTemplate,
@@ -142,6 +143,55 @@ def test_refused_capacity_is_retried_up_to_the_jobs_allowed_attempts(tmp_path: P
     status = b.scheduler.read(two)
     assert (status.phase, status.outcome, status.cause) == ("done", "lost", "capacity_refused")
     assert status.attempts == 2 and status.usd == 0
+
+
+@pytest.mark.parametrize("elapsed", [0, 59, 61])
+def test_refused_status_keeps_each_runs_own_reason_after_restart(
+    tmp_path: Path, elapsed: int
+) -> None:
+    b = bench(tmp_path)
+    (one, two) = b.scheduler.queue(job().runs(1, 2), rent="l4")
+    with patch.object(
+        b.service,
+        "create",
+        side_effect=[Refused("first capacity refusal"), Refused("second capacity refusal")],
+    ):
+        b.scheduler.tick()
+    # Diagnostic retention cannot change scheduling or status facts.
+    b.store._db.execute("DELETE FROM diagnostics")
+    b.clock.advance(elapsed)
+    restarted = Scheduler(b.store, {}, clock=b.clock)
+    assert str(restarted.read(one)) == "queued (provider refused: first capacity refusal), $0.00"
+    assert str(restarted.read(two)) == "queued (provider refused: second capacity refusal), $0.00"
+
+
+@pytest.mark.parametrize("reason", [None, ""])
+def test_refused_status_without_a_recorded_reason(tmp_path: Path, reason: str | None) -> None:
+    b = bench(tmp_path)
+    b.service.refuse = 1
+    (one,) = b.scheduler.queue(job(), rent="l4")
+    b.scheduler.tick()
+    session = b.store.session(b.scheduler.attempts(one)[-1].session)
+    b.store.record_refusal(session, b.clock(), reason)
+    restarted = Scheduler(b.store, {}, clock=b.clock)
+    assert str(restarted.read(one)) == "queued (provider refused capacity), $0.00"
+
+
+def test_refusal_pause_survives_restart_without_diagnostics(tmp_path: Path) -> None:
+    b = bench(tmp_path)
+    b.service.refuse = 2
+    (one,) = b.scheduler.queue(job(), rent="l4")
+    b.scheduler.tick()
+    b.store._db.execute("DELETE FROM diagnostics")
+    restarted = Scheduler(b.store, {"runpod": lambda held: b.service}, clock=b.clock)
+    b.clock.advance(59)
+    restarted.tick()
+    assert b.service.creates == 1
+    assert str(restarted.read(one)) == "queued (provider refused: no capacity), $0.00"
+    b.clock.advance(1)
+    restarted.tick()
+    assert b.service.creates == 2
+    assert len(restarted.attempts(one)) == 2
 
 
 def test_a_lost_machine_retries_the_same_run_with_remaining_hours(tmp_path: Path) -> None:

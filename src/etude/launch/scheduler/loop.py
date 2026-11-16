@@ -356,7 +356,7 @@ class Scheduler:
             # identity, or record that it holds nothing.
             provider_id = self._service(held).find(held.id)
             if provider_id is None:
-                self._store.record_refusal(held, self._clock())
+                self._store.record_refusal(held, self._clock(), None)
                 return
             self._store.record_provider_id(held, provider_id)
             held = self._store.session(held.id)
@@ -779,11 +779,13 @@ class Scheduler:
                             if session.provider_id is None:
                                 if attempts:
                                     break  # keep confirmed placements; later runs stay queued
-                                reason = (
-                                    self._trouble.get(placement.supply, "provider refused capacity")
-                                    if session.refused_at
-                                    else "create reply unknown"
-                                )
+                                reason = "create reply unknown"
+                                if session.refused_at is not None:
+                                    reason = (
+                                        f"provider refused: {session.refusal}"
+                                        if session.refusal
+                                        else "provider refused capacity"
+                                    )
                                 raise LauncherError(
                                     f"cannot launch on {placement.supply!r}: {reason};"
                                     " etude queue would wait"
@@ -829,7 +831,7 @@ class Scheduler:
                         if session.provider_id is not None:
                             self._end_session(session)
                         elif session.claimed_at is None:
-                            self._store.record_refusal(session, self._clock())
+                            self._store.record_refusal(session, self._clock(), None)
                     except Exception as error:
                         self._diagnose("cleanup", "cleanup unconfirmed", error, session=session.id)
                         # Next tick cleans up; unknown creates are only looked up.
@@ -1293,14 +1295,19 @@ class Scheduler:
             )
         if last is not None and not retry:
             return seen.model_copy(update={"phase": "done", "outcome": last.outcome})
-        if last is not None and last.cause == "capacity_refused" and not superseded:
-            refused = (
-                self._store.recent_refusal(session.supply, now - timedelta(seconds=60))
-                if session
-                else None
+        if (
+            last is not None
+            and last.cause == "capacity_refused"
+            and not superseded
+            and session is not None
+        ):
+            return seen.model_copy(
+                update={
+                    "reason": f"provider refused: {session.refusal}"
+                    if session.refusal
+                    else "provider refused capacity"
+                }
             )
-            if refused is not None:
-                return seen.model_copy(update={"reason": refused.message})
         if last is not None:
             return seen.model_copy(
                 update={
@@ -1370,7 +1377,7 @@ class Scheduler:
                     continue  # storage or the provider will answer on a later pass
             elif not self._kept_rental(session) and not self._store.attempts(session=session.id):
                 # A crashed admission never asked for this machine. Release its claim.
-                self._store.record_refusal(session, now)
+                self._store.record_refusal(session, now, None)
         self._store.check_lock(supply.name)
         self._plan(supply, now)
         for idle in self._idle_sessions(supply, now):
@@ -1482,7 +1489,6 @@ class Scheduler:
             else:
                 refused = self._store.recent_refusal(supply.name, now - timedelta(seconds=60))
                 if refused is not None:
-                    self._trouble[supply.name] = refused.message
                     return
                 offer = self._rentable(supply)
                 if offer is None:
@@ -1761,11 +1767,10 @@ class Scheduler:
                     packet.model_copy(update={"kept": True}) if idle else packet
                 )
         except Refused as error:
-            self._trouble[session.supply] = "provider refused: " + sanitize(str(error))
             self._diagnose(
                 "machine create", "provider refused; no machine acquired", error, session=session.id
             )
-            self._store.record_refusal(session, now)
+            self._store.record_refusal(session, now, sanitize(str(error)))
             for attempt in self._store.attempts(session=session.id):
                 self._store.fail_before_start(attempt, "capacity_refused", now)
             return
@@ -2002,7 +2007,7 @@ class Scheduler:
                 for attempt in attempts:
                     if attempt.outcome is None:
                         self._store.finish(attempt, now, "lost", cause="create_unconfirmed")
-                self._store.record_refusal(session, now)
+                self._store.record_refusal(session, now, None)
             return
         if not attempts and (rental is None or not rental.kept):
             self._end_session(session)

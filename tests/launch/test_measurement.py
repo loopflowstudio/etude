@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -24,7 +25,7 @@ from etude.launch.commands import Kind
 from etude.launch.database import launcher_file, upgrade
 from etude.launch.executor import Execution
 from etude.launch.provisioner.providers.runpod.http import PodHTTP
-from etude.launch.records import Machine, OnDemand
+from etude.launch.records import Machine, OnDemand, Pool
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet
 from etude.launch.ssh import SSH, SessionRequest
@@ -122,6 +123,44 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
     # and the status it returns reads the machine's attempts for how many shared it.
     # Refusal pause and shutdown settlement add three indexed local reads.
     assert wait == Counts(provider=4, bucket=1, database=107)  # known debt: wait advances work
+
+
+@pytest.mark.parametrize("history", [0, 4096])
+def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> None:
+    b = bench(tmp_path)
+    b.service.refuse = 1
+    (run,) = b.scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
+    b.scheduler.tick()
+    b.store.add_pool(Pool(name="history"))
+    b.store.add_machine(Machine(name="history", kind="ssh", pool="history", address="fixture"))
+    old = (b.clock() - timedelta(days=1)).isoformat()
+    b.store._db.executemany(
+        "INSERT INTO sessions(id, machine, planned_at, refused_at) VALUES (?, ?, ?, ?)",
+        [(f"history-{index}", "history", old, old) for index in range(history)],
+    )
+    restarted = Scheduler(b.store, {}, clock=b.clock)
+    counting = Counting(b.store, b.service)
+    with counting.record():
+        assert str(restarted.read(run)) == "queued (provider refused: no capacity), $0.00"
+        status = counting.snapshot()
+    started = time.perf_counter()
+    with counting.record():
+        refused = b.store.recent_refusal("l4", b.clock() - timedelta(seconds=60))
+        pause = counting.snapshot()
+    elapsed = time.perf_counter() - started
+    print(f"refusal lookup with {history} historical sessions: {elapsed:.6f} s")
+    assert refused is not None and refused.refusal == "no capacity"
+    assert status == Counts(database=14)
+    assert pause == Counts(database=1)
+    statements: list[str] = []
+    b.store._db.set_trace_callback(statements.append)
+    try:
+        b.store.recent_refusal("l4", b.clock() - timedelta(seconds=60))
+    finally:
+        b.store._db.set_trace_callback(None)
+    plan = [row[3] for row in b.store._db.execute("EXPLAIN QUERY PLAN " + statements[0])]
+    assert any("sessions_refused" in step for step in plan), plan
+    assert not any("SCAN" in step for step in plan), plan
 
 
 def test_several_run_git_and_database_counts(

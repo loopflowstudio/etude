@@ -1143,24 +1143,19 @@ class Database:
             )
         )
 
-    def recent_refusal(self, supply: str, since: datetime) -> Diagnostic | None:
-        """The newest create refusal in this supply's retry pause, across scheduler starts."""
-        # Start with the bounded refusal window. Explicit text affinity lets
-        # SQLite use the diagnostic JSON expression index when joining session ids.
+    def recent_refusal(self, supply: str, since: datetime) -> Session | None:
+        """The newest refusal in this supply's retry pause, across scheduler starts."""
         row = self._db.execute(
-            """SELECT d.body FROM sessions w
-               CROSS JOIN machines m ON m.name = w.machine
-               CROSS JOIN diagnostics d ON CAST(json_extract(d.body, '$.session') AS TEXT) = w.id
-                 AND json_extract(d.body, '$.operation') = 'machine create'
-               WHERE w.refused_at > ? AND m.ondemand = ?
-                 AND json_extract(d.body, '$.exception') = 'Refused'
-               ORDER BY w.refused_at DESC LIMIT 1""",
+            f"""{_SESSIONS} WHERE w.refused_at > ? AND m.ondemand = ?
+                ORDER BY w.refused_at DESC LIMIT 1""",
             (since.isoformat(), supply),
         ).fetchone()
-        return None if row is None else Diagnostic.model_validate_json(row[0])
+        return None if row is None else _session_from_row(row)
 
-    def record_refusal(self, session: Session, at: datetime) -> None:
-        self._change("sessions", session.id, session.version, refused_at=at.isoformat())
+    def record_refusal(self, session: Session, at: datetime, reason: str | None) -> None:
+        self._change(
+            "sessions", session.id, session.version, refused_at=at.isoformat(), refusal=reason
+        )
 
     def record_finish(self, session: Session, at: datetime) -> None:
         self._change("sessions", session.id, session.version, finish_requested_at=at.isoformat())
