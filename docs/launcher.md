@@ -115,8 +115,8 @@ When `wait` returns, each machine rented for its runs reads `deleted` in
 `etude machines`, its final logs are collected, and the on-demand's `--max` is
 free for the next launch, so `launch; wait; launch; wait` needs nothing in
 between. A machine rented by hand with `etude rent` is kept and does not hold
-`wait`. A launch issued while a machine is still ending says which one:
-`at its machine limit (gpu-41840a01c3b1 is finishing)`; `etude wait` clears it.
+`wait`. A launch issued while a machine is still finishing says which one:
+`at its machine limit (finishing: gpu-41840a01c3b1)`; `etude wait` clears it.
 
 ## Fetching a run's files
 

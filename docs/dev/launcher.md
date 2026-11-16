@@ -761,11 +761,11 @@ is finished and no such session remains. Confirming an end records the
 session's `ended_at` and the machine's deletion together and collects its final
 logs, so `etude machines` and `etude logs` are settled when `wait` returns. A
 kept rental (`etude rent`) is never told to finish and does not hold `wait`. A
-`wait` that times out there names the machines still ending. `launch` and
+`wait` that times out there names the machines still finishing. `launch` and
 `--quote` confirm ends whose receipt has arrived before they count an
 on-demand's machines; they run no other part of a scheduling pass and rent for
-no other run. A machine still ending counts toward the limit, and the refusal
-names it: `at its machine limit (demo-cpu-d96e90953e46 is finishing)`. Started
+no other run. A machine still finishing counts toward the limit, and the refusal
+names it: `at its machine limit (finishing: demo-cpu-d96e90953e46)`. Started
 workers execute their delivered work independently; a launched machine with
 an inbox is cleaned up on the next scheduling pass or at its own deadline.
 `launch` first acquires machines for the runs it can place. Each machine

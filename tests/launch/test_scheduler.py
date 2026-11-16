@@ -240,7 +240,7 @@ def test_a_machine_told_to_finish_is_given_no_more_work(tmp_path: Path) -> None:
     assert b.scheduler.read(one).outcome == "succeeded"  # and its idle machine was told to finish
     (two,) = b.scheduler.queue(job(max_hours=0.5), rent="l4")  # it fits what is left of that rental
     b.run(1)
-    assert b.scheduler.read(two).phase == "queued"  # the one machine allowed is still ending
+    assert b.scheduler.read(two).phase == "queued"  # the one machine allowed is still finishing
     (status,) = b.scheduler.wait(two, every=60)
     assert (status.outcome, status.attempts, b.service.creates) == ("succeeded", 1, 2)
 
@@ -995,9 +995,9 @@ def test_launch_names_the_machine_still_finishing_and_quote_settles_its_receipt(
     (one,) = b.scheduler.launch(job(), rent="l4")
     b.run(601)
     machine = b.scheduler.read(one).machine
-    with pytest.raises(LauncherError, match=f"{machine} is finishing"):
+    with pytest.raises(LauncherError, match=rf"\(finishing: {machine}\)"):
         b.scheduler.launch(job(), rent="l4")
-    with pytest.raises(TimeoutError, match=f"machines still ending: {machine}"):
+    with pytest.raises(TimeoutError, match=f"machines still finishing: {machine}"):
         b.scheduler.wait(one, timeout=0)
     b.clock.advance(5)
     quote = b.scheduler.quote([RunRequest(job=job())], rent="l4")

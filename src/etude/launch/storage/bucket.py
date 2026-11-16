@@ -524,8 +524,10 @@ class BucketJournal:
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
         run = self._runs(session_id).get(attempt)
         record = None if run is None else self._record(session_id, run, attempt)
-        if run is None or record is None or record.exited is None or not record.delivered:
-            raise LauncherError(f"attempt {attempt} recorded no output {name!r}")
+        if run is None:
+            raise LauncherError(f"session {session_id} was not given attempt {attempt}")
+        if record is None or record.exited is None or not record.delivered:
+            raise LauncherError(f"run {run}'s latest attempt has not delivered its files yet")
 
         def read_out() -> OutFiles | None:
             raw = self._bucket.get(self._run_prefix(run) + MEMBERSHIP)

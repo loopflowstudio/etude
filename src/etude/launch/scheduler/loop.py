@@ -1024,7 +1024,7 @@ class Scheduler:
             if give_up is not None and self._clock() >= give_up:
                 if ending:
                     raise TimeoutError(
-                        "machines still ending: " + ", ".join(s.machine for s in ending)
+                        "machines still finishing: " + ", ".join(s.machine for s in ending)
                     )
                 raise TimeoutError("runs still running: " + ", ".join(runs))
             self._sleep(every)
@@ -1570,7 +1570,7 @@ class Scheduler:
         if problem == "at its machine limit":
             ending = [s.machine for s in self._store.finishing_sessions(supply=ondemand.name)]
             if ending:
-                problem += f" ({', '.join(ending)} is finishing)"
+                problem += f" (finishing: {', '.join(ending)})"
         if problem is not None:
             self._trouble[ondemand.name] = problem
             return None
