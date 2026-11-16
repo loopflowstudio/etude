@@ -50,7 +50,7 @@ from etude.eval.records import CheckpointSlot, Benchmark, Code, Seating, checkpo
 from etude.jobs import ExperimentState
 from etude.jobs import EvalJob, TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, SmokeForm
+from etude.spec import Job, SmokeForm
 from etude.report import Report
 from tests.eval.games import {play}
 

@@ -25,9 +25,10 @@ Later passes see new checkpoints and submit their eval matches. Supply finite
 runs; eval seeds are indices in the match generator's panel.
 
 `Job` is also available from `etude.spec` for arbitrary shell commands. Its
-`inputs`, `environment`, `prepare`, `runtime`, `setup`, `cleanup` and `extras`
+`inputs`, `environment`, `prepare`, `runtime`, `setup` and `cleanup`
 control execution. Typed jobs derive their command from an importable Python
-function and validated Pydantic config; do not specify another command.
+function and validated Pydantic config; do not specify another command. Their
+`extras` select project dependency extras for that function's environment.
 
 ## Pools and owned machines
 

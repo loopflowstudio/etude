@@ -300,7 +300,7 @@ def advance(
                 each.decision.played = result.played
             continue
         executable = group_evaluations(executables, members)
-        keys = sorted(m.key for spec in members for m in spec.matches or ())
+        keys = sorted(m.key for spec in members for m in spec.matches)
         stem = f"{experiment.name}/evals-{digest(keys)[:12]}"
         identity = stem
         number = 2
@@ -358,7 +358,7 @@ def _play_here(
     """Play with the same verified artifacts a launched run receives as inputs."""
     with TemporaryDirectory(prefix="etude-eval-") as folder:
         here = fetch_checkpoints(
-            tuple(match for spec in specs for match in spec.matches or ()),
+            tuple(match for spec in specs for match in spec.matches),
             state,
             (),
             Path(folder),

@@ -376,7 +376,7 @@ def test_typed_stop_and_continuation_restore_full_state_and_only_change_target(
             "recipe_continuation.py": RECIPE,
             "job.py": """
 from etude.jobs import TrainingJob
-from etude.launch.records import Job, Runtime
+from etude.spec import Job, Runtime
 from recipe_continuation import Config, train
 
 def training_jobs(python: str) -> Job:

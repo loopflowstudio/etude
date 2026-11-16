@@ -55,7 +55,7 @@ def train(config: TrainConfig) -> None:
 
 JOB = """
 from etude.jobs import TrainingJob
-from etude.launch.records import Job, Runtime
+from etude.spec import Job, Runtime
 
 from {module} import OtherConfig, TrainConfig, train
 
@@ -174,7 +174,7 @@ def train(config: Config) -> None:
 """,
             "plain.py": f"""
 from etude.jobs import TrainingJob
-from etude.launch.records import Job, Runtime
+from etude.spec import Job, Runtime
 from {module} import Config, train
 
 def training_jobs(python: str) -> Job:
@@ -483,7 +483,7 @@ def test_job_seeds_expand_to_named_requests_without_changing_job_identity(tmp_pa
     file.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job
+from etude.spec import Job
 def training_jobs():
     return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="baseline", seeds=(0, 7), repo=None)
 """
@@ -505,7 +505,7 @@ def training_jobs():
     file.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job
+from etude.spec import Job
 def training_jobs():
     return [TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="first", repo=None), TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="other", repo=None)]
 """

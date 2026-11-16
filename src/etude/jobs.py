@@ -440,23 +440,7 @@ class Evaluation(Record):
         files = TypeAdapter(dict[str, str]).validate_python(value.get("files", {}))
         if given is not None:
             if isinstance(given, Input):
-                key = (
-                    _checkpoint_id(
-                        experiment="",
-                        run=given.run,
-                        name=given.key
-                        if given.key.startswith("out/")
-                        else checkpoint_file_name(given.key),
-                    )
-                    if given.run is not None
-                    else given.key
-                )
-                ref = CheckpointRef(
-                    address=key,
-                    artifact=ArtifactRef(
-                        uri=given.uri or given.key, sha256=given.sha256, size_bytes=given.size_bytes
-                    ),
-                )
+                ref = _input_checkpoint(given)
                 files[ref.key] = given.name
             else:
                 ref = given.ref if isinstance(given, CheckpointRecord) else given
@@ -683,26 +667,7 @@ class EvalJob(Job):
         if isinstance(self.checkpoint, CheckpointRecord):
             refs = (self.checkpoint.ref,)
         elif isinstance(self.checkpoint, Input):
-            given = self.checkpoint
-            key = (
-                _checkpoint_id(
-                    experiment="",
-                    run=given.run,
-                    name=given.key
-                    if given.key.startswith("out/")
-                    else checkpoint_file_name(given.key),
-                )
-                if given.run is not None
-                else given.key
-            )
-            refs = (
-                CheckpointRef(
-                    address=key,
-                    artifact=ArtifactRef(
-                        uri=given.uri or given.key, sha256=given.sha256, size_bytes=given.size_bytes
-                    ),
-                ),
-            )
+            refs = (_input_checkpoint(self.checkpoint),)
         return TournamentRun(
             tournament=self.tournament, checkpoints=refs, entrants=tuple(self.enter)
         )
@@ -798,9 +763,7 @@ def _group_key(job: Job, spec: Evaluation) -> str:
         "cleanup_seconds",
         "max_attempts",
     }
-    return job.model_dump_json(include=shared) + (
-        spec.agents.model_dump_json() if spec.agents else ""
-    )
+    return job.model_dump_json(include=shared) + spec.agents.model_dump_json()
 
 
 def hold_group(
@@ -898,7 +861,7 @@ def hold_group(
                     play=spec.play,
                     checkout=checkout,
                     tournament=spec.definition.name,
-                    agents=agent_process.address if agent_process and spec.agents else None,
+                    agents=agent_process.address if agent_process else None,
                     build=spec.agents.build,
                     load=spec.agents.load if needs_loading and agent_process is None else None,
                     memory=agent_bytes(spec.agents.memory_gb) // max(1, cpus.games),
@@ -951,6 +914,25 @@ def group_evaluations(jobs: Sequence[Job], evaluations: Sequence[Evaluation]) ->
             if any(job.max_usd is None for job in jobs)
             else sum((job.max_usd or Decimal(0) for job in jobs), Decimal(0)),
         }
+    )
+
+
+def _input_checkpoint(given: Input) -> CheckpointRef:
+    """Name an input's checkpoint independently of its current byte location."""
+    key = (
+        _checkpoint_id(
+            experiment="",
+            run=given.run,
+            name=given.key if given.key.startswith("out/") else checkpoint_file_name(given.key),
+        )
+        if given.run is not None
+        else given.key
+    )
+    return CheckpointRef(
+        address=key,
+        artifact=ArtifactRef(
+            uri=given.uri or given.key, sha256=given.sha256, size_bytes=given.size_bytes
+        ),
     )
 
 
@@ -1209,7 +1191,9 @@ def _hold(group: EvalGroup) -> None:
 
 def _received(evaluation: Evaluation) -> Evaluation:
     if evaluation.experiment is None:
-        raise SystemExit("etude: evaluation jobs need their experiment")
+        raise SystemExit(
+            "etude: evaluation jobs need their experiment; use etude eval FILE or etude launch FILE"
+        )
     folder = os.environ.get("ETUDE_INPUTS_DIR")
     if evaluation.files and folder is None:
         raise SystemExit("etude: an evaluation job's checkpoints arrive as inputs")

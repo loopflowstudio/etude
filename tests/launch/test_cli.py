@@ -37,14 +37,14 @@ JOB_FILE = r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
 
 import sys
-from etude.launch.records import Job, Run
+from etude.spec import RunRequest
 from decimal import Decimal
 from pathlib import Path
 command = f"{sys.executable} {Path(__file__).parent / 'train.py'}"
 here = Path(__file__).parent
 
 
-def training_jobs(steps: int = 26000, seeds: int = 2) -> list[Run]:
+def training_jobs(steps: int = 26000, seeds: int = 2) -> list[RunRequest]:
     return [run for arm in ("small", "large") for run in
             TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command=command, text=(here / (arm + ".toml")).read_text()), max_hours=0.1, max_usd=Decimal(5), until=f"steps={steps}", name=arm, experiment="capacity", repo=None).runs(*range(1, seeds + 1))]
 
@@ -172,7 +172,7 @@ run.finish()
 from tests.launch.tasks import Command, RUNTIME, train_command
 import sys
 from pathlib import Path
-from etude.launch.records import Job
+from etude.spec import Job
 def training_jobs() -> Job:
     train = Path(__file__).parent / 'train.py'
     return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command=f'{sys.executable} {train}'), max_hours=0.1, name="base", repo=None)
@@ -236,7 +236,7 @@ def test_machines_join_pools_and_this_computer_can_be_turned_off(
     (tmp_path / "job.py").write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, max_usd=1, name="base", repo=None)
 """
     )
@@ -264,7 +264,7 @@ def test_default_target_and_owned_status(
     path.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="echo hi"), max_hours=0.01, max_usd=1, name="base", repo=None)
 """
     )
@@ -277,7 +277,7 @@ def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, co
     path.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="echo free"), name="free", max_hours=0.001, repo=None)
 """
     )
@@ -376,7 +376,7 @@ def test_launch_makes_machines_that_start_themselves(
     path.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="train"), max_hours=1, max_usd=1, name="base", repo=None)"""
         + (".runs(1, 2)" if cohort else "")
     )
@@ -510,7 +510,7 @@ def test_a_job_file_takes_parameters_and_records_them_on_each_run(
         r"""from __future__ import annotations
 from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(hidden: int = 256, seeds: int = 1, lr: float = 0.1, fast: bool = False,
          tag='x', shape: list[int] | None = None) -> list[RunRequest]:
     assert type(hidden) is int and type(lr) is float and type(fast) is bool
@@ -545,7 +545,7 @@ def test_job_help_required_flags_mixed_order_and_collision(
     path.write_text(
         r'''from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job
+from etude.spec import Job
 def training_jobs(width: int, fast: bool = False):
     """Train a chosen width."""
     return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), name=f"width-{width}", max_hours=1, repo=None)

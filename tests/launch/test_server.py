@@ -184,7 +184,7 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     job.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 from pathlib import Path
 here = Path(__file__).parent
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="sh train.sh", text=(here / "config.txt").read_text()), experiment="capacity", max_hours=0.01, max_usd=1, repo=str(here / "source with spaces"), until="steps=10", name="base").runs(1, 2)
@@ -243,7 +243,7 @@ def test_loop_survives_an_empty_queue_and_places_later_work(
             job.write_text(
                 r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="sleep 0.2"), max_hours=0.01, max_usd=1, name="base", repo=None).runs(1, 2)
 """
             )
@@ -320,7 +320,7 @@ def test_remote_queue_preserves_choice_without_local_database(
     path.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, max_usd=1, name="base", repo=None).runs(1, 2)
 """
     )

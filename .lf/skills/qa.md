@@ -156,7 +156,8 @@ launcher commands for unmerged SQL. Reads never initialize the database.
 `uv run etude launch experiment.py --pool local` submits pending work;
 `uv run etude wait --experiment experiment` drives it. Launch again to discover
 evals after training, then wait again. Read printed outcomes, logs and cleanup
-receipts: exit 0 from wait alone does not establish success. Each job uses an
+receipts: exit 0 from wait alone does not establish success. `wait` takes no
+time limit and macOS has no `timeout`; bound it with the shell tool's own timeout. Each job uses an
 environment separate from the client. Keep `max_hours` and `max_usd` bounded.
 
 Check a continuation with `uv run etude continue --run ADDRESS --until updates=N`.

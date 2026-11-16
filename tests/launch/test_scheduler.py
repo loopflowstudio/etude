@@ -395,7 +395,7 @@ def test_quote_prints_planned_first_wave_costs_and_rents_nothing(
     path.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job
+from etude.spec import Job
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command='train'), max_hours=1, max_usd=2, name="base", repo=None).runs(1, 2, 3)
 """
     )

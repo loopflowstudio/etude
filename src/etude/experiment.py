@@ -167,7 +167,7 @@ def state_of(
             matches = tuple(
                 Match.model_validate(m.model_dump(), context={"experiment": experiment}).key
                 for spec in group.evaluations
-                for m in spec.matches or ()
+                for m in spec.matches
             )
             prior = next((r for r in eval_runs if r.name == name), None)
             if prior is not None:
