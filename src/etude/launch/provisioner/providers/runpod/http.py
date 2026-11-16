@@ -9,12 +9,27 @@ from decimal import Decimal
 from typing import Any
 
 from etude.deadline import call
-from etude.launch.errors import ProviderUnavailable
+from etude.errors import sanitize
+from etude.launch.errors import ProviderRejected, ProviderUnavailable
 from etude.launch.provisioner.providers.http import MAX_REPLY_BYTES, send_to_provider
 from etude.launch.storage.transport import Send
 
 BASE = "https://api.runpod.io/v2/"
 _ID = re.compile(r"[a-zA-Z0-9_-]{1,200}")
+
+
+def _reason(body: bytes) -> str:
+    """The provider's words from an error reply: sanitized, printable, 300 characters at most."""
+    text = body.decode(errors="replace")
+    try:
+        value = json.loads(text)
+    except ValueError:
+        value = None
+    if isinstance(value, dict):
+        detail = value.get("detail") or value.get("title")
+        if isinstance(detail, str):
+            text = detail
+    return "".join(c for c in sanitize(text) if c.isprintable())[:300].strip()
 
 
 class PodHTTP:
@@ -50,6 +65,8 @@ class PodHTTP:
             raise ProviderUnavailable(f"{method} {path}: no reply") from None
         if absent_ok and reply.status == 404:
             return None
+        if 400 <= reply.status < 500:
+            raise ProviderRejected(reply.status, _reason(reply.body))
         if not 200 <= reply.status < 300 or len(reply.body) > MAX_REPLY_BYTES:
             raise ProviderUnavailable(f"{method} {path}: status {reply.status}")
         try:

@@ -78,7 +78,7 @@ def show_ondemands(scheduler: Scheduler) -> None:
         parts = [f"{kind} on {source}", f"up to {each.max_machines} at once{ceiling}"]
         if each.slots > 1:
             parts.append(f"{each.slots} runs at once on each")
-        rented = [m.name for m in scheduler.machines(each.name) if m.deleted_at is None]
+        rented = [m.name for m in scheduler.machines(each.name) if m.held]
         if rented:
             parts.append("rented: " + ", ".join(rented))
         parts.append("safeguards: " + ", ".join(scheduler.safeguards(each.name)))
@@ -108,7 +108,17 @@ def show_machines(scheduler: Scheduler, *, ended: bool) -> None:
             )
     for ondemand in scheduler.ondemands():
         for machine in scheduler.machines(ondemand.name):
-            if machine.name not in windows or (machine.deleted_at is not None and not ended):
+            if not machine.held and not ended:
+                continue
+            if machine.refused_at is not None:
+                print(
+                    machine.name,
+                    ondemand.name,
+                    f"unavailable, nothing rented {machine.refused_at:%Y-%m-%d %H:%M} UTC",
+                    sep="  ",
+                )
+                continue
+            if machine.name not in windows:
                 continue
             spent = windows[machine.name]
             rental = spent.rental

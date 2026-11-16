@@ -15,7 +15,7 @@ from etude.launch.database import upgrade
 from etude.spec import RunRequest, Runtime, Until
 from etude.storage import default_root
 from etude.train.read import read
-from tests.launch.counting import Counting
+from tests.launch.counting import Counting, query_plan
 from tests.launch.fake import bench
 from tests.launch.tasks import Command, train_command
 from tests.launch.test_scheduler import job
@@ -87,6 +87,30 @@ def test_resume_refuses_a_live_allocation(tmp_path: Path) -> None:
     with pytest.raises(LauncherError, match="allocated attempt"):
         b.scheduler.launch(RunRequest(job=spec, id=identity, seed=0, resume=True), rent="l4")
     assert len(b.scheduler.attempts(identity)) == 1
+
+
+def test_cancelled_capacity_refusals_leave_the_full_attempt_budget_for_resume(
+    tmp_path: Path,
+) -> None:
+    b = bench(tmp_path)
+    spec = job(max_attempts=1)
+    b.service.refuse = 2
+    (identity,) = b.scheduler.queue(spec, rent="l4")
+    b.scheduler.tick()
+    b.run(60)
+    assert b.service.creates == 2
+    assert b.scheduler.cancel(identity).outcome == "cancelled"
+    b.run(60)
+    assert b.service.creates == 2
+    assert not b.store.waiting("l4")
+
+    b.scheduler.queue(RunRequest(job=spec, id=identity, seed=0, resume=True), rent="l4")
+    b.scheduler.tick()
+    assert b.service.creates == 3
+    assert b.scheduler.attempts(identity)[-1].number == 3
+    b.run(601)
+    status = b.scheduler.read(identity)
+    assert (status.outcome, status.attempts) == ("succeeded", 1)
 
 
 def test_resumed_failure_can_stop_and_retry_without_replaying_old_failures(tmp_path: Path) -> None:
@@ -197,13 +221,8 @@ def test_resumed_waiting_query_indexes_supply_and_allocation_number(tmp_path: Pa
     (identity,) = b.scheduler.launch(spec, rent="l4")
     b.run(601)
     b.scheduler.queue(RunRequest(job=spec, id=identity, seed=0, resume=True), rent="l4")
-    statements: list[str] = []
-    b.store._db.set_trace_callback(statements.append)
-    try:
-        assert [run.id for run in b.store.waiting("l4")] == [identity]
-    finally:
-        b.store._db.set_trace_callback(None)
-    plan = [row[3] for row in b.store._db.execute("EXPLAIN QUERY PLAN " + statements[0])]
+    assert [run.id for run in b.store.waiting("l4")] == [identity]
+    plan = query_plan(b.store, lambda: b.store.waiting("l4"))
     assert any("USING INDEX runs_pool" in step for step in plan)
     assert any("USING INDEX runs_rent" in step for step in plan)
     assert any("USING INDEX attempts_run (run=? AND number>?)" in step for step in plan)

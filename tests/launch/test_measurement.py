@@ -24,14 +24,14 @@ from etude.launch.commands import Kind
 from etude.launch.database import launcher_file, upgrade
 from etude.launch.executor import Execution
 from etude.launch.provisioner.providers.runpod.http import PodHTTP
-from etude.launch.records import Machine, OnDemand
+from etude.launch.records import Machine, OnDemand, Pool
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet
 from etude.launch.ssh import SSH, SessionRequest
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
 from etude.spec import Job
-from tests.launch.counting import Counting, Counts
+from tests.launch.counting import Counting, Counts, query_plan
 from tests.launch.fake import Bench, bench
 from tests.launch.test_source import repository  # noqa: F401
 
@@ -46,10 +46,11 @@ def baseline(count: int) -> dict[str, Counts]:
     shared it (2026-11-06). Storage-backed active attempts read their storage
     selection and one indexed delivery timestamp (2026-11-11).
     """
+    # One indexed finishing-session read per supply settles already requested ends.
     return {
         "status": Counts(database=49 * count + 1),
         "runs": Counts(database=17 * count + 1),
-        "tick": Counts(provider=2 * count, bucket=count, database=31 * count + 21),
+        "tick": Counts(provider=2 * count, bucket=count, database=31 * count + 22),
     }
 
 
@@ -119,7 +120,64 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
     assert ask == Counts(database=37)  # target: ask records intent without remote effects
     # Creation also reads provider safeguards for affordable time and the reserved budget,
     # and the status it returns reads the machine's attempts for how many shared it.
-    assert wait == Counts(provider=4, bucket=1, database=104)  # known debt: wait advances work
+    # Refusal pause and shutdown settlement add three indexed local reads.
+    assert wait == Counts(provider=4, bucket=1, database=107)  # known debt: wait advances work
+
+
+@pytest.mark.parametrize("history", [1, 4096])
+def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> None:
+    b = bench(tmp_path)
+    b.service.refuse = 1
+    (run,) = b.scheduler.queue(Job(command="true", max_hours=1, max_usd=Decimal(1)), rent="l4")
+    b.scheduler.tick()
+    b.store.add_pool(Pool(name="history"))
+    b.store.add_machine(Machine(name="history", kind="ssh", pool="history", address="fixture"))
+    old = (b.clock() - timedelta(days=1)).isoformat()
+    b.store._db.executemany(
+        "INSERT INTO sessions(id, machine, planned_at, refused_at, refusal) VALUES (?, ?, ?, ?, 'no capacity')",
+        [(f"history-{index}", "history", old, old) for index in range(history - 1)],
+    )
+    b.store._db.execute("UPDATE attempts SET number = ? WHERE run = ?", (history, run))
+    b.store._db.executemany(
+        """INSERT INTO attempts(id, run, session, machine, number, position,
+               limit_seconds, limit_kind, outcome, cause)
+           VALUES (?, ?, ?, 'history', ?, 0, 3600, 'out_of_time', 'lost', 'capacity_refused')""",
+        [(f"old-{index}", run, f"history-{index}", index + 1) for index in range(history - 1)],
+    )
+    restarted = Scheduler(b.store, {}, clock=b.clock)
+    counting = Counting(b.store, b.service)
+    with counting.record():
+        assert str(restarted.read(run)) == "queued (provider refused: no capacity), $0.00"
+        status = counting.snapshot()
+    with counting.record():
+        refused = b.store.recent_refusal("l4", b.clock() - timedelta(seconds=60))
+        pause = counting.snapshot()
+    with counting.record():
+        assert [record.id for record in b.store.waiting("l4")] == [run]
+        waiting = counting.snapshot()
+    assert refused is not None and refused.refusal == "no capacity"
+    assert status == Counts(database=7)
+    assert pause == Counts(database=1)
+    assert waiting == Counts(database=1)
+    with counting.record():
+        b.scheduler.tick()
+        planning = counting.snapshot()
+    assert planning == Counts(database=49)
+    assert b.service.creates == 1
+    b.clock.advance(60)
+    with counting.record():
+        b.scheduler.tick()
+        admission = counting.snapshot()
+    assert admission == Counts(provider=4, bucket=1, database=113), admission.model_dump()
+    assert b.scheduler.attempts(run)[-1].number == history + 1
+    assert b.scheduler.read(run).attempts == 1
+    since = b.clock() - timedelta(seconds=60)
+    plan = query_plan(b.store, lambda: b.store.recent_refusal("l4", since))
+    assert any("sessions_refused" in step for step in plan), plan
+    assert not any("SCAN" in step for step in plan), plan
+    plan = query_plan(b.store, lambda: b.store.waiting("l4"))
+    assert sum("SEARCH a USING INDEX attempts_run" in step for step in plan) == 2, plan
+    assert not any("SCAN a" in step or "SCAN r" in step for step in plan), plan
 
 
 def test_several_run_git_and_database_counts(

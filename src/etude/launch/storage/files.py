@@ -1,4 +1,4 @@
-"""Atomic journal writes, file digests and job-owned progress reads.
+"""Journal writes, file fingerprints, output selection and job-owned progress reads.
 
 Both readers and workers use these file operations; reading a journal never
 loads the process that executes attempts.
@@ -6,8 +6,12 @@ loads the process that executes attempts.
 
 import hashlib
 import os
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from etude.errors import LauncherError
+from etude.launch.records import Output
+from etude.out import OutFile, OutFiles
 from etude.records import RunProgress
 
 RESULT = "etude-result.json"
@@ -42,3 +46,24 @@ def read_result(outputs: Path) -> RunProgress:
         return RunProgress.model_validate_json((outputs / RESULT).read_bytes(), strict=True)
     except (OSError, ValueError):
         return RunProgress()
+
+
+def select_output(
+    run: str, name: str, outputs: Sequence[Output], read_out: Callable[[], OutFiles | None]
+) -> Output | OutFile:
+    """Prefer attempt outputs; read out membership only when needed, and list names on absence."""
+    for output in outputs:
+        if output.name == name:
+            return output
+    membership = read_out()
+    members = () if membership is None else membership.files
+    for member in members:
+        if member.key == f"out/{name}":
+            return member
+    names = list(
+        dict.fromkeys([o.name for o in outputs] + [m.key.removeprefix("out/") for m in members])
+    )
+    available = ", ".join(names[:20]) or "(none)"
+    if len(names) > 20:
+        available += f", and {len(names) - 20} more"
+    raise LauncherError(f"run {run} has no output {name!r}; it has: {available}")

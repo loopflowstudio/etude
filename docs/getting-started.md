@@ -63,11 +63,17 @@ Keep using the same experiment file and storage:
 uv run etude launch examples/prototype.py --rent demo-cpu --max-usd 0.20
 uv run etude wait
 uv run etude report examples/prototype.py --source s3://YOUR_BUCKET/etude/demo --open
+uv run etude fetch prototype/coin@0 coin.json fetched
 ```
+
+Each `wait` returns once its runs are done and the machine rented for them is
+deleted, so the next launch can rent again under `--max 1`. `fetch` copies the
+checkpoint the training run published to `fetched/coin.json`.
 
 A quote rents nothing. Dollar and time caps bound admission, not the provider's
 final bill. [The launcher guide](launcher.md) explains storage, credentials,
 owned machines and cancellation; [limits](limits.md) lists the sharp edges.
 
 For a bounded wait from Python, call `etude.launch.client.wait(timeout=120)`;
-the CLI `etude wait` waits until its selected runs finish.
+the CLI `etude wait` waits until its selected runs finish and their rented
+machines are deleted.

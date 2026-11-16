@@ -83,5 +83,17 @@ class Counting:
             self.database._db.set_trace_callback(None)
 
 
+def query_plan(store: Database, call: Callable[[], object]) -> list[str]:
+    """The SQLite plan steps of the one statement `call` runs."""
+    statements: list[str] = []
+    store._db.set_trace_callback(statements.append)
+    try:
+        call()
+    finally:
+        store._db.set_trace_callback(None)
+    (statement,) = statements
+    return [row[3] for row in store._db.execute("EXPLAIN QUERY PLAN " + statement)]
+
+
 def job_text(snapshot: LogSnapshot) -> str:
     return "".join(stream.text for stream in snapshot.streams if stream.producer == "job")

@@ -630,9 +630,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     except typer.Exit as error:
         return int(error.exit_code)
     except Exception as error:
+        # Entry points load failure-specific dependencies only on the failing command.
+        from etude.storage_timeout import StorageUnavailable
+
         if isinstance(
             error,
-            (LauncherError, EtudeError, RetryRequested, OSError, ValueError, typer.BadParameter),
+            (
+                LauncherError,
+                EtudeError,
+                RetryRequested,
+                StorageUnavailable,
+                OSError,
+                ValueError,
+                typer.BadParameter,
+            ),
         ):
             # A bad flag value names its flag: "Invalid value for '--hidden': ...".
             said = error.format_message() if isinstance(error, typer.BadParameter) else str(error)

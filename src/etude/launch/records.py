@@ -78,10 +78,12 @@ Cause = Literal[
     "machine_lost",
     "create_unconfirmed",
 ]
+# A definite refusal acquired no machine and spends no attempt budget.
+CAPACITY_REFUSED: Cause = "capacity_refused"
 # Confirmed machine loss permits a new attempt; an uncertain start does not, nor
 # an input the machine was not given, which a retry would not be given either.
 RETRYABLE: frozenset[str] = frozenset(
-    {"capacity_refused", "setup_failed", "machine_lost_before_start", "machine_lost"}
+    {CAPACITY_REFUSED, "setup_failed", "machine_lost_before_start", "machine_lost"}
 )
 # Which of a run's two limits ends it first on the rental it was given.
 Limit = Literal["over_budget", "out_of_time"]
@@ -354,6 +356,11 @@ class Machine(Record):
     def expired(self, now: datetime) -> bool:
         return self.expires_at is not None and now >= self.expires_at
 
+    @property
+    def held(self) -> bool:
+        """Someone holds this machine now: neither deleted nor released with nothing rented."""
+        return self.deleted_at is None and self.refused_at is None
+
 
 class Output(Record):
     name: str  # path below the run's output directory
@@ -407,6 +414,7 @@ class Session(Record):
     provider_id: str | None
     started_at: datetime | None
     refused_at: datetime | None
+    refusal: str | None = None
     ended_at: datetime | None
     # When it was told no more work will come; it is given none after.
     finish_requested_at: datetime | None = None

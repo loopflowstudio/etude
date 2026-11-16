@@ -297,7 +297,7 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
         stored = tracked / record.id / "checkpoints" / "steps-2.pt"
         assert stored.read_bytes() == b"weights"
         assert checkpoint.artifact.sha256 == hashlib.sha256(b"weights").hexdigest()
-        assert [o.name for o in launched.outputs] == ["etude-result.json", "weights.pt"]
+        assert [o.name for o in launched.outputs] == ["weights.pt"]
     # The report labels the job as its author named it, with its seed count.
     (drawn,) = training(found).jobs
     assert drawn.name == "hidden256" and drawn.label.startswith("hidden256 · ")

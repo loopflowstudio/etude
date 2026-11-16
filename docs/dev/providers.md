@@ -174,7 +174,10 @@ etude launch job.py --rent cpu --max-usd 1     # rents up to the on-demand's 2 m
 
 `availability` asks the provider, so it is a wait: it prints what would be
 rented, the price and ceiling, how many of the on-demand's machines are in use
-and when the provider answered; `--timeout` bounds it. `--quote` places the
+and when the provider answered; `--timeout` bounds it. `rentable now` is the
+provider's stock signal, not a reservation: the create can still be refused,
+and is then
+[a refusal](launcher.md#ownership-and-failure-behavior) carrying the provider's reason. `--quote` places the
 first wave as launch would, asking the provider for prices, and prints one line
 per run: an owned or already rented machine it would use, or the hardware it
 would rent and that window's planned rental cost. It then prints the planned
@@ -244,14 +247,15 @@ etude machines
 etude terminate MACHINE
 ```
 
-`etude machines` is the one list. Each machine shows its state: `starting`,
-`available`, `unavailable` (refused, expired, or its pool off) or `deleted`.
+`etude machines` is the one list of machines held now. Each shows its state:
+`starting`, `available`, `unavailable` (expired or its pool off) or `deleted`.
 Each owned machine shows its pool, its
 committed cost and its expiry (or that it never expires). Each rented machine
 shows its on-demand, the hardware the provider was asked for (a GPU type with the minimum vCPUs
 and memory its host must have, or a CPU flavor and its exact vCPUs), the end of its window and its cost; `etude status` names it beside the
-run's machine. `etude machines --all` includes rented
-machines whose window has ended, so late bills stay visible. `terminate` takes
+run's machine. `etude machines --all` adds rented
+machines whose window has ended, so late bills stay visible, and machines that were
+asked for and never rented (`unavailable, nothing rented DATE TIME UTC`). `terminate` takes
 the machine's name. `etude pools` shows each pool's machines and `etude ondemands` each
 on-demand's template, budget, machines and safeguards; both mark the default.
 
@@ -265,7 +269,7 @@ manually rented one waits until its deadline or termination. Terminate refuses
 while it still has unfinished work. Ending a machine rented for queued work is asked of it
 through its inbox: its worker delivers its last files, the tail of its log and its end
 receipt, then deletes the machine, and the launcher confirms the deletion once the receipt
-arrives, or at the rental's deadline.
+arrives, or at the rental's deadline. `etude wait` returns after that confirmation.
 
 The launcher needs `RUNPOD_API_KEY`, `AWS_ACCESS_KEY_ID` and
 `AWS_SECRET_ACCESS_KEY` from the configured secret manager. No secrets enter

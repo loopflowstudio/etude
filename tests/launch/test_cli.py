@@ -24,6 +24,7 @@ from etude.launch.database import launcher_file, upgrade
 from etude.launch.schemas import Packet
 from etude.spec import Runtime
 from etude.storage import default_root
+from etude.storage_timeout import StorageUnavailable
 from tests.launch.fake import bench
 
 
@@ -688,3 +689,14 @@ def training_jobs(width: int = 32) -> list[Job]:
     assert main(["queue", str(path), "--width", "64", "--job", "wide", "--seed", "7"]) == 0
     assert "sweep/wide@7  new, queued" in capsys.readouterr().out
     assert default().record("sweep/wide@7").launch.params == {"width": 64}
+
+
+def test_storage_failure_is_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fail(**kwargs: object) -> None:
+        raise StorageUnavailable("storage request failed")
+
+    monkeypatch.setattr("etude.cli.app", fail)
+    assert main(["report"]) == 1
+    assert capsys.readouterr().err == "etude: storage request failed\n"

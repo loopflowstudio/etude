@@ -167,6 +167,9 @@ def test_tick_moves_an_older_queue_retry(tmp_path: Path) -> None:
     assert b.scheduler.read(earlier).phase == "queued"
     (queued,) = b.scheduler.queue(job(), rent="l4")
     b.scheduler.tick()
+    assert b.service.creates == 1
+    b.clock.advance(60)
+    b.scheduler.tick()
     assert b.service.creates == 3
     assert b.scheduler.read(queued).phase == "setting_up"
 

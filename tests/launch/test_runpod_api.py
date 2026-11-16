@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
+import urllib.error
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from email.message import Message
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +17,8 @@ import pytest
 from etude.errors import LauncherError
 from etude.launch.database import launcher_file
 from etude.launch.errors import ProviderUnavailable
-from etude.launch.provisioner.machines import MachineRequest
+from etude.launch.provisioner.machines import MachineRequest, Refused
+from etude.launch.provisioner.providers.http import MAX_ERROR_BYTES, send_to_provider
 from etude.launch.provisioner.providers.program import boot_source
 from etude.launch.provisioner.providers.runpod.api import PodFact, RunPodAPI
 from etude.launch.provisioner.providers.runpod.machines import STOCK_IMAGE, RunPodMachines
@@ -184,7 +188,12 @@ def test_a_failed_or_mismatched_create_is_unknown_not_refused() -> None:
         "disk_gb": 40,
         "entrypoint": ("python3.12", "-c", "boot"),
     }
-    for replies in ({}, {"POST pods": (500, None)}, {"POST pods": (200, {**POD, "name": "other"})}):
+    for replies in (
+        {},
+        {"POST pods": (500, None)},
+        {"POST pods": (408, None)},
+        {"POST pods": (200, {**POD, "name": "other"})},
+    ):
         with pytest.raises(ProviderUnavailable):
             RunPodAPI("key", Provider(replies=replies)).create(**wanted)
 
@@ -372,3 +381,47 @@ def test_one_cpu_rental_quotes_creates_and_deletes_with_pinned_provider_calls(
     (created,) = [payload for method, _, payload in provider.asked if method == "POST"]
     assert created["cpu"] == {"id": "cpu3c", "vcpuCount": 8} and "gpu" not in created
     assert created["disk"] == 40 and created["image"] == STOCK_IMAGE
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 429])
+def test_a_create_refusal_carries_bounded_sanitized_provider_words(
+    status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RUNPOD_API_KEY", "private-provider-key")
+    api = RunPodAPI(
+        "key",
+        Provider(
+            replies={
+                "POST pods": (
+                    status,
+                    {"detail": "No stock private-provider-key\n\x1b " + "x" * 500},
+                )
+            }
+        ),
+    )
+    with pytest.raises(Refused) as failure:
+        api.create(
+            name="etude-7f3a",
+            hardware=CPU(flavor="cpu3c", vcpus=2),
+            image="r/e@sha256:" + "a" * 64,
+            registry="",
+            env={},
+            disk_gb=40,
+            entrypoint=("python3.12",),
+        )
+    assert str(failure.value).startswith("No stock [redacted]")
+    assert len(str(failure.value)) == 300
+    assert "\n" not in str(failure.value) and "\x1b" not in str(failure.value)
+
+
+def test_provider_transport_reads_only_a_bounded_error_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(request: object, timeout: float | None) -> None:
+        raise urllib.error.HTTPError(
+            "https://fixture", 400, "Bad Request", Message(), io.BytesIO(b"x" * 8192)
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fail)
+    reply = send_to_provider("POST", "https://fixture", b"{}", {})
+    assert reply.status == 400 and reply.body == b"x" * MAX_ERROR_BYTES

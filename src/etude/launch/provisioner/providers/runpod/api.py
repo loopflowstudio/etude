@@ -12,7 +12,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from etude.errors import LauncherError
-from etude.launch.errors import ProviderUnavailable
+from etude.launch.errors import ProviderRejected, ProviderUnavailable
+from etude.launch.provisioner.machines import Refused
 from etude.launch.provisioner.providers.runpod.http import _ID, PodHTTP
 from etude.launch.records import CPU, GPU, Hardware, Offer
 from etude.spec import Record
@@ -158,7 +159,7 @@ class RunPodAPI(PodHTTP):
         data_center: str | None = None,
         entrypoint: tuple[str, ...],
     ) -> PodFact:
-        """Ask for one on-demand pod. Any error leaves it unknown whether one exists."""
+        """Ask once; a 4xx other than 408 confirms refusal, other failures stay unknown."""
         if "@sha256:" not in image or "RUNPOD_API_KEY" in env:
             raise ValueError("the image must be pinned by digest and the account key kept out")
         payload: dict[str, Any] = {
@@ -184,7 +185,12 @@ class RunPodAPI(PodHTTP):
             payload["cpu"] = {"id": hardware.flavor, "vcpuCount": hardware.vcpus}
         if data_center is not None:
             payload["dataCenterIds"] = [data_center]
-        pod = self._pod(self._ask("POST", "pods", payload=payload))
+        try:
+            pod = self._pod(self._ask("POST", "pods", payload=payload))
+        except ProviderRejected as error:
+            if error.status == 408:
+                raise
+            raise Refused(error.detail) from None
         if pod.name != name or pod.usd_per_hour <= 0 or pod.status in {"EXITED", "TERMINATED"}:
             raise ProviderUnavailable("the created pod is not the one asked for")
         return pod.model_copy(update={"hardware": hardware})

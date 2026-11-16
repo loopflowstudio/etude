@@ -35,6 +35,7 @@ from etude.errors import LauncherError
 from etude.launch.errors import SchemaAdvanced
 from etude.launch.provenance import frontier
 from etude.launch.records import (
+    CAPACITY_REFUSED,
     RETRYABLE,
     Cause,
     Diagnostic,
@@ -926,11 +927,13 @@ class Database:
         """Runs that may use this pool or on-demand and want a new attempt, oldest first.
 
         A run waits when nobody cancelled it and every attempt so far had a
-        confirmed infrastructure loss, with tries left. The launcher checks budgets.
+        confirmed infrastructure loss, with tries left. Definite capacity refusals
+        spend no try. The launcher checks budgets.
         """
         marks = ", ".join("?" for _ in RETRYABLE)
         rows = self._db.execute(
-            f"""SELECT r.*, (SELECT count(*) FROM attempts a WHERE a.run = r.id) AS tries
+            f"""SELECT r.*, (SELECT count(*) FROM attempts a WHERE a.run = r.id
+                  AND (a.cause IS NULL OR a.cause != ?)) AS tries
                 FROM runs r
                 WHERE r.id IN (
                   SELECT id FROM runs WHERE pool = ? UNION SELECT id FROM runs WHERE rent = ?
@@ -939,7 +942,7 @@ class Database:
                   a.outcome IS NULL OR (a.outcome != 'stopped' AND
                   (a.outcome != 'lost' OR a.cause NOT IN ({marks})))))
                 ORDER BY r.seq""",
-            (supply, supply, *sorted(RETRYABLE)),
+            (CAPACITY_REFUSED, supply, supply, *sorted(RETRYABLE)),
         ).fetchall()
         return tuple(
             run
@@ -1121,8 +1124,41 @@ class Database:
             _session_from_row(row) for row in self._db.execute(f"{_SESSIONS} ORDER BY w.seq")
         )
 
-    def record_refusal(self, session: Session, at: datetime) -> None:
-        self._change("sessions", session.id, session.version, refused_at=at.isoformat())
+    def finishing_sessions(
+        self, runs: Sequence[str] = (), *, supply: str | None = None
+    ) -> tuple[Session, ...]:
+        """Requested shutdowns still awaiting confirmation, optionally belonging to selected runs."""
+        selection = ""
+        if runs:
+            marks = ", ".join("?" for _ in runs)
+            selection = f" AND EXISTS (SELECT 1 FROM attempts a WHERE a.session = w.id AND a.run IN ({marks}))"
+        parameters = tuple(runs)
+        if supply is not None:
+            selection += " AND COALESCE(m.pool, m.ondemand) = ?"
+            parameters += (supply,)
+        return tuple(
+            _session_from_row(row)
+            for row in self._db.execute(
+                f"{_SESSIONS} WHERE w.finish_requested_at IS NOT NULL AND w.ended_at IS NULL"
+                + selection
+                + " ORDER BY w.seq",
+                parameters,
+            )
+        )
+
+    def recent_refusal(self, supply: str, since: datetime) -> Session | None:
+        """The newest refusal in this supply's retry pause, across scheduler starts."""
+        row = self._db.execute(
+            f"""{_SESSIONS} WHERE w.refusal IS NOT NULL AND w.refused_at > ? AND m.ondemand = ?
+                ORDER BY w.refused_at DESC LIMIT 1""",
+            (since.isoformat(), supply),
+        ).fetchone()
+        return None if row is None else _session_from_row(row)
+
+    def record_refusal(self, session: Session, at: datetime, reason: str | None) -> None:
+        self._change(
+            "sessions", session.id, session.version, refused_at=at.isoformat(), refusal=reason
+        )
 
     def record_finish(self, session: Session, at: datetime) -> None:
         self._change("sessions", session.id, session.version, finish_requested_at=at.isoformat())

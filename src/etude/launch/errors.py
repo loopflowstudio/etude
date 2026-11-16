@@ -15,6 +15,15 @@ class ProviderUnavailable(LauncherError):
     """No usable provider answer. This never means the requested thing is absent."""
 
 
+class ProviderRejected(ProviderUnavailable):
+    """A definite HTTP refusal, with a bounded and sanitized provider explanation."""
+
+    def __init__(self, status: int, detail: str) -> None:
+        self.status = status
+        self.detail = detail
+        super().__init__(f"status {status}: {detail}".removesuffix(": "))
+
+
 class SchemaAdvanced(LauncherError):
     """A breaking upgrade fenced this process; program identifies its successor."""
 
