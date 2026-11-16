@@ -124,6 +124,11 @@ def _refused(session: Session) -> str:
     )
 
 
+def _count_attempts(attempts: Sequence[RunAttempt]) -> int:
+    """Budgeted attempts: a definite refusal acquired no machine and spends no try."""
+    return sum(attempt.cause != "capacity_refused" for attempt in attempts)
+
+
 def _new_session(id: str, supply: Supply, machine: Machine, now: datetime) -> Session:
     """A session not yet claimed; only a rented machine's starts by itself."""
     return Session(
@@ -1250,7 +1255,7 @@ class Scheduler:
             clocks={} if last is None else last.clocks,
             tally=None if last is None else last.tally,
             usd=sum((self._attempt_usd(a, now) for a in attempts), Decimal(0)),
-            attempts=len(attempts),
+            attempts=_count_attempts(attempts),
             machine=None if last is None else last.machine,
             hardware=None if session is None else session.hardware,
             rental_ended=None
@@ -1277,7 +1282,7 @@ class Scheduler:
             or superseded
             or (
                 (last.outcome == "stopped" or last.outcome == "lost" and last.cause in RETRYABLE)
-                and len(attempts) < record.launch.spec.max_attempts
+                and seen.attempts < record.launch.spec.max_attempts
             )
         )
         if last is not None and not retry and last.outcome != "stopped":
@@ -2277,7 +2282,7 @@ class Scheduler:
             update={"submission": prior.launch.model_copy(update={"spec": job})}
         )
         left = self._remaining(candidate, self._clock())
-        if len(attempts) >= job.max_attempts or left.seconds < 1 or left.usd <= 0:
+        if _count_attempts(attempts) >= job.max_attempts or left.seconds < 1 or left.usd <= 0:
             raise LauncherError(
                 "run has no remaining hours, dollars or attempts; raise its job limits"
             )

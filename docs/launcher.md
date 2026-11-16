@@ -89,9 +89,11 @@ Nothing was rented and nothing needs cleaning up: `etude machines` lists the
 refused machine as `unavailable`, it does not count toward `--max`, and the same
 run can be launched again at once, on this on-demand or another. A queued run
 keeps the reason in `etude status` and its on-demand is asked again no sooner
-than a minute later. Refusals count toward the job's `max_attempts`. A reply that does not settle whether a machine was made
-(a timeout, a dropped connection, a provider error) is not a refusal: Etude
-looks that machine up before asking for another.
+than a minute later. Capacity refusals do not count toward the job's `max_attempts`.
+While its hours and dollars remain, the run stays queued until capacity is
+admitted or the run is cancelled. A reply that does not settle whether a machine
+was made (a timeout, a dropped connection, a provider error) is not a refusal:
+Etude looks that machine up before asking for another.
 
 ## Queue, launch and wait
 

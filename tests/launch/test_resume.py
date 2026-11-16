@@ -89,6 +89,30 @@ def test_resume_refuses_a_live_allocation(tmp_path: Path) -> None:
     assert len(b.scheduler.attempts(identity)) == 1
 
 
+def test_cancelled_capacity_refusals_leave_the_full_attempt_budget_for_resume(
+    tmp_path: Path,
+) -> None:
+    b = bench(tmp_path)
+    spec = job(max_attempts=1)
+    b.service.refuse = 2
+    (identity,) = b.scheduler.queue(spec, rent="l4")
+    b.scheduler.tick()
+    b.run(60)
+    assert b.service.creates == 2
+    assert b.scheduler.cancel(identity).outcome == "cancelled"
+    b.run(60)
+    assert b.service.creates == 2
+    assert not b.store.waiting("l4")
+
+    b.scheduler.queue(RunRequest(job=spec, id=identity, seed=0, resume=True), rent="l4")
+    b.scheduler.tick()
+    assert b.service.creates == 3
+    assert b.scheduler.attempts(identity)[-1].number == 3
+    b.run(601)
+    status = b.scheduler.read(identity)
+    assert (status.outcome, status.attempts) == ("succeeded", 1)
+
+
 def test_resumed_failure_can_stop_and_retry_without_replaying_old_failures(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.service.outcome = lambda work: "failed"

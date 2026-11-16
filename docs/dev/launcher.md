@@ -328,6 +328,7 @@ left it, and `run.resume` loads the state `run.save()` kept there
 
 The run's hours, dollars and `max_attempts` span all attempts. Hours count code
 execution; dollars include attributed setup and failed attempts.
+Definite capacity refusals acquire no machine and spend none of these limits.
 The default `max_attempts=3` includes planned stops: a healthy run needing a
 fourth rental window ends `stopped` after its third planned stop. Increase
 `max_attempts` on the job for a longer run.
@@ -442,7 +443,8 @@ out checkpoints remain available when selected explicitly. An empty `out`
 can resume from the latest checkpoint copied into `checkpoints/`; it never
 restores a removed out checkpoint or falls back to an older record.
 
-There is no `retry` flag; `max_attempts=1` bounds a job to one attempt.
+There is no `retry` flag; `max_attempts=1` bounds a job to one attempt, excluding
+definite capacity refusals.
 
 ## Progress and continuation
 
@@ -742,10 +744,12 @@ the reason from its latest attempt's session, never from diagnostics, so it
 survives scheduler restarts and the retry pause. Queued work does not ask that
 on-demand again within 60 seconds of a provider's refusal; an explicit `launch`
 is not paused, and releasing a claim that never reached the provider pauses
-nothing. Refusals still count toward `max_attempts`. Timeouts, no reply, 408,
-5xx and unreadable or mismatched replies stay unknown. A remote start has an
-exclusive claim; a lost SSH reply cannot start another process. An unreachable
-machine is unknown. A lost attempt requires evidence that its process or
+nothing. Attempts ending as `capacity_refused` remain in the history, with their
+original numbers, but do not count toward `max_attempts` or the status attempt
+count. Scheduling, status and explicit resume use that same budget rule.
+Timeouts, no reply, 408, 5xx and unreadable or mismatched replies stay unknown.
+A remote start has an exclusive claim; a lost SSH reply cannot start another
+process. An unreachable machine is unknown. A lost attempt requires evidence that its process or
 provider machine is gone. Infrastructure losses retry up to `max_attempts`,
 including confirmed loss after code started. If startup intent reached storage
 but an attempt claim did not, its start is uncertain and it is not retried.

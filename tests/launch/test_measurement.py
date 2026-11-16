@@ -137,6 +137,16 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
         "INSERT INTO sessions(id, machine, planned_at, refused_at, refusal) VALUES (?, ?, ?, ?, 'no capacity')",
         [(f"history-{index}", "history", old, old) for index in range(history)],
     )
+    (previous,) = b.scheduler.queue(
+        Job(command="true", max_hours=1, max_usd=Decimal(1)).runs(1), rent="l4"
+    )
+    b.scheduler.cancel(previous)
+    b.store._db.executemany(
+        """INSERT INTO attempts(id, run, session, machine, number, position,
+               limit_seconds, limit_kind, outcome, cause)
+           VALUES (?, ?, ?, 'history', ?, 0, 3600, 'hours', 'lost', 'capacity_refused')""",
+        [(f"old-{index}", previous, f"history-{index}", index + 1) for index in range(history)],
+    )
     restarted = Scheduler(b.store, {}, clock=b.clock)
     counting = Counting(b.store, b.service)
     with counting.record():
@@ -145,9 +155,13 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
     with counting.record():
         refused = b.store.recent_refusal("l4", b.clock() - timedelta(seconds=60))
         pause = counting.snapshot()
+    with counting.record():
+        assert [record.id for record in b.store.waiting("l4")] == [run]
+        waiting = counting.snapshot()
     assert refused is not None and refused.refusal == "no capacity"
     assert status == Counts(database=14)
     assert pause == Counts(database=1)
+    assert waiting == Counts(database=1)
     statements: list[str] = []
     b.store._db.set_trace_callback(statements.append)
     try:
@@ -157,6 +171,16 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
     plan = [row[3] for row in b.store._db.execute("EXPLAIN QUERY PLAN " + statements[0])]
     assert any("sessions_refused" in step for step in plan), plan
     assert not any("SCAN" in step for step in plan), plan
+
+    statements.clear()
+    b.store._db.set_trace_callback(statements.append)
+    try:
+        b.store.waiting("l4")
+    finally:
+        b.store._db.set_trace_callback(None)
+    plan = [row[3] for row in b.store._db.execute("EXPLAIN QUERY PLAN " + statements[0])]
+    assert sum("SEARCH a USING INDEX attempts_run" in step for step in plan) == 2, plan
+    assert not any("SCAN a" in step or "SCAN r" in step for step in plan), plan
 
 
 def test_several_run_git_and_database_counts(

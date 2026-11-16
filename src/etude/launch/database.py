@@ -926,11 +926,13 @@ class Database:
         """Runs that may use this pool or on-demand and want a new attempt, oldest first.
 
         A run waits when nobody cancelled it and every attempt so far had a
-        confirmed infrastructure loss, with tries left. The launcher checks budgets.
+        confirmed infrastructure loss, with tries left. Definite capacity refusals
+        spend no try. The launcher checks budgets.
         """
         marks = ", ".join("?" for _ in RETRYABLE)
         rows = self._db.execute(
-            f"""SELECT r.*, (SELECT count(*) FROM attempts a WHERE a.run = r.id) AS tries
+            f"""SELECT r.*, (SELECT count(*) FROM attempts a WHERE a.run = r.id
+                  AND (a.cause IS NULL OR a.cause != 'capacity_refused')) AS tries
                 FROM runs r
                 WHERE r.id IN (
                   SELECT id FROM runs WHERE pool = ? UNION SELECT id FROM runs WHERE rent = ?

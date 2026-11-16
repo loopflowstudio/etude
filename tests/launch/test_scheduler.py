@@ -173,29 +173,44 @@ def test_failed_admission_cleanup_does_not_pause_queued_work(tmp_path: Path) -> 
     assert b.scheduler.read(one).phase == "setting_up"
 
 
-def test_refused_capacity_is_retried_up_to_the_jobs_allowed_attempts(tmp_path: Path) -> None:
+@pytest.mark.parametrize("lost", [False, True])
+def test_repeated_capacity_refusals_preserve_the_attempt_budget_until_admission(
+    tmp_path: Path, lost: bool
+) -> None:
     b = bench(tmp_path)
-    b.service.refuse = 1
-    (one,) = b.scheduler.queue(job(), rent="l4")
-    b.scheduler.tick()
-    assert "provider refused" in str(b.scheduler.read(one))
-    b.run(59)
-    assert len(b.scheduler.attempts(one)) == 1
-    b.run(1)
-    b.run(1)
-    b.run(601)
-    status = b.scheduler.read(one)
-    assert (status.outcome, status.attempts) == ("succeeded", 2)
+    b.service.refuse = 5
+    (one,) = b.scheduler.queue(job(max_attempts=1), rent="l4")
+    for creates in range(1, 6):
+        b.scheduler.tick()
+        # Status is a database-only read in another scheduler, after diagnostics expire.
+        b.store._db.execute("DELETE FROM diagnostics")
+        status = Scheduler(b.store, {}, clock=b.clock).read(one)
+        assert str(status) == "queued (provider refused: no capacity), $0.00"
+        assert status.attempts == 0 and status.usd == 0
+        assert b.service.creates == creates
+        assert not b.store.unsettled_sessions()
+        assert [a.number for a in b.scheduler.attempts(one)] == list(range(1, creates + 1))
+        b.run(59)
+        assert b.service.creates == creates
+        b.clock.advance(1)
 
-    b.service.refuse = 9
-    (two,) = b.scheduler.queue(job(max_attempts=2), rent="l4")
     b.scheduler.tick()
-    b.run(59)
-    assert len(b.scheduler.attempts(two)) == 1
-    b.run(1)
-    status = b.scheduler.read(two)
-    assert (status.phase, status.outcome, status.cause) == ("done", "lost", "capacity_refused")
-    assert status.attempts == 2 and status.usd == 0
+    admitted = b.scheduler.attempts(one)[-1]
+    assert admitted.number == 6 and admitted.cause is None
+    assert b.scheduler.read(one).phase == "setting_up"
+    assert b.scheduler.read(one).attempts == 1
+    assert b.service.creates == 6
+    if lost:
+        b.run(1)
+        b.service.kill(admitted.session)
+        b.run(1)
+    else:
+        b.run(601)
+    status = b.scheduler.read(one)
+    assert status.phase == "done"
+    assert status.outcome == ("lost" if lost else "succeeded")
+    assert status.cause == ("machine_lost" if lost else None)
+    assert status.attempts == 1 and b.service.creates == 6
 
 
 @pytest.mark.parametrize("elapsed", [0, 59, 61])
