@@ -229,11 +229,10 @@ class Scheduler:
             self._store.ondemand(name).model_copy(update={"max_machines": maximum})
         )
 
-    def set_ondemand_image(self, name: str, image: Image | str) -> None:
+    def set_ondemand_image(self, name: str, image: Image) -> None:
         """Change the image an on-demand's next machines boot. Running ones are untouched."""
-        selected = Image(requested=image, resolved=image) if isinstance(image, str) else image
         ondemand = self._store.ondemand(name)
-        template = ondemand.template.model_copy(update={"image": selected})
+        template = ondemand.template.model_copy(update={"image": image})
         self._store.change_ondemand(ondemand.model_copy(update={"template": template}))
 
     def set_default(self, pool: str | None = None, *, rent: str | None = None) -> None:

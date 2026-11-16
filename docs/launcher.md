@@ -98,11 +98,11 @@ optional server. An unattended queue does not run itself without one.
 
 Declare inputs on the job rather than fetching arbitrary paths from another
 host. Fingerprints verify bytes; the producer run enables host relay.
-`TrainingJob(start=checkpoint)` transfers its model; `continue RUN --until
+`TrainingJob(start=checkpoint)` transfers its model; `continue --run RUN --until
 updates=4000` creates a new run carrying the parent's retained state and absolute
 coordinates. An interrupted run retries from its latest complete save.
 
-Use `source RUN` and `history RUN` for retained provenance and attempt history.
+Use `source RUN` and `runs` for retained provenance and run history.
 Run source is a git snapshot, and restarting on edited source is an explicit
 resume/continuation decision. The [source reference](dev/launcher.md#a-runs-source-in-git)
 explains recovery and retention.

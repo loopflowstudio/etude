@@ -114,7 +114,7 @@ Do not hardcode another machine's local path.
 For a new continuation from an existing launched run:
 
 ```sh
-uv run etude continue experiment/base@0 --until updates=4000
+uv run etude continue --run experiment/base@0 --until updates=4000
 ```
 
 A continuation copies the parent's retained out state (or a selected checkpoint)
