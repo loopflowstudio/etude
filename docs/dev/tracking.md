@@ -349,4 +349,3 @@ being delivered. If delivery was interrupted, run `uv run etude sync --directory
 `read(source, experiment, run)` returns the whole run at once, every metric
 included, for inspection and short runs. For a long run with many metrics,
 use `read_batches`.
-

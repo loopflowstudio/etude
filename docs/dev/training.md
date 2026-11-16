@@ -102,4 +102,3 @@ atomically and keep what one resume needs in one file: a machine lost between
 two of them leaves one new and one old. `run.save(fn)` is the way to keep
 several files together. A name ending `.partial` is never sent, and anything
 under a folder whose name starts with `.` stays on the machine.
-

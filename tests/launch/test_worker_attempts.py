@@ -275,8 +275,9 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
         (launched,) = scheduler._store.attempts(run=record.id)
         # One place on the machine for every run; the script named no directory.
         tracked = tmp_path / "track"
-        assert ("capacity", record.id) in runs(tracked)
-        data = read(tracked, "capacity", record.id)
+        name = record.id.rsplit("/", 1)[-1]
+        assert ("capacity", name) in runs(tracked)
+        data = read(tracked, "capacity", name)
         found.append(data)
         assert data.file is not None and data.rows == 3
         declared = data.file

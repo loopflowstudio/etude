@@ -307,4 +307,3 @@ free slot on a machine training has rented is room for them, so with
 `--slots 2` evals start beside training without another rental. Each eval
 run using shared GPU inference starts its own agent process: two eval runs
 sharing a machine do not share one. CPU game processes cache forwards directly.
-

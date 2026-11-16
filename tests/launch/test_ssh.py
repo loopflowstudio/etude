@@ -150,6 +150,7 @@ def test_continuation_moves_between_local_and_remote_disk(
     scheduler.add_machine("bench", "bench")
     (tmp_path / "train.py").write_text(TRAIN)
     job = Job(
+        experiment="lab",
         command=f"{sys.executable} {tmp_path / 'train.py'}",
         until=Until.parse("steps=3"),
         max_hours=0.1,

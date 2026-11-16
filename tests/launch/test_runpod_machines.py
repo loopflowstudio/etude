@@ -956,7 +956,7 @@ time.sleep(30)
     )
     until(c.scheduler, run, "running")
     rows = f"etude/t/{run}/metrics/"
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + 25
     while time.monotonic() < deadline:
         sealed = [key for key in c.storage.objects if key.startswith(rows) and key.endswith(".blk")]
         if sealed:

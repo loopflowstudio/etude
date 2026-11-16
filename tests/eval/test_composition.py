@@ -30,7 +30,7 @@ from etude.eval.records import (
     relocate_player,
 )
 from etude.eval.tournament import evaluating, played, scores
-from etude.jobs import Agents, ExperimentState, checkpoint_inputs, hold_group
+from etude.jobs import Agents, EvalJob, ExperimentState, checkpoint_inputs, hold_group
 from etude.page import _players
 from etude.records import ArtifactRef
 from tests.eval.arithmetic import Shift, build, checkpoint, load
@@ -389,11 +389,15 @@ def test_author_kind_fields_do_not_impersonate_checkpoint_records() -> None:
 
 
 def test_a_composed_player_needs_its_build_hook_at_declaration() -> None:
-    active = job("wrapped", Agents(load=load)).model_copy(
-        update={"enter": (checkpoint("small"), compose(Shift(over=checkpoint("small"))))}
-    )
+    active = job("wrapped", Agents(load=load))
     with pytest.raises(LauncherError, match="build"):
-        active.plain()
+        EvalJob(
+            tournament=active.tournament,
+            play=active.play,
+            agents=active.agents,
+            enter=(checkpoint("small"), compose(Shift(over=checkpoint("small")))),
+            max_hours=0.1,
+        )
 
 
 def test_one_seed_selects_one_held_line_for_fixed_and_composed_opponents() -> None:
