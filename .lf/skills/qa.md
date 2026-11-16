@@ -55,389 +55,127 @@ with screenshots or transcripts, and what you fixed. Finish with what works now,
 what you could not reach and why, and what is still wrong, worst first. Do not
 publish, land or choose the next Graph step from here.
 
-## Etude: driving a report
+## Etude: a local prototype
 
-Build a lab outside the repo (e.g. `/tmp/lab`) with its own `ETUDE_HOME`:
+Use `docs/getting-started.md`, `docs/training.md` and `docs/evaluation.md` as
+current author instructions. Copy `examples/prototype.py` into a fresh git/uv
+lab outside this checkout. It trains a tiny coin model without a model library.
+The `eval` extra belongs to the dependency, `etude-sdk[eval]`.
 
-1. Write training runs with `etude.train.tracking.track(experiment=..., run=..., job=...,
-   clocks=[...], directory=RUNS)`, `run.log(...)`, `run.checkpoint(file, updates=N)`,
-   `run.finish(timeout=60)`, via `uv run --project REPO python script.py`. Track the
-   same run again to make a resumed attempt.
-2. Put `NAME.py` (with `eval_jobs(state)` and `report()`) and its play module in the lab,
-   then `git init` and commit: `etude eval` refuses play functions outside a git checkout.
-   Play with `uv run --project REPO etude eval NAME.py --source RUNS` from that folder.
-3. Serve with `uv run --project REPO etude report NAME.py --source RUNS --serve --port P`
-   (a folder path serves an index). Drive it in Chrome; `curl -X POST /` is the Refresh.
-   Edits to `charts.js`/`page.html`, the experiment file and the helper modules it imports
-   from its folder take effect on the next Refresh; edits to Etude's Python need a restart.
-4. Mixed execution setups: have `play` return `Result(tables=..., execution={"device":
-   os.environ["QA_DEVICE"], ...})` and run `etude eval` once per device. To interrupt a
-   pass part way, slow `play` with a sleep and send SIGTERM (`pkill -TERM -f "etude eval
-   NAME.py"`): a backgrounded job in a non-interactive shell ignores SIGINT. Results
-   played before the signal are sealed; the next pass plays only the rest. A seating's
-   name is its identity (`seating_conflict` if its conditions change): add new seatings
-   under the same tag instead. Replay already-played matches on another setup with
-   `etude.eval.match.evaluate(experiment=..., matches=..., run="replay-x")`, taking the
-   benchmark from `Evaluation.model_validate_json(job.config)` for each job
-   `etude.experiment.asked(read_experiment(file).eval, observe(RUNS, NAME))` returns.
-   Inspect provenance with `etude.eval.query.statsdb(NAME, RUNS)` (`matches.execution`).
-   A page's own numbers are in `JSON.parse(document.getElementById("data").textContent)`
-   (`cells` with `selection`, `subject`, `matches`, `rows`).
-5. Export `ETUDE_HOME` for `python -c` statsdb reads too: otherwise `statsdb` keeps its
-   database under `~/.etude/statsdb/`. To see what `etude status` would say of a launched
-   eval pass without renting, run `etude eval` with `ETUDE_OUTPUT_DIR=DIR` and render
-   `DIR/etude-result.json`'s `tally` with `etude.launch.records.Tally`.
-6. Stop the servers before finishing. In zsh, `$args` does not word-split: call
-   commands explicitly rather than looping over argument strings.
-7. A "still running" lab run must not `os._exit` right after `run.ship()`: with a plain
-   `directory=` there is no destination, so `ship()` is True at once and the background
-   writer has not yet written `checkpoints/NAME.json`. The `.pt` without its manifest reads
-   as no checkpoint (the run vanishes from every curve). Wait until that `.json` exists
-   before exiting. `run.checkpoint` needs a value for every declared clock (otherwise
-   `checkpoint_clock_mismatch`, and nothing is recorded). `play` must live in its own module beside
-   the experiment file, not in the file itself. The experiment is named for its file, so
-   a second report variant goes in another git-tracked folder as `NAME.py`.
-8. Bucket path: `etude sync --directory RUNS --to r2://manabot/etude-r2-test/NAME`
-   under `doppler run -p manabot -c prd --only-secrets R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY`,
-   then `etude report ... --source r2://manabot/etude-r2-test/NAME` with a fresh
-   `ETUDE_HOME`. `du` of that home after each build shows the bytes the build read.
-   Afterwards delete the prefix with `S3Storage.client.delete_objects`.
-   The aws CLI also works under the same `doppler run`: `sh -c 'AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
-   AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY aws s3 rm --recursive --region auto --endpoint-url
-   https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com s3://manabot/etude-r2-test/NAME/'`.
-9. To tell a regression from an old bug, run the same script on main: `git worktree add
-   --detach /tmp/NAME-main main`, `uv run` from there, then `git worktree remove`.
-   Compare `etude.page.build(RUNS, FILE)` by hashing `page.training.model_dump_json()`
-   and `repr(page.cells)`; rendered HTML carries timestamps.
+```sh
+REPO="$PWD"
+LAB=$(mktemp -d /tmp/etude-qa-XXXXXX)
+cp examples/prototype.py "$LAB/experiment.py"
+cd "$LAB"
+cat > pyproject.toml <<EOF
+[project]
+name = "etude-qa"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = ["etude-sdk[eval]"]
+[tool.uv]
+package = false
+[tool.uv.sources]
+etude-sdk = { path = "$REPO", editable = true }
+EOF
+printf '.venv/\n__pycache__/\nhome/\n*.log\n' > .gitignore
+uv python pin 3.12
+uv lock
+git init -q
+git add .
+git -c user.name=QA -c user.email=qa@example.test commit -qm prototype
+export ETUDE_HOME="$LAB/home"
+uv run etude train experiment.py
+uv run etude eval experiment.py
+uv run etude eval experiment.py
+uv run etude report experiment.py
+uv run etude smoke experiment.py
+```
 
-10. Repository-level report modules (a package beside `experiments/`): make the lab a
-   uv project, `dependencies = ["etude-sdk[eval]"]` with `[tool.uv.sources] etude-sdk =
-   { path = REPO, editable = true }` and a hatchling build of its package, `uv sync`, then
-   run `uv run etude ...` from the lab, not `--project REPO`. `/tmp` is a symlink to
-   `/private/tmp`, which exercises resolved-path module matching.
-11. Launcher-style jobs without launching: set `ETUDE_JOB` (the launcher's key, which
-   hashes the commit) and `ETUDE_JOB_NAME` (the launch name) before `track()`; a new key
-   under one name is a relaunch at another commit, a different `config=` a config change.
-   Run names are global across experiments (`run_name_belongs_to_another_experiment`):
-   prefix a second experiment's runs. Use one `Benchmark` across all runs: a benchmark
-   per run makes each panel show one seed's tournament. Make `play` depend on the run
-   (`player.model_dump_json()` holds the run name), or every job's curve overlaps.
-   Changed `play` code reuses delivered matches: delete `RUNS/ladder.*` and `ETUDE_HOME`
-   to replay.
-12. When Chrome extensions are not connected: `npm i playwright-core` in a scratch folder
-   and launch with `executablePath` set to the cached
-   `~/Library/Caches/ms-playwright/chromium_headless_shell-*/…/chrome-headless-shell`.
-   Click `getByRole("button", {name: "Refresh"})` and read `document.body.innerText`.
-   `page.on("pageerror")` and `page.on("console")` show script errors; a blank chart with data
-   in the page JSON is otherwise silent.
-   Gap reasons and point values are only in hover text: `page.mouse.move(x, y - scrollY)` on a
-   point in a full-page screenshot, then read `innerText` of `.u-legend` and `[class*=tip]`.
-   A seating curve's per-checkpoint data is the page JSON's `points`: `selection` indexes
-   `selections`; `at` gives its position, `value` its score, and `gap` (an eval `Gap`; its `missing` is `not_yet` or `never`) why it has none.
-13. Cross-experiment seats (`Final(experiment=...)`, `PolicyKey`): write each experiment's
-   runs with `track(experiment=E, run="small@0", job="small", seed=0, ...)` into one source;
-   two experiments may share a run name. Hold another experiment's checkpoints with
-   `observe(SOURCE, OTHER).policy(PolicyKey(...)).checkpoints`. An experiment with no runs of
-   its own still evaluates ("Evaluation only"). To replay an eval from scratch, delete both
-   `RUNS/E/NAME.*` and `ETUDE_HOME/track/E/NAME.*`: with only the source copy gone, the pass
-   resumes the finished local run and re-ships just `outcome.json`, and the page shows
-   nothing recorded. `etude.page.build` takes `Path`s. The page's legend and
-   `players[].line` show whether foreign checkpoints sit on their own lines. Returning-user
-   check: same file and runs evaluated on a `main` worktree, then `etude eval` here must
-   print `nothing to play`, and hashing `(subject, opponent, value, rows, matches)` over
-   `build(...).cells` must match.
-   Adding a seed to an every-seed seat replays most matches: games are re-split over
-   the new seed pairs, so match keys change (main plays 16, then 28 more for a third
-   seed). Compare with a main run before calling a replay count a regression.
-   Keep helper scripts in their own folder with names that are not stdlib modules:
-   a `/tmp/X/inspect.py` beside the script shadows `inspect` and breaks `etude.page`.
-   Drive the Python path as well as the CLI: a script calling `evaluating(bench,
-   experiment=E, checkpoint=ref, directory=SOURCE, storages=[], run="hand-x",
-   lines=observe(SOURCE, E).lines + observe(SOURCE, OTHER).lines)` then `run.play(play)`,
-   run from the lab with `PYTHONPATH=LAB` so `games` imports. Build `ref` each documented
-   way (`PolicyKey(...).checkpoint(name=, artifact=)`, flat `CheckpointRef(job=, seed=,
-   name=, ...)`, `CheckpointRef(address=...)`). `ArtifactRef` needs `sha256` or the ref
-   fails validation. A hand-built ref of a tracked file must give its stored position
-   (`name="out/policy-200.pt"`); `name="policy-200.pt"` keys `.../checkpoints/policy-200.pt`,
-   a second player on the same line. Compare `seats.line` per eval run in `statsdb`
-   with the CLI pass's. In zsh, an unmatched glob aborts the whole `rm`; use `find -exec rm`.
-14. The stats database under `ETUDE_HOME/statsdb` rebuilds its derived tables (`players`,
-   `schedule`) only when new data arrives or its `SCHEMA` changes, so after editing
-   `etude/eval/query.py` delete that folder before judging the page.
+Require one finished training run (`experiment/coin@0`), eight played matches,
+no replay on the second eval, a report under `home/track/reports/`, and smoke
+success. Inspect the report in a browser; its charts render in JavaScript.
+For live refresh use `uv run etude report experiment.py --serve --port PORT`;
+stop the exact process you started before finishing.
 
-## Etude: storage outages on the SDK and a launched worker
+For interruption, make a separate lab copy with an author-controlled pause
+(`time.sleep(0.1)` per update) and more updates. Drive `uv run etude train
+experiment.py` with a Python subprocess driver: `etude train` prints no progress
+lines, so sleep a few seconds, then send SIGINT to that process (a driver that
+blocks on `readline` never sends it). Require exit 75. The next plain
+`etude train experiment.py` prints `stopped; --job coin --seed 0 --resume`;
+follow it, then read `etude.train.read.read(default_root(), "experiment",
+"coin@0").points("heads", "updates")` and require each update once, in order,
+across two metric writers. Use `uv run python` for the driver. A background
+shell job may ignore SIGINT; do not signal processes by a broad name pattern.
 
-SDK against fake S3: `uvx --from 'moto[server]' moto_server -p 5047`, then put a
-small TCP proxy in front of it that, when a mode file says `dead`, accepts new
-connections and stops forwarding on existing ones without closing them. boto3 reuses
-keep-alive sockets, so a proxy that only refuses new connections never causes an
-outage. Run the script with `AWS_ENDPOINT_URL=http://127.0.0.1:PROXY`, dummy AWS keys,
-`storages=[storage_from_uri("s3://BUCKET/runs")]` and a short
-`ETUDE_STORAGE_TIMEOUT_SECONDS`. Time how long the process takes to exit as well as
-`finish()`: s3transfer threads hold interpreter exit. Add
-`faulthandler.register(signal.SIGUSR1, all_threads=True)` to see where it waits;
-py-spy needs root on macOS. Recover with `etude sync --directory RUNS --to s3://…`.
-It prints nothing on success, so list the bucket afterwards.
+Training code calls `track(config=config)` only inside Etude's assigned run.
+Saves (`run.resume` / `run.save`) restore learning; `run.checkpoint(path)`
+publishes evaluation inputs. Do not simulate worker identity in a standalone
+tracking script or tune internal queue/block settings.
 
-Launched worker without renting: the built-in `local` machine has no storage, so use
-an SSH host. Build a `python:3.12-slim` image with openssh-server, iptables and
-`/uv` copied from `ghcr.io/astral-sh/uv`, plus your public key in
-`/root/.ssh/authorized_keys`. Run it with `--cap-add NET_ADMIN -p 127.0.0.1:2247:22`.
-Leave `~/.ssh` alone: put `ssh`/`scp` wrappers first on `PATH` that exec
-`/usr/bin/ssh -F /tmp/…/ssh_config` (a Host alias with Port, `StrictHostKeyChecking
-accept-new` and its own `UserKnownHostsFile`). With an isolated `ETUDE_HOME`:
-`etude storage add qa --bucket manabot --prefix etude-qa/NAME --provider r2`,
-`etude machine add box ALIAS --storage qa`, then from a committed job repo (a uv
-project depending on `etude-sdk`, with `package = false`) run `etude launch job.py
---pool box` followed by `etude server run` in the background. Both need
-`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` **and `R2_API_TOKEN`**
-from Doppler `manabot/prd`. Without the token, launch is refused (`capacity_refused`).
-Cut storage with `docker exec box iptables -A OUTPUT -p tcp --dport 443 -j DROP`;
-`-D` restores it. Read the worker's own log with `etude logs --machine box` or
-`/root/.etude/sessions/*/worker.log` and `usage.jsonl` in the container. Restart
-that loop after code changes. Afterwards remove the container and delete the
-`etude-qa/NAME/` prefix.
+## Etude: evaluation recovery and placement
 
-## Etude: launching an experiment file on this computer
+Copy `examples/{agents.py,agent_game.py,agent_models.py,agent.txt}` into another
+committed lab to exercise wrappers and shared checkpoint leaves. Keep one
+`config={"lane": name}` per seating and indexed matches. Increasing `games`
+keeps the completed prefix; changing config or base seed changes match keys.
 
-Initialize the empty lab launcher with `etude database upgrade --development`
-before its launcher commands. Reads never initialize it.
+- Run `uv run etude eval agents.py` twice; the second pass plays nothing.
+  Query `statsdb` from `etude.eval.query` for matches, players, seats and scores.
+- In separate fresh labs, raise `RuntimeError` or `RetryRequested` (from
+  `etude.errors`) in the checkpoint loader. Ordinary failures require
+  `--retry-failed`; transient failures retry on the next pass. Fail every
+  undelivered match using that leaf across tournaments, even when play catches
+  the error. Preserve successes delivered before the failure and unrelated
+  results. Use controlled ordering, not a timing race, to check both cases.
+- Interrupt eval after a progress line, then rerun with the same home and
+  source. Only unfinished matches should play. Relocate retained checkpoint
+  bytes and update their locators while preserving keys, digests and lengths;
+  bare and composed players retain their keys and delivered results.
+- For explicit manual match lists, use `evaluating` from
+  `etude.eval.tournament`: `with evaluating(environment, experiment=...,
+  matches=matches) as run: run.play(play, agents=Agents(...))`. Put execution
+  under `if __name__ == "__main__":`; play, load and build are importable
+  module-level functions. There is one signature, `play(match, agents)`.
 
-A lab that runs typed jobs (`TrainingJob(name=..., train=train, config=...)`) is a git repo, outside the
-repo, with an isolated `ETUDE_HOME`:
+CPU games load forwards directly and keep one model-library thread per game.
+On visible NVIDIA hardware, a shared agent process batches checkpoint forwards;
+only that path keeps model loading out of game imports. Code-only builds start
+no loading process and perform no hardware probe. Check controlled CPU/memory
+capacity, cross-tournament batching, multiple leaves, eviction and partial-batch
+drain with bounded fixtures; never create resource pressure. Keep complete
+results and protocol counts separate from timing observations. Hardware capacity
+does not select the author's model device. Do not rent just to refresh QA notes.
 
-- `pyproject.toml`: `dependencies = ["etude-sdk[eval]"]` (the `eval` extra brings
-  duckdb; without it every tournament fails), `[tool.uv] package = false`, and
-  `[tool.uv.sources] etude-sdk = { path = "<this checkout>", editable = true }`.
-  `uv lock`, add `.gitignore` with `.venv/` and `__pycache__/`, and commit, or every
-  run says "plus uncommitted changes".
-- `train.py` with a Pydantic config whose real size raises, so a passing smoke shows
-  its smoke form ran; `games.py` with `play(match, agents)`; `ppo.py` with `training_jobs()`, `eval_jobs(state)`
-  and `report()`. A job's `max_usd` must be more than zero or omitted.
-- `uv run etude smoke ppo.py`, `uv run etude launch ppo.py`, then
-  `etude status`. Nothing runs the scheduler's loop here: cancel what you queued
-  (`etude cancel --experiment ppo`) and `etude wait RUN` until each says `done: cancelled`,
-  so no worker is left behind. macOS has no `timeout`; use
-  `perl -e 'alarm 60; exec @ARGV' uv run etude wait RUN`.
-- Client jobs submitted directly from Python need `experiment=`
-  (`job.model_copy(update=...)`). `etude launch FILE.py` defaults unnamed jobs
-  to the file stem; recipes call `track()` without an experiment.
-- Smoke trains each distinct `job_id` once: two jobs differing only in name share one
-  smoke run, so give each lab job its own config.
-- Pass output: unbuffered (`PYTHONUNBUFFERED=1`) to see stdout and stderr in order;
-  a failing pass otherwise shows its error before its state line.
-- A `--keep` smoke folder's `track/` holds a tiny tournament (games=1): as an
-  `etude eval --source` it gives `seating_conflict`. Copy only the training run's
-  folder out for a clean source.
+Returning-user checks explicitly read released config panels and multi-game
+records with their original keys and seeds. They do not teach those formats for
+new declarations. Use a disposable retained-data copy, never operational state.
 
-## Etude: tracking and reading a run against a bucket
+## Etude: local launcher and source-free continuation
 
-Write a real run with `track(..., directory=D, segment_rows=500)` and `run.finish()`;
-`queue_size=50_000` stops a tight logging loop dropping rows. Two `track` calls with the
-same run name, the first with `run.checkpoint(path, updates=N)`, give a resumed attempt.
-Deliver with `uv run etude sync --directory D --to r2://manabot/etude-r2-test/NAME`, with
-secrets injected by `doppler run -p manabot -c prd --only-secrets
-R2_ACCOUNT_ID,R2_ACCESS_KEY_ID,R2_SECRET_ACCESS_KEY -- ...`. Set `ETUDE_HOME` to an empty
-directory: `~/.etude/cache` holds ~200k files and each cached range read scans them all,
-so bucket reads take minutes there. `tests.run.storage.MeasuredStorage` counts requests
-(needs `PYTHONPATH=.`). Delete the prefix afterwards with `storage.delete` over
-`storage.keys("")`.
+In a fresh lab home, run `uv run etude database upgrade --development` before
+launcher commands for unmerged SQL. Reads never initialize the database.
+`uv run etude launch experiment.py --pool local` submits pending work;
+`uv run etude wait --experiment experiment` drives it. Launch again to discover
+evals after training, then wait again. Read printed outcomes, logs and cleanup
+receipts: exit 0 from wait alone does not establish success. `wait` takes no
+time limit and macOS has no `timeout`; bound it with the shell tool's own timeout. Each job uses an
+environment separate from the client. Keep `max_hours` and `max_usd` bounded.
 
-## Etude: a recipe's out, planned stops and retries on a fresh host
+Check a continuation with `uv run etude continue --run ADDRESS --until updates=N`.
+For the SSH scheduler path, submit frozen source once, make the client's
+checkout unavailable, and continue the retained run. The server must reuse its
+source archive without requiring another client checkout or transferring the
+same archive again. Preserve source-free output fetch and launch-failure evidence.
+The controlled stand-in SSH scenario is
+`tests/launch/test_server.py::test_remote_launch_freezes_sources_config_and_returns_outputs`.
 
-Local recipe path: a lab outside the repo with its own `ETUDE_HOME` and a
-wrapper script `bin/etude` that runs `exec uv run --project REPO --extra train
-etude "$@"` (zsh will not split a command held in a variable). Copy
-`examples/coin.py`, or write a recipe as `docs/training.md` shows
-(`track(config=config)`, `run.resume(...)`, `run.steps(...)`, `run.save()`),
-with a `time.sleep` per step so a stop lands mid-run. Then:
-
-- `etude train FILE [--until clock=N]` (0 finished, 75 stopped); runs land in
-  `ETUDE_HOME/track/ADDRESS/` (`run.json`, `outcome.json`, `metrics/`, `out/`).
-- Ctrl-C: a background job in a non-interactive shell ignores SIGINT, so send it
-  from a tiny Python driver (`Popen(argv)`, `sleep`, `send_signal(SIGINT)`,
-  print `wait()`). `--seconds 2` gives a deadline stop instead.
-- `etude train FILE --resume [--until ...]`; refusals to check: rerun without
-  `--resume` (`run_name_taken`), resume a finished run (`run_already_finished`),
-  changed `--config` (`run_identity_conflict`), a target on a clock the recipe
-  does not count (`until_clock_undeclared`). Never pipe a run into `head`: the
-  SIGPIPE fails the run.
-- A `training_jobs()` file with `seeds=(0, 1, 2)` trains `NAME@0..2` in order; `--job`
-  and `--seed` select. Do not teach `--resume` as finishing a partly started
-  selection (an unstarted member is refused; Open 6).
-- Read rows with `etude.train.read.read(ETUDE_HOME/track, EXPERIMENT, ADDRESS)
-  .points(metric, clock).x`; `etude checkpoints` lists stored checkpoints;
-  `etude report FILE` writes `ETUDE_HOME/track/reports/NAME.html`.
-- Hanabi: `bin/hetude` running `uv run --extra train --extra eval --extra hanabi
-  etude` from the repo root, then `docs/hanabi.md`'s commands; 2000 updates take
-  long enough to interrupt at ~5 s.
-
-Launch a plain file defining only `training_jobs()` to check that its
-stem supplies the experiment. Also check an explicit `Job.experiment`: plain
-files preserve it, while files defining `report()` or `eval_jobs(state)` require
-their own stem.
-
-For an installed-package check, build with `uv build --wheel --out-dir /tmp/qa-dist`,
-create an isolated Python 3.12 environment with `uv venv --python 3.12 /tmp/qa-client`,
-and install the wheel's `train,eval,hanabi` extras with `uv pip install --python
-/tmp/qa-client/bin/python '/tmp/qa-dist/etude_sdk-VERSION-py3-none-any.whl[train,eval,hanabi]'`.
-Invoke `/tmp/qa-client/bin/etude` with a separate `ETUDE_HOME`. Copy the examples
-into a temporary git repo before `etude eval`; `Seating` needs `configs=({},)`
-even when the game has no config fields. Hanabi's group scores can be queried
-with `statsdb`/`compare`; current report charts draw individuals and explain when
-team scores are omitted.
-
-To exercise automatic retries without renting, declare a job with `max_hours`,
-`max_attempts=2` and `Runtime(python=...)` pointing to a **separate job environment**
-containing the wheel. Using the client environment as the job runtime is refused.
-Have the real recipe register a counter, save at update 2, and raise `Stopped`;
-its next allocation resumes at 3. Run `etude launch FILE --pool local`,
-then `etude wait --experiment NAME`, inspect `etude logs --run ADDRESS`, and require a stopped
-attempt followed by success. Check `etude continue --run ADDRESS --until updates=N`
-too: implicit recipe clocks must work across branching. Check cleanup receipts and ensure
-no owned worker remains after waiting. A wait command's exit 0 alone does not mean
-the run succeeded; read its printed final outcome.
-
-Manabot acceptance without touching its checkout: `git ls-files -z | rsync -a
---from0 --files-from=- . /tmp/X/` plus the in-tree `managym/_managym.*.so`; then
-`uv venv -p 3.13` and `uv pip install` manabot's dependency list (without
-managym, which would build Rust) with `-e <this checkout>`, and `--no-deps -e .`.
-Apply the cutover in `scratch/questions.md` and run `.venv/bin/manabot train
---recipe belief --out DIR` (about 85 s; a rerun about 13 s).
-
-SSH boxes when `docker build` hangs on registry metadata: `docker run -d` the
-cached `ghcr.io/astral-sh/uv:python3.12-bookworm-slim` (amd64 here, so pass
-`--platform linux/amd64`), `apt-get install openssh-server git iptables procps`
-inside, copy the key, `docker commit --change 'CMD ["/usr/sbin/sshd","-D","-e"]'`.
-The job repo must install this branch on the box: build a wheel into
-`wheels/`, depend on `etude-sdk[s3]` with `[tool.uv.sources] etude-sdk = {path =
-"wheels/…whl"}`, and `uv lock --upgrade-package etude-sdk` after each rebuild
-(same version, new hash). Wrap Doppler in a script (`withr2 CMD…`): zsh does
-not word-split a command stored in a variable.
-
-To place a retry on a fresh host deterministically: launch, `etude pool off P`
-at once, `etude wait RUN` under `perl -e 'alarm 100'` until attempt 1 ends
-`stopped`, then `docker rm -f` and `docker run` the box again on the same port
-(`ssh-keygen -R '[127.0.0.1]:PORT' -f KNOWN_HOSTS`), `etude pool on P`, wait.
-Grep `etude logs --run RUN` for the job's own lines. Per-session bucket reads
-are in `sessions/S/out/usage.jsonl`. Destroying an owned host mid-attempt is
-never declared lost (no deadline): the run stays `running`, and cancelling
-leaves it `stopping`. Use a fresh `ETUDE_HOME` and prefix after installing an
-interim schema. Afterwards remove the containers and delete the prefixes
-(`aws s3 rm --recursive` under Doppler, as above).
-
-## Etude: one pass over an experiment file (train, eval, launch, queue)
-
-Lab as in "launching an experiment file on this computer", with `two.py` declaring
-`training_jobs(state)` (base, seeds 0 and 1; then `fine` with `start=` base@0's
-`final` once it is finished) and `eval_jobs(state)` (a `Benchmark` over every
-`run.final`). Use a recipe that checkpoints a folder (`run.checkpoint(policy=...)`):
-single-file checkpoints hide nested input names (`start/checkpoint.json`).
-
-- Here: `etude train two.py` three times (stage one, stage two, all `finished`),
-  `etude eval two.py` twice (`N new ... N played`, then `nothing to play`), `etude report two.py`.
-- Launched: fresh `ETUDE_HOME`, `etude launch two.py --max-usd 5`, then
-  `perl -e 'alarm 240; exec @ARGV' uv run etude wait --experiment two` (wait drives the
-  local pool), and `launch` again, immediately and after waiting. In-flight matches read
-  `0 new, N running`. `--max-usd 1.5` with `max_usd=1` per job holds the second seed.
-- Ctrl-C: a slower copy of the file (`pause=0.5`) under the `Popen`/`SIGINT` driver after
-  ~7 s gives exit 75; the next pass prints `stopped; --job base --seed N --resume`
-  (which seed depends on timing); follow that hint.
-- Cancelled before start: `etude queue two.py`, `etude cancel --experiment two`, wait;
-  the next pass prints `failed; --job base --seed 0 --resume`; following it with both
-  `etude train` and `etude launch` must start the run.
-- Returning user: `git worktree add --detach /tmp/X main`, a lab whose pyproject points
-  at it, train `runs()` files (compact `ppo@0`, `solo`) and `etude queue` (makes
-  `launcher-19.db`). Repoint the pyproject at this checkout, `uv lock`, rename per
-  `release/UNRELEASED.md`, and check stored runs read `finished`.
-
-## Driving Etude
-
-- Isolate each scenario: a fresh `ETUDE_HOME` and a fresh `--source` directory.
-  Eval runs are written under `$ETUDE_HOME/track` and delivered to the source.
-  For recovery, reuse the home and move checkpoint files without changing their
-  keys, digests or lengths: bare and composed players must resume without
-  replaying delivered matches. Changed author fields or checkpoint fingerprints
-  must still raise `eval_run_tournament_conflict`.
-- Evaluations: `uv run etude eval FILE.py --source DIR`, run twice (the second
-  pass must play nothing), then `--retry-failed`. `examples/agents.py` covers
-  grouped tournaments, a shared checkpoint and nested wrappers. To vary the
-  game or loader, copy the example files into a temp folder and run
-  `uv run --project <checkout> etude eval agents.py` from there.
-- Results: `statsdb(experiment, DIR)` from `etude.eval.query`, using the
-  `players`, `seats` and `matches` tables.
-- Report: `uv run etude report FILE.py --source DIR --out OUT`, then look at it with
-  `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new
-  --disable-gpu --screenshot=OUT.png --window-size=1300,800 file://OUT/FILE.html`
-  and read the PNG. The page renders in JavaScript, so grepping the HTML text
-  shows nothing.
-- Failure paths: copy the example into a git lab and edit `agent_models.py`
-  (`raise RuntimeError(...)` for a bad checkpoint, `raise RetryRequested(...)`
-  from `etude.errors` for a transient one) or `play` (raise in one lane). Each
-  needs a fresh `ETUDE_HOME` and source; run three passes to see what is
-  replayed, held for `--retry-failed`, or settled.
-- To interrupt a pass at a known point, read its output from a Python driver
-  (`Popen(..., stdout=PIPE, stderr=STDOUT)`) and send SIGTERM after the line
-  `K/N matches played`; a fixed sleep misses because this Mac runs ~16 games
-  at a time. The next pass should play only the interrupted matches.
-
-## Etude: grouped evals with agents
-
-Copy `examples/{agents.py,agent_game.py,agent_models.py,agent.txt}` into a git lab
-and run `uv run --project REPO etude eval agents.py --source RUNS` with a fresh
-`ETUDE_HOME`. Drive scenarios with environment knobs read inside the lab's own
-modules: a `play` wrapper that raises when `QA_FAIL` appears in a player's JSON or
-sleeps for `QA_SLOW` (make one player's matches ten times longer, or every match
-finishes before a SIGTERM lands), a loader that raises when `QA_BAD` names a
-checkpoint key, and `Agents(memory_gb=float(os.environ["QA_MEM"]))` (`3e-9` fits
-one two-byte checkpoint and forces eviction). Send each pass's output to its own file:
-`grep -v` in a pipe buffers until exit, so a slow pass looks hung, and several passes
-in one tool call can exceed its timeout on a busy Mac. Judge a suspected hang from the
-timestamps under `ETUDE_HOME/track/NAME/artifacts/agents/` and the run's `blocks/`,
-not from `ps` elapsed times.
-
-Launched grouping without renting: put the same lab files in a uv lab (as in
-"launching an experiment file on this computer"), `etude database upgrade
---development`, `etude launch two.py`; every tournament should report the same
-`running two/evals-*` run. `etude wait --experiment two` drives the local pool;
-`etude logs --run two/evals-*` shows one allocation: on CPU, `agents: CPU inference
-in N game processes` (each game loads its forwards directly); on visible NVIDIA
-hardware, one shared `agents: started ...` process. `QA_*` knobs do not reach the
-launched worker, so drive failures through `etude eval`.
-
-Retain the startup game count and inference thread count with protocol comparison
-results. On NVIDIA hardware, verify batch-sized game capacity with pending and
-host-memory bounds; hide the GPU to verify the CPU allocation. Hardware probing
-must not import the loading library or run for agentless games. Keep model
-placement separate from the loader's device choice. Exercise cross-job batches,
-multiple checkpoint leaves, partial-batch drain, loader failure propagation and
-fresh-host resume. Keep per-decision and whole-arm metrics separate; CPU results
-do not select GPU placement, or conversely.
-Controlled CPU/memory checks cover one CPU, fewer pending games than
-CPUs, memory-limited games, agentless games, code-only builds and multiple
-tournaments; verify one allocation reaches dispatch. CPU games import the
-loader and keep one thread each; only the shared GPU path keeps model loading
-out of game imports and sets shared inference threads. Code-only builds start
-no loading process and run no hardware probe. Use the unchanged frozen panel, retain its whole-arm timer
-before querying reports, and compare complete action sequences.
-
-Use distinct tournament configs such as `configs=({"lane": name},)`: identical
-configs produce identical match keys, so a later tournament sees those matches
-in flight. Compare the `seats.player`/`scores` results after eviction, interruption
-and retries with an unconstrained run. `etude smoke FILE` checks grouping too.
-
-Placement errors: `etude pool add owned` (no machines), then `etude launch FILE
---pool owned --quote` gives "no free machine"; `etude pool off owned` gives "is
-turned off". Both need pending matches: after `etude queue` plus `etude cancel`,
-the cancelled matches read as failed and need `--retry-failed`. Ignore every
-`ETUDE_HOME` in the lab's `.gitignore`, or runs say "plus uncommitted changes".
-
-For protocol intervals, sort `started_monotonic`/`finished_monotonic` endpoints
-and count starts minus finishes; compare the peak with the reported game capacity.
-Standalone runs retain reports under their own `artifacts/agents/` and ship them
-with results. Their scripts need an `if __name__ == "__main__":` guard.
-For an upgrade check, create results on a detached `main` checkout using `Code`
-players and an unannotated `play`, then read them here.
+Placement errors need pending work: an empty owned pool quotes no free machine;
+a disabled pool refuses placement. Cancel lab work and wait for cleanup before
+finishing. Credentials for explicitly authorized bucket/remote scenarios come
+from Doppler, injected into the command; never print them. Keep each scenario's
+home and storage prefix isolated and remove only its own resources.
 
 ## Etude: explicit launcher upgrades
 

@@ -15,21 +15,22 @@ from etude.eval.query import statsdb
 from etude.eval.records import (
     Aligned,
     Benchmark,
+    CheckpointSlot,
     Code,
     Composition,
     Final,
-    Held,
     Line,
     Match,
     Seated,
     Seating,
     TournamentRun,
+    checkpoint_player,
     compose,
     player_checkpoints,
     relocate_player,
 )
 from etude.eval.tournament import evaluating, played, scores
-from etude.jobs import Agents, ExperimentState, checkpoint_inputs, hold_group
+from etude.jobs import Agents, EvalJob, ExperimentState, checkpoint_inputs, hold_group
 from etude.page import _players
 from etude.records import ArtifactRef
 from tests.eval.arithmetic import Shift, build, checkpoint, load
@@ -98,7 +99,7 @@ def test_relocated_benchmark_leaves_and_pairings_resume_without_replaying(tmp_pa
             seatings=(
                 Seating(
                     name="relative",
-                    players=(Held(), opponent),
+                    players=(CheckpointSlot(), opponent),
                     configs=({},),
                     games=1,
                 ),
@@ -110,7 +111,7 @@ def test_relocated_benchmark_leaves_and_pairings_resume_without_replaying(tmp_pa
 
     small = small.model_copy(update={"at": {"updates": 1}})
     other_ref = other.checkpoint.model_copy(update={"at": {"updates": 1}})
-    fixed = compose(Shift(over=Held().player(other_ref)))
+    fixed = compose(Shift(over=checkpoint_player(other_ref)))
     for uri, expected in ((small.artifact.uri, 1), ("file:///moved/weights", 0)):
         moved = relocate_player(fixed, {"other": uri})
         assert isinstance(moved, Composition)
@@ -293,7 +294,9 @@ def test_composition_resolves_two_relative_leaves() -> None:
             members=(Aligned(clock="updates", job="left"), Aligned(clock="updates", job="right"))
         )
     )
-    seating: Seating = Seating(name="both", players=(Held(), tree), configs=({},), games=3)
+    seating: Seating = Seating(
+        name="both", players=(CheckpointSlot(), tree), configs=({},), games=3
+    )
     seated = seating.resolve(
         held,
         (
@@ -312,13 +315,13 @@ def test_benchmark_scores_keep_players_with_one_or_several_checkpoint_leaves(
     tmp_path: Path,
 ) -> None:
     small = checkpoint("small").checkpoint
-    wrapped = compose(Shift(over=Held()))
+    wrapped = compose(Shift(over=CheckpointSlot()))
     nested = compose(Shift(over=wrapped, amount=2))
-    ensemble = compose(Ensemble(members=(Held(), checkpoint("belief"))))
+    ensemble = compose(Ensemble(members=(CheckpointSlot(), checkpoint("belief"))))
     seatings: tuple[Seating, ...] = tuple(
         Seating(name=name, players=(player, Code(name="heuristic")), configs=({},), games=1)
         for name, player in (
-            ("bare", Held()),
+            ("bare", CheckpointSlot()),
             ("shift", wrapped),
             ("nested", nested),
             ("ensemble", ensemble),
@@ -386,11 +389,15 @@ def test_author_kind_fields_do_not_impersonate_checkpoint_records() -> None:
 
 
 def test_a_composed_player_needs_its_build_hook_at_declaration() -> None:
-    active = job("wrapped", Agents(load=load)).model_copy(
-        update={"enter": (checkpoint("small"), compose(Shift(over=checkpoint("small"))))}
-    )
+    active = job("wrapped", Agents(load=load))
     with pytest.raises(LauncherError, match="build"):
-        active.plain()
+        EvalJob(
+            tournament=active.tournament,
+            play=active.play,
+            agents=active.agents,
+            enter=(checkpoint("small"), compose(Shift(over=checkpoint("small")))),
+            max_hours=0.1,
+        )
 
 
 def test_one_seed_selects_one_held_line_for_fixed_and_composed_opponents() -> None:
@@ -409,7 +416,7 @@ def test_one_seed_selects_one_held_line_for_fixed_and_composed_opponents() -> No
     )
     for opponent in (checkpoint("fixed"), tree):
         seating: Seating = Seating(
-            name="one", players=(Held(), opponent), configs=({},), games=7, seeds="one"
+            name="one", players=(CheckpointSlot(), opponent), configs=({},), games=7, seeds="one"
         )
         scheduled = [seating.resolve(each.checkpoints[0], (*mine, *others)) for each in mine]
         assert all(isinstance(result, Seated) for result in scheduled)
@@ -434,7 +441,7 @@ def test_composed_policy_seats_resolve_each_experiment_and_role() -> None:
     seating: Seating = Seating(
         name="composed",
         players=(
-            Held(),
+            CheckpointSlot(),
             compose(
                 Ensemble(
                     members=(
@@ -484,7 +491,7 @@ def test_composed_policy_seats_resolve_each_experiment_and_role() -> None:
     assert match.games == 3
     # Defaults inside fixed wrappers bind using the same policy lines.
     unresolved = CheckpointRef(experiment="rival", job="base", name="final", artifact=artifact)
-    fixed = compose(Ensemble(members=(Held().player(unresolved),)))
+    fixed = compose(Ensemble(members=(checkpoint_player(unresolved),)))
     bound = TournamentRun(tournament=benchmark, entrants=(fixed,)).bind(lines, experiment="league")
     (ref,) = player_checkpoints(bound.entrants[0])
     assert ref.key == opponent.key

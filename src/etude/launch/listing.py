@@ -5,11 +5,12 @@ from collections.abc import Sequence
 
 from etude.identity import run_address
 from etude.launch.records import Availability, Machine, Quote
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
+from etude.launch.server import PythonClient, selected
 from etude.launch.source import line
 
 
-def show_runs(scheduler: Scheduler, ids: Sequence[str]) -> None:
+def show_runs(scheduler: Scheduler | PythonClient, ids: Sequence[str]) -> None:
     for run in ids:
         status = scheduler.read(run)
         where = f", machine {status.machine}" if status.machine else ""
@@ -42,7 +43,7 @@ def resolve_runs(
 
 def _here() -> str:
     """What to call the machine that holds the database, as its owner would read it."""
-    return "the server" if os.environ.get("ETUDE_SERVER_LOCAL") else "this computer"
+    return "the server" if (os.environ.get("ETUDE_SERVER_LOCAL") or selected()) else "this computer"
 
 
 def _machine_name(machine: Machine) -> str:
@@ -86,7 +87,7 @@ def show_ondemands(scheduler: Scheduler) -> None:
         print(each.name, "; ".join(parts) + _marks(scheduler, each.name), sep="  ")
 
 
-def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) -> None:
+def show_machines(scheduler: Scheduler, *, ended: bool) -> None:
     """One line per machine: owned with its cost and expiry, or rented with its window and cost."""
     windows = {cost.rental.machine: cost for cost in scheduler.rentals()}
     now = scheduler.now()
@@ -127,11 +128,6 @@ def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) ->
                 f"{machine.state(now)}, {hardware}{window}, {cost}",
                 sep="  ",
             )
-            if images and machine.image is not None:
-                image = machine.image
-                print(
-                    f"  image: {image.requested} -> {image.resolved} ({image.platform or 'platform unchecked'})"
-                )
             if spent.over_cap:
                 print(f"warning: {machine.name} bill exceeds its ${rental.cap_usd:.4f} cap")
 

@@ -111,11 +111,11 @@ def test_put_once_get_and_absence_mean_what_they_say() -> None:
 
 
 def test_a_writing_form_is_limited_to_its_folder_and_its_time() -> None:
-    form = bucket(Storage(replies=[])).post_form("etude/r1/out/", 3600, max_bytes=1000)
+    form = bucket(Storage(replies=[])).post_form("etude/r1/out/", 3600)
     policy = json.loads(base64.b64decode(form.fields["policy"]))
     assert policy["expiration"] == "2013-05-24T01:00:00Z"
     assert ["starts-with", "$key", "etude/r1/out/"] in policy["conditions"]
-    assert ["content-length-range", 0, 1000] in policy["conditions"]
+    assert ["content-length-range", 0, 5 * 1024**3] in policy["conditions"]
     storage = Storage(replies=[HTTPReply(status=204, body=b"")])
     post(form, "etude/r1/out/log", b"line\n", storage)
     sent = storage.asked[0][2] or b""

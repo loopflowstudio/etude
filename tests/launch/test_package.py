@@ -17,10 +17,10 @@ from pydantic import ValidationError
 from etude.launch.client import _open
 from etude.launch.database import upgrade
 from etude.launch.environment import install
-from etude.launch.providers import bootstrap, package
-from etude.launch.providers.package import program_archive
-from etude.launch.providers.runpod import pod
-from etude.launch.providers.vast import instance
+from etude.launch.provisioner.providers import bootstrap, package
+from etude.launch.provisioner.providers.package import program_archive
+from etude.launch.provisioner.providers.runpod import pod
+from etude.launch.provisioner.providers.vast import instance
 from etude.launch.schemas import Packet
 from etude.launch.storage.files import read_result
 from etude.launch.storage.transport import HTTPReply
@@ -88,9 +88,9 @@ def test_guardian_payload_runs_without_site_packages(tmp_path: Path, module: str
             f"""import os, sys
 from datetime import UTC, datetime
 from pathlib import Path
-from etude.launch.providers import bootstrap
+from etude.launch.provisioner.providers import bootstrap
 from etude.launch.storage.transport import HTTPReply
-import etude.launch.providers.{module} as provider
+import etude.launch.provisioner.providers.{module} as provider
 
 calls = []
 api = provider.GuardianAPI("fixture", lambda method, *args:
@@ -126,7 +126,9 @@ def test_transferred_package_keeps_its_digest_when_forwarded(
     metadata.mkdir()
     for name in ("pyproject.toml", "uv.lock"):
         (metadata / name).write_bytes((tmp_path / name).read_bytes())
-    monkeypatch.setattr(package, "__file__", str(tmp_path / "etude/launch/providers/package.py"))
+    monkeypatch.setattr(
+        package, "__file__", str(tmp_path / "etude/launch/provisioner/providers/package.py")
+    )
     assert package.program_archive() == original
 
 

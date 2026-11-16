@@ -353,21 +353,6 @@ function model(D) {
     return p == null || p.control ? selected : p.selection;
   };
   const usesSelection = (D.panel_selections || []).some(p => p.control);
-  function plannedSeries(panel, jobs = JOBS) {
-    return jobs.flatMap(job => {
-      const samples = panel.jobs[job.name] ?? panel.jobs[job.launch];
-      if (!samples) return [];
-      const points = samples.map(p => ({x: p.at, y: p.value}));
-      const markers = job.runs.flatMap(run => {
-        const x = T.runs.find(r => r.name === run)?.at?.[panel.clock];
-        if (x == null || x < points[0].x || x > points.at(-1).x) return [];
-        const right = points.findIndex(p => p.x >= x), b = points[right], a = points[Math.max(0, right - 1)];
-        const y = x === b.x ? b.y : a.y + (b.y - a.y) * (x - a.x) / (b.x - a.x);
-        return [{run, x, y, meta: `recorded ${panel.clock} · ${run}`}];
-      });
-      return [{job, points, markers}];
-    });
-  }
   // Opponents are the anchors checkpoints met, by name; checkpoints met are head-to-head games.
   function opponents(score, sel) {
     const seen = new Set(D.cells.filter(c => c.selection === sel && c.score === score && !c.fixed && placed(c.subject)).map(c => c.opponent));
@@ -425,7 +410,7 @@ function model(D) {
     };
   };
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, jobPoints, cellOf, subjectAt, placed, positioned, atClocks, alignClock, fixedPlayers, usesSelection, panelSelection, seated, plannedSeries, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
+  return {T, R, JOBS, marks, markOf, jobPoints, cellOf, subjectAt, placed, positioned, atClocks, alignClock, fixedPlayers, usesSelection, panelSelection, seated, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
 }
 
 // The first curve supplies the index headline, with the page's default score,

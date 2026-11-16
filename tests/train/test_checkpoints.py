@@ -9,18 +9,18 @@ from pydantic import BaseModel
 from etude.carriage import RecordMismatch, put_back, recorded_file, recorded_files, restore_set
 from etude.checkpoints import CheckpointRecord, PolicyKey
 from etude.errors import EtudeError
-from etude.eval.match import environment, evaluate
+from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Code, Held, Match
+from etude.eval.records import Code, Match, checkpoint_player
 from etude.experiment import observe
 from etude.jobs import Checkpoints, TrainingJob, checkpoint_inputs_for
-from etude.records import Continuation, SourceKey
+from etude.records import Clock, Continuation, SourceKey
 from etude.run import RunFiles
 from etude.storage import DirectoryStorage
-from etude.train.records import Step
-from etude.train.tracking import track
 from tests.eval.games import play_checkpoint_folder
+from tests.eval.playing import play_matches
 from tests.run.storage import MeasuredStorage
+from tests.train.tracking import open_run
 
 
 class Config(BaseModel):
@@ -37,11 +37,11 @@ def test_two_models_publish_one_checkpoint_and_read_the_same_record(
     torch = pytest.importorskip("torch")  # optional training dependency
     policy, value = torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)
     bucket = DirectoryStorage(tmp_path / "bucket")
-    with track(
+    with open_run(
         experiment="tiny",
         run="seed-0",
         directory=tmp_path / "runs",
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         storages=[bucket],
         strict=True,
     ) as run:
@@ -66,19 +66,18 @@ def test_two_models_publish_one_checkpoint_and_read_the_same_record(
     assert observed is not None
     assert observed.artifact.sha256 == first.sha256
     assert observed.path == tmp_path / "bucket/tiny/seed-0/out/checkpoints/updates-00000002"
-    assert observed.player(Held()).checkpoint == observed.ref
+    assert checkpoint_player(observed.ref).checkpoint == observed.ref
     assert {given.name for given in checkpoint_inputs_for(observed, "start")} == {
         "start/checkpoint.json",
         "start/policy.pt",
         "start/value.pt",
     }
-    seated = Match(players=(observed.player(Held()), Code(name="opponent")), games=1)
-    result = evaluate(
+    seated = Match(players=(checkpoint_player(observed.ref), Code(name="opponent")), games=1)
+    result = play_matches(
         experiment="tiny",
         environment=environment("tiny-game"),
         matches=[seated],
         play=play_checkpoint_folder,
-        workers=1,
         run="eval",
         directory=tmp_path / "evaluations",
         storages=[bucket],
@@ -94,11 +93,11 @@ def test_two_models_publish_one_checkpoint_and_read_the_same_record(
     assert len(job.inputs) == 3
     for variable in job.environment:
         monkeypatch.setenv(variable.name, variable.value)
-    with track(
+    with open_run(
         experiment="tiny",
         run="child",
         directory=tmp_path / "child-runs",
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
     ) as child:
         recorded = RunFiles(child.files.root).run_file()
         assert recorded is not None and recorded.start == observed.key
@@ -116,11 +115,11 @@ def test_two_models_publish_one_checkpoint_and_read_the_same_record(
 
 
 def test_exported_folder_is_immutable_and_a_failed_export_publishes_nothing(tmp_path: Path) -> None:
-    with track(
+    with open_run(
         experiment="tiny",
         run="r",
         directory=tmp_path,
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         strict=True,
     ) as run:
 
@@ -152,7 +151,7 @@ def test_policy_key_defaults_and_roles_keep_separate_checkpoint_lines(tmp_path: 
         (folder / "weights.bin").write_bytes(b"same weights")
 
     for seed in (2, 0):
-        with track(
+        with open_run(
             experiment="league",
             run=f"small@{seed}",
             job="small",
@@ -184,7 +183,7 @@ def test_policy_key_defaults_and_roles_keep_separate_checkpoint_lines(tmp_path: 
 
 def test_policy_key_defaults_choose_lowest_seed_and_list_ambiguous_jobs(tmp_path: Path) -> None:
     for job, seed in (("small", 2), ("small", 0)):
-        with track(
+        with open_run(
             experiment="defaults",
             run=f"{job}@{seed}",
             job=job,
@@ -199,7 +198,7 @@ def test_policy_key_defaults_choose_lowest_seed_and_list_ambiguous_jobs(tmp_path
     assert observe(tmp_path, "defaults").policy(PolicyKey()).key == PolicyKey(
         experiment="defaults", job="small", seed=0, role="policy"
     )
-    with track(
+    with open_run(
         experiment="defaults",
         run="large@0",
         job="large",
@@ -214,7 +213,7 @@ def test_policy_key_defaults_choose_lowest_seed_and_list_ambiguous_jobs(tmp_path
 
 
 def test_policy_roles_reference_one_out_file_without_sharing_identity(tmp_path: Path) -> None:
-    with track(
+    with open_run(
         experiment="roles",
         run="small@0",
         job="small",
@@ -237,7 +236,7 @@ def test_policy_roles_reference_one_out_file_without_sharing_identity(tmp_path: 
 
 def test_policy_key_checkpoint_choosers_follow_continuation_save_order(tmp_path: Path) -> None:
     for name, position in (("z-parent", 1), ("a-child", 2)):
-        with track(
+        with open_run(
             experiment="chain",
             run=name,
             job="small",

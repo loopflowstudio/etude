@@ -24,6 +24,9 @@ from typing import TYPE_CHECKING, cast
 from etude.errors import RetryRequested, explain
 from etude.eval.resources import Cpus, Resources, agent_bytes, seconds_left
 
+__all__ = ("Forward",)
+
+
 if TYPE_CHECKING:
     from etude.call import Function
     from etude.checkpoints import CheckpointRef

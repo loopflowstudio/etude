@@ -1,7 +1,7 @@
 """Optional SSH server: command transport, frozen inputs and a standing loop.
 
-SSH supplies authentication and streams ordinary command output. Only launch
-inputs and fetched files need a wire envelope. Provider/storage keys stay in the
+SSH streams ordinary CLI commands. Python submissions and file transfers use
+a small wire envelope. Provider/storage keys stay in the
 server's environment. The local setting never opens the launcher database.
 """
 
@@ -18,7 +18,6 @@ import tempfile
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from functools import cache
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn
@@ -28,22 +27,17 @@ from pydantic import Field, RootModel, TypeAdapter
 from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError, explain
 from etude.launch.errors import LaunchError, SchemaAdvanced
-from etude.launch.listing import show_runs
-from etude.launch.measurement import timed
-from etude.launch.providers.package import program_archive
+from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import (
-    Availability,
-    Diagnostic,
     Launch,
     LogSnapshot,
-    Machine,
     Quote,
     Standing,
     Status,
     Target,
 )
-from etude.launch.scheduler import Scheduler
-from etude.launch.source import freeze, home, retain, source_archive
+from etude.launch.scheduler.loop import Scheduler
+from etude.launch.source import freeze, home, retain, source_archive, stored
 from etude.launch.ssh import (
     _INSTALL_CODE,
     EncodedOutput,
@@ -83,9 +77,8 @@ class FetchRequest(Record):
 
 
 class SubmissionRequest(Record):
-    operation: Literal["launch", "prepare_launch", "quote"]
+    operation: Literal["launch", "prepare_launch", "quote", "missing_sources"]
     submission: LaunchInput
-    api: bool = False  # a launch replies with its run ids instead of printing the runs
 
 
 class FailLaunchRequest(Record):
@@ -101,7 +94,7 @@ class OutputRequest(Record):
 
 
 class RunOperation(Record):
-    operation: Literal["record", "status", "cancel"]
+    operation: Literal["record", "status", "read", "cancel"]
     run: str
 
 
@@ -119,7 +112,7 @@ class WaitRequest(Record):
 
 
 class EvidenceRequest(Record):
-    operation: Literal["diagnostics", "usage"]
+    operation: Literal["usage"] = "usage"
     run: str | None = None
     machine: str | None = None
 
@@ -132,24 +125,6 @@ class LogsRequest(Record):
     timeout: float | None = None
 
 
-class RentRequest(Record):
-    operation: Literal["rent"] = "rent"
-    ondemand: str
-    hours: float
-    max_usd: Decimal | None = None
-
-
-class TerminateRequest(Record):
-    operation: Literal["terminate"] = "terminate"
-    machine: str
-
-
-class AvailabilityRequest(Record):
-    operation: Literal["availability"] = "availability"
-    ondemand: str
-    timeout: float | None = None
-
-
 type Request = Annotated[
     SubmissionRequest
     | FailLaunchRequest
@@ -158,10 +133,7 @@ type Request = Annotated[
     | StandingRequest
     | WaitRequest
     | EvidenceRequest
-    | LogsRequest
-    | RentRequest
-    | TerminateRequest
-    | AvailabilityRequest,
+    | LogsRequest,
     Field(discriminator="operation"),
 ]
 _REQUEST: TypeAdapter[Request] = TypeAdapter(Request)
@@ -174,15 +146,12 @@ type Response = (
     | Status
     | LaunchInput
     | EncodedOutput
-    | Machine
     | Usage
     | LogSnapshot
-    | tuple[Diagnostic, ...]
     | tuple[RunRecord, ...]
     | tuple[Standing, ...]
     | Launch
     | Quote
-    | Availability
     | str
 )
 
@@ -240,7 +209,6 @@ def _command(address: str, argv: Sequence[str]) -> list[str]:
     ]
 
 
-@timed("ssh.server.install")
 def install(address: str, *, startup_seconds: float | None = None) -> None:
     """Send this client's code to the server. Safe to repeat."""
     if startup_seconds is not None and (not math.isfinite(startup_seconds) or startup_seconds <= 0):
@@ -270,7 +238,6 @@ def install(address: str, *, startup_seconds: float | None = None) -> None:
         )
 
 
-@timed("ssh.server.command")
 def _ssh(address: str, argv: Sequence[str], **options: Any) -> subprocess.CompletedProcess[bytes]:
     """Run one command on the server, sending the program first if it is not there.
 
@@ -299,7 +266,8 @@ def prepare(address: str, submission: LaunchInput) -> LaunchInput:
         return _with_sources(
             submission.model_copy(
                 update={"launch": launch.id, "runs": tuple(freeze(run) for run in requested)}
-            )
+            ),
+            client,
         )
     except Exception as error:
         message = explain(error)
@@ -310,12 +278,17 @@ def prepare(address: str, submission: LaunchInput) -> LaunchInput:
         raise LaunchError(launch.id, tuple(r.run for r in launch.requests), message) from error
 
 
-def _with_sources(submission: LaunchInput) -> LaunchInput:
+def _with_sources(submission: LaunchInput, client: PythonClient) -> LaunchInput:
     """Attach transport bytes to already frozen intent, without submitting a new run."""
+    missing = set(
+        TypeAdapter(tuple[str, ...]).validate_json(
+            client._request(SubmissionRequest(operation="missing_sources", submission=submission))
+        )
+    )
     sources: dict[tuple[str, str], Source] = {}
     for run in submission.runs:
         job = run.job
-        if job.repo is not None:
+        if run.id in missing and job.repo is not None:
             repo = job.repo
             assert job.revision is not None
             commit = job.revision
@@ -331,47 +304,9 @@ def _with_sources(submission: LaunchInput) -> LaunchInput:
     return submission.model_copy(update={"sources": tuple(sources.values())})
 
 
-def submit(scheduler: Scheduler, submission: LaunchInput) -> Sequence[str]:
-    if submission.launch is not None:
-        return scheduler.submit_launch(
-            submission.launch,
-            submission.runs,
-            Target(pool=submission.pool, rent=submission.rent),
-            queued=submission.queued,
-        )
-    send = scheduler.queue if submission.queued else scheduler.launch
-    return send(submission.runs, submission.pool, rent=submission.rent)
-
-
-def quote(scheduler: Scheduler | PythonClient, submission: LaunchInput) -> Quote:
-    return scheduler.quote(submission.runs, submission.pool, rent=submission.rent)
-
-
-def forward(
-    address: str,
-    argv: Sequence[str],
-    submission: LaunchInput | None = None,
-    fetch: FetchRequest | None = None,
-) -> int:
-    if submission is None and fetch is None:
-        return _ssh(address, argv).returncode
-    request: Request
-    if submission is not None:
-        request = SubmissionRequest(operation="launch", submission=prepare(address, submission))
-    else:
-        assert fetch is not None
-        request = OutputRequest(run=fetch.run, output=fetch.name)
-    done = _ssh(
-        address,
-        ["--server-request"],
-        input=_REQUEST.dump_json(request),
-        stdout=subprocess.PIPE if fetch is not None else None,
-    )
-    if done.returncode:
-        return done.returncode  # a lost reply never retries a launch
-    if fetch is not None:
-        print(_save_output(EncodedOutput.model_validate_json(done.stdout), fetch))
-    return 0
+def forward(address: str, argv: Sequence[str]) -> int:
+    """Run the same CLI on the selected host, preserving its output and exit status."""
+    return _ssh(address, argv).returncode
 
 
 def _retain(sources: Sequence[Source]) -> None:
@@ -396,10 +331,10 @@ def _save_output(raw: EncodedOutput, request: FetchRequest) -> Path:
 
 
 class PythonClient:
-    """Typed Python calls over the same SSH server protocol as the CLI.
+    """Python submissions and retained evidence over SSH.
 
     Each request is sent once. In particular a lost launch reply never resubmits.
-    Explicit Launcher instances continue to own only their local database.
+    Explicit Scheduler instances continue to own only their local database.
     """
 
     def __init__(self, address: str) -> None:
@@ -411,11 +346,7 @@ class PythonClient:
             ["--server-request"],
             input=_REQUEST.dump_json(request),
             capture_output=True,
-            **(
-                {"timeout": remaining(request.timeout)}
-                if isinstance(request, LogsRequest | AvailabilityRequest)
-                else {}
-            ),
+            **({"timeout": remaining(request.timeout)} if isinstance(request, LogsRequest) else {}),
         )
         if done.returncode:
             raise LauncherError(
@@ -440,9 +371,7 @@ class PythonClient:
         )
         try:
             return TypeAdapter(tuple[str, ...]).validate_json(
-                self._request(
-                    SubmissionRequest(operation="launch", submission=submission, api=True)
-                )
+                self._request(SubmissionRequest(operation="launch", submission=submission))
             )
         except Exception as error:
             assert submission.launch is not None
@@ -482,11 +411,6 @@ class PythonClient:
             self._request(SubmissionRequest(operation="quote", submission=submission))
         )
 
-    def availability(self, rent: str, *, timeout: float | None = None) -> Availability:
-        return Availability.model_validate_json(
-            self._request(AvailabilityRequest(ondemand=rent, timeout=timeout))
-        )
-
     def standing(
         self, experiment: str | None = None, *, job: str | None = None
     ) -> tuple[Standing, ...]:
@@ -502,6 +426,9 @@ class PythonClient:
     def status(self, run: str) -> Status:
         return Status.model_validate_json(self._request(RunOperation(operation="status", run=run)))
 
+    def read(self, run: str) -> Status:
+        return Status.model_validate_json(self._request(RunOperation(operation="read", run=run)))
+
     def wait(self, *runs: str, every: float = 1.0, timeout: float | None = None) -> list[Status]:
         return TypeAdapter(list[Status]).validate_json(
             self._request(WaitRequest(runs=runs, every=every, timeout=timeout))
@@ -509,13 +436,6 @@ class PythonClient:
 
     def cancel(self, run: str) -> Status:
         return Status.model_validate_json(self._request(RunOperation(operation="cancel", run=run)))
-
-    def diagnostics(
-        self, *, run: str | None = None, machine: str | None = None
-    ) -> tuple[Diagnostic, ...]:
-        return TypeAdapter(tuple[Diagnostic, ...]).validate_json(
-            self._request(EvidenceRequest(operation="diagnostics", run=run, machine=machine))
-        )
 
     def logs(
         self,
@@ -539,23 +459,13 @@ class PythonClient:
             ) from None
 
     def usage(self, *, run: str | None = None, machine: str | None = None) -> Usage:
-        return Usage.model_validate_json(
-            self._request(EvidenceRequest(operation="usage", run=run, machine=machine))
-        )
+        return Usage.model_validate_json(self._request(EvidenceRequest(run=run, machine=machine)))
 
     def fetch(self, run: str, name: str, destination: Path) -> Path:
         return _save_output(
             EncodedOutput.model_validate_json(self._request(OutputRequest(run=run, output=name))),
             FetchRequest(run=run, name=name, destination=destination),
         )
-
-    def rent(self, ondemand: str, hours: float, max_usd: Decimal | None = None) -> str:
-        return TypeAdapter(str).validate_json(
-            self._request(RentRequest(ondemand=ondemand, hours=hours, max_usd=max_usd))
-        )
-
-    def terminate(self, machine: str) -> Machine:
-        return Machine.model_validate_json(self._request(TerminateRequest(machine=machine)))
 
 
 def receive(scheduler: Scheduler) -> int:
@@ -566,6 +476,15 @@ def receive(scheduler: Scheduler) -> int:
             response = scheduler.prepare_launch(
                 submission.runs, submission.pool, rent=submission.rent
             )
+        case SubmissionRequest(operation="missing_sources", submission=submission):
+            response = tuple(
+                run.id
+                for run in submission.runs
+                if run.id is not None
+                and run.job.repo is not None
+                and run.job.revision is not None
+                and not stored(run.job.repo, run.job.revision).is_file()
+            )
         case SubmissionRequest(operation="launch", submission=submission):
             try:
                 _retain(submission.sources)
@@ -573,13 +492,19 @@ def receive(scheduler: Scheduler) -> int:
                 if submission.launch is not None:
                     scheduler.fail_launch(submission.launch, explain(error))
                 raise
-            ids = submit(scheduler, submission)
-            if not request.api:
-                show_runs(scheduler, ids)
-                return 0
+            if submission.launch is not None:
+                ids = scheduler.submit_launch(
+                    submission.launch,
+                    submission.runs,
+                    Target(pool=submission.pool, rent=submission.rent),
+                    queued=submission.queued,
+                )
+            else:
+                send = scheduler.queue if submission.queued else scheduler.launch
+                ids = send(submission.runs, submission.pool, rent=submission.rent)
             response = tuple(ids)
         case SubmissionRequest(operation="quote", submission=submission):
-            response = quote(scheduler, submission)
+            response = scheduler.quote(submission.runs, submission.pool, rent=submission.rent)
         case FailLaunchRequest():
             scheduler.fail_launch(request.launch, request.message)
             response = "failed; no run admitted"
@@ -600,10 +525,8 @@ def receive(scheduler: Scheduler) -> int:
             response = scheduler.standing(request.experiment, job=request.job)
         case WaitRequest():
             response = scheduler.wait(*request.runs, every=request.every, timeout=request.timeout)
-        case EvidenceRequest(operation="usage"):
+        case EvidenceRequest():
             response = scheduler.usage(run=request.run, machine=request.machine)
-        case EvidenceRequest(operation="diagnostics"):
-            response = scheduler.diagnostics(run=request.run, machine=request.machine)
         case LogsRequest():
             response = scheduler.logs(
                 run=request.run,
@@ -611,12 +534,8 @@ def receive(scheduler: Scheduler) -> int:
                 refresh=request.refresh,
                 timeout=request.timeout,
             )
-        case RentRequest():
-            response = scheduler.rent(request.ondemand, request.hours, request.max_usd)
-        case AvailabilityRequest():
-            response = scheduler.availability(request.ondemand, timeout=request.timeout)
-        case TerminateRequest():
-            response = scheduler.terminate(request.machine)
+        case RunOperation(operation="read"):
+            response = scheduler.read(request.run)
         case _:
             raise LauncherError(f"unknown server operation {request.operation!r}")
     print(ServerReply(response).model_dump_json())

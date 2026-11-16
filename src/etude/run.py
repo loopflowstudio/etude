@@ -355,30 +355,25 @@ def declare(
     experiment: str,
     clocks: Sequence[Clock] | None,
     run: str | None = None,
-    job: str | None = None,
-    seed: int | None = None,
     kind: str | None = None,
     config: Mapping[str, object] | str | None = None,
     continues: Continuation | None = None,
     inherited_clocks: Sequence[Clock] = (),
     directory: Path | str | None = None,
-    namespace: str = "local",
     resume: bool = False,
 ) -> Declared:
     """Claim a new run's `run.json`, or validate an explicitly resumed one.
 
-    A resumed run's declaration is the stored one. Under `etude launch`, `run`,
-    `job` and `seed` default to what the launcher handed the process
-    (`ETUDE_RUN`, `ETUDE_JOB`, `ETUDE_SEED`, `ETUDE_COHORT`); an argument given
-    here wins. Elsewhere `run` defaults to a new random name. Re-using a name
+    A resumed run's declaration is the stored one. Its job and seed are what
+    the launcher handed the process (`ETUDE_JOB`, `ETUDE_SEED`); `run` defaults
+    to `ETUDE_RUN`, else a new random name. Re-using a name
     is refused unless `resume`; its identity must match the first declaration.
     `config` given as text is kept byte for byte; a mapping is written as JSON.
     Inherited clocks seed a new child's axes without closing its resumed set.
     """
     handed = os.environ
     name = (run or handed.get("ETUDE_RUN") or secrets.token_hex(8)).removeprefix(experiment + "/")
-    if seed is None and "ETUDE_SEED" in handed:
-        seed = int(handed["ETUDE_SEED"])
+    seed = int(handed["ETUDE_SEED"]) if "ETUDE_SEED" in handed else None
     address = run or handed.get("ETUDE_RUN_ADDRESS") or name
     base, root = run_directory(directory, experiment, address)
     text = (
@@ -387,10 +382,10 @@ def declare(
     declaration = RunRecord(
         id=run_address(address, experiment),
         experiment=experiment,
-        namespace=namespace,
+        namespace="local",
         clocks=tuple(inherited_clocks if clocks is None else clocks),
-        job=job or handed.get("ETUDE_JOB"),
-        job_name=None if job else handed.get("ETUDE_JOB_NAME"),
+        job=handed.get("ETUDE_JOB"),
+        job_name=handed.get("ETUDE_JOB_NAME"),
         seed=seed,
         kind=kind,
         config=text,

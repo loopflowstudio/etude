@@ -119,6 +119,9 @@ from etude.records import Digest, Record, RunOutcome
 from etude.run import as_storage, declared, run_folders, under
 from etude.storage import DirectoryStorage, Storage, default_root
 
+__all__ = ("statsdb", "read_blobs", "estimate", "compare", "Estimate", "Comparison")
+
+
 if TYPE_CHECKING:
     import duckdb
     from _typeshed import SupportsRichComparison
@@ -1337,7 +1340,7 @@ def estimate(
 ) -> list[Estimate | None]:
     """Each column's ratio of totals over units × columns `numerators` and `denominators`.
 
-    A unit is what the bootstrap resamples whole, such as a match or a deal,
+    A unit is what the bootstrap resamples whole, such as a match,
     so its correlated rows move together. Every column shares one bootstrap:
     one draw of unit weights gives each column's 95% percentile interval.
     Units are ordered by their `keys` before resampling, so the result does

@@ -11,16 +11,21 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 
-from etude.carriage import immutable, listing
+from etude.carriage import immutable, publication
 from etude.errors import EtudeError
+from etude.records import Clock
 from etude.run import sync
 from etude.storage import DirectoryStorage
 from etude.train.read import read
-from etude.train.records import RowTable, Step, TablePoint, Time
-from etude.train.tracking import EtudeWarning, track
+from etude.train.records import RowTable, TablePoint, Time
+from etude.train.tracking import EtudeWarning
 from tests.run.storage import MeasuredStorage
+from tests.train.tracking import open_run
 
-CLOCKS = [Step("updates", "optimizer updates"), Time("seconds", "active training")]
+CLOCKS = [
+    Clock(name="updates", kind="step", meaning="optimizer updates"),
+    Time("seconds", "active training"),
+]
 
 
 def test_row_tables_roundtrip_ship_once_and_relocate(tmp_path: Path) -> None:
@@ -29,7 +34,7 @@ def test_row_tables_roundtrip_ship_once_and_relocate(tmp_path: Path) -> None:
         {"deck": "红", "seat": 0, "wins": 12, "rate": 0.6, "ok": True, "note": None},
         {"deck": "blue", "nested": {"results": [1, False, None, "win"]}},
     ]
-    with track(experiment="e", run="r", clocks=CLOCKS, directory=local) as run:
+    with open_run(experiment="e", run="r", clocks=CLOCKS, directory=local) as run:
         run.log_table("decks", rows, updates=400, seconds=20)
         (artifact,) = (local / "e/r/artifacts").iterdir()
         before = artifact.stat().st_mtime_ns
@@ -54,7 +59,7 @@ def test_row_tables_roundtrip_ship_once_and_relocate(tmp_path: Path) -> None:
     # Only a digest is retained in the update's text column.
     assert data.columns[0].row(0).values == {"decks": artifact.stem}
     key = artifact.relative_to(local / "e/r").as_posix()
-    assert immutable(key) and key in listing(local / "e/r", tail_seconds=0)
+    assert immutable(key) and key in publication(local / "e/r", tail_seconds=0).keys
 
     bucket = MeasuredStorage(DirectoryStorage(tmp_path / "bucket"))
     assert sync(local, storages=[bucket]) == {}
@@ -74,7 +79,7 @@ def test_row_tables_resolve_only_surviving_updates_across_machine_folders(
     tmp_path: Path, empty_resume: bool
 ) -> None:
     first = tmp_path / "pool/first/out/track"
-    with track(experiment="e", run="r", clocks=CLOCKS, directory=first) as run:
+    with open_run(experiment="e", run="r", clocks=CLOCKS, directory=first) as run:
         run.log_table("decks", [{"result": "keep"}], updates=1, seconds=1)
         run.log_table("decks", [{"result": "checkpoint"}], updates=2, seconds=2)
         run.log_table("decks", [{"result": "superseded"}], updates=3, seconds=3)
@@ -83,7 +88,7 @@ def test_row_tables_resolve_only_surviving_updates_across_machine_folders(
         if not empty_resume and b"superseded" in path.read_bytes():
             path.unlink()
     second = tmp_path / "pool/second/out/track"
-    with track(
+    with open_run(
         experiment="e",
         run="r",
         clocks=CLOCKS,
@@ -117,7 +122,7 @@ def test_row_tables_resolve_only_surviving_updates_across_machine_folders(
 
 @pytest.mark.parametrize("damage", ["missing", "digest", "schema", "reference"])
 def test_selected_row_table_damage_is_visible(tmp_path: Path, damage: str) -> None:
-    with track(experiment="e", run="r", clocks=CLOCKS, directory=tmp_path) as run:
+    with open_run(experiment="e", run="r", clocks=CLOCKS, directory=tmp_path) as run:
         if damage == "schema":
             body = b'{"rows":[1]}'
             digest = sha256(body).hexdigest()
@@ -145,7 +150,7 @@ def test_selected_row_table_damage_is_visible(tmp_path: Path, damage: str) -> No
 
 
 def test_row_table_rejects_invalid_rows_clocks_and_existing_damage(tmp_path: Path) -> None:
-    with track(experiment="e", run="r", clocks=CLOCKS, directory=tmp_path) as run:
+    with open_run(experiment="e", run="r", clocks=CLOCKS, directory=tmp_path) as run:
         for value in (object(), float("nan"), {"nested": float("inf")}):
             with pytest.raises(ValidationError):
                 run.log_table("t", [{"value": value}], updates=1, seconds=1)
@@ -164,7 +169,7 @@ def test_row_table_rejects_invalid_rows_clocks_and_existing_damage(tmp_path: Pat
 def test_metric_name_warning_counts_numeric_names_across_attempts(tmp_path: Path) -> None:
     with warnings.catch_warnings(record=True) as said:
         warnings.simplefilter("always", EtudeWarning)
-        with track(
+        with open_run(
             experiment="e",
             run="r",
             clocks=CLOCKS,
@@ -178,7 +183,7 @@ def test_metric_name_warning_counts_numeric_names_across_attempts(tmp_path: Path
             )
             run.log_table("decks", [], updates=1, seconds=1)
         assert said == []  # Clocks, text, flags and table references do not add numeric names.
-        with track(
+        with open_run(
             resume=True,
             experiment="e",
             run="r",
@@ -191,17 +196,5 @@ def test_metric_name_warning_counts_numeric_names_across_attempts(tmp_path: Path
             resumed.log({"fourth": 4}, updates=4, seconds=4)
     assert len(said) == 1
     assert "3 distinct metric names" in str(said[0].message)
-    assert "metric_name_limit=2" in str(said[0].message) and "log_table" in str(said[0].message)
+    assert "2-name limit" in str(said[0].message) and "log_table" in str(said[0].message)
     assert read(tmp_path, "e", "r").points("fourth", "updates").y.tolist() == [4]
-    with warnings.catch_warnings(record=True) as disabled:
-        warnings.simplefilter("always", EtudeWarning)
-        with track(
-            resume=True,
-            experiment="e",
-            run="r",
-            clocks=CLOCKS,
-            directory=tmp_path,
-            metric_name_limit=None,
-        ) as run:
-            run.log({"fifth": 5}, updates=5, seconds=5)
-    assert disabled == []

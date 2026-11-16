@@ -34,13 +34,13 @@ from etude.launch.database import Database, launcher_file
 from etude.launch.executor import Execution, Executor, local
 from etude.launch.listing import show_machines, show_runs
 from etude.launch.logging import CLOSED, log_to, write_log
-from etude.launch.providers.bootstrap import guard
-from etude.launch.providers.runpod.api import RunPodAPI
-from etude.launch.providers.runpod.machines import RunPodMachines
-from etude.launch.providers.runpod.pod import GuardianAPI
+from etude.launch.provisioner.providers.bootstrap import guard
+from etude.launch.provisioner.providers.runpod.api import RunPodAPI
+from etude.launch.provisioner.providers.runpod.machines import RunPodMachines
+from etude.launch.provisioner.providers.runpod.pod import GuardianAPI
 from etude.launch.records import Image, Machine, MachineTemplate, OnDemand, Provider, Status
 from etude.launch.records import Storage as Place
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import (
     WORKER_LOG,
     AttemptRecord,
@@ -58,15 +58,14 @@ from etude.launch.storage.transport import HTTPReply, emit
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
 from etude.launch.worker.courier import run as run_in_pod
-from etude.records import ArtifactRef
+from etude.records import ArtifactRef, Clock
 from etude.spec import Input, Job, RunRequest, Until
 from etude.storage_timeout import StorageUnavailable
-from etude.train.records import Step
 from etude.train.tracking import TrainingRun as TrackedRun
-from etude.train.tracking import track
 from tests.experiments import authored
 from tests.launch.counting import Counting, Counts, job_text
 from tests.launch.fake import open_database
+from tests.train.tracking import open_run
 
 TRAIN = """
 echo "seed $ETUDE_SEED to $ETUDE_UNTIL_VALUE"
@@ -78,10 +77,10 @@ printf '{"clocks": {"steps": %s}}' "$ETUDE_UNTIL_VALUE" > "$ETUDE_OUTPUT_DIR/etu
 TRACKED = """
 import os
 from pathlib import Path
-from etude.train.records import Step
+from etude.records import Clock
 from etude.train.tracking import track
-run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
-latest = run.latest_checkpoint()
+run = track(clocks=[Clock(name='steps', kind='step', meaning='training steps')])
+latest = (run._checkpoint_here(_saved_checkpoint) if (_saved_checkpoint := run._latest_record()) is not None else None)
 start = 0 if latest is None else int(latest.at["steps"])
 kept = "" if latest is None else latest.path.read_text()
 target = int(os.environ["ETUDE_UNTIL_VALUE"])
@@ -424,7 +423,11 @@ def test_a_runs_source_is_in_storage_before_any_pod_is_rented_for_it(
     c = cloud(tmp_path)
     c.scheduler.set_ondemand_max("l4", 2)
     job = Job(
-        command="sh train.sh", repo=str(repository(tmp_path)), max_hours=0.05, max_usd=Decimal(1)
+        experiment="capacity",
+        command="sh train.sh",
+        repo=str(repository(tmp_path)),
+        max_hours=0.05,
+        max_usd=Decimal(1),
     )
     if queued:
         runs = c.scheduler.queue(job.runs(1, 2), rent="l4")
@@ -455,6 +458,7 @@ def test_inputs_reach_the_job_by_name_once_and_wrong_bytes_are_refused(tmp_path:
         size_bytes=len(weights),
     )
     job = Job(
+        experiment="capacity",
         command='cat "$ETUDE_INPUTS_DIR/weights.pt"',
         inputs=(given,),
         max_hours=0.05,
@@ -509,6 +513,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     c = cloud(tmp_path, delivery_seconds=delivery_seconds)
     repo = tracked_repository(tmp_path)
     job = Job(
+        experiment="capacity",
         command=f"{sys.executable} train.py",
         repo=str(repo),
         until=Until.parse("steps=3"),
@@ -548,7 +553,7 @@ def test_a_run_from_a_commit_runs_in_a_pod_and_continues_in_another(
     )
     assert sent["delivery_seconds"] == delivery_seconds
 
-    held = c.store.rental(status.machine or "")
+    held = next(r for r in c.store.rentals() if r.machine == status.machine or "")
     machine = c.store.machine(held.machine)
     assert ((machine.kind != "rented"), machine.provider_id, machine.deleted_at is not None) == (
         False,
@@ -580,6 +585,7 @@ def test_a_pods_checkpoint_reaches_an_owned_host_without_its_storage_from_the_bu
     )
     c.scheduler.add_machine("mini", "mini.lan", storage=storage)
     job = Job(
+        experiment="capacity",
         command=f"{sys.executable} train.py",
         repo=str(tracked_repository(tmp_path)),
         until=Until.parse("steps=3"),
@@ -631,6 +637,7 @@ def test_a_checkpoint_gone_or_changed_in_the_bucket_ends_the_attempt_undelivered
     c = cloud(tmp_path, owned=mini)
     c.scheduler.add_machine("mini", "mini.lan")
     job = Job(
+        experiment="capacity",
         command=f"{sys.executable} train.py",
         repo=str(tracked_repository(tmp_path)),
         until=Until.parse("steps=3"),
@@ -666,7 +673,7 @@ def test_a_lost_create_reply_finds_the_pod_by_name_and_never_asks_twice(tmp_path
     c = cloud(tmp_path)
     c.provider.lose_reply = True
     (one,) = c.scheduler.queue(
-        Job(command="echo hi", max_hours=0.05, max_usd=Decimal(1)), rent="l4"
+        Job(experiment="capacity", command="echo hi", max_hours=0.05, max_usd=Decimal(1)), rent="l4"
     )
     c.scheduler.tick()
     assert c.scheduler.read(one).phase == "renting"
@@ -683,7 +690,9 @@ def test_machines_and_status_show_the_hardware_rented(
 ) -> None:
     # Without a GPU, 6 vCPUs and 48 GB round up to the 16 vCPU size of a 4 GB/vCPU flavor.
     c = cloud(tmp_path, gpu=gpu)
-    (one,) = c.scheduler.launch(Job(command="true", max_hours=0.05, max_usd=Decimal(1)), rent="l4")
+    (one,) = c.scheduler.launch(
+        Job(experiment="capacity", command="true", max_hours=0.05, max_usd=Decimal(1)), rent="l4"
+    )
     (status,) = c.scheduler.wait(one, every=0.05, timeout=30)
     assert status.outcome == "succeeded"
     capsys.readouterr()
@@ -699,10 +708,19 @@ def test_no_stock_is_a_refusal_and_cancel_reaches_a_running_pod(tmp_path: Path) 
     c.provider.available = "NONE"
 
     with pytest.raises(LauncherError, match="no available machines.*etude queue"):
-        c.scheduler.launch(Job(command="true", max_hours=0.05, max_usd=Decimal(1)), rent="l4")
+        c.scheduler.launch(
+            Job(experiment="capacity", command="true", max_hours=0.05, max_usd=Decimal(1)),
+            rent="l4",
+        )
     assert not c.scheduler.runs(done=True)
     (one,) = c.scheduler.queue(
-        Job(command="sleep 30", max_hours=0.05, max_usd=Decimal(1), max_attempts=2),
+        Job(
+            experiment="capacity",
+            command="sleep 30",
+            max_hours=0.05,
+            max_usd=Decimal(1),
+            max_attempts=2,
+        ),
         rent="l4",
     )
     assert c.provider.creates == 0
@@ -725,7 +743,10 @@ def test_an_r2_storage_that_cannot_grant_keys_fails_the_launch_before_renting(
 ) -> None:
     c = cloud(tmp_path, r2=True)
     with pytest.raises(LauncherError, match="R2_API_TOKEN"):
-        c.scheduler.launch(Job(command="true", max_hours=0.05, max_usd=Decimal(1)), rent="l4")
+        c.scheduler.launch(
+            Job(experiment="capacity", command="true", max_hours=0.05, max_usd=Decimal(1)),
+            rent="l4",
+        )
     assert (c.provider.creates, c.scheduler.runs(done=True)) == (0, ())
     # Refused, not unknown: no pod was asked for, so none is looked for later.
     (session,) = c.store.sessions()
@@ -737,11 +758,13 @@ def test_a_kept_session_takes_work_through_its_inbox(tmp_path: Path) -> None:
     c = cloud(tmp_path)
     machine = c.scheduler.rent("l4", hours=0.05)
     (first,) = c.scheduler.launch(
-        Job(command="echo one", max_hours=0.01, max_usd=Decimal(1)), rent="l4"
+        Job(experiment="capacity", command="echo one", max_hours=0.01, max_usd=Decimal(1)),
+        rent="l4",
     )
     (status,) = c.scheduler.wait(first, every=0.05, timeout=30)
     (second,) = c.scheduler.launch(
-        Job(command="echo two", max_hours=0.01, max_usd=Decimal(1)), rent="l4"
+        Job(experiment="capacity", command="echo two", max_hours=0.01, max_usd=Decimal(1)),
+        rent="l4",
     )
     (again,) = c.scheduler.wait(second, every=0.05, timeout=30)
     assert (status.outcome, again.outcome) == ("succeeded", "succeeded")
@@ -823,7 +846,7 @@ def test_shared_inputs_are_prepared_once(tmp_path: Path) -> None:
     )
     with counting.record():
         journal.prepare(packet)
-    # Packet, one source listing/upload, inbox, bootstrap.
+    # Packet, one source publication/upload, inbox, bootstrap.
     assert counting.snapshot() == Counts(bucket=5, git=1)
     bootstrap = Bootstrap.model_validate_json(
         storage.objects["test/sessions/shared/bootstrap.json"]
@@ -914,20 +937,26 @@ def test_tracking_files_reach_storage_while_the_job_runs(tmp_path: Path) -> None
     c = cloud(tmp_path)
     script = tmp_path / "train.py"
     script.write_text(
-        "import time\n"
-        "from etude.train.records import Step\n"
-        "from etude.train.tracking import track\n"
-        'run = track(experiment="capacity", clocks=[Step("steps", "training steps")],\n'
-        "           segment_seconds=0.1)\n"
-        'run.log({"loss": 0.5}, steps=1)\n'
-        "time.sleep(30)\n"
+        """import time
+from etude.records import Clock
+from etude.train.tracking import track
+run = track(clocks=[Clock(name='steps', kind='step', meaning='training steps')])
+run.log({"loss": 0.5}, steps=1)
+time.sleep(30)
+"""
     )
     (run,) = c.scheduler.launch(
-        Job(command=f"{sys.executable} {script}", max_hours=0.05, max_usd=Decimal(1)), rent="l4"
+        Job(
+            experiment="capacity",
+            command=f"{sys.executable} {script}",
+            max_hours=0.05,
+            max_usd=Decimal(1),
+        ),
+        rent="l4",
     )
     until(c.scheduler, run, "running")
     rows = f"etude/t/{run}/metrics/"
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + 25
     while time.monotonic() < deadline:
         sealed = [key for key in c.storage.objects if key.startswith(rows) and key.endswith(".blk")]
         if sealed:
@@ -948,13 +977,13 @@ def machine(tmp_path: Path, storage: Storage, *, run: str = "run1") -> tuple[Cou
     attempt = home / "attempts/a1"
     (attempt / "outputs").mkdir(parents=True)
     (attempt / "run").write_text(run)
-    track = tmp_path / "pod/track" / run
-    (track / "metrics").mkdir(parents=True)
+    tracked = tmp_path / "pod/track" / run
+    (tracked / "metrics").mkdir(parents=True)
     session = Grant(
         prefix="etude/sessions/r/out/", form=held.post_form("etude/sessions/r/out/", 3600)
     )
     courier = Courier(home, session, "unused", storage, {run: access}, home / "worker.log")
-    return courier, attempt, track
+    return courier, attempt, tracked
 
 
 def test_a_twelve_hour_log_is_sent_once_in_a_few_hundred_pieces(
@@ -1043,7 +1072,8 @@ def test_a_finished_rental_delivers_its_end_and_log_tail_before_it_is_deleted(
     monkeypatch.setenv("ETUDE_STORAGE_BYTES_PER_SECOND", "524288")
     c = cloud(tmp_path)
     (run,) = c.scheduler.launch(
-        Job(command="echo done", max_hours=0.05, max_usd=Decimal(1)), rent="l4"
+        Job(experiment="capacity", command="echo done", max_hours=0.05, max_usd=Decimal(1)),
+        rent="l4",
     )
     c.scheduler.wait(run, every=0.05, timeout=30)
     released(c.scheduler, run)
@@ -1089,22 +1119,22 @@ def test_output_printed_during_an_upload_waits_for_the_next_piece(tmp_path: Path
 
 def test_a_machine_deletes_only_uploaded_files_in_the_removal_note(tmp_path: Path) -> None:
     storage = Storage()
-    courier, _, track = machine(tmp_path, storage)
+    courier, _, tracked = machine(tmp_path, storage)
     # Names are deliberately not tracking block names: only the job knows them.
     recent = ["metrics/first", "metrics/second"]
     for name in recent:
-        (track / name).write_bytes(b"recent")
+        (tracked / name).write_bytes(b"recent")
     courier.carry_out()
     out = "etude/run1/"
     assert {out + name for name in recent} <= set(storage.objects)
     # Tracking joins the two into one permanent block and removes them.
     joined = "metrics/joined"
-    (track / joined).write_bytes(b"joined")
+    (tracked / joined).write_bytes(b"joined")
     for name in recent:
-        (track / name).unlink()
-    (track / "metrics/newer").write_bytes(b"newer")
+        (tracked / name).unlink()
+    (tracked / "metrics/newer").write_bytes(b"newer")
     storage.objects[out + "not-ours"] = b"another uploader"
-    (track / "metrics/w.removed").write_text(
+    (tracked / "metrics/w.removed").write_text(
         "\n".join([*recent, "not-ours", "../other-run/file", ""])
     )
     courier.carry_out()
@@ -1123,12 +1153,12 @@ def test_a_machine_deletes_only_uploaded_files_in_the_removal_note(tmp_path: Pat
 def test_a_machine_without_keys_keeps_every_block_and_still_delivers(tmp_path: Path) -> None:
     storage = Storage()
     storage.grants = False  # AWS would not issue keys; the machine has the form alone
-    courier, attempt, track = machine(tmp_path, storage)
+    courier, attempt, tracked = machine(tmp_path, storage)
     writer = "0123456789ab"
-    (track / f"metrics/1-00000000-00000007-{writer}.blk").write_bytes(b"recent")
+    (tracked / f"metrics/1-00000000-00000007-{writer}.blk").write_bytes(b"recent")
     courier.carry_out()
-    (track / f"metrics/2-00000000-00000007-{writer}.blk").write_bytes(b"joined")
-    (track / "metrics/w.removed").write_text(f"metrics/1-00000000-00000007-{writer}.blk\n")
+    (tracked / f"metrics/2-00000000-00000007-{writer}.blk").write_bytes(b"joined")
+    (tracked / "metrics/w.removed").write_text(f"metrics/1-00000000-00000007-{writer}.blk\n")
     courier.carry_out()
     out = "etude/run1/metrics/"
     assert (
@@ -1141,20 +1171,20 @@ def test_courier_defers_removals_added_during_an_upload_pass(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     storage = Storage()
-    courier, _, track = machine(tmp_path, storage)
-    old = track / "metrics/first"
+    courier, _, tracked = machine(tmp_path, storage)
+    old = tracked / "metrics/first"
     old.write_bytes(b"first")
     courier.carry_out()
     # The first pass must ignore this torn line until the writer finishes it.
-    (track / "metrics/w.removed").write_text("metrics/first")
-    (track / "run.json").write_bytes(b"identity")
+    (tracked / "metrics/w.removed").write_text("metrics/first")
+    (tracked / "run.json").write_bytes(b"identity")
     put = courier._put
 
     def compact_during_upload(path: Path, run: str, key: str) -> None:
         put(path, run, key)
         if path.name == "run.json":
-            (track / "metrics/joined").write_bytes(b"joined")
-            (track / "metrics/w.removed").write_text("metrics/first\n")
+            (tracked / "metrics/joined").write_bytes(b"joined")
+            (tracked / "metrics/w.removed").write_text("metrics/first\n")
             old.unlink()
 
     monkeypatch.setattr(courier, "_put", compact_during_upload)
@@ -1174,12 +1204,12 @@ def test_courier_keeps_old_files_when_replacement_upload_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     storage = Storage()
-    courier, _, track = machine(tmp_path, storage)
-    (track / "metrics/first").write_bytes(b"first")
+    courier, _, tracked = machine(tmp_path, storage)
+    (tracked / "metrics/first").write_bytes(b"first")
     courier.carry_out()
-    (track / "metrics/joined").write_bytes(b"joined")
-    (track / "metrics/w.removed").write_text("metrics/first\n")
-    (track / "metrics/first").unlink()
+    (tracked / "metrics/joined").write_bytes(b"joined")
+    (tracked / "metrics/w.removed").write_text("metrics/first\n")
+    (tracked / "metrics/first").unlink()
     put = courier._put
 
     def unavailable(path: Path, run: str, key: str) -> None:
@@ -1205,9 +1235,9 @@ def test_a_large_checkpoint_goes_in_parts_and_arrives_whole(
 ) -> None:
     monkeypatch.setattr(courier_module, "PART_BYTES", 4)
     storage = Storage()
-    courier, _, track = machine(tmp_path, storage)
-    (track / "checkpoints").mkdir()
-    (track / "checkpoints/steps-1.pt").write_bytes(b"0123456789")
+    courier, _, tracked = machine(tmp_path, storage)
+    (tracked / "checkpoints").mkdir()
+    (tracked / "checkpoints/steps-1.pt").write_bytes(b"0123456789")
     courier.carry_out()
     assert storage.objects["etude/run1/checkpoints/steps-1.pt"] == b"0123456789"
     assert storage.uploads == {}  # the upload was finished, not left open
@@ -1217,12 +1247,12 @@ def test_a_large_checkpoint_goes_in_parts_and_arrives_whole(
 
 def test_a_file_that_vanishes_mid_pass_does_not_stop_the_others(tmp_path: Path) -> None:
     storage = Storage()
-    courier, _, track = machine(tmp_path, storage)
+    courier, _, tracked = machine(tmp_path, storage)
     # Training removes its open log and joined blocks while the courier walks
-    # the folder. A link to nothing stands in for a file gone since the listing.
-    (track / "metrics/00000001-0123456789ab.gone").symlink_to(track / "metrics/absent")
-    (track / "metrics/2-00000000-00000007-0123456789ab.blk").write_bytes(b"kept")
-    (track / "state.json").write_text("{}")
+    # the folder. A link to nothing stands in for a file gone since the publication.
+    (tracked / "metrics/00000001-0123456789ab.gone").symlink_to(tracked / "metrics/absent")
+    (tracked / "metrics/2-00000000-00000007-0123456789ab.blk").write_bytes(b"kept")
+    (tracked / "state.json").write_text("{}")
     courier.carry_out()
     out = "etude/run1/"
     assert storage.objects[out + "metrics/2-00000000-00000007-0123456789ab.blk"] == b"kept"
@@ -1233,13 +1263,13 @@ def test_replaced_files_are_deleted_before_the_attempt_is_reported_finished(
     tmp_path: Path,
 ) -> None:
     storage = Storage()
-    courier, attempt, track = machine(tmp_path, storage)
+    courier, attempt, tracked = machine(tmp_path, storage)
     recent = "metrics/1-00000000-00000007-0123456789ab.blk"
-    (track / recent).write_bytes(b"recent")
+    (tracked / recent).write_bytes(b"recent")
     courier.carry_out()
-    (track / "metrics/2-00000000-00000007-0123456789ab.blk").write_bytes(b"joined")
-    (track / recent).unlink()
-    (track / "metrics/w.removed").write_text(recent + "\n")
+    (tracked / "metrics/2-00000000-00000007-0123456789ab.blk").write_bytes(b"joined")
+    (tracked / recent).unlink()
+    (tracked / "metrics/w.removed").write_text(recent + "\n")
     (attempt / "finished.json").write_text(_finished())
     courier.carry_out()
     assert f"etude/run1/{recent}" not in storage.objects
@@ -1255,11 +1285,11 @@ def test_finished_outputs_go_under_the_attempt_and_checkpoints_under_the_run(
     tmp_path: Path,
 ) -> None:
     storage = Storage()
-    courier, attempt, track = machine(tmp_path, storage)
+    courier, attempt, tracked = machine(tmp_path, storage)
     outputs = attempt / "outputs"
     (outputs / "weights.pt").write_bytes(b"weights")
-    (track / "checkpoints").mkdir()
-    (track / "checkpoints/steps-10.pt").write_bytes(b"weights")
+    (tracked / "checkpoints").mkdir()
+    (tracked / "checkpoints/steps-10.pt").write_bytes(b"weights")
     (outputs / "etude-result.json").write_text(json.dumps({"clocks": {"steps": 10}}))
     (attempt / "finished.json").write_text(_finished())
     courier.carry_out()
@@ -1281,9 +1311,9 @@ def _tracked(root: Path, run: str = "run1") -> TrackedRun:
             "ETUDE_OUT": str(root / run / "out"),
         },
     ):
-        return track(
+        return open_run(
             experiment="capacity",
-            clocks=[Step("steps", "training steps")],
+            clocks=[Clock(name="steps", kind="step", meaning="training steps")],
             run=run,
             directory=root,
             segment_seconds=0.05,
@@ -1351,7 +1381,11 @@ def test_each_checkpoint_reaches_storage_while_the_attempt_runs(tmp_path: Path) 
     again = run.checkpoint(weights, steps=3)
     courier.carry_out()
     assert len(_sent(storage, "/checkpoints/")) == 6
-    latest = run.latest_checkpoint()
+    latest = (
+        run._checkpoint_here(_saved_checkpoint)
+        if (_saved_checkpoint := run._latest_record()) is not None
+        else None
+    )
     assert latest is not None and (latest.ordinal, latest.artifact.sha256) == (3, again.sha256)
     weights.write_bytes(b"retrained")
     run.checkpoint(weights, steps=3)
@@ -1427,7 +1461,11 @@ def test_a_retry_on_a_fresh_machine_resumes_from_the_runs_latest_checkpoint(
     assert sum(len(storage.objects[key]) for key in reads) <= 2 * written
 
     resumed = _tracked(there.parent)
-    latest = resumed.latest_checkpoint()
+    latest = (
+        resumed._checkpoint_here(_saved_checkpoint)
+        if (_saved_checkpoint := resumed._latest_record()) is not None
+        else None
+    )
     assert latest is not None and latest.ordinal == 3
     assert latest.path.read_bytes() == b"weights at 3" * 100
     weights.write_bytes(b"weights at 4")
@@ -1465,7 +1503,11 @@ def _orphaned(tmp_path: Path, storage: Storage) -> tuple[Courier, Path, Path]:
 def _retrained(courier: Courier, folder: Path, weights: Path) -> ArtifactRef:
     """The next attempt resumes from steps 2 and reaches steps 3 with different bytes."""
     resumed = _tracked(folder.parent)
-    latest = resumed.latest_checkpoint()
+    latest = (
+        resumed._checkpoint_here(_saved_checkpoint)
+        if (_saved_checkpoint := resumed._latest_record()) is not None
+        else None
+    )
     assert latest is not None and latest.ordinal == 2
     weights.write_bytes(b"weights at 3")
     reference = resumed.checkpoint(weights, steps=3)

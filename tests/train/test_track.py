@@ -19,22 +19,27 @@ import numpy as np
 import pytest
 from moto import mock_aws
 
-from etude.carriage import listing
+from etude.carriage import publication
 from etude.cli import main
 from etude.errors import EtudeError
 from etude.launch.database import launcher_file
 from etude.page import Server, build
+from etude.records import Clock
 from etude.run import runs, sync
 from etude.storage import DirectoryStorage, S3Storage, default_root
-from etude.train.block import rows
 from etude.train.read import buckets, read
-from etude.train.records import Step, Time
+from etude.train.records import Time
 from etude.train.report import training
 from etude.train.tracking import EtudeWarning, TrainingRun, track
 from tests.experiments import authored, experiment_file
+from tests.train.tracking import open_run
 
 CLOCKS = [
-    Step("progress/updates", "optimizer updates, absolute across continuation"),
+    Clock(
+        name="progress/updates",
+        kind="step",
+        meaning="optimizer updates, absolute across continuation",
+    ),
     Time("progress/training_seconds", "active training time, pauses excluded"),
 ]
 
@@ -52,27 +57,19 @@ def manabot_row(update: int) -> dict[str, object]:
     }
 
 
-def test_a_launched_run_is_its_experiment_files_and_refuses_another(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    with pytest.raises(EtudeError, match="experiment_not_named") as refusal:
-        track(clocks=CLOCKS, directory=tmp_path)
-    assert str(refusal.value) == (
-        "experiment_not_named: use etude train FILE or etude launch FILE; "
-        "for a process Etude did not start, name the run with track(experiment=..., run=...)"
-    )
-    monkeypatch.setenv("ETUDE_EXPERIMENT", "ppo")
-    with pytest.raises(EtudeError, match="experiment_differs_from_launch"):
-        track(experiment="capacity", clocks=CLOCKS, directory=tmp_path)
-    run = track(clocks=CLOCKS, run="r", directory=tmp_path)
-    run.finish()
-    assert run.experiment == "ppo"
-    assert read(DirectoryStorage(tmp_path), "ppo", "r").name == "r"
+def test_tracking_requires_an_etude_assignment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ETUDE_EXPERIMENT", raising=False)
+    monkeypatch.delenv("ETUDE_RUN", raising=False)
+    with pytest.raises(EtudeError, match="training_run_not_assigned"):
+        track()
+    monkeypatch.setenv("ETUDE_EXPERIMENT", "pilot")
+    with pytest.raises(EtudeError, match="training_run_not_assigned"):
+        track()
 
 
 def test_rows_round_trip_through_files_and_a_bucket_directory(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
-    run = track(
+    run = open_run(
         experiment="capacity-pilot",
         run="training-3f9a",
         clocks=CLOCKS,
@@ -103,7 +100,7 @@ def test_rows_round_trip_through_files_and_a_bucket_directory(tmp_path: Path) ->
     stored = [
         row
         for table in read(bucket, "capacity-pilot", "training-3f9a").columns
-        for row in rows(table)
+        for row in (table.row(index) for index in range(table.rows))
     ]
     assert len(stored) == 202
     partial, _ = [row for row in stored if authored(row.clocks) == {CLOCKS[0].name: 999}]
@@ -139,14 +136,14 @@ def test_resume_replays_harmlessly_and_sync_delivers_what_an_outage_left(
 ) -> None:
     local = tmp_path / "local"
     # First process: no destination is reachable, so only local files exist.
-    first = track(
+    first = open_run(
         experiment="pilot", run="seed-1", clocks=CLOCKS, directory=local, segment_seconds=0.05
     )
     for update in range(50):
         first.log(manabot_row(update))
     first.finish()
     # A second process resumes the same name behind the last row and replays ten.
-    second = track(
+    second = open_run(
         resume=True,
         experiment="pilot",
         run="seed-1",
@@ -158,7 +155,12 @@ def test_resume_replays_harmlessly_and_sync_delivers_what_an_outage_left(
         second.log({**manabot_row(update), "rl/loss": 9.0})
     second.finish()
     with pytest.raises(EtudeError, match="run_clock_conflict"):
-        track(experiment="pilot", run="seed-1", clocks=[Step("other", "other")], directory=local)
+        open_run(
+            experiment="pilot",
+            run="seed-1",
+            clocks=[Clock(name="other", kind="step", meaning="other")],
+            directory=local,
+        )
 
     bucket = DirectoryStorage(tmp_path / "bucket")
     assert sync(local, storages=[bucket]) == {}
@@ -171,7 +173,7 @@ def test_resume_replays_harmlessly_and_sync_delivers_what_an_outage_left(
 
 
 def test_log_never_blocks_or_raises_and_counts_what_it_drops(tmp_path: Path) -> None:
-    run = track(
+    run = open_run(
         experiment="pilot",
         run="flood",
         clocks=CLOCKS,
@@ -192,7 +194,9 @@ def test_log_never_blocks_or_raises_and_counts_what_it_drops(tmp_path: Path) -> 
     assert run.dropped > 0 and written + run.dropped == 50_002
     assert elapsed < 5
 
-    strict = track(experiment="pilot", run="strict", clocks=CLOCKS, directory=tmp_path, strict=True)
+    strict = open_run(
+        experiment="pilot", run="strict", clocks=CLOCKS, directory=tmp_path, strict=True
+    )
     with pytest.raises(EtudeError, match="row_missing_clock"):
         strict.log({"rl/loss": 1.0})
     strict.log(manabot_row(10))
@@ -205,7 +209,7 @@ def test_log_never_blocks_or_raises_and_counts_what_it_drops(tmp_path: Path) -> 
 def test_files_alone_read_back_and_report_with_a_seed_sample(tmp_path: Path) -> None:
 
     for seed, length in enumerate((120, 120, 60)):
-        run = track(
+        run = open_run(
             experiment="pilot",
             run=f"seed-{seed}",
             clocks=CLOCKS,
@@ -253,7 +257,7 @@ def test_files_alone_read_back_and_report_with_a_seed_sample(tmp_path: Path) -> 
 def test_checkpoint_references_read_back_and_an_incomplete_coordinate_is_not_recorded(
     tmp_path: Path,
 ) -> None:
-    training = track(
+    training = open_run(
         experiment="pilot",
         run="training",
         clocks=CLOCKS,
@@ -296,7 +300,7 @@ def test_metrics_and_checkpoints_reach_an_s3_bucket_and_read_back(
         client = boto3.client("s3")
         client.create_bucket(Bucket="runs")
         bucket = S3Storage("runs", "team/a", client=client)
-        run = track(
+        run = open_run(
             experiment="pilot",
             run="s3",
             clocks=CLOCKS,
@@ -313,7 +317,6 @@ def test_metrics_and_checkpoints_reach_an_s3_bucket_and_read_back(
         model.write_bytes(b"the trainer saved over the same path")
         second = run.checkpoint(model, {**AT, "progress/updates": 60})
         run.tag(first, "best")
-        run.untag(first, "periodic")
         run.finish(timeout=30)
         assert run.problems == {} and run.incomplete == 0
 
@@ -327,14 +330,14 @@ def test_metrics_and_checkpoints_reach_an_s3_bucket_and_read_back(
         # Everything reads back from the bucket alone.
         data = read(bucket, "pilot", "s3")
         assert data.rows == 50 and data.outcome is not None
-        assert [c.tags for c in data.checkpoints] == [("best",), ()]
+        assert [c.tags for c in data.checkpoints] == [("periodic", "best"), ()]
         assert data.checkpoints[0].artifact == first and authored(data.checkpoints[0].at) == AT
         pilot = experiment_file(tmp_path / "experiments", "pilot")
         assert build(bucket, pilot).training.runs == build(tmp_path / "local", pilot).training.runs
         assert sync(tmp_path / "local", storages=[bucket]) == {}
         assert main(["checkpoints", "--source", "s3://runs/team/a"]) == 0
         listed = capsys.readouterr().out.splitlines()
-        assert len(listed) == 2 and "\tbest\t" in listed[0] and first.uri in listed[0]
+        assert len(listed) == 2 and "\tperiodic,best\t" in listed[0] and first.uri in listed[0]
 
 
 def test_checkpoints_are_stored_locally_and_tagged_after_a_resume(
@@ -347,7 +350,7 @@ def test_checkpoints_are_stored_locally_and_tagged_after_a_resume(
     model.write_bytes(b"weights")
 
     def opened() -> TrainingRun:
-        return track(
+        return open_run(
             experiment="pilot",
             run="local",
             clocks=CLOCKS,
@@ -382,7 +385,7 @@ def test_checkpoints_are_stored_locally_and_tagged_after_a_resume(
         data = read(source, "pilot", "local")
         assert [(c.ordinal, c.tags) for c in data.checkpoints] == [(1, ("best",)), (2, ()), (3, ())]
         # The relaunch is the same run and a second attempt, on other hardware.
-        first, second = data.attempts
+        first, second = data.writers
         assert (first.pod, first.attempt) == (None, None) and first.writer != second.writer
         assert (second.pod, second.attempt) == ("pod-b", "attempt-7")
     # Only the relaunch logged rows, and its block carries its name.
@@ -408,7 +411,7 @@ def test_the_server_serves_the_experiments_page_from_the_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
-    run = track(experiment="pilot", run="a", clocks=CLOCKS)  # no directory named
+    run = open_run(experiment="pilot", run="a", clocks=CLOCKS)  # no directory named
     run.log(manabot_row(1))
     run.finish()
     experiments = tmp_path / "experiments"
@@ -449,7 +452,7 @@ def test_tracking_commands_use_local_files_with_a_selected_server(
     monkeypatch.delenv("ETUDE_SERVER_LOCAL", raising=False)
     local = tmp_path / "local"
     destination = tmp_path / "copy"
-    with track(experiment="pilot", run="one", clocks=CLOCKS, directory=local) as run:
+    with open_run(experiment="pilot", run="one", clocks=CLOCKS, directory=local) as run:
         run.log(manabot_row(10))
         run.checkpoint(
             "s3://models/one.pt", {"progress/updates": 10, "progress/training_seconds": 2.5}
@@ -488,7 +491,7 @@ def test_finish_retries_retained_files_when_storage_recovers(tmp_path: Path) -> 
             super().put(key, data)
 
     destination = Recovering(tmp_path / "bucket")
-    run = track(
+    run = open_run(
         experiment="pilot",
         run="final",
         clocks=CLOCKS,
@@ -506,7 +509,7 @@ def test_finish_retries_retained_files_when_storage_recovers(tmp_path: Path) -> 
     assert destination.requests == len(destination.keys("pilot/final")) + 1
     assert all(
         destination.get("pilot/final/" + key) == (run.files.root / key).read_bytes()
-        for key in listing(run.files.root, tail_seconds=run.files.tail_age)
+        for key in publication(run.files.root, tail_seconds=run.files.tail_age).keys
     )
 
 
@@ -517,7 +520,7 @@ def test_a_job_relaunched_at_another_commit_pools_with_its_seeds(
     for seed, key in enumerate(("a1b2c3d4e5f6", "f6e5d4c3b2a1")):
         monkeypatch.setenv("ETUDE_JOB", key)
         monkeypatch.setenv("ETUDE_JOB_NAME", "ppo")
-        run = track(
+        run = open_run(
             experiment="pilot", run=f"seed-{seed}", clocks=CLOCKS, seed=seed, directory=tmp_path
         )
         run.log(manabot_row(1))
@@ -533,7 +536,7 @@ def test_a_job_relaunched_with_another_config_is_its_own_job(
     configs = ({"lr": 0.001}, {"lr": 0.001}, {"lr": 0.01})
     for seed, (key, config) in enumerate(zip(("a1b2c3", "f6e5d4", "f6e5d4"), configs)):
         monkeypatch.setenv("ETUDE_JOB", key)
-        run = track(
+        run = open_run(
             experiment="pilot",
             run=f"seed-{seed}",
             clocks=CLOCKS,

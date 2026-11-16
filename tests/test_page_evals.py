@@ -15,29 +15,38 @@ from moto import mock_aws
 from etude.block_file import parse
 from etude.carriage import EVAL_BLOCK_PACK, checkpoint_file
 from etude.checkpoints import CheckpointRef
-from etude.controller import advance
-from etude.declarations import read_experiment
+from etude.controller.advance import advance
+from etude.controller.declarations import read_experiment
 from etude.errors import EtudeError
-from etude.eval.match import environment, evaluate
+from etude.eval.match import environment
 from etude.eval.query import compare, statsdb
-from etude.eval.records import Benchmark, CheckpointPlayer, Code, Held, Match, Player, Seating
-from etude.eval.run import Result
-from etude.eval.tournament import hold
+from etude.eval.records import (
+    Benchmark,
+    CheckpointPlayer,
+    Code,
+    Match,
+    Player,
+    Seating,
+    checkpoint_player,
+)
+from etude.eval.result import Result
 from etude.experiment import observe
 from etude.page import Drawn, OutsideTournaments, Page, PanelSelection, build
 from etude.records import ArtifactRef, Clock, Continuation, SourceKey
 from etude.report import Matches
 from etude.storage import DirectoryStorage, S3Storage, Storage
-from etude.train.tracking import TrainingRun, track
+from etude.train.tracking import TrainingRun
 from tests.eval.games import play, play_failing_deal_one, play_teams, play_with_evidence
+from tests.eval.playing import play_matches, play_tournament
 from tests.eval.stored import stored_inference
 from tests.experiments import authored, experiment_file
 from tests.run.storage import CountedClient, MeasuredStorage
+from tests.train.tracking import open_run
 
 LAB = """
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import (Held,Benchmark, Code, Seating, CheckpointPlayer)
+from etude.eval.records import (CheckpointSlot,Benchmark, Code, Seating, CheckpointPlayer)
 from etude.checkpoints import CheckpointId, CheckpointRef
 from etude.records import ArtifactRef
 from etude.jobs import EvalJob
@@ -107,7 +116,7 @@ def test_report_explains_recorded_team_scores_it_cannot_draw(
         "def report():\n"
         "    return Report(score=Score(table='teams', value='won'))\n",
     )
-    evaluate(
+    play_matches(
         experiment="teams",
         environment=environment("team-game"),
         matches=[
@@ -155,13 +164,13 @@ def lab(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Path, Path]]
         # Running an experiment file puts its folder on the import path.
         patch.setattr(sys, "path", list(sys.path))
         for name in ("a", "b"):
-            run = track(experiment="lab", run=name, job=name, clocks=CLOCKS, directory=runs)
+            run = open_run(experiment="lab", run=name, job=name, clocks=CLOCKS, directory=runs)
             save(run, tmp_path, range(100, 500, 100))
             run.finish(timeout=30)
         # Deal 1 of the corrupt benchmark fails, and the pass stops.
         with pytest.raises(EtudeError, match="match_failed"):
             advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)
-        resumed = track(
+        resumed = open_run(
             resume=True, experiment="lab", run="a", job="a", clocks=CLOCKS, directory=runs
         )
         save(resumed, tmp_path, range(500, 700, 100))
@@ -295,7 +304,7 @@ def test_a_report_reads_no_checkpoint_bytes(lab: tuple[Path, Path], page: Page) 
 VERSIONED = """
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import Held, Benchmark, Code, Seating
+from etude.eval.records import CheckpointSlot, Benchmark, Code, Seating, checkpoint_player
 from etude.jobs import EvalJob
 from tests.eval.games import play
 
@@ -323,7 +332,7 @@ def test_a_page_offers_each_commit_its_matches_were_played_at(
     for commit, updates in (("a" * 40, range(100, 300, 100)), ("b" * 40, range(300, 400, 100))):
         # Each pass sees exactly the checkpoints delivered before it: the run
         # finishes, as a resumed job's attempt does, before the eval advances.
-        run = track(
+        run = open_run(
             resume=updates.start > 100,
             experiment="versioned",
             run="a",
@@ -421,7 +430,7 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
         )
         benchmark = Benchmark(name="mixed", environment=DUEL, seatings=(seating,))
         matches = seating.matches(checkpoint)
-        held = hold(
+        held = play_tournament(
             benchmark,
             experiment="lab",
             checkpoints=[checkpoint],
@@ -439,7 +448,7 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
     # A replay on another setup still names the same requested games and seed.
     monkeypatch.setenv("ETUDE_TEST_DEVICE", "mps")
     monkeypatch.setenv("ETUDE_TEST_COMPUTE", "serial")
-    evaluate(
+    play_matches(
         experiment="lab",
         environment=DUEL,
         matches=matches[:1],
@@ -449,7 +458,7 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
     )
     monkeypatch.setenv("ETUDE_RUN", "complete")
     assert (
-        hold(
+        play_tournament(
             benchmark,
             experiment="lab",
             checkpoints=[checkpoint],
@@ -521,7 +530,7 @@ def evaluation_only(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[
             hours = outside(
                 "hours100", {"updates": 100} | ({"running_hours": 0.25} if run == "plain-b" else {})
             )
-            evaluate(
+            play_matches(
                 experiment="lab",
                 environment=DUEL,
                 matches=[
@@ -606,7 +615,7 @@ def test_commit_views_keep_each_environment_of_a_match(
         monkeypatch.setenv("ETUDE_COMMIT", commit)
         for name in ("first", "second"):
             rival = Code(name="heuristic", source=[str(file)], config={"strength": 5})
-            evaluate(
+            play_matches(
                 experiment="lab",
                 environment=environment(name),
                 matches=[duel(outside("u0", {"updates": 0}), rival)],
@@ -655,7 +664,7 @@ def test_checkpoints_of_two_named_lines_at_the_same_positions_are_two_lines(
         line: {n: outside(f"u{n}", {"updates": n}, line) for n in (0, 400)}
         for line in ("seed-1", "seed-2")
     }
-    evaluate(
+    play_matches(
         experiment="lab",
         environment=DUEL,
         matches=[duel(u[400], u[0]) for u in seeds.values()],
@@ -697,19 +706,19 @@ def test_a_tracked_checkpoint_is_placed_by_its_seat_first_and_its_training_recor
     file = experiment_file(tmp_path / "experiments", "seated", SEATED)
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(sys, "path", list(sys.path))
-    run = track(experiment="seated", run="a", job="a", clocks=CLOCKS, directory=runs)
+    run = open_run(experiment="seated", run="a", job="a", clocks=CLOCKS, directory=runs)
     save(run, tmp_path, range(100, 300, 100))
     run.finish(timeout=30)
     first, second = observe(DirectoryStorage(runs), "seated").runs[0].checkpoints
     # Seated as stored matches were: without `at`, and once where the seat says otherwise.
     bare = first.ref.model_copy(update={"at": {}})
     moved = second.ref.model_copy(update={"at": {"updates": 250}})
-    evaluate(
+    play_matches(
         experiment="seated",
         environment=DUEL,
         matches=[
-            duel(Held().player(bare), HEURISTIC),
-            duel(Held().player(moved), HEURISTIC),
+            duel(checkpoint_player(bare), HEURISTIC),
+            duel(checkpoint_player(moved), HEURISTIC),
         ],
         play=play,
         run="plain",
@@ -735,7 +744,7 @@ def test_a_failure_outside_a_tournament_is_kept_until_its_environment_plays_it(
     monkeypatch.setattr(sys, "path", list(sys.path))
     crashing = duel(outside("u0", {"updates": 0}), HEURISTIC, deal=1)
     with pytest.raises(EtudeError, match="match_failed"):
-        evaluate(
+        play_matches(
             experiment="lab",
             environment=DUEL,
             matches=[crashing],
@@ -743,7 +752,7 @@ def test_a_failure_outside_a_tournament_is_kept_until_its_environment_plays_it(
             run="failed-in-duel",
             directory=runs,
         )
-    evaluate(
+    play_matches(
         experiment="lab",
         environment=environment("other"),
         matches=[crashing],
@@ -765,11 +774,11 @@ def test_a_continued_run_is_one_line_with_the_run_it_continues(
     file = experiment_file(tmp_path / "experiments", "seated", SEATED)
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(sys, "path", list(sys.path))
-    first = track(experiment="seated", run="a", job="a", clocks=CLOCKS, directory=runs)
+    first = open_run(experiment="seated", run="a", job="a", clocks=CLOCKS, directory=runs)
     save(first, tmp_path, range(100, 300, 100))
     first.finish(timeout=30)
     parent = SourceKey(namespace="local", kind="run", source_id="a")
-    continued = track(
+    continued = open_run(
         experiment="seated",
         run="b",
         job="a",
@@ -785,10 +794,10 @@ def test_a_continued_run_is_one_line_with_the_run_it_continues(
     # Seated with no line, as matches recorded before seats carried one: each checkpoint's
     # line is its training run's, the first run of its chain.
     unlined = [
-        Held().player(CheckpointRef(address=each.key, artifact=each.artifact, at=each.at))
+        checkpoint_player(CheckpointRef(address=each.key, artifact=each.artifact, at=each.at))
         for each in saved
     ]
-    evaluate(
+    play_matches(
         experiment="seated",
         environment=DUEL,
         matches=[duel(unlined[-1], unlined[0])],
@@ -813,7 +822,7 @@ def test_a_running_eval_runs_results_show_and_are_marked_partial(
     players = tuple(
         Code(name=name, source=[__file__], config={"strength": n}) for n, name in enumerate("ab")
     )
-    evaluate(
+    play_matches(
         experiment="lab", environment=environment("duel"), play=play, run="killed",
         matches=[Match(players=players, config={"deal": 0}, games=1)],
         directory=runs,
@@ -910,12 +919,12 @@ def test_a_page_reads_metrics_from_training_jobs_once_and_no_eval_blob(
     monkeypatch.setattr(sys, "path", list(sys.path))
     runs = tmp_path / "runs"
     file = experiment_file(tmp_path / "experiments", "lab", SCHEDULED)
-    trained = track(experiment="lab", run="t", job="t", clocks=CLOCKS, directory=runs)
+    trained = open_run(experiment="lab", run="t", job="t", clocks=CLOCKS, directory=runs)
     for update in range(1, 200):
         trained.log({"loss": 1 / update}, updates=update)
     save(trained, tmp_path, range(100, 300, 100))
     trained.finish(timeout=30)
-    evaluate(
+    play_matches(
         experiment="lab",
         environment=DUEL,
         matches=[duel(outside("u100", {"updates": 100}), HEURISTIC)],
@@ -965,7 +974,7 @@ def _attempt(key: str) -> bool:
 REVISED = """
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import Held, Benchmark, Code, Seating
+from etude.eval.records import CheckpointSlot, Benchmark, Code, Seating, checkpoint_player
 from etude.jobs import EvalJob
 from etude.report import Curve, Matches, Report, Score
 from tests.eval.games import play
@@ -999,7 +1008,7 @@ def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
     monkeypatch.setattr(sys, "path", list(sys.path))
     runs = tmp_path / "runs"
     file = experiment_file(tmp_path / "experiments", "lab", REVISED.replace("SOURCE", "'v1'"))
-    trained = track(experiment="lab", run="a", job="a", clocks=CLOCKS, directory=runs)
+    trained = open_run(experiment="lab", run="a", job="a", clocks=CLOCKS, directory=runs)
     save(trained, tmp_path, range(100, 300, 100))
     trained.finish(timeout=30)
     (first,) = advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)
@@ -1027,7 +1036,7 @@ def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
 SETUPS = """
 from etude.eval.match import environment
 from tests.eval.stored import stored_inference, stored_relative
-from etude.eval.records import Held, Benchmark, Code, Seating
+from etude.eval.records import CheckpointSlot, Benchmark, Code, Seating, checkpoint_player
 from etude.jobs import EvalJob
 from etude.report import Curve, Matches, Report, Score
 from tests.eval.games import play
@@ -1065,7 +1074,7 @@ def test_a_seating_pools_every_tournament_and_setup_that_played_it(
     monkeypatch.setattr(sys, "path", list(sys.path))
     runs = tmp_path / "runs"
     file = experiment_file(tmp_path / "experiments", "lab", SETUPS)
-    trained = track(experiment="lab", run="a", job="a", clocks=CLOCKS, directory=runs)
+    trained = open_run(experiment="lab", run="a", job="a", clocks=CLOCKS, directory=runs)
     save(trained, tmp_path, range(100, 300, 100))
     trained.finish(timeout=30)
     passes = advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)
@@ -1123,7 +1132,7 @@ def test_fixed_pairs_are_drawn_once_where_their_first_seat_stood(
         )
         for n in (100, 200)
     )
-    hold(
+    play_tournament(
         Benchmark(name="pairs", environment=DUEL, seatings=seatings),
         experiment="lab",
         play=play,

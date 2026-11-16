@@ -17,7 +17,6 @@ Every time is timezone-aware UTC.
 
 from __future__ import annotations
 
-import warnings
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -45,6 +44,27 @@ from etude.spec import Until as Until
 from etude.spec import Variable as Variable
 from etude.spec import job_id as job_id
 from etude.spec import number as number
+
+__all__ = (
+    "MachineTemplate",
+    "OnDemand",
+    "Provider",
+    "Pool",
+    "Storage",
+    "Image",
+    "GPU",
+    "CPU",
+    "Availability",
+    "Offer",
+    "Status",
+    "Quote",
+    "Diagnostic",
+    "Machine",
+    "RentalCost",
+    "LogStream",
+    "Standing",
+)
+
 
 Outcome = Literal[
     "succeeded", "failed", "cancelled", "over_budget", "out_of_time", "lost", "stopped"
@@ -523,19 +543,6 @@ class Quote(Record):
         return sum((machine.max_usd for machine in self.machines), Decimal(0))
 
 
-class StartPhase(Record):
-    """A recorded start milestone, or an explicitly unavailable timestamp.
-
-    The database retains no provider reply timestamp. That milestone remains
-    unavailable rather than borrowing the session readiness timestamp.
-    """
-
-    name: str
-    at: datetime | None
-    attempt: str | None = None
-    evidence: str | None = None
-
-
 class LaunchRequest(Record):
     run: str
     fingerprint: str
@@ -621,17 +628,6 @@ class BootstrapLinks(Record):
     url: str
     log_url: str
     worker_log_url: str
-
-
-def __getattr__(name: str) -> object:
-    if name == "Run":
-        warnings.warn(
-            "etude.launch.records.Run is now RunRequest; removed in 0.5",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return RunRequest
-    raise AttributeError(name)
 
 
 class Standing(Record):

@@ -160,9 +160,9 @@ def write_log(operation: str, message: str) -> None:
             pass
 
 
-def publish(path: Path, url: str, timeout: float | None = None) -> None:
+def publish(path: Path, url: str) -> None:
     """One best-effort PUT, within the configured log and enclosing rental allowance."""
-    limits = [timeout] if timeout is not None else []
+    limits = []
     if value := os.environ.get("ETUDE_LOG_SECONDS"):
         limits.append(float(value))
     if value := os.environ.get("ETUDE_DEADLINE"):

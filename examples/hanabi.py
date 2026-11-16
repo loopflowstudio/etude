@@ -17,8 +17,8 @@ from pydantic import BaseModel, Field
 from etude.checkpoints import CheckpointRef
 from etude.eval.agents import Forward
 from etude.eval.match import environment
-from etude.eval.records import Benchmark, CheckpointPlayer, Code, Held, Match, Seating
-from etude.eval.run import Tables
+from etude.eval.records import Benchmark, CheckpointPlayer, CheckpointSlot, Code, Match, Seating
+from etude.eval.result import Tables
 from etude.jobs import Agents, EvalJob, ExperimentState
 from etude.train.tracking import track
 
@@ -44,12 +44,8 @@ class Counts(BaseModel):
     transitions: int = 0
 
 
-class Deal(BaseModel):
-    deal: int
-
-
 class ArenaConfig(BaseModel):
-    deals: tuple[Deal, ...] = (Deal(deal=101), Deal(deal=102))
+    base_seed: int = 101
     games: int = Field(default=2, ge=1)
 
 
@@ -155,14 +151,16 @@ def arena(config: ArenaConfig) -> Benchmark:
         seatings=(
             Seating(
                 name="self-play",
-                players=(Held(), Held()),
-                configs=config.deals,
+                players=(CheckpointSlot(), CheckpointSlot()),
+                config={},
+                base_seed=config.base_seed,
                 games=config.games,
             ),
             Seating(
                 name="random teammate",
-                players=(Held(), Code(name="random")),
-                configs=config.deals,
+                players=(CheckpointSlot(), Code(name="random")),
+                config={},
+                base_seed=config.base_seed,
                 games=config.games,
             ),
         ),
@@ -200,24 +198,13 @@ class Policy:
         return torch.tensor(self.forward([observation.tolist()])[0])
 
 
-def play(match: Match[Deal], agents: Sequence[Forward | None]) -> Tables:
+def play(match: Match, agents: Sequence[Forward | None]) -> Tables:
     torch.set_num_threads(1)
     game = _game()
     policies = [Policy(agent) if agent is not None else None for agent in agents]
-    rows: list[dict[str, bool | int | float | str | None]] = []
     with torch.no_grad():
-        for game_index in range(match.games):
-            episode = _episode(game, policies, seed=match.config.deal + game_index)
-            rows.append(
-                {
-                    "game": game_index,
-                    "group": "all",
-                    "score": episode.score,
-                    "transitions": episode.transitions,
-                    "deal": match.config.deal,
-                }
-            )
-    return {"teams": rows}
+        episode = _episode(game, policies, seed=match.seed)
+    return {"teams": [{"group": "all", "score": episode.score, "transitions": episode.transitions}]}
 
 
 def eval_jobs(state: ExperimentState) -> EvalJob:

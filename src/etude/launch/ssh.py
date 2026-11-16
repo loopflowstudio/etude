@@ -22,9 +22,8 @@ from pydantic import Field
 from etude.deadline import remaining
 from etude.errors import LauncherError
 from etude.launch.logs import snapshot_stream
-from etude.launch.machines import Allocation
-from etude.launch.measurement import timed
-from etude.launch.providers.package import program_archive
+from etude.launch.provisioner.machines import Allocation
+from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import BootstrapLinks, LogProducer, LogStream
 from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.source import source_archive
@@ -270,16 +269,12 @@ class SSH:
         self,
         address: str,
         root: str = "~/.etude/sessions",
-        executable: str = "ssh",
-        python: str | None = None,
     ) -> None:
         if not address or address.startswith("-") or any(c.isspace() for c in address):
             raise LauncherError("use one SSH address, with options in ~/.ssh/config")
-        self.address, self.root, self.executable = address, root, executable
-        self.python = python or remote_python()
+        self.address, self.root = address, root
         self._program = base64.b64encode(program_archive()).decode()
 
-    @timed("ssh.call")
     def call(self, request: RemoteRequest) -> RemoteReply:
         start = isinstance(request, StartRequest)
         startup_deadline = (
@@ -307,11 +302,11 @@ class SSH:
         try:
             result = subprocess.run(
                 [
-                    self.executable,
+                    "ssh",
                     "-o",
                     "BatchMode=yes",
                     self.address,
-                    login_shell(shlex.join([self.python, "-c", _BOOT])),
+                    login_shell(shlex.join([remote_python(), "-c", _BOOT])),
                 ],
                 input=json.dumps(sent).encode(),
                 capture_output=True,

@@ -7,9 +7,8 @@ role and portable name, or an outside address. Its digest verifies bytes and nam
 
 from __future__ import annotations
 
-import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Self
 from urllib.parse import unquote, urlparse
 
 from pydantic import (
@@ -24,6 +23,8 @@ from pydantic import (
 
 from etude.carriage import checkpoint_file_name, within
 from etude.records import ArtifactRef, Name, Record
+
+__all__ = ("CheckpointRef", "CheckpointRecord", "PolicyKey")
 
 
 def _checkpoint_id(
@@ -243,12 +244,6 @@ class CheckpointRef(Record):
         return Path(unquote(parsed.path))
 
 
-class _Seat[P](Protocol):
-    """A checkpoint seat (`etude.eval.records.Held`); evaluation is not imported here."""
-
-    def player(self, checkpoint: CheckpointRef) -> P: ...
-
-
 class CheckpointRecord(Record):
     """A published checkpoint: its files and where every one of its clocks stood.
 
@@ -318,16 +313,6 @@ class CheckpointRecord(Record):
     def path(self) -> Path:
         """This checkpoint on the current machine; remote addresses need an input first."""
         return self.ref.path
-
-    def player[P](self, seat: _Seat[P]) -> P:
-        return seat.player(self.ref)
-
-    def model[P](self, seat: _Seat[P]) -> P:
-        """Released spelling; use player()."""
-        warnings.warn(
-            "Checkpoint.model() is now player(); removed in 0.5", DeprecationWarning, stacklevel=2
-        )
-        return self.player(seat)
 
     @field_validator("file")
     @classmethod

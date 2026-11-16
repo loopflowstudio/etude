@@ -22,8 +22,9 @@ from pydantic import ValidationError
 
 from etude.call import Function
 from etude.checkpoints import CheckpointRef
-from etude.controller import advance
-from etude.declarations import Experiment, read_experiment
+from etude.controller.advance import advance
+from etude.controller.declarations import Experiment, read_experiment
+from etude.controller.smoke import Step, smoke_file
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval import resources as eval_resources
 from etude.eval.agents import AgentConnection, Answer, Forward, Request
@@ -31,7 +32,7 @@ from etude.eval.batching import _Batches
 from etude.eval.game import Execution, Performance, _performance
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Code, Config, Held, Match, RoundRobin
+from etude.eval.records import Code, Config, Match, RoundRobin, checkpoint_player
 from etude.eval.resources import (
     Cpus,
     _has_gpu,
@@ -44,28 +45,19 @@ from etude.eval.result import Tables
 from etude.eval.run import Terminated
 from etude.eval.tournament import evaluating, played
 from etude.experiment import state_of
-from etude.jobs import (
-    Agents,
-    EvalGroup,
-    EvalJob,
-    ExperimentState,
-    evaluation_group,
-    hold_group,
-    with_experiment,
-)
+from etude.jobs import Agents, EvalGroup, EvalJob, ExperimentState, evaluation_group, hold_group
 from etude.launch import client
 from etude.launch.records import Pool, Standing, Status
 from etude.records import ArtifactRef, RunRecord, RunSubmission
-from etude.smoke import Step, smoke_file
 from etude.spec import Job, RunRequest
 from etude.storage import DirectoryStorage, default_root
-from etude.train.tracking import track
 from tests.eval.arithmetic import checkpoint, load, play
 from tests.eval.thread_budget import load_checkpoint
 from tests.launch.counting import Counting, job_text
 from tests.launch.fake import bench
 from tests.run.storage import MeasuredStorage
 from tests.test_jobs import checkout
+from tests.train.tracking import open_run
 
 
 @pytest.fixture(autouse=True)
@@ -96,11 +88,11 @@ def tournament(name: str) -> RoundRobin:
     )
 
 
-def job(name: str, agents: Agents | None) -> EvalJob:
+def job(name: str, agents: Agents | None, playing: Callable[..., Tables] | None = None) -> EvalJob:
     return EvalJob(
         tournament=tournament(name),
         enter=(checkpoint("left"), checkpoint("right")),
-        play=plain if agents is None else play,
+        play=playing or (plain if agents is None else play),
         agents=agents or Agents(),
         repo=None,
         max_hours=0.1,
@@ -113,7 +105,9 @@ def group(*jobs: EvalJob) -> EvalGroup:
         evaluations=tuple(
             spec
             for job in jobs
-            for spec in evaluation_group(with_experiment(job, "grouped")).evaluations
+            for spec in evaluation_group(
+                job.lower(ExperimentState(experiment="grouped"))
+            ).evaluations
         )
     )
 
@@ -173,7 +167,7 @@ def test_pending_group_queues_during_training_within_budget(
     definition = Experiment(name="grouped", eval=declare)
     measured = MeasuredStorage(source)
     counts = Counting(b.store, b.service)
-    with track(experiment="grouped", run="train@0", directory=source.root):
+    with open_run(experiment="grouped", run="train@0", directory=source.root):
         with counts.record():
             decisions = advance(
                 definition,
@@ -229,7 +223,7 @@ def test_pending_group_uses_existing_room_or_one_rental(
 
     source = DirectoryStorage(tmp_path / "source")
     definition = Experiment(name="grouped", eval=declare)
-    with track(experiment="grouped", run="training", directory=source.root):
+    with open_run(experiment="grouped", run="training", directory=source.root):
         decisions = advance(
             definition,
             source=source,
@@ -337,7 +331,7 @@ def test_retained_single_eval_records_are_read_and_finished_groups_stop_being_in
     # The launched config names all member matches, independent of stored member names.
     source = DirectoryStorage(tmp_path)
     selected = played(
-        spec.tournament, experiment="grouped", enter=spec.entrants, storages=[source]
+        spec.definition, experiment="grouped", enter=spec.tournament.entrants, storages=[source]
     ).new
     spec = spec.model_copy(update={"matches": tuple(selected)})
     grouped = old.model_copy(update={"config": EvalGroup(evaluations=(spec,)).model_dump_json()})
@@ -380,7 +374,7 @@ def test_unknown_durations_rent_instead_of_stranding_new_tournaments(
     def declare(state: ExperimentState) -> list[EvalJob]:
         return [job("new", None)]
 
-    with track(experiment="grouped", run="training", directory=source.root):
+    with open_run(experiment="grouped", run="training", directory=source.root):
         decisions = advance(
             Experiment(name="grouped", eval=declare), source=source, pool="waiting", mode="queue"
         )
@@ -557,7 +551,7 @@ def test_play_arity_and_removed_workers_are_refused() -> None:
 
     for agents in (None, Agents(load=load)):
         with pytest.raises(LauncherError, match="match and agents"):
-            job("bad", agents).model_copy(update={"play": one_parameter}).plain()
+            job("bad", agents, one_parameter)
     with pytest.raises(ValidationError, match="workers"):
         EvalJob.model_validate({**job("bad", None).model_dump(), "workers": 2})
 
@@ -700,16 +694,26 @@ def test_group_execution_respects_declared_agent_memory(
     assert set(budgets.values()) == {str(max(1, cpus - concurrent))}
     for spec in selected.evaluations:
         found = played(
-            spec.tournament, experiment="grouped", enter=spec.entrants, directory=tmp_path
+            spec.definition,
+            experiment="grouped",
+            enter=spec.tournament.entrants,
+            directory=tmp_path,
         )
         assert len(found.delivered) == 1 and not found.new and not found.failed
 
 
 def test_released_queued_evaluation_discards_workers() -> None:
     spec = evaluation_group(job("old", None)).evaluations[0]
-    text = spec.model_dump()
-    text["workers"] = 28
-    assert EvalGroup.model_validate(text).evaluations == (spec,)
+    text = {
+        "tournament": spec.definition.model_dump(mode="json"),
+        "experiment": spec.experiment,
+        "play": spec.play.model_dump(mode="json"),
+        "entrants": [player.model_dump(mode="json") for player in spec.tournament.entrants],
+        "workers": 28,
+    }
+    restored = EvalGroup.model_validate(text).evaluations[0]
+    assert restored.definition == spec.definition
+    assert restored.matches == spec.matches
 
 
 class Echo:
@@ -745,7 +749,7 @@ def test_batch_size_and_delay_flush_with_a_controlled_clock() -> None:
 
 def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_inputs() -> None:
     players = [
-        Held().player(
+        checkpoint_player(
             CheckpointRef(
                 address=f"{name}/checkpoints/model",
                 artifact=ArtifactRef(uri=f"file:///unused/{name}", sha256="0" * 64, size_bytes=1),
@@ -829,7 +833,7 @@ def test_launched_group_delivers_members_then_the_next_pass_plays_nothing(
         {
             "launched_agents.py": f"""
 from etude.jobs import Agents, EvalJob, ExperimentState
-from etude.eval.records import Code, RoundRobin
+from etude.eval.records import Code, RoundRobin, checkpoint_player
 from etude.eval.match import environment
 from etude.spec import Runtime, Variable
 from tests.eval.arithmetic import load
@@ -877,7 +881,7 @@ def test_game_imports_only_play_module_with_one_send_and_receive_per_decision(
 import sys
 from collections.abc import Sequence
 from etude.eval.agents import Forward
-from etude.eval.records import Match
+from etude.eval.records import Match, checkpoint_player
 from etude.eval.result import Tables
 
 def play(match: Match, agents: Sequence[Forward]) -> Tables:
@@ -900,7 +904,7 @@ from etude.call import Function
 from etude.eval.agents import Answer
 from etude.eval.game import initialize_game, play_match
 from etude.eval.resources import Resources
-from etude.eval.records import Match
+from etude.eval.records import Match, checkpoint_player
 from pathlib import Path
 from tests.eval.arithmetic import checkpoint
 
@@ -1127,8 +1131,8 @@ import sys
 sys.path.insert(0, sys.argv[1])
 from heavy_fixture_game import play
 from etude.eval.match import environment
-from etude.eval.records import Code, RoundRobin
-from etude.jobs import Agents, EvalGroup, EvalJob, evaluation_group, hold_group, with_experiment
+from etude.eval.records import Code, RoundRobin, checkpoint_player
+from etude.jobs import Agents, EvalGroup, EvalJob, evaluation_group, hold_group, ExperimentState
 from tests.eval.arithmetic import load
 from tests.eval.arithmetic import checkpoint
 import etude.eval.resources
@@ -1137,7 +1141,7 @@ agents = Agents(load=load) if sys.argv[2] == "True" else Agents()
 jobs = [EvalJob(tournament=RoundRobin(name=name, environment=environment("heavy"), configs=({},), games=1),
                enter=(checkpoint("one"), checkpoint("two")), play=play,
                agents=agents or Agents(), repo=None, max_hours=0.1) for name in ("first", "second")]
-hold_group(EvalGroup(evaluations=tuple(evaluation_group(with_experiment(job, "heavy")).evaluations[0] for job in jobs)),
+hold_group(EvalGroup(evaluations=tuple(evaluation_group(job.lower(ExperimentState(experiment="heavy"))).evaluations[0] for job in jobs)),
            directory=sys.argv[1])
 """
     result = subprocess.run(
@@ -1182,7 +1186,9 @@ def test_agent_startup_failure_reports_retryable_matches(
     log = capfd.readouterr().err
     assert "[redacted]" in log and "synthetic-fixture-credential" not in log
     assert json.loads((outputs / "etude-result.json").read_text())["tally"]["failed"] == 1
-    found = played(spec.tournament, experiment="grouped", enter=spec.entrants, directory=tmp_path)
+    found = played(
+        spec.definition, experiment="grouped", enter=spec.tournament.entrants, directory=tmp_path
+    )
     assert len(found.new) == len(found.retry) == len(found.failed) == 1
 
 
@@ -1265,7 +1271,7 @@ def asks_or_returns(match: Match[dict[str, str]], agents: Sequence[Forward]) -> 
 def test_loader_failure_reaches_undispatched_matches_across_tournaments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry: bool, in_flight: bool
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4 if in_flight else 2)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4 if in_flight else 1)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     agents = Agents(load=selective_retry_load if retry else selective_load)
     jobs = [
@@ -1277,8 +1283,30 @@ def test_loader_failure_reaches_undispatched_matches_across_tournaments(
         )
         for name in ("one", "two")
     ]
+    selected = group(*jobs)
+    # Attempt the broken leaf before a no-forward game can deliver success.
+    # The separate earlier-delivery test pins the opposite ordering.
+    selected = selected.model_copy(
+        update={
+            "evaluations": tuple(
+                spec.model_copy(
+                    update={
+                        "matches": tuple(
+                            sorted(
+                                spec.matches,
+                                key=lambda match: (
+                                    {p.name for p in match.players} != {"broken", "right"}
+                                ),
+                            )
+                        )
+                    }
+                )
+                for spec in selected.evaluations
+            )
+        }
+    )
     with pytest.raises(RetryRequested if retry else EtudeError):
-        hold_group(group(*jobs), directory=tmp_path)
+        hold_group(selected, directory=tmp_path)
     for active in jobs:
         found = played(
             active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path
@@ -1313,7 +1341,7 @@ def test_loader_failure_preserves_previously_delivered_matches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     agents = Agents(load=selective_load)
     jobs = [

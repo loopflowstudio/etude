@@ -21,18 +21,18 @@ from etude.jobs import checkpoint_inputs_for, continue_from
 from etude.launch.database import launcher_file
 from etude.launch.executor import local as local_service
 from etude.launch.records import Machine, Pool, Status
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
+from etude.records import Clock
 from etude.run import runs
 from etude.spec import Input, Job, RunRequest, Until, job_id
 from etude.storage import DirectoryStorage
 from etude.train.read import read
-from etude.train.records import Step
 from etude.train.report import training
-from etude.train.tracking import track
 from tests.experiments import authored
 from tests.launch.counting import job_text
 from tests.launch.fake import open_database
 from tests.run.storage import MeasuredStorage
+from tests.train.tracking import open_run
 
 TRAIN = """
 test -f "$ETUDE_SOURCE_DIR/train.sh" || exit 3
@@ -78,6 +78,7 @@ def test_a_run_from_a_commit_reports_progress_and_keeps_its_outputs(
 
     scheduler = local(tmp_path)
     spec = Job(
+        experiment="capacity",
         command="sh train.sh",
         repo=str(repo),
         revision=revision,
@@ -102,10 +103,10 @@ def test_a_run_from_a_commit_reports_progress_and_keeps_its_outputs(
 CONTINUED = """
 import os
 from pathlib import Path
-from etude.train.records import Step
+from etude.records import Clock
 from etude.train.tracking import track
-run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
-latest = run.latest_checkpoint()
+run = track(clocks=[Clock(name='steps', kind='step', meaning='training steps')])
+latest = (run._checkpoint_here(_saved_checkpoint) if (_saved_checkpoint := run._latest_record()) is not None else None)
 start = 0 if latest is None else int(latest.at["steps"])
 kept = "" if latest is None else latest.path.read_text()
 target = int(os.environ["ETUDE_UNTIL_VALUE"])
@@ -122,6 +123,7 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     scheduler = local(tmp_path)
     (tmp_path / "train.py").write_text(CONTINUED)
     spec = Job(
+        experiment="capacity",
         command=f"{sys.executable} {tmp_path / 'train.py'}",
         until=Until.parse("steps=2"),
         max_hours=0.1,
@@ -140,11 +142,11 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
 
     # Tagging the parent's checkpoint later does not make the continuation another job.
     identity = job_id(continue_from(scheduler.record(first), "steps=5", source=tracked).job)
-    parent = track(
+    parent = open_run(
         resume=True,
         seed=3,
         experiment="capacity",
-        clocks=[Step("steps", "training steps")],
+        clocks=[Clock(name="steps", kind="step", meaning="training steps")],
         run=first,
         directory=tracked,
     )
@@ -168,14 +170,22 @@ def test_a_continuation_starts_from_its_parents_recorded_checkpoint(tmp_path: Pa
     assert checkpoint.path.read_text() == ("trained to 2\ntrained to 5\n")
     assert data.file is not None and data.file.continues is not None
     continues = data.file.continues
-    assert (continues.parent.source_id, continues.clock, continues.value) == (first, "steps", 2)
+    assert (continues.parent.source_id, continues.clock, continues.value) == (
+        first.rsplit("/", 1)[-1],
+        "steps",
+        2,
+    )
     assert scheduler.record(second).seed == 3
 
 
 def test_runs_queue_through_one_machine_and_cancel_stops_the_running_one(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
-    (running,) = scheduler.launch(Job(command="sleep 30", max_hours=0.1, max_usd=Decimal(1)))
-    (queued,) = scheduler.queue(Job(command="echo next", max_hours=0.1, max_usd=Decimal(1)))
+    (running,) = scheduler.launch(
+        Job(experiment="capacity", command="sleep 30", max_hours=0.1, max_usd=Decimal(1))
+    )
+    (queued,) = scheduler.queue(
+        Job(experiment="capacity", command="echo next", max_hours=0.1, max_usd=Decimal(1))
+    )
     scheduler.tick()
     until(scheduler, running, "running")
     assert scheduler.read(queued).reason == "waiting for local: no free machine"
@@ -187,7 +197,9 @@ def test_runs_queue_through_one_machine_and_cancel_stops_the_running_one(tmp_pat
 
 def test_a_run_past_its_hours_is_ended_on_the_machine_with_nobody_watching(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
-    (one,) = scheduler.launch(Job(command="sleep 30", max_hours=1.5 / 3600, max_usd=Decimal(1)))
+    (one,) = scheduler.launch(
+        Job(experiment="capacity", command="sleep 30", max_hours=1.5 / 3600, max_usd=Decimal(1))
+    )
     del scheduler  # nobody is watching while the limit passes
     time.sleep(3)
     (status,) = local(tmp_path).wait(one, every=0.05, timeout=30)
@@ -196,7 +208,9 @@ def test_a_run_past_its_hours_is_ended_on_the_machine_with_nobody_watching(tmp_p
 
 def test_a_killed_session_retries_its_run(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
-    (one,) = scheduler.launch(Job(command="sleep 5", max_hours=0.1, max_usd=Decimal(1)))
+    (one,) = scheduler.launch(
+        Job(experiment="capacity", command="sleep 5", max_hours=0.1, max_usd=Decimal(1))
+    )
     status = until(scheduler, one, "running")
     session = scheduler.attempts(one)[0].session
     os.kill(
@@ -212,7 +226,7 @@ def test_a_killed_session_retries_its_run(tmp_path: Path) -> None:
 def test_added_work_has_a_session_but_no_rental_or_session_deadline(tmp_path: Path) -> None:
     scheduler = local(tmp_path)
     (first,) = scheduler.launch(
-        Job(command="sleep 2; echo one", max_hours=0.01, max_usd=Decimal(1))
+        Job(experiment="capacity", command="sleep 2; echo one", max_hours=0.01, max_usd=Decimal(1))
     )
     attempt = scheduler.attempts(first)[0]
     session = scheduler._store.session(attempt.session)
@@ -228,9 +242,9 @@ def test_added_work_has_a_session_but_no_rental_or_session_deadline(tmp_path: Pa
 
 TRACKED = """
 import os
-from etude.train.records import Step
+from etude.records import Clock
 from etude.train.tracking import track
-run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
+run = track(clocks=[Clock(name='steps', kind='step', meaning='training steps')])
 for step in range(3):
     run.log({"loss": 1.0 / (step + 1)}, steps=step)
 weights = os.path.join(os.environ["ETUDE_OUTPUT_DIR"], "weights.pt")
@@ -245,6 +259,7 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
     scheduler = local(tmp_path)
     (tmp_path / "train.py").write_text(TRACKED)
     job = Job(
+        experiment="capacity",
         command=f"{sys.executable} {tmp_path / 'train.py'}",
         name="hidden256",
         max_hours=0.1,
@@ -260,8 +275,9 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
         (launched,) = scheduler._store.attempts(run=record.id)
         # One place on the machine for every run; the script named no directory.
         tracked = tmp_path / "track"
-        assert ("capacity", record.id) in runs(tracked)
-        data = read(tracked, "capacity", record.id)
+        name = record.id.rsplit("/", 1)[-1]
+        assert ("capacity", name) in runs(tracked)
+        data = read(tracked, "capacity", name)
         found.append(data)
         assert data.file is not None and data.rows == 3
         declared = data.file
@@ -271,7 +287,7 @@ def test_a_launched_job_tracks_as_its_run_without_naming_itself(tmp_path: Path) 
             record.seed,
             None,
         )
-        (attempt,) = data.attempts
+        (attempt,) = data.writers
         assert attempt.attempt == launched.id
         # The script never wrote etude-result.json; tracking reported its progress.
         # With Etude's hours, which a job's `until` may name as it may name its own clocks.
@@ -314,6 +330,7 @@ def test_an_attempt_links_its_held_inputs_read_only_without_copying(tmp_path: Pa
     scheduler = local(tmp_path)
     (one,) = scheduler.launch(
         Job(
+            experiment="capacity",
             command='cat "$ETUDE_INPUTS_DIR/weights" | wc -c',
             inputs=(weights.input,),
             max_hours=0.1,
@@ -337,6 +354,7 @@ def test_a_corrupted_held_input_is_refused_before_the_job_starts(tmp_path: Path)
     scheduler = local(tmp_path)
     (one,) = scheduler.launch(
         Job(
+            experiment="capacity",
             command="touch started",
             inputs=(weights.input,),
             max_hours=0.1,
@@ -351,11 +369,11 @@ def test_a_corrupted_held_input_is_refused_before_the_job_starts(tmp_path: Path)
 
 
 def test_a_folder_checkpoint_reaches_a_job_as_verified_nested_inputs(tmp_path: Path) -> None:
-    with track(
+    with open_run(
         experiment="tiny",
         run="r",
         directory=tmp_path / "tracked",
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         strict=True,
     ) as run:
 
@@ -372,6 +390,7 @@ def test_a_folder_checkpoint_reaches_a_job_as_verified_nested_inputs(tmp_path: P
     put_back(tmp_path / "track/tiny/r", restore_set(run.files.root))
     (one,) = scheduler.launch(
         Job(
+            experiment="capacity",
             command='cat "$ETUDE_INPUTS_DIR/start/nested/policy" "$ETUDE_INPUTS_DIR/start/value"',
             inputs=inputs,
             max_hours=0.1,

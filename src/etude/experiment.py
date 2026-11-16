@@ -7,7 +7,6 @@ Author-facing types are defined in `etude.jobs`.
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Sequence
 from dataclasses import replace
 from decimal import Decimal
@@ -16,7 +15,7 @@ from pathlib import Path
 from typing import Literal
 
 import etude.jobs as jobs
-from etude.checkpoints import CheckpointRecord, PolicyKey
+from etude.checkpoints import PolicyKey
 from etude.errors import EtudeError
 from etude.eval.records import Benchmark, Line, Match, TournamentRun
 from etude.launch import client
@@ -26,6 +25,8 @@ from etude.run import LocatedRun, located_runs
 from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
 from etude.train.report import job_names
+
+__all__ = ("observe",)
 
 
 def observe(
@@ -166,7 +167,7 @@ def state_of(
             matches = tuple(
                 Match.model_validate(m.model_dump(), context={"experiment": experiment}).key
                 for spec in group.evaluations
-                for m in spec.matches or ()
+                for m in spec.matches
             )
             prior = next((r for r in eval_runs if r.name == name), None)
             if prior is not None:
@@ -232,21 +233,3 @@ def _launcher_state(
     if item.status.done:
         return state if item.status.outcome == "succeeded" else "failed"
     return item.placement
-
-
-def __getattr__(name: str) -> object:
-    if name == "TrainingRun":
-        warnings.warn(
-            "etude.experiment.TrainingRun is now etude.jobs.TrainingRunSummary; removed in 0.5",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return jobs.TrainingRunSummary
-    if name == "Checkpoint":
-        warnings.warn(
-            "etude.experiment.Checkpoint is now etude.checkpoints.CheckpointRecord; removed in 0.5",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return CheckpointRecord
-    raise AttributeError(name)

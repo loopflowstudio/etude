@@ -15,13 +15,13 @@ from threading import Thread
 import pytest
 
 from etude.cli import main
-from etude.declarations import read_training_jobs
+from etude.controller.declarations import read_training_jobs
+from etude.controller.local import train
 from etude.errors import LauncherError
 from etude.experiment import observe
 from etude.launch.client import default
 from etude.launch.database import launcher_file, upgrade
 from etude.launch.schemas import Packet
-from etude.local import train
 from etude.spec import Runtime
 from etude.storage import default_root
 from tests.launch.fake import bench
@@ -37,14 +37,14 @@ JOB_FILE = r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
 
 import sys
-from etude.launch.records import Job, Run
+from etude.spec import RunRequest
 from decimal import Decimal
 from pathlib import Path
 command = f"{sys.executable} {Path(__file__).parent / 'train.py'}"
 here = Path(__file__).parent
 
 
-def training_jobs(steps: int = 26000, seeds: int = 2) -> list[Run]:
+def training_jobs(steps: int = 26000, seeds: int = 2) -> list[RunRequest]:
     return [run for arm in ("small", "large") for run in
             TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command=command, text=(here / (arm + ".toml")).read_text()), max_hours=0.1, max_usd=Decimal(5), until=f"steps={steps}", name=arm, experiment="capacity", repo=None).runs(*range(1, seeds + 1))]
 
@@ -55,20 +55,20 @@ if __name__ == "__main__":
 
 
 # A tracked job: it resumes from the checkpoint its run, or its parent, recorded.
-TRAIN = r"""
+TRAIN = """
 import os
 from pathlib import Path
 from urllib.parse import urlparse
-from etude.train.records import Step
+from etude.records import Clock
 from etude.train.tracking import track
-run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
-latest = run.latest_checkpoint()
+run = track(clocks=[Clock(name='steps', kind='step', meaning='training steps')])
+latest = (run._checkpoint_here(_saved_checkpoint) if (_saved_checkpoint := run._latest_record()) is not None else None)
 start = 0 if latest is None else int(latest.at["steps"])
 target = int(os.environ["ETUDE_UNTIL_VALUE"])
 config = Path(os.environ["ETUDE_CONFIG"]).read_text()
 print(f"{config} seed {os.environ['ETUDE_SEED']} from {start} to {target}")
 weights = Path(os.environ["ETUDE_OUTPUT_DIR"]) / "weights.pt"
-weights.write_text("weights\n")
+weights.write_text("weights\\n")
 run.log({"loss": 0.5}, steps=target)
 run.checkpoint(weights, steps=target)
 run.finish()
@@ -160,18 +160,19 @@ def test_an_experiment_file_launches_runs_of_its_experiment(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     upgrade(tmp_path / "home", development=True)
     (tmp_path / "train.py").write_text(
-        "from etude.train.records import Step\n"
-        "from etude.train.tracking import track\n"
-        'run = track(clocks=[Step("steps", "training steps")])\n'
-        'run.log({"loss": 0.5}, steps=1)\n'
-        "run.finish()\n"
+        """from etude.records import Clock
+from etude.train.tracking import track
+run = track(clocks=[Clock(name='steps', kind='step', meaning='training steps')])
+run.log({"loss": 0.5}, steps=1)
+run.finish()
+"""
     )
     (tmp_path / "ppo.py").write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
 import sys
 from pathlib import Path
-from etude.launch.records import Job
+from etude.spec import Job
 def training_jobs() -> Job:
     train = Path(__file__).parent / 'train.py'
     return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command=f'{sys.executable} {train}'), max_hours=0.1, name="base", repo=None)
@@ -235,7 +236,7 @@ def test_machines_join_pools_and_this_computer_can_be_turned_off(
     (tmp_path / "job.py").write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, max_usd=1, name="base", repo=None)
 """
     )
@@ -263,7 +264,7 @@ def test_default_target_and_owned_status(
     path.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="echo hi"), max_hours=0.01, max_usd=1, name="base", repo=None)
 """
     )
@@ -276,7 +277,7 @@ def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, co
     path.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="echo free"), name="free", max_hours=0.001, repo=None)
 """
     )
@@ -364,7 +365,7 @@ def test_launch_makes_machines_that_start_themselves(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(
@@ -375,7 +376,7 @@ def test_launch_makes_machines_that_start_themselves(
     path.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="train"), max_hours=1, max_usd=1, name="base", repo=None)"""
         + (".runs(1, 2)" if cohort else "")
     )
@@ -401,7 +402,7 @@ def test_explicit_rent_uses_the_same_startup_rule(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(
@@ -509,7 +510,7 @@ def test_a_job_file_takes_parameters_and_records_them_on_each_run(
         r"""from __future__ import annotations
 from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(hidden: int = 256, seeds: int = 1, lr: float = 0.1, fast: bool = False,
          tag='x', shape: list[int] | None = None) -> list[RunRequest]:
     assert type(hidden) is int and type(lr) is float and type(fast) is bool
@@ -544,7 +545,7 @@ def test_job_help_required_flags_mixed_order_and_collision(
     path.write_text(
         r'''from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job
+from etude.spec import Job
 def training_jobs(width: int, fast: bool = False):
     """Train a chosen width."""
     return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), name=f"width-{width}", max_hours=1, repo=None)

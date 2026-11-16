@@ -14,13 +14,14 @@ import pytest
 
 from etude.cache import Cache
 from etude.cli import main
-from etude.eval.match import environment, evaluate
-from etude.eval.records import Code, Held, Match
+from etude.eval.match import environment
+from etude.eval.records import Code, Match, checkpoint_player
 from etude.experiment import observe
 from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.state import read_state
 from tests.eval.games import play_checkpoint_folder
+from tests.eval.playing import play_matches
 
 
 def test_local_seeds_share_one_input_copy_per_pass(
@@ -177,7 +178,7 @@ def training_jobs() -> list[TrainingJob]:
 
 RECIPE = """from pathlib import Path
 from pydantic import BaseModel
-from etude.train.records import Step
+from etude.records import Clock
 from etude.train.tracking import track
 from etude.stopping import Stopped
 
@@ -189,7 +190,7 @@ class Counts(BaseModel):
     games: int = 0
 
 def train(config: Config) -> None:
-    with track(clocks=[Step("updates", "updates")], config=config) as run:
+    with track(clocks=[Clock(name='updates', kind='step', meaning='updates')], config=config) as run:
         counts = run.resume(extra=Counts())
         for update in run.steps("updates", to=config.updates, save_every=1):
             counts.games += 3
@@ -240,7 +241,7 @@ def test_local_stop_resume_and_finished_refusals_preserve_one_run(
     assert (root / "out/phase-two").read_text() == "12"
     completed = read(DirectoryStorage(base.parent), "train", "train")
     assert completed.points("games", "updates").y.tolist() == [3, 6, 9, 12]
-    assert len(completed.attempts) == 2
+    assert len(completed.writers) == 2
     outcome = (root / "outcome.json").read_bytes()
     assert main(args) == 1
     assert "run_name_taken" in capsys.readouterr().err
@@ -254,7 +255,7 @@ def test_local_stop_resume_and_finished_refusals_preserve_one_run(
     assert main(["train", str(file), "--resume", "--seed", "8"]) == 1
     assert "select the file's sole job and seed 0" in capsys.readouterr().err
     assert (root / "outcome.json").read_bytes() == outcome
-    assert len(read(DirectoryStorage(base.parent), "train", "train").attempts) == 2
+    assert len(read(DirectoryStorage(base.parent), "train", "train").writers) == 2
     assert main(["train", str(file), "--resume", "--until", "updates=6"]) == 0
     extended = read(DirectoryStorage(base.parent), "train", "train")
     assert extended.points("games", "updates").y.tolist() == [3, 6, 9, 12, 15, 18]
@@ -335,7 +336,7 @@ def test_local_experiment_override_and_resume_selection(
     assert json.loads(capsys.readouterr().out)["run"] == "lab"
     assert main([*args, "--resume", "--until", "updates=6"]) == 0
     data = read(tmp_path / "home/track", "lab", "lab")
-    assert len(data.attempts) == 3
+    assert len(data.writers) == 3
     assert data.points("games", "updates").y.tolist() == [3, 6, 9, 12, 15, 18]
     assert not (tmp_path / "home/track/train").exists()
 
@@ -371,8 +372,7 @@ def test_outcome_reader_keeps_historical_state_files(
     (root / "outcome.json").rename(root / filename)
     data = read(DirectoryStorage(base.parent), "train", "train")
     assert data.outcome is not None and data.outcome.state == "stopped"
-    with pytest.warns(DeprecationWarning, match=r"RunData.state.*RunData.outcome; removed in 0.5"):
-        assert data.state is data.outcome
+    assert data.outcome is not None
     dumped = data.model_dump(mode="json")
     assert dumped["outcome"]["state"] == "stopped"
     assert "state" not in dumped
@@ -442,7 +442,7 @@ def test_changed_source_resumes_and_each_attempt_records_its_commit(
     second = _git(tmp_path, ["rev-parse", "HEAD"])
     assert main(["train", str(file), "--resume"]) == 0
     data = read(DirectoryStorage(tmp_path / "home/track"), "train", "train")
-    assert [attempt.commit for attempt in data.attempts] == [first, second]
+    assert [attempt.commit for attempt in data.writers] == [first, second]
     assert first != second
 
 
@@ -462,14 +462,14 @@ def test_a_resumed_attempt_keeps_its_launch_target(
     assert main(["train", str(file), "--resume"]) == 0
     data = read(DirectoryStorage(tmp_path / "home/track"), "train", "train")
     assert data.reached["updates"] == 3
-    assert {attempt.until for attempt in data.attempts} == {"updates=3.0"}
+    assert {attempt.until for attempt in data.writers} == {"updates=3.0"}
 
 
 def test_seconds_deadline_stops_before_the_first_step_when_expired(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
-    monkeypatch.setattr("etude.local.time", SimpleNamespace(time=lambda: 0.0))
+    monkeypatch.setattr("etude.controller.local.time", SimpleNamespace(time=lambda: 0.0))
     file = tmp_path / "train.py"
     file.write_text(RECIPE)
     assert main(["train", str(file), "--seconds", "1"]) == 75
@@ -507,13 +507,12 @@ def test_two_model_cli_recipe_resumes_and_its_checkpoint_can_be_seated(
     checkpoint = observe(base.parent, "tiny").run("tiny").final
     assert checkpoint is not None and checkpoint.at["updates"] == 4
     assert {name: (checkpoint.path / f"{name}.pt").read_bytes() for name in weights} == weights
-    seated = Match(players=(checkpoint.player(Held()), Code(name="opponent")), games=1)
-    played = evaluate(
+    seated = Match(players=(checkpoint_player(checkpoint.ref), Code(name="opponent")), games=1)
+    played = play_matches(
         experiment="tiny",
         environment=environment("tiny-game"),
         matches=[seated],
         play=play_checkpoint_folder,
-        workers=1,
         run="eval",
         directory=tmp_path / "eval",
     )
@@ -624,7 +623,8 @@ def test_declared_training_advances_stages_with_inputs_and_environment(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("RECIPE_SETTING", "caller")
     file = tmp_path / "stages.py"
-    file.write_text("""
+    file.write_text(
+        """
 import os
 from pydantic import BaseModel
 from etude.jobs import TrainingJob
@@ -635,7 +635,7 @@ class Config(BaseModel):
     second: bool = False
 
 def train(config: Config) -> None:
-    with track(config=config, clocks=["updates"]) as run:
+    with track(config=config, clocks=['updates']) as run:
         if config.second:
             assert os.environ["RECIPE_SETTING"] == "job"
             assert (run.input("start") / "weights.pt").read_bytes() == b"first stage"
@@ -649,7 +649,8 @@ def training_jobs(state):
         jobs.append(TrainingJob(name="second", train=train, config=Config(second=True),
             start=finished[0], environment=(Variable(name="RECIPE_SETTING", value="job"),)))
     return jobs
-""")
+"""
+    )
     args = ["train", str(file)]
     assert main(args) == 0
     assert main([*args, *(["--job", "second"] if selected else [])]) == 0

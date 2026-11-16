@@ -16,25 +16,25 @@ import pytest
 from etude.cache import Content
 from etude.checkpoints import CheckpointRecord
 from etude.cli import main
-from etude.declarations import read_training_jobs
+from etude.controller.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
-from etude.eval.records import Benchmark, Code, Held, Match, RoundRobin
+from etude.eval.records import Benchmark, Code, Match, RoundRobin, checkpoint_player
 from etude.experiment import observe
-from etude.jobs import EvalJob, JobOptions, TrainingJob, checkpoint_inputs, with_experiment
+from etude.jobs import EvalJob, ExperimentState, JobOptions, TrainingJob, checkpoint_inputs
 from etude.launch.smoke import tiny
 from etude.records import ArtifactRef
 from etude.spec import Input, Job, Preparation, Runtime, SmokeForm, Until, job_id
 from etude.storage import DirectoryStorage
 from etude.train.read import read
-from etude.train.tracking import track
 from tests.eval.games import play
 from tests.experiments import authored
 from tests.launch.counting import job_text
 from tests.launch.tasks import Command, train_command
 from tests.launch.test_runpod_machines import cloud
 from tests.launch.test_worker_attempts import local
+from tests.train.tracking import open_run
 
 TRAIN = """
 from pydantic import BaseModel
@@ -55,7 +55,7 @@ def train(config: TrainConfig) -> None:
 
 JOB = """
 from etude.jobs import TrainingJob
-from etude.launch.records import Job, Runtime
+from etude.spec import Job, Runtime
 
 from {module} import OtherConfig, TrainConfig, train
 
@@ -68,8 +68,8 @@ PLAY = """
 import json
 from pathlib import Path
 
-from etude.eval.match import Tables
-from etude.eval.records import Held, Match, CheckpointPlayer
+from etude.eval.result import Tables
+from etude.eval.records import CheckpointSlot, Match, CheckpointPlayer, checkpoint_player
 
 
 def weights(checkpoint: Path) -> bytes:
@@ -159,14 +159,14 @@ def test_a_plain_training_file_supplies_the_recipes_experiment(
         {
             f"{module}.py": """
 from pydantic import BaseModel
-from etude.train.records import Step
+from etude.records import Clock
 from etude.train.tracking import track
 
 class Config(BaseModel):
     value: int = 7
 
 def train(config: Config) -> None:
-    with track(clocks=[Step("updates", "optimizer updates")], strict=True) as run:
+    with track(clocks=[Clock(name='updates', kind='step', meaning='optimizer updates')], strict=True) as run:
         saved = run.out / "final.txt"
         saved.write_text(str(config.value))
         run.log({"value": config.value}, updates=1)
@@ -174,7 +174,7 @@ def train(config: Config) -> None:
 """,
             "plain.py": f"""
 from etude.jobs import TrainingJob
-from etude.launch.records import Job, Runtime
+from etude.spec import Job, Runtime
 from {module} import Config, train
 
 def training_jobs(python: str) -> Job:
@@ -340,7 +340,7 @@ def test_an_evaluation_job_holds_a_benchmark_for_the_checkpoint_it_is_given(
         {
             f"arena_duel_{form}.py": """from pydantic import BaseModel
 from etude.eval.match import environment
-from etude.eval.records import Held, Benchmark, Code, Seating
+from etude.eval.records import CheckpointSlot, Benchmark, Code, Seating, checkpoint_player
 """
             + PLAY
             + """
@@ -349,7 +349,7 @@ class ArenaConfig(BaseModel):
 
 def arena(config: ArenaConfig) -> Benchmark:
     return Benchmark(name="anchors", environment=environment("duel"), seatings=(
-        Seating(name="model vs fixed", players=(Held(), Code(name="fixed")),
+        Seating(name="model vs fixed", players=(CheckpointSlot(), Code(name="fixed")),
                 configs=({"deal": 1}, {"deal": 2}), games=config.games),))
 """
         },
@@ -403,7 +403,7 @@ def arena(config: ArenaConfig) -> Benchmark:
         max_attempts=1,
         runtime=Runtime(python=job_python),
     )
-    executable = with_experiment(job, "ppo")
+    executable = job.lower(ExperimentState(experiment="ppo"))
     assert len(job.plain().inputs) == len(members)
     assert {each.key for each in job.plain().inputs} == {
         "checkpoints/updates-100" + ("/" + name if name else "") for name in members
@@ -483,7 +483,7 @@ def test_job_seeds_expand_to_named_requests_without_changing_job_identity(tmp_pa
     file.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job
+from etude.spec import Job
 def training_jobs():
     return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="baseline", seeds=(0, 7), repo=None)
 """
@@ -505,7 +505,7 @@ def training_jobs():
     file.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job
+from etude.spec import Job
 def training_jobs():
     return [TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="first", repo=None), TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, name="other", repo=None)]
 """
@@ -521,21 +521,7 @@ def test_one_allocation_owns_many_writers_without_changing_its_limits(
 from etude.train.tracking import track
 """
         + TRAIN
-        + """
-def write(config: TrainConfig) -> None:
-    clocks = [Clock(name="updates", kind="step", meaning="optimizer updates")]
-    with track(clocks=clocks) as run:
-        run.log({"loss": 10}, updates=1)
-        run.log({"loss": 20}, updates=2)
-        run.log({"loss": 30}, updates=3)
-    with track(clocks=clocks) as run:
-        run.log({"loss": 200}, updates=2)
-        run.log({"loss": 300}, updates=3)
-    with track(clocks=clocks, run="another") as run:
-        run.log({"loss": 4}, updates=1)
-    with track(clocks=clocks):
-        pass
-"""
+        + '\ndef write(config: TrainConfig) -> None:\n    clocks = [Clock(name="updates", kind="step", meaning="optimizer updates")]\n    with track(clocks=clocks) as run:\n        run.log({"loss": 10}, updates=1)\n        run.log({"loss": 20}, updates=2)\n        run.log({"loss": 30}, updates=3)\n    with track(clocks=clocks) as run:\n        run.log({"loss": 200}, updates=2)\n        run.log({"loss": 300}, updates=3)\n    with track(clocks=clocks):\n        pass\n'
     )
     repo = checkout(tmp_path / "writers", {"allocation_writers.py": source})
     monkeypatch.syspath_prepend(str(repo))
@@ -555,10 +541,10 @@ def write(config: TrainConfig) -> None:
         scheduler.logs(refresh=True, run=run)
     )
     (attempt,) = scheduler.attempts(run)
-    assert len(attempt.writers) == 4
-    assert len({writer.writer for writer in attempt.writers}) == 4
+    assert len(attempt.writers) == 3
+    assert len({writer.writer for writer in attempt.writers}) == 3
     assert {writer.attempt for writer in attempt.writers} == {attempt.id}
-    assert {writer.run for writer in attempt.writers} == {run, "pilot/another"}
+    assert {writer.run for writer in attempt.writers} == {run}
     data = read(tmp_path / "track", "pilot", run.removeprefix("pilot/"))
     points = data.points("loss", "updates")
     assert list(points.x) == [1, 2, 3]
@@ -573,7 +559,7 @@ def test_a_seated_artifact_keeps_its_experiment_when_a_local_run_has_the_same_na
 ) -> None:
     source = DirectoryStorage(tmp_path)
     for experiment, body in (("producer", b"earlier weights"), ("review", b"local weights")):
-        with track(
+        with open_run(
             experiment=experiment, run="base@0", directory=tmp_path, clocks=["updates"], strict=True
         ) as run:
             path = run.out / "weights.pt"
@@ -583,7 +569,7 @@ def test_a_seated_artifact_keeps_its_experiment_when_a_local_run_has_the_same_na
     assert checkpoint is not None
     state = observe(source, "review")
     assert state.checkpoint(checkpoint.key) is None
-    match = Match(players=(checkpoint.player(Held()), Code(name="fixed")), games=1)
+    match = Match(players=(checkpoint_player(checkpoint.ref), Code(name="fixed")), games=1)
     saved = checkpoint_inputs([match], state, [checkpoint] if declared else [])
     assert saved[checkpoint.key].artifact == checkpoint.artifact
 

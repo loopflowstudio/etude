@@ -12,10 +12,8 @@
 Each function uses the selected SSH server, or a launcher under ETUDE_HOME
 (default ~/.etude) with an initial pool, "local", holding this computer. A
 call names a pool (`pool=`), an on-demand to rent from (`rent=`), or both.
-With `smoke=True`, `queue` and `launch` first
-run each job's smoke form here (`etude.launch.smoke`) and submit nothing if one
-fails; each run records what its smoke did. `etude.smoke.smoke_file` smokes a
-whole experiment file, evaluation and report too.
+`etude launch FILE --smoke` first smokes a whole experiment file here
+(`etude.controller.smoke.smoke_file`).
 """
 
 from __future__ import annotations
@@ -23,23 +21,20 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Sequence
-from decimal import Decimal
 from functools import cache
 from pathlib import Path
 
 from etude.errors import LauncherError
 from etude.launch.database import launcher_file, open_home
 from etude.launch.executor import Execution, Executor, local
-from etude.launch.machines import Machines, OwnedMachine, Safeguards
-from etude.launch.providers.lium.api import LiumAPI
-from etude.launch.providers.lium.machines import LiumMachines
-from etude.launch.providers.runpod.api import RunPodAPI
-from etude.launch.providers.runpod.machines import RunPodMachines
-from etude.launch.providers.vast.api import VastAPI
-from etude.launch.providers.vast.machines import VastMachines
+from etude.launch.provisioner.machines import Machines, OwnedMachine, Safeguards
+from etude.launch.provisioner.providers.lium.api import LiumAPI
+from etude.launch.provisioner.providers.lium.machines import LiumMachines
+from etude.launch.provisioner.providers.runpod.api import RunPodAPI
+from etude.launch.provisioner.providers.runpod.machines import RunPodMachines
+from etude.launch.provisioner.providers.vast.api import VastAPI
+from etude.launch.provisioner.providers.vast.machines import VastMachines
 from etude.launch.records import (
-    Availability,
-    Diagnostic,
     LogSnapshot,
     Machine,
     OnDemand,
@@ -47,9 +42,8 @@ from etude.launch.records import (
     Standing,
     Status,
 )
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.server import PythonClient, selected
-from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.launch.source import home
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
 from etude.launch.storage.bucket import BucketJournal
@@ -57,6 +51,20 @@ from etude.launch.storage.s3 import _send, open_bucket
 from etude.launch.storage.transport import HTTPReply, observe
 from etude.launch.usage import Usage
 from etude.spec import Job, RunRequest, expand_runs
+
+__all__ = (
+    "queue",
+    "launch",
+    "quote",
+    "status",
+    "wait",
+    "cancel",
+    "logs",
+    "fetch",
+    "default",
+    "usage",
+    "standing",
+)
 
 
 @cache
@@ -148,16 +156,8 @@ def _client() -> Scheduler | PythonClient:
     return PythonClient(address) if address else default()
 
 
-def _smoked(runs: RunRequest | Job | Sequence[RunRequest | Job], smoke: bool) -> list[RunRequest]:
-    given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
-    each = expand_runs(given)
-    if not smoke:
-        return each
-    with smoke_home() as folder:
-        trained = smoke_train(each, folder)
-    for one in trained:
-        show(one.step)
-    return Smoked(train={one.job: one.step for one in trained}).stamp(each)
+def _runs(runs: RunRequest | Job | Sequence[RunRequest | Job]) -> list[RunRequest]:
+    return expand_runs([runs] if isinstance(runs, (Job, RunRequest)) else runs)
 
 
 def queue(
@@ -165,9 +165,8 @@ def queue(
     pool: str | None = None,
     *,
     rent: str | None = None,
-    smoke: bool = False,
 ) -> tuple[str, ...]:
-    return _client().queue(_smoked(runs, smoke), pool, rent=rent)
+    return _client().queue(_runs(runs), pool, rent=rent)
 
 
 def launch(
@@ -175,9 +174,8 @@ def launch(
     pool: str | None = None,
     *,
     rent: str | None = None,
-    smoke: bool = False,
 ) -> tuple[str, ...]:
-    return _client().launch(_smoked(runs, smoke), pool, rent=rent)
+    return _client().launch(_runs(runs), pool, rent=rent)
 
 
 def quote(
@@ -190,11 +188,6 @@ def quote(
     return _client().quote(runs, pool, rent=rent)
 
 
-def availability(rent: str, *, timeout: float | None = None) -> Availability:
-    """Ask an on-demand's provider what it would rent now, at what price; rents nothing."""
-    return _client().availability(rent, timeout=timeout)
-
-
 def status(run: str) -> Status:
     return _client().status(run)
 
@@ -205,10 +198,6 @@ def wait(*runs: str, every: float = 1.0, timeout: float | None = None) -> list[S
 
 def cancel(run: str) -> Status:
     return _client().cancel(run)
-
-
-def diagnostics(*, run: str | None = None, machine: str | None = None) -> tuple[Diagnostic, ...]:
-    return _client().diagnostics(run=run, machine=machine)
 
 
 def logs(
@@ -224,16 +213,6 @@ def logs(
 
 def fetch(run: str, name: str, destination: Path) -> Path:
     return _client().fetch(run, name, destination)
-
-
-def rent(ondemand: str, hours: float, max_usd: Decimal | None = None) -> str:
-    """Rent a machine from an on-demand for a window and return its name."""
-    return _client().rent(ondemand, hours, max_usd)
-
-
-def terminate(machine: str) -> Machine:
-    """Delete an idle rented machine and return its acquisition record."""
-    return _client().terminate(machine)
 
 
 def usage(*, run: str | None = None, machine: str | None = None) -> Usage:

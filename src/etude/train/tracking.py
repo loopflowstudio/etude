@@ -48,7 +48,6 @@ import time
 import warnings
 import zlib
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import file_digest, sha256
 from itertools import chain, count
@@ -94,6 +93,9 @@ from etude.train.block import encode as encode_block
 from etude.train.manifest import Index, metric_names
 from etude.train.records import ParentRun, RowTable, checkpoint_name
 from etude.train.state import State, saved_states, state_folder, write_objects
+
+__all__ = ("EtudeWarning", "TrainingRun", "seal_runs", "track")
+
 
 # Compaction is bounded by bytes or elapsed cadence, independent of training steps.
 PERMANENT_BYTES, RECENT_BLOCKS = 8_000_000, 64
@@ -209,36 +211,10 @@ class EtudeWarning(UserWarning):
     """Logging needs attention: lost rows, invalid clocks or excessive metric names."""
 
 
-@contextmanager
-def local_launch(*, out: Path | str, experiment: str) -> Iterator[None]:
-    """Call a recipe locally with one persistent directory and experiment.
-
-    Environment settings are restored on exit, including after an exception.
-    Like process environment itself, this context is not thread-local.
-    """
-    warnings.warn(
-        "local_launch is replaced by etude train; removed in 0.5", DeprecationWarning, stacklevel=2
-    )
-    folder = Path(out).resolve()
-    folder.mkdir(parents=True, exist_ok=True)
-    launch = {
-        "ETUDE_OUT": str(folder),
-        "ETUDE_EXPERIMENT": experiment,
-        "ETUDE_RUN": re.sub(r"[^A-Za-z0-9_.-]", "-", folder.name),
-        "ETUDE_TRACK_DIR": str(folder / "etude"),
-        "ETUDE_RESUME": "1",
-    }
-    previous = {key: os.environ.get(key) for key in launch}
-    os.environ.update(launch)
-    try:
-        yield
-    finally:
-        for key, value in previous.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-
+_QUEUE_SIZE = 10_000
+_SEGMENT_SECONDS = 2.0
+_SEGMENT_ROWS = 5_000
+_METRIC_NAME_LIMIT = 1000
 
 _STOP = object()
 
@@ -275,12 +251,8 @@ class TrainingRun(Run):
         root: Path,
         clocks: tuple[Clock, ...],
         destinations: Sequence[StorageDestination],
-        queue_size: int,
-        segment_seconds: float,
-        segment_rows: int,
         strict: bool,
         closed_clocks: bool,
-        metric_name_limit: int | None = 1000,
         inherited: CheckpointRecord | None = None,
         seed: int = 0,
     ) -> None:
@@ -329,9 +301,9 @@ class TrainingRun(Run):
             )
             self._checkpoints[known.ordinal] = _Kept(path.stem, known)
         self._inherited = inherited
-        self._segment_seconds = segment_seconds
+        self._segment_seconds = _SEGMENT_SECONDS
         self._finish_deadline: float | None = None
-        self._segment_rows = segment_rows
+        self._segment_rows = _SEGMENT_ROWS
         self._writer_id = secrets.token_hex(6)
         # Etude's clocks continue from the saved state an attempt restores;
         # without one, from the latest checkpoint, this run's or the parent's
@@ -366,8 +338,8 @@ class TrainingRun(Run):
         self._save("metrics", self._writer_id, self._writer_record)
         seal_logs(self.files.root, self._columns)  # what an earlier process left unsealed
         self._index = Index(root, self._writer_id)
-        self._metric_name_limit = metric_name_limit
-        self._metric_names = metric_names(root) if metric_name_limit is not None else set()
+        self._metric_name_limit = _METRIC_NAME_LIMIT
+        self._metric_names = metric_names(root)
         self._sequence = 0
         # Only the current compaction window stays in memory.
         self._tails: list[Columns] = []
@@ -375,7 +347,7 @@ class TrainingRun(Run):
         self._recent: list[Columns] = []
         self._recent_bytes = 0
         self._folded_at = time.monotonic()
-        self._queue: queue.Queue[object] = queue.Queue(maxsize=queue_size)
+        self._queue: queue.Queue[object] = queue.Queue(maxsize=_QUEUE_SIZE)
         self._wake = threading.Event()
         self._stopping = threading.Event()
         self._finished = False
@@ -793,18 +765,6 @@ class TrainingRun(Run):
         self._offer(kept)
         return record.artifact
 
-    def checkpoint_due(self, every: float, clock: str = RUNNING_HOURS) -> bool:
-        """Whether `clock` has crossed a multiple of `every` since the latest checkpoint.
-
-        `if run.checkpoint_due(1): run.checkpoint(...)` saves every running hour,
-        counted from zero and continuing across resumes and continuations.
-        """
-        if every <= 0 or not math.isfinite(every):
-            raise ValueError("every must be positive")
-        here, latest = self.at(clock), self._latest_record()
-        there = 0.0 if latest is None else latest.at.get(clock, 0.0)
-        return here // every > there // every
-
     def _now(self) -> tuple[int, dict[str, float]]:
         """The wall time in milliseconds, and where Etude's clocks stand."""
         wall_ms = time.time_ns() // 1_000_000
@@ -820,21 +780,6 @@ class TrainingRun(Run):
             if self._checkpoints
             else self._inherited
         )
-
-    def latest_checkpoint(self) -> CheckpointRecord | None:
-        """The latest checkpoint record, or an inherited parent checkpoint.
-
-        Relocate its address when the file is present here. A removed out file
-        is not restored just because its record survives; its recorded address
-        may be unavailable. None when there is no record.
-        """
-        warnings.warn(
-            "Run.latest_checkpoint() is now checkpoints(); removed in 0.5",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        record = self._latest_record()
-        return None if record is None else self._checkpoint_here(record)
 
     def checkpoints(self) -> tuple[CheckpointRecord, ...]:
         """Published checkpoints in ordinal order, relocated when their bytes are here."""
@@ -968,14 +913,6 @@ class TrainingRun(Run):
 
     def tag(self, checkpoint: ArtifactRef | int, *tags: str) -> None:
         """Add labels to a checkpoint this run recorded, by reference or ordinal."""
-        self._retag(checkpoint, tags, ())
-
-    def untag(self, checkpoint: ArtifactRef | int, *tags: str) -> None:
-        self._retag(checkpoint, (), tags)
-
-    def _retag(
-        self, checkpoint: ArtifactRef | int, add: Sequence[str], remove: Sequence[str]
-    ) -> None:
         try:
             kept = (
                 self._checkpoints.get(checkpoint)
@@ -992,8 +929,9 @@ class TrainingRun(Run):
             if kept is None:
                 raise EtudeError("checkpoint_not_recorded", 404)
             record = kept.record
-            tags = tuple(t for t in dict.fromkeys((*record.tags, *add)) if t not in remove)
-            changed = CheckpointRecord.model_validate(record.model_dump() | {"tags": tags})
+            changed = CheckpointRecord.model_validate(
+                record.model_dump() | {"tags": tuple(dict.fromkeys((*record.tags, *tags)))}
+            )
         except (ValidationError, EtudeError) as error:
             if self.strict:
                 raise
@@ -1165,7 +1103,7 @@ class TrainingRun(Run):
         if len(at) != len(columns):
             # Charted against the clocks it does give, and wall time; counted.
             self.incomplete += 1
-        if self._metric_name_limit is not None and "metric_names" not in self._warned:
+        if "metric_names" not in self._warned:
             self._metric_names.update(
                 name
                 for name, value in values.items()
@@ -1175,7 +1113,7 @@ class TrainingRun(Run):
                 self._warn(
                     "metric_names",
                     f"{len(self._metric_names)} distinct metric names exceed "
-                    f"metric_name_limit={self._metric_name_limit}; use log_table for "
+                    f"the {self._metric_name_limit}-name limit; use log_table for "
                     "per-update collections instead of encoding dimensions in metric names",
                 )
                 # The one-time warning needs no growing name registry afterward.
@@ -1271,69 +1209,24 @@ class TrainingRun(Run):
 
 def track(
     *,
-    experiment: str | None = None,
     clocks: Sequence[str | Clock] | None = None,
-    run: str | None = None,
-    job: str | None = None,
-    seed: int | None = None,
-    kind: str | None = None,
     config: BaseModel | Mapping[str, object] | str | None = None,
-    continues: Continuation | None = None,
-    directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
-    namespace: str = "local",
-    queue_size: int = 10_000,
-    segment_seconds: float = 2.0,
-    segment_rows: int = 5_000,
     strict: bool = False,
-    metric_name_limit: int | None = 1000,
-    resume: bool = False,
 ) -> TrainingRun:
-    """Open a new run, or explicitly resume one. A bad declaration raises here.
+    """Track the run assigned by etude train or the launcher.
 
-    The experiment is the one `etude launch` started the run for
-    (`ETUDE_EXPERIMENT`, by default the experiment file's stem) unless named here. Naming
-    another raises `EtudeError("experiment_differs_from_launch")`; naming none
-    outside such a launch raises `EtudeError("experiment_not_named")`. The
-    run's identity, and whether it resumes, is settled by
-    `etude.run.declare`. Under `etude launch` the files are
-    written to `ETUDE_TRACK_DIR`, which the launcher carries to storage as they
-    are, and a later attempt finds the run's checkpoints there
-    (`Run.checkpoints`). A continuation (`etude.jobs.continue_from`) is
-    handed its parent's position and optional checkpoint in `ETUDE_CONTINUES`:
-    unless `continues` is given, the run declares that lineage.
-
-    A taken name is refused unless `resume=True` or the launcher requests a retry.
-    A resumed run's first logged row sets where it supersedes earlier rows.
-    An attempt that logs nothing replaces nothing. `etude train` (`etude.local.train`)
-    supplies the experiment, identity and persistent `out` for a local call.
+    Identity, inputs, continuation and paths belong to the command. A process
+    without that assignment is refused before creating files or writer threads.
     """
-    if metric_name_limit is not None and metric_name_limit < 0:
-        raise ValueError("metric_name_limit must be nonnegative or None")
-    if seed is not None:
-        warnings.warn(
-            "track(seed=) is replaced by launch seeds or etude train --seed; removed in 0.5",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-    launched = os.environ.get("ETUDE_EXPERIMENT") or None
-    if experiment is not None and launched not in (None, experiment):
-        raise EtudeError("experiment_differs_from_launch", 409) from ValueError(
-            f"track(experiment={experiment!r}) in a run etude launch started for {launched!r};"
-            " omit experiment= here, or name it on the launched Job"
-        )
-    experiment = experiment or launched
-    if experiment is None:
+    experiment = os.environ.get("ETUDE_EXPERIMENT")
+    if not experiment or not os.environ.get("ETUDE_RUN"):
         raise EtudeError(
-            "experiment_not_named",
-            422,
-            detail=(
-                "use etude train FILE or etude launch FILE; for a process Etude did not start, "
-                "name the run with track(experiment=..., run=...)"
-            ),
+            "training_run_not_assigned", 422, detail="use etude train FILE or etude launch FILE"
         )
     handed = _inherited()
-    if handed is not None and continues is None:
+    continues = None
+    if handed is not None:
         at = handed.at
         until = os.environ.get("ETUDE_UNTIL_CLOCK")
         clock = until if until in at else next(iter(at))
@@ -1346,18 +1239,10 @@ def track(
             Clock(name=clock, kind="step", meaning=clock) if isinstance(clock, str) else clock
             for clock in clocks
         ),
-        run=run,
-        job=job,
-        seed=seed,
-        kind=kind,
         config=config.model_dump(mode="json") if isinstance(config, BaseModel) else config,
         continues=continues,
         inherited_clocks=() if handed is None else handed.clocks,
-        directory=directory,
-        namespace=namespace,
-        resume=resume
-        or os.environ.get("ETUDE_RESUME") == "1"
-        or bool(os.environ.get("ETUDE_ATTEMPT")),
+        resume=os.environ.get("ETUDE_RESUME") == "1" or bool(os.environ.get("ETUDE_ATTEMPT")),
     )
     return TrainingRun(
         experiment=experiment,
@@ -1365,12 +1250,8 @@ def track(
         root=declared.root,
         clocks=declared.record.clocks,
         destinations=destinations(declared.base, storages),
-        queue_size=queue_size,
-        segment_seconds=segment_seconds,
-        segment_rows=segment_rows,
         strict=strict,
         closed_clocks=clocks is not None,
-        metric_name_limit=metric_name_limit,
         inherited=None if handed is None else handed.checkpoint,
         seed=declared.record.seed or 0,
     )
@@ -1420,12 +1301,3 @@ def seal_runs(directory: Path | str) -> None:
         if declared is not None:
             names = [clock.name for clock in declared.clocks]
             seal_logs(root, [*names, *BUILT_IN_NAMES])
-
-
-__all__ = [
-    "EtudeWarning",
-    "TrainingRun",
-    "local_launch",
-    "seal_runs",
-    "track",
-]

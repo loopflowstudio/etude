@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
-from etude.launch.machines import (
+from etude.launch.provisioner.machines import (
     Allocation,
     Bill,
     MachineRequest,

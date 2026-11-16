@@ -26,12 +26,12 @@ from etude.launch.environment import install
 from etude.launch.errors import LaunchError
 from etude.launch.logging import CLOSED, LIMIT, bound, bounded
 from etude.launch.logs import LogCursor, render, snapshot_stream
-from etude.launch.providers import bootstrap
-from etude.launch.providers.package import program_archive
-from etude.launch.providers.runpod import pod
+from etude.launch.provisioner.providers import bootstrap
+from etude.launch.provisioner.providers.package import program_archive
+from etude.launch.provisioner.providers.runpod import pod
 from etude.launch.records import Diagnostic, LogSnapshot, LogStream
 from etude.launch.records import Storage as StorageRecord
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import (
     WORKER_LOG,
     AttemptRecord,
@@ -467,7 +467,7 @@ def test_follow_positions_survive_truncation_without_repeating_text() -> None:
     assert len(kept.opening) + len(kept.tail) + kept.omitted == len(initial)
 
 
-def test_log_reads_and_phases_never_drive_execution(tmp_path: Path) -> None:
+def test_log_reads_never_drive_execution(tmp_path: Path) -> None:
     b = bench(tmp_path)
     (run,) = b.scheduler.launch(job(), rent="l4")
     counting = Counting(b.store, b.service)
@@ -477,7 +477,6 @@ def test_log_reads_and_phases_never_drive_execution(tmp_path: Path) -> None:
     assert count == Counts(bucket=3, database=26)
     with counting.record():
         assert b.scheduler.diagnostics(run=run)
-        assert b.scheduler.start_phases(run)
         count = counting.snapshot()
     assert (
         Counts(provider=count.provider, bucket=count.bucket, ssh=count.ssh, git=count.git)
@@ -612,7 +611,7 @@ def test_bootstrap_publication_is_one_bounded_request_and_keeps_local_evidence(
         raise OSError("storage unavailable")
 
     monkeypatch.setattr(logging, "urlopen", denied)
-    logging.publish(path, "https://fixture/write-only", timeout=2)
+    logging.publish(path, "https://fixture/write-only")
     assert received == [b"install failed\n"]
     assert len(allowances) == 1 and 0 < allowances[0] <= 2
     assert path.read_text() == "install failed\n"
@@ -790,10 +789,6 @@ def test_bootstrap_failure_remains_readable_after_deletion_and_restart(
     assert (expected in fresh) is not storage_denied
     if earlier and not storage_denied:
         assert "starting installed client" in earlier and "starting installed client" not in fresh
-    assert (
-        any(expected in (phase.evidence or "") for phase in scheduler.start_phases(identity))
-        is not storage_denied
-    )
     assert b.service.creates == 1
 
 

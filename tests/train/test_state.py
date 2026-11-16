@@ -7,12 +7,11 @@ import pytest
 from pydantic import BaseModel
 
 from etude.carriage import put_back, restore_set
-from etude.records import HOURS_SINCE_START, RUNNING_HOURS
+from etude.records import HOURS_SINCE_START, RUNNING_HOURS, Clock
 from etude.stopping import Stopped
 from etude.train.read import read
-from etude.train.records import Step
 from etude.train.state import read_state
-from etude.train.tracking import track
+from tests.train.tracking import open_run
 
 
 class Counts(BaseModel):
@@ -24,11 +23,11 @@ def test_two_models_and_extra_resume_from_one_save(tmp_path: Path) -> None:
     model, rival = torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.25)
     config = Counts(games=3)
-    with track(
+    with open_run(
         experiment="e",
         run="r",
         directory=tmp_path,
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         config=config,
         strict=True,
     ) as run:
@@ -41,12 +40,12 @@ def test_two_models_and_extra_resume_from_one_save(tmp_path: Path) -> None:
         expected_rival = rival.weight.detach().clone()
     model2, rival2 = torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)
     optimizer2 = torch.optim.SGD(model2.parameters(), lr=0.01)
-    with track(
+    with open_run(
         resume=True,
         experiment="e",
         run="r",
         directory=tmp_path,
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         config=config,
         strict=True,
     ) as resumed:
@@ -62,11 +61,11 @@ def test_two_models_and_extra_resume_from_one_save(tmp_path: Path) -> None:
 
 
 def test_callback_save_failure_leaves_the_previous_save_whole(tmp_path: Path) -> None:
-    with track(
+    with open_run(
         experiment="e",
         run="r",
         directory=tmp_path,
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         strict=True,
     ) as run:
         assert run.resume() is None
@@ -97,11 +96,14 @@ def test_stop_saves_the_pass_before_raising_and_never_enters_the_next_phase(
     entered_second = False
     with (
         pytest.raises(Stopped),
-        track(
+        open_run(
             experiment="e",
             run="r",
             directory=tmp_path,
-            clocks=[Step("updates", "updates"), Step("fits", "sampler fits")],
+            clocks=[
+                Clock(name="updates", kind="step", meaning="updates"),
+                Clock(name="fits", kind="step", meaning="sampler fits"),
+            ],
             strict=True,
         ) as run,
     ):
@@ -116,12 +118,15 @@ def test_stop_saves_the_pass_before_raising_and_never_enters_the_next_phase(
         entered_second = True
     assert not entered_second
     stop.unlink()
-    with track(
+    with open_run(
         resume=True,
         experiment="e",
         run="r",
         directory=tmp_path,
-        clocks=[Step("updates", "updates"), Step("fits", "sampler fits")],
+        clocks=[
+            Clock(name="updates", kind="step", meaning="updates"),
+            Clock(name="fits", kind="step", meaning="sampler fits"),
+        ],
         strict=True,
     ) as resumed:
         path = resumed.resume(name="policy")
@@ -135,23 +140,23 @@ def test_running_hours_resume_from_saved_state_instead_of_a_checkpoint(
 ) -> None:
     now = 100.0
     monkeypatch.setattr("etude.train.tracking.time.monotonic", lambda: now)
-    with track(
+    with open_run(
         experiment="e",
         run="r",
         directory=tmp_path,
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         strict=True,
     ) as run:
         run.resume()
         for _ in run.steps("updates", to=1, save_every=1):
             now += 3600
             run.save()
-    with track(
+    with open_run(
         resume=True,
         experiment="e",
         run="r",
         directory=tmp_path,
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         strict=True,
     ) as resumed:
         resumed.resume()
@@ -160,8 +165,11 @@ def test_running_hours_resume_from_saved_state_instead_of_a_checkpoint(
 
 
 def test_state_registration_refuses_objects_without_a_state_protocol(tmp_path: Path) -> None:
-    with track(
-        experiment="e", run="r", directory=tmp_path, clocks=[Step("updates", "updates")]
+    with open_run(
+        experiment="e",
+        run="r",
+        directory=tmp_path,
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
     ) as run:
         with pytest.raises(TypeError, match="state_dict"):
             run.resume(model=object())
@@ -175,11 +183,11 @@ def test_both_hour_clocks_survive_a_relay_without_checkpoints(
     now, wall_ms = 100.0, 1_000_000_000_000
     monkeypatch.setattr("etude.train.tracking.time.monotonic", lambda: now)
     monkeypatch.setattr("etude.train.tracking.time.time_ns", lambda: wall_ms * 1_000_000)
-    with track(
+    with open_run(
         experiment="e",
         run="r",
         directory=tmp_path / "first",
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         strict=True,
     ) as run:
         run.resume()
@@ -190,12 +198,12 @@ def test_both_hour_clocks_survive_a_relay_without_checkpoints(
     put_back(tmp_path / "second/e/r", restore_set(tmp_path / "first/e/r"))
     now += 1800
     wall_ms += 1_800_000
-    with track(
+    with open_run(
         resume=True,
         experiment="e",
         run="r",
         directory=tmp_path / "second",
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         strict=True,
     ) as resumed:
         resumed.resume()

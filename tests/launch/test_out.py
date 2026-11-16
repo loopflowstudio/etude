@@ -19,15 +19,15 @@ from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker.courier import Courier
 from etude.out import MEMBERSHIP, OutFile, OutFiles
+from etude.records import Clock
 from etude.spec import Input, Job
 from etude.storage import DirectoryStorage
 from etude.storage_timeout import StorageUnavailable
 from etude.train.read import read
-from etude.train.records import Step
-from etude.train.tracking import track
 from tests.launch.test_runpod_machines import BucketObjects, Observed, Storage, machine
 from tests.launch.test_worker_attempts import local
 from tests.run.storage import MeasuredStorage
+from tests.train.tracking import open_run
 
 
 class Writes(Storage):
@@ -56,8 +56,11 @@ def test_courier_hashes_mutable_out_and_restores_every_file_once(
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
     monkeypatch.setenv("ETUDE_RUN", "run1")
     monkeypatch.setenv("ETUDE_ATTEMPT", "a1")
-    with track(
-        experiment="e", run="run1", clocks=[Step("updates", "updates")], directory=root.parent
+    with open_run(
+        experiment="e",
+        run="run1",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=root.parent,
     ) as run:
         (run.out / "weights").mkdir()
         (run.out / "weights/model.json").write_bytes(b"weights")
@@ -101,7 +104,7 @@ def test_courier_hashes_mutable_out_and_restores_every_file_once(
     )
     before = len(storage.asked)
     links = journal._restore([work])
-    assert len(storage.asked) == before + 1  # one listing; links make no requests
+    assert len(storage.asked) == before + 1  # one publication; links make no requests
     fresh, _, restored = machine(tmp_path / "fresh", storage)
     before = len(storage.asked)
     fresh.restore(links, [work])
@@ -153,8 +156,11 @@ def test_a_retry_on_the_same_machine_restores_out_only_when_its_folder_is_gone(
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
     monkeypatch.setenv("ETUDE_RUN", "run1")
     monkeypatch.setenv("ETUDE_ATTEMPT", "a1")
-    with track(
-        experiment="e", run="run1", clocks=[Step("updates", "updates")], directory=root.parent
+    with open_run(
+        experiment="e",
+        run="run1",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=root.parent,
     ) as run:
         (run.out / "state").write_bytes(b"update 12")
     courier.carry_out()
@@ -202,8 +208,11 @@ def test_deleted_files_stay_absent_after_restart_recovery_and_continuation(
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
     monkeypatch.setenv("ETUDE_RUN", "run1")
     monkeypatch.setenv("ETUDE_ATTEMPT", "a1")
-    with track(
-        experiment="e", run="run1", clocks=[Step("updates", "updates")], directory=root.parent
+    with open_run(
+        experiment="e",
+        run="run1",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=root.parent,
     ) as run:
         final = run.out / "final.pt"
         final.write_bytes(b"immutable weights")
@@ -259,7 +268,7 @@ def test_deleted_files_stay_absent_after_restart_recovery_and_continuation(
     before = len(storage.asked)
     held = journal.held("run1")
     reads = [key.partition("?")[0] for method, key in storage.asked[before:] if method == "GET"]
-    assert len(reads) == 4  # one listing, the checkpoint record, declaration and membership
+    assert len(reads) == 4  # one publication, the checkpoint record, declaration and membership
     relayed = tmp_path / "relay/run1"
     (relayed / "out").mkdir(parents=True)
     (relayed / "out/stale").write_bytes(b"old host state")
@@ -398,7 +407,7 @@ def test_failed_membership_delivery_keeps_the_previous_membership_until_replayed
     assert OutFiles.model_validate_json(storage.objects["etude/run1/out.json"]).files == (
         OutFile(key="out/old", sha256=sha256(b"old").hexdigest(), size_bytes=3),
     )
-    # Recovery still uses current bytes and listing lengths. A machine lost
+    # Recovery still uses current bytes and publication lengths. A machine lost
     # between data and membership delivery can restore the newer save.
     journal = BucketJournal(
         Place(name="east", bucket="b", prefix="etude", provider="s3", region="us-east-1"),
@@ -422,8 +431,11 @@ def test_courier_carries_a_changed_out_file_before_publishing_its_checkpoint(
     monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
     monkeypatch.setenv("ETUDE_RUN", "run1")
     monkeypatch.setenv("ETUDE_ATTEMPT", "a1")
-    with track(
-        experiment="e", run="run1", clocks=[Step("updates", "updates")], directory=root.parent
+    with open_run(
+        experiment="e",
+        run="run1",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=root.parent,
     ) as run:
         model = run.out / "model.pt"
         model.write_bytes(b"draft")

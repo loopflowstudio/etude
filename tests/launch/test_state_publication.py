@@ -7,20 +7,20 @@ from typing import IO
 
 import pytest
 
-from etude.carriage import listing, put_back, restore_set
+from etude.carriage import publication, put_back, restore_set
 from etude.launch.records import Storage as Place
 from etude.launch.schemas import Work
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.out import MEMBERSHIP
+from etude.records import Clock
 from etude.run import RunFiles, StorageDestination, prune
 from etude.storage import DirectoryStorage
 from etude.storage_timeout import StorageUnavailable
-from etude.train.records import Step
-from etude.train.tracking import track
 from tests.launch.test_out import Writes
 from tests.launch.test_runpod_machines import machine
 from tests.run.storage import MeasuredStorage
+from tests.train.tracking import open_run
 
 
 def _save(root: Path, number: int, *, name: str | None = None) -> Path:
@@ -222,7 +222,7 @@ def test_directory_delivery_and_host_relay_select_the_same_save(tmp_path: Path) 
     target = tmp_path / "relay"
     put_back(target, restore_set(root))
     assert (target / "out/state/save-00000003/optimizer").read_bytes() == b"3"
-    assert "out/state/current.json" in listing(root, tail_seconds=0)
+    assert "out/state/current.json" in publication(root, tail_seconds=0).keys
     assert not any("save-00000001" in key for key in storage.keys("run1/"))
 
 
@@ -231,7 +231,7 @@ def test_invalid_pointer_never_selects_or_deletes_files(tmp_path: Path, value: s
     folder = _save(tmp_path, 1)
     (folder.parent / "current.json").write_text(json.dumps({"save": value}))
     with pytest.raises(ValueError, match="numbered save"):
-        listing(tmp_path, tail_seconds=0)
+        publication(tmp_path, tail_seconds=0).keys
     assert folder.exists()
 
 
@@ -270,11 +270,11 @@ def test_server_retires_remote_saves_under_an_upload_only_grant(tmp_path: Path) 
 def test_a_folder_checkpoint_is_delivered_once_and_relayed_member_by_member(tmp_path: Path) -> None:
     storage = Writes()
     courier, _, root = machine(tmp_path, storage, run="tiny/run1")
-    with track(
+    with open_run(
         experiment="tiny",
         run="run1",
         directory=root.parent.parent,
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         strict=True,
     ) as run:
 

@@ -26,18 +26,18 @@ from etude.launch.records import (
     Tally,
     Target,
 )
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Observation
 from etude.launch.ssh import Unreachable
 from etude.launch.storage.disk import DirectoryJournal
+from etude.records import Clock as RunClock
 from etude.records import RunRecord
 from etude.spec import Job, RunRequest
 from etude.storage_timeout import StorageUnavailable
-from etude.train.records import Step
 from etude.train.tracking import TrainingRun as TrackedRun
-from etude.train.tracking import track
 from tests.launch.counting import Counting, job_text
 from tests.launch.fake import L4, Bench, Clock, FakeService, bench, open_database
+from tests.train.tracking import open_run
 
 USD_PER_RUN = Decimal("0.59") * 600 / 3600  # every fake run takes 600 seconds
 
@@ -384,7 +384,7 @@ def test_quote_prints_planned_first_wave_costs_and_rents_nothing(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(
@@ -395,7 +395,7 @@ def test_quote_prints_planned_first_wave_costs_and_rents_nothing(
     path.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job
+from etude.spec import Job
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command='train'), max_hours=1, max_usd=2, name="base", repo=None).runs(1, 2, 3)
 """
     )
@@ -423,7 +423,7 @@ def test_availability_asks_the_provider_once_and_rents_nothing(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(
@@ -452,7 +452,7 @@ def test_machines_shows_an_owned_machines_cost_and_expiry(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(
@@ -494,7 +494,7 @@ def test_a_job_is_what_decides_the_result_not_its_name_or_limits(tmp_path: Path)
     same, also, different = (b.scheduler.record(r) for r in (first, second, other))
     assert same.job == also.job != different.job
     assert same.job is not None
-    assert [r.seed for r in b.store.job_runs(same.job)] == [1, 2]
+    assert [r.seed for r in b.store.runs(job=same.job)] == [1, 2]
     assert (also.launch.spec.max_usd, also.name) == (Decimal(9), also.id)
     assert same.launch.spec.max_usd == Decimal(5)
 
@@ -526,14 +526,18 @@ def test_an_ondemand_rents_nothing_above_its_price_ceiling(tmp_path: Path) -> No
     b.service.usd_per_hour = Decimal("0.49")
     b.run(1)
     held = b.store.session(b.scheduler.attempts(one)[0].session)
-    assert b.store.rental(held.machine).usd_per_hour == Decimal("0.49")
+    assert next(r for r in b.store.rentals() if r.machine == held.machine).usd_per_hour == Decimal(
+        "0.49"
+    )
 
 
 def test_a_rental_made_by_hand_takes_several_launches_and_one_setup(tmp_path: Path) -> None:
     b = bench(tmp_path, max_machines=1)
     machine = b.scheduler.rent("l4", hours=2)
     held = b.store.rented_session(machine).id
-    assert b.service.creates == 1 and b.store.rental(machine).kept
+    assert (
+        b.service.creates == 1 and next(r for r in b.store.rentals() if r.machine == machine).kept
+    )
     assert b.service.sessions[held].packet.autorun
 
     (first,) = b.scheduler.queue(job(), rent="l4")
@@ -572,7 +576,9 @@ def test_a_rented_machine_cannot_be_terminated_under_a_run_and_ends_at_its_deadl
     b = bench(tmp_path, max_machines=1)
     machine = b.scheduler.rent("l4", hours=1, max_usd=Decimal("0.59") / 2)  # dollars buy 30 min
     held = b.store.rented_session(machine).id
-    assert b.store.rental(machine).deadline == b.clock.now + timedelta(minutes=30)
+    assert next(
+        r for r in b.store.rentals() if r.machine == machine
+    ).deadline == b.clock.now + timedelta(minutes=30)
     (one,) = b.scheduler.queue(job(max_hours=0.2), rent="l4")
     b.scheduler.tick()
     b.run(1)
@@ -753,9 +759,9 @@ def _tracked(directory: Path, run: str, *, resume: bool = False) -> TrackedRun:
             "ETUDE_OUT": str(directory / run / "out"),
         },
     ):
-        return track(
+        return open_run(
             experiment="lab",
-            clocks=[Step("steps", "training steps")],
+            clocks=[RunClock(name="steps", kind="step", meaning="training steps")],
             run=run,
             directory=directory,
             resume=resume,
@@ -814,7 +820,11 @@ def test_a_retry_on_another_owned_host_waits_for_and_continues_the_runs_folder(
     ]
 
     resumed = _tracked(hosts["second"].track, run, resume=True)
-    latest = resumed.latest_checkpoint()
+    latest = (
+        resumed._checkpoint_here(_saved_checkpoint)
+        if (_saved_checkpoint := resumed._latest_record()) is not None
+        else None
+    )
     assert latest is not None and latest.ordinal == 2
     weights.write_bytes(b"weights at 3")
     assert resumed.checkpoint(weights, steps=3).sha256 is not None

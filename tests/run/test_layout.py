@@ -54,12 +54,12 @@ def test_shared_run_code_imports_no_kind_of_run_and_training_imports_no_evaluati
 def test_only_the_top_level_command_and_typed_jobs_import_evaluation() -> None:
     composers = {
         SOURCE / "etude/cli.py",
-        SOURCE / "etude/controller.py",
-        SOURCE / "etude/declarations.py",
+        SOURCE / "etude/controller/advance.py",
+        SOURCE / "etude/controller/declarations.py",
         SOURCE / "etude/jobs.py",
         SOURCE / "etude/experiment.py",
         SOURCE / "etude/page.py",
-        SOURCE / "etude/smoke.py",
+        SOURCE / "etude/controller/smoke.py",
     }
     for path, names in _imports("etude").items():
         if not path.is_relative_to(SOURCE / "etude/eval") and path not in composers:

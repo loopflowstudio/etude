@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from decimal import Decimal
 from pathlib import Path
 
@@ -28,11 +28,45 @@ from etude.launch.client import (
 )
 from etude.launch.database import launcher_file, upgrade
 from etude.launch.records import Pool
-from etude.launch.server import FetchRequest, PythonClient, forward, warning
+from etude.launch.server import PythonClient, warning
 from etude.spec import Job, RunRequest, Runtime, Until
 from tests.launch.counting import job_text
+from tests.launch.fake import bench
 from tests.launch.test_source import git
 from tests.launch.test_source import repository as repository
+
+
+def test_remote_commands_use_one_exchange_without_local_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    backend = bench(tmp_path / "backend")
+    exchanges = 0
+
+    def exchange(
+        address: str, argv: Sequence[str], **options: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        nonlocal exchanges
+        exchanges += 1
+        with monkeypatch.context() as scope:
+            scope.setenv("ETUDE_SERVER_LOCAL", "1")
+            scope.setattr("etude.launch.cli.default", lambda: backend.scheduler)
+            code = main(list(argv))
+        return subprocess.CompletedProcess(argv, code)
+
+    monkeypatch.setattr("etude.launch.server._ssh", exchange)
+    local = tmp_path / "client"
+    local.mkdir()
+    monkeypatch.setenv("ETUDE_HOME", str(local))
+    (local / "server").write_text("fixture")
+    assert main(["pool", "add", "lab"]) == 0
+    assert "lab" in capsys.readouterr().out
+    assert main(["pools"]) == 0
+    assert "lab" in capsys.readouterr().out
+    assert main(["status"]) == 0
+    assert "last loop: never" in capsys.readouterr().out
+    assert exchanges == 3
+    assert not launcher_file(local).exists()
+    assert backend.service.creates == 0
 
 
 @pytest.fixture(autouse=True)
@@ -45,10 +79,10 @@ def _command_environment(command_python: str, monkeypatch: pytest.MonkeyPatch) -
 TRACKED = """
 import os
 from pathlib import Path
-from etude.train.records import Step
+from etude.records import Clock
 from etude.train.tracking import track
-run = track(experiment="capacity", clocks=[Step("steps", "training steps")])
-latest = run.latest_checkpoint()
+run = track(clocks=[Clock(name='steps', kind='step', meaning='training steps')])
+latest = (run._checkpoint_here(_saved_checkpoint) if (_saved_checkpoint := run._latest_record()) is not None else None)
 start = 0 if latest is None else int(latest.at["steps"])
 target = int(os.environ["ETUDE_UNTIL_VALUE"])
 weights = Path(os.environ["ETUDE_OUTPUT_DIR"]) / "weights.pt"
@@ -86,10 +120,17 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]
     ssh = scripts / "ssh"
     ssh.write_text(
         f"#!{sys.executable}\n"
-        "import os, subprocess, sys\n"
+        "import json, os, subprocess, sys\n"
         "assert sys.argv[1:3] == ['--', 'server-alias']\n"
         f"os.environ['ETUDE_HOME'] = {str(remote)!r}\n"
         f"os.chdir({str(remote)!r})\n"
+        "if '--server-request' in sys.argv[3]:\n"
+        "    body = sys.stdin.buffer.read()\n"
+        "    request = json.loads(body)\n"
+        "    sources = request.get('submission', {}).get('sources', [])\n"
+        f"    with open({str(remote / 'source-transfers')!r}, 'a') as log:\n"
+        "        log.write(str(sum(len(s['body']) for s in sources)) + '\\n')\n"
+        "    raise SystemExit(subprocess.run(sys.argv[3], shell=True, input=body).returncode)\n"
         "raise SystemExit(subprocess.call(sys.argv[3], shell=True))\n"
     )
     ssh.chmod(0o700)
@@ -134,7 +175,7 @@ def test_remote_launch_freezes_sources_config_and_returns_outputs(
     job.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 from pathlib import Path
 here = Path(__file__).parent
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="sh train.sh", text=(here / "config.txt").read_text()), experiment="capacity", max_hours=0.01, max_usd=1, repo=str(here / "source with spaces"), until="steps=10", name="base").runs(1, 2)
@@ -160,6 +201,9 @@ def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, co
     assert continued.returncode == 0, continued.stderr
     next_id = continued.stdout.split()[0]
     assert command("wait", next_id).returncode == 0
+    transfers = [int(line) for line in (remote / "source-transfers").read_text().splitlines()]
+    assert sum(size > 0 for size in transfers) == 1
+    assert not (client / "sources").exists()
     destination = tmp_path / "fetched files"
     fetched = command("fetch", next_id, "weights.pt", str(destination))
     assert fetched.returncode == 0, fetched.stderr
@@ -190,7 +234,7 @@ def test_loop_survives_an_empty_queue_and_places_later_work(
             job.write_text(
                 r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="sleep 0.2"), max_hours=0.01, max_usd=1, name="base", repo=None).runs(1, 2)
 """
             )
@@ -253,7 +297,7 @@ def test_fetch_checks_digest_before_replacing_client_file(
     target.write_text("old")
     monkeypatch.setattr(subprocess, "run", bad_reply)
     with pytest.raises(LauncherError, match="digest mismatch"):
-        forward("alias", [], fetch=FetchRequest(run="run", name="result", destination=tmp_path))
+        PythonClient("alias").fetch("run", "result", tmp_path)
     assert target.read_text() == "old"
 
 
@@ -267,7 +311,7 @@ def test_remote_queue_preserves_choice_without_local_database(
     path.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="true"), max_hours=1, max_usd=1, name="base", repo=None).runs(1, 2)
 """
     )
@@ -388,7 +432,7 @@ def test_server_keeps_source_history_and_checks_out_on_client(
     assert record.launch.source.origin == str(origin)
     assert git(origin, "rev-parse", f"refs/etude/runs/{id}") == record.launch.spec.revision
     repo.rename(repo.with_name("unavailable"))
-    listed = command("runs", "--contains", "v1", "--pool", "waiting")
+    listed = command("runs", "--experiment", record.experiment)
     assert listed.returncode == 0 and id in listed.stdout, listed.stderr
     destination = client / "recovered"
     result = command("source", id, str(destination))

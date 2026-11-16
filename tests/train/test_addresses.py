@@ -6,17 +6,16 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.declarations import read_training_jobs, select_runs
+from etude.controller.declarations import read_training_jobs, select_runs
 from etude.jobs import checkpoint_inputs_for
 from etude.launch.database import upgrade
-from etude.records import RunRecord
+from etude.records import Clock, RunRecord
 from etude.run import RunFiles, declare, run_directories, runs, sync
 from etude.spec import Job, expand_runs
 from etude.storage import DirectoryStorage
 from etude.train.read import read
-from etude.train.records import Step
-from etude.train.tracking import track
 from tests.run.storage import MeasuredStorage
+from tests.train.tracking import open_run
 
 
 @pytest.mark.parametrize(
@@ -62,12 +61,12 @@ def test_local_selection_resumes_current_source_and_refuses_changed_config(
 from pydantic import BaseModel
 from etude.jobs import TrainingJob
 from etude.train.tracking import track
-from etude.train.records import Step
+from etude.records import Clock
 class Config(BaseModel):
     rate: float = 0.1
 
 def train(config: Config) -> None:
-    with track(clocks=[Step("updates", "updates")], config=config) as run:
+    with track(clocks=[Clock(name='updates', kind='step', meaning='updates')], config=config) as run:
         run.resume(extra=Config())
         for update in run.steps("updates", to=1, save_every=1):
             run.log({"revision": 1})
@@ -104,8 +103,11 @@ def training_jobs():
 
 def test_compact_parent_and_nested_runs_are_discovered_and_delivered_once(tmp_path: Path) -> None:
     source, target = tmp_path / "source", tmp_path / "target"
-    with track(
-        experiment="league", run="league", clocks=[Step("updates", "updates")], directory=source
+    with open_run(
+        experiment="league",
+        run="league",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=source,
     ) as active:
         active.log({"score": 3}, updates=1)
     declare(experiment="league", run="eval", clocks=[], kind="evaluation", directory=source)
@@ -160,7 +162,7 @@ def training_jobs():
 
 
 def test_a_job_named_for_its_experiment_keeps_its_qualified_address(tmp_path: Path) -> None:
-    with track(
+    with open_run(
         experiment="league", run="league/league", clocks=["updates"], directory=tmp_path
     ) as active:
         active.log({"score": 1}, updates=1)
@@ -289,7 +291,7 @@ def test_checkpoint_listing_preserves_compact_and_historical_stored_addresses(
     weights.write_bytes(b"weights")
     for address in ("coin", "old/old", "league/league"):
         experiment = address.split("/")[0]
-        with track(experiment=experiment, run=address, directory=tmp_path) as run:
+        with open_run(experiment=experiment, run=address, directory=tmp_path) as run:
             run.log({"score": 1}, updates=1)
             run.checkpoint(weights, updates=1)
     assert main(["checkpoints", "--source", str(tmp_path)]) == 0

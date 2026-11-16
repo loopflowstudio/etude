@@ -9,20 +9,21 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.declarations import read_training_jobs
+from etude.controller.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.launch.client import launch, queue, wait
 from etude.launch.database import launcher_file, upgrade
 from etude.launch.errors import LaunchError
-from etude.launch.machines import Refused
+from etude.launch.provisioner.machines import Refused
 from etude.launch.records import Offer, OnDemand, Pool, Stale
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet, Work
+from etude.records import Clock
 from etude.spec import Job, RunRequest, Until
-from etude.train.records import ParentRun, Step
-from etude.train.tracking import track
+from etude.train.records import ParentRun
 from tests.experiments import authored
 from tests.launch.fake import L4, bench, open_database
+from tests.train.tracking import open_run
 
 
 def job() -> Job:
@@ -107,7 +108,7 @@ def test_cli_queue_records_the_choice(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(
@@ -118,7 +119,7 @@ def test_cli_queue_records_the_choice(
     path.write_text(
         r"""from etude.jobs import TrainingJob
 from tests.launch.tasks import Command, RUNTIME, train_command
-from etude.launch.records import Job, RunRequest
+from etude.spec import Job, RunRequest
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="train"), max_hours=1, max_usd=1, name="base", repo=None)"""
         + (".runs(1, 2)" if several else "")
     )
@@ -225,7 +226,7 @@ def test_cli_continue_waits_without_capacity(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(
@@ -240,8 +241,11 @@ def test_cli_continue_waits_without_capacity(
     # What the parent's job recorded, as tracking keeps it in its runs directory.
     weights = tmp_path / "weights.pt"
     weights.write_bytes(b"weights")
-    tracked = track(
-        experiment="capacity", clocks=[Step("steps", "steps")], run=parent, directory=tmp_path
+    tracked = open_run(
+        experiment="capacity",
+        clocks=[Clock(name="steps", kind="step", meaning="steps")],
+        run=parent,
+        directory=tmp_path,
     )
     tracked.checkpoint(weights, steps=3)
     tracked.finish()
@@ -404,7 +408,7 @@ def test_machines_lists_rented_windows_and_terminate_takes_the_machine_name(
     monkeypatch.setattr(import_module("etude.launch.cli"), "default", lambda: b.scheduler)
     monkeypatch.setattr(import_module("etude.launch.client"), "default", lambda: b.scheduler)
     monkeypatch.setattr(
-        "etude.controller.source_for",
+        "etude.controller.advance.source_for",
         lambda pool, rent, source=None: source or str(tmp_path / "track"),
     )
     monkeypatch.setattr(

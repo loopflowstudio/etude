@@ -69,6 +69,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from etude.deadline import remaining
 
 _CHUNK = 65536
+# One resumable range; transports may read it in concurrent parts.
+_RANGE_BYTES = 256 * 1024**2
 
 
 class _Record(BaseModel):
@@ -274,12 +276,11 @@ class Cache:
         root: Path | None = None,
         *,
         max_bytes: int = 20 * 1024**3,
-        range_bytes: int = 256 * 1024**2,  # one resume step; a transport may read it in parts
     ) -> None:
-        if max_bytes < 0 or range_bytes <= 0:
-            raise ValueError("cache allowance must be nonnegative and range size positive")
+        if max_bytes < 0:
+            raise ValueError("cache allowance must be nonnegative")
         self.root = root or Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser() / "cache"
-        self.max_bytes, self.range_bytes = max_bytes, range_bytes
+        self.max_bytes = max_bytes
         self._stamps: dict[tuple[Path, Content], _Stamp] = {}
 
     def read(
@@ -650,7 +651,7 @@ class Cache:
             output.seek(offset)
             while offset < content.size_bytes:
                 remaining()
-                end = min(content.size_bytes, offset + self.range_bytes) - 1
+                end = min(content.size_bytes, offset + _RANGE_BYTES) - 1
                 piece = source.read(offset, end, state.etag)
                 if len(piece.body) != end - offset + 1 or (
                     state.etag is not None and piece.etag != state.etag

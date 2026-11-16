@@ -16,22 +16,20 @@ import pytest
 from etude.cli import main
 from etude.errors import EtudeError
 from etude.page import Index, Page, Pages, Server, build, experiment_files, index, render, target
+from etude.records import Clock
 from etude.report import (
     Anchors,
     Curve,
     Matches,
     Matrix,
-    Planned,
-    PlannedPoint,
     Ranking,
     Report,
     Series,
 )
 from etude.storage import DirectoryStorage, Storage, storage_from_uri
-from etude.train.records import Step
-from etude.train.tracking import track
 from tests.experiments import experiment_file
 from tests.run.storage import MeasuredStorage
+from tests.train.tracking import open_run
 
 LAB = """
 from etude.report import Matrix, Report, Score
@@ -56,7 +54,12 @@ def _restore_imports(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def trained(runs: Path, experiment: str, run: str) -> None:
-    with track(experiment=experiment, run=run, clocks=[Step("updates", "updates")], directory=runs):
+    with open_run(
+        experiment=experiment,
+        run=run,
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=runs,
+    ):
         pass
 
 
@@ -72,7 +75,12 @@ def test_the_report_is_the_files_and_the_experiment_is_named_for_it(tmp_path: Pa
 
 def test_checkpoints_with_no_etude_clock_are_named_with_the_reason(tmp_path: Path) -> None:
     runs = tmp_path / "runs"
-    run = track(experiment="lab", run="a", clocks=[Step("updates", "updates")], directory=runs)
+    run = open_run(
+        experiment="lab",
+        run="a",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=runs,
+    )
     run.checkpoint("s3://models/10.pt", updates=10)
     run.finish(timeout=30)
     file = experiment_file(tmp_path / "experiments", "lab", LAB)
@@ -91,7 +99,12 @@ def test_checkpoints_with_no_etude_clock_are_named_with_the_reason(tmp_path: Pat
 
 def test_without_a_report_the_page_is_the_default_and_says_so(tmp_path: Path) -> None:
     runs = tmp_path / "runs"
-    run = track(experiment="lab", run="a", clocks=[Step("updates", "updates")], directory=runs)
+    run = open_run(
+        experiment="lab",
+        run="a",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=runs,
+    )
     run.log({"custom/score": 1.0}, updates=1)
     run.finish(timeout=30)
     page = build(runs, experiment_file(tmp_path, "lab", "def train(config: object) -> None: ...\n"))
@@ -370,21 +383,6 @@ def test_served_folder_index_reuses_output_until_refresh(tmp_path: Path) -> None
         assert server.page("/lab") == detail
 
 
-def test_planned_values_round_trip_and_reject_ambiguous_points() -> None:
-    planned = Planned(
-        title="Learning rate",
-        clock="updates",
-        jobs={"large": (PlannedPoint(at=1000, value=0.1), PlannedPoint(at=2000, value=0.01))},
-    )
-    report = Report(ml=(planned,))
-    assert Report.model_validate_json(report.model_dump_json()) == report
-    for points in ((), (PlannedPoint(at=1000, value=1), PlannedPoint(at=1000, value=2))):
-        with pytest.raises(ValueError, match="planned_points_must_increase"):
-            Planned(title="Bad plan", clock="updates", jobs={"large": points})
-    with pytest.raises(ValueError):
-        PlannedPoint(at=float("nan"), value=1)
-
-
 def test_http_folder_refresh_keeps_syntax_failures_and_recovers(tmp_path: Path) -> None:
     runs, folder = tmp_path / "runs", tmp_path / "experiments"
     trained(runs, "lab", "a")
@@ -481,25 +479,28 @@ def test_planned_marker_uses_the_current_continuation_not_an_older_overrun(
 ) -> None:
     runs = tmp_path / "runs"
     file = experiment_file(tmp_path, "lab", REPORTED)
-    with track(
-        experiment="lab", run="a", clocks=[Step("updates", "updates")], directory=runs
+    with open_run(
+        experiment="lab",
+        run="a",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=runs,
     ) as run:
         run.log({"rl/loss": 1.0}, updates=1500)
-    with track(
+    with open_run(
         resume=True,
         experiment="lab",
         run="a",
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         directory=runs,
     ) as run:
         run.log({"rl/loss": 0.5}, updates=1200)
     page = build(runs, file)
     assert page.training.runs[0].at["updates"] == 1200
-    with track(
+    with open_run(
         resume=True,
         experiment="lab",
         run="a",
-        clocks=[Step("updates", "updates")],
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
         directory=runs,
     ):
         pass
@@ -560,7 +561,7 @@ def test_report_experiment_override_selects_runs_and_names_the_output(
         "from etude.report import Report\ndef report():\n    return Report(other_metrics=True)\n"
     )
     for name, score in (("coin", 1), ("wide", 9)):
-        with track(experiment=name, run=name, directory=source) as run:
+        with open_run(experiment=name, run=name, directory=source) as run:
             run.log({"score": score}, updates=1)
     pages = Pages(source, experiment="wide")
     assert pages.build(file).experiment == "wide"
@@ -587,7 +588,7 @@ def test_default_rl_panels_use_logged_keys_but_explicit_panels_keep_missing_keys
     tmp_path: Path, explicit: bool
 ) -> None:
     runs = tmp_path / "runs"
-    with track(experiment="lab", run="a", directory=runs) as run:
+    with open_run(experiment="lab", run="a", directory=runs) as run:
         run.log({"rl/loss": 0.5}, updates=1)
     panels = "ml=(Series(title='Losses', keys=('rl/loss', 'rl/value_loss')),)" if explicit else ""
     code = (
@@ -604,7 +605,7 @@ def test_default_rl_panels_use_logged_keys_but_explicit_panels_keep_missing_keys
 def test_policy_key_report_resolves_cross_experiment_seats_once(tmp_path: Path) -> None:
     source = DirectoryStorage(tmp_path / "source")
     for experiment, seed in (("frontier", 0), ("frontier", 1), ("rival", 0)):
-        with track(
+        with open_run(
             experiment=experiment,
             run=f"small@{seed}",
             job="small",

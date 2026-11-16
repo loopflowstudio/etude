@@ -15,9 +15,9 @@ from etude.launch.database import launcher_file
 from etude.launch.environment import install, startup_timeout
 from etude.launch.errors import LaunchError
 from etude.launch.logging import Console
-from etude.launch.providers import program
-from etude.launch.providers.package import program_archive
-from etude.launch.providers.runpod import machines
+from etude.launch.provisioner.providers import program
+from etude.launch.provisioner.providers.package import program_archive
+from etude.launch.provisioner.providers.runpod import machines
 from etude.launch.records import Pool
 from etude.launch.schemas import Observation, Packet
 from etude.launch.ssh import SSH, LogsRequest, SessionRequest, StartRequest
@@ -117,7 +117,8 @@ def test_detached_ssh_install_is_readable_cancellable_and_not_replayed(
     ssh_script.chmod(0o700)
     monkeypatch.setattr("etude.launch.ssh.login_shell", lambda command: command)
     root = tmp_path / "remote"
-    ssh = SSH("fixture", str(root), str(ssh_script), sys.executable)
+    monkeypatch.setenv("ETUDE_REMOTE_PYTHON", sys.executable)
+    ssh = SSH("fixture", str(root))
     packet = Packet(
         session="slow",
         deadline=None,

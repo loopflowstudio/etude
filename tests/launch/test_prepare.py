@@ -5,7 +5,6 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
-import re
 import shutil
 import signal
 import subprocess
@@ -20,7 +19,7 @@ from etude.cli import main
 from etude.launch.client import default
 from etude.launch.database import upgrade
 from etude.launch.records import Status
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.worker.prepared import Receipt, evict, home
 from etude.spec import Input, Job, Preparation, Runtime
 from tests.launch.counting import job_text
@@ -100,7 +99,7 @@ def test_a_second_attempt_reuses_the_prepared_directory(tmp_path: Path) -> None:
     assert count.read_text() == "built\n"  # the command ran once
 
 
-def test_status_and_usage_say_what_a_second_attempt_reused(
+def test_attempts_and_usage_say_what_a_second_attempt_reused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
@@ -117,12 +116,8 @@ def test_status_and_usage_say_what_a_second_attempt_reused(
     capsys.readouterr()
 
     for run, outcome in zip(runs, ("built", "reused"), strict=True):
-        assert main(["status", run, "--phases"]) == 0
-        # Each line is "RUN NAME AT (EVIDENCE) attempt=ID"; keep the names, in order.
-        lines = capsys.readouterr().out.splitlines()
-        said = [re.split(r" \d{4}-\d\d-\d\dT", line)[0] for line in lines]
-        prepared = f"{run} prepared ({outcome})"
-        assert said[-3:] == [f"{run} code started", prepared, f"{run} finished"]
+        (attempt,) = scheduler.attempts(run)
+        assert attempt.prepared is not None and attempt.prepared.outcome == outcome
 
     assert main(["usage", "--run", runs[1]]) == 0
     assert "input: received 0 bytes, reused 1000 bytes" in capsys.readouterr().out.splitlines()

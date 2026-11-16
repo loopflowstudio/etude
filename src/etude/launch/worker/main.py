@@ -6,7 +6,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from etude.launch.providers.cleanup import command as cleanup_command
+from etude.launch.provisioner.providers.cleanup import command as cleanup_command
 from etude.launch.worker import attempts, courier
 
 

@@ -30,9 +30,9 @@ from etude.deadline import limit_time, remaining
 from etude.launch import client
 from etude.launch.database import launcher_file
 from etude.launch.logging import log_to
-from etude.launch.providers import bootstrap
+from etude.launch.provisioner.providers import bootstrap
 from etude.launch.records import Output, Storage
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import (
     WORKER_LOG,
     AttemptRecord,
@@ -50,7 +50,7 @@ from etude.launch.storage.download import Download, download
 from etude.launch.storage.files import RESULT
 from etude.launch.storage.s3 import Bucket, Grant, Keys, PostForm, _send, read
 from etude.launch.storage.transport import HTTPReply, attribute, observe
-from etude.launch.usage import R2, S3_US_WEST_2, Access, Transfer, Usage, reconcile
+from etude.launch.usage import Transfer, Usage
 from etude.launch.worker.courier import Courier
 from etude.records import RunProgress as Result
 from etude.records import RunRecord
@@ -205,9 +205,10 @@ def http(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[HTTP]:
 def test_ranges_are_read_as_concurrent_parts_and_ahead_observed_on_the_calling_thread(
     http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(engine, "_RANGE_BYTES", 8)
     monkeypatch.setattr(downloads, "PART_BYTES", 4)
     observed: list[tuple[int, str]] = []
-    cache = Cache(tmp_path / "cache", range_bytes=8)  # the second range is read ahead
+    cache = Cache(tmp_path / "cache")  # the second range is read ahead
     with observe(lambda raw: observed.append((threading.get_ident(), raw))):
         result = download(http.source(), tmp_path / "result", cache=cache)
     assert result.read_bytes() == b"abcdefghijkl"
@@ -216,8 +217,11 @@ def test_ranges_are_read_as_concurrent_parts_and_ahead_observed_on_the_calling_t
     assert sum(Transfer.model_validate_json(raw).received_bytes for _, raw in observed) == 12
 
 
-def test_cold_warm_concurrent_and_new_process_retrieval(http: HTTP, tmp_path: Path) -> None:
-    cache = Cache(tmp_path / "cache", range_bytes=4)
+def test_cold_warm_concurrent_and_new_process_retrieval(
+    http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(engine, "_RANGE_BYTES", 4)
+    cache = Cache(tmp_path / "cache")
     events: list[Transfer] = []
     with observe(lambda raw: events.append(Transfer.model_validate_json(raw))):
         download(http.source(), tmp_path / "first", cache=cache)
@@ -250,7 +254,7 @@ download(Download.model_validate_json(sys.argv[2]), Path(sys.argv[3]), cache=Cac
     )
     assert (tmp_path / "third").read_bytes() == b"abcdefghijkl"
     assert (http.requests, http.received) == (3, 12)
-    another = Cache(tmp_path / "concurrent", range_bytes=4)
+    another = Cache(tmp_path / "concurrent")
     with ThreadPoolExecutor(max_workers=2) as pool:
         paths = list(
             pool.map(lambda n: download(http.source(), tmp_path / str(n), cache=another), [1, 2])
@@ -263,13 +267,17 @@ download(Download.model_validate_json(sys.argv[2]), Path(sys.argv[3]), cache=Cac
     )
 
 
-def test_interrupted_ranges_count_partial_bytes_and_resume(http: HTTP, tmp_path: Path) -> None:
-    cache = Cache(tmp_path / "cache", range_bytes=4)
+def test_interrupted_ranges_count_partial_bytes_and_resume(
+    http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(engine, "_RANGE_BYTES", 4)
+    monkeypatch.setattr(downloads, "_RETRIES", 0)
+    cache = Cache(tmp_path / "cache")
     events: list[Transfer] = []
     http.fault = "interrupted"
     with observe(lambda raw: events.append(Transfer.model_validate_json(raw))):
         with pytest.raises(StorageUnavailable):
-            download(http.source(), tmp_path / "result", retries=0, cache=cache)
+            download(http.source(), tmp_path / "result", cache=cache)
         assert not (tmp_path / "result").exists()
         assert sum(e.received_bytes for e in events) == 6
         assert not events[-1].completed
@@ -284,7 +292,11 @@ def test_interrupted_ranges_count_partial_bytes_and_resume(http: HTTP, tmp_path:
 
 
 @pytest.mark.parametrize("fault", ["ignored", "wrong-range", "denied", "timeout", "digest"])
-def test_failures_preserve_existing_destination(http: HTTP, tmp_path: Path, fault: str) -> None:
+def test_failures_preserve_existing_destination(
+    http: HTTP, tmp_path: Path, fault: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(engine, "_RANGE_BYTES", 4)
+    monkeypatch.setattr(downloads, "_RETRIES", 0)
     source = http.source()
     target = tmp_path / "result"
     target.write_bytes(b"previous verified result")
@@ -292,17 +304,19 @@ def test_failures_preserve_existing_destination(http: HTTP, tmp_path: Path, faul
     if fault == "digest":
         source = source.model_copy(update={"sha256": "0" * 64})
     with pytest.raises((StorageUnavailable, TimeoutError)):
-        download(
-            source, target, timeout=0.05, retries=0, cache=Cache(tmp_path / "cache", range_bytes=4)
-        )
+        download(source, target, timeout=0.05, cache=Cache(tmp_path / "cache"))
     assert target.read_bytes() == b"previous verified result"
 
 
-def test_changed_identity_and_corrupt_retained_range_fail(http: HTTP, tmp_path: Path) -> None:
-    cache = Cache(tmp_path / "cache", range_bytes=4)
+def test_changed_identity_and_corrupt_retained_range_fail(
+    http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(engine, "_RANGE_BYTES", 4)
+    monkeypatch.setattr(downloads, "_RETRIES", 0)
+    cache = Cache(tmp_path / "cache")
     http.fault = "interrupted"
     with pytest.raises(StorageUnavailable):
-        download(http.source(), tmp_path / "result", retries=0, cache=cache)
+        download(http.source(), tmp_path / "result", cache=cache)
     http.fault = ""
     http.etag = '"version-two"'
     with pytest.raises(StorageUnavailable, match="identity"):
@@ -315,8 +329,11 @@ def test_changed_identity_and_corrupt_retained_range_fail(http: HTTP, tmp_path: 
     assert not (tmp_path / "result").exists()
 
 
-def test_bounded_cache_and_oversized_download(http: HTTP, tmp_path: Path) -> None:
-    cache = Cache(tmp_path / "cache", max_bytes=12, range_bytes=4)
+def test_bounded_cache_and_oversized_download(
+    http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(engine, "_RANGE_BYTES", 4)
+    cache = Cache(tmp_path / "cache", max_bytes=12)
     download(http.source(), tmp_path / "a", cache=cache)
     http.objects["/other"] = b"mnopqrstuvwx"
     download(http.source("/other"), tmp_path / "b", cache=cache)
@@ -442,7 +459,11 @@ def test_transient_range_http_retains_both_attempts(http: HTTP, tmp_path: Path) 
 
 
 @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
-def test_transient_range_retries_share_one_budget(tmp_path: Path, status: int) -> None:
+def test_transient_range_retries_share_one_budget(
+    tmp_path: Path, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(engine, "_RANGE_BYTES", 4)
+    monkeypatch.setattr(downloads, "_RETRIES", 2)
     payload = b"abcdefghijkl"
     source = Download(
         url="https://fixture/payload", sha256=hashlib.sha256(payload).hexdigest(), size_bytes=12
@@ -466,16 +487,17 @@ def test_transient_range_retries_share_one_budget(tmp_path: Path, status: int) -
 
     target = tmp_path / "result"
     with pytest.raises(StorageUnavailable):
-        download(
-            source, target, send=send, retries=2, cache=Cache(tmp_path / "cache", range_bytes=4)
-        )
+        download(source, target, send=send, cache=Cache(tmp_path / "cache"))
     assert ranges == ["bytes=0-3", "bytes=0-3", "bytes=4-7", "bytes=4-7", "bytes=8-11"]
     assert not target.exists()
 
 
-def test_cost_scenario_and_safe_access_reconciliation(http: HTTP, tmp_path: Path) -> None:
+def test_a_warm_download_makes_no_request(
+    http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(engine, "_RANGE_BYTES", 4)
     events: list[Transfer] = []
-    cache = Cache(tmp_path / "cache", range_bytes=4)
+    cache = Cache(tmp_path / "cache")
     with (
         observe(lambda raw: events.append(Transfer.model_validate_json(raw))),
         attribute(purpose="result"),
@@ -486,40 +508,6 @@ def test_cost_scenario_and_safe_access_reconciliation(http: HTTP, tmp_path: Path
         download(http.source(), tmp_path / "warm", cache=cache)
     warm = Usage(events=tuple(events), observed_at=datetime.now(UTC))
     assert (cold.received_bytes, cold.requests, warm.received_bytes, warm.requests) == (12, 3, 0, 0)
-    # Three reads and 12 bytes out: S3 bills the egress, R2 only the reads.
-    assert cold.estimate(S3_US_WEST_2) == Decimal("0.00000120108")
-    assert cold.estimate(R2) == Decimal("0.00000108")
-    assert warm.estimate(S3_US_WEST_2) == warm.estimate(R2) == 0
-    first = cold.events[0]
-    row = Access(
-        backend=first.backend,
-        request_id=first.request_id or "",
-        key=first.key,
-        response_bytes=4,
-        status=206,
-    )
-    missing = row.model_copy(update={"request_id": "unmatched", "response_bytes": 7})
-    reconciled = reconcile(cold, [row, row, missing])
-    assert reconciled.matched == (row,)
-    assert reconciled.unmatched_provider == (missing,)
-    assert len(reconciled.unmatched_client) == 2
-    complete = reconcile(
-        cold,
-        [
-            Access(
-                backend=e.backend,
-                request_id=e.request_id or "",
-                key=e.key,
-                response_bytes=e.received_bytes,
-                status=206,
-            )
-            for e in cold.events
-        ],
-    )
-    assert len(complete.matched) == 3
-    assert complete.unmatched_client == ()
-    assert complete.unmatched_provider == ()
-    assert "fixture-private-query" not in reconciled.model_dump_json()
 
 
 def test_runtime_bootstrap_failure_reaches_retained_session_usage(
@@ -765,8 +753,6 @@ def test_completed_workload_before_and_after(
         http.objects["/source"]
     ) + 1024**2 + 3 * len(payload)
     assert (before.requests, after.requests) == (62, 58)
-    saved = before.estimate(S3_US_WEST_2) - after.estimate(S3_US_WEST_2)
-    assert saved == Decimal("0.00707948782")
     assert after.requests == control.requests + bulk.requests
     own = [b.scheduler.usage(run=run) for run in runs]
     shared = {e.id: e for report in own for e in report.shared_events}
@@ -863,10 +849,10 @@ def test_the_launcher_fetches_a_multipart_output_and_retains_each_part(
 
 
 def test_active_cache_capacity_streams_another_digest_without_overfilling(
-    http: HTTP,
-    tmp_path: Path,
+    http: HTTP, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cache = Cache(tmp_path / "cache", max_bytes=12, range_bytes=4)
+    monkeypatch.setattr(engine, "_RANGE_BYTES", 4)
+    cache = Cache(tmp_path / "cache", max_bytes=12)
     cache.root.mkdir()
     active = cache.root / ("f" * 64 + "-12.partial")
     active.write_bytes(b"reservedsize")
@@ -1074,8 +1060,9 @@ def test_bytes_removed_behind_the_cache_are_measured_before_it_refuses(tmp_path:
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("max_bytes", [0, 64])
 def test_ranges_preserve_requested_versions_at_one_location(
-    tmp_path: Path, reverse: bool, max_bytes: int
+    tmp_path: Path, reverse: bool, max_bytes: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(engine, "_RANGE_BYTES", 2)
     sources = [_Held(b"abcdef"), _Held(b"UVWXYZ")]
     if reverse:
         sources.reverse()
@@ -1085,21 +1072,24 @@ def test_ranges_preserve_requested_versions_at_one_location(
     ]
     root = tmp_path / "cache"
     for source, artifact in zip(sources, artifacts, strict=True):
-        cache = Cache(root, max_bytes=max_bytes, range_bytes=2)
+        cache = Cache(root, max_bytes=max_bytes)
         assert cache.read(artifact, source, start=1, length=2) == source.body[1:3]
 
     # Reopening the cache must preserve each version, including for whole reads.
     for source, artifact in zip(sources, artifacts, strict=True):
-        cache = Cache(root, max_bytes=max_bytes, range_bytes=2)
+        cache = Cache(root, max_bytes=max_bytes)
         assert cache.read(artifact, source) == source.body
         assert cache.read(artifact, source, start=2, length=3) == source.body[2:5]
         if max_bytes:
             assert source.read_bytes == len(source.body)
 
 
-def test_a_range_verifies_the_requested_digest_before_exposing_bytes(tmp_path: Path) -> None:
+def test_a_range_verifies_the_requested_digest_before_exposing_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(engine, "_RANGE_BYTES", 2)
     expected, wrong = _Held(b"abcdef"), _Held(b"abcdeX")
-    cache = Cache(tmp_path / "cache", range_bytes=2)
+    cache = Cache(tmp_path / "cache")
     # The requested range matches; corruption elsewhere still invalidates the version.
     with pytest.raises(engine.ContentMismatch):
         cache.read(expected.artifact, wrong, start=1, length=2)

@@ -8,7 +8,7 @@ from hashlib import sha256
 
 from etude.errors import RetryRequested
 from etude.eval.records import CheckpointPlayer, Config, Match, Player
-from etude.eval.run import Result, Tables
+from etude.eval.result import Result, Tables
 
 type Rows = list[dict[str, bool | int | float | str | None]]
 

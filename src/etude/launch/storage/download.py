@@ -36,6 +36,7 @@ from etude.storage_timeout import StorageUnavailable
 
 PART_BYTES = 16 * 1024**2
 CONNECTIONS = 32
+_RETRIES = 2
 
 
 class _Pending[T]:
@@ -185,7 +186,6 @@ def download(
     destination: Path,
     *,
     timeout: float | None = None,
-    retries: int = 2,
     send: Send = _send,
     cache: Cache | None = None,
     holder: str | None = None,
@@ -198,8 +198,6 @@ def download(
     Raises `StoredContentMismatch` when storage holds other bytes, and `StorageUnavailable`
     when it cannot be read; `destination` is left as it was.
     """
-    if retries < 0:
-        raise ValueError("retry allowance must be nonnegative")
     # The signature is how this machine may read the object, not which object it is.
     location = urlsplit(source.url)._replace(query="", fragment="").geturl()
     artifact = Artifact(location=location, sha256=source.sha256, size_bytes=source.size_bytes)
@@ -208,7 +206,7 @@ def download(
         attribute(transfer=uuid4().hex, sha256=source.sha256, size_bytes=source.size_bytes),
     ):
         cache = cache or Cache()
-        link = _Link(source, retries, send)
+        link = _Link(source, _RETRIES, send)
         try:
             if holder is not None:
                 return cache.hold(artifact, link, holder=holder, staging=destination)

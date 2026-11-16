@@ -23,9 +23,9 @@ run. What it finds is exact, so found for good: the hold records it
 A player is a resolved checkpoint, code, or a composition of other players.
 Compositions store an author's qualified record type and fields; their identity
 replaces every checkpoint leaf by its key, never its current byte location.
-Held and relative seats resolve before play. Old inference-configured players
+CheckpointSlot and relative seats resolve before play. Old inference-configured players
 retain their keys and provenance. Match identity fixes player keys by seat,
-groups, config and game count.
+groups, config, base seed and index. Released multi-game keys keep their game count.
 
 Records published etude-sdk wrote, with `agents` and etude-sdk 0.2's digest
 identities, load as players (`_player`); a 0.2 player's key equals no key
@@ -36,9 +36,7 @@ from __future__ import annotations
 
 import json
 import re
-import warnings
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from functools import partial
 from hashlib import sha256
 from itertools import combinations, islice, product
 from math import prod
@@ -65,12 +63,34 @@ from etude.checkpoints import (
     CheckpointId,
     CheckpointRef,
     PolicyKey,
-    _checkpoint_id,
     seen_from,
 )
 from etude.errors import EtudeError
 from etude.eval.source import digest_files, source_commit
 from etude.records import BUILT_IN_NAMES, Digest, Name, Record
+
+__all__ = (
+    "CheckpointPlayer",
+    "Code",
+    "CheckpointSlot",
+    "checkpoint_player",
+    "Composition",
+    "compose",
+    "Benchmark",
+    "RoundRobin",
+    "Seating",
+    "Seat",
+    "Earlier",
+    "Fraction",
+    "At",
+    "Final",
+    "Aligned",
+    "Match",
+    "Environment",
+    "Player",
+    "Rollup",
+)
+
 
 type Config = dict[str, JsonValue]
 type ColumnType = Literal["BOOLEAN", "BIGINT", "DOUBLE", "VARCHAR"]
@@ -216,13 +236,10 @@ def checkpoint_player(checkpoint: CheckpointRef) -> CheckpointPlayer:
     )
 
 
-class Held(Record):
-    """The checkpoint a benchmark is held for, used directly as a player."""
+class CheckpointSlot(Record):
+    """A generator slot filled once for each checkpoint supplied to a benchmark."""
 
     kind: Literal["held"] = "held"
-
-    def player(self, checkpoint: CheckpointRef) -> CheckpointPlayer:
-        return checkpoint_player(checkpoint)
 
 
 class Composition(Record):
@@ -299,7 +316,7 @@ def _tree_name(value: JsonValue) -> str:
 
 
 def _encode_tree(value: object) -> JsonValue:
-    if isinstance(value, (CheckpointPlayer, Code, Held, Composition, *_RELATIVE)):
+    if isinstance(value, (CheckpointPlayer, Code, CheckpointSlot, Composition, *_RELATIVE)):
         return _JSON.validate_python(value.model_dump(mode="json"))
     if isinstance(value, BaseModel):
         kind = type(value)
@@ -418,15 +435,6 @@ class Environment(Record):
         return digest([self.name, self.files, identifying(self.config)])
 
 
-def _match_config_name(
-    data: object, info: ValidationInfo, name: Literal["config", "configs"]
-) -> object:
-    # JSON retains the released field name so match keys and wire data stay stable.
-    if info.mode == "python" and isinstance(data, dict) and "conditions" in data:
-        warnings.warn(f"conditions is now {name}; removed in 0.5", DeprecationWarning, stacklevel=3)
-    return data
-
-
 _MatchConfig = TypeVar(
     "_MatchConfig",
     bound=BaseModel | Mapping[str, JsonValue],
@@ -436,7 +444,7 @@ _MatchConfig = TypeVar(
 
 
 class Match(Record, Generic[_MatchConfig]):
-    """Players in their seats under a fixed config, played for some games.
+    """Players in their seats under one config at one seed index.
 
     The unit Etude schedules, resumes and resamples. Group `all` holds every
     seat and is added when not given.
@@ -454,19 +462,22 @@ class Match(Record, Generic[_MatchConfig]):
         serialization_alias="conditions",
     )
 
+    # Released records may contain several games under their original key.
     games: int = Field(default=1, ge=1)
+    index: int | None = Field(default=0, ge=0, exclude_if=lambda value: value is None)
+    base_seed: int = Field(default=0, exclude_if=lambda value: value == 0)
 
     @model_validator(mode="before")
     @classmethod
-    def _config_name(cls, data: object, info: ValidationInfo) -> object:
-        return _match_config_name(data, info, "config")
-
-    @property
-    def conditions(self) -> _MatchConfig:
-        warnings.warn(
-            "Match.conditions is now Match.config; removed in 0.5", DeprecationWarning, stacklevel=2
-        )
-        return self.config
+    def _stored_games(cls, data: object, info: ValidationInfo) -> object:
+        # Absent index in released JSON means the old multi-game key and seed.
+        if (
+            isinstance(data, dict)
+            and "index" not in data
+            and (info.mode == "json" or "games" in data)
+        ):
+            return {**data, "index": None}
+        return data
 
     @model_validator(mode="before")
     @classmethod
@@ -487,6 +498,8 @@ class Match(Record, Generic[_MatchConfig]):
             for leaf in seat_leaves(player)
         ):
             raise ValueError("match_player_has_unresolved_checkpoint")
+        if self.index is not None and self.games != 1:
+            raise ValueError("indexed_match_is_one_game")
         if self.groups[EVERYONE] != tuple(range(len(self.players))):
             raise ValueError("group_all_is_every_seat")
         for seats in self.groups.values():
@@ -501,12 +514,19 @@ class Match(Record, Generic[_MatchConfig]):
         """Identifies the match wherever it is played."""
         seating = [player.key for player in self.players]
         groups = {name: list(seats) for name, seats in self.groups.items()}
-        return digest([seating, groups, as_config(self.config), self.games])
+        if self.index is None:
+            return digest([seating, groups, as_config(self.config), self.games])
+        return digest([seating, groups, as_config(self.config), self.base_seed, self.index])
 
     @property
     def seed(self) -> int:
-        """Derived from the key, so a replayed match draws the same games."""
-        return int(self.key[:15], 16)
+        """SHA256 of [base_seed, index], first 60 bits; independent of players and config.
+
+        Released multi-game records retain their original key-derived seed.
+        """
+        return int(
+            (self.key if self.index is None else digest([self.base_seed, self.index]))[:15], 16
+        )
 
 
 # The error of a match that returned no rows: refused when played (`etude.eval.match`).
@@ -856,15 +876,28 @@ _SeatingConfig = TypeVar(
 )
 
 
+def _panel_config(data: object) -> object:
+    """Distinguish one authored config from a released stored config panel."""
+    if isinstance(data, dict):
+        if "config" not in data and not ({"conditions", "configs"} & data.keys()):
+            return {**data, "config": {}}
+        panel = data.get("configs", data.get("conditions"))
+        if data.get("config") is not None and panel:
+            raise ValueError("give_one_match_config")
+        if data.get("config") is None and not panel:
+            raise ValueError("match_config_is_required")
+    return data
+
+
 class Seating(Record, Generic[_SeatingConfig]):
-    """The rule for who meets whom: `players` in seat order, played under each of `configs`.
+    """Generate indexed matches from one config and players in seat order.
 
-    A seat is a fixed player, `Held()` for the checkpoint being evaluated,
-    a relative seat, or an author's composition of these. No held leaf means
-    it plays once, rather than once per held checkpoint. Each config makes
-    one match per resolved pairing, with the first player's value reported.
+    A seat is a fixed player, `CheckpointSlot()` for each supplied checkpoint,
+    a relative seat, or an author's composition of these. No slot leaf means
+    one panel, rather than one per checkpoint. Results belong to seated
+    players, including a composition as a whole.
 
-    `games` is per config and point: an `at` of the held checkpoint's
+    `games` is per point: an `at` of the held checkpoint's
     job, whatever its seeds. With `seeds="every"` a point plays every pair of
     a seed of that job and a seed of the other seat's (its own line, or a
     fixed player, counting as one), its games split evenly over the pairs,
@@ -875,23 +908,24 @@ class Seating(Record, Generic[_SeatingConfig]):
 
     name: str = Field(min_length=1, max_length=200)
     players: tuple[Seat, Seat]
-    # Mapping, so a literal like `{"deal": 1}` type-checks as a config.
+    # Mapping lets a JSON literal type-check as a config.
     model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
+    config: SerializeAsAny[_SeatingConfig] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    base_seed: int = Field(default=0, exclude_if=lambda value: value == 0)
+    # Released config panels stay decodable, including their original schedule/keys.
     configs: tuple[SerializeAsAny[_SeatingConfig], ...] = Field(
-        min_length=1,
+        default=(),
+        exclude_if=lambda value: not value,
         validation_alias=AliasChoices("configs", "conditions"),
         serialization_alias="conditions",
     )
 
     @model_validator(mode="before")
     @classmethod
-    def _config_name(cls, data: object, info: ValidationInfo) -> object:
-        return _match_config_name(data, info, "configs")
-
-    @property
-    def conditions(self) -> tuple[_SeatingConfig, ...]:
-        warnings.warn("conditions is now configs; removed in 0.5", DeprecationWarning, stacklevel=2)
-        return self.configs
+    def _config_name(cls, data: object) -> object:
+        return _panel_config(data)
 
     games: int = Field(ge=1)
     # The author's labels, such as "anchor" or "held-out", for choosing
@@ -901,7 +935,7 @@ class Seating(Record, Generic[_SeatingConfig]):
 
     @model_validator(mode="after")
     def relative_to_a_held_checkpoint(self) -> Self:
-        if self.relative and not any(isinstance(each, Held) for each in self.leaves):
+        if self.relative and not any(isinstance(each, CheckpointSlot) for each in self.leaves):
             raise ValueError("relative_seat_needs_a_held_seat")
         return self
 
@@ -912,7 +946,7 @@ class Seating(Record, Generic[_SeatingConfig]):
     @property
     def fixed(self) -> bool:
         """Whether every seat is a fixed player, so no checkpoint changes its matches."""
-        return not any(isinstance(each, Held) for each in self.leaves)
+        return not any(isinstance(each, CheckpointSlot) for each in self.leaves)
 
     @property
     def relative(self) -> bool:
@@ -922,6 +956,17 @@ class Seating(Record, Generic[_SeatingConfig]):
     @property
     def definition(self) -> Digest:
         """What two eval runs must agree on to share the name: keys, not versions."""
+        if self.config is not None:
+            return digest(
+                [
+                    self.name,
+                    [_seat_definition(each) for each in self.players],
+                    as_config(self.config),
+                    self.base_seed,
+                    self.tags,
+                    self.seeds,
+                ]
+            )
         # Preserve the released definitions of held and relative seats.
         players = [_seat_definition(each) for each in self.players]
         # Default seeds leave the definition every seating was first held with.
@@ -940,9 +985,10 @@ class Seating(Record, Generic[_SeatingConfig]):
     def matches(
         self, checkpoint: CheckpointRef | None = None, seated: Seated | None = None
     ) -> list[Match]:
-        """One match per config and pairing: `checkpoint` in every held seat, and in
-        a relative seat the checkpoint the pairing found. Without `seated`, one pairing
-        playing every game, as for a checkpoint of a job with one seed."""
+        """Generate each pairing's indexed panel, filling checkpoint and relative slots.
+
+        Released config panels retain one multi-game match per config/pairing.
+        """
         if seated is None:
             if self.relative:
                 raise ValueError("relative_seat_needs_its_checkpoints")
@@ -951,18 +997,28 @@ class Seating(Record, Generic[_SeatingConfig]):
             )
         else:
             pairings = seated.pairings
-        return [
-            Match(
-                players=tuple(
-                    _seat(each, checkpoint, found, pairing.resolved)
-                    for each, found in zip(self.players, pairing.seats, strict=True)
-                ),
-                config=as_config(given),
-                games=pairing.games,
+        matches: list[Match] = []
+        for pairing in pairings:
+            players = tuple(
+                _seat(each, checkpoint, found, pairing.resolved)
+                for each, found in zip(self.players, pairing.seats, strict=True)
             )
-            for pairing in pairings
-            for given in self.configs
-        ]
+            if self.config is not None:
+                matches.extend(
+                    Match(
+                        players=players,
+                        config=as_config(self.config),
+                        index=index,
+                        base_seed=self.base_seed,
+                    )
+                    for index in range(pairing.games)
+                )
+            else:
+                matches.extend(
+                    Match(players=players, config=as_config(given), games=pairing.games, index=None)
+                    for given in self.configs
+                )
+        return matches
 
     def resolve(
         self, checkpoint: CheckpointRef, lines: Sequence[Line], *, experiment: str | None = None
@@ -1107,14 +1163,14 @@ class Seating(Record, Generic[_SeatingConfig]):
 
 
 def _seat_definition(seat: Seat) -> JsonValue:
-    if isinstance(seat, Held):
+    if isinstance(seat, CheckpointSlot):
         return ["model", {}]
     if isinstance(seat, _RELATIVE):
         return ["relative", _relative_definition(seat)]
     if isinstance(seat, Composition) and seat.type == "etude:configured":
         over = _SEAT.validate_python(seat.fields["over"])
         config = identifying(_CONFIG.validate_python(seat.fields["config"]))
-        if isinstance(over, Held):
+        if isinstance(over, CheckpointSlot):
             return ["model", config]
         if isinstance(over, _RELATIVE):
             return ["relative", {**_relative_definition(over), "inference": {"config": config}}]
@@ -1155,7 +1211,7 @@ def _seat(
         if found is None:
             raise ValueError("relative_seat_needs_its_checkpoints")
         return checkpoint_player(found)
-    if isinstance(each, Held):
+    if isinstance(each, CheckpointSlot):
         if checkpoint is None:
             raise ValueError("held_seat_needs_a_checkpoint")
         return checkpoint_player(checkpoint)
@@ -1181,7 +1237,7 @@ def _seat_value(value: object) -> object:
                 ).model_dump(mode="json"),
             },
         }
-    if isinstance(value, BaseModel) and not isinstance(value, (Held, *_RELATIVE)):
+    if isinstance(value, BaseModel) and not isinstance(value, (CheckpointSlot, *_RELATIVE)):
         return _player(value)
     if isinstance(value, dict) and "inference" in value and value.get("kind") != "model":
         value = dict(value)
@@ -1195,7 +1251,7 @@ def _seat_value(value: object) -> object:
     return value
 
 
-type Seat = Annotated[Player | Held | Relative, BeforeValidator(_seat_value)]
+type Seat = Annotated[Player | CheckpointSlot | Relative, BeforeValidator(_seat_value)]
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 _PLAYER: TypeAdapter[Player] = TypeAdapter(Player)
 _SEAT: TypeAdapter[Seat] = TypeAdapter(Seat)
@@ -1399,7 +1455,7 @@ class Benchmark(Record):
 
 
 class RoundRobin(Record, Generic[_SeatingConfig]):
-    """Hand-picked players, every two of them once per config.
+    """Generate indexed matches for every unordered pair of entrants under one config.
 
     Its entrants are every player any of its eval runs entered. Seat swaps
     belong inside the author's match.
@@ -1408,31 +1464,43 @@ class RoundRobin(Record, Generic[_SeatingConfig]):
     name: str = Field(min_length=1, max_length=200)
     environment: Environment
     rollups: tuple[Rollup, ...] = Field(default=(), exclude_if=lambda rollups: not rollups)
-    # Mapping, so a literal like `{"deal": 1}` type-checks as a config.
+    # Mapping lets a JSON literal type-check as a config.
     model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
+    config: SerializeAsAny[_SeatingConfig] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    base_seed: int = Field(default=0, exclude_if=lambda value: value == 0)
+    # Released config panels stay decodable, including their original schedule/keys.
     configs: tuple[SerializeAsAny[_SeatingConfig], ...] = Field(
-        min_length=1,
+        default=(),
+        exclude_if=lambda value: not value,
         validation_alias=AliasChoices("configs", "conditions"),
         serialization_alias="conditions",
     )
 
     @model_validator(mode="before")
     @classmethod
-    def _config_name(cls, data: object, info: ValidationInfo) -> object:
-        return _match_config_name(data, info, "configs")
-
-    @property
-    def conditions(self) -> tuple[_SeatingConfig, ...]:
-        warnings.warn("conditions is now configs; removed in 0.5", DeprecationWarning, stacklevel=2)
-        return self.configs
+    def _config_name(cls, data: object) -> object:
+        return _panel_config(data)
 
     games: int = Field(ge=1)
 
     def matches(self, entrants: Iterable[Player]) -> list[Match]:
-        """Each pair once per config, in key order; of two entrants with one key, the later."""
+        """Each pair's indexed panel in key order; later same-key entrants replace earlier ones."""
         ordered = sorted({each.key: each for each in entrants}.items())
+        if self.config is not None:
+            return [
+                Match(
+                    players=(a, b),
+                    config=as_config(self.config),
+                    index=index,
+                    base_seed=self.base_seed,
+                )
+                for (_, a), (_, b) in combinations(ordered, 2)
+                for index in range(self.games)
+            ]
         return [
-            Match(players=(a, b), config=as_config(given), games=self.games)
+            Match(players=(a, b), config=as_config(given), games=self.games, index=None)
             for (_, a), (_, b) in combinations(ordered, 2)
             for given in self.configs
         ]
@@ -1508,7 +1576,8 @@ class TournamentRun(Record):
     entrants: tuple[Player, ...] = ()
     # What relative seats found for the checkpoints it scheduled (`Seating.resolve`).
     seated: tuple[Seated, ...] = ()
-    # The part of the scheduled matches the run plays (`etude.eval.tournament.hold`).
+    # Released runs could play one part of a split hold; new runs play the whole of it.
+    # The field stays in the record so stored holds read and run names keep their digests.
     share: Share = Share()
 
     def bind(self, lines: Sequence[Line], *, experiment: str) -> TournamentRun:
@@ -1686,7 +1755,7 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
     """The tournament its eval runs make together, from the first of them on.
 
     Raises `EtudeError("tournament_conflict")` when they disagree on its
-    format or environment (its setup aside), or a round robin's configs or games, and
+    format or environment (its setup aside), or a round robin's config/seed panel, and
     `EtudeError("seating_conflict")` when they define one seating name two ways.
     Different contents under one checkpoint key raise `checkpoint_key_conflict`.
     Versions are not definitions: a later run's seating, checkpoint or entrant
@@ -1706,15 +1775,23 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
             or given.environment.identity != first.environment.identity
         ):
             raise EtudeError("tournament_conflict", 409) from ValueError(first.name)
-        if isinstance(given, RoundRobin) and given.model_copy(
-            update={"environment": first.environment}
-        ).model_dump(mode="json") != first.model_dump(mode="json"):
-            raise EtudeError("tournament_conflict", 409) from ValueError(first.name)
+        if isinstance(given, RoundRobin) and isinstance(first, RoundRobin):
+            comparable = given.model_copy(update={"environment": first.environment})
+            if given.config is not None and first.config is not None:
+                comparable = comparable.model_copy(update={"games": first.games})
+            if comparable.model_dump(mode="json") != first.model_dump(mode="json"):
+                raise EtudeError("tournament_conflict", 409) from ValueError(first.name)
+            first = first.model_copy(update={"games": max(first.games, given.games)})
         if isinstance(given, Benchmark):
             for each in given.seatings:
                 if seatings.setdefault(each.name, each).definition != each.definition:
                     raise EtudeError("seating_conflict", 409) from ValueError(each.name)
-                seatings[each.name] = each
+                prior = seatings[each.name]
+                seatings[each.name] = (
+                    each.model_copy(update={"games": max(prior.games, each.games)})
+                    if each.config is not None
+                    else each
+                )
         checkpoints.update((str(each.key), each) for each in run.checkpoints)
         entrants.update((each.key, each) for each in run.entrants)
     definition = (
@@ -1728,19 +1805,3 @@ def assemble(held: Iterable[TournamentRun]) -> Tournament:
         entrants=tuple(entrants[key] for key in sorted(entrants)),
         seated=_most_lines(each for run in runs for each in run.seated),
     )
-
-
-def __getattr__(name: str) -> object:
-    if name == "Model":
-        warnings.warn(
-            "Model is now CheckpointPlayer; removed in 0.5", DeprecationWarning, stacklevel=2
-        )
-        return CheckpointPlayer
-    if name == "CheckpointKey":
-        warnings.warn(
-            "CheckpointKey is now CheckpointRef; removed in 0.5",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return partial(_checkpoint_id, experiment="")
-    raise AttributeError(name)

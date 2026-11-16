@@ -968,8 +968,7 @@ def run(
     bootstrap_url: str,
     delete_self: Callable[[], None],
     root: Path = ROOT,
-    send: Send = _send,
-    sleep: Callable[[float], None] = time.sleep,
+    send: Send = _send,  # the bucket transport: the boundary fixtures replace
     every: float = 3.0,
 ) -> None:
     session = os.environ.get("ETUDE_SESSION")
@@ -978,7 +977,7 @@ def run(
     with log_to(log):
         try:
             write_log("worker entry", "client ready")
-            _serve(bootstrap_url, root, send, sleep, every, log, url)
+            _serve(bootstrap_url, root, send, time.sleep, every, log, url)
         finally:
             original_error = sys.exception()
             try:

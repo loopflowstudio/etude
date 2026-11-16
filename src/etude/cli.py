@@ -50,7 +50,7 @@ def train_recipe(
     json_output: Annotated[bool, typer.Option("--json", help="print a JSON result")] = False,
 ) -> None:
     """Train a recipe on this computer; 0 finished, 75 stopped, other failed."""
-    from etude.local import train
+    from etude.controller.local import train
     from etude.spec import Until
 
     target = Until.model_validate(until) if until is not None else None
@@ -98,8 +98,8 @@ def _submit(
     import time
     from decimal import Decimal, InvalidOperation
 
-    from etude.controller import advance, source_for
-    from etude.declarations import read_experiment, read_training_jobs
+    from etude.controller.advance import advance, source_for
+    from etude.controller.declarations import read_experiment, read_training_jobs
     from etude.spec import Until
     from etude.storage import storage_from_uri
 
@@ -289,9 +289,9 @@ def smoke_experiment(
         raise typer.BadParameter("an experiment FILE is required")
     from typing import cast
 
-    from etude.declarations import read_training_jobs
+    from etude.controller.declarations import read_training_jobs
+    from etude.controller.smoke import STEPS, Step, smoke_file
     from etude.experiment_file import defined_functions
-    from etude.smoke import STEPS, Step, smoke_file
     from etude.storage import storage_from_uri
 
     steps = step or list(STEPS)
@@ -459,8 +459,8 @@ def eval_experiment(
     # Experiments join tracking, evaluation and the launcher.
     import time
 
-    from etude.controller import advance
-    from etude.declarations import read_experiment
+    from etude.controller.advance import advance
+    from etude.controller.declarations import read_experiment
     from etude.storage import default_root, storage_from_uri
 
     definition = read_experiment(file, experiment=experiment)
@@ -587,6 +587,7 @@ def continue_run(
 app.command()(kind(Kind.wait)(checkpoints))
 app.command()(kind(Kind.wait)(sync))
 
+
 # Commands that run on this computer even when a server is chosen: they read
 # local files or a bucket, run a machine's worker, or submit through the server
 # themselves. Every other command is sent to a chosen server.
@@ -594,6 +595,8 @@ _HERE = (
     "launch",
     "queue",
     "smoke",
+    "train",
+    "eval",
     "database",
     "source",
     "fetch",
@@ -607,7 +610,8 @@ _HERE = (
 )
 
 
-def _main(argv: list[str]) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
     try:
         if argv and argv[0] not in _HERE and not {"--help", "-h"} & set(argv):
             # Entry points import only the command being run (AGENTS.md).
@@ -639,21 +643,3 @@ def _main(argv: list[str]) -> int:
             error.show()
             raise SystemExit(error.exit_code) from None
         raise
-
-
-def main(argv: Sequence[str] | None = None) -> int:
-    """Profile a whole invocation with `etude --profile FILE COMMAND ...`."""
-    args = list(sys.argv[1:] if argv is None else argv)
-    if not args or args[0] != "--profile":
-        return _main(args)
-    if len(args) < 3:
-        print("etude: --profile needs a file and a command", file=sys.stderr)
-        return 1
-
-    import cProfile
-
-    profile = cProfile.Profile()
-    try:
-        return int(profile.runcall(_main, args[2:]))
-    finally:
-        profile.dump_stats(args[1])

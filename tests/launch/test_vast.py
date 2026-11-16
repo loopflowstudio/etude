@@ -23,12 +23,12 @@ from etude.launch.client import _open
 from etude.launch.database import Database, launcher_file, upgrade
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Executor
-from etude.launch.machines import MachineRequest, Refused
-from etude.launch.providers.bootstrap import guard
-from etude.launch.providers.cleanup import command
-from etude.launch.providers.vast.api import Create, Instance, VastAPI
-from etude.launch.providers.vast.instance import GuardianAPI
-from etude.launch.providers.vast.machines import OUTAGE_SECONDS, Outage, VastMachines
+from etude.launch.provisioner.machines import MachineRequest, Refused
+from etude.launch.provisioner.providers.bootstrap import guard
+from etude.launch.provisioner.providers.cleanup import command
+from etude.launch.provisioner.providers.vast.api import Create, Instance, VastAPI
+from etude.launch.provisioner.providers.vast.instance import GuardianAPI
+from etude.launch.provisioner.providers.vast.machines import OUTAGE_SECONDS, Outage, VastMachines
 from etude.launch.records import (
     GPU,
     STOCK_IMAGE,
@@ -38,7 +38,7 @@ from etude.launch.records import (
     Provider,
 )
 from etude.launch.records import Storage as Place
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, Keys
 from etude.launch.storage.transport import HTTPReply
@@ -93,7 +93,6 @@ class Marketplace:
         self.inventory_visible = True
         self.offline = False
         self.delete_pending = False
-        self.charge: dict[str, object] | None = None
 
     def __call__(
         self, method: str, url: str, body: bytes | None, headers: dict[str, str]
@@ -135,13 +134,6 @@ class Marketplace:
                 reply = {"success": True}
             else:
                 reply = {"instances": self.instances.get(12)}
-        elif path == "/api/v0/charges":
-            query = parse_qs(urlsplit(url).query)
-            days = json.loads(query["select_filters"][0])["day"]
-            rows = []
-            if self.charge is not None and days["gte"] <= self.charge["start"] <= days["lte"]:
-                rows.append(self.charge)
-            reply = {"results": rows, "next_token": None}
         else:
             raise AssertionError(f"unhandled fixture path: {method} {path}")
         return HTTPReply(200, json.dumps(reply).encode())
@@ -206,7 +198,7 @@ def test_rental_keeps_identity_and_package_without_account_credentials() -> None
     assert "fixture-account-key" not in created.model_dump_json()
     assert created.env["ETUDE_DEADLINE"]
     with zipfile.ZipFile(io.BytesIO(base64.b64decode(created.env["ETUDE_PROGRAM"]))) as archive:
-        assert "etude/launch/providers/vast/instance.py" in archive.namelist()
+        assert "etude/launch/provisioner/providers/vast/instance.py" in archive.namelist()
         assert "etude/launch/worker/main.py" not in archive.namelist()
     assert b"fixture-not-retained" not in storage.objects["test/sessions/session/receipt.json"]
     market.counts.clear()
@@ -387,85 +379,6 @@ def test_inventory_errors_and_duplicate_labels_are_not_absence() -> None:
         api.named("etude-session")
 
 
-@pytest.mark.parametrize("elapsed_days", [0, 1, 3])
-def test_charges_include_creation_day_without_claiming_settlement(elapsed_days: int) -> None:
-    market = Marketplace()
-    api = VastAPI("fixture", market)
-    instance = Instance.model_validate(INSTANCE)
-    first = instance.created_at.replace(hour=0, minute=0, second=0, microsecond=0)
-    last = first + timedelta(days=elapsed_days)
-    now = instance.created_at + timedelta(days=elapsed_days, hours=2)
-    assert api.charges(instance, now) is None
-    market.charge = {
-        "type": "instance",
-        "source": "instance-12",
-        "amount": 0.168,
-        "start": first.timestamp(),
-        "end": last.timestamp(),
-    }
-    charges = api.charges(instance, now)
-    assert charges is not None and charges.usd == Decimal("0.168")
-    assert (charges.first_day, charges.last_day) == (first.date(), last.date())
-    assert charges.observed_at == now
-    # A revised amount on the same dates is still a report, not an exact interval.
-    market.charge["amount"] = 0.190
-    revised = api.charges(instance, now + timedelta(minutes=1))
-    assert revised is not None and revised.usd == Decimal("0.190")
-    assert market.counts == {"GET": 3}
-    machine = machines(market, Storage())
-    assert machine.bill("session", now) is None
-    assert market.counts == {"GET": 3}  # no query can establish an absent watermark
-
-
-@pytest.mark.parametrize("invalid_end", [1793750401, 1793664000, 1793836800])
-def test_charges_reject_elapsed_timestamps_reversed_and_future_dates(invalid_end: int) -> None:
-    market = Marketplace()
-    market.charge = {
-        "type": "instance",
-        "source": "instance-12",
-        "amount": 0.168,
-        "start": 1793750400,
-        "end": invalid_end,
-    }
-    with pytest.raises(ProviderUnavailable, match="charge date"):
-        VastAPI("fixture", market).charges(
-            Instance.model_validate(INSTANCE), datetime.fromtimestamp(1793777200, UTC)
-        )
-    assert market.counts == {"GET": 1}
-
-
-def test_charges_exhaust_pages_and_reject_duplicate_contract_totals() -> None:
-    calls = 0
-    duplicate = False
-    row = {
-        "type": "instance",
-        "source": "instance-12",
-        "amount": 0.168,
-        "start": 1793750400,
-        "end": 1793750400,
-    }
-
-    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
-        nonlocal calls
-        calls += 1
-        later = "after_token" in parse_qs(urlsplit(url).query)
-        rows = [row] if later or duplicate else [{**row, "source": "instance-99"}]
-        return HTTPReply(
-            200, json.dumps({"results": rows, "next_token": None if later else "next"}).encode()
-        )
-
-    api = VastAPI("fixture", send)
-    instance = Instance.model_validate(INSTANCE)
-    now = datetime.fromtimestamp(1793777200, UTC)
-    charges = api.charges(instance, now)
-    assert charges is not None and charges.usd == Decimal("0.168")
-    assert calls == 2
-    duplicate = True
-    with pytest.raises(ProviderUnavailable, match="duplicate"):
-        api.charges(instance, now)
-    assert calls == 4
-
-
 def test_guardian_shortens_budget_and_deletes_after_caller_loss() -> None:
     market = Marketplace()
     market.instances[12] = INSTANCE.copy()
@@ -514,7 +427,12 @@ def test_default_cleanup_uses_only_the_active_instance(monkeypatch: pytest.Monke
     monkeypatch.delenv("RUNPOD_POD_ID", raising=False)
     monkeypatch.setenv("CONTAINER_ID", "12")
     monkeypatch.setenv("CONTAINER_API_KEY", "fixture")
-    assert command() == [sys.executable, "-m", "etude.launch.providers.vast.instance", "delete"]
+    assert command() == [
+        sys.executable,
+        "-m",
+        "etude.launch.provisioner.providers.vast.instance",
+        "delete",
+    ]
 
 
 @pytest.mark.parametrize("cancel", [False, True])
@@ -663,24 +581,17 @@ def test_invalid_offers_are_unknown_and_do_not_disclose_provider_bodies(reply: b
     assert "fixture-secret" not in str(error.value)
 
 
-@pytest.mark.parametrize("resource", ["inventory", "charges"])
-def test_pagination_requires_a_terminal_page_and_detects_nonadvancing_cursors(
-    resource: str,
-) -> None:
+def test_pagination_requires_a_terminal_page_and_detects_nonadvancing_cursors() -> None:
     calls = 0
 
     def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
         nonlocal calls
         calls += 1
-        field = "instances" if resource == "inventory" else "results"
-        return HTTPReply(200, json.dumps({field: [], "next_token": "repeated"}).encode())
+        return HTTPReply(200, json.dumps({"instances": [], "next_token": "repeated"}).encode())
 
     with pytest.raises(ProviderUnavailable, match="pagination"):
         api = VastAPI("fixture", send)
-        if resource == "inventory":
-            api.named("etude-session")
-        else:
-            api.charges(Instance.model_validate(INSTANCE), datetime.now(UTC))
+        api.named("etude-session")
     assert calls == 2
 
 

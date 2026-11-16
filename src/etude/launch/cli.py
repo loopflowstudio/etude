@@ -13,7 +13,7 @@ import typer
 from etude.launch.commands import Kind, kind
 
 if TYPE_CHECKING:
-    from etude.launch.scheduler import Scheduler
+    from etude.launch.scheduler.loop import Scheduler
 
 # Entry points import only the command being run (AGENTS.md): help must not load
 # the scheduler, worker or tracking stack. Imports below these entries stay at top.
@@ -46,7 +46,6 @@ server_app = _app(
 provider_app = _app(help="Record an account that supplies machines.")
 storage_app = _app(help="Add a place in a bucket for records.")
 database_app = _app(help="Inspect local schema or explicitly upgrade the launcher database.")
-image_app = _app(help="Resolve container images before renting.")
 for name, sub in (
     ("pool", pool_app),
     ("ondemand", ondemand_app),
@@ -54,7 +53,6 @@ for name, sub in (
     ("server", server_app),
     ("provider", provider_app),
     ("storage", storage_app),
-    ("image", image_app),
     ("database", database_app),
 ):
     app.add_typer(sub, name=name)
@@ -83,10 +81,6 @@ def status(
         list[str] | None,
         typer.Argument(help="run addresses; none means all unfinished"),
     ] = None,
-    phases: Annotated[
-        bool,
-        typer.Option(help="show when each stage of a run's start happened, from saved records"),
-    ] = False,
     experiment: Annotated[
         str | None, typer.Option(help="select this experiment; names may be unqualified")
     ] = None,
@@ -98,14 +92,6 @@ def status(
 
     scheduler = default()
     selected = resolve_runs(scheduler, runs or [], experiment=experiment, job=job)
-    if phases:
-        for run in selected:
-            for phase in scheduler.start_phases(run):
-                at = phase.at.isoformat() if phase.at else "not recorded"
-                attempt = f" attempt={phase.attempt}" if phase.attempt else ""
-                evidence = f" ({phase.evidence})" if phase.evidence else ""
-                print(f"{run} {phase.name} {at}{evidence}{attempt}")
-        return
     show_runs(scheduler, selected)
     server.show_freshness(scheduler)
 
@@ -113,11 +99,6 @@ def status(
 @app.command("runs")
 @kind(Kind.read)
 def history(
-    contains: Annotated[
-        str | None, typer.Option(help="only runs whose source includes this git commit or tag")
-    ] = None,
-    pool: Annotated[str | None, typer.Option(help="only runs sent to this pool")] = None,
-    rent: Annotated[str | None, typer.Option(help="only runs that may rent from this")] = None,
     job: Annotated[
         str | None, typer.Option(help="only runs of this job, by digest or name")
     ] = None,
@@ -129,17 +110,7 @@ def history(
     scheduler = default()
     show_runs(
         scheduler,
-        [
-            r.id
-            for r in scheduler.runs(
-                done=True,
-                contains=contains,
-                pool=pool,
-                rent=rent,
-                job=job,
-                experiment=experiment,
-            )
-        ],
+        [r.id for r in scheduler.runs(done=True, job=job, experiment=experiment)],
     )
 
 
@@ -273,18 +244,9 @@ def fetch(
     directory: Annotated[Path, typer.Argument(help="where to copy it")] = Path("."),
 ) -> None:
     """Copy one of a run's output files here and check it against its digest."""
-    from etude.launch import server
+    from etude.launch.client import fetch as fetch_output
 
-    address = server.selected()
-    if address:
-        raise typer.Exit(
-            server.forward(
-                address,
-                [],
-                fetch=server.FetchRequest(run=run, name=name, destination=directory),
-            )
-        )
-    print(default().fetch(run, name, directory))
+    print(fetch_output(run, name, directory))
 
 
 @app.command()
@@ -370,14 +332,11 @@ def machines(
     all: Annotated[
         bool, typer.Option(help="include rented machines whose window has ended")
     ] = False,
-    images: Annotated[
-        bool, typer.Option(help="show retained image selections without registry access")
-    ] = False,
 ) -> None:
     """List machines: added ones, and rented ones with their window and cost."""
     from etude.launch.listing import show_machines
 
-    show_machines(default(), ended=all, images=images)
+    show_machines(default(), ended=all)
 
 
 @app.command()
@@ -555,21 +514,6 @@ def ondemand_startup(name: str, seconds: StartupSeconds = 0) -> None:
     ondemands()
 
 
-@image_app.command("prepare")
-@kind(Kind.wait)
-def image_prepare(
-    reference: str,
-    platform: str = "linux/amd64",
-    timeout: Annotated[
-        float, typer.Option(min=0, help="total seconds; 0 disables the timeout")
-    ] = 0,
-) -> None:
-    """Wait for registry metadata and print the immutable selection; never rent."""
-    from etude.launch.images import resolve_image
-
-    print(resolve_image(reference, platform=platform, timeout=timeout or None).model_dump_json())
-
-
 @ondemand_app.command("image")
 @kind(Kind.wait)
 def ondemand_image(
@@ -580,7 +524,7 @@ def ondemand_image(
     ] = 0,
 ) -> None:
     """Resolve an image within timeout, then select it for future machines."""
-    from etude.launch.images import resolve_image
+    from etude.launch.provisioner.images import resolve_image
     from etude.launch.records import Image
 
     selected = (

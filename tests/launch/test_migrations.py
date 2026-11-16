@@ -31,9 +31,9 @@ from etude.launch.database import (
 )
 from etude.launch.errors import SchemaAdvanced
 from etude.launch.provenance import frontier
-from etude.launch.providers.package import program_archive
+from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import Pool
-from etude.launch.scheduler import Scheduler
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Finished
 from etude.launch.server import _hand_over
 from tests.launch.fake import bench
