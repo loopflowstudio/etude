@@ -486,13 +486,13 @@ def test_handover_without_usable_program_exits_with_restart_instruction(
         _hand_over(program)
 
 
-def test_refusal_lookup_upgrade_from_the_released_schema_preserves_facts(
+def test_refusal_lookup_upgrade_from_the_preceding_schema_preserves_facts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     known = migrations()
-    released = tuple(m for m in known if m.floor is not None)
+    preceding = known[: next(i for i, m in enumerate(known) if m.name == "provider_refusal_lookup")]
     with monkeypatch.context() as old:
-        old.setattr(database, "migrations", lambda: released)
+        old.setattr(database, "migrations", lambda: preceding)
         upgrade(tmp_path)
         store = open_home(tmp_path)
         store.add_pool(Pool(name="preserved"))
