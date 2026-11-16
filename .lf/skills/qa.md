@@ -100,10 +100,13 @@ stop the exact process you started before finishing.
 
 For interruption, make a separate lab copy with an author-controlled pause
 (`time.sleep(0.1)` per update) and more updates. Drive `uv run etude train
-experiment.py` with a Python subprocess driver, wait for a progress line, then
-send SIGINT to that process. Require exit 75 and retained state. Follow the
-printed `--job coin --seed 0 --resume` hint; check that updates continue from
-the saved absolute coordinate. Use `uv run python` for the driver. A background
+experiment.py` with a Python subprocess driver: `etude train` prints no progress
+lines, so sleep a few seconds, then send SIGINT to that process (a driver that
+blocks on `readline` never sends it). Require exit 75. The next plain
+`etude train experiment.py` prints `stopped; --job coin --seed 0 --resume`;
+follow it, then read `etude.train.read.read(default_root(), "experiment",
+"coin@0").points("heads", "updates")` and require each update once, in order,
+across two metric writers. Use `uv run python` for the driver. A background
 shell job may ignore SIGINT; do not signal processes by a broad name pattern.
 
 Training code calls `track(config=config)` only inside Etude's assigned run.

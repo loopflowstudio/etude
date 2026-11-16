@@ -491,22 +491,6 @@ class Evaluation(Record):
     def definition(self) -> Benchmark | RoundRobin:
         return self.tournament.tournament
 
-    def resolve(self, matches: Sequence[Match] | None, lines: Sequence[Line]) -> Evaluation:
-        recorded = (
-            self.tournament.bind(lines, experiment=self.experiment)
-            if self.experiment is not None
-            else self.tournament
-        )
-        resolved, _ = assemble([recorded]).resolve(lines, experiment=self.experiment)
-        return self.model_copy(
-            update={
-                "tournament": recorded.model_copy(update={"seated": resolved.seated}),
-                "matches": tuple(each.match for each in resolved.schedule())
-                if matches is None
-                else tuple(matches),
-            }
-        )
-
     def relocate(self, files: Mapping[str, str]) -> Evaluation:
         """Locate checkpoint leaves without changing scientific match identity."""
         return self.model_copy(
@@ -692,13 +676,12 @@ class EvalJob(Job):
         options["name"] = self.tournament.name
         repo = _repo(self.play, options)
         recorded = self.recorded()
-        spec = Evaluation(
-            tournament=recorded,
-            experiment=state.experiment or None,
-            play=_function(self.play, repo),
-            matches=(),
-            agents=self.agents.plain(repo),
-        ).resolve(matches, lines)
+        experiment = state.experiment or None
+        bound = recorded.bind(lines, experiment=experiment) if experiment is not None else recorded
+        resolved, _ = assemble([bound]).resolve(lines, experiment=experiment)
+        selected = (
+            tuple(each.match for each in resolved.schedule()) if matches is None else tuple(matches)
+        )
         given: dict[str, tuple[Input, ...]] = {}
         if self.checkpoint is not None:
             ref = recorded.checkpoints[0]
@@ -710,21 +693,28 @@ class EvalJob(Job):
             )
         inputs: dict[str, Input] = {item.name: item for item in self.inputs}
         files: dict[str, str] = {}
-        for key, checkpoint in checkpoint_inputs(spec.matches, state, self.checkpoints).items():
+        for key, checkpoint in checkpoint_inputs(selected, state, self.checkpoints).items():
             name = f"checkpoint-{digest(key)[:16]}{PurePosixPath(checkpoint_file_name(checkpoint.artifact.uri)).suffix}"
             for item in given.get(key, ()) or checkpoint_inputs_for(checkpoint, name):
                 if item.name in inputs and inputs[item.name] != item:
                     raise EtudeError("eval_input_conflict", 422, detail=item.name)
                 inputs[item.name] = item
             files[key] = name
-        spec = spec.model_copy(update={"files": files})
+        spec = Evaluation(
+            tournament=bound.model_copy(update={"seated": resolved.seated}),
+            experiment=experiment,
+            play=_function(self.play, repo),
+            matches=selected,
+            files=files,
+            agents=self.agents.plain(repo),
+        )
         options["inputs"] = tuple(inputs.values())
         return _job(
             _hold,
             EvalGroup(evaluations=(spec,)),
             origin=self.play,
             options=options,
-            experiment=state.experiment or None,
+            experiment=experiment,
             extras=self.extras,
         )
 

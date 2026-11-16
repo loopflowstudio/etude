@@ -544,7 +544,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
                         max_hours=0.05, runtime=Runtime(python={command_python!r}),
                         repo=str(Path(__file__).parent))]
     tournament = RoundRobin(name="ladder", environment=environment("duel"), configs=({{}},), games=1)
-    return [EvalJob(tournament=tournament, enter=(CHECKPOINT.player(stored_inference(config={{}})), fixed),
+    return [EvalJob(tournament=tournament, enter=(stored_inference(config={{}}).player(CHECKPOINT.ref), fixed),
                     play=play, max_hours=0.05, runtime=Runtime(python={command_python!r}),
                     repo=str(Path(__file__).parent))]
 """
@@ -689,7 +689,7 @@ from tests.eval.games import play
 def eval_jobs(state):
     checkpoint = observe({str(source.root)!r}, "a").runs[0].final.model_copy(update={{"experiment": "a"}})
     return EvalJob(tournament=RoundRobin(name="first", environment=environment("duel"),
-        configs=({{}},), games=1), enter=(checkpoint.player(stored_inference(config={{"strength": 1}})), Code(name="fixed", config={{"strength": 0}})),
+        configs=({{}},), games=1), enter=(stored_inference(config={{"strength": 1}}).player(checkpoint.ref), Code(name="fixed", config={{"strength": 0}})),
         play=play, max_hours=0.1)
 """
     file.write_text(text)

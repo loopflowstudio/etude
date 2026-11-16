@@ -378,7 +378,7 @@ Use `evaluating(...)` and `run.play(...)` instead of `evaluate` or `hold`.
 Import `Tables`, `Result` and `EvalResult` from `etude.eval.result`.
 Use `CheckpointPlayer`, `CheckpointRef` and `RunRequest` from their defining
 modules, `TrainingRunSummary` from `etude.jobs`, `RunData.writers` and
-`RunData.outcome`, `checkpoint.player(...)`, and `run.checkpoints()` for this run's published models.
+`RunData.outcome`, `checkpoint_player(checkpoint.ref)`, and `run.checkpoints()` for this run's published models.
 Continuation code restores registered state or reads its assigned start input;
 checkpoints() does not claim the parent's models as newly published by the child.
 Count clocks are declared by use (or explicit `Clock` records); `Step` is gone.
@@ -394,9 +394,9 @@ Eval declarations stay as Python objects through match selection. Only the
 selected matches, tournament provenance and verified artifact inputs enter the
 worker payload. Grouping combines those payloads rather than resolving another
 checkpoint/entrant selection on the worker. Previously queued payloads normalize
-at their reader boundary. CLI operations use the same typed client as Python;
-there is no argv-forwarding command path. All providers and the optional SSH
-scheduler remain supported.
+at their reader boundary. Remote administration and continuation run the same
+CLI over SSH; Python submissions and verified file transfers keep their wire
+envelopes. All providers and the optional SSH scheduler remain supported.
 
 Tracking's queue/block sizing and metric-name limit are implementation policy;
 `track` no longer exposes those tuning parameters. Rental attribution always
