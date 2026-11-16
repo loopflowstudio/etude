@@ -732,19 +732,18 @@ repeated; if the provider still has no such machine at the rental's deadline,
 or when it is terminated, it is recorded as never acquired: it costs nothing and
 no longer counts toward the on-demand's machine limit. A 4xx reply to a create
 (except 408) is an answer, not a lost reply: nothing was made, so the session
-is recorded refused at once with the provider's reason, its attempts fail
-before start as `capacity_refused`, and nothing is left `starting` or fenced.
-The reason is the reply's `detail` or `title` field when the body is JSON,
-else its text; at most 2 KiB of an error body is read and at most 300
-characters kept, through the shared sanitizer. A launch reports it as
-`provider refused: REASON`; a queued run's status reads its latest attempt's
-session, keeping that reason across scheduler restarts and after the retry pause.
-Diagnostics are evidence, not scheduling inputs. The scheduler does not ask that
-on-demand for queued work again within 60 seconds of a provider's refusal of a
-create. Releasing a claim that never reached the provider does not pause queued
-work. An empty refusal reason is recorded as `no reason given`. Refusals still
-count toward `max_attempts`. An explicit `launch` is not paused. Timeouts, no reply, 408, 5xx and
-unreadable or mismatched replies stay unknown. A remote start has an
+is recorded refused at once with the provider's reason (`no reason given`
+when it gave none), its attempts fail before start as `capacity_refused`, and
+nothing is left `starting` or fenced. The reason is the reply's `detail` or
+`title` field when the body is JSON, else its text; at most 2 KiB of an error
+body is read and at most 300 characters kept, through the shared sanitizer. A
+launch reports it as `provider refused: REASON`. A queued run's status reads
+the reason from its latest attempt's session, never from diagnostics, so it
+survives scheduler restarts and the retry pause. Queued work does not ask that
+on-demand again within 60 seconds of a provider's refusal; an explicit `launch`
+is not paused, and releasing a claim that never reached the provider pauses
+nothing. Refusals still count toward `max_attempts`. Timeouts, no reply, 408,
+5xx and unreadable or mismatched replies stay unknown. A remote start has an
 exclusive claim; a lost SSH reply cannot start another process. An unreachable
 machine is unknown. A lost attempt requires evidence that its process or
 provider machine is gone. Infrastructure losses retry up to `max_attempts`,

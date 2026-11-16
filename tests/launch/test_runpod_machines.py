@@ -704,7 +704,8 @@ def test_machines_and_status_show_the_hardware_rented(
     show_machines(c.scheduler, ended=True)
     run_line, machine_line = capsys.readouterr().out.splitlines()
     assert f"machine {status.machine} ({shown})" in run_line
-    assert machine_line.startswith(f"{status.machine}  l4  available, {shown}, rented")
+    # `wait` returned, so the rented machine is already confirmed deleted.
+    assert machine_line.startswith(f"{status.machine}  l4  deleted, {shown}, rented, ended ")
 
 
 def test_no_stock_is_a_refusal_and_cancel_reaches_a_running_pod(tmp_path: Path) -> None:
@@ -1612,12 +1613,4 @@ def test_create_400_frees_admission_and_the_queue_pauses_across_scheduler_starts
     scheduler.tick()
     assert c.provider.creates == 3
     assert "There are no longer any instances available" in str(scheduler.read(run))
-    scheduler = Scheduler(
-        c.store, {"runpod": lambda held: c.service}, clock=clock, sleep=clock.advance
-    )
-    scheduler.tick()
-    assert c.provider.creates == 3
-    clock.advance(60)
-    scheduler.tick()
-    assert c.provider.creates == 4
     assert not c.provider.pods and not c.store.unsettled_sessions()

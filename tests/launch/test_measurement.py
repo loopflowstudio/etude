@@ -10,7 +10,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -143,12 +142,9 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
     with counting.record():
         assert str(restarted.read(run)) == "queued (provider refused: no capacity), $0.00"
         status = counting.snapshot()
-    started = time.perf_counter()
     with counting.record():
         refused = b.store.recent_refusal("l4", b.clock() - timedelta(seconds=60))
         pause = counting.snapshot()
-    elapsed = time.perf_counter() - started
-    print(f"refusal lookup with {history} historical sessions: {elapsed:.6f} s")
     assert refused is not None and refused.refusal == "no capacity"
     assert status == Counts(database=14)
     assert pause == Counts(database=1)

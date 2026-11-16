@@ -1299,21 +1299,14 @@ class Scheduler:
             )
         if last is not None and not retry:
             return seen.model_copy(update={"phase": "done", "outcome": last.outcome})
-        if (
-            last is not None
-            and last.cause == "capacity_refused"
-            and not superseded
-            and session is not None
-        ):
-            return seen.model_copy(update={"reason": _refused(session)})
-        if last is not None:
-            return seen.model_copy(
-                update={
-                    "reason": "explicit resume"
-                    if superseded
-                    else f"retrying after {last.cause or last.outcome}"
-                }
-            )
+        if last is not None and session is not None:
+            if superseded:
+                reason = "explicit resume"
+            elif last.cause == "capacity_refused":
+                reason = _refused(session)
+            else:
+                reason = f"retrying after {last.cause or last.outcome}"
+            return seen.model_copy(update={"reason": reason})
         waits = [
             name + (f": {self._trouble[name]}" if name in self._trouble else "")
             for name in (record.launch.pool, record.launch.rent)
@@ -1382,16 +1375,14 @@ class Scheduler:
             if self._kept_rental(idle):
                 continue
             try:
-                # A rented machine delivers its last files and end receipt before it
-                # is deleted: it is ended here once its journal says so, or at its deadline.
-                rented = self._store.rental_for(idle) is not None
-                if rented and idle.finish_requested_at is None:
-                    # Recorded before it is sent: a session that may have read it
-                    # might end at any moment, so it is placed no more work.
-                    self._store.record_finish(idle, now)
-                    idle = self._store.session(idle.id)
-                if not rented:
+                if self._store.rental_for(idle) is None:
                     self._end_session(idle)
+                elif idle.finish_requested_at is None:
+                    # A rented machine delivers its last files and end receipt before it
+                    # is deleted: `_confirm_ends` ends it once its journal says so, or at
+                    # its deadline. Recorded before it is sent: a session that may have
+                    # read it might end at any moment, so it is placed no more work.
+                    self._store.record_finish(idle, now)
             except (OSError, LauncherError, StorageUnavailable):
                 continue  # cleanup retained its error and remains unconfirmed
         self._confirm_ends(supply)
@@ -1485,9 +1476,8 @@ class Scheduler:
                 session = _new_session(_id(), supply, owned, now)
                 rented, rental = None, None
             else:
-                refused = self._store.recent_refusal(supply.name, now - timedelta(seconds=60))
-                if refused is not None:
-                    return
+                if self._store.recent_refusal(supply.name, now - timedelta(seconds=60)):
+                    return  # the provider just said no; the refused run's status says why
                 offer = self._rentable(supply)
                 if offer is None:
                     return
