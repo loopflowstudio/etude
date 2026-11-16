@@ -141,9 +141,12 @@ computer's database and match waiting runs to machines while they run.
 
 The setting is a small `server` file beside the local database, under
 `ETUDE_HOME` (default `~/.etude`). Setting or clearing it needs no database and
-moves no existing records. With a server selected, CLI commands run there
-through the user's `ssh`, except selection commands, `worker` and source
-checkout, which run on the machine where invoked. The remote database's built-in `local` pool
+moves no existing records. With a server selected, administrative commands and
+continuation run the same CLI there through the user's `ssh`. Experiment files,
+training, eval, smoke, reports, database maintenance and storage reads run where
+invoked. Launch/queue submit frozen intent; source checkout and fetch copy results
+here. These operations use the existing Python client for server evidence and
+file transport. The remote database's built-in `local` pool
 is renamed `server`, including the default selection if it named `local`.
 It is never advertised as the client's local machine.
 

@@ -24,7 +24,7 @@ def show_runs(scheduler: Scheduler | PythonClient, ids: Sequence[str]) -> None:
 
 
 def resolve_runs(
-    scheduler: Scheduler | PythonClient,
+    scheduler: Scheduler,
     names: Sequence[str],
     *,
     experiment: str | None = None,
@@ -50,12 +50,12 @@ def _machine_name(machine: Machine) -> str:
     return _here() if machine.kind == "local" else machine.name
 
 
-def _marks(scheduler: Scheduler | PythonClient, name: str) -> str:
+def _marks(scheduler: Scheduler, name: str) -> str:
     chosen = scheduler.default_target()
     return " (default)" if name in (chosen.pool, chosen.rent) else ""
 
 
-def show_pools(scheduler: Scheduler | PythonClient) -> None:
+def show_pools(scheduler: Scheduler) -> None:
     """One line per pool: the machines you own in it."""
     for each in scheduler.pools():
         owned = ", ".join(_machine_name(m) for m in scheduler.machines(each.name))
@@ -64,7 +64,7 @@ def show_pools(scheduler: Scheduler | PythonClient) -> None:
         print(each.name, (owned or "no machines") + slots + marks, sep="  ")
 
 
-def show_ondemands(scheduler: Scheduler | PythonClient) -> None:
+def show_ondemands(scheduler: Scheduler) -> None:
     """One line per on-demand: what it rents, its budget and the machines it holds now."""
     for each in scheduler.ondemands():
         template = each.template
@@ -87,9 +87,7 @@ def show_ondemands(scheduler: Scheduler | PythonClient) -> None:
         print(each.name, "; ".join(parts) + _marks(scheduler, each.name), sep="  ")
 
 
-def show_machines(
-    scheduler: Scheduler | PythonClient, *, ended: bool, images: bool = False
-) -> None:
+def show_machines(scheduler: Scheduler, *, ended: bool, images: bool = False) -> None:
     """One line per machine: owned with its cost and expiry, or rented with its window and cost."""
     windows = {cost.rental.machine: cost for cost in scheduler.rentals()}
     now = scheduler.now()
