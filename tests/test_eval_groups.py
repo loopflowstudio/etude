@@ -88,11 +88,11 @@ def tournament(name: str) -> RoundRobin:
     )
 
 
-def job(name: str, agents: Agents | None) -> EvalJob:
+def job(name: str, agents: Agents | None, playing: Callable[..., Tables] | None = None) -> EvalJob:
     return EvalJob(
         tournament=tournament(name),
         enter=(checkpoint("left"), checkpoint("right")),
-        play=plain if agents is None else play,
+        play=playing or (plain if agents is None else play),
         agents=agents or Agents(),
         repo=None,
         max_hours=0.1,
@@ -551,7 +551,7 @@ def test_play_arity_and_removed_workers_are_refused() -> None:
 
     for agents in (None, Agents(load=load)):
         with pytest.raises(LauncherError, match="match and agents"):
-            job("bad", agents).model_copy(update={"play": one_parameter}).plain()
+            job("bad", agents, one_parameter)
     with pytest.raises(ValidationError, match="workers"):
         EvalJob.model_validate({**job("bad", None).model_dump(), "workers": 2})
 

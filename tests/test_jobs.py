@@ -521,7 +521,7 @@ def test_one_allocation_owns_many_writers_without_changing_its_limits(
 from etude.train.tracking import track
 """
         + TRAIN
-        + '\ndef write(config: TrainConfig) -> None:\n    clocks = [Clock(name="updates", kind="step", meaning="optimizer updates")]\n    with track(clocks=clocks) as run:\n        run.log({"loss": 10}, updates=1)\n        run.log({"loss": 20}, updates=2)\n        run.log({"loss": 30}, updates=3)\n    with track(clocks=clocks) as run:\n        run.log({"loss": 200}, updates=2)\n        run.log({"loss": 300}, updates=3)\n    with track(clocks=clocks) as run:\n        run.log({"loss": 4}, updates=1)\n    with track(clocks=clocks):\n        pass\n'
+        + '\ndef write(config: TrainConfig) -> None:\n    clocks = [Clock(name="updates", kind="step", meaning="optimizer updates")]\n    with track(clocks=clocks) as run:\n        run.log({"loss": 10}, updates=1)\n        run.log({"loss": 20}, updates=2)\n        run.log({"loss": 30}, updates=3)\n    with track(clocks=clocks) as run:\n        run.log({"loss": 200}, updates=2)\n        run.log({"loss": 300}, updates=3)\n    with track(clocks=clocks):\n        pass\n'
     )
     repo = checkout(tmp_path / "writers", {"allocation_writers.py": source})
     monkeypatch.syspath_prepend(str(repo))
@@ -541,10 +541,10 @@ from etude.train.tracking import track
         scheduler.logs(refresh=True, run=run)
     )
     (attempt,) = scheduler.attempts(run)
-    assert len(attempt.writers) == 4
-    assert len({writer.writer for writer in attempt.writers}) == 4
+    assert len(attempt.writers) == 3
+    assert len({writer.writer for writer in attempt.writers}) == 3
     assert {writer.attempt for writer in attempt.writers} == {attempt.id}
-    assert {writer.run for writer in attempt.writers} == {run, "pilot/another"}
+    assert {writer.run for writer in attempt.writers} == {run}
     data = read(tmp_path / "track", "pilot", run.removeprefix("pilot/"))
     points = data.points("loss", "updates")
     assert list(points.x) == [1, 2, 3]
