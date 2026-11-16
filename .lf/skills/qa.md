@@ -259,6 +259,13 @@ The CPU pod is cpu3c at $0.06/hour, about a minute per run. The prototype's
 eval budget (`max_usd=0.10`) does not cover a GPU hour; raise it in the clone
 (0.30 quotes $0.18 on an A6000) and raise `games` so the eval has new matches.
 RunPod's catalog can say `rentable now` while every create is refused with 400.
+To find stock, add one throwaway on-demand per GPU (`--gpu "NVIDIA GeForce RTX 4090"`,
+`"NVIDIA RTX A5000"`, `"NVIDIA L4"`, …) and run `etude availability NAME --timeout 30`;
+only `rentable now` under its ceiling is worth a create. A queued run needs a loop: drive
+`etude wait` from a Python subprocess driver that samples `etude status` and sends SIGINT
+(exit 130), since `wait` keeps waiting while creates are refused. A cancelled eval run reads
+as failed: the next launch needs `--retry-failed`. `etude report FILE --source r2://… --out DIR`.
+On a GPU the job log shows `etude: agents: … N inputs in M batches` for the shared agent process.
 List pods with `curl -H "Authorization: Bearer $RUNPOD_API_KEY"
 https://api.runpod.io/v2/pods` (`.pods[]`); `rest.runpod.io` does not resolve
 here. Other sessions' `etude-*` pods may be present; touch only your own.
