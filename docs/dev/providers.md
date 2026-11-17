@@ -324,16 +324,18 @@ curl -s -H "$auth" $api/workspaces   # note your workspace's id
 
 curl -s -H "$auth" -H "$json" $api/identities \
     -d '{"identity_type": "service", "display_name": "etude-guardian"}'   # note its id
-for role in TERMINATE_ROLE_ID READER_ROLE_ID; do
-    curl -s -H "$auth" -H "$json" $api/identities/IDENTITY_ID/role-assignments \
-        -d "{\"role_id\": \"$role\", \"scope\": {\"type\": \"workspace\", \"workspace_id\": \"WORKSPACE_ID\"}}"
-done
-curl -s -H "$auth" -H "$json" $api/identities/IDENTITY_ID/api-keys -d '{"name": "etude-guardian"}'
+curl -fsS -H "$auth" -H "$json" $api/workspaces/WORKSPACE_ID/memberships \
+    -d '{"member_id":"IDENTITY_ID","role_ids":["TERMINATE_ROLE_ID","READER_ROLE_ID"]}'
+# Pipe the one-time secret directly into Doppler.
+set -o pipefail
+curl -fsS -H "$auth" -H "$json" $api/identities/IDENTITY_ID/api-keys \
+    -d '{"name":"etude-guardian"}' | jq -er .data.api_key | \
+    doppler secrets set LAMBDA_TERMINATE_KEY --silent
 ```
 
-The last call prints the key once: put it in your secret store as
-`LAMBDA_TERMINATE_KEY`. Leave out `expires_in`, or keep it longer than any
-rental; `availability` cannot tell that the key has expired.
+Supply both role IDs when creating the membership. Omitting them assigns
+Workspace Member, which can launch machines. If the key expires, its expiry
+must follow the rental deadline.
 
 That key reaches the machine, where the job is your own code. It can read and
 terminate every instance in that workspace, so an account shared with other
