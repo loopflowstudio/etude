@@ -360,6 +360,11 @@ with every GPU. The launch names one SSH key because Lambda requires it:
 `LAMBDA_SSH_KEY_NAME`, or the account's first key by name. Add one to the
 account before renting; `ssh ubuntu@IP` then reaches the host.
 
+On the A10 proof host, `nvidia-smi` reported driver 570.148.08. A job using
+PyTorch with CUDA 13.2 needed NVIDIA's `cuda-compat-13-2` libraries on its
+`LD_LIBRARY_PATH`. Choose the compatibility package for the job's CUDA
+runtime and the host driver. [NVIDIA compatibility matrix](https://docs.nvidia.com/deploy/cuda-compatibility/latest/forward-compatibility.html)
+
 **Deletion.** Before downloading the container, the host arms a systemd timer
 for the rental deadline. The timer reads the host's cloud-init instance UUID,
 removes its hyphens to obtain the Lambda API ID, and calls the terminate
