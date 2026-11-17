@@ -6,6 +6,7 @@ CPU pod with its vCPUs and memory. Both share create, receipts, bills and deleti
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
@@ -21,7 +22,7 @@ from etude.launch.provisioner.machines import (
     check_creation,
 )
 from etude.launch.provisioner.providers.program import Program, boot_source
-from etude.launch.provisioner.providers.runpod.api import PodFact, RunPodAPI
+from etude.launch.provisioner.providers.runpod.api import PodFact, PodIdentity, RunPodAPI
 from etude.launch.records import GPU, Hardware, MachineTemplate, Offer, Provider
 from etude.launch.records import STOCK_IMAGE as DEFAULT_IMAGE
 from etude.launch.storage.s3 import Bucket
@@ -56,12 +57,25 @@ class RunPodMachines:
     def _key(self, session_id: str) -> str:
         return f"{self._prefix}/sessions/{session_id}/receipt.json"
 
-    def _keep(self, session_id: str, pod: PodFact) -> None:
+    def _keep(self, session_id: str, pod: PodIdentity) -> None:
         self._bucket.put(self._key(session_id), pod.model_dump_json().encode())
 
-    def _stored_pod(self, session_id: str) -> PodFact | None:
+    def _stored_pod(self, session_id: str) -> PodIdentity | None:
         raw = self._bucket.get(self._key(session_id))
-        return None if raw is None else PodFact.model_validate_json(raw)
+        if raw is None:
+            return None
+        data = json.loads(raw)
+        if data.keys() == PodIdentity.model_fields.keys():
+            return PodIdentity.model_validate(data)
+        return PodFact.model_validate(data)
+
+    def _receipt(self, session_id: str) -> PodIdentity | None:
+        pod = self._stored_pod(session_id)
+        if pod is None:
+            pod = self._api.named(f"etude-{session_id}")
+            if pod is not None:
+                self._keep(session_id, pod)
+        return pod
 
     def create(self, request: MachineRequest) -> Allocation:
         assert request.deadline is not None
@@ -114,18 +128,20 @@ class RunPodMachines:
         )
 
     def find(self, session_id: str) -> str | None:
-        allocation = self.allocation(session_id)
-        return None if allocation is None else allocation.id
+        pod = self._receipt(session_id)
+        return None if pod is None else pod.id
 
     def allocation(self, session_id: str) -> Allocation | None:
-        # The immutable receipt already contains identity and charged price.
-        # Health belongs to alive(); worker startup does not wait for SSH.
-        pod = self._stored_pod(session_id)
-        if pod is not None:
-            return self._allocation(pod)
-        pod = self._api.named(f"etude-{session_id}")
+        receipt = self._receipt(session_id)
+        if receipt is None:
+            return None
+        if isinstance(receipt, PodFact):
+            return self._allocation(receipt)
+        pod = self._api.pod(receipt.id)
         if pod is None:
             return None
+        if pod.id != receipt.id or pod.name != receipt.name:
+            raise ProviderUnavailable("the pod id now names a different pod")
         self._keep(session_id, pod)
         return self._allocation(pod)
 
@@ -140,14 +156,14 @@ class RunPodMachines:
             return True
 
     def end(self, session_id: str) -> datetime | None:
-        pod = self._stored_pod(session_id) or self._api.named(f"etude-{session_id}")
+        pod = self._receipt(session_id)
         if pod is None:
             return None
-        return datetime.now(UTC) if self._api.pod(pod.id) is None else self._api.delete(pod)
+        return self._api.delete(pod)
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
         pod = self._stored_pod(session_id)
-        if pod is None:
+        if not isinstance(pod, PodFact):
             return None
         rows = self._api.bills(pod, now)
         through = pod.created_at.replace(minute=0, second=0, microsecond=0)
