@@ -274,17 +274,33 @@ facts before SQL commits. Preserve shipped worker journal decoding.
 
 ## Safeguards and bills
 
-`etude ondemands` lists each on-demand's safeguards. Providers declare lifetime
-and startup-command support. RunPod supports a startup timer, but no provider
-lifetime setting. Its timer begins before client installation and ends the pod at the
+```text
+$ etude ondemands
+l4       L4 on aws; up to 1 at once under $0.90/hour; safeguards: machine timer, launcher cleanup; records in west
+l4-spot  L4 on aws, spot; up to 1 at once under $0.70/hour; safeguards: machine timer, launcher cleanup; records in west
+rtx5090  RTX 5090 on lium; up to 1 at once under $0.80/hour; safeguards: provider lifetime, launcher cleanup; records in west
+```
+
+`etude ondemands` lists each on-demand's safeguards: what ends its machines.
+
+| Safeguard | What it is | Providers |
+| --- | --- | --- |
+| machine timer | The machine deletes itself at its deadline, with no launcher alive. | RunPod, Vast, EC2, Lambda |
+| provider lifetime | The provider removes the machine at a time set when it is made. | Lium |
+| launcher cleanup | The scheduler's loop deletes it; needs that loop running. | all |
+
+RunPod's timer begins before client installation and ends the pod at the
 deadline or when its dollar cap runs out at the actual price. Autorun uses the
 same timer. A failed timer triggers deletion. The worker ends work early
-enough to leave up to two minutes for final evidence delivery.
+enough to leave up to two minutes for final evidence delivery. EC2's and
+Lambda's timers are armed by the host before anything is downloaded
+([providers](providers.md#aws-ec2)).
 
 Scheduling passes check recorded machines; queue submission itself does not. An on-demand machine with no started
 worker five minutes after the create claim is deleted (earlier at its
 deadline). This check needs a command to run; the machine timer runs independently
-once its image starts. RunPod cannot run that timer while an image is pulling.
+once its image starts. RunPod cannot run that timer while an image is pulling;
+EC2 and Lambda arm theirs on the host, before the image is pulled.
 
 The charged hourly price replaces the quote after creation. Machine acquisition and rental records
 hold billed dollars and the end of their last contiguous billed clock hour.
@@ -329,6 +345,21 @@ left it, and `run.resume` loads the state `run.save()` kept there
 The run's hours, dollars and `max_attempts` span all attempts. Hours count code
 execution; dollars include attributed setup and failed attempts.
 Definite capacity refusals acquire no machine and spend none of these limits.
+
+A spot machine lost under a started attempt ends that attempt
+`lost (spot_machine_lost)`. It is retried like any lost machine and spends
+hours and dollars, but not one of `max_attempts`:
+
+```sh
+etude launch ppo.py --rent l4-spot   # attempt 1: AWS takes the machine back at update 870
+etude status RUN                     # running, updates 1400, ~$0.41: attempt 1, from update 800
+etude logs --run RUN                 # both tries, the first ended lost (spot_machine_lost)
+```
+
+The cause does not claim the provider reclaimed the machine: from outside, a
+crashed spot machine looks the same, and is treated the same. A spot machine
+lost before its attempt started is `machine_lost_before_start`, as at the
+standard price, and counts.
 The default `max_attempts=3` includes planned stops: a healthy run needing a
 fourth rental window ends `stopped` after its third planned stop. Increase
 `max_attempts` on the job for a longer run.
@@ -751,7 +782,8 @@ Timeouts, no reply, 408, 5xx and unreadable or mismatched replies stay unknown.
 A remote start has an exclusive claim; a lost SSH reply cannot start another
 process. An unreachable machine is unknown. A lost attempt requires evidence that its process or
 provider machine is gone. Infrastructure losses retry up to `max_attempts`,
-including confirmed loss after code started. If startup intent reached storage
+including confirmed loss after code started; a spot machine lost after start
+(`spot_machine_lost`) retries outside that count, as `capacity_refused` does. If startup intent reached storage
 but an attempt claim did not, its start is uncertain and it is not retried.
 
 Tables are `machines`, `sessions`, `rentals` (one per rented machine, keyed by
@@ -777,7 +809,7 @@ workers execute their delivered work independently; a launched machine with
 an inbox is cleaned up on the next scheduling pass or at its own deadline.
 `launch` first acquires machines for the runs it can place. Each machine
 then takes waiting work that fits its remaining window. `etude server run` keeps matching new work
-after commands exit. Sweeps, spot recovery and additional providers remain open.
+after commands exit. Sweeps remain open.
 
 ## Layout and dependency rules
 

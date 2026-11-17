@@ -52,9 +52,10 @@ runs = launch(job.runs(1, 2), rent="rtx4090")
 print(wait(*runs))
 ```
 
-Vast selects verified, on-demand Linux amd64 offers with the requested GPU count
+Vast selects verified Linux amd64 offers with the requested GPU count
 (`--gpu-count`, default 1) and
-free upload **and** download. Its quoted hourly rate includes the requested disk
+free upload **and** download: Vast's on-demand offers, or its interruptible
+ones for a [`--spot`](#spot) on-demand. Its quoted hourly rate includes the requested disk
 (default 40 GB); offers with metered transfer are excluded because an arbitrary
 job's traffic cannot be bounded from its runtime alone. `--data-center US` means
 a country code for Vast; RunPod uses its data center IDs. Public images are
@@ -119,7 +120,8 @@ launcher.add_ondemand(
 )
 ```
 
-Lium selects **secure** nodes only, respects the node's minimum rental count,
+Lium selects **secure** nodes (**spot** nodes for a [`--spot`](#spot)
+on-demand, never a mix), respects the node's minimum rental count,
 and quotes CPU, RAM and disk allocated to that GPU count. Public feed resources
 describe the whole node; Etude uses the [allocation quote](https://lium.io/api/openapi.json)
 instead. `--data-center US` selects a country code. Missing allocation facts are
@@ -142,8 +144,8 @@ need Python 3.12 and OpenSSH support. Signed bootstrap links travel over SSH;
 Lium shutdown is **best effort**. Creation includes a whole-hour timer from boot;
 the scheduler immediately schedules the absolute rental deadline and verifies
 readback. A local standard-library watchdog starts before client installation and
-stops bootstrap/work at the deadline. Unlike RunPod/Vast's self-scoped guardians,
-it cannot delete the pod or end billing: Lium exposes no documented pod-scoped
+stops bootstrap/work at the deadline. Unlike the machine timers of RunPod, Vast,
+EC2 and Lambda, it cannot delete the pod or end billing: Lium exposes no documented pod-scoped
 self-deletion key. Completion, failure and cancellation rely on the scheduler's deletion;
 without its loop, on the provider timer. Boot delays, the gap before exact
 scheduling, and undocumented removal processing delays can exceed the reservation.
@@ -157,12 +159,200 @@ survives pod deletion; Etude reports actual costs only through its validated
 charges afterward. Missing or contradictory accounting stays estimated.
 Offline fixtures verify this integration; no paid Lium lifecycle is claimed here.
 
+### AWS EC2
+
+```text
+$ etude storage add west --bucket BUCKET --prefix etude/launch --provider s3 --region us-west-2
+$ etude provider set aws --kind ec2 --storage west
+$ etude ondemand add l4 --provider aws --gpu L4 --max 1 --max-usd-per-hour 0.90
+$ etude availability l4 --timeout 60
+l4  g6.xlarge: L4 with at least 4 vCPUs, 16 GB at $0.8229/hour (ceiling $0.90)  available  0 of 1 in use  rentable now  asked 2026-11-17 19:02:11 UTC
+$ etude launch job.py --rent l4 --max-usd 2
+$ etude wait
+$ etude machines --all
+l4-41840a01c3b1  l4  deleted, g6.xlarge: L4 with at least 4 vCPUs, 16 GB, rented, ended 2026-11-17 19:31 UTC, ~$0.31
+```
+
+EC2 uses the keys S3 storage already reads: `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY` and, for a temporary role, `AWS_SESSION_TOKEN`. One
+identity then needs the bucket and these actions:
+
+| Action | Used for |
+| --- | --- |
+| `ec2:DescribeInstanceTypes`, `pricing:GetProducts`, `ec2:DescribeSpotPriceHistory` | what would be rented, and its price |
+| `servicequotas:GetServiceQuota` | whether the account may run it |
+| `ssm:GetParameter` on `/aws/service/deeplearning/ami/*` | the host image |
+| `ec2:DescribeVpcs`, `ec2:DescribeSubnets` | the default VPC |
+| `ec2:RunInstances`, `ec2:CreateTags` | renting |
+| `ec2:DescribeInstances`, `ec2:TerminateInstances` | finding and deleting what was rented |
+
+A first spot rental in an account also needs AWS's `AWSServiceRoleForEC2Spot`
+role to exist. The bootstrap links are signed with the launcher's keys, so
+keys from a temporary role must outlive the rental: an SSO session that expires
+mid-rental breaks the machine's access to storage, though not its deletion.
+
+`--gpu` is AWS's GPU name (`L4`, `A10G`, `T4`, `L40S`). You do not name an
+instance type: Etude rents the cheapest x86_64 type with exactly `--gpu-count`
+of that GPU and at least `--vcpus` and `--memory-gb`, and `availability` shows
+which. `--data-center` is a region (`us-west-2`) or one zone (`us-west-2b`);
+omitted, it is the region of the on-demand's S3 storage, where transfer to the
+bucket is free. An on-demand on R2 storage must name it. Only GPU templates
+rent from EC2.
+
+The quote is read from AWS, never from a table in Etude: the instance, its
+disk (75 GB for the host image plus `--disk-gb`, default 40) and its public
+address. It excludes transfer to a bucket outside the region. EC2 bills arrive
+a day late, so `machines` shows the estimate at the quote (`~`).
+
+`not rentable now` carries AWS's reason. New accounts often have a zero quota:
+
+```text
+$ etude availability l4-spot
+l4-spot  none available: AWS quota 'All G and VT Spot Instance Requests' is 0 vCPUs; g6.xlarge needs 4  0 of 1 in use  not rentable now  asked 2026-11-17 19:02:14 UTC
+```
+
+Raise it in the AWS console under Service Quotas; the standard-price quota is
+`Running On-Demand G and VT instances`.
+
+The instance boots AWS's GPU base image (NVIDIA driver and Docker) in the
+default VPC with no key pair, no inbound rule and no instance role, and runs
+the on-demand's image as a container with every GPU. `--image` therefore means
+what it means on the other providers. There is no SSH access; read `etude logs`.
+
+**Deletion.** The instance is made so that powering off terminates it and
+deletes its disk. Before anything is downloaded, the host schedules that
+power-off for the rental's deadline; it also powers off when the worker exits
+for any reason. No credential that can delete anything is on the machine, and
+neither path needs the launcher. The scheduler's loop terminates by the
+`etude-session` tag as the third path, and `RunInstances` carries the session
+id as its idempotency token, so a lost reply never rents a second instance.
+To check an account by hand:
+
+```sh
+aws ec2 describe-instances --filters Name=tag-key,Values=etude-session \
+    Name=instance-state-name,Values=pending,running,stopping,stopped
+```
+
+### Lambda Cloud
+
+```text
+$ etude provider set lambda --kind lambda --storage west
+$ etude ondemand add a10 --provider lambda --gpu "A10 (24 GB PCIe)" --max 1 --max-usd-per-hour 1.50
+$ etude availability a10 --timeout 60
+a10  gpu_1x_a10: A10 (24 GB PCIe) with at least 30 vCPUs, 200 GB at $1.29/hour (ceiling $1.50)  available  0 of 1 in use  rentable now  asked 2026-11-17 19:10:52 UTC
+$ etude launch job.py --rent a10 --max-usd 2
+```
+
+The launcher needs two keys, and refuses to ask or rent while either is unset:
+
+| Variable | What it is | Where it goes |
+| --- | --- | --- |
+| `LAMBDA_API_KEY` | your account key | the launcher only |
+| `LAMBDA_TERMINATE_KEY` | a key that can read and terminate instances, and launch nothing | every rented machine |
+
+Lambda has no machine lifetime setting, so each machine terminates itself
+through Lambda's API, and needs a key to do it. Make that key once. These
+calls change your Lambda account; Etude never does.
+
+```sh
+api=https://cloud.lambda.com/api/v1
+auth="Authorization: Bearer $LAMBDA_API_KEY"
+json="Content-Type: application/json"
+
+curl -s -H "$auth" $api/roles        # note the ids of instance-terminate and instance-reader
+curl -s -H "$auth" $api/workspaces   # note your workspace's id
+
+curl -s -H "$auth" -H "$json" $api/identities \
+    -d '{"identity_type": "service", "display_name": "etude-guardian"}'   # note its id
+for role in TERMINATE_ROLE_ID READER_ROLE_ID; do
+    curl -s -H "$auth" -H "$json" $api/identities/IDENTITY_ID/role-assignments \
+        -d "{\"role_id\": \"$role\", \"scope\": {\"type\": \"workspace\", \"workspace_id\": \"WORKSPACE_ID\"}}"
+done
+curl -s -H "$auth" -H "$json" $api/identities/IDENTITY_ID/api-keys -d '{"name": "etude-guardian"}'
+```
+
+The last call prints the key once: put it in your secret store as
+`LAMBDA_TERMINATE_KEY`. Leave out `expires_in`, or keep it longer than any
+rental; `availability` cannot tell that the key has expired.
+
+That key reaches the machine, where the job is your own code. It can read and
+terminate every instance in that workspace, so an account shared with other
+work should give Etude a workspace of its own.
+
+`--gpu` is Lambda's description of the GPU, quoted, as its instance types list
+it. A name Lambda does not use is answered with the ones it does:
+
+```text
+$ etude availability a10
+a10  none available: Lambda has no GPU named 'A10'; it names: A10 (24 GB PCIe), A100 (40 GB SXM4), H100 (80 GB SXM5), ...  0 of 1 in use  not rentable now  asked 2026-11-17 19:10:40 UTC
+```
+
+Etude rents the cheapest instance type with that GPU, `--gpu-count` of them
+and at least `--vcpus` and `--memory-gb`. `--data-center` is a Lambda region
+(`us-west-1`); omitted, any region that reports capacity. Lambda's price is per
+instance type and includes its disk, so `--disk-gb` is not applied. Lambda rents at one
+price: a `--spot` on-demand is never rentable. Only GPU templates rent from Lambda.
+
+The instance boots Lambda Stack and runs the on-demand's image as a container
+with every GPU. The launch names one SSH key because Lambda requires it:
+`LAMBDA_SSH_KEY_NAME`, or the account's first key by name. Add one to the
+account before renting; `ssh ubuntu@IP` then reaches the host.
+
+**Deletion.** Before anything is downloaded, the host learns its own instance
+id and arms a timer that calls Lambda's terminate endpoint with
+`LAMBDA_TERMINATE_KEY` at the rental's deadline. It makes the same call when
+the worker exits, retrying until Lambda accepts it. The scheduler's loop
+terminates by the instance's name, `etude-SESSION`, as the third path. A
+terminate key that is wrong or expired leaves only that third path. Lambda's
+launch call has no idempotency token: a lost reply is looked up by name and
+never sent twice. Lambda reports no per-machine bill, so cost stays the
+estimate at the listed price.
+
+### Spot
+
+```sh
+etude ondemand add l4-spot --provider aws --gpu L4 --spot --max 1 --max-usd-per-hour 0.70
+etude ondemand add rtx4090-spot --provider vast --gpu "RTX 4090" --spot --max 1 --max-usd-per-hour 0.30
+etude availability l4-spot       # ... at $0.6510/hour, spot (ceiling $0.70) ...
+etude launch job.py --rent l4-spot
+```
+
+`--spot` (`MachineTemplate(spot=True)`) is a fact of the on-demand; listings
+mark it `spot`. To offer both prices, add two on-demands. Without it an
+on-demand rents at the provider's standard price.
+
+| Provider | A `--spot` on-demand rents | Quote, the most it can cost per hour | When the machine is taken back |
+| --- | --- | --- | --- |
+| EC2 | a one-time spot instance | the cheapest permitted zone's spot price plus 10%, never above the standard price; plus disk and address | terminated by AWS |
+| Vast | an interruptible instance at the offer's minimum bid | that bid plus storage | paused by Vast, still billing storage; Etude destroys it |
+| Lium | a `spot` node | its listed price plus Lium's tolerance | removed by Lium |
+| RunPod | nothing: `Etude rents no spot machines from RunPod` | | |
+| Lambda | nothing: `Etude rents no spot machines from Lambda` | | |
+
+On EC2 the quote is sent as the instance's maximum price, so AWS never charges
+more; if the market rises past it, AWS takes the machine back. The 10% is
+headroom for that: over a week of us-west-2 L4 prices the spot price moved
+about four times a day, within that range. The on-demand's `--max-usd-per-hour`
+applies to the quote as always. Spot has its own AWS quota (`All G and VT Spot
+Instance Requests`), and thin spot stock is refused at create like any other
+[capacity refusal](launcher.md#ownership-and-failure-behavior).
+
+A spot machine lost under a running attempt is retried on a new machine from
+the latest delivered save, as any lost machine is, and
+[does not spend `max_attempts`](launcher.md#the-run-promise). EC2 gives two
+minutes' notice before taking a machine back; Etude does not act on it. There
+is no fallback from spot to the standard price.
+
+### CPU machines
+
 A template without `--gpu` rents RunPod CPU pods: the cheapest secure-cloud CPU
 flavor with at least `--vcpus` (rounded up to a power of two, RunPod's sizes)
 and `--memory-gb`, priced per vCPU and capped like a GPU pod. CPU pods boot the
 same default image. Their disk defaults to 40 GB, or 10 GB per vCPU when smaller.
 On a CPU pod `os.cpu_count()` reports the host's CPUs; size worker pools from
 `len(os.sched_getaffinity(0))`.
+
+### Availability, quotes and limits
 
 ```sh
 etude ondemand add cpu --provider runpod --vcpus 8 --memory-gb 16 --max 2 --max-usd-per-hour 0.40
@@ -174,7 +364,9 @@ etude launch job.py --rent cpu --max-usd 1     # rents up to the on-demand's 2 m
 
 `availability` asks the provider, so it is a wait: it prints what would be
 rented, the price and ceiling, how many of the on-demand's machines are in use
-and when the provider answered; `--timeout` bounds it. `rentable now` is the
+and when the provider answered; `--timeout` bounds it. When the provider has nothing to rent, the line
+reads `none available: REASON` in the provider's terms (stock, quota, no spot
+machines, or a GPU name it does not use) and names no price. `rentable now` is the
 provider's stock signal, not a reservation: the create can still be refused,
 and is then
 [a refusal](launcher.md#ownership-and-failure-behavior) carrying the provider's reason. `--quote` places the
@@ -193,7 +385,7 @@ allows only machines rented by hand.
 A zero limit still permits an explicit `rent`; a positive limit bounds
 concurrent rented windows. Lowering the limit leaves current windows intact.
 The limit and ceiling belong to the on-demand, so every launch that names it shares them.
-All three providers default to the pinned stock image
+Every provider defaults to the pinned stock image
 `runpod/pytorch@sha256:4d1721e62b56d345c83b4fd6090664be6daf9312caab5b2e76f23d8231941851`.
 It needs Python 3.12 on PATH. uv must also be available; when absent, boot
 fetches uv 0.8.22 for Linux x86_64 and verifies its SHA-256
@@ -205,8 +397,9 @@ The launcher stores its private package in the on-demand's storage under
 checks its digest, installs with `uv sync --frozen` into
 `~/.etude/programs/DIGEST/.venv`, then runs `etude worker --bootstrap URL`.
 Etude is never fetched by package name from an index. The client and each job
-use separate environments. RunPod/Vast start commands and Lium's SSH start carry
-a small standard-library bootstrap; no Etude files need to be present in the image.
+use separate environments. RunPod/Vast start commands, Lium's SSH start and the
+EC2/Lambda host script carry or fetch a small standard-library bootstrap; no
+Etude files need to be present in the image.
 
 An on-demand's `--image` or `etude ondemand image` selects a user's own pinned image for
 training dependencies installed ahead of time. It must meet the same Python
@@ -214,7 +407,7 @@ and uv requirements and needs nothing of Etude. For RunPod, `--registry` supplie
 provider pull credential for a user's private image. The stock image needs no
 registry credential.
 
-To inspect a new rental over SSH, add your public key (for example, the contents
+To inspect a new RunPod rental over SSH, add your public key (for example, the contents
 of `~/.ssh/id_ed25519.pub`) to your RunPod account's SSH keys before renting.
 Open the pod's **Connect** tab and copy its **SSH over exposed TCP** command:
 
@@ -271,11 +464,19 @@ through its inbox: its worker delivers its last files, the tail of its log and i
 receipt, then deletes the machine, and the launcher confirms the deletion once the receipt
 arrives, or at the rental's deadline. `etude wait` returns after that confirmation.
 
-The launcher needs `RUNPOD_API_KEY`, `AWS_ACCESS_KEY_ID` and
+The launcher needs its provider's keys and the storage's `AWS_ACCESS_KEY_ID` and
 `AWS_SECRET_ACCESS_KEY` from the configured secret manager. No secrets enter
 SQLite. An on-demand takes its provider's storage when added and keeps it. A storage
-cannot change; add another name. `--data-center` selects a RunPod data center;
-omitting it lets RunPod place the machine. `ondemand image` affects future machines.
+cannot change; add another name. `ondemand image` affects future machines.
+
+`--data-center` is the provider's own name for a place:
+
+| Provider | `--data-center` | Omitted |
+| --- | --- | --- |
+| RunPod | a data center id | RunPod places the machine |
+| Vast, Lium | a country code (`US`) | anywhere |
+| EC2 | a region or zone (`us-west-2`, `us-west-2b`) | the S3 storage's region |
+| Lambda | a region (`us-west-1`) | any region with capacity |
 
 ### Several runs on one machine
 
