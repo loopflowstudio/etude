@@ -202,7 +202,8 @@ def test_rental_keeps_identity_and_package_without_account_credentials() -> None
         assert "etude/launch/worker/main.py" not in archive.namelist()
     assert b"fixture-not-retained" not in storage.objects["test/sessions/session/receipt.json"]
     market.counts.clear()
-    assert machine.find("session") == allocation
+    assert machine.find("session") == allocation.id
+    assert machine.allocation("session") == allocation
     assert market.counts == {}
     assert machine.create(request()) == allocation  # the intent prohibits duplicate acquisition
     assert market.counts == {}

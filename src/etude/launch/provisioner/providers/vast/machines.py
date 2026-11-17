@@ -85,7 +85,7 @@ class VastMachines:
         if request.deadline is None or request.bootstrap is None:
             raise Refused("Vast rentals need a deadline and a storage bootstrap link")
         if self._bucket.get(self._key(request.session, "offer")) is not None:
-            existing = self.find(request.session)
+            existing = self.allocation(request.session)
             if existing is not None:
                 return existing
             raise ProviderUnavailable("Vast create already attempted; awaiting reconciliation")
@@ -158,7 +158,11 @@ class VastMachines:
             hardware=instance.hardware,
         )
 
-    def find(self, session_id: str) -> Allocation | None:
+    def find(self, session_id: str) -> str | None:
+        allocation = self.allocation(session_id)
+        return None if allocation is None else allocation.id
+
+    def allocation(self, session_id: str) -> Allocation | None:
         instance = self._stored_instance(session_id)
         if instance is None:
             if self._bucket.get(self._key(session_id, "offer")) is None:

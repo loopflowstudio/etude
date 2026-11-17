@@ -113,7 +113,11 @@ class RunPodMachines:
             hardware=pod.hardware,
         )
 
-    def find(self, session_id: str) -> Allocation | None:
+    def find(self, session_id: str) -> str | None:
+        allocation = self.allocation(session_id)
+        return None if allocation is None else allocation.id
+
+    def allocation(self, session_id: str) -> Allocation | None:
         # The immutable receipt already contains identity and charged price.
         # Health belongs to alive(); worker startup does not wait for SSH.
         pod = self._stored_pod(session_id)

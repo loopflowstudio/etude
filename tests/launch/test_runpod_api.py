@@ -303,7 +303,7 @@ def test_stock_create_counts_package_reuse_without_waiting_for_ssh(
         body = receipt.model_dump_json().encode()
         storage.objects[receipt_key] = body
         with counting.record():
-            found = machines.find("7f3a")
+            found = machines.allocation("7f3a")
             assert found is not None and found.usd_per_hour == receipt.usd_per_hour
             assert counting.snapshot() == Counts(bucket=1)
         assert storage.objects[receipt_key] == body
@@ -314,8 +314,8 @@ def test_stock_create_counts_package_reuse_without_waiting_for_ssh(
         {"pods": [POD], "pagination": {"hasNextPage": False, "nextCursor": None}},
     )
     with counting.record():
-        found = machines.find("7f3a")
-        assert found is not None and found.id == POD["id"]
+        identity = machines.find("7f3a")
+        assert identity == POD["id"]
         assert counting.snapshot() == Counts(provider=1, bucket=2)
     payloads = [payload for method, path, payload in provider.asked if method == "POST"]
     assert len([key for key in storage.objects if "/programs/" in key]) == 1

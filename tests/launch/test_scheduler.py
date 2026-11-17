@@ -74,6 +74,23 @@ def test_one_run_finishes_and_its_session_is_confirmed_ended(tmp_path: Path) -> 
     assert job_text(b.scheduler.logs(refresh=True, run=one)).startswith("log of ")
 
 
+def test_known_rental_stays_starting_until_the_worker_checks_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    b = bench(tmp_path)
+    checked_in = [False]
+    monkeypatch.setattr(b.service, "started", lambda session_id: checked_in[0])
+    (run,) = b.scheduler.queue(job(), rent="l4")
+    b.scheduler.tick()
+    machine = b.store.machine(b.scheduler.attempts(run)[0].machine)
+    assert machine.provider_id is not None
+    assert machine.started_at is None and machine.state(b.clock()) == "starting"
+    checked_in[0] = True
+    b.run(1)
+    machine = b.store.machine(machine.name)
+    assert machine.started_at is not None and machine.state(b.clock()) == "available"
+
+
 def test_a_lost_create_reply_is_looked_up_and_never_asked_twice(tmp_path: Path) -> None:
     b = bench(tmp_path)
     b.service.lose_reply = 1

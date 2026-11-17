@@ -20,11 +20,12 @@ from etude.launch.client import _open
 from etude.launch.database import Database, launcher_file, upgrade
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Execution, Executor
+from etude.launch.listing import show_machines
 from etude.launch.provisioner.machines import MachineRequest, Refused
 from etude.launch.provisioner.providers import bootstrap as bootstrap_module
 from etude.launch.provisioner.providers.bootstrap import guard
 from etude.launch.provisioner.providers.lium.api import Create, LiumAPI, Pod
-from etude.launch.provisioner.providers.lium.machines import _START, LiumMachines
+from etude.launch.provisioner.providers.lium.machines import _START, LiumMachines, Receipt
 from etude.launch.provisioner.providers.lium.pod import Watchdog
 from etude.launch.provisioner.providers.lium.pod import main as pod_main
 from etude.launch.records import GPU, BootstrapLinks, Machine, MachineTemplate, OnDemand, Provider
@@ -83,6 +84,7 @@ class Marketplace:
         self.created: Create | None = None
         self.counts: Counter[str] = Counter()
         self.lost_reply = False
+        self.invalid_facts = False
         self.visible = True
         self.acknowledge_timer = True
         self.delete_pending = False
@@ -110,12 +112,14 @@ class Marketplace:
                 "executor_id": NODE,
                 "pod_name": self.created.pod_name,
                 "status": "PENDING",
-                "created_at": datetime.now(UTC).isoformat(),
+                "created_at": datetime.now(UTC).replace(tzinfo=None).isoformat(),
                 "price": 1.5,
                 "gpu_count": "2",
                 "ssh_connect_cmd": "",
                 "removal_scheduled_at": None,
             }
+            if self.invalid_facts:
+                self.pod["created_at"] = "unreadable"
             if self.lost_reply:
                 raise OSError("fixture lost create reply")
             reply = {"pod_id": POD}
@@ -124,7 +128,11 @@ class Marketplace:
         elif path == f"pods/{POD}/schedule-removal":
             assert self.pod is not None and body is not None
             if self.acknowledge_timer:
-                self.pod["removal_scheduled_at"] = json.loads(body)["removal_scheduled_at"]
+                self.pod["removal_scheduled_at"] = (
+                    datetime.fromisoformat(json.loads(body)["removal_scheduled_at"])
+                    .replace(tzinfo=None)
+                    .isoformat()
+                )
             reply = {}
         elif path == f"pods/{POD}/statement":
             if self.statement is None:
@@ -239,6 +247,7 @@ def test_create_acknowledges_timer_and_keeps_secrets_off_provider() -> None:
     wanted = request()
     allocation = machines(market, storage).create(wanted)
     assert allocation.id == POD and allocation.hardware is not None
+    assert allocation.created_at.tzinfo is UTC
     assert market.created is not None and market.pod is not None
     assert market.created.termination_hours == 1 and not market.created.enable_backups
     assert wanted.deadline is not None
@@ -264,7 +273,7 @@ def test_lost_create_recovers_without_second_paid_request() -> None:
         machines(market, storage).find("session")
     market.visible = True
     found = machines(market, storage).find("session")
-    assert found is not None and found.id == POD
+    assert found == POD
     assert machines(market, storage).create(request()).id == POD
     assert market.pod is not None and market.pod["removal_scheduled_at"] is not None
     assert market.counts[f"POST executors/{NODE}/rent"] == 1
@@ -278,7 +287,7 @@ def test_unacknowledged_timer_is_retried_before_work() -> None:
         machines(market, storage).create(request())
     assert "test/sessions/session/booted.json" not in storage.objects
     market.acknowledge_timer = True
-    assert machines(market, storage).find("session") is not None
+    assert machines(market, storage).allocation("session") is not None
     assert market.counts[f"POST pods/{POD}/schedule-removal"] == 2
     assert market.counts[f"POST executors/{NODE}/rent"] == 1
 
@@ -295,8 +304,8 @@ def test_ssh_bootstrap_starts_once_after_running(monkeypatch: pytest.MonkeyPatch
         environments.append(env)
 
     monkeypatch.setattr("etude.launch.provisioner.providers.lium.machines._start", start)
-    machine.find("session")
-    machines(market, storage).find("session")
+    machine.allocation("session")
+    machines(market, storage).allocation("session")
     assert len(environments) == 1
     assert environments[0]["ETUDE_BOOTSTRAP_URL"] == "https://fixture/bootstrap"
     assert not any("KEY" in name for name in environments[0])
@@ -324,11 +333,11 @@ def test_ledger_survives_deletion_without_inventing_settlement() -> None:
     market.statement = {
         "pod_id": POD,
         "created_at": start,
-        "removed_at": now.isoformat(),
+        "removed_at": now.replace(tzinfo=None).isoformat(),
         "removed": True,
-        "billed_until": now.isoformat(),
+        "billed_until": now.replace(tzinfo=None).isoformat(),
         "total": 0.03,
-        "days": [{"amount": 0.03, "billed_until": now.isoformat()}],
+        "days": [{"amount": 0.03, "billed_until": now.replace(tzinfo=None).isoformat()}],
     }
     machine.end("session")
     bill = machine.bill("session", now)
@@ -527,8 +536,8 @@ def test_failed_ssh_reply_can_recover_without_renting_again(
 
     monkeypatch.setattr("etude.launch.provisioner.providers.lium.machines._start", start)
     with pytest.raises(ProviderUnavailable):
-        machine.find("session")
-    assert machines(market, storage).find("session") is not None
+        machine.allocation("session")
+    assert machines(market, storage).allocation("session") is not None
     assert attempts[0] == 2 and market.counts[f"POST executors/{NODE}/rent"] == 1
     assert market.counts[f"POST pods/{POD}/schedule-removal"] == 1
 
@@ -678,7 +687,144 @@ def test_incompatible_paid_allocation_is_deleted_without_starting_work() -> None
     assert market.pod is not None
     market.pod["gpu_count"] = 1
     with pytest.raises(ProviderUnavailable, match="different node or GPU count"):
-        machine.find("session")
+        machine.allocation("session")
     assert market.pod is None and market.counts[f"DELETE pods/{POD}"] == 1
     assert "test/sessions/session/booted.json" not in storage.objects
     assert machine.end("session") is not None
+
+
+@pytest.mark.parametrize("terminate", [True, False])
+def test_unreadable_created_pod_is_recorded_and_deleted_by_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    terminate: bool,
+) -> None:
+    market, storage = Marketplace(), Storage()
+    market.invalid_facts = True
+    clock = [datetime.now(UTC)]
+    starts: list[str] = []
+
+    def start(pod: Pod, env: dict[str, str]) -> None:
+        starts.append(str(pod.id))
+
+    monkeypatch.setattr("etude.launch.provisioner.providers.lium.machines._start", start)
+    store = open_database(launcher_file(tmp_path))
+    try:
+        scheduler = _scheduler(store, market, storage)
+        monkeypatch.setattr(scheduler, "_clock", lambda: clock[0])
+        scheduler.set_startup("5090", 10)
+        name = scheduler.rent("5090", hours=0.1, max_usd=Decimal(2))
+        session = store.rented_session(name)
+        receipt = Receipt.model_validate_json(
+            storage.objects[f"test/sessions/{session.id}/receipt.json"]
+        )
+        assert str(receipt.id) == POD and receipt.pod is None
+        assert session.provider_id is None
+        scheduler.tick()
+        assert store.rented_session(name).provider_id == POD
+        scheduler.tick()
+        assert any(
+            d.operation == "machine facts"
+            and d.session == session.id
+            and "Lium reply is missing valid required fields" in d.message
+            for d in scheduler.diagnostics(machine=name)
+        )
+        show_machines(scheduler, ended=False)
+        assert "starting" in capsys.readouterr().out
+        if terminate:
+            assert scheduler.terminate(name).deleted_at is not None
+        else:
+            clock[0] += timedelta(seconds=11)
+            scheduler.tick()
+        assert store.rented_session(name).ended_at is not None
+        assert store.machine(name).deleted_at is not None
+        show_machines(scheduler, ended=True)
+        listing = capsys.readouterr().out
+        assert name in listing and "deleted" in listing and "ended" in listing
+        assert market.pod is None and not starts
+        assert market.counts[f"POST executors/{NODE}/rent"] == 1
+        assert market.counts[f"DELETE pods/{POD}"] == 1
+        assert market.counts["GET pods"] == 0
+        assert market.counts[f"POST pods/{POD}/schedule-removal"] == 0
+    finally:
+        store.close()
+
+
+def test_terminate_reads_only_status_after_deleting_unreadable_pod() -> None:
+    market, storage = Marketplace(), Storage()
+    market.invalid_facts = True
+    machine = machines(market, storage)
+    with pytest.raises(ProviderUnavailable, match="valid required fields"):
+        machine.create(request())
+    assert machine.find("session") == POD
+    assert machine.bill("session", datetime.now(UTC)) is None
+    market.delete_pending = True
+    assert machine.end("session") is None
+    assert market.pod is not None
+    market.delete_pending = False
+    market.counts.clear()
+    assert machine.end("session") is not None
+    assert market.pod is None
+    assert market.counts == {f"DELETE pods/{POD}": 1, f"GET pods/{POD}": 1}
+
+
+def test_provider_timestamp_offsets_are_preserved_as_utc() -> None:
+    market = Marketplace()
+    machine = machines(market, Storage())
+    machine.create(request())
+    assert market.pod is not None
+    market.pod["created_at"] = "2026-11-17T08:01:32.886331-08:00"
+    assert Pod.model_validate(market.pod).created_at == datetime(
+        2026, 11, 17, 16, 1, 32, 886331, tzinfo=UTC
+    )
+
+
+def test_unreadable_pod_startup_deadline_settles_its_runs_as_lost(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    market, storage = Marketplace(), Storage()
+    market.invalid_facts = True
+    clock = [datetime.now(UTC)]
+    store = open_database(launcher_file(tmp_path))
+    try:
+        scheduler = _scheduler(store, market, storage)
+        monkeypatch.setattr(scheduler, "_clock", lambda: clock[0])
+        scheduler.set_startup("5090", 10)
+        (run,) = scheduler.queue(
+            Job(command="true", max_hours=0.1, max_usd=Decimal(2), max_attempts=1).runs(1),
+            rent="5090",
+        )
+        scheduler.tick()
+        scheduler.tick()
+        attempt = scheduler.attempts(run)[0]
+        assert store.session(attempt.session).provider_id == POD
+        clock[0] += timedelta(seconds=11)
+        scheduler.tick()
+        status = scheduler.read(run)
+        assert status.outcome == "lost" and status.rental_ended
+        assert scheduler.attempts(run)[0].finished_at is not None
+        assert market.pod is None
+        assert market.counts[f"POST executors/{NODE}/rent"] == 1
+        assert market.counts[f"DELETE pods/{POD}"] == 1
+        assert market.counts["GET pods"] == 0
+    finally:
+        store.close()
+
+
+def test_lost_create_keeps_identity_before_reading_unreadable_facts() -> None:
+    market, storage = Marketplace(), Storage()
+    market.lost_reply = True
+    market.invalid_facts = True
+    with pytest.raises(ProviderUnavailable):
+        machines(market, storage).create(request())
+    market.counts.clear()
+    recovered = machines(market, storage)
+    assert recovered.find("session") == POD
+    assert recovered.end("session") is not None
+    assert market.pod is None
+    assert market.counts == {
+        "GET pods": 1,
+        f"DELETE pods/{POD}": 1,
+        f"GET pods/{POD}": 1,
+    }
