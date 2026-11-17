@@ -82,6 +82,10 @@ def test_catalog_names_and_region_capacity_cost_one_read_each() -> None:
     offer = api.offer(template)
     assert offer.available and offer.usd_per_hour == Decimal("1.29") and offer.region == "us-west-1"
     assert not api.offer(template.model_copy(update={"data_center": "elsewhere"})).available
+    assert (
+        api.offer(template.model_copy(update={"spot": True})).reason
+        == "Etude rents no spot machines from Lambda"
+    )
     assert workspace.calls == {"instance-types": 3}
 
 

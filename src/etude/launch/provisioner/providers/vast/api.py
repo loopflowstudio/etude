@@ -135,6 +135,8 @@ class VastAPI(InstanceHTTP):
             params = {**params, "after_token": page.next_token}
 
     def offers(self, template: MachineTemplate) -> tuple[VastOffer, ...]:
+        if template.spot:
+            return ()
         if template.gpu is None:
             raise ValueError("Vast rentals need a GPU model")
         vcpus = template.vcpus or 4

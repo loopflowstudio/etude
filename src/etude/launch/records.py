@@ -76,14 +76,16 @@ Cause = Literal[
     "input_undelivered",
     "machine_lost_before_start",
     "machine_lost",
+    "spot_machine_lost",
     "create_unconfirmed",
 ]
 # A definite refusal acquired no machine and spends no attempt budget.
 CAPACITY_REFUSED: Cause = "capacity_refused"
+TRY_EXEMPT = (CAPACITY_REFUSED, "spot_machine_lost")
 # Confirmed machine loss permits a new attempt; an uncertain start does not, nor
 # an input the machine was not given, which a retry would not be given either.
 RETRYABLE: frozenset[str] = frozenset(
-    {CAPACITY_REFUSED, "setup_failed", "machine_lost_before_start", "machine_lost"}
+    {*TRY_EXEMPT, "setup_failed", "machine_lost_before_start", "machine_lost"}
 )
 # Which of a run's two limits ends it first on the rental it was given.
 Limit = Literal["over_budget", "out_of_time"]
@@ -160,6 +162,7 @@ def _image(value: object) -> object:
 class MachineTemplate(Record):
     """What a rented machine is made from: which provider, what kind, and where."""
 
+    spot: bool = False
     provider: str  # the name of the provider that supplies them
     gpu: str | None = None  # the provider's name for the GPU, such as "NVIDIA L4"
     gpu_count: int = Field(default=1, ge=1)
@@ -216,6 +219,7 @@ class Offer(Record):
 class Availability(Record):
     """An on-demand's offer as its provider answered at `observed_at`, beside its budget."""
 
+    spot: bool = False
     ondemand: str
     offer: Offer
     max_usd_per_hour: Decimal | None
@@ -533,6 +537,7 @@ class QuotedMachine(Record):
     Provider delays can exceed the admitted budget.
     """
 
+    spot: bool = False
     run: str  # the run's name
     machine: str | None  # an existing machine; None means one would be rented
     hardware: Hardware | None  # for a rental, what the provider would be asked for

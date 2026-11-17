@@ -199,8 +199,9 @@ def test_unmerged_upgrade_refuses_operational_state(
 def test_compatible_branch_uses_same_canonical_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    known = tuple(m for m in migrations() if m.floor is not None)
+    monkeypatch.setattr(database, "migrations", lambda: known)
     upgrade(tmp_path, development=True)
-    known = migrations()
     monkeypatch.setattr(database, "migrations", lambda: known[:-1])
     with_open = open_home(tmp_path)
     with_open.add_pool(Pool(name="shared"))
@@ -210,6 +211,16 @@ def test_compatible_branch_uses_same_canonical_file(
     assert store.pool("shared").name == "shared"
     assert store._path == launcher_file(tmp_path)
     store.close()
+
+
+def test_spot_templates_require_a_scheduler_that_honors_the_market(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    upgrade(tmp_path, development=True)
+    previous = tuple(m for m in migrations() if m.name != "spot_rentals")
+    monkeypatch.setattr(database, "migrations", lambda: previous)
+    with pytest.raises(LauncherError, match="spot_rentals"):
+        open_home(tmp_path)
 
 
 def test_additive_upgrade_preserves_open_writer_and_backup(
@@ -326,7 +337,7 @@ def test_declared_json_break_raises_floor() -> None:
 def test_release_records_floor(
     sql: str, reason: str | None, floor: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    known = migrations()
+    known = tuple(m for m in migrations() if m.floor is not None)
     change = _migration(sql, floor=None).model_copy(update={"breaks": reason})
     monkeypatch.setattr(database, "migrations", lambda: (*known, change))
     recorded = database.release("0.5.0")

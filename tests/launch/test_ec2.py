@@ -43,6 +43,7 @@ class Region:
         self.volume = True
         self.image_exists = True
         self.quota = 4
+        self.spot_price = "0.5"
         self.launches: dict[str, bytes] = {}
         self.boot = ""
 
@@ -63,7 +64,9 @@ class Region:
             elif target == "GetServiceQuota":
                 payload = {
                     "Quota": {
-                        "QuotaName": "Running On-Demand G and VT instances",
+                        "QuotaName": "All G and VT Spot Instance Requests"
+                        if json.loads(body)["QuotaCode"] == "L-3819A6DF"
+                        else "Running On-Demand G and VT instances",
                         "Value": self.quota,
                     }
                 }
@@ -90,6 +93,20 @@ class Region:
                 for name, cpus in (("g6.2xlarge", 8), ("g6.xlarge", 4))
             ]
             xml = "<instanceTypeSet>" + "".join(items) + "</instanceTypeSet>"
+        elif action == "DescribeSpotPriceHistory":
+            xml = (
+                "<spotPriceHistorySet>"
+                + "".join(
+                    f"<item><instanceType>g6.xlarge</instanceType><availabilityZone>{zone}</availabilityZone>"
+                    f"<spotPrice>{price}</spotPrice><timestamp>{at}</timestamp></item>"
+                    for zone, price, at in (
+                        ("us-west-2a", "1.2", "2026-11-17T08:00:00Z"),
+                        ("us-west-2b", self.spot_price, "2026-11-17T09:00:00Z"),
+                        ("us-west-2a", "0.1", "2026-11-17T07:00:00Z"),
+                    )
+                )
+                + "</spotPriceHistorySet>"
+            )
         elif action == "RunInstances":
             token = fields["ClientToken"][0]
             if token not in self.launches:
@@ -154,6 +171,23 @@ def test_availability_quotes_a_gpu_and_explains_quota_without_creating(
     assert "none available: AWS quota 'Running On-Demand G and VT instances' is 0 vCPUs" in line
     assert "not rentable now" in line
     assert region.calls["RunInstances"] == 0
+    assert (
+        main(["ondemand", "add", "interruptible", "--gpu", "L4", "--provider", "aws", "--spot"])
+        == 0
+    )
+    assert "L4 on aws, spot" in capsys.readouterr().out
+    assert main(["availability", "interruptible"]) == 0
+    assert "All G and VT Spot Instance Requests' is 0 vCPUs" in capsys.readouterr().out
+    region.quota = 4
+    region.calls.clear()
+    assert main(["availability", "interruptible"]) == 0
+    assert "$0.5678/hour, spot" in capsys.readouterr().out
+    assert region.calls == {
+        "DescribeInstanceTypes": 1,
+        "GetProducts": 3,
+        "GetServiceQuota": 1,
+        "DescribeSpotPriceHistory": 1,
+    }
 
 
 def test_unknown_gpu_lists_catalog_names_and_missing_region_needs_no_read() -> None:
@@ -169,12 +203,17 @@ def test_unknown_gpu_lists_catalog_names_and_missing_region_needs_no_read() -> N
     assert region.calls == {"DescribeInstanceTypes": 1}
 
 
-def test_retry_recovers_one_rental_and_waits_for_guest_shutdown() -> None:
+@pytest.mark.parametrize(("spot_price", "bid"), [(None, None), ("0.5", "0.55"), ("0.8", "0.8048")])
+def test_retry_recovers_one_rental_and_waits_for_guest_shutdown(
+    spot_price: str | None, bid: str | None
+) -> None:
     region, storage = Region(), Storage()
     keys = Keys(access_key="fixture", secret_key="fixture")
     api = EC2API(keys, "us-west-2", region)
     bucket = Bucket("test", "us-west-2", keys, storage)
-    template = MachineTemplate(provider="aws", gpu="L4")
+    if spot_price:
+        region.spot_price = spot_price
+    template = MachineTemplate(provider="aws", gpu="L4", spot=spot_price is not None)
     machine = EC2Machines(template, api, None, bucket, "test")
     request = MachineRequest(
         session="one",
@@ -184,6 +223,13 @@ def test_retry_recovers_one_rental_and_waits_for_guest_shutdown() -> None:
     )
     allocation = machine.create(request)
     assert allocation.id == "i-l4"
+    launch = parse_qs(region.launches["one"].decode())
+    if bid is None:
+        assert "InstanceMarketOptions.MarketType" not in launch
+    else:
+        assert launch["InstanceMarketOptions.MarketType"] == ["spot"]
+        assert launch["Placement.AvailabilityZone"] == ["us-west-2b"]
+        assert launch["InstanceMarketOptions.SpotOptions.MaxPrice"] == [bid]
     assert region.calls["RunInstances"] == 2 and len(region.launches) == 1
     assert len(region.boot.encode()) < 16384
     (boot,) = [v for k, v in storage.objects.items() if "/boot/" in k]

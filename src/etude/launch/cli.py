@@ -454,6 +454,9 @@ def ondemand_add(
     gpu: Annotated[
         str | None, typer.Option(help="the provider's name for the GPU; omit for CPU machines")
     ] = None,
+    spot: Annotated[
+        bool, typer.Option(help="rent interruptible machines at the spot price")
+    ] = False,
     gpu_count: Annotated[int, typer.Option(help="GPUs per machine", min=1)] = 1,
     vcpus: Annotated[int | None, typer.Option(help="minimum virtual CPUs")] = None,
     memory_gb: Annotated[int | None, typer.Option(help="minimum memory")] = None,
@@ -483,6 +486,7 @@ def ondemand_add(
                 provider=provider,
                 gpu=gpu,
                 gpu_count=gpu_count,
+                spot=spot,
                 vcpus=vcpus,
                 memory_gb=memory_gb,
                 disk_gb=disk_gb,

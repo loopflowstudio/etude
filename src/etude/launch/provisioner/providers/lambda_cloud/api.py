@@ -156,6 +156,8 @@ class LambdaAPI:
             ) from None
 
     def offer(self, template: MachineTemplate) -> LambdaOffer:
+        if template.spot:
+            return LambdaOffer.unavailable("Etude rents no spot machines from Lambda")
         if not template.gpu:
             return LambdaOffer.unavailable("Lambda needs a GPU template")
         catalog = self._read(_Catalog, "instance-types").data.values()

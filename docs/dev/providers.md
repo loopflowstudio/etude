@@ -243,8 +243,8 @@ identity then needs the bucket and these actions:
 | `ec2:RunInstances`, `ec2:CreateTags` | renting |
 | `ec2:DescribeInstances`, `ec2:DescribeVolumes`, `ec2:TerminateInstances` | finding and deleting what was rented |
 
-A first spot rental in an account also needs AWS's `AWSServiceRoleForEC2Spot`
-role to exist. The bootstrap links are signed with the launcher's keys, so
+EC2 uses the service-linked role `AWSServiceRoleForEC2Spot`. If the role
+is absent, the first spot request needs permission to create it. The bootstrap links are signed with the launcher's keys, so
 keys from a temporary role must outlive the rental: an SSO session that expires
 mid-rental breaks the machine's access to storage, though not its deletion.
 
@@ -398,8 +398,8 @@ on-demand rents at the provider's standard price.
 | RunPod | nothing: `Etude rents no spot machines from RunPod` | | |
 | Lambda | nothing: `Etude rents no spot machines from Lambda` | | |
 
-On EC2 the quote is sent as the instance's maximum price, so AWS never charges
-more; if the market rises past it, AWS takes the machine back. The 10% is
+On EC2 the compute portion of the quote is sent as the instance's maximum
+price. If the spot market rises past it, AWS takes the machine back. The 10% is
 headroom for that: over a week of us-west-2 L4 prices the spot price moved
 about four times a day, within that range. The on-demand's `--max-usd-per-hour`
 applies to the quote as always. Spot has its own AWS quota (`All G and VT Spot

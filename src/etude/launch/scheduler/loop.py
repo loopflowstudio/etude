@@ -45,6 +45,7 @@ from etude.launch.records import (
     CAPACITY_REFUSED,
     RETRYABLE,
     STOCK_IMAGE,
+    TRY_EXEMPT,
     Availability,
     Cause,
     Diagnostic,
@@ -125,9 +126,8 @@ def _refused(session: Session) -> str:
     )
 
 
-def _budgeted_attempts(attempts: Sequence[RunAttempt]) -> tuple[RunAttempt, ...]:
-    """Budgeted attempts: a definite refusal acquired no machine and spends no try."""
-    return tuple(attempt for attempt in attempts if attempt.cause != CAPACITY_REFUSED)
+def _tries(attempts: Sequence[RunAttempt]) -> int:
+    return sum(attempt.cause not in TRY_EXEMPT for attempt in attempts)
 
 
 def _new_session(id: str, supply: Supply, machine: Machine, now: datetime) -> Session:
@@ -435,6 +435,7 @@ class Scheduler:
         return Availability(
             ondemand=rent,
             offer=offer,
+            spot=ondemand.template.spot,
             max_usd_per_hour=ondemand.max_usd_per_hour,
             in_use=in_use,
             max_machines=ondemand.max_machines,
@@ -519,6 +520,7 @@ class Scheduler:
                 seconds = min(life, self._longest_rental(ondemand))
                 share = self._rental_cost(ondemand, price, seconds) / len(placement.runs)
             pending = [r for r in pending if r not in placement.runs]
+            supply = self._store.supply(placement.supply)
             for record in placement.runs:
                 most = share
                 if most is None:
@@ -531,7 +533,8 @@ class Scheduler:
                         hardware=placement.hardware,
                         usd_per_hour=price,
                         max_usd=most,
-                        slots=self._store.supply(placement.supply).slots,
+                        slots=supply.slots,
+                        spot=isinstance(supply, OnDemand) and supply.template.spot,
                         alongside=tuple(r.id for r in placement.runs if r.id != record.id),
                     )
                 )
@@ -1236,7 +1239,7 @@ class Scheduler:
         now = self._clock()
         record = self._store.run(run)
         attempts = self._store.attempts(run=run)
-        budgeted = _budgeted_attempts(attempts)
+        paid = [a for a in attempts if a.cause != CAPACITY_REFUSED]
         last = attempts[-1] if attempts else None
         refused = last is not None and last.cause == CAPACITY_REFUSED
         session = None if last is None else self._store.session(last.session)
@@ -1257,14 +1260,14 @@ class Scheduler:
             until=record.launch.spec.until,
             clocks={} if last is None else last.clocks,
             tally=None if last is None else last.tally,
-            usd=sum((self._attempt_usd(a, now) for a in budgeted), Decimal(0)),
-            attempts=len(budgeted),
+            usd=sum((self._attempt_usd(a, now) for a in paid), Decimal(0)),
+            attempts=_tries(attempts),
             machine=None if last is None or refused else last.machine,
             hardware=None if session is None or refused else session.hardware,
             rental_ended=None
             if rental is None
             else self._store.machine(rental.machine).deleted_at is not None,
-            estimated=any(self._estimated(self._store.session(a.session), now) for a in budgeted),
+            estimated=any(self._estimated(self._store.session(a.session), now) for a in paid),
             shared=1
             if last is None or session is None
             else self._shared(last, session, rental, now),
@@ -2166,6 +2169,10 @@ class Scheduler:
                 if attempt.started_at is None
                 else "machine_lost"
             )
+            if cause == "machine_lost":
+                supply = self._store.supply(session.supply)
+                if isinstance(supply, OnDemand) and supply.template.spot:
+                    cause = "spot_machine_lost"
             self._store.finish(
                 attempt,
                 now,
@@ -2179,7 +2186,7 @@ class Scheduler:
             )
             self._diagnose(
                 "execution",
-                f"attempt lost: {cause}; final exit status not received",
+                f"attempt lost ({cause}); final exit status not received",
                 session=session.id,
                 attempt=attempt.id,
             )
@@ -2292,11 +2299,7 @@ class Scheduler:
             update={"submission": prior.launch.model_copy(update={"spec": job})}
         )
         left = self._remaining(candidate, self._clock())
-        if (
-            len(_budgeted_attempts(attempts)) >= job.max_attempts
-            or left.seconds < 1
-            or left.usd <= 0
-        ):
+        if _tries(attempts) >= job.max_attempts or left.seconds < 1 or left.usd <= 0:
             raise LauncherError(
                 "run has no remaining hours, dollars or attempts; raise its job limits"
             )
@@ -2364,7 +2367,7 @@ class Scheduler:
         )
 
     def _remaining(self, run: RunRecord, now: datetime) -> Budget:
-        attempts = _budgeted_attempts(self._store.attempts(run=run.id))
+        attempts = [a for a in self._store.attempts(run=run.id) if a.cause != CAPACITY_REFUSED]
         seconds = sum(
             max(0, ((a.finished_at or now) - a.started_at).total_seconds())
             for a in attempts

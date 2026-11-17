@@ -35,8 +35,8 @@ from etude.errors import LauncherError
 from etude.launch.errors import SchemaAdvanced
 from etude.launch.provenance import frontier
 from etude.launch.records import (
-    CAPACITY_REFUSED,
     RETRYABLE,
+    TRY_EXEMPT,
     Cause,
     Diagnostic,
     Hardware,
@@ -927,13 +927,14 @@ class Database:
         """Runs that may use this pool or on-demand and want a new attempt, oldest first.
 
         A run waits when nobody cancelled it and every attempt so far had a
-        confirmed infrastructure loss, with tries left. Definite capacity refusals
-        spend no try. The launcher checks budgets.
+        confirmed infrastructure loss, with tries left. Capacity refusals and started
+        attempts lost with spot machines spend no try. The launcher checks budgets.
         """
         marks = ", ".join("?" for _ in RETRYABLE)
+        exempt = ", ".join("?" for _ in TRY_EXEMPT)
         rows = self._db.execute(
             f"""SELECT r.*, (SELECT count(*) FROM attempts a WHERE a.run = r.id
-                  AND (a.cause IS NULL OR a.cause != ?)) AS tries
+                  AND (a.cause IS NULL OR a.cause NOT IN ({exempt}))) AS tries
                 FROM runs r
                 WHERE r.id IN (
                   SELECT id FROM runs WHERE pool = ? UNION SELECT id FROM runs WHERE rent = ?
@@ -942,7 +943,7 @@ class Database:
                   a.outcome IS NULL OR (a.outcome != 'stopped' AND
                   (a.outcome != 'lost' OR a.cause NOT IN ({marks})))))
                 ORDER BY r.seq""",
-            (CAPACITY_REFUSED, supply, supply, *sorted(RETRYABLE)),
+            (*TRY_EXEMPT, supply, supply, *sorted(RETRYABLE)),
         ).fetchall()
         return tuple(
             run

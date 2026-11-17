@@ -474,8 +474,8 @@ out checkpoints remain available when selected explicitly. An empty `out`
 can resume from the latest checkpoint copied into `checkpoints/`; it never
 restores a removed out checkpoint or falls back to an older record.
 
-There is no `retry` flag; `max_attempts=1` bounds a job to one attempt, excluding
-definite capacity refusals.
+`max_attempts=1` gives the job one counted attempt. A capacity refusal or the
+loss of a running spot machine leaves that allowance available.
 
 ## Progress and continuation
 

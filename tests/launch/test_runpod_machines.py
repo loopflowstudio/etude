@@ -330,6 +330,7 @@ def cloud(
     *,
     delivery_seconds: float | None = None,
     gpu: str | None = "NVIDIA L4",
+    spot: bool = False,
     r2: bool = False,
     owned: Executor | None = None,
 ) -> Cloud:
@@ -351,6 +352,7 @@ def cloud(
     template = MachineTemplate(
         provider="runpod",
         gpu=gpu,
+        spot=spot,
         vcpus=6,
         memory_gb=48,
         disk_gb=40,
@@ -707,6 +709,12 @@ def test_machines_and_status_show_the_hardware_rented(
     assert f"machine {status.machine} ({shown})" in run_line
     # `wait` returned, so the rented machine is already confirmed deleted.
     assert machine_line.startswith(f"{status.machine}  l4  deleted, {shown}, rented, ended ")
+
+
+def test_runpod_spot_reports_why_it_cannot_rent(tmp_path: Path) -> None:
+    account = cloud(tmp_path, spot=True)
+    answer = account.scheduler.availability("l4")
+    assert not answer.rentable and answer.refusal == "Etude rents no spot machines from RunPod"
 
 
 def test_no_stock_is_a_refusal_and_cancel_reaches_a_running_pod(tmp_path: Path) -> None:

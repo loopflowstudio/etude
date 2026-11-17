@@ -1,0 +1,2 @@
+-- after: provider_refusal_lookup
+-- breaks: older schedulers ignore the spot market and cannot decode spot_machine_lost

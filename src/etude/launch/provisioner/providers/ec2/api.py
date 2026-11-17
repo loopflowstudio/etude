@@ -21,9 +21,24 @@ from etude.launch.records import GPU, MachineTemplate, Offer
 from etude.launch.storage.transport import HTTPReply, Send
 from etude.spec import Record
 
+# One week of us-west-2 L4 prices moved within this margin over a day.
+SPOT_HEADROOM = Decimal("1.10")
+
 AMI_PARAMETER = (
     "/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-24.04/latest/ami-id"
 )
+
+
+class EC2Offer(Offer):
+    zone: str | None = None
+    max_price: Decimal | None = None  # compute only; EBS and IPv4 are billed separately
+
+
+class SpotPrice(Record):
+    flavor: str = Field(min_length=1)
+    zone: str = Field(min_length=1)
+    price: Decimal = Field(gt=0)
+    at: datetime
 
 
 class Instance(Record):
@@ -129,6 +144,9 @@ class EC2API:
             if action == "RunInstances" and code in {
                 "InsufficientInstanceCapacity",
                 "VcpuLimitExceeded",
+                "MaxSpotInstanceCountExceeded",
+                "SpotMaxPriceTooLow",
+                "UnfulfillableCapacity",
                 "Unsupported",
                 "InstanceLimitExceeded",
                 "VPCIdNotSpecified",
@@ -217,9 +235,33 @@ class EC2API:
             raise ProviderUnavailable("AWS price does not identify a single product")
         return products[0].rate
 
-    def offer(self, template: MachineTemplate, zone: str | None) -> Offer:
-        def none(reason: str) -> Offer:
-            return Offer(hardware=None, usd_per_hour=Decimal(0), available=False, reason=reason)
+    def _spot_prices(self, flavors: list[str], zone: str | None) -> list[SpotPrice]:
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        fields = {f"InstanceType.{i}": name for i, name in enumerate(flavors, 1)}
+        fields.update({"StartTime": now, "EndTime": now, "ProductDescription.1": "Linux/UNIX"})
+        if zone:
+            fields["AvailabilityZone"] = zone
+        latest: dict[tuple[str, str], SpotPrice] = {}
+        for node in self._items("DescribeSpotPriceHistory", fields, "spotPriceHistorySet/item"):
+            try:
+                price = SpotPrice.model_validate(
+                    {
+                        "flavor": node.findtext("instanceType"),
+                        "zone": node.findtext("availabilityZone"),
+                        "price": node.findtext("spotPrice"),
+                        "at": node.findtext("timestamp"),
+                    }
+                )
+            except ValidationError:
+                raise ProviderUnavailable("EC2 returned an invalid spot price") from None
+            key = (price.flavor, price.zone)
+            if key not in latest or latest[key].at < price.at:
+                latest[key] = price
+        return list(latest.values())
+
+    def offer(self, template: MachineTemplate, zone: str | None) -> EC2Offer:
+        def none(reason: str) -> EC2Offer:
+            return EC2Offer(hardware=None, usd_per_hour=Decimal(0), available=False, reason=reason)
 
         if not self.region:
             return none("EC2 needs an AWS region or availability zone in --data-center")
@@ -227,7 +269,7 @@ class EC2API:
             return none("EC2 needs a GPU template")
         fields = {
             "Filter.1.Name": "supported-usage-class",
-            "Filter.1.Value.1": "on-demand",
+            "Filter.1.Value.1": "spot" if template.spot else "on-demand",
             "Filter.2.Name": "processor-info.supported-architecture",
             "Filter.2.Value.1": "x86_64",
             "Filter.3.Name": "instance-type",
@@ -295,9 +337,29 @@ class EC2API:
         rates = {product.flavor: product.rate for product in products}
         if rates.keys() != flavors.keys():
             raise ProviderUnavailable("AWS prices do not cover the matching instance types")
-        hardware = min(candidates, key=lambda gpu: rates[gpu.flavor])
-        rate = rates[hardware.flavor]
-        quota_code = "L-417A185B" if (hardware.flavor or "").startswith("p") else "L-DB2E81BA"
+        if template.spot:
+            prices = self._spot_prices(list(flavors), zone)
+            if not prices:
+                return none("EC2 has no current spot price for the matching instance types")
+            spot = min(
+                prices,
+                key=lambda p: (
+                    min(rates[p.flavor], p.price * SPOT_HEADROOM),
+                    p.price,
+                    p.zone,
+                    p.flavor,
+                ),
+            )
+            hardware = flavors[spot.flavor]
+            rate = min(rates[spot.flavor], spot.price * SPOT_HEADROOM)
+            zone = spot.zone
+        else:
+            hardware = min(candidates, key=lambda gpu: rates[gpu.flavor])
+            rate = rates[hardware.flavor]
+        if (hardware.flavor or "").startswith("p"):
+            quota_code = "L-7212CCBC" if template.spot else "L-417A185B"
+        else:
+            quota_code = "L-3819A6DF" if template.spot else "L-DB2E81BA"
         quota = self._json(
             "servicequotas",
             "ServiceQuotasV20190624.GetServiceQuota",
@@ -312,7 +374,9 @@ class EC2API:
         address = self._price(
             "AmazonVPC", groupDescription="Hourly charge for In-use Public IPv4 Addresses"
         )
-        return Offer(
+        return EC2Offer(
+            zone=zone,
+            max_price=rate if template.spot else None,
             hardware=hardware,
             available=True,
             usd_per_hour=(rate + address + disk * (hardware.disk_gb or 0) / 720).quantize(

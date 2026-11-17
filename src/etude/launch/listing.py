@@ -15,6 +15,8 @@ def show_runs(scheduler: Scheduler | PythonClient, ids: Sequence[str]) -> None:
         status = scheduler.read(run)
         where = f", machine {status.machine}" if status.machine else ""
         where += f" ({status.hardware})" if status.hardware else ""
+        if status.attempts:
+            where += f", attempt {status.attempts}"
         record = scheduler.record(run)
         print(run, record.name, str(status) + where, sep="  ")
         if record.launch.spec.repo is not None:
@@ -72,6 +74,8 @@ def show_ondemands(scheduler: Scheduler) -> None:
         if template.vcpus or template.memory_gb:
             kind += f" {template.vcpus or 'any'} vCPUs, {template.memory_gb or 'any'} GB"
         source = template.provider + (f" in {template.data_center}" if template.data_center else "")
+        if template.spot:
+            source += ", spot"
         ceiling = (
             f" under ${each.max_usd_per_hour}/hour" if each.max_usd_per_hour is not None else ""
         )
@@ -131,6 +135,8 @@ def show_machines(scheduler: Scheduler, *, ended: bool) -> None:
                 window = f"rented, ended {machine.deleted_at:%Y-%m-%d %H:%M} UTC"
             else:
                 window = f"rented until {rental.deadline:%Y-%m-%d %H:%M} UTC"
+            if ondemand.template.spot:
+                window += ", spot"
             hardware = f"{machine.hardware}, " if machine.hardware else ""
             print(
                 machine.name,
@@ -151,6 +157,8 @@ def show_quote(quote: Quote) -> None:
             )
         else:
             where = f"rent {each.hardware or 'a machine'} at ${each.usd_per_hour}/hour"
+        if each.spot:
+            where += ", spot"
         if each.slots > 1:
             where += f", {each.slots} slots"
             if each.alongside:
@@ -170,10 +178,9 @@ def show_availability(answer: Availability) -> None:
     ceiling = (
         "no ceiling" if answer.max_usd_per_hour is None else f"ceiling ${answer.max_usd_per_hour}"
     )
+    market = ", spot" if answer.spot else ""
     if offer.available:
-        description = (
-            f"{offer.hardware or 'a machine'} at ${offer.usd_per_hour}/hour ({ceiling})  available"
-        )
+        description = f"{offer.hardware or 'a machine'} at ${offer.usd_per_hour}/hour{market} ({ceiling})  available"
     else:
         description = f"none available: {offer.reason}" if offer.reason else "none available"
     print(

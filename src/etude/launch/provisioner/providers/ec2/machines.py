@@ -18,10 +18,10 @@ from etude.launch.provisioner.machines import (
     Safeguards,
     check_creation,
 )
-from etude.launch.provisioner.providers.ec2.api import EC2API, Instance
+from etude.launch.provisioner.providers.ec2.api import EC2API, EC2Offer, Instance
 from etude.launch.provisioner.providers.host import container_boot, fetch_boot, user_data
 from etude.launch.provisioner.providers.program import Program
-from etude.launch.records import GPU, STOCK_IMAGE, MachineTemplate, Offer
+from etude.launch.records import GPU, STOCK_IMAGE, MachineTemplate
 from etude.launch.storage.s3 import AlreadyThere, Bucket
 from etude.spec import Record
 from etude.storage_timeout import StorageUnavailable
@@ -44,9 +44,9 @@ class EC2Machines:
         self.template, self.api, self.zone = template, api, zone
         self.bucket, self.prefix = bucket, prefix
         self.program = Program(bucket, prefix)
-        self._quote: Offer | None = None
+        self._quote: EC2Offer | None = None
 
-    def offer(self) -> Offer:
+    def offer(self) -> EC2Offer:
         self._quote = self.api.offer(self.template, self.zone)
         return self._quote
 
@@ -104,8 +104,19 @@ class EC2Machines:
             "NetworkInterface.1.AssociatePublicIpAddress": "true",
         }
         # A region-wide request lets EC2 pick a default subnet with capacity.
-        if self.zone:
-            fields["Placement.AvailabilityZone"] = self.zone
+        if quote.zone:
+            fields["Placement.AvailabilityZone"] = quote.zone
+        if quote.max_price is not None:
+            fields.update(
+                {
+                    "InstanceMarketOptions.MarketType": "spot",
+                    "InstanceMarketOptions.SpotOptions.SpotInstanceType": "one-time",
+                    "InstanceMarketOptions.SpotOptions.InstanceInterruptionBehavior": "terminate",
+                    "InstanceMarketOptions.SpotOptions.MaxPrice": format(
+                        quote.max_price.normalize(), "f"
+                    ),
+                }
+            )
         for i, resource in enumerate(("instance", "volume"), start=1):
             tag = f"TagSpecification.{i}"
             fields.update(

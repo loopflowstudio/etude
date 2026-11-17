@@ -183,6 +183,8 @@ def _read[T: Record](model: type[T], raw: bytes | None) -> T:
 
 class LiumAPI(LiumHTTP):
     def offers(self, template: MachineTemplate) -> tuple[LiumOffer, ...]:
+        if template.spot:
+            return ()
         if template.gpu is None:
             raise ValueError("Lium rentals need a GPU model")
         feed = _read(_Nodes, self.ask("GET", "public/v1/nodes"))
