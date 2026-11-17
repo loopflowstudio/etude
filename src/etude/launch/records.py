@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import Field, field_validator, model_validator
 
@@ -96,6 +96,9 @@ class Stale(LauncherError):
     """A record changed after it was read; the write did not happen."""
 
 
+ProviderKind = Literal["runpod", "vast", "lium", "ec2", "lambda"]
+
+
 class Provider(Record):
     """An account that supplies machines on demand. It is set once and can be changed.
 
@@ -104,7 +107,7 @@ class Provider(Record):
     """
 
     name: str  # what a machine template's `provider` names
-    kind: Literal["runpod", "vast", "lium", "ec2", "lambda"]
+    kind: ProviderKind
     registry: str  # the provider's id for the credential that pulls private images
     storage: str  # the storage a new pool uses unless it names another
 
@@ -214,6 +217,10 @@ class Offer(Record):
     usd_per_hour: Decimal
     reason: str | None = None
     available: bool  # False only when the provider positively reports none
+
+    @classmethod
+    def unavailable(cls, reason: str) -> Self:
+        return cls(available=False, hardware=None, usd_per_hour=Decimal(0), reason=reason)
 
 
 class Availability(Record):

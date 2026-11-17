@@ -29,6 +29,7 @@ from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from pathlib import Path
+from typing import get_args
 from uuid import uuid4
 
 from etude.carriage import RecordMismatch
@@ -61,6 +62,7 @@ from etude.launch.records import (
     OnDemand,
     Pool,
     Provider,
+    ProviderKind,
     Quote,
     QuotedMachine,
     Rental,
@@ -124,6 +126,11 @@ def _refused(session: Session) -> str:
         if session.refusal is not None
         else "provider refused capacity"
     )
+
+
+def _paid(attempts: Sequence[RunAttempt]) -> list[RunAttempt]:
+    """Attempts that held a machine: a definite refusal acquired none."""
+    return [attempt for attempt in attempts if attempt.cause != CAPACITY_REFUSED]
 
 
 def _tries(attempts: Sequence[RunAttempt]) -> int:
@@ -1239,7 +1246,7 @@ class Scheduler:
         now = self._clock()
         record = self._store.run(run)
         attempts = self._store.attempts(run=run)
-        paid = [a for a in attempts if a.cause != CAPACITY_REFUSED]
+        paid = _paid(attempts)
         last = attempts[-1] if attempts else None
         refused = last is not None and last.cause == CAPACITY_REFUSED
         session = None if last is None else self._store.session(last.session)
@@ -1625,8 +1632,7 @@ class Scheduler:
             image=template.image
             or (
                 STOCK_IMAGE
-                if self._provider_service(template.provider)
-                in {"runpod", "vast", "lium", "ec2", "lambda"}
+                if self._provider_service(template.provider) in get_args(ProviderKind)
                 else None
             ),
         )
@@ -2367,7 +2373,7 @@ class Scheduler:
         )
 
     def _remaining(self, run: RunRecord, now: datetime) -> Budget:
-        attempts = [a for a in self._store.attempts(run=run.id) if a.cause != CAPACITY_REFUSED]
+        attempts = _paid(self._store.attempts(run=run.id))
         seconds = sum(
             max(0, ((a.finished_at or now) - a.started_at).total_seconds())
             for a in attempts

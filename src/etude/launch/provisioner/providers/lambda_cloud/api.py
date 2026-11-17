@@ -98,10 +98,6 @@ class _Failed(Record):
 class LambdaOffer(Offer):
     region: str | None = None
 
-    @classmethod
-    def unavailable(cls, reason: str) -> LambdaOffer:
-        return cls(available=False, hardware=None, usd_per_hour=Decimal(0), reason=reason)
-
 
 class LambdaAPI:
     def __init__(self, key: str, send: Send = send_to_provider) -> None:

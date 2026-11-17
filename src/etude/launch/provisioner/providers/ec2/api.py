@@ -260,13 +260,12 @@ class EC2API:
         return list(latest.values())
 
     def offer(self, template: MachineTemplate, zone: str | None) -> EC2Offer:
-        def none(reason: str) -> EC2Offer:
-            return EC2Offer(hardware=None, usd_per_hour=Decimal(0), available=False, reason=reason)
-
         if not self.region:
-            return none("EC2 needs an AWS region or availability zone in --data-center")
+            return EC2Offer.unavailable(
+                "EC2 needs an AWS region or availability zone in --data-center"
+            )
         if not template.gpu:
-            return none("EC2 needs a GPU template")
+            return EC2Offer.unavailable("EC2 needs a GPU template")
         fields = {
             "Filter.1.Name": "supported-usage-class",
             "Filter.1.Value.1": "spot" if template.spot else "on-demand",
@@ -305,7 +304,7 @@ class EC2API:
                     )
                 )
         if template.gpu not in names:
-            return none(
+            return EC2Offer.unavailable(
                 f"EC2 has no GPU named {template.gpu!r}; it names: {', '.join(sorted(names))}"
             )
         if zone:
@@ -324,7 +323,7 @@ class EC2API:
             }
             candidates = [gpu for gpu in candidates if gpu.flavor in supported]
         if not candidates:
-            return none("EC2 has no matching GPU instance type in this location")
+            return EC2Offer.unavailable("EC2 has no matching GPU instance type in this location")
         flavors = {gpu.flavor: gpu for gpu in candidates if gpu.flavor}
         products = self._products(
             "AmazonEC2",
@@ -340,7 +339,9 @@ class EC2API:
         if template.spot:
             prices = self._spot_prices(list(flavors), zone)
             if not prices:
-                return none("EC2 has no current spot price for the matching instance types")
+                return EC2Offer.unavailable(
+                    "EC2 has no current spot price for the matching instance types"
+                )
             spot = min(
                 prices,
                 key=lambda p: (
@@ -367,7 +368,7 @@ class EC2API:
             Quota,
         )
         if quota.vcpus < hardware.min_vcpus:
-            return none(
+            return EC2Offer.unavailable(
                 f"AWS quota {quota.name!r} is {quota.vcpus:g} vCPUs; {hardware.flavor} needs {hardware.min_vcpus}"
             )
         disk = self._price("AmazonEC2", volumeApiName="gp3", group="EBS Storage")

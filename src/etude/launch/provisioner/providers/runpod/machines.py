@@ -47,12 +47,7 @@ class RunPodMachines:
     def offer(self) -> Offer:
         template = self._template
         if template.spot:
-            return Offer(
-                available=False,
-                hardware=None,
-                usd_per_hour=Decimal(0),
-                reason="Etude rents no spot machines from RunPod",
-            )
+            return Offer.unavailable("Etude rents no spot machines from RunPod")
         return self._api.quote(
             gpu=template.gpu,
             gpu_count=template.gpu_count,
