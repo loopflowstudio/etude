@@ -57,7 +57,7 @@ class EC2Machines:
         raw = self.bucket.get(self._key(session))
         return None if raw is None else Intent.model_validate_json(raw)
 
-    def _prepare(self, request: MachineRequest) -> tuple[Intent, dict[str, str]]:
+    def _prepare(self, request: MachineRequest) -> tuple[Intent, dict[str, str], tuple[str, ...]]:
         if request.deadline is None or request.bootstrap is None:
             raise Refused("EC2 needs a deadline and storage bootstrap")
         quote = self._quote or self.offer()
@@ -88,7 +88,6 @@ class EC2Machines:
         if len(script) > 16 * 1024:
             raise Refused("EC2 user data exceeds 16 KiB")
         fields = {
-            "ClientToken": request.session,
             "MinCount": "1",
             "MaxCount": "1",
             "InstanceType": gpu.flavor,
@@ -103,9 +102,6 @@ class EC2Machines:
             "NetworkInterface.1.DeviceIndex": "0",
             "NetworkInterface.1.AssociatePublicIpAddress": "true",
         }
-        # A region-wide request lets EC2 pick a default subnet with capacity.
-        if quote.zone:
-            fields["Placement.AvailabilityZone"] = quote.zone
         if quote.max_price is not None:
             fields.update(
                 {
@@ -134,7 +130,7 @@ class EC2Machines:
             hardware=gpu,
             usd_per_hour=quote.usd_per_hour,
         )
-        return intent, fields
+        return intent, fields, quote.zones
 
     def _launch(self, intent: Intent, fields: dict[str, str]) -> Allocation:
         if datetime.now(UTC) >= intent.creation_deadline:
@@ -147,7 +143,7 @@ class EC2Machines:
         if prior is not None:
             return prior
         try:
-            intent, fields = self._prepare(request)
+            intent, fields, zones = self._prepare(request)
         except (OSError, ProviderUnavailable, StorageUnavailable) as error:
             # No RunInstances request can have left during boot preparation.
             raise Refused(f"EC2 preparation failed: {sanitize(str(error))}") from None
@@ -160,16 +156,33 @@ class EC2Machines:
             )
         except AlreadyThere:
             raise ProviderUnavailable("EC2 launch already claimed; reconciling by tag") from None
-        try:
-            allocation = self._launch(intent, fields)
-        except OSError:
-            # EC2 may have accepted the request. Replay the identical token, subnet,
-            # and signed user data while the original placement fence still holds.
+        # A region-wide request lets EC2 pick a default subnet with capacity. Each
+        # zone has its own token, so a refusal in one never fences the next.
+        placements = [
+            {
+                **fields,
+                "ClientToken": f"{request.session}-{zone}",
+                "Placement.AvailabilityZone": zone,
+            }
+            for zone in zones
+        ] or [{**fields, "ClientToken": request.session}]
+        for placement in placements:
             try:
-                allocation = self._launch(intent, fields)
-            except Refused:
-                raise ProviderUnavailable("EC2 launch reply lost; reconciling by tag") from None
-        return self._keep(request.session, allocation)
+                allocation = self._launch(intent, placement)
+            except Refused as error:
+                refusal = error
+                continue
+            except OSError:
+                # EC2 may have accepted the request. Replay the identical token, zone,
+                # and signed user data while the original placement fence still holds.
+                try:
+                    allocation = self._launch(intent, placement)
+                except Refused:
+                    raise ProviderUnavailable("EC2 launch reply lost; reconciling by tag") from None
+            return self._keep(request.session, allocation)
+        if len(zones) > 1:
+            raise Refused(f"{refusal} (asked {', '.join(zones)})") from None
+        raise refusal
 
     @staticmethod
     def _allocation(instance: Instance, intent: Intent) -> Allocation:

@@ -45,6 +45,8 @@ class Region:
         self.quota = 4
         self.spot_price = "0.5"
         self.launches: dict[str, bytes] = {}
+        self.extra_prices: tuple[tuple[str, str, str], ...] = ()
+        self.full: set[str] = set()  # zones that refuse for capacity
         self.boot = ""
 
     def __call__(
@@ -103,11 +105,16 @@ class Region:
                         ("us-west-2a", "1.2", "2026-11-17T08:00:00Z"),
                         ("us-west-2b", self.spot_price, "2026-11-17T09:00:00Z"),
                         ("us-west-2a", "0.1", "2026-11-17T07:00:00Z"),
+                        *self.extra_prices,
                     )
                 )
                 + "</spotPriceHistorySet>"
             )
         elif action == "RunInstances":
+            zone = fields.get("Placement.AvailabilityZone", [""])[0]
+            if zone in self.full:
+                error = f"<Error><Code>InsufficientInstanceCapacity</Code><Message>no {zone}</Message></Error>"
+                return HTTPReply(400, f"<Response><Errors>{error}</Errors></Response>".encode())
             token = fields["ClientToken"][0]
             if token not in self.launches:
                 self.launches[token] = body
@@ -223,7 +230,7 @@ def test_retry_recovers_one_rental_and_waits_for_guest_shutdown(
     )
     allocation = machine.create(request)
     assert allocation.id == "i-l4"
-    launch = parse_qs(region.launches["one"].decode())
+    (launch,) = [parse_qs(body.decode()) for body in region.launches.values()]
     if bid is None:
         assert "InstanceMarketOptions.MarketType" not in launch
     else:
@@ -249,6 +256,37 @@ def test_retry_recovers_one_rental_and_waits_for_guest_shutdown(
     region.volume = False
     assert recovered.end("one") is not None
     assert region.calls["TerminateInstances"] == 1
+
+
+def test_spot_asks_each_zone_its_bid_covers_after_a_capacity_refusal() -> None:
+    region, storage = Region(), Storage()
+    keys = Keys(access_key="fixture", secret_key="fixture")
+    api = EC2API(keys, "us-west-2", region)
+    bucket = Bucket("test", "us-west-2", keys, storage)
+    # The bid is 0.55: it covers 2c at 0.54 but not 2d at 0.60.
+    region.extra_prices = (
+        ("us-west-2c", "0.54", "2026-11-17T09:00:00Z"),
+        ("us-west-2d", "0.60", "2026-11-17T09:00:00Z"),
+    )
+    template = MachineTemplate(provider="aws", gpu="L4", spot=True)
+    request = MachineRequest(
+        session="one",
+        deadline=datetime.now(UTC) + timedelta(hours=1),
+        cap_usd=Decimal("1"),
+        bootstrap=BootstrapLinks(url="read", log_url="log", worker_log_url="worker"),
+    )
+    region.full = {"us-west-2b", "us-west-2c"}
+    with pytest.raises(Refused, match=r"no us-west-2c \(asked us-west-2b, us-west-2c\)"):
+        EC2Machines(template, api, None, bucket, "test").create(request)
+    assert region.calls["RunInstances"] == 2 and not region.launches
+    region.full = {"us-west-2b"}
+    region.calls.clear()
+    machine = EC2Machines(template, api, None, bucket, "other")
+    assert machine.create(request).id == "i-l4"
+    (launch,) = [parse_qs(body.decode()) for body in region.launches.values()]
+    assert launch["Placement.AvailabilityZone"] == ["us-west-2c"]
+    assert launch["InstanceMarketOptions.SpotOptions.MaxPrice"] == ["0.55"]
+    assert region.calls["RunInstances"] == 3  # 2b refused, 2c's lost reply replayed
 
 
 def test_missing_host_image_refuses_before_acquisition() -> None:

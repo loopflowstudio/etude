@@ -26,6 +26,7 @@ from etude.launch.client import _open
 from etude.launch.database import Database, launcher_file, upgrade
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Executor
+from etude.launch.listing import show_availability
 from etude.launch.provisioner.machines import MachineRequest, Refused
 from etude.launch.provisioner.providers.bootstrap import guard
 from etude.launch.provisioner.providers.cleanup import command
@@ -35,6 +36,7 @@ from etude.launch.provisioner.providers.vast.machines import OUTAGE_SECONDS, Out
 from etude.launch.records import (
     GPU,
     STOCK_IMAGE,
+    Availability,
     BootstrapLinks,
     MachineTemplate,
     OnDemand,
@@ -208,6 +210,30 @@ def test_spot_rental_bids_compute_only_and_destroys_a_stopped_instance() -> None
     assert machine.end("session") is not None
     assert not market.instances
     assert market.counts == {"POST": 1, "PUT": 1, "GET": 4, "DELETE": 1}
+
+
+def test_spot_availability_prints_the_bid_and_disk_rate_as_a_price(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    market = Marketplace()
+    # Vast's floats: their exact sum is 0.344444444444444413...
+    market.offers = [
+        {**OFFER, "min_bid": 0.333333333333333, "storage_total_cost": 0.0111111111111111}
+    ]
+    offer = machines(market, Storage(), template=TEMPLATE.model_copy(update={"spot": True})).offer()
+    show_availability(
+        Availability(
+            spot=True,
+            ondemand="bid",
+            offer=offer,
+            max_usd_per_hour=Decimal("0.50"),
+            in_use=0,
+            max_machines=1,
+            observed_at=datetime(2026, 11, 17, tzinfo=UTC),
+            refusal=None,
+        )
+    )
+    assert "at $0.3444/hour, spot (ceiling $0.50)  available" in capsys.readouterr().out
 
 
 def test_rental_keeps_identity_and_package_without_account_credentials() -> None:

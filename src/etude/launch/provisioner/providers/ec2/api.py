@@ -30,7 +30,10 @@ AMI_PARAMETER = (
 
 
 class EC2Offer(Offer):
-    zone: str | None = None
+    # Zones to ask, in order; empty lets EC2 choose. A spot offer lists every zone
+    # whose current price its bid covers, cheapest first: one zone's capacity
+    # refusal says nothing about the next.
+    zones: tuple[str, ...] = ()
     max_price: Decimal | None = None  # compute only; EBS and IPv4 are billed separately
 
 
@@ -353,10 +356,15 @@ class EC2API:
             )
             hardware = flavors[spot.flavor]
             rate = min(rates[spot.flavor], spot.price * SPOT_HEADROOM)
-            zone = spot.zone
+            covered = sorted(
+                (p for p in prices if p.flavor == spot.flavor and p.price <= rate),
+                key=lambda p: (p.price, p.zone),
+            )
+            zones = tuple(p.zone for p in covered)
         else:
             hardware = min(candidates, key=lambda gpu: rates[gpu.flavor])
             rate = rates[hardware.flavor]
+            zones = (zone,) if zone else ()
         if (hardware.flavor or "").startswith("p"):
             quota_code = "L-7212CCBC" if template.spot else "L-417A185B"
         else:
@@ -376,7 +384,7 @@ class EC2API:
             "AmazonVPC", groupDescription="Hourly charge for In-use Public IPv4 Addresses"
         )
         return EC2Offer(
-            zone=zone,
+            zones=zones,
             max_price=rate if template.spot else None,
             hardware=hardware,
             available=True,

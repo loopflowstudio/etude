@@ -228,8 +228,8 @@ def test_machines_join_pools_and_this_computer_can_be_turned_off(
     assert run(capsys, "machine", "add", "bench", "bench")[-1] == "bench  bench"
     listed = run(capsys, "machine", "add", "second", "second", "--pool", "bench")
     assert listed[-1] == "bench  bench, second"
-    assert main(["ondemand", "add", "l4", "--provider", "lambda", "--gpu", "NVIDIA L4"]) == 1
-    assert "no provider named 'lambda'" in capsys.readouterr().err
+    assert main(["ondemand", "add", "l4", "--provider", "nowhere", "--gpu", "NVIDIA L4"]) == 1
+    assert "no provider named 'nowhere'" in capsys.readouterr().err
     assert main(["machine", "add", "local", "localhost"]) == 1
     assert "already the local pool" in capsys.readouterr().err
 

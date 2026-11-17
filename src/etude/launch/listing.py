@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import Sequence
+from decimal import Decimal
 
 from etude.identity import run_address
 from etude.launch.records import Availability, Machine, Quote
@@ -153,10 +154,10 @@ def show_quote(quote: Quote) -> None:
     for each in quote.machines:
         if each.machine is not None:
             where = f"machine {each.machine}" + (
-                f" at ${each.usd_per_hour}/hour" if each.usd_per_hour else ""
+                f" at {_per_hour(each.usd_per_hour)}" if each.usd_per_hour else ""
             )
         else:
-            where = f"rent {each.hardware or 'a machine'} at ${each.usd_per_hour}/hour"
+            where = f"rent {each.hardware or 'a machine'} at {_per_hour(each.usd_per_hour)}"
         if each.spot:
             where += ", spot"
         if each.slots > 1:
@@ -173,6 +174,11 @@ def show_quote(quote: Quote) -> None:
     )
 
 
+def _per_hour(usd: Decimal) -> str:
+    """A provider's hourly price to four decimal places: Vast's float sums carry binary noise."""
+    return f"${usd.quantize(Decimal('0.0001')).normalize():f}/hour"
+
+
 def show_availability(answer: Availability) -> None:
     offer = answer.offer
     ceiling = (
@@ -180,7 +186,7 @@ def show_availability(answer: Availability) -> None:
     )
     market = ", spot" if answer.spot else ""
     if offer.available:
-        description = f"{offer.hardware or 'a machine'} at ${offer.usd_per_hour}/hour{market} ({ceiling})  available"
+        description = f"{offer.hardware or 'a machine'} at {_per_hour(offer.usd_per_hour)}{market} ({ceiling})  available"
     else:
         description = f"none available: {offer.reason}" if offer.reason else "none available"
     print(

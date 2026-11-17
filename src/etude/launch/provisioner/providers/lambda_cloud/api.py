@@ -156,7 +156,12 @@ class LambdaAPI:
             return LambdaOffer.unavailable("Etude rents no spot machines from Lambda")
         if not template.gpu:
             return LambdaOffer.unavailable("Lambda needs a GPU template")
-        catalog = self._read(_Catalog, "instance-types").data.values()
+        # CPU types (`cpu_4x_general`) describe their GPU as "N/A".
+        catalog = [
+            stock
+            for stock in self._read(_Catalog, "instance-types").data.values()
+            if stock.instance_type.specs.gpus > 0
+        ]
         matches = [
             stock for stock in catalog if stock.instance_type.gpu_description == template.gpu
         ]

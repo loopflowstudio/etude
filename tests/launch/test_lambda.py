@@ -40,7 +40,16 @@ class Workspace:
                         "specs": {"gpus": 1, "vcpus": 30, "memory_gib": 200, "storage_gib": 1400},
                     },
                     "regions_with_capacity_available": [{"name": "us-west-1"}],
-                }
+                },
+                "cpu_4x_general": {
+                    "instance_type": {
+                        "name": "cpu_4x_general",
+                        "price_cents_per_hour": 10,
+                        "gpu_description": "N/A",
+                        "specs": {"gpus": 0, "vcpus": 4, "memory_gib": 16, "storage_gib": 100},
+                    },
+                    "regions_with_capacity_available": [{"name": "us-west-1"}],
+                },
             }
         elif path == "ssh-keys":
             data = [{"name": "test"}]

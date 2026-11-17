@@ -285,7 +285,8 @@ power-off for the rental's deadline; it also powers off when the worker exits
 for any reason. No credential that can delete anything is on the machine, and
 neither path needs the launcher. The scheduler's loop terminates by the
 `etude-session` tag as the third path, and `RunInstances` carries the session
-id as its idempotency token, so a lost reply never rents a second instance.
+id (with the zone, for a request that names one) as its idempotency token, so a
+lost reply never rents a second instance.
 To check an account by hand:
 
 ```sh
@@ -399,7 +400,8 @@ on-demand rents at the provider's standard price.
 | Lambda | nothing: `Etude rents no spot machines from Lambda` | | |
 
 On EC2 the compute portion of the quote is sent as the instance's maximum
-price. If the spot market rises past it, AWS takes the machine back. The 10% is
+price. When a zone refuses for capacity, Etude asks the next zone whose current
+spot price that maximum covers, cheapest first, before reporting the refusal. If the spot market rises past it, AWS takes the machine back. The 10% is
 headroom for that: over a week of us-west-2 L4 prices the spot price moved
 about four times a day, within that range. The on-demand's `--max-usd-per-hour`
 applies to the quote as always. Spot has its own AWS quota (`All G and VT Spot

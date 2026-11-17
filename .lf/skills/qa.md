@@ -290,3 +290,29 @@ the node that booted, when it is in stock. Read the pod inventory with
 `LiumAPI(key).ask("GET", "pods")` inside `limit_time(30)`. A run that loses
 its machine retries on a fresh rental: set `etude ondemand max NAME 0` and
 `etude cancel` before finishing, then confirm `GET pods` is `[]`.
+
+## Etude: a live EC2 or Lambda check, when a Task authorizes spend
+
+Rent from the repo clone (as for RunPod), never from a `/tmp` lab whose
+`etude-sdk` source is an editable path on this Mac: the remote job's `uv`
+cannot resolve that path and the run fails after the machine boots. S3 storage
+needs the client's `s3` extra; without it a command says only `s3_requires_boto3`.
+AWS keys come from the SSO role, Lambda keys from Doppler:
+
+```sh
+eval "$(aws configure export-credentials --format env)"
+doppler run -p etude -c prd --only-secrets LAMBDA_API_KEY --only-secrets LAMBDA_TERMINATE_KEY -- CMD
+etude storage add west --bucket etudefantasia --prefix manabot/etude-launch/qa-TASK --provider s3 --region us-west-2
+etude provider set aws --kind ec2 --storage west
+etude ondemand add t4 --provider aws --gpu T4 --max 1 --max-usd-per-hour 0.70
+etude availability t4 --timeout 60        # g4dn.xlarge ... $0.5438/hour
+```
+
+`availability` reads are free; probe spot, quota (`--data-center us-east-1`
+spot is 0 vCPUs), unknown GPU names and providers without spot there first.
+The prototype's `max_usd=0.10` does not cover a T4 window; raise it to 0.30 in
+the clone. Boot to job takes about six minutes (image pull). us-west-2 spot is
+often refused in every zone; a refused create rents nothing. Confirm cleanup
+with `aws ec2 describe-instances` / `describe-volumes` filtered on
+`tag-key=etude-session` (state reason `Client.UserInitiatedShutdown` is the
+host's own power-off).
