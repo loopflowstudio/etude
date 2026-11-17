@@ -156,7 +156,11 @@ survives pod deletion; Etude reports actual costs only through its validated
 charges afterward. Missing or contradictory accounting stays estimated. A pod
 removed before any charge has no statement, so its cost stays an estimate.
 Lium sends timestamps without a zone; Etude reads them as UTC.
-Offline fixtures verify this integration; no paid Lium lifecycle is claimed here.
+A live check on 2026-11-17 confirmed creation, timestamp parsing and deletion
+after the startup deadline: the RTX 4090 pod stayed `PENDING` without an SSH
+address for ten minutes, then the scheduler confirmed its deletion. A final
+inventory read showed no pods. The machine listed as `deleted` at about $0.07 estimated
+cost. A successful bootstrap and GPU job remain unverified.
 
 #### A pod Etude made is always deletable
 
@@ -165,10 +169,10 @@ A pod whose description Etude cannot read is still a machine it holds, and
 
 ```text
 $ etude machines
-rtx4090-7b0c01e641d4  rtx4090  starting, RTX 4090 with at least 4 vCPUs, 16 GB, rented until 2026-11-17 17:01 UTC, ~$0.01
+rtx4090-7b0c01e641d4  rtx4090  starting, RTX 4090 with at least 11 vCPUs, 20 GB, rented until 2026-11-17 17:01 UTC, ~$0.01
 $ etude terminate rtx4090-7b0c01e641d4
 $ etude machines --all
-rtx4090-7b0c01e641d4  rtx4090  deleted, RTX 4090 with at least 4 vCPUs, 16 GB, rented, ended 2026-11-17 16:04 UTC, ~$0.01
+rtx4090-7b0c01e641d4  rtx4090  deleted, RTX 4090 with at least 11 vCPUs, 20 GB, rented, ended 2026-11-17 16:04 UTC, ~$0.01
 ```
 
 Left alone, the same machine is deleted by the scheduler's loop at its startup
