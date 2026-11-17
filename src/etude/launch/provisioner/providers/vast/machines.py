@@ -28,6 +28,7 @@ from etude.launch.provisioner.machines import (
 )
 from etude.launch.provisioner.providers.program import Program, boot_source
 from etude.launch.provisioner.providers.vast.api import (
+    BidOffer,
     Create,
     Instance,
     InstanceIdentity,
@@ -72,7 +73,7 @@ class VastMachines:
         selected = self._offers[0] if self._offers else None
         return Offer(
             hardware=None if selected is None else selected.hardware,
-            usd_per_hour=Decimal(0) if selected is None else selected.dph_total,
+            usd_per_hour=Decimal(0) if selected is None else selected.price,
             available=selected is not None,
         )
 
@@ -113,7 +114,7 @@ class VastMachines:
             (
                 candidate
                 for candidate in offers
-                if candidate.dph_total <= offers[0].dph_total
+                if candidate.price <= offers[0].price
                 and (
                     candidate.end_date is None or candidate.end_date >= request.deadline.timestamp()
                 )
@@ -128,7 +129,7 @@ class VastMachines:
         now = datetime.now(UTC)
         if now >= creation_deadline:
             raise Refused("startup or rental deadline expired; no Vast instance created")
-        cost = offer.dph_total * Decimal(str((request.deadline - now).total_seconds())) / 3600
+        cost = offer.price * Decimal(str((request.deadline - now).total_seconds())) / 3600
         if cost > request.cap_usd:
             raise Refused("Vast offer exceeds the reserved rental budget")
         # Receipt of intent is not a receipt of creation. Never retry the PUT,
@@ -142,6 +143,7 @@ class VastMachines:
                 offer,
                 Create(
                     image=image.resolved,
+                    price=float(offer.min_bid) if isinstance(offer, BidOffer) else None,
                     disk=self._template.disk_gb or 40,
                     label=f"etude-{request.session}",
                     env=env,
@@ -212,7 +214,10 @@ class VastMachines:
             return True
         key = self._key(session_id, "outage")
         raw = self._bucket.get(key)
-        if current is not None and current.actual_status == "destroyed":
+        if current is not None and (
+            current.actual_status == "destroyed"
+            or (self._template.spot and current.actual_status == "stopped")
+        ):
             return False
         if current is not None and current.actual_status not in _DOWN:
             if raw is not None:

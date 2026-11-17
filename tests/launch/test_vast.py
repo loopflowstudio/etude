@@ -104,7 +104,9 @@ class Marketplace:
         path = urlsplit(url).path
         reply: object
         if path == "/api/v0/bundles/":
-            reply = {"offers": self.offers}
+            assert body is not None
+            bid = json.loads(body)["type"] == "bid"
+            reply = {"offers": [row for row in self.offers if ("min_bid" in row) == bid]}
         elif path == "/api/v0/asks/7/" and method == "PUT":
             assert body is not None
             self.created = Create.model_validate_json(body)
@@ -141,12 +143,16 @@ class Marketplace:
 
 
 def machines(
-    market: Marketplace, storage: Storage, now: Callable[[], datetime] = lambda: datetime.now(UTC)
+    market: Marketplace,
+    storage: Storage,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    *,
+    template: MachineTemplate = TEMPLATE,
 ) -> VastMachines:
     bucket = Bucket(
         "journal", "us-west-2", Keys(access_key="fixture", secret_key="fixture"), storage
     )
-    return VastMachines(TEMPLATE, VastAPI("fixture-account-key", market), bucket, "test", now)
+    return VastMachines(template, VastAPI("fixture-account-key", market), bucket, "test", now)
 
 
 def request() -> MachineRequest:
@@ -181,6 +187,20 @@ def test_offer_prices_disk_and_filters_incompatible_or_metered_capacity() -> Non
     market.offline = True
     with pytest.raises(ProviderUnavailable):
         machine.offer()
+
+
+def test_spot_rental_bids_compute_only_and_destroys_a_stopped_instance() -> None:
+    market = Marketplace()
+    market.offers = [{**OFFER, "min_bid": 0.3, "dph_total": 0.4}]
+    machine = machines(market, Storage(), template=TEMPLATE.model_copy(update={"spot": True}))
+    assert machine.offer().usd_per_hour == Decimal("0.4")
+    machine.create(request())
+    assert market.created is not None and market.created.price == 0.3
+    market.instances[12]["actual_status"] = "stopped"
+    assert not machine.alive("session")
+    assert machine.end("session") is not None
+    assert not market.instances
+    assert market.counts == {"POST": 1, "PUT": 1, "GET": 4, "DELETE": 1}
 
 
 def test_rental_keeps_identity_and_package_without_account_credentials() -> None:
