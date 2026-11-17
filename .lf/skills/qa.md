@@ -269,3 +269,24 @@ On a GPU the job log shows `etude: agents: … N inputs in M batches` for the sh
 List pods with `curl -H "Authorization: Bearer $RUNPOD_API_KEY"
 https://api.runpod.io/v2/pods` (`.pods[]`); `rest.runpod.io` does not resolve
 here. Other sessions' `etude-*` pods may be present; touch only your own.
+
+## Etude: a live Lium check, when a Task authorizes spend
+
+Same clone and Doppler wrapper as RunPod, adding `--only-secrets LIUM_API_KEY`
+from `etude/prd`; export `LIUM_SSH_PUBLIC_KEY="$(cat ~/.ssh/id_ed25519.pub)"`.
+Launch from the clone (`examples/prototype.py`), never from a `/tmp` lab whose
+`etude-sdk` is a local path source: the job's remote `uv sync` fails with
+`Distribution not found`. Raise the training job's `max_usd` to 0.60 in the
+clone: Lium reserves a whole hour ($0.36–0.41 on a 4090).
+
+Lium nodes took about fourteen minutes to reach RUNNING, and a launch-rented
+machine lives only job hours + `setup_seconds` (900, not settable from the CLI);
+`ondemand startup --seconds` cannot extend that. For a GPU job that must
+finish, `etude rent ONDEMAND --hours 1 --max-usd 0.60` first, then launch.
+Host keys are unknown before boot: put a QA-only `ssh` shim first on `PATH`
+that adds `-o StrictHostKeyChecking=accept-new`. Executor `4b606116-…` (DE)
+stayed `PENDING / connecting to node` on two rentals; `--data-center GR` is
+the node that booted, when it is in stock. Read the pod inventory with
+`LiumAPI(key).ask("GET", "pods")` inside `limit_time(30)`. A run that loses
+its machine retries on a fresh rental: set `etude ondemand max NAME 0` and
+`etude cancel` before finishing, then confirm `GET pods` is `[]`.
