@@ -8,17 +8,34 @@ from __future__ import annotations
 
 import ipaddress
 import shlex
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import AwareDatetime, Field, TypeAdapter, model_validator
+from pydantic import AfterValidator, Field, TypeAdapter, model_validator
 
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.provisioner.providers.lium.http import LiumHTTP
 from etude.launch.records import GPU, MachineTemplate
 from etude.spec import Record
+
+
+def _utc(value: datetime) -> datetime:
+    # Lium's timezone-naive wire timestamps describe UTC, never launcher local time.
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+_Timestamp = Annotated[datetime, AfterValidator(_utc)]
+
+
+class _Identity(Record):
+    id: UUID
+    pod_name: str
+
+
+class _Status(Record):
+    status: str
 
 
 class Node(Record):
@@ -103,11 +120,11 @@ class Pod(Record):
     executor_id: UUID
     pod_name: str
     status: str
-    created_at: AwareDatetime
+    created_at: _Timestamp
     price: Decimal = Field(ge=0, allow_inf_nan=False)
     gpu_count: int = Field(gt=0)
     ssh_connect_cmd: str
-    removal_scheduled_at: AwareDatetime | None
+    removal_scheduled_at: _Timestamp | None
 
     @model_validator(mode="after")
     def _validate_address(self) -> Pod:
@@ -142,15 +159,15 @@ class _Removal(Record):
 
 class Charge(Record):
     amount: Decimal = Field(ge=0, allow_inf_nan=False)
-    billed_until: AwareDatetime
+    billed_until: _Timestamp
 
 
 class Statement(Record):
     pod_id: UUID
-    created_at: AwareDatetime | None
-    removed_at: AwareDatetime | None
+    created_at: _Timestamp | None
+    removed_at: _Timestamp | None
     removed: bool
-    billed_until: AwareDatetime | None
+    billed_until: _Timestamp | None
     total: Decimal = Field(ge=0, allow_inf_nan=False)
     days: tuple[Charge, ...]
 
@@ -239,18 +256,22 @@ class LiumAPI(LiumHTTP):
             raise ProviderUnavailable("Lium returned a different pod id")
         return pod
 
-    def named(self, name: str) -> Pod | None:
+    def status(self, id: UUID) -> str | None:
+        raw = self.ask("GET", f"pods/{id}", absent_ok=True)
+        return None if raw is None else _read(_Status, raw).status
+
+    def named(self, name: str) -> UUID | None:
         try:
             raw = self.ask("GET", "pods")
             if raw is None:
                 raise ValueError()
-            pods = TypeAdapter(tuple[Pod, ...]).validate_json(raw)
+            pods = TypeAdapter(tuple[_Identity, ...]).validate_json(raw)
         except ValueError:
             raise ProviderUnavailable("Lium pod inventory is unreadable") from None
         found = [pod for pod in pods if pod.pod_name == name]
         if len(found) > 1:
             raise ProviderUnavailable("multiple Lium pods have the session name")
-        return found[0] if found else None
+        return found[0].id if found else None
 
     def schedule(self, id: UUID, deadline: datetime) -> Pod:
         self.ask(

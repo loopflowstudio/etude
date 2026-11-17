@@ -74,8 +74,12 @@ class Machines(Protocol):
 
     def offer(self) -> Offer: ...
     def create(self, request: MachineRequest) -> Allocation: ...
-    def find(self, session_id: str) -> Allocation | None:
-        """Recover acquisition; None confirms none occurred. Raise while uncertain."""
+    def find(self, session_id: str) -> str | None:
+        """Read identity only; None confirms none occurred. Raise while uncertain."""
+        ...
+
+    def allocation(self, session_id: str) -> Allocation | None:
+        """Read price, hardware and address; raise while facts are unreadable."""
         ...
 
     def alive(self, session_id: str) -> bool: ...
@@ -103,7 +107,10 @@ class OwnedMachine:
             created_at=datetime.now(UTC),
         )
 
-    def find(self, session_id: str) -> Allocation | None:
+    def find(self, session_id: str) -> str | None:
+        return None
+
+    def allocation(self, session_id: str) -> Allocation | None:
         return None
 
     def alive(self, session_id: str) -> bool:

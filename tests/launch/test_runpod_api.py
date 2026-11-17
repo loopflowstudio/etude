@@ -29,7 +29,7 @@ from etude.launch.storage.s3 import Bucket
 from etude.launch.storage.transport import HTTPReply
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import open_database
-from tests.launch.test_runpod_machines import Storage
+from tests.launch.test_runpod_machines import RunPod, Storage
 
 POD = {
     "id": "abc123",
@@ -213,7 +213,7 @@ def test_a_pod_is_found_by_name_across_pages_and_absence_needs_the_last_page() -
         RunPodAPI("key", Provider(replies={})).named("etude-7f3a")
 
 
-def test_delete_dates_only_the_exact_live_pod() -> None:
+def test_delete_checks_retained_creation_time_and_dates_confirmed_absence() -> None:
     fact = RunPodAPI._pod(POD)
     live = Provider(replies={"GET pods/abc123": (200, POD), "DELETE pods/abc123": (200, None)})
     assert RunPodAPI("key", live).delete(fact).tzinfo is not None
@@ -224,8 +224,7 @@ def test_delete_dates_only_the_exact_live_pod() -> None:
     with pytest.raises(ProviderUnavailable, match="different pod"):
         RunPodAPI("key", reused).delete(fact)
     gone = Provider(replies={"GET pods/abc123": (404, None)})
-    with pytest.raises(ProviderUnavailable, match="cannot be dated"):
-        RunPodAPI("key", gone).delete(fact)
+    assert RunPodAPI("key", gone).delete(fact).tzinfo is not None
     assert all(method == "GET" for method, _, _ in reused.asked + gone.asked)
 
 
@@ -304,7 +303,7 @@ def test_stock_create_counts_package_reuse_without_waiting_for_ssh(
         body = receipt.model_dump_json().encode()
         storage.objects[receipt_key] = body
         with counting.record():
-            found = machines.find("7f3a")
+            found = machines.allocation("7f3a")
             assert found is not None and found.usd_per_hour == receipt.usd_per_hour
             assert counting.snapshot() == Counts(bucket=1)
         assert storage.objects[receipt_key] == body
@@ -315,8 +314,8 @@ def test_stock_create_counts_package_reuse_without_waiting_for_ssh(
         {"pods": [POD], "pagination": {"hasNextPage": False, "nextCursor": None}},
     )
     with counting.record():
-        found = machines.find("7f3a")
-        assert found is not None and found.id == POD["id"]
+        identity = machines.find("7f3a")
+        assert identity == POD["id"]
         assert counting.snapshot() == Counts(provider=1, bucket=2)
     payloads = [payload for method, path, payload in provider.asked if method == "POST"]
     assert len([key for key in storage.objects if "/programs/" in key]) == 1
@@ -328,6 +327,51 @@ def test_stock_create_counts_package_reuse_without_waiting_for_ssh(
         assert payload["entrypoint"] == ["python3.12", "-c", boot]
         assert len(boot.encode()) < 512  # below the previously accepted small bootstrap
         assert len(base64.b64decode(payload["env"]["ETUDE_PROGRAM"])) < 32_000
+
+
+@pytest.mark.parametrize("recover_facts", [False, True])
+def test_unreadable_inventory_facts_do_not_block_owned_pod_deletion(
+    tmp_path: Path, recover_facts: bool
+) -> None:
+    storage = Storage()
+    market = RunPod(storage, tmp_path)
+    market.pods = {
+        "foreign": {"id": "foreign", "name": "another-session"},
+        "abc123": {"id": "abc123", "name": "etude-7f3a", "createdAt": "invalid"},
+    }
+    counts = Counting(open_database(launcher_file(tmp_path)))
+    machines = RunPodMachines(
+        Account(name="runpod", kind="runpod", registry="", storage="west"),
+        MachineTemplate(provider="runpod", gpu="NVIDIA L4"),
+        RunPodAPI("key", counts.transport("provider", market)),
+        Bucket(
+            "journal",
+            "us-west-2",
+            Keys(access_key="fixture", secret_key="fixture"),
+            counts.transport("bucket", storage),
+        ),
+        "test",
+    )
+    with counts.record():
+        assert machines.find("7f3a") == "abc123"
+        assert counts.snapshot() == Counts(provider=1, bucket=2)
+    if recover_facts:
+        market.pods["abc123"] = POD.copy()
+        with counts.record():
+            allocation = machines.allocation("7f3a")
+            assert allocation is not None and allocation.usd_per_hour == Decimal("0.59")
+            assert machines.allocation("7f3a") == allocation
+            assert counts.snapshot() == Counts(provider=1, bucket=3)
+        del market.pods["abc123"]["cost"]
+    else:
+        market.pods["abc123"]["name"] = "reused"
+        with pytest.raises(ProviderUnavailable, match="different pod"):
+            machines.end("7f3a")
+        market.pods["abc123"]["name"] = "etude-7f3a"
+    with counts.record():
+        assert machines.end("7f3a") is not None
+        assert set(market.pods) == {"foreign"}
+        assert counts.snapshot() == Counts(provider=2, bucket=1)
 
 
 def test_one_cpu_rental_quotes_creates_and_deletes_with_pinned_provider_calls(
@@ -378,7 +422,7 @@ def test_one_cpu_rental_quotes_creates_and_deletes_with_pinned_provider_calls(
     assert allocation.hardware == CPU(flavor="cpu3c", vcpus=8)
     with counting.record():
         assert machines.end("7f3a") is not None
-        assert counting.snapshot() == Counts(provider=3, bucket=1)
+        assert counting.snapshot() == Counts(provider=2, bucket=1)
     (created,) = [payload for method, _, payload in provider.asked if method == "POST"]
     assert created["cpu"] == {"id": "cpu3c", "vcpuCount": 8} and "gpu" not in created
     assert created["disk"] == 40 and created["image"] == STOCK_IMAGE

@@ -11,8 +11,9 @@ import math
 import os
 import shlex
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import UUID
 
 from etude.deadline import limit_time, remaining
 from etude.launch.errors import ProviderUnavailable
@@ -34,6 +35,11 @@ from etude.spec import Record
 class Intent(Record):
     request: MachineRequest
     offer: LiumOffer
+
+
+class Receipt(Record):
+    id: UUID
+    pod: Pod | None = None
 
 
 # A lost SSH reply can be retried, but never starts a second bootstrap. The
@@ -105,13 +111,18 @@ class LiumMachines:
     def _keep(self, session: str, pod: Pod) -> None:
         if pod.pod_name != f"etude-{session}":
             raise ProviderUnavailable("Lium pod name does not match this session")
-        self._bucket.put(self._key(session, "receipt"), pod.model_dump_json().encode())
+        self._keep_receipt(session, Receipt(id=pod.id, pod=pod))
+
+    def _keep_receipt(self, session: str, receipt: Receipt) -> None:
+        self._bucket.put(self._key(session, "receipt"), receipt.model_dump_json().encode())
 
     def create(self, request: MachineRequest) -> Allocation:
         if request.deadline is None or request.bootstrap is None:
             raise Refused("Lium rentals need a deadline and storage bootstrap")
-        found = self.find(request.session)
-        if found is not None:
+        if self._receipt(request.session) is not None:
+            found = self.allocation(request.session)
+            if found is None:
+                raise ProviderUnavailable("Lium accepted creation; pod not yet visible")
             return found
         public_key = os.environ.get("LIUM_SSH_PUBLIC_KEY", "").strip()
         if (
@@ -147,6 +158,7 @@ class LiumMachines:
         check_creation()
         with limit_time((cutoff - datetime.now(UTC)).total_seconds()):
             id = self._api.create(offer, creation, request.session)
+            self._keep_receipt(request.session, Receipt(id=id))
             pod = self._api.pod(id)
             if pod is None:
                 raise ProviderUnavailable("Lium accepted creation; pod not yet visible")
@@ -189,55 +201,82 @@ class LiumMachines:
             hardware=intent.offer.hardware,
         )
 
-    def find(self, session_id: str) -> Allocation | None:
+    def _receipt(self, session_id: str) -> Receipt | None:
+        receipt = self._read(session_id, "receipt", Receipt)
+        if receipt is not None:
+            return receipt
         intent = self._read(session_id, "intent", Intent)
         if intent is None:
             return None
-        receipt = self._read(session_id, "receipt", Pod)
-        pod = (
-            self._api.named(f"etude-{session_id}") if receipt is None else self._api.pod(receipt.id)
-        )
+        id = self._api.named(f"etude-{session_id}")
+        if id is None:
+            assert intent.request.deadline is not None
+            # The whole-hour fallback may outlive the absolute rental deadline.
+            settles = intent.request.deadline + timedelta(hours=self.safeguards.reservation_hours)
+            if datetime.now(UTC) >= settles:
+                return None
+            raise ProviderUnavailable(
+                "Lium create has no pod yet; settles as nothing rented after "
+                f"{settles:%Y-%m-%d %H:%M} UTC"
+            )
+        receipt = Receipt(id=id)
+        self._keep_receipt(session_id, receipt)
+        return receipt
+
+    def find(self, session_id: str) -> str | None:
+        receipt = self._receipt(session_id)
+        return None if receipt is None else str(receipt.id)
+
+    def allocation(self, session_id: str) -> Allocation | None:
+        receipt = self._receipt(session_id)
+        if receipt is None:
+            return None
+        intent = self._read(session_id, "intent", Intent)
+        assert intent is not None
+        pod = self._api.pod(receipt.id)
         if pod is None:
-            if receipt is not None:
-                return self._allocation(intent, receipt)
-            raise ProviderUnavailable("Lium create already attempted; awaiting reconciliation")
+            return None if receipt.pod is None else self._allocation(intent, receipt.pod)
         self._keep(session_id, pod)
         return self._resume(intent, pod)
 
     def alive(self, session_id: str) -> bool:
-        receipt = self._read(session_id, "receipt", Pod)
+        receipt = self._read(session_id, "receipt", Receipt)
         if receipt is None:
             return True
-        pod = self._api.pod(receipt.id)
-        return pod is not None and pod.status not in {"ERROR", "FAILED", "TERMINATED"}
+        try:
+            status = self._api.status(receipt.id)
+        except ProviderUnavailable:
+            return True
+        return status is not None and status not in {
+            "CREATION_FAILED",
+            "BROKEN",
+            "STOPPED",
+            "DELETING",
+            "FAILED",
+            "REBOOT_FAILED",
+        }
 
     def end(self, session_id: str) -> datetime | None:
-        receipt = self._read(session_id, "receipt", Pod)
-        if receipt is None and self._read(session_id, "intent", Intent) is None:
+        receipt = self._receipt(session_id)
+        if receipt is None:
             return None
-        pod = (
-            self._api.named(f"etude-{session_id}") if receipt is None else self._api.pod(receipt.id)
-        )
-        if pod is None:
-            return datetime.now(UTC) if receipt is not None else None
-        self._keep(session_id, pod)
-        self._api.delete(pod.id)
-        return datetime.now(UTC) if self._api.pod(pod.id) is None else None
+        self._api.delete(receipt.id)
+        return datetime.now(UTC) if self._api.status(receipt.id) is None else None
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
-        receipt = self._read(session_id, "receipt", Pod)
-        if receipt is None:
+        receipt = self._read(session_id, "receipt", Receipt)
+        if receipt is None or receipt.pod is None:
             return None
         statement = self._api.statement(receipt.id)
         if statement is None or statement.billed_until is None:
             return None
         watermarks = [row.billed_until for row in statement.days]
         if (
-            statement.created_at != receipt.created_at
-            or not receipt.created_at <= statement.billed_until <= now
+            statement.created_at != receipt.pod.created_at
+            or not receipt.pod.created_at <= statement.billed_until <= now
             or not watermarks
             or watermarks != sorted(set(watermarks))
-            or watermarks[0] < receipt.created_at
+            or watermarks[0] < receipt.pod.created_at
             or watermarks[-1] != statement.billed_until
             or sum(row.amount for row in statement.days) != statement.total
             or (statement.removed and statement.removed_at != statement.billed_until)

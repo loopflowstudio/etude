@@ -37,7 +37,7 @@ from etude.errors import LauncherError, explain, sanitize
 from etude.identity import resume_conflicts, run_address
 from etude.launch import source
 from etude.launch.database import Database
-from etude.launch.errors import LaunchError
+from etude.launch.errors import LaunchError, ProviderUnavailable
 from etude.launch.executor import Execution
 from etude.launch.logging import bounded
 from etude.launch.provisioner.machines import Refused, Safeguards, creation_guard
@@ -1789,7 +1789,13 @@ class Scheduler:
 
     def _creation_facts(self, session: Session, now: datetime) -> Session:
         service = self._service(session)
-        allocation = service.allocation(session.id)
+        try:
+            allocation = service.allocation(session.id)
+        except ProviderUnavailable as error:
+            self._diagnose(
+                "machine readiness", "machine is not ready yet", error, session=session.id
+            )
+            allocation = None
         if allocation is not None and allocation.usd_per_hour != self._usd_per_hour(session):
             self._store.record_price(session, allocation.usd_per_hour)
             session = self._store.session(session.id)

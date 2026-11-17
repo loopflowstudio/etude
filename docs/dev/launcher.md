@@ -750,7 +750,9 @@ provisioning and execution, while provisioners and workers remain independent.
 - **Provisioner.** `provisioner/machines.py` defines allocations, requests,
   safeguards and definite capacity refusal. Provider implementations obtain
   machines, supply stock-image boot, read prices/bills and terminate exact
-  identities. `OwnedMachine` represents an existing address. Provisioning knows
+  identities. `Machines.find` answers with the provider's id alone;
+  `Machines.allocation` reads the facts and may fail without hiding the
+  machine. `OwnedMachine` represents an existing address. Provisioning knows
   nothing of jobs or runs. Rented machines start themselves; owned hosts use
   their configured connection.
 - **Worker.** `worker/attempts.py` executes packets; `worker/courier.py` moves
@@ -760,12 +762,20 @@ provisioning and execution, while provisioners and workers remain independent.
 
 The SQLite file is `$ETUDE_HOME/launcher.sqlite` (default `~/.etude`), carried
 across releases by migrations; see [Upgrading Etude](#upgrading-etude). Versioned
-writes claim each session once. A lost create reply is looked up, never
-repeated; if the provider still has no such machine at the rental's deadline,
-or when it is terminated, it is recorded as never acquired: it costs nothing and
-no longer counts toward the on-demand's machine limit. A 4xx reply to a create
-(except 408) is an answer, not a lost reply: nothing was made, so the session
-is recorded refused at once with the provider's reason (`no reason given`
+writes claim each session once. A rented machine is known by the provider's id
+for it, which is all that recording, terminating or deleting it at a deadline
+needs. The worker's first receipt (`started_at`) makes it `available`; a provider
+id alone leaves it `starting`. Its price, hardware and address are a separate
+read: while that read fails, each pass retains a `machine readiness` diagnostic for
+the session, the machine stays `starting`, and it is deleted at its startup
+deadline or by `terminate`. A lost create reply is looked up, never repeated;
+if the provider still has no such machine at the rental's deadline, or when it
+is terminated, it is recorded as never acquired: it costs nothing and
+no longer counts toward the on-demand's machine limit. Lium settles this an hour
+after the deadline, once [its own removal timer](providers.md#a-pod-etude-made-is-always-deletable)
+has passed; Vast keeps looking, because its inventory can lag. A 4xx reply to a
+create (except 408) is an answer, not a lost reply: nothing was made, so the
+session is recorded refused at once with the provider's reason (`no reason given`
 when it gave none), its attempts fail before start as `capacity_refused`, and
 nothing is left `starting` or fenced. The reason is the reply's `detail` or
 `title` field when the body is JSON, else its text; at most 2 KiB of an error
@@ -956,8 +966,11 @@ requests. Signed-link generation makes no HTTP request.
 
 Looking up a retained machine receipt uses 1 bucket read and no provider call
 or receipt write. Recovering a lost create reply uses 1 bucket read, the provider
-inventory (1 call per page), and 1 receipt write when found. Health checks remain
-separate from receipt lookup; no path waits for a rented machine's SSH address.
+inventory (1 call per page), and 1 receipt write when found. Terminating a Lium
+machine whose id is retained uses 1 delete and 1 status read, with no inventory
+read and no SSH; without a retained id it adds the inventory. No path sends a
+second create for a session. Health checks remain separate from receipt
+lookup; no path waits for a rented machine's SSH address.
 
 ## Checks
 

@@ -333,7 +333,7 @@ def _run_from_row(row: sqlite3.Row) -> RunRecord:
 # said about making and deleting the machine is recorded on that session.
 _MACHINES = """SELECT m.name, m.pool, m.ondemand, m.kind, m.cost_usd, m.expires_at,
     m.provider, m.address, m.storage, m.image,
-    w.claimed_at, w.provider_id, w.hardware, w.refused_at,
+    w.claimed_at, w.provider_id, w.started_at, w.hardware, w.refused_at,
     COALESCE(w.ended_at, m.deleted_at) AS deleted_at
     FROM machines m LEFT JOIN sessions w ON w.machine=m.name AND m.kind='rented'"""
 # A session's supply is its machine's: one owner for the fact.
