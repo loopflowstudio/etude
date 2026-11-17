@@ -188,6 +188,17 @@ def test_quote_counts_gpus_and_only_allocated_resources() -> None:
     assert market.counts == {"GET public/v1/nodes": 1, f"GET executors/{NODE}/quote": 1}
 
 
+def test_spot_template_quotes_only_spot_nodes() -> None:
+    market = Marketplace()
+    api = LiumAPI("fixture", market)
+    spot = TEMPLATE.model_copy(update={"spot": True})
+    assert api.offers(spot) == ()
+    market.nodes[0]["tier"] = "spot"
+    (offer,) = api.offers(spot)
+    assert offer.node.tier == "spot" and offer.price == Decimal("1.52")
+    assert market.counts == {"GET public/v1/nodes": 2, f"GET executors/{NODE}/quote": 1}
+
+
 @pytest.mark.parametrize(
     "change",
     [

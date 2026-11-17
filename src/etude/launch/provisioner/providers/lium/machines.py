@@ -132,7 +132,7 @@ class LiumMachines:
             raise Refused("LIUM_SSH_PUBLIC_KEY must contain the server's public SSH key")
         offers = self._api.offers(self._template)  # revalidate current stock, resources and price
         if not offers:
-            raise Refused("no compatible secure Lium allocation")
+            raise Refused("no compatible Lium allocation")
         offer = offers[0]
         cutoff = min(request.deadline, request.startup_deadline or request.deadline)
         now = datetime.now(UTC)
