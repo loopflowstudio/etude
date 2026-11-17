@@ -86,6 +86,8 @@ l4  g6.xlarge: L4 with at least 4 vCPUs, 16 GB at $0.8226/hour (ceiling $0.90)  
 $ uv run etude availability l4-spot
 l4-spot  g6.xlarge: L4 with at least 4 vCPUs, 16 GB at $0.6510/hour, spot (ceiling $0.70)  available  0 of 1 in use  rentable now  asked 2026-11-17 19:02:14 UTC
 $ uv run etude launch experiment.py --rent l4-spot --max-usd 2
+$ uv run etude status experiment/base@0
+experiment/base@0  base  running, steps 1400, ~$0.41, machine l4-spot-41840a01c3b1 (g6.xlarge: L4 with at least 4 vCPUs, 16 GB), 1 of 3 attempts used
 ```
 
 `--spot` on `ondemand add` rents the provider's cheaper machines that it may

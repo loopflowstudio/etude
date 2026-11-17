@@ -318,8 +318,8 @@ Storage charges are excluded.
 
 ```sh
 etude launch ppo.py --rent runpod-cpu8   # attempt 1: its machine is lost at update 870
-etude status RUN                         # running, updates 1400, ~$0.61: attempt 2, from update 800
-etude status RUN                         # running, updates 2140, ~$1.02: attempt 3, after a planned stop
+etude status RUN                         # running, updates 1400, ~$0.61, 2 of 3 attempts used, from update 800
+etude status RUN                         # running, updates 2140, ~$1.02, 3 of 3 attempts used, after a planned stop
 etude logs --run RUN                     # every attempt, and how each ended
 etude launch ppo.py --resume         # after it ended unfinished: another attempt, on current code
 ```
@@ -352,7 +352,7 @@ hours and dollars, but not one of `max_attempts`:
 
 ```sh
 etude launch ppo.py --rent l4-spot   # attempt 1: AWS takes the machine back at update 870
-etude status RUN                     # running, updates 1400, ~$0.41: attempt 1, from update 800
+etude status RUN                     # running, updates 1400, ~$0.41, 1 of 3 attempts used, from update 800
 etude logs --run RUN                 # both tries, the first ended lost (spot_machine_lost)
 ```
 

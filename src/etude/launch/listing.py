@@ -16,9 +16,9 @@ def show_runs(scheduler: Scheduler | PythonClient, ids: Sequence[str]) -> None:
         status = scheduler.read(run)
         where = f", machine {status.machine}" if status.machine else ""
         where += f" ({status.hardware})" if status.hardware else ""
-        if status.attempts:
-            where += f", attempt {status.attempts}"
         record = scheduler.record(run)
+        if status.attempts:
+            where += f", {status.attempts} of {record.launch.spec.max_attempts} attempts used"
         print(run, record.name, str(status) + where, sep="  ")
         if record.launch.spec.repo is not None:
             print("  source: " + line(record.launch.source, record.launch.spec.revision or "HEAD"))

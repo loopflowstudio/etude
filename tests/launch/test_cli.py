@@ -271,7 +271,9 @@ def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, co
     )
     (line,) = run(capsys, "launch", str(path))
     assert "new, running" in line
-    assert "succeeded" in run(capsys, "wait", line.split()[0])[0]
+    run_id = line.split()[0]
+    assert "succeeded" in run(capsys, "wait", run_id)[0]
+    assert "1 of 3 attempts used" in run(capsys, "status", run_id)[0]
     assert run(capsys, "machines") == [  # no session
         "local  local  available, owned (this computer), $0.00 committed, never expires"
     ]
