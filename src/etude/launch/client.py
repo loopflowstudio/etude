@@ -31,6 +31,8 @@ from etude.launch.executor import Execution, Executor, local
 from etude.launch.provisioner.machines import Machines, OwnedMachine, Safeguards
 from etude.launch.provisioner.providers.ec2.api import EC2API, location
 from etude.launch.provisioner.providers.ec2.machines import EC2Machines
+from etude.launch.provisioner.providers.lambda_cloud.api import LambdaAPI
+from etude.launch.provisioner.providers.lambda_cloud.machines import LambdaMachines
 from etude.launch.provisioner.providers.lium.api import LiumAPI
 from etude.launch.provisioner.providers.lium.machines import LiumMachines
 from etude.launch.provisioner.providers.runpod.api import RunPodAPI
@@ -170,6 +172,17 @@ def _open(home: Path) -> Scheduler:
                     template, LiumAPI(key), bucket, storage.prefix
                 ),
                 LiumMachines.safeguards,
+            ),
+            "lambda": provider(
+                lambda: api_key("LAMBDA_API_KEY"),
+                lambda key, _, template, bucket, storage: LambdaMachines(
+                    template,
+                    LambdaAPI(key),
+                    os.environ.get("LAMBDA_TERMINATE_KEY"),
+                    bucket,
+                    storage.prefix,
+                ),
+                LambdaMachines.safeguards,
             ),
             "ec2": provider(lambda: Keys.from_environment("s3"), ec2, EC2Machines.safeguards),
         },

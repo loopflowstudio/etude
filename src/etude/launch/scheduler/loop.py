@@ -1622,7 +1622,8 @@ class Scheduler:
             image=template.image
             or (
                 STOCK_IMAGE
-                if self._provider_service(template.provider) in {"runpod", "vast", "lium", "ec2"}
+                if self._provider_service(template.provider)
+                in {"runpod", "vast", "lium", "ec2", "lambda"}
                 else None
             ),
         )

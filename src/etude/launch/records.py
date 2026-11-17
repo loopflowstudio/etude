@@ -102,7 +102,7 @@ class Provider(Record):
     """
 
     name: str  # what a machine template's `provider` names
-    kind: Literal["runpod", "vast", "lium", "ec2"]
+    kind: Literal["runpod", "vast", "lium", "ec2", "lambda"]
     registry: str  # the provider's id for the credential that pulls private images
     storage: str  # the storage a new pool uses unless it names another
 

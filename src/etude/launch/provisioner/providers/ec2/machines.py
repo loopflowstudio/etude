@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import math
-import shlex
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -20,8 +19,8 @@ from etude.launch.provisioner.machines import (
     check_creation,
 )
 from etude.launch.provisioner.providers.ec2.api import EC2API, Instance
-from etude.launch.provisioner.providers.ec2.host import user_data
-from etude.launch.provisioner.providers.program import Program, boot_source
+from etude.launch.provisioner.providers.host import container_boot, fetch_boot, user_data
+from etude.launch.provisioner.providers.program import Program
 from etude.launch.records import GPU, STOCK_IMAGE, MachineTemplate, Offer
 from etude.launch.storage.s3 import AlreadyThere, Bucket
 from etude.spec import Record
@@ -77,26 +76,14 @@ class EC2Machines:
 
         image = self.template.image or STOCK_IMAGE
         env = self.program.prepare(request, image)
-        # Only names go in docker's argv; all capabilities travel in the environment.
-        exports = "\n".join(f"export {k}={shlex.quote(v)}" for k, v in env.items())
-        command = ["docker", "run", "--rm", "--init", "--gpus", "all"]
-        for key in env:
-            command.extend(["--env", key])
-        command.extend(
-            [
-                "--entrypoint",
-                "python3.12",
-                image.resolved,
-                "-c",
-                boot_source("etude.launch.provisioner.providers.watchdog"),
-            ]
-        )
-        boot = f"set -eu\n{exports}\nexec {shlex.join(command)}\n".encode()
+        boot = container_boot(image.resolved, env).encode()
         sha = hashlib.sha256(boot).hexdigest()
         key = f"{self.prefix}/sessions/{request.session}/boot/{sha}"
         self.bucket.put(key, boot)
         script = user_data(
-            request.deadline, self.bucket.get_url(key, math.ceil(seconds)), sha
+            request.deadline,
+            "systemctl --no-block poweroff",
+            fetch_boot(self.bucket.get_url(key, math.ceil(seconds)), sha),
         ).encode()
         if len(script) > 16 * 1024:
             raise Refused("EC2 user data exceeds 16 KiB")

@@ -360,11 +360,13 @@ with every GPU. The launch names one SSH key because Lambda requires it:
 `LAMBDA_SSH_KEY_NAME`, or the account's first key by name. Add one to the
 account before renting; `ssh ubuntu@IP` then reaches the host.
 
-**Deletion.** Before anything is downloaded, the host learns its own instance
-id and arms a timer that calls Lambda's terminate endpoint with
-`LAMBDA_TERMINATE_KEY` at the rental's deadline. It makes the same call when
+**Deletion.** Before downloading the container, the host arms a systemd timer
+for the rental deadline. The timer reads the host's cloud-init instance UUID,
+removes its hyphens to obtain the Lambda API ID, and calls the terminate
+endpoint with `LAMBDA_TERMINATE_KEY`. It makes the same call when
 the worker exits, retrying until Lambda accepts it. The scheduler's loop
-terminates by the instance's name, `etude-SESSION`, as the third path. A
+terminates by the instance ID, recovering it by name (`etude-SESSION`) if
+the launch reply was lost. A
 terminate key that is wrong or expired leaves only that third path. Lambda's
 launch call has no idempotency token: a lost reply is looked up by name and
 never sent twice. Lambda reports no per-machine bill, so cost stays the

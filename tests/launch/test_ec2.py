@@ -18,8 +18,8 @@ from etude.launch.aws import Keys
 from etude.launch.database import upgrade
 from etude.launch.provisioner.machines import MachineRequest, Refused
 from etude.launch.provisioner.providers.ec2.api import EC2API
-from etude.launch.provisioner.providers.ec2.host import user_data
 from etude.launch.provisioner.providers.ec2.machines import EC2Machines
+from etude.launch.provisioner.providers.host import fetch_boot, user_data
 from etude.launch.records import BootstrapLinks, MachineTemplate
 from etude.launch.storage.s3 import Bucket
 from etude.launch.storage.transport import HTTPReply
@@ -250,7 +250,9 @@ def test_host_powers_off_after_work_or_failed_boot(
         path.chmod(0o700)
     digest = hashlib.sha256(payload if intact else b"changed").hexdigest()
     script = user_data(
-        datetime.fromtimestamp(1700000000 + seconds, UTC), "https://signed.invalid/boot", digest
+        datetime.fromtimestamp(1700000000 + seconds, UTC),
+        "systemctl --no-block poweroff",
+        fetch_boot("https://signed.invalid/boot", digest),
     )
     env = {**os.environ, "PROOF": str(tmp_path), "PATH": f"{tmp_path}:{os.environ['PATH']}"}
     result = subprocess.run(

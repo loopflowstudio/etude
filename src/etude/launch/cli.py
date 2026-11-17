@@ -352,7 +352,8 @@ def providers() -> None:
 def provider_set(
     name: str,
     kind: Annotated[
-        Literal["runpod", "vast", "lium", "ec2"], typer.Option(help="which provider this is")
+        Literal["runpod", "vast", "lium", "ec2", "lambda"],
+        typer.Option(help="which provider this is"),
     ],
     storage: Annotated[str, typer.Option(help="the storage new pools on this provider use")],
     registry: Annotated[
