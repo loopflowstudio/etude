@@ -156,11 +156,15 @@ survives pod deletion; Etude reports actual costs only through its validated
 charges afterward. Missing or contradictory accounting stays estimated. A pod
 removed before any charge has no statement, so its cost stays an estimate.
 Lium sends timestamps without a zone; Etude reads them as UTC.
-A live check on 2026-11-17 confirmed creation, timestamp parsing and deletion
-after the startup deadline: the RTX 4090 pod stayed `PENDING` without an SSH
-address for ten minutes, then the scheduler confirmed its deletion. A final
-inventory read showed no pods. The machine listed as `deleted` at about $0.07 estimated
-cost. A successful bootstrap and GPU job remain unverified.
+A live check on 2026-11-17 completed start → GPU job → explicit terminate →
+confirmed absent on an RTX 4090. The job's retained `etude logs` output showed
+`nvidia-smi`, driver 595.84, CUDA 13.2 and 24,564 MiB GPU memory. The machine
+listed as `deleted` at about $0.10 (part billed, part estimated), and the final
+account inventory was empty. This node needed about fourteen minutes to reach
+RUNNING; the check used a twenty-minute startup allowance and configured SSH
+host trust before bootstrap. An earlier node stayed `PENDING` without an SSH
+address for ten minutes and was deleted at its startup deadline, at about
+$0.07 estimated cost.
 
 #### A pod Etude made is always deletable
 
