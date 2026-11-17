@@ -269,7 +269,7 @@ def test_lost_create_recovers_without_second_paid_request() -> None:
     with pytest.raises(ProviderUnavailable):
         machines(market, storage).create(request())
     market.visible = False
-    with pytest.raises(ProviderUnavailable, match="awaiting reconciliation"):
+    with pytest.raises(ProviderUnavailable, match="Lium create has no pod yet; settles"):
         machines(market, storage).find("session")
     market.visible = True
     found = machines(market, storage).find("session")
@@ -278,6 +278,78 @@ def test_lost_create_recovers_without_second_paid_request() -> None:
     assert market.pod is not None and market.pod["removal_scheduled_at"] is not None
     assert market.counts[f"POST executors/{NODE}/rent"] == 1
     assert market.counts["GET pods"] == 2
+
+
+def test_lost_create_settles_only_after_timer_and_readable_absent_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    market, storage = Marketplace(), Storage()
+    market.lost_reply = True
+    wanted = request()
+    assert wanted.deadline is not None
+    settles = wanted.deadline + timedelta(hours=LiumMachines.safeguards.reservation_hours)
+    clock = [datetime.now(UTC)]
+
+    class Time(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Time:
+            return cls.fromtimestamp(clock[0].timestamp(), UTC)
+
+    monkeypatch.setattr("etude.launch.provisioner.providers.lium.machines.datetime", Time)
+    with pytest.raises(ProviderUnavailable):
+        machines(market, storage).create(wanted)
+    market.pod = None
+    clock[0] = settles - timedelta(microseconds=1)
+    message = (
+        f"Lium create has no pod yet; settles as nothing rented after {settles:%Y-%m-%d %H:%M} UTC"
+    )
+    with pytest.raises(ProviderUnavailable) as pending:
+        machines(market, storage).find("session")
+    assert str(pending.value) == message
+    clock[0] = settles
+    market.pod = {"status": "PENDING"}  # unreadable inventory cannot confirm absence
+    with pytest.raises(ProviderUnavailable, match="inventory is unreadable"):
+        machines(market, storage).find("session")
+    market.pod = None
+    assert machines(market, storage).find("session") is None
+    assert machines(market, storage).allocation("session") is None
+    assert market.counts == {
+        "GET public/v1/nodes": 1,
+        f"GET executors/{NODE}/quote": 1,
+        f"POST executors/{NODE}/rent": 1,
+        "GET pods": 4,
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "alive"),
+    [
+        ("PENDING", True),
+        ("RUNNING", True),
+        ("STOP_PENDING", True),
+        ("START_PENDING", True),
+        ("REBOOT_PENDING", True),
+        ("CREATION_FAILED", False),
+        ("BROKEN", False),
+        ("STOPPED", False),
+        ("DELETING", False),
+        ("FAILED", False),
+        ("REBOOT_FAILED", False),
+        ("UNKNOWN", True),
+        (None, True),
+    ],
+)
+def test_health_uses_status_without_reading_pod_facts(status: str | None, alive: bool) -> None:
+    market, storage = Marketplace(), Storage()
+    market.invalid_facts = True
+    machine = machines(market, storage)
+    with pytest.raises(ProviderUnavailable, match="valid required fields"):
+        machine.create(request())
+    assert market.pod is not None
+    market.pod["status"] = status
+    market.counts.clear()
+    assert machine.alive("session") is alive
+    assert market.counts == {f"GET pods/{POD}": 1}
 
 
 def test_unacknowledged_timer_is_retried_before_work() -> None:
@@ -808,6 +880,66 @@ def test_unreadable_pod_startup_deadline_settles_its_runs_as_lost(
         assert market.counts[f"POST executors/{NODE}/rent"] == 1
         assert market.counts[f"DELETE pods/{POD}"] == 1
         assert market.counts["GET pods"] == 0
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("terminate", [False, True])
+def test_lost_create_with_no_pod_settles_rental_after_provider_timer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    terminate: bool,
+) -> None:
+    market, storage = Marketplace(), Storage()
+    market.lost_reply = True
+    clock = [datetime.now(UTC)]
+
+    class Time(datetime):
+        @classmethod
+        def now(cls, tz: object = None) -> Time:
+            return cls.fromtimestamp(clock[0].timestamp(), UTC)
+
+    monkeypatch.setattr("etude.launch.provisioner.providers.lium.machines.datetime", Time)
+    store = open_database(launcher_file(tmp_path))
+    try:
+        scheduler = _scheduler(store, market, storage)
+        monkeypatch.setattr(scheduler, "_clock", lambda: clock[0])
+        name = scheduler.rent("5090", hours=0.1, max_usd=Decimal(2))
+        session = store.rented_session(name)
+        rental = store.rental_for(session)
+        assert rental is not None
+        market.pod = None
+        settles = rental.deadline + timedelta(hours=1)
+        clock[0] = settles - timedelta(microseconds=1)
+        scheduler.tick()
+        assert store.rented_session(name).refused_at is None
+        assert scheduler.rentals()[0].usd > 0
+        with pytest.raises(ProviderUnavailable, match="settles as nothing rented after"):
+            scheduler.terminate(name)
+        assert any(
+            "settles as nothing rented after" in d.message
+            for d in scheduler.diagnostics(machine=name)
+        )
+        market.counts.clear()
+        clock[0] = settles
+        if terminate:
+            scheduler.terminate(name)
+        else:
+            scheduler.tick()
+        settled = store.rented_session(name)
+        assert settled.refused_at == settles and settled.provider_id is None
+        assert session.id not in {s.id for s in store.unsettled_sessions()}
+        assert scheduler.rentals()[0].usd == 0
+        show_machines(scheduler, ended=True)
+        assert (
+            f"unavailable, nothing rented {settles:%Y-%m-%d %H:%M} UTC" in capsys.readouterr().out
+        )
+        assert market.counts == {"GET pods": 1}
+        clock[0] += timedelta(hours=1)
+        scheduler.tick()
+        assert scheduler.rentals()[0].usd == 0
+        assert market.counts == {"GET pods": 1}
     finally:
         store.close()
 

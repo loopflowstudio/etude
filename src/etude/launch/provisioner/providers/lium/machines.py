@@ -11,7 +11,7 @@ import math
 import os
 import shlex
 import subprocess
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -205,11 +205,20 @@ class LiumMachines:
         receipt = self._read(session_id, "receipt", Receipt)
         if receipt is not None:
             return str(receipt.id)
-        if self._read(session_id, "intent", Intent) is None:
+        intent = self._read(session_id, "intent", Intent)
+        if intent is None:
             return None
         id = self._api.named(f"etude-{session_id}")
         if id is None:
-            raise ProviderUnavailable("Lium create already attempted; awaiting reconciliation")
+            assert intent.request.deadline is not None
+            # The whole-hour fallback may outlive the absolute rental deadline.
+            settles = intent.request.deadline + timedelta(hours=self.safeguards.reservation_hours)
+            if datetime.now(UTC) >= settles:
+                return None
+            raise ProviderUnavailable(
+                "Lium create has no pod yet; settles as nothing rented after "
+                f"{settles:%Y-%m-%d %H:%M} UTC"
+            )
         self._keep_receipt(session_id, Receipt(id=id))
         return str(id)
 
@@ -233,7 +242,14 @@ class LiumMachines:
             status = self._api.status(receipt.id)
         except ProviderUnavailable:
             return True
-        return status is not None and status not in {"ERROR", "FAILED", "TERMINATED"}
+        return status is not None and status not in {
+            "CREATION_FAILED",
+            "BROKEN",
+            "STOPPED",
+            "DELETING",
+            "FAILED",
+            "REBOOT_FAILED",
+        }
 
     def end(self, session_id: str) -> datetime | None:
         id = self.find(session_id)
