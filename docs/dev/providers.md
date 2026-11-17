@@ -131,8 +131,7 @@ Hourly admission includes Lium's one-cent-per-GPU price-change tolerance. Rental
 budgets reserve whole hours for the initial `termination_hours` timer, even for
 a shorter job. This is a reserve, not Lium's billing minimum: billing is per
 second. A five-minute rental at a quoted $0.76/hour requires a $0.76 reservation.
-The scheduler rechecks stock, allocation and price before sending one create;
-lost replies reconcile by session name without creating another pod.
+The scheduler rechecks stock, allocation and price before sending one create.
 
 Etude supplies its public pinned image through a Dockerfile, then bootstraps over
 SSH after RUNNING and acknowledged exact scheduled removal. Custom public images
@@ -154,8 +153,58 @@ changes account settings.
 Deletion is complete only after confirmed absence. The provider's ledger statement
 survives pod deletion; Etude reports actual costs only through its validated
 `billed_until` watermark. A settled final removal also establishes zero compute
-charges afterward. Missing or contradictory accounting stays estimated.
+charges afterward. Missing or contradictory accounting stays estimated. A pod
+removed before any charge has no statement, so its cost stays an estimate.
+Lium sends timestamps without a zone; Etude reads them as UTC.
 Offline fixtures verify this integration; no paid Lium lifecycle is claimed here.
+
+#### A pod Etude made is always deletable
+
+A pod whose description Etude cannot read is still a machine it holds, and
+`terminate` deletes it:
+
+```text
+$ etude machines
+rtx4090-7b0c01e641d4  rtx4090  starting, RTX 4090 with at least 4 vCPUs, 16 GB, rented until 2026-11-17 17:01 UTC, ~$0.01
+$ etude terminate rtx4090-7b0c01e641d4
+$ etude machines --all
+rtx4090-7b0c01e641d4  rtx4090  deleted, RTX 4090 with at least 4 vCPUs, 16 GB, rented, ended 2026-11-17 16:04 UTC, ~$0.01
+```
+
+Left alone, the same machine is deleted by the scheduler's loop at its startup
+deadline: it cannot bootstrap without an address, and its runs end `lost` and
+retry elsewhere. Until then each pass retains a `machine facts` diagnostic
+naming the session, `Lium reply is missing valid required fields`.
+
+Etude keeps two things about a pod, and only the first is needed to own it:
+
+| | Read from | Needed for |
+| --- | --- | --- |
+| Identity: the pod id | the create reply, else the pod named for the session in `GET pods` | recording the machine, `terminate`, deletion at a deadline |
+| Facts: address, price, GPU count, node, creation time | `GET pods/{id}` | bootstrap, verifying what was rented, the bill |
+
+The id is written to the session's `receipt.json` as soon as it is known,
+before any facts are read; the facts join it when they first parse. Deleting a
+pod sends one `DELETE` and reads its status until Lium answers that it is
+absent. Neither step reads the pod's facts, and with a kept id neither lists
+the account's pods. A pod on the wrong node, GPU count or price is deleted
+without starting work.
+
+A create whose reply was lost is looked up by session name and never sent
+again. While no pod of that name exists, nothing is assumed, and `terminate`
+says when the question closes:
+
+```text
+$ etude terminate rtx4090-7b0c01e641d4
+etude: Lium create has no pod yet; settles as nothing rented after 2026-11-17 18:01 UTC
+```
+
+That time is the rental's deadline plus the whole hour of Lium's own removal
+timer: past it, Lium has removed anything the create could have made. The next
+pass or `terminate` then records that nothing was rented, the rental stops
+accruing, and `etude machines --all` shows
+`unavailable, nothing rented 2026-11-17 18:01 UTC`. A pod that does appear by
+name before then is recorded and deleted like any other.
 
 A template without `--gpu` rents RunPod CPU pods: the cheapest secure-cloud CPU
 flavor with at least `--vcpus` (rounded up to a power of two, RunPod's sizes)
