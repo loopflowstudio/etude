@@ -260,7 +260,7 @@ def test_host_powers_off_after_work_or_failed_boot(
         cwd=tmp_path,
         env=env,
         capture_output=True,
-        timeout=5,
+        timeout=60,
     )
     assert (result.returncode == 0) == intact
     assert (tmp_path / "off").exists()

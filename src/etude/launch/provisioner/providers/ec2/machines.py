@@ -145,7 +145,7 @@ class EC2Machines:
         return self._allocation(self.api.launch(fields), intent)
 
     def create(self, request: MachineRequest) -> Allocation:
-        prior = self.find(request.session)
+        prior = self.allocation(request.session)
         if prior is not None:
             return prior
         try:
@@ -194,7 +194,13 @@ class EC2Machines:
         raw = self.bucket.get(self._receipt_key(session))
         return None if raw is None else Allocation.model_validate_json(raw)
 
-    def find(self, session_id: str) -> Allocation | None:
+    def find(self, session_id: str) -> str | None:
+        allocation = self.allocation(session_id)
+        return None if allocation is None else allocation.id
+
+    def allocation(self, session_id: str) -> Allocation | None:
+        # The facts come from the launch intent, so they are readable whenever
+        # the instance is found.
         receipt = self._receipt(session_id)
         if receipt is not None:
             return receipt
