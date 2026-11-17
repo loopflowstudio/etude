@@ -135,7 +135,12 @@ standard-library-only: each rental guardian must start before
 client dependency installation. The client and each job use separate environments.
 `logging.py` and top-level `storage_timeout.py` are also in the standard-library
 bootstrap subset. New bootstrap imports must be present in both the guardian
-archive (`provisioner/providers/package.py`) and SSH's pre-install loader (`ssh.py`). Operational errors
+archive (`provisioner/providers/package.py`) and SSH's pre-install loader (`ssh.py`).
+Lambda Stack mounts `/run` with `noexec`. Invoke the host's termination script
+there with `/bin/bash`, including from the systemd timer. Keep the timer
+independent of the job environment and container.
+
+Operational errors
 use the shared sanitizer in `etude.errors` before retention; subprocess diagnostics omit argv and traceback
 locals. Journal log reads return `LogStream`, preserving missing versus silent
 output, and share the caller's monotonic deadline through `deadline.py`.
