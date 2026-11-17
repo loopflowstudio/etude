@@ -40,6 +40,7 @@ class Region:
     def __init__(self) -> None:
         self.calls: Counter[str] = Counter()
         self.state: str | None = None
+        self.launched = datetime.now(UTC)
         self.volume = True
         self.image_exists = True
         self.quota = 4
@@ -54,7 +55,7 @@ class Region:
     ) -> HTTPReply:
         assert body
         target = headers.get("x-amz-target", "").split(".")[-1]
-        instance = f"""<item><instanceId>i-l4</instanceId><launchTime>2026-11-17T00:00:00Z</launchTime>
+        instance = f"""<item><instanceId>i-l4</instanceId><launchTime>{self.launched.isoformat()}</launchTime>
         <instanceState><name>{self.state}</name></instanceState></item>"""
         if target:
             self.calls[target] += 1
@@ -256,6 +257,40 @@ def test_retry_recovers_one_rental_and_waits_for_guest_shutdown(
     region.volume = False
     assert recovered.end("one") is not None
     assert region.calls["TerminateInstances"] == 1
+
+
+@pytest.mark.parametrize(
+    ("receipt_minutes", "volume", "alive", "volume_reads"),
+    [(60, False, False, 2), (60, True, True, 2), (1, False, True, 0), (None, False, True, 0)],
+)
+def test_empty_inventory_after_launch(
+    receipt_minutes: int | None, volume: bool, alive: bool, volume_reads: int
+) -> None:
+    region, storage = Region(), Storage()
+    keys = Keys(access_key="fixture", secret_key="fixture")
+    machines = EC2Machines(
+        MachineTemplate(provider="aws", gpu="L4"),
+        EC2API(keys, "us-west-2", region),
+        None,
+        Bucket("test", "us-west-2", keys, storage),
+        "test",
+    )
+    region.launched -= timedelta(minutes=receipt_minutes or 60)
+    machines.create(
+        MachineRequest(
+            session="one",
+            deadline=datetime.now(UTC) + timedelta(hours=1),
+            cap_usd=Decimal("1"),
+            bootstrap=BootstrapLinks(url="read", log_url="log", worker_log_url="worker"),
+        )
+    )
+    if receipt_minutes is None:
+        del storage.objects["test/sessions/one/receipt.json"]
+    region.state, region.volume = None, volume
+    region.calls.clear()
+    assert machines.alive("one") is alive
+    assert (machines.end("one") is None) is alive
+    assert region.calls == Counter(DescribeInstances=2, DescribeVolumes=volume_reads)
 
 
 def test_spot_asks_each_zone_its_bid_covers_after_a_capacity_refusal() -> None:

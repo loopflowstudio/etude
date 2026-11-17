@@ -279,7 +279,13 @@ what it means on the other providers. There is no SSH access; read `etude logs`.
 
 **Deletion.** The instance is made so that powering off terminates it and
 deletes its disk. The launcher confirms termination and the removal of tagged
-volumes before reporting deletion. Before downloading the signed, digest-checked
+volumes before reporting deletion. If the launch receipt is more than five
+minutes old, empty session-tag listings for both instances and volumes confirm
+deletion. A fresh or missing receipt leaves an empty listing unconfirmed before
+the rental deadline. When the launcher notices a spot reclaim late, its cost
+estimate uses the quoted rate through the time it noticed the loss.
+
+Before downloading the signed, digest-checked
 session boot script, the host schedules that
 power-off for the rental's deadline; it also powers off when the worker exits
 for any reason. No credential that can delete anything is on the machine, and

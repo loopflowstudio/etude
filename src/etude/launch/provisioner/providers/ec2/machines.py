@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from etude.errors import sanitize
@@ -25,6 +25,10 @@ from etude.launch.records import GPU, STOCK_IMAGE, MachineTemplate
 from etude.launch.storage.s3 import AlreadyThere, Bucket
 from etude.spec import Record
 from etude.storage_timeout import StorageUnavailable
+
+# EC2's eventual-consistency guidance allows several minutes for a new resource
+# to appear in Describe responses after a successful launch.
+_LISTING_LAG = timedelta(minutes=5)
 
 
 class Intent(Record):
@@ -223,11 +227,15 @@ class EC2Machines:
             return self._keep(session_id, self._allocation(instances[0], intent))
         raise ProviderUnavailable("EC2 launch intent exists; awaiting tagged instance")
 
+    def _past_listing_lag(self, session_id: str) -> bool:
+        receipt = self._receipt(session_id)
+        return receipt is not None and datetime.now(UTC) - receipt.created_at > _LISTING_LAG
+
     def alive(self, session_id: str) -> bool:
         instances = self.api.instances(session_id)
-        # EC2 may not list a newly launched instance yet. Its deadline still
-        # leads to end() if the worker never checks in.
-        return not instances or any(i.state in {"running", "pending"} for i in instances)
+        if instances:
+            return any(i.state in {"running", "pending"} for i in instances)
+        return not self._past_listing_lag(session_id) or self.api.volumes_remain(session_id)
 
     def end(self, session_id: str) -> datetime | None:
         instances = self.api.instances(session_id)
@@ -237,8 +245,8 @@ class EC2Machines:
             return None
         if any(i.state == "shutting-down" for i in instances):
             return None
-        if not instances:
-            # Empty inventory before expiration is ambiguous after a lost reply.
+        if not instances and not self._past_listing_lag(session_id):
+            # An unconfirmed or newly created instance may still appear.
             intent = self._intent(session_id)
             if intent is None or datetime.now(UTC) < intent.rental_deadline:
                 return None
