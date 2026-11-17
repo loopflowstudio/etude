@@ -10,7 +10,9 @@ durable `Outage`; the rental is lost once the outage outlasts `OUTAGE_SECONDS`.
 
 from __future__ import annotations
 
+import base64
 import json
+import lzma
 import shlex
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -125,6 +127,15 @@ class VastMachines:
             raise Refused("no quoted Vast offer covers the requested rental deadline")
         image = self._template.image or STOCK_IMAGE
         env = self._program.prepare(request, image)
+        # Vast limits the combined environment. Session-token URLs repeat most of
+        # their bytes; pack the environment together, keeping the guardian offline.
+        packed = base64.b64encode(lzma.compress(json.dumps(env).encode())).decode()
+        boot = (
+            "import base64,json,lzma,os\n"
+            "os.environ.update(json.loads(lzma.decompress(base64.b64decode("
+            "os.environ.pop('ETUDE_BOOT')))))\n"
+            + boot_source("etude.launch.provisioner.providers.vast.instance")
+        )
         creation_deadline = min(request.deadline, request.startup_deadline or request.deadline)
         now = datetime.now(UTC)
         if now >= creation_deadline:
@@ -146,9 +157,8 @@ class VastMachines:
                     price=float(offer.min_bid) if isinstance(offer, BidOffer) else None,
                     disk=self._template.disk_gb or 40,
                     label=f"etude-{request.session}",
-                    env=env,
-                    onstart="exec python3.12 -c "
-                    + shlex.quote(boot_source("etude.launch.provisioner.providers.vast.instance")),
+                    env={"ETUDE_BOOT": packed},
+                    onstart="exec python3.12 -c " + shlex.quote(boot),
                 ),
             )
             instance = self._api.instance(id)

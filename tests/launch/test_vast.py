@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import lzma
 import sys
 import threading
 import zipfile
@@ -16,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from pydantic import TypeAdapter
 
 from etude.cli import main
 from etude.errors import LauncherError
@@ -94,6 +96,11 @@ class Marketplace:
         self.inventory_visible = True
         self.offline = False
         self.delete_pending = False
+
+    def boot_environment(self) -> dict[str, str]:
+        assert self.created is not None
+        raw = base64.b64decode(self.created.env["ETUDE_BOOT"])
+        return TypeAdapter(dict[str, str]).validate_json(lzma.decompress(raw))
 
     def __call__(
         self, method: str, url: str, body: bytes | None, headers: dict[str, str]
@@ -207,7 +214,15 @@ def test_rental_keeps_identity_and_package_without_account_credentials() -> None
     market, storage = Marketplace(), Storage()
     machine = machines(market, storage)
     machine.offer()
-    allocation = machine.create(request())
+    # AWS session credentials add the same large token to each signed URL.
+    token = "session-token-" * 130
+    links = BootstrapLinks(
+        url=f"https://fixture/bootstrap?token={token}",
+        log_url=f"https://fixture/log?token={token}",
+        worker_log_url=f"https://fixture/worker?token={token}",
+    )
+    rental = request().model_copy(update={"bootstrap": links})
+    allocation = machine.create(rental)
     assert allocation.id == "12" and allocation.usd_per_hour == Decimal("0.6")
     assert isinstance(allocation.hardware, GPU) and allocation.hardware.id == "RTX 4090"
     assert market.counts == {"POST": 1, "PUT": 1, "GET": 1}
@@ -217,8 +232,12 @@ def test_rental_keeps_identity_and_package_without_account_credentials() -> None
     assert created.cancel_unavail and created.runtype == "ssh_direct"
     assert len(created.onstart) < 4048
     assert "fixture-account-key" not in created.model_dump_json()
-    assert created.env["ETUDE_DEADLINE"]
-    with zipfile.ZipFile(io.BytesIO(base64.b64decode(created.env["ETUDE_PROGRAM"]))) as archive:
+    assert len(json.dumps(created.env)) < 32_000
+    env = market.boot_environment()
+    assert env["ETUDE_BOOTSTRAP_URL"] == links.url
+    assert rental.deadline is not None
+    assert env["ETUDE_DEADLINE"] == rental.deadline.isoformat()
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(env["ETUDE_PROGRAM"]))) as archive:
         assert "etude/launch/provisioner/providers/vast/instance.py" in archive.namelist()
         assert "etude/launch/worker/main.py" not in archive.namelist()
     assert b"fixture-not-retained" not in storage.objects["test/sessions/session/receipt.json"]
@@ -498,7 +517,7 @@ def test_vast_cohort_uses_the_worker_and_retains_outputs_before_deletion(
         assert market.created is not None
         try:
             run_courier(
-                market.created.env["ETUDE_BOOTSTRAP_URL"],
+                market.boot_environment()["ETUDE_BOOTSTRAP_URL"],
                 delete,
                 root=tmp_path / "instance",
                 send=storage,
