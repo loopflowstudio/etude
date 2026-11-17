@@ -26,15 +26,9 @@ from etude.launch.provisioner.machines import MachineRequest, Refused
 from etude.launch.provisioner.providers import bootstrap as bootstrap_module
 from etude.launch.provisioner.providers.bootstrap import guard
 from etude.launch.provisioner.providers.lium.api import Create, LiumAPI, Pod
-<<<<<<< HEAD
-from etude.launch.provisioner.providers.lium.machines import _START, LiumMachines
+from etude.launch.provisioner.providers.lium.machines import _START, LiumMachines, Receipt
 from etude.launch.provisioner.providers.watchdog import Watchdog
 from etude.launch.provisioner.providers.watchdog import main as pod_main
-=======
-from etude.launch.provisioner.providers.lium.machines import _START, LiumMachines, Receipt
-from etude.launch.provisioner.providers.lium.pod import Watchdog
-from etude.launch.provisioner.providers.lium.pod import main as pod_main
->>>>>>> 4b375f189719487bfa431b595d699ae1a3be46b6
 from etude.launch.records import GPU, BootstrapLinks, Machine, MachineTemplate, OnDemand, Provider
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler.loop import Scheduler
