@@ -325,6 +325,7 @@ class Machine(Record):
     provider: str | None = None  # account that supplied a rented machine
     claimed_at: datetime | None = None  # when its session claimed the right to ask for it
     provider_id: str | None = None  # the provider's name for it, once its create is confirmed
+    started_at: datetime | None = None  # first worker receipt, read from its session
     hardware: Hardware | None = None  # None: not rented, or found by name without its receipt
     refused_at: datetime | None = None
     address: str | None = None  # SSH address for an added host; never a provider receipt
@@ -349,7 +350,7 @@ class Machine(Record):
             return "deleted"
         if off or self.refused_at is not None or self.expired(now):
             return "unavailable"
-        if self.kind == "rented" and self.provider_id is None:
+        if self.kind == "rented" and self.started_at is None:
             return "starting"
         return "available"
 

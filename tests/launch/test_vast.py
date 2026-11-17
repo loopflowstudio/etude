@@ -202,7 +202,8 @@ def test_rental_keeps_identity_and_package_without_account_credentials() -> None
         assert "etude/launch/worker/main.py" not in archive.namelist()
     assert b"fixture-not-retained" not in storage.objects["test/sessions/session/receipt.json"]
     market.counts.clear()
-    assert machine.find("session") == allocation
+    assert machine.find("session") == allocation.id
+    assert machine.allocation("session") == allocation
     assert market.counts == {}
     assert machine.create(request()) == allocation  # the intent prohibits duplicate acquisition
     assert market.counts == {}
@@ -226,9 +227,28 @@ def test_lost_reply_recovers_across_inventory_pages_without_another_create() -> 
     fresh = machines(market, storage)
     allocation = fresh.create(request())
     assert allocation.id == "12"
-    assert market.counts == {"POST": 1, "PUT": 1, "GET": 2}
+    assert fresh.allocation("session") == allocation
+    assert market.counts == {"POST": 1, "PUT": 1, "GET": 3}
     assert fresh.end("session") is not None
     assert market.instances == {}
+
+
+def test_unreadable_inventory_facts_do_not_block_owned_instance_deletion() -> None:
+    market, storage = Marketplace(), Storage()
+    market.lost_reply = True
+    machine = machines(market, storage)
+    with pytest.raises(ProviderUnavailable):
+        machine.create(request())
+    market.instances[13] = {"id": 13, "label": "foreign"}
+    del market.instances[12]["start_date"]
+    assert machine.find("session") == "12"
+    assert market.counts == {"POST": 1, "PUT": 1, "GET": 2}
+    with pytest.raises(ProviderUnavailable):
+        machine.allocation("session")
+    market.counts.clear()
+    assert machines(market, storage).end("session") is not None
+    assert set(market.instances) == {13}
+    assert market.counts == {"GET": 2, "DELETE": 1}
 
 
 def test_unconfirmed_create_and_foreign_labels_never_trigger_paid_retries_or_deletion() -> None:

@@ -10,6 +10,7 @@ durable `Outage`; the rental is lost once the outage outlasts `OUTAGE_SECONDS`.
 
 from __future__ import annotations
 
+import json
 import shlex
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -26,7 +27,13 @@ from etude.launch.provisioner.machines import (
     check_creation,
 )
 from etude.launch.provisioner.providers.program import Program, boot_source
-from etude.launch.provisioner.providers.vast.api import Create, Instance, VastAPI, VastOffer
+from etude.launch.provisioner.providers.vast.api import (
+    Create,
+    Instance,
+    InstanceIdentity,
+    VastAPI,
+    VastOffer,
+)
 from etude.launch.records import STOCK_IMAGE, MachineTemplate, Offer
 from etude.launch.storage.s3 import Bucket
 from etude.spec import Record
@@ -72,11 +79,16 @@ class VastMachines:
     def _key(self, session: str, name: str) -> str:
         return f"{self._prefix}/sessions/{session}/{name}.json"
 
-    def _stored_instance(self, session: str) -> Instance | None:
+    def _stored_instance(self, session: str) -> InstanceIdentity | None:
         raw = self._bucket.get(self._key(session, "receipt"))
-        return None if raw is None else Instance.model_validate_json(raw)
+        if raw is None:
+            return None
+        data = json.loads(raw)
+        if data.keys() == InstanceIdentity.model_fields.keys():
+            return InstanceIdentity.model_validate(data)
+        return Instance.model_validate(data)
 
-    def _keep(self, session: str, instance: Instance) -> None:
+    def _keep(self, session: str, instance: InstanceIdentity) -> None:
         if instance.label != f"etude-{session}":
             raise ProviderUnavailable("Vast instance label does not match this session")
         self._bucket.put(self._key(session, "receipt"), instance.model_dump_json().encode())
@@ -85,7 +97,7 @@ class VastMachines:
         if request.deadline is None or request.bootstrap is None:
             raise Refused("Vast rentals need a deadline and a storage bootstrap link")
         if self._bucket.get(self._key(request.session, "offer")) is not None:
-            existing = self.find(request.session)
+            existing = self.allocation(request.session)
             if existing is not None:
                 return existing
             raise ProviderUnavailable("Vast create already attempted; awaiting reconciliation")
@@ -158,7 +170,7 @@ class VastMachines:
             hardware=instance.hardware,
         )
 
-    def find(self, session_id: str) -> Allocation | None:
+    def _receipt(self, session_id: str) -> InstanceIdentity | None:
         instance = self._stored_instance(session_id)
         if instance is None:
             if self._bucket.get(self._key(session_id, "offer")) is None:
@@ -172,6 +184,22 @@ class VastMachines:
                     "awaiting reconciliation"
                 )
             self._keep(session_id, instance)
+        return instance
+
+    def find(self, session_id: str) -> str | None:
+        receipt = self._receipt(session_id)
+        return None if receipt is None else str(receipt.id)
+
+    def allocation(self, session_id: str) -> Allocation | None:
+        receipt = self._receipt(session_id)
+        if receipt is None:
+            return None
+        if isinstance(receipt, Instance):
+            return self._allocation(receipt)
+        instance = self._api.instance(receipt.id)
+        if instance is None:
+            return None
+        self._keep(session_id, instance)
         return self._allocation(instance)
 
     def alive(self, session_id: str) -> bool:
@@ -200,24 +228,18 @@ class VastMachines:
         return now - first_seen < timedelta(seconds=OUTAGE_SECONDS)
 
     def end(self, session_id: str) -> datetime | None:
-        receipt = self._stored_instance(session_id)
-        if receipt is None and self._bucket.get(self._key(session_id, "offer")) is None:
+        receipt = self._receipt(session_id)
+        if receipt is None:
             return None
-        current = (
-            self._api.instance(receipt.id)
-            if receipt is not None
-            else self._api.named(f"etude-{session_id}")
-        )
+        current = self._api.identity(receipt.id)
         if current is None:
-            return datetime.now(UTC) if receipt is not None else None
+            return datetime.now(UTC)
         if current.label != f"etude-{session_id}":
             raise ProviderUnavailable("refusing to destroy a Vast instance with a different label")
-        if receipt is None:
-            self._keep(session_id, current)
         self._api.delete_self(str(current.id))
         # DELETE success acknowledges the operation. Confirm absence before
         # declaring the rental ended and releasing its reservation.
-        return datetime.now(UTC) if self._api.instance(current.id) is None else None
+        return datetime.now(UTC) if self._api.identity(current.id) is None else None
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
         # Vast's daily charge totals do not establish contiguous settled

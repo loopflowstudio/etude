@@ -114,6 +114,8 @@ Queued work needs a scheduling loop: `wait`, a later scheduling command, or the
 optional server. An unattended queue does not run itself without one.
 `rent NAME --hours H --max-usd D` explicitly rents capacity;
 `terminate MACHINE` explicitly ends an idle rental. Both affect billing.
+Any machine `etude machines` lists as rented can be terminated, including one
+still `starting` whose provider details Etude could not read.
 
 When `wait` returns, each machine rented for its runs reads `deleted` in
 `etude machines`, its final logs are collected, and the on-demand's `--max` is

@@ -11,6 +11,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from pydantic import Field
+
 from etude.errors import LauncherError
 from etude.launch.errors import ProviderRejected, ProviderUnavailable
 from etude.launch.provisioner.machines import Refused
@@ -19,9 +21,12 @@ from etude.launch.records import CPU, GPU, Hardware, Offer
 from etude.spec import Record
 
 
-class PodFact(Record):
-    id: str
+class PodIdentity(Record):
+    id: str = Field(pattern=f"^{_ID.pattern}$")
     name: str  # the session's identity, set by us at create
+
+
+class PodFact(PodIdentity):
     usd_per_hour: Decimal
     created_at: datetime
     status: str
@@ -47,7 +52,7 @@ class RunPodAPI(PodHTTP):
             )
         except (KeyError, TypeError, ValueError, InvalidOperation):
             raise ProviderUnavailable("a pod record was missing its expected fields") from None
-        if not _ID.fullmatch(fact.id) or fact.created_at.tzinfo is None:
+        if fact.created_at.tzinfo is None:
             raise ProviderUnavailable("a pod record was missing its expected fields")
         return fact
 
@@ -124,7 +129,7 @@ class RunPodAPI(PodHTTP):
         raw = self._ask("GET", f"pods/{id}", absent_ok=True)
         return None if raw is None else self._pod(raw)
 
-    def named(self, name: str) -> PodFact | None:
+    def named(self, name: str) -> PodIdentity | None:
         """The pod carrying one session's identity, from the whole inventory.
 
         None means every page was read and no pod has that name.
@@ -134,9 +139,9 @@ class RunPodAPI(PodHTTP):
         for _ in range(100):
             page = self._ask("GET", "pods", params=params)
             try:
-                pods = [self._pod(raw) for raw in page["pods"]]
+                pods = [PodIdentity.model_validate(raw) for raw in page["pods"]]
                 more, cursor = page["pagination"]["hasNextPage"], page["pagination"]["nextCursor"]
-            except (KeyError, TypeError):
+            except (KeyError, TypeError, ValueError):
                 raise ProviderUnavailable("the pod inventory was unreadable") from None
             found = next((pod for pod in pods if pod.name == name), None)
             if found is not None or not more:
@@ -195,18 +200,20 @@ class RunPodAPI(PodHTTP):
             raise ProviderUnavailable("the created pod is not the one asked for")
         return pod.model_copy(update={"hardware": hardware})
 
-    def delete(self, pod: PodFact) -> datetime:
-        """Delete exactly this pod and return when the provider confirmed it.
-
-        Refuses when the id now belongs to something else, and when the pod is
-        already absent: an absent pod gives no date to record.
-        """
-        current = self.pod(pod.id)
-        if current is None:
-            raise ProviderUnavailable("the pod is absent, so its deletion cannot be dated")
-        if current.name != pod.name or current.created_at != pod.created_at:
-            raise ProviderUnavailable("the pod id now names a different pod")
-        self._ask("DELETE", f"pods/{pod.id}")
+    def delete(self, pod: PodIdentity) -> datetime:
+        """Date confirmed absence or delete after checking the retained identity."""
+        raw = self._ask("GET", f"pods/{pod.id}", absent_ok=True)
+        if raw is not None:
+            try:
+                current = PodIdentity.model_validate(raw)
+                same = current.id == pod.id and current.name == pod.name
+                if isinstance(pod, PodFact):
+                    same = same and datetime.fromisoformat(raw["createdAt"]) == pod.created_at
+            except (ValueError, KeyError, TypeError):
+                raise ProviderUnavailable("the pod identity was unreadable") from None
+            if not same:
+                raise ProviderUnavailable("the pod id now names a different pod")
+            self._ask("DELETE", f"pods/{pod.id}")
         return datetime.now(UTC)
 
     def bills(self, pod: PodFact, now: datetime) -> tuple[HourBill, ...]:

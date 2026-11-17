@@ -182,8 +182,7 @@ class Executor:
     def find(self, session_id: str) -> str | None:
         if self.machines.owned:
             return session_id if self.journal.started(session_id) else None
-        machine = self.machines.find(session_id)
-        return None if machine is None else machine.id
+        return self.machines.find(session_id)
 
     def observe(self, session_id: str) -> Observation:
         seen = self.journal.observe(session_id)
@@ -193,7 +192,7 @@ class Executor:
         return self.journal.started(session_id)
 
     def allocation(self, session_id: str) -> Allocation | None:
-        return None if self.machines.owned else self.machines.find(session_id)
+        return None if self.machines.owned else self.machines.allocation(session_id)
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
         return self.machines.bill(session_id, now)

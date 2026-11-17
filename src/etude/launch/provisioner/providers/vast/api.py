@@ -48,9 +48,12 @@ class VastOffer(Record):
         )
 
 
-class Instance(Record):
+class InstanceIdentity(Record):
     id: int = Field(gt=0)
     label: str | None
+
+
+class Instance(InstanceIdentity):
     actual_status: str | None
     start_date: float = Field(gt=0, allow_inf_nan=False)
     dph_total: Decimal = Field(ge=0, allow_inf_nan=False)
@@ -84,11 +87,11 @@ class _Page(Record):
 
 
 class _Instances(_Page):
-    instances: tuple[Instance, ...]
+    instances: tuple[InstanceIdentity, ...]
 
 
-class _Instance(Record):
-    instances: Instance | None
+class _Instance[T: InstanceIdentity](Record):
+    instances: T | None
 
 
 class _Created(Record):
@@ -187,16 +190,22 @@ class VastAPI(InstanceHTTP):
         reply = self.ask("PUT", f"api/v0/asks/{offer.id}/", body=request.model_dump_json())
         return _read(_Created, reply).new_contract
 
-    def instance(self, id: int) -> Instance | None:
+    def _instance[T: InstanceIdentity](self, id: int, model: type[_Instance[T]]) -> T | None:
         if id <= 0:
             raise ValueError("not a Vast instance id")
         reply = self.ask("GET", f"api/v0/instances/{id}/", absent_ok=True)
-        instance = None if reply is None else _read(_Instance, reply).instances
+        instance = None if reply is None else _read(model, reply).instances
         if instance is not None and instance.id != id:
             raise ProviderUnavailable("Vast returned a different instance id")
         return instance
 
-    def named(self, label: str) -> Instance | None:
+    def instance(self, id: int) -> Instance | None:
+        return self._instance(id, _Instance[Instance])
+
+    def identity(self, id: int) -> InstanceIdentity | None:
+        return self._instance(id, _Instance[InstanceIdentity])
+
+    def named(self, label: str) -> InstanceIdentity | None:
         params = {"limit": "25", "select_filters": json.dumps({"label": {"eq": label}})}
         found = [
             instance
