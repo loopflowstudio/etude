@@ -866,10 +866,12 @@ need no reverse dependency. `launch/records.py` owns launcher records;
 `launch/schemas.py` owns packet, result, bootstrap and inbox models.
 `executor.py` owns `Executor` and its `Execution` interface.
 
-The stock-image bootstrap and guardian live in
-`provisioner/providers/runpod/pod.py`; `provisioner/providers/package.py` builds
-the archive and its bare-Python subset. SSH's pre-install loader includes the
-same bootstrap dependencies. Startup follows the machine's kind. A session's
+Inside `provisioner/providers/`, `bootstrap.py` starts the guardian before
+installing the client. RunPod and Vast use instance-scoped credentials for
+deletion. Lium, EC2 and Lambda use `watchdog.py` to stop the process group.
+EC2 and Lambda also arm a host timer to terminate the machine.
+`package.py` builds the client archive and its standard-library bootstrap
+subset. SSH's pre-install loader includes the same bootstrap dependencies. Startup follows the machine's kind. A session's
 packet, journal folder and bucket keys are named by its session id.
 
 ## Command expectations

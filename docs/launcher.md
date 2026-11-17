@@ -90,8 +90,10 @@ $ uv run etude launch experiment.py --rent l4-spot --max-usd 2
 
 `--spot` on `ondemand add` rents the provider's cheaper machines that it may
 take back at any moment. Everything else is the same: the template, the
-ceiling, `--quote`, the cost cap and cleanup. The price shown is the most the
-rental can cost per hour, and budgets reserve against it.
+ceiling, `--quote`, the cost cap and cleanup. Budgets reserve the full quoted hourly rate.
+On Vast, for example, a $0.333333/hour compute bid plus $0.011111/hour
+for disk reserves $0.344444/hour. If Vast pauses the instance, Etude destroys
+it to end storage billing.
 
 When the provider takes a spot machine back, the run is retried on a new one
 from its latest delivered save; work since that save is done again. Losing a

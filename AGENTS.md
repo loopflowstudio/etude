@@ -136,6 +136,9 @@ client dependency installation. The client and each job use separate environment
 `logging.py` and top-level `storage_timeout.py` are also in the standard-library
 bootstrap subset. New bootstrap imports must be present in both the guardian
 archive (`provisioner/providers/package.py`) and SSH's pre-install loader (`ssh.py`).
+Vast validates the total size of the create request's `env` field. Keep the
+guardian and signed URLs in one compressed environment. Exercise this path
+with session-token URLs, which can each approach 2 KB.
 Lambda Stack mounts `/run` with `noexec`. Invoke the host's termination script
 there with `/bin/bash`, including from the systemd timer. Keep the timer
 independent of the job environment and container.
