@@ -21,6 +21,7 @@ import pytest
 
 from etude.errors import LauncherError
 from etude.launch import logging, source
+from etude.launch.aws import Keys
 from etude.launch.database import launcher_file
 from etude.launch.environment import install
 from etude.launch.errors import LaunchError
@@ -46,7 +47,7 @@ from etude.launch.schemas import (
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.files import write
-from etude.launch.storage.s3 import Bucket, Grant, Keys, PostForm
+from etude.launch.storage.s3 import Bucket, Grant, PostForm
 from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier

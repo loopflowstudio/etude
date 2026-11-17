@@ -417,7 +417,7 @@ class Scheduler:
             name
             for enabled, name in (
                 (declared.lifetime, "provider lifetime"),
-                (declared.start_command, "machine timer"),
+                (declared.machine_timer, "machine timer"),
                 (True, "launcher cleanup"),
             )
             if enabled
@@ -1622,7 +1622,7 @@ class Scheduler:
             image=template.image
             or (
                 STOCK_IMAGE
-                if self._provider_service(template.provider) in {"runpod", "vast", "lium"}
+                if self._provider_service(template.provider) in {"runpod", "vast", "lium", "ec2"}
                 else None
             ),
         )

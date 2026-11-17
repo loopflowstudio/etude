@@ -12,7 +12,7 @@ def test_folder_rules() -> None:
         for path in root.rglob("*.py")
     }
     edges: dict[str, set[str]] = {}
-    providers = {"runpod", "vast", "lium"}
+    providers = {"runpod", "vast", "lium", "ec2"}
     for module, path in modules.items():
         tree = ast.parse(path.read_text())
         imports: set[str] = set()
@@ -64,6 +64,7 @@ def test_folder_rules() -> None:
                         "etude.launch.provisioner.providers.runpod",
                         "etude.launch.provisioner.providers.vast",
                         "etude.launch.provisioner.providers.lium",
+                        "etude.launch.provisioner.providers.ec2",
                     )
                 )
                 for node in ast.walk(tree)
@@ -104,7 +105,7 @@ def test_folder_rules() -> None:
                 ), module
     for entry in (
         "etude.launch.provisioner.providers.runpod.pod",
-        "etude.launch.provisioner.providers.lium.pod",
+        "etude.launch.provisioner.providers.watchdog",
         "etude.launch.provisioner.providers.vast.instance",
         "etude.launch.provisioner.providers.bootstrap",
         "etude.launch.provisioner.providers.package",

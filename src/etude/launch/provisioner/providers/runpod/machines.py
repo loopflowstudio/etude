@@ -28,7 +28,7 @@ from etude.launch.storage.s3 import Bucket
 
 
 class RunPodMachines:
-    safeguards = Safeguards(start_command=True)
+    safeguards = Safeguards(machine_timer=True)
     owned = False
 
     def __init__(

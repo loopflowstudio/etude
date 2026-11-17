@@ -19,6 +19,7 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
+from etude.launch.aws import Keys
 from etude.launch.client import _open
 from etude.launch.database import Database, launcher_file, upgrade
 from etude.launch.errors import ProviderUnavailable
@@ -40,7 +41,7 @@ from etude.launch.records import (
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.s3 import Bucket
 from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker.courier import run as run_courier
 from etude.spec import Job

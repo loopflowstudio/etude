@@ -29,6 +29,7 @@ from etude.cache import Artifact, Cache, Content, Fetched
 from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError
 from etude.launch import client
+from etude.launch.aws import Keys
 from etude.launch.database import launcher_file
 from etude.launch.logging import log_to
 from etude.launch.provisioner.providers import bootstrap
@@ -50,7 +51,7 @@ from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.download import Download, download
 from etude.launch.storage.files import RESULT, select_output
-from etude.launch.storage.s3 import Bucket, Grant, Keys, PostForm, _send, read
+from etude.launch.storage.s3 import Bucket, Grant, PostForm, _send, read
 from etude.launch.storage.transport import HTTPReply, attribute, observe
 from etude.launch.usage import Transfer, Usage
 from etude.launch.worker.courier import Courier

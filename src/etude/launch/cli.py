@@ -351,7 +351,9 @@ def providers() -> None:
 @kind(Kind.ask)
 def provider_set(
     name: str,
-    kind: Annotated[Literal["runpod", "vast", "lium"], typer.Option(help="which provider this is")],
+    kind: Annotated[
+        Literal["runpod", "vast", "lium", "ec2"], typer.Option(help="which provider this is")
+    ],
     storage: Annotated[str, typer.Option(help="the storage new pools on this provider use")],
     registry: Annotated[
         str, typer.Option(help="the provider's id for the credential that pulls private images")

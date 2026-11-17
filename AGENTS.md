@@ -128,7 +128,7 @@ through `model_validate`: the typed constructor describes the decoded model,
 while runtime validation expects JSON text. Keep `provisioner/providers/runpod/http.py`,
 `provisioner/providers/runpod/pod.py`, `provisioner/providers/vast/http.py`,
 `provisioner/providers/vast/instance.py`,
-`provisioner/providers/lium/pod.py`,
+`provisioner/providers/watchdog.py`,
 `provisioner/providers/http.py`, `provisioner/providers/bootstrap.py`,
 `provisioner/providers/package.py` and `environment.py`
 standard-library-only: each rental guardian must start before

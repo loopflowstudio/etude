@@ -16,6 +16,7 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
+from etude.launch.aws import Keys
 from etude.launch.client import _open
 from etude.launch.database import Database, launcher_file, upgrade
 from etude.launch.errors import ProviderUnavailable
@@ -25,13 +26,13 @@ from etude.launch.provisioner.providers import bootstrap as bootstrap_module
 from etude.launch.provisioner.providers.bootstrap import guard
 from etude.launch.provisioner.providers.lium.api import Create, LiumAPI, Pod
 from etude.launch.provisioner.providers.lium.machines import _START, LiumMachines
-from etude.launch.provisioner.providers.lium.pod import Watchdog
-from etude.launch.provisioner.providers.lium.pod import main as pod_main
+from etude.launch.provisioner.providers.watchdog import Watchdog
+from etude.launch.provisioner.providers.watchdog import main as pod_main
 from etude.launch.records import GPU, BootstrapLinks, Machine, MachineTemplate, OnDemand, Provider
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.s3 import Bucket
 from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker.courier import run as run_courier
 from etude.spec import Job
@@ -497,7 +498,7 @@ def test_local_watchdog_stops_work_without_provider_credentials(
     def killpg(group: int, signal: int) -> None:
         terminated.append(group)
 
-    monkeypatch.setattr("etude.launch.provisioner.providers.lium.pod.os.killpg", killpg)
+    monkeypatch.setattr("etude.launch.provisioner.providers.watchdog.os.killpg", killpg)
     guard(
         Watchdog(),
         "4321",

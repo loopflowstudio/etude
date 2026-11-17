@@ -102,13 +102,13 @@ class Provider(Record):
     """
 
     name: str  # what a machine template's `provider` names
-    kind: Literal["runpod", "vast", "lium"]
+    kind: Literal["runpod", "vast", "lium", "ec2"]
     registry: str  # the provider's id for the credential that pulls private images
     storage: str  # the storage a new pool uses unless it names another
 
     @model_validator(mode="after")
     def _registry_supported(self) -> Provider:
-        if self.kind in {"vast", "lium"} and self.registry:
+        if self.kind != "runpod" and self.registry:
             raise ValueError(
                 f"{self.kind.title()} supports public images; registry credentials are not stored"
             )
@@ -169,12 +169,13 @@ class MachineTemplate(Record):
     image: Image | None = None
 
     _parse_image = field_validator("image", mode="before")(_image)
-    data_center: str | None = None  # RunPod data center id; Vast/Lium country code; None: anywhere
+    data_center: str | None = None  # provider location: data center, country, region or zone
 
 
 class GPU(Record):
     """An allocation of GPUs with at least this much CPU, memory and known disk."""
 
+    flavor: str | None = None
     id: str  # the provider's GPU type id, such as "NVIDIA L4"
     count: int = Field(default=1, ge=1)
     min_vcpus: int
@@ -184,6 +185,8 @@ class GPU(Record):
     def __str__(self) -> str:
         # The host's CPU and memory are only known as the minimums asked for.
         name = self.id if self.count == 1 else f"{self.count} × {self.id}"
+        if self.flavor:
+            name = f"{self.flavor}: {name}"
         return f"{name} with at least {self.min_vcpus} vCPUs, {self.min_memory_gb} GB"
 
 
@@ -206,6 +209,7 @@ class Offer(Record):
 
     hardware: Hardware | None  # None for a machine you own
     usd_per_hour: Decimal
+    reason: str | None = None
     available: bool  # False only when the provider positively reports none
 
 
@@ -290,7 +294,7 @@ def refusal(
     if offer is None:
         return None
     if not offer.available:
-        return "provider reports no available machines"
+        return offer.reason or "provider reports no available machines"
     ceiling = ondemand.max_usd_per_hour
     if ceiling is not None and offer.usd_per_hour > ceiling:
         return "price is above its ceiling"

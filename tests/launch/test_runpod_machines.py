@@ -30,6 +30,7 @@ from pydantic import ValidationError
 from etude.carriage import restore_set
 from etude.errors import LauncherError
 from etude.jobs import continue_from
+from etude.launch.aws import Keys
 from etude.launch.database import Database, launcher_file
 from etude.launch.executor import Execution, Executor, local
 from etude.launch.listing import show_machines, show_runs
@@ -53,7 +54,7 @@ from etude.launch.schemas import (
     log_piece,
 )
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Bucket, Grant, Keys
+from etude.launch.storage.s3 import Bucket, Grant
 from etude.launch.storage.transport import HTTPReply, emit
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier

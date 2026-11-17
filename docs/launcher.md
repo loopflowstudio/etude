@@ -82,7 +82,7 @@ There is no cross-provider fallback.
 $ uv run etude ondemand add l4 --provider aws --gpu L4 --max 1 --max-usd-per-hour 0.90
 $ uv run etude ondemand add l4-spot --provider aws --gpu L4 --spot --max 1 --max-usd-per-hour 0.70
 $ uv run etude availability l4
-l4  g6.xlarge: L4 with at least 4 vCPUs, 16 GB at $0.8229/hour (ceiling $0.90)  available  0 of 1 in use  rentable now  asked 2026-11-17 19:02:11 UTC
+l4  g6.xlarge: L4 with at least 4 vCPUs, 16 GB at $0.8226/hour (ceiling $0.90)  available  0 of 1 in use  rentable now  asked 2026-11-17 19:02:11 UTC
 $ uv run etude availability l4-spot
 l4-spot  g6.xlarge: L4 with at least 4 vCPUs, 16 GB at $0.6510/hour, spot (ceiling $0.70)  available  0 of 1 in use  rentable now  asked 2026-11-17 19:02:14 UTC
 $ uv run etude launch experiment.py --rent l4-spot --max-usd 2

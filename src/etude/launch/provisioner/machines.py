@@ -42,7 +42,7 @@ class Refused(Exception):
 class Safeguards(Record):
     reservation_hours: int = 0  # round fallback-timer budget to this many hours
     lifetime: bool = False
-    start_command: bool = False
+    machine_timer: bool = False
 
 
 class Allocation(Record):

@@ -44,7 +44,7 @@ class Outage(Record):
 
 
 class VastMachines:
-    safeguards = Safeguards(start_command=True)
+    safeguards = Safeguards(machine_timer=True)
     owned = False
 
     def __init__(

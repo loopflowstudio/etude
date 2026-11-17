@@ -296,10 +296,10 @@ enough to leave up to two minutes for final evidence delivery. EC2's and
 Lambda's timers are armed by the host before anything is downloaded
 ([providers](providers.md#aws-ec2)).
 
-Scheduling passes check recorded machines; queue submission itself does not. An on-demand machine with no started
-worker five minutes after the create claim is deleted (earlier at its
-deadline). This check needs a command to run; the machine timer runs independently
-once its image starts. RunPod cannot run that timer while an image is pulling;
+A scheduling pass requests deletion if the worker has not started by the
+rental deadline or an earlier configured `--startup-seconds` cutoff. The
+default allows startup through the rental deadline. The machine timer runs
+independently once armed. RunPod cannot run that timer while an image is pulling;
 EC2 and Lambda arm theirs on the host, before the image is pulled.
 
 The charged hourly price replaces the quote after creation. Machine acquisition and rental records

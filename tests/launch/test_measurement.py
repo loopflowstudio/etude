@@ -20,6 +20,7 @@ import pytest
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch import cli, client
+from etude.launch.aws import Keys
 from etude.launch.commands import Kind
 from etude.launch.database import launcher_file, upgrade
 from etude.launch.executor import Execution
@@ -28,7 +29,7 @@ from etude.launch.records import Machine, OnDemand, Pool
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet
 from etude.launch.ssh import SSH, SessionRequest
-from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.s3 import Bucket
 from etude.launch.storage.transport import HTTPReply
 from etude.spec import Job
 from tests.launch.counting import Counting, Counts, query_plan

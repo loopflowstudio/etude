@@ -20,14 +20,17 @@ from __future__ import annotations
 
 import os
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import cache
 from pathlib import Path
 
 from etude.errors import LauncherError
+from etude.launch.aws import Keys
 from etude.launch.database import launcher_file, open_home
 from etude.launch.executor import Execution, Executor, local
 from etude.launch.provisioner.machines import Machines, OwnedMachine, Safeguards
+from etude.launch.provisioner.providers.ec2.api import EC2API, location
+from etude.launch.provisioner.providers.ec2.machines import EC2Machines
 from etude.launch.provisioner.providers.lium.api import LiumAPI
 from etude.launch.provisioner.providers.lium.machines import LiumMachines
 from etude.launch.provisioner.providers.runpod.api import RunPodAPI
@@ -37,17 +40,20 @@ from etude.launch.provisioner.providers.vast.machines import VastMachines
 from etude.launch.records import (
     LogSnapshot,
     Machine,
+    MachineTemplate,
     OnDemand,
+    Provider,
     Quote,
     Standing,
     Status,
+    Storage,
 )
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.server import PythonClient, selected
 from etude.launch.source import home
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import _send, open_bucket
+from etude.launch.storage.s3 import Bucket, _send, open_bucket
 from etude.launch.storage.transport import HTTPReply, observe
 from etude.launch.usage import Usage
 from etude.spec import Job, RunRequest, expand_runs
@@ -81,41 +87,43 @@ def _open(home: Path) -> Scheduler:
         with observe(store.retain_transfer_json):
             return _send(method, url, body, headers)
 
-    def rented(held: Machine | OnDemand) -> Execution:
-        """Construct only the selected provider, when a remote operation needs it."""
-        if not isinstance(held, OnDemand):
-            raise LauncherError("rentals need an on-demand")
-        provider = store.provider(held.template.provider)
-        key_name = {"runpod": "RUNPOD_API_KEY", "vast": "VAST_API_KEY", "lium": "LIUM_API_KEY"}[
-            provider.kind
-        ]
-        if key_name not in os.environ:
-            raise LauncherError(f"{key_name} is not set")
-        if held.storage is None:
-            raise LauncherError(f"on-demand {held.name!r} has no storage")
-        storage = store.storage(held.storage)
-        bucket = open_bucket(storage, send)
-        machines: Machines
-        if provider.kind == "runpod":
-            machines = RunPodMachines(
-                provider,
-                held.template,
-                RunPodAPI(os.environ[key_name]),
-                bucket,
-                storage.prefix,
+    def api_key(name: str) -> str:
+        if key := os.environ.get(name):
+            return key
+        raise LauncherError(f"{name} is not set")
+
+    def provider[K](
+        credentials: Callable[[], K],
+        make: Callable[[K, Provider, MachineTemplate, Bucket, Storage], Machines],
+        safeguards: Safeguards,
+    ) -> Callable[[Machine | OnDemand], Execution]:
+        def rented(held: Machine | OnDemand) -> Execution:
+            if not isinstance(held, OnDemand) or held.storage is None:
+                raise LauncherError("rentals need an on-demand with storage")
+            keys = credentials()
+            account = store.provider(held.template.provider)
+            storage = store.storage(held.storage)
+            bucket = open_bucket(storage, send)
+            return Executor(
+                make(keys, account, held.template, bucket, storage),
+                None,
+                BucketJournal(storage, bucket),
             )
-        elif provider.kind == "vast":
-            machines = VastMachines(
-                held.template,
-                VastAPI(os.environ[key_name]),
-                bucket,
-                storage.prefix,
-            )
-        else:
-            machines = LiumMachines(
-                held.template, LiumAPI(os.environ[key_name]), bucket, storage.prefix
-            )
-        return Executor(machines, None, BucketJournal(storage, bucket))
+
+        rented.safeguards = safeguards  # type: ignore[attr-defined]
+        return rented
+
+    def ec2(
+        keys: Keys, account: Provider, template: MachineTemplate, bucket: Bucket, storage: Storage
+    ) -> Machines:
+        region, zone = location(template, storage.region)
+        return EC2Machines(
+            template,
+            EC2API(keys, region, send),
+            zone,
+            bucket,
+            storage.prefix,
+        )
 
     def ssh(machine: Machine | OnDemand) -> Execution:
         if not isinstance(machine, Machine) or machine.address is None:
@@ -133,14 +141,38 @@ def _open(home: Path) -> Scheduler:
             )
         return Executor(OwnedMachine(machine.address), SSHStart(connection), journal)
 
-    def lium(held: Machine | OnDemand) -> Execution:
-        return rented(held)
-
-    lium.safeguards = LiumMachines.safeguards  # type: ignore[attr-defined]
-    rented.safeguards = Safeguards(start_command=True)  # type: ignore[attr-defined]
     scheduler = Scheduler(
         store,
-        {"local": lambda machine: here, "ssh": ssh, "runpod": rented, "vast": rented, "lium": lium},
+        {
+            "local": lambda machine: here,
+            "ssh": ssh,
+            "runpod": provider(
+                lambda: api_key("RUNPOD_API_KEY"),
+                lambda key, account, template, bucket, storage: RunPodMachines(
+                    account,
+                    template,
+                    RunPodAPI(key),
+                    bucket,
+                    storage.prefix,
+                ),
+                RunPodMachines.safeguards,
+            ),
+            "vast": provider(
+                lambda: api_key("VAST_API_KEY"),
+                lambda key, _, template, bucket, storage: VastMachines(
+                    template, VastAPI(key), bucket, storage.prefix
+                ),
+                VastMachines.safeguards,
+            ),
+            "lium": provider(
+                lambda: api_key("LIUM_API_KEY"),
+                lambda key, _, template, bucket, storage: LiumMachines(
+                    template, LiumAPI(key), bucket, storage.prefix
+                ),
+                LiumMachines.safeguards,
+            ),
+            "ec2": provider(lambda: Keys.from_environment("s3"), ec2, EC2Machines.safeguards),
+        },
     )
     if os.environ.get("ETUDE_SERVER_LOCAL"):
         store.name_server_pool()

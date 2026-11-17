@@ -170,10 +170,15 @@ def show_availability(answer: Availability) -> None:
     ceiling = (
         "no ceiling" if answer.max_usd_per_hour is None else f"ceiling ${answer.max_usd_per_hour}"
     )
+    if offer.available:
+        description = (
+            f"{offer.hardware or 'a machine'} at ${offer.usd_per_hour}/hour ({ceiling})  available"
+        )
+    else:
+        description = f"none available: {offer.reason}" if offer.reason else "none available"
     print(
         answer.ondemand,
-        f"{offer.hardware or 'a machine'} at ${offer.usd_per_hour}/hour ({ceiling})",
-        "available" if offer.available else "none available",
+        description,
         f"{answer.in_use} of {answer.max_machines} in use",
         "rentable now" if answer.rentable else "not rentable now",
         f"asked {answer.observed_at:%Y-%m-%d %H:%M:%S} UTC",

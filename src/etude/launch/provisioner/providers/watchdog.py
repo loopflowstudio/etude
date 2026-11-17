@@ -1,8 +1,4 @@
-"""Pre-install Lium watchdog. Stops this pod's work, never ends provider billing.
-
-The account credential stays on the server. Provider removal timers cover
-server loss; this process adds a local deadline for bootstrap and execution.
-"""
+"""Stop a rental process group at its deadline. Its host owns machine deletion."""
 
 from __future__ import annotations
 
@@ -20,14 +16,13 @@ class Watchdog:
         return None
 
     def delete_self(self, machine: str) -> None:
-        # The SSH bootstrap owns a fresh process group. This kills its bootstrap
-        # and worker; the worker's own deadline supervises its job groups.
+        # The bootstrap owns its process group. The worker supervises job groups.
         os.killpg(int(machine), signal.SIGTERM)
 
 
 def main(argv: list[str]) -> int:
     if argv[1] == "boot":
-        return boot("etude.launch.provisioner.providers.lium.pod", None, None)
+        return boot("etude.launch.provisioner.providers.watchdog", None, None)
     if argv[1] != "guard":
         raise ValueError("expected boot or guard")
     GUARDIAN_MARKER.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

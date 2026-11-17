@@ -166,7 +166,7 @@ $ etude storage add west --bucket BUCKET --prefix etude/launch --provider s3 --r
 $ etude provider set aws --kind ec2 --storage west
 $ etude ondemand add l4 --provider aws --gpu L4 --max 1 --max-usd-per-hour 0.90
 $ etude availability l4 --timeout 60
-l4  g6.xlarge: L4 with at least 4 vCPUs, 16 GB at $0.8229/hour (ceiling $0.90)  available  0 of 1 in use  rentable now  asked 2026-11-17 19:02:11 UTC
+l4  g6.xlarge: L4 with at least 4 vCPUs, 16 GB at $0.8226/hour (ceiling $0.90)  available  0 of 1 in use  rentable now  asked 2026-11-17 19:02:11 UTC
 $ etude launch job.py --rent l4 --max-usd 2
 $ etude wait
 $ etude machines --all
@@ -182,9 +182,9 @@ identity then needs the bucket and these actions:
 | `ec2:DescribeInstanceTypes`, `pricing:GetProducts`, `ec2:DescribeSpotPriceHistory` | what would be rented, and its price |
 | `servicequotas:GetServiceQuota` | whether the account may run it |
 | `ssm:GetParameter` on `/aws/service/deeplearning/ami/*` | the host image |
-| `ec2:DescribeVpcs`, `ec2:DescribeSubnets` | the default VPC |
+| `ec2:DescribeInstanceTypeOfferings` | types offered in a requested zone |
 | `ec2:RunInstances`, `ec2:CreateTags` | renting |
-| `ec2:DescribeInstances`, `ec2:TerminateInstances` | finding and deleting what was rented |
+| `ec2:DescribeInstances`, `ec2:DescribeVolumes`, `ec2:TerminateInstances` | finding and deleting what was rented |
 
 A first spot rental in an account also needs AWS's `AWSServiceRoleForEC2Spot`
 role to exist. The bootstrap links are signed with the launcher's keys, so
@@ -215,12 +215,15 @@ Raise it in the AWS console under Service Quotas; the standard-price quota is
 `Running On-Demand G and VT instances`.
 
 The instance boots AWS's GPU base image (NVIDIA driver and Docker) in the
-default VPC with no key pair, no inbound rule and no instance role, and runs
+default VPC using its existing default security group. Etude supplies no key
+pair or instance role and opens no ports. The host runs
 the on-demand's image as a container with every GPU. `--image` therefore means
 what it means on the other providers. There is no SSH access; read `etude logs`.
 
 **Deletion.** The instance is made so that powering off terminates it and
-deletes its disk. Before anything is downloaded, the host schedules that
+deletes its disk. The launcher confirms termination and the removal of tagged
+volumes before reporting deletion. Before downloading the signed, digest-checked
+session boot script, the host schedules that
 power-off for the rental's deadline; it also powers off when the worker exits
 for any reason. No credential that can delete anything is on the machine, and
 neither path needs the launcher. The scheduler's loop terminates by the
