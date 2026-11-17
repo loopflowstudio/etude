@@ -119,7 +119,7 @@ class LiumMachines:
     def create(self, request: MachineRequest) -> Allocation:
         if request.deadline is None or request.bootstrap is None:
             raise Refused("Lium rentals need a deadline and storage bootstrap")
-        if self.find(request.session) is not None:
+        if self._receipt(request.session) is not None:
             found = self.allocation(request.session)
             if found is None:
                 raise ProviderUnavailable("Lium accepted creation; pod not yet visible")
@@ -201,10 +201,10 @@ class LiumMachines:
             hardware=intent.offer.hardware,
         )
 
-    def find(self, session_id: str) -> str | None:
+    def _receipt(self, session_id: str) -> Receipt | None:
         receipt = self._read(session_id, "receipt", Receipt)
         if receipt is not None:
-            return str(receipt.id)
+            return receipt
         intent = self._read(session_id, "intent", Intent)
         if intent is None:
             return None
@@ -219,15 +219,20 @@ class LiumMachines:
                 "Lium create has no pod yet; settles as nothing rented after "
                 f"{settles:%Y-%m-%d %H:%M} UTC"
             )
-        self._keep_receipt(session_id, Receipt(id=id))
-        return str(id)
+        receipt = Receipt(id=id)
+        self._keep_receipt(session_id, receipt)
+        return receipt
+
+    def find(self, session_id: str) -> str | None:
+        receipt = self._receipt(session_id)
+        return None if receipt is None else str(receipt.id)
 
     def allocation(self, session_id: str) -> Allocation | None:
-        if self.find(session_id) is None:
+        receipt = self._receipt(session_id)
+        if receipt is None:
             return None
         intent = self._read(session_id, "intent", Intent)
-        receipt = self._read(session_id, "receipt", Receipt)
-        assert intent is not None and receipt is not None
+        assert intent is not None
         pod = self._api.pod(receipt.id)
         if pod is None:
             return None if receipt.pod is None else self._allocation(intent, receipt.pod)
@@ -252,11 +257,11 @@ class LiumMachines:
         }
 
     def end(self, session_id: str) -> datetime | None:
-        id = self.find(session_id)
-        if id is None:
+        receipt = self._receipt(session_id)
+        if receipt is None:
             return None
-        self._api.delete(UUID(id))
-        return datetime.now(UTC) if self._api.status(UUID(id)) is None else None
+        self._api.delete(receipt.id)
+        return datetime.now(UTC) if self._api.status(receipt.id) is None else None
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
         receipt = self._read(session_id, "receipt", Receipt)
