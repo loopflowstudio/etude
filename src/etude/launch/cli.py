@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 
 import typer
 
-from etude.launch.commands import Kind, kind
+from etude.launch.commands import Kind, ProviderKind, kind
 
 if TYPE_CHECKING:
     from etude.launch.scheduler.loop import Scheduler
@@ -351,10 +351,7 @@ def providers() -> None:
 @kind(Kind.ask)
 def provider_set(
     name: str,
-    kind: Annotated[
-        Literal["runpod", "vast", "lium", "ec2", "lambda"],
-        typer.Option(help="which provider this is"),
-    ],
+    kind: Annotated[ProviderKind, typer.Option(help="which provider this is")],
     storage: Annotated[str, typer.Option(help="the storage new pools on this provider use")],
     registry: Annotated[
         str, typer.Option(help="the provider's id for the credential that pulls private images")

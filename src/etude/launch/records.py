@@ -24,6 +24,7 @@ from typing import Literal, Self
 from pydantic import Field, field_validator, model_validator
 
 from etude.errors import LauncherError as LauncherError
+from etude.launch.commands import ProviderKind
 from etude.records import RunRecord as RunRecord
 from etude.records import RunWriter
 from etude.records import Tally as Tally
@@ -94,9 +95,6 @@ Phase = Literal["queued", "renting", "setting_up", "running", "stopping", "done"
 
 class Stale(LauncherError):
     """A record changed after it was read; the write did not happen."""
-
-
-ProviderKind = Literal["runpod", "vast", "lium", "ec2", "lambda"]
 
 
 class Provider(Record):

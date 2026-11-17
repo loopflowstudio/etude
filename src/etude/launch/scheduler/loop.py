@@ -37,6 +37,7 @@ from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError, explain, sanitize
 from etude.identity import resume_conflicts, run_address
 from etude.launch import source
+from etude.launch.commands import ProviderKind
 from etude.launch.database import Database
 from etude.launch.errors import LaunchError, ProviderUnavailable
 from etude.launch.executor import Execution
@@ -62,7 +63,6 @@ from etude.launch.records import (
     OnDemand,
     Pool,
     Provider,
-    ProviderKind,
     Quote,
     QuotedMachine,
     Rental,
