@@ -797,7 +797,7 @@ def test_unreadable_created_pod_is_recorded_and_deleted_by_identity(
         assert store.rented_session(name).provider_id == POD
         scheduler.tick()
         assert any(
-            d.operation == "machine facts"
+            d.operation == "machine readiness"
             and d.session == session.id
             and "Lium reply is missing valid required fields" in d.message
             for d in scheduler.diagnostics(machine=name)

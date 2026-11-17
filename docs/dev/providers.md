@@ -173,15 +173,15 @@ A pod whose description Etude cannot read is still a machine it holds, and
 
 ```text
 $ etude machines
-rtx4090-7b0c01e641d4  rtx4090  starting, RTX 4090 with at least 11 vCPUs, 20 GB, rented until 2026-11-17 17:01 UTC, ~$0.01
+rtx4090-7b0c01e641d4  rtx4090  starting, rented until 2026-11-17 17:01 UTC, ~$0.01
 $ etude terminate rtx4090-7b0c01e641d4
 $ etude machines --all
-rtx4090-7b0c01e641d4  rtx4090  deleted, RTX 4090 with at least 11 vCPUs, 20 GB, rented, ended 2026-11-17 16:04 UTC, ~$0.01
+rtx4090-7b0c01e641d4  rtx4090  deleted, rented, ended 2026-11-17 16:04 UTC, ~$0.01
 ```
 
 Left alone, the same machine is deleted by the scheduler's loop at its startup
 deadline: it cannot bootstrap without an address, and its runs end `lost` and
-retry elsewhere. Until then each pass retains a `machine facts` diagnostic
+retry elsewhere. Until then each pass retains a `machine readiness` diagnostic
 naming the session, `Lium reply is missing valid required fields`.
 
 Etude keeps two things about a pod, and only the first is needed to own it:

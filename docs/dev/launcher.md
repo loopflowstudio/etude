@@ -735,7 +735,7 @@ writes claim each session once. A rented machine is known by the provider's id
 for it, which is all that recording, terminating or deleting it at a deadline
 needs. The worker's first receipt (`started_at`) makes it `available`; a provider
 id alone leaves it `starting`. Its price, hardware and address are a separate
-read: while that read fails, each pass retains a `machine facts` diagnostic for
+read: while that read fails, each pass retains a `machine readiness` diagnostic for
 the session, the machine stays `starting`, and it is deleted at its startup
 deadline or by `terminate`. A lost create reply is looked up, never repeated;
 if the provider still has no such machine at the rental's deadline, or when it

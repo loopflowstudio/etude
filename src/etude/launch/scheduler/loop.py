@@ -1793,7 +1793,7 @@ class Scheduler:
             allocation = service.allocation(session.id)
         except ProviderUnavailable as error:
             self._diagnose(
-                "machine facts", "could not read machine facts", error, session=session.id
+                "machine readiness", "machine is not ready yet", error, session=session.id
             )
             allocation = None
         if allocation is not None and allocation.usd_per_hour != self._usd_per_hour(session):
