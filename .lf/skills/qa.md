@@ -316,3 +316,14 @@ often refused in every zone; a refused create rents nothing. Confirm cleanup
 with `aws ec2 describe-instances` / `describe-volumes` filtered on
 `tag-key=etude-session` (state reason `Client.UserInitiatedShutdown` is the
 host's own power-off).
+
+To prove interruption and resume, add a job that sleeps per update, saves every
+update and appends `ETUDE_ATTEMPT` to its resumed extra; give it `max_usd=0.60`
+(the admission check adds setup time to the hours). Start `etude wait
+--experiment NAME` with output to a file, wait until `etude status` shows a few
+updates, then `aws ec2 terminate-instances` on the instance tagged with its
+session. A standard-price loss reads `2 of 3 attempts used`; a spot loss keeps
+`1 of 3`. The attempt is recorded lost only after the old volume is gone
+(about six minutes). `etude fetch RUN NAME DIR` takes the directory positionally;
+the fetched file should list both attempt ids. `status` prints `last loop: never`
+under `etude wait`: only `etude server run` writes that heartbeat.
