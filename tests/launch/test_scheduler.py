@@ -338,7 +338,8 @@ def test_a_lost_machine_retries_the_same_run_with_remaining_hours(
     assert status.usd >= before.usd > 0
     assert status.attempts == (1 if spot else 2)
     show_runs(b.scheduler, [one])
-    assert f", attempt {status.attempts}" in capsys.readouterr().out
+    used = f", {status.attempts} of {1 if spot else 2} attempts used"
+    assert used in capsys.readouterr().out
     assert attempts[1].limit_seconds == 3500
     assert attempts[1].machine != first.machine
     b.run(601)
