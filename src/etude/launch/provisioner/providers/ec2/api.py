@@ -28,6 +28,20 @@ AMI_PARAMETER = (
     "/aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-ubuntu-24.04/latest/ami-id"
 )
 
+# RunInstances errors that definitely created nothing: a refusal, not an outage.
+_REFUSALS = frozenset(
+    {
+        "InsufficientInstanceCapacity",
+        "VcpuLimitExceeded",
+        "MaxSpotInstanceCountExceeded",
+        "SpotMaxPriceTooLow",
+        "UnfulfillableCapacity",
+        "Unsupported",
+        "InstanceLimitExceeded",
+        "VPCIdNotSpecified",
+    }
+)
+
 
 class EC2Offer(Offer):
     # Zones to ask, in order; empty lets EC2 choose. A spot offer lists every zone
@@ -144,16 +158,7 @@ class EC2API:
         if reply.status != 200:
             code = root.findtext(".//Error/Code") or f"HTTP {reply.status}"
             detail = sanitize(root.findtext(".//Error/Message") or "")[:300]
-            if action == "RunInstances" and code in {
-                "InsufficientInstanceCapacity",
-                "VcpuLimitExceeded",
-                "MaxSpotInstanceCountExceeded",
-                "SpotMaxPriceTooLow",
-                "UnfulfillableCapacity",
-                "Unsupported",
-                "InstanceLimitExceeded",
-                "VPCIdNotSpecified",
-            }:
+            if action == "RunInstances" and code in _REFUSALS:
                 raise Refused(f"AWS {code}: {detail}")
             raise ProviderUnavailable(f"AWS {action}: {code}")
         return root
@@ -345,17 +350,13 @@ class EC2API:
                 return EC2Offer.unavailable(
                     "EC2 has no current spot price for the matching instance types"
                 )
-            spot = min(
-                prices,
-                key=lambda p: (
-                    min(rates[p.flavor], p.price * SPOT_HEADROOM),
-                    p.price,
-                    p.zone,
-                    p.flavor,
-                ),
-            )
-            hardware = flavors[spot.flavor]
-            rate = min(rates[spot.flavor], spot.price * SPOT_HEADROOM)
+
+            def bid(p: SpotPrice) -> Decimal:
+                # Never bid above the standard price of the same instance type.
+                return min(rates[p.flavor], p.price * SPOT_HEADROOM)
+
+            spot = min(prices, key=lambda p: (bid(p), p.price, p.zone, p.flavor))
+            hardware, rate = flavors[spot.flavor], bid(spot)
             covered = sorted(
                 (p for p in prices if p.flavor == spot.flavor and p.price <= rate),
                 key=lambda p: (p.price, p.zone),

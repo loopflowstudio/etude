@@ -37,6 +37,15 @@ class Intent(Record):
     hardware: GPU
     usd_per_hour: Decimal
 
+    def allocation(self, instance: Instance) -> Allocation:
+        return Allocation(
+            id=instance.id,
+            address=None,
+            created_at=instance.launched,
+            hardware=self.hardware,
+            usd_per_hour=self.usd_per_hour,
+        )
+
 
 class EC2Machines:
     owned = False
@@ -54,11 +63,11 @@ class EC2Machines:
         self._quote = self.api.offer(self.template, self.zone)
         return self._quote
 
-    def _key(self, session: str) -> str:
-        return f"{self.prefix}/sessions/{session}/intent.json"
+    def _key(self, session: str, name: str) -> str:
+        return f"{self.prefix}/sessions/{session}/{name}.json"
 
     def _intent(self, session: str) -> Intent | None:
-        raw = self.bucket.get(self._key(session))
+        raw = self.bucket.get(self._key(session, "intent"))
         return None if raw is None else Intent.model_validate_json(raw)
 
     def _prepare(self, request: MachineRequest) -> tuple[Intent, dict[str, str], tuple[str, ...]]:
@@ -140,7 +149,7 @@ class EC2Machines:
         if datetime.now(UTC) >= intent.creation_deadline:
             raise ProviderUnavailable("EC2 create window ended; awaiting inventory reconciliation")
         check_creation()
-        return self._allocation(self.api.launch(fields), intent)
+        return intent.allocation(self.api.launch(fields))
 
     def create(self, request: MachineRequest) -> Allocation:
         prior = self.allocation(request.session)
@@ -156,7 +165,9 @@ class EC2Machines:
         check_creation()
         try:
             self.bucket.put(
-                self._key(request.session), intent.model_dump_json().encode(), once=True
+                self._key(request.session, "intent"),
+                intent.model_dump_json().encode(),
+                once=True,
             )
         except AlreadyThere:
             raise ProviderUnavailable("EC2 launch already claimed; reconciling by tag") from None
@@ -188,25 +199,12 @@ class EC2Machines:
             raise Refused(f"{refusal} (asked {', '.join(zones)})") from None
         raise refusal
 
-    @staticmethod
-    def _allocation(instance: Instance, intent: Intent) -> Allocation:
-        return Allocation(
-            id=instance.id,
-            address=None,
-            created_at=instance.launched,
-            hardware=intent.hardware,
-            usd_per_hour=intent.usd_per_hour,
-        )
-
-    def _receipt_key(self, session: str) -> str:
-        return f"{self.prefix}/sessions/{session}/receipt.json"
-
     def _keep(self, session: str, allocation: Allocation) -> Allocation:
-        self.bucket.put(self._receipt_key(session), allocation.model_dump_json().encode())
+        self.bucket.put(self._key(session, "receipt"), allocation.model_dump_json().encode())
         return allocation
 
     def _receipt(self, session: str) -> Allocation | None:
-        raw = self.bucket.get(self._receipt_key(session))
+        raw = self.bucket.get(self._key(session, "receipt"))
         return None if raw is None else Allocation.model_validate_json(raw)
 
     def find(self, session_id: str) -> str | None:
@@ -224,7 +222,7 @@ class EC2Machines:
             return None
         instances = self.api.instances(session_id)
         if instances:
-            return self._keep(session_id, self._allocation(instances[0], intent))
+            return self._keep(session_id, intent.allocation(instances[0]))
         raise ProviderUnavailable("EC2 launch intent exists; awaiting tagged instance")
 
     def _past_listing_lag(self, session_id: str) -> bool:
