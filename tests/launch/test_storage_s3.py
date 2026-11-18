@@ -10,10 +10,11 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from etude.launch.aws import Keys
 from etude.launch.records import Storage as Place
 from etude.launch.schemas import Work
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import AlreadyThere, Bucket, Denied, Keys, open_bucket, post
+from etude.launch.storage.s3 import AlreadyThere, Bucket, Denied, open_bucket, post
 from etude.launch.storage.transport import HTTPReply
 from etude.spec import Input
 from etude.storage_timeout import StorageUnavailable

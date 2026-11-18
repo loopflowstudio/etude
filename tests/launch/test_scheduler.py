@@ -311,17 +311,35 @@ def test_empty_refusal_records_a_reason_for_status_and_admission(tmp_path: Path)
     assert refused is not None and refused.refusal == "no reason given"
 
 
-def test_a_lost_machine_retries_the_same_run_with_remaining_hours(tmp_path: Path) -> None:
+@pytest.mark.parametrize("spot", [True, False])
+def test_a_lost_machine_retries_the_same_run_with_remaining_hours(
+    tmp_path: Path, spot: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
     b = bench(tmp_path)
-    (one,) = b.scheduler.queue(job(), rent="l4")
+    b.scheduler.add_ondemand(
+        OnDemand(
+            name="market",
+            template=L4.model_copy(update={"spot": spot}),
+            max_machines=1,
+            setup_seconds=0,
+        )
+    )
+    (one,) = b.scheduler.queue(job(max_attempts=1 if spot else 2), rent="market")
     b.scheduler.tick()
     b.run(100)
     first = b.scheduler.attempts(one)[0]
+    before = b.scheduler.read(one)
     b.service.kill(first.session)
     b.run(1)
     attempts = b.scheduler.attempts(one)
     assert len(attempts) == 2
-    assert attempts[0].cause == "machine_lost"
+    assert attempts[0].cause == ("spot_machine_lost" if spot else "machine_lost")
+    status = b.scheduler.read(one)
+    assert status.usd >= before.usd > 0
+    assert status.attempts == (1 if spot else 2)
+    show_runs(b.scheduler, [one])
+    used = f", {status.attempts} of {1 if spot else 2} attempts used"
+    assert used in capsys.readouterr().out
     assert attempts[1].limit_seconds == 3500
     assert attempts[1].machine != first.machine
     b.run(601)

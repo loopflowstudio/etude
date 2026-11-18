@@ -19,11 +19,12 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import Field, field_validator, model_validator
 
 from etude.errors import LauncherError as LauncherError
+from etude.launch.commands import ProviderKind
 from etude.records import RunRecord as RunRecord
 from etude.records import RunWriter
 from etude.records import Tally as Tally
@@ -76,14 +77,16 @@ Cause = Literal[
     "input_undelivered",
     "machine_lost_before_start",
     "machine_lost",
+    "spot_machine_lost",
     "create_unconfirmed",
 ]
 # A definite refusal acquired no machine and spends no attempt budget.
 CAPACITY_REFUSED: Cause = "capacity_refused"
+TRY_EXEMPT = (CAPACITY_REFUSED, "spot_machine_lost")
 # Confirmed machine loss permits a new attempt; an uncertain start does not, nor
 # an input the machine was not given, which a retry would not be given either.
 RETRYABLE: frozenset[str] = frozenset(
-    {CAPACITY_REFUSED, "setup_failed", "machine_lost_before_start", "machine_lost"}
+    {*TRY_EXEMPT, "setup_failed", "machine_lost_before_start", "machine_lost"}
 )
 # Which of a run's two limits ends it first on the rental it was given.
 Limit = Literal["over_budget", "out_of_time"]
@@ -102,13 +105,13 @@ class Provider(Record):
     """
 
     name: str  # what a machine template's `provider` names
-    kind: Literal["runpod", "vast", "lium"]
+    kind: ProviderKind
     registry: str  # the provider's id for the credential that pulls private images
     storage: str  # the storage a new pool uses unless it names another
 
     @model_validator(mode="after")
     def _registry_supported(self) -> Provider:
-        if self.kind in {"vast", "lium"} and self.registry:
+        if self.kind != "runpod" and self.registry:
             raise ValueError(
                 f"{self.kind.title()} supports public images; registry credentials are not stored"
             )
@@ -160,6 +163,7 @@ def _image(value: object) -> object:
 class MachineTemplate(Record):
     """What a rented machine is made from: which provider, what kind, and where."""
 
+    spot: bool = False
     provider: str  # the name of the provider that supplies them
     gpu: str | None = None  # the provider's name for the GPU, such as "NVIDIA L4"
     gpu_count: int = Field(default=1, ge=1)
@@ -169,12 +173,13 @@ class MachineTemplate(Record):
     image: Image | None = None
 
     _parse_image = field_validator("image", mode="before")(_image)
-    data_center: str | None = None  # RunPod data center id; Vast/Lium country code; None: anywhere
+    data_center: str | None = None  # provider location: data center, country, region or zone
 
 
 class GPU(Record):
     """An allocation of GPUs with at least this much CPU, memory and known disk."""
 
+    flavor: str | None = None
     id: str  # the provider's GPU type id, such as "NVIDIA L4"
     count: int = Field(default=1, ge=1)
     min_vcpus: int
@@ -184,6 +189,8 @@ class GPU(Record):
     def __str__(self) -> str:
         # The host's CPU and memory are only known as the minimums asked for.
         name = self.id if self.count == 1 else f"{self.count} × {self.id}"
+        if self.flavor:
+            name = f"{self.flavor}: {name}"
         return f"{name} with at least {self.min_vcpus} vCPUs, {self.min_memory_gb} GB"
 
 
@@ -206,12 +213,18 @@ class Offer(Record):
 
     hardware: Hardware | None  # None for a machine you own
     usd_per_hour: Decimal
+    reason: str | None = None
     available: bool  # False only when the provider positively reports none
+
+    @classmethod
+    def unavailable(cls, reason: str) -> Self:
+        return cls(available=False, hardware=None, usd_per_hour=Decimal(0), reason=reason)
 
 
 class Availability(Record):
     """An on-demand's offer as its provider answered at `observed_at`, beside its budget."""
 
+    spot: bool = False
     ondemand: str
     offer: Offer
     max_usd_per_hour: Decimal | None
@@ -290,7 +303,7 @@ def refusal(
     if offer is None:
         return None
     if not offer.available:
-        return "provider reports no available machines"
+        return offer.reason or "provider reports no available machines"
     ceiling = ondemand.max_usd_per_hour
     if ceiling is not None and offer.usd_per_hour > ceiling:
         return "price is above its ceiling"
@@ -529,6 +542,7 @@ class QuotedMachine(Record):
     Provider delays can exceed the admitted budget.
     """
 
+    spot: bool = False
     run: str  # the run's name
     machine: str | None  # an existing machine; None means one would be rented
     hardware: Hardware | None  # for a rental, what the provider would be asked for

@@ -231,7 +231,7 @@ class Job(Record):
     config: str | None = None  # the config file's text, handed back at ETUDE_CONFIG
     repo: str | None = None  # a local git repository; None runs in an empty directory
     revision: str | None = None  # None snapshots working files; a named revision is exact
-    # Includes infrastructure loss and planned stops; definite capacity refusals spend no try.
+    # Capacity refusals and started attempts lost with spot machines spend no try.
     max_attempts: int = 3
     inputs: tuple[Input, ...] = ()  # files at ETUDE_INPUTS_DIR/NAME when the job starts
     # Set in the job's environment; Etude's own ETUDE_* settings take precedence.

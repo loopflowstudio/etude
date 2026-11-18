@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from etude.errors import LauncherError
+from etude.launch.aws import Keys
 from etude.launch.database import launcher_file
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.provisioner.machines import MachineRequest, Refused
@@ -24,7 +25,7 @@ from etude.launch.provisioner.providers.runpod.api import PodFact, RunPodAPI
 from etude.launch.provisioner.providers.runpod.machines import STOCK_IMAGE, RunPodMachines
 from etude.launch.records import CPU, GPU, BootstrapLinks, MachineTemplate
 from etude.launch.records import Provider as Account
-from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.s3 import Bucket
 from etude.launch.storage.transport import HTTPReply
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import open_database

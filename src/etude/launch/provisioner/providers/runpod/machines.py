@@ -29,7 +29,7 @@ from etude.launch.storage.s3 import Bucket
 
 
 class RunPodMachines:
-    safeguards = Safeguards(start_command=True)
+    safeguards = Safeguards(machine_timer=True)
     owned = False
 
     def __init__(
@@ -46,6 +46,8 @@ class RunPodMachines:
 
     def offer(self) -> Offer:
         template = self._template
+        if template.spot:
+            return Offer.unavailable("Etude rents no spot machines from RunPod")
         return self._api.quote(
             gpu=template.gpu,
             gpu_count=template.gpu_count,
@@ -82,12 +84,13 @@ class RunPodMachines:
         template = self._template
         offer = self.offer()
         hardware = offer.hardware
-        assert hardware is not None  # RunPod prices only hardware it names
         if not offer.available:
             raise Refused(
-                f"no {template.gpu or 'CPU pod'} available in"
+                offer.reason
+                or f"no {template.gpu or 'CPU pod'} available in"
                 f" {template.data_center or 'any data center'}"
             )
+        assert hardware is not None  # RunPod prices only hardware it names
         if request.bootstrap is None:
             raise LauncherError("a rented machine needs a storage bootstrap link")
         image = template.image or DEFAULT_IMAGE

@@ -8,10 +8,11 @@ from typing import IO
 import pytest
 
 from etude.carriage import publication, put_back, restore_set
+from etude.launch.aws import Keys
 from etude.launch.records import Storage as Place
 from etude.launch.schemas import Work
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.s3 import Bucket
 from etude.out import MEMBERSHIP
 from etude.records import Clock
 from etude.run import RunFiles, StorageDestination, prune

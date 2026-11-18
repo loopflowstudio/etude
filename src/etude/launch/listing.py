@@ -2,6 +2,7 @@
 
 import os
 from collections.abc import Sequence
+from decimal import Decimal
 
 from etude.identity import run_address
 from etude.launch.records import Availability, Machine, Quote
@@ -16,6 +17,8 @@ def show_runs(scheduler: Scheduler | PythonClient, ids: Sequence[str]) -> None:
         where = f", machine {status.machine}" if status.machine else ""
         where += f" ({status.hardware})" if status.hardware else ""
         record = scheduler.record(run)
+        if status.attempts:
+            where += f", {status.attempts} of {record.launch.spec.max_attempts} attempts used"
         print(run, record.name, str(status) + where, sep="  ")
         if record.launch.spec.repo is not None:
             print("  source: " + line(record.launch.source, record.launch.spec.revision or "HEAD"))
@@ -72,6 +75,8 @@ def show_ondemands(scheduler: Scheduler) -> None:
         if template.vcpus or template.memory_gb:
             kind += f" {template.vcpus or 'any'} vCPUs, {template.memory_gb or 'any'} GB"
         source = template.provider + (f" in {template.data_center}" if template.data_center else "")
+        if template.spot:
+            source += ", spot"
         ceiling = (
             f" under ${each.max_usd_per_hour}/hour" if each.max_usd_per_hour is not None else ""
         )
@@ -131,6 +136,8 @@ def show_machines(scheduler: Scheduler, *, ended: bool) -> None:
                 window = f"rented, ended {machine.deleted_at:%Y-%m-%d %H:%M} UTC"
             else:
                 window = f"rented until {rental.deadline:%Y-%m-%d %H:%M} UTC"
+            if ondemand.template.spot:
+                window += ", spot"
             hardware = f"{machine.hardware}, " if machine.hardware else ""
             print(
                 machine.name,
@@ -147,10 +154,12 @@ def show_quote(quote: Quote) -> None:
     for each in quote.machines:
         if each.machine is not None:
             where = f"machine {each.machine}" + (
-                f" at ${each.usd_per_hour}/hour" if each.usd_per_hour else ""
+                f" at {_per_hour(each.usd_per_hour)}" if each.usd_per_hour else ""
             )
         else:
-            where = f"rent {each.hardware or 'a machine'} at ${each.usd_per_hour}/hour"
+            where = f"rent {each.hardware or 'a machine'} at {_per_hour(each.usd_per_hour)}"
+        if each.spot:
+            where += ", spot"
         if each.slots > 1:
             where += f", {each.slots} slots"
             if each.alongside:
@@ -165,15 +174,24 @@ def show_quote(quote: Quote) -> None:
     )
 
 
+def _per_hour(usd: Decimal) -> str:
+    """A provider's hourly price to four decimal places: Vast's float sums carry binary noise."""
+    return f"${usd.quantize(Decimal('0.0001')).normalize():f}/hour"
+
+
 def show_availability(answer: Availability) -> None:
     offer = answer.offer
     ceiling = (
         "no ceiling" if answer.max_usd_per_hour is None else f"ceiling ${answer.max_usd_per_hour}"
     )
+    market = ", spot" if answer.spot else ""
+    if offer.available:
+        description = f"{offer.hardware or 'a machine'} at {_per_hour(offer.usd_per_hour)}{market} ({ceiling})  available"
+    else:
+        description = f"none available: {offer.reason}" if offer.reason else "none available"
     print(
         answer.ondemand,
-        f"{offer.hardware or 'a machine'} at ${offer.usd_per_hour}/hour ({ceiling})",
-        "available" if offer.available else "none available",
+        description,
         f"{answer.in_use} of {answer.max_machines} in use",
         "rentable now" if answer.rentable else "not rentable now",
         f"asked {answer.observed_at:%Y-%m-%d %H:%M:%S} UTC",

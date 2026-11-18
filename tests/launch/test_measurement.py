@@ -20,6 +20,7 @@ import pytest
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch import cli, client
+from etude.launch.aws import Keys
 from etude.launch.commands import Kind
 from etude.launch.database import launcher_file, upgrade
 from etude.launch.executor import Execution
@@ -28,7 +29,7 @@ from etude.launch.records import Machine, OnDemand, Pool
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet
 from etude.launch.ssh import SSH, SessionRequest
-from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.s3 import Bucket
 from etude.launch.storage.transport import HTTPReply
 from etude.spec import Job
 from tests.launch.counting import Counting, Counts, query_plan
@@ -209,14 +210,15 @@ def test_several_run_git_and_database_counts(
             8,
             ("numpy", "pydantic", "etude.launch.worker", "etude.launch.scheduler"),
         ),
-        # Client composition includes four modules each for Vast and Lium, the
-        # request every provider shares, the storage socket policy it forwards
+        # Client composition includes four modules each for Vast and Lium, three
+        # each for EC2 and Lambda, the VM host script they share, the AWS signer,
+        # the request every provider shares, the storage socket policy it forwards
         # to workers, and shared run-identity validation.
         # The layout adds provisioner/scheduler packages and two scheduler leaves.
-        (["pools"], 60, ("numpy", "boto3", "etude.launch.worker")),
+        (["pools"], 68, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            34,  # includes the empty provisioner package for generic cleanup
+            35,  # the empty provisioner package for generic cleanup; S3's AWS signer
             (
                 "numpy",
                 "boto3",

@@ -47,6 +47,18 @@ class VastOffer(Record):
             min_memory_gb=int(self.cpu_ram / 1000),
         )
 
+    @property
+    def price(self) -> Decimal:
+        return self.dph_total
+
+
+class BidOffer(VastOffer):
+    min_bid: Decimal = Field(gt=0, allow_inf_nan=False)
+
+    @property
+    def price(self) -> Decimal:
+        return self.min_bid + self.storage_total_cost
+
 
 class InstanceIdentity(Record):
     id: int = Field(gt=0)
@@ -78,8 +90,8 @@ class Instance(InstanceIdentity):
         return datetime.fromtimestamp(self.start_date, UTC)
 
 
-class _Offers(Record):
-    offers: tuple[VastOffer, ...]
+class _Offers[T: VastOffer](Record):
+    offers: tuple[T, ...]
 
 
 class _Page(Record):
@@ -103,6 +115,7 @@ class Create(Record):
     client_id: Literal["me"] = "me"
     image: str
     disk: int
+    price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     label: str
     env: dict[str, str]
     onstart: str
@@ -143,7 +156,7 @@ class VastAPI(InstanceHTTP):
         # Search includes disk in dph_total. Zero transfer rates keep arbitrary
         # training traffic within the quoted rental rate, without a guessed byte cap.
         query = {
-            "type": "ondemand",
+            "type": "bid" if template.spot else "ondemand",
             "order": [["dph_total", "asc"]],
             "gpu_name": {"eq": template.gpu},
             "num_gpus": {"eq": template.gpu_count},
@@ -161,7 +174,8 @@ class VastAPI(InstanceHTTP):
         }
         if template.data_center:
             query["geolocation"] = {"eq": template.data_center}
-        page = _read(_Offers, self.ask("POST", "api/v0/bundles/", body=json.dumps(query)))
+        raw = self.ask("POST", "api/v0/bundles/", body=json.dumps(query))
+        page = _read(_Offers[BidOffer], raw) if template.spot else _read(_Offers[VastOffer], raw)
         # Validate the selection locally as well: a server ignoring a filter must
         # not sell the caller a smaller machine or charge unbounded bandwidth.
         offers = (
@@ -184,10 +198,12 @@ class VastAPI(InstanceHTTP):
                 or offer.geolocation.split(",")[-1].strip() == template.data_center
             )
         )
-        return tuple(sorted(offers, key=lambda offer: (offer.dph_total, offer.id)))
+        return tuple(sorted(offers, key=lambda offer: (offer.price, offer.id)))
 
     def create(self, offer: VastOffer, request: Create) -> int:
-        reply = self.ask("PUT", f"api/v0/asks/{offer.id}/", body=request.model_dump_json())
+        reply = self.ask(
+            "PUT", f"api/v0/asks/{offer.id}/", body=request.model_dump_json(exclude_none=True)
+        )
         return _read(_Created, reply).new_contract
 
     def _instance[T: InstanceIdentity](self, id: int, model: type[_Instance[T]]) -> T | None:

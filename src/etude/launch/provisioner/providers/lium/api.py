@@ -192,7 +192,7 @@ class LiumAPI(LiumHTTP):
         for node in feed.nodes:
             if (
                 node.gpu_model != template.gpu
-                or node.tier != "secure"
+                or node.tier != ("spot" if template.spot else "secure")
                 or not node.available_now
                 or not node.min_rentable_gpu_count <= template.gpu_count <= node.available_gpu_count
                 or (template.data_center and node.country_code != template.data_center)

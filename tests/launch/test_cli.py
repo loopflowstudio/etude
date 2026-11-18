@@ -228,8 +228,8 @@ def test_machines_join_pools_and_this_computer_can_be_turned_off(
     assert run(capsys, "machine", "add", "bench", "bench")[-1] == "bench  bench"
     listed = run(capsys, "machine", "add", "second", "second", "--pool", "bench")
     assert listed[-1] == "bench  bench, second"
-    assert main(["ondemand", "add", "l4", "--provider", "lambda", "--gpu", "NVIDIA L4"]) == 1
-    assert "no provider named 'lambda'" in capsys.readouterr().err
+    assert main(["ondemand", "add", "l4", "--provider", "nowhere", "--gpu", "NVIDIA L4"]) == 1
+    assert "no provider named 'nowhere'" in capsys.readouterr().err
     assert main(["machine", "add", "local", "localhost"]) == 1
     assert "already the local pool" in capsys.readouterr().err
 
@@ -271,7 +271,9 @@ def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, co
     )
     (line,) = run(capsys, "launch", str(path))
     assert "new, running" in line
-    assert "succeeded" in run(capsys, "wait", line.split()[0])[0]
+    run_id = line.split()[0]
+    assert "succeeded" in run(capsys, "wait", run_id)[0]
+    assert "1 of 3 attempts used" in run(capsys, "status", run_id)[0]
     assert run(capsys, "machines") == [  # no session
         "local  local  available, owned (this computer), $0.00 committed, never expires"
     ]

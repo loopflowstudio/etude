@@ -10,6 +10,10 @@ failure recovery requires.
 - A training attempt can run again. Register models, optimizers, counters and
   random state needed to resume. A lost machine loses work since the last
   delivered save. Etude cannot recover files that never left a destroyed disk.
+- A spot machine can be taken back at any moment and gives no time to save.
+  Each loss is retried without counting toward `max_attempts`; only the run's
+  hours and dollars end a spot run that never reaches a save. Etude does not
+  fall back from spot to the standard price or to another provider.
 - Successful matches are reused by identity within one experiment and
   environment. A game/API call can execute again after process loss before
   its result was retained. External side effects need your own idempotency;
@@ -30,6 +34,8 @@ failure recovery requires.
   not prove remote work was cancelled.
 - Time/dollar caps bound admitted rental allocations, not provider bills.
   Outages can delay deletion. External storage/transfer/API costs are excluded.
+  An EC2 machine reading or writing a bucket outside its AWS region (any R2
+  bucket) pays AWS for that transfer, outside the quote.
   Rental windows cannot outlast scoped storage grants (7 days on R2, 36 hours
   on S3). Queues require a scheduling loop to keep advancing.
 - `availability` and `--quote` report a provider's stock signal, not a

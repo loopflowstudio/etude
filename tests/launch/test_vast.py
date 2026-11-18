@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import lzma
 import sys
 import threading
 import zipfile
@@ -16,13 +17,16 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from pydantic import TypeAdapter
 
 from etude.cli import main
 from etude.errors import LauncherError
+from etude.launch.aws import Keys
 from etude.launch.client import _open
 from etude.launch.database import Database, launcher_file, upgrade
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.executor import Executor
+from etude.launch.listing import show_availability
 from etude.launch.provisioner.machines import MachineRequest, Refused
 from etude.launch.provisioner.providers.bootstrap import guard
 from etude.launch.provisioner.providers.cleanup import command
@@ -32,6 +36,7 @@ from etude.launch.provisioner.providers.vast.machines import OUTAGE_SECONDS, Out
 from etude.launch.records import (
     GPU,
     STOCK_IMAGE,
+    Availability,
     BootstrapLinks,
     MachineTemplate,
     OnDemand,
@@ -40,7 +45,7 @@ from etude.launch.records import (
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.storage.bucket import BucketJournal
-from etude.launch.storage.s3 import Bucket, Keys
+from etude.launch.storage.s3 import Bucket
 from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker.courier import run as run_courier
 from etude.spec import Job
@@ -94,6 +99,11 @@ class Marketplace:
         self.offline = False
         self.delete_pending = False
 
+    def boot_environment(self) -> dict[str, str]:
+        assert self.created is not None
+        raw = base64.b64decode(self.created.env["ETUDE_BOOT"])
+        return TypeAdapter(dict[str, str]).validate_json(lzma.decompress(raw))
+
     def __call__(
         self, method: str, url: str, body: bytes | None, headers: dict[str, str]
     ) -> HTTPReply:
@@ -103,7 +113,9 @@ class Marketplace:
         path = urlsplit(url).path
         reply: object
         if path == "/api/v0/bundles/":
-            reply = {"offers": self.offers}
+            assert body is not None
+            bid = json.loads(body)["type"] == "bid"
+            reply = {"offers": [row for row in self.offers if ("min_bid" in row) == bid]}
         elif path == "/api/v0/asks/7/" and method == "PUT":
             assert body is not None
             self.created = Create.model_validate_json(body)
@@ -140,12 +152,16 @@ class Marketplace:
 
 
 def machines(
-    market: Marketplace, storage: Storage, now: Callable[[], datetime] = lambda: datetime.now(UTC)
+    market: Marketplace,
+    storage: Storage,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    *,
+    template: MachineTemplate = TEMPLATE,
 ) -> VastMachines:
     bucket = Bucket(
         "journal", "us-west-2", Keys(access_key="fixture", secret_key="fixture"), storage
     )
-    return VastMachines(TEMPLATE, VastAPI("fixture-account-key", market), bucket, "test", now)
+    return VastMachines(template, VastAPI("fixture-account-key", market), bucket, "test", now)
 
 
 def request() -> MachineRequest:
@@ -182,11 +198,57 @@ def test_offer_prices_disk_and_filters_incompatible_or_metered_capacity() -> Non
         machine.offer()
 
 
+def test_spot_rental_bids_compute_only_and_destroys_a_stopped_instance() -> None:
+    market = Marketplace()
+    market.offers = [{**OFFER, "min_bid": 0.3, "dph_total": 0.4}]
+    machine = machines(market, Storage(), template=TEMPLATE.model_copy(update={"spot": True}))
+    assert machine.offer().usd_per_hour == Decimal("0.4")
+    machine.create(request())
+    assert market.created is not None and market.created.price == 0.3
+    market.instances[12]["actual_status"] = "stopped"
+    assert not machine.alive("session")
+    assert machine.end("session") is not None
+    assert not market.instances
+    assert market.counts == {"POST": 1, "PUT": 1, "GET": 4, "DELETE": 1}
+
+
+def test_spot_availability_prints_the_bid_and_disk_rate_as_a_price(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    market = Marketplace()
+    # Vast's floats: their exact sum is 0.344444444444444413...
+    market.offers = [
+        {**OFFER, "min_bid": 0.333333333333333, "storage_total_cost": 0.0111111111111111}
+    ]
+    offer = machines(market, Storage(), template=TEMPLATE.model_copy(update={"spot": True})).offer()
+    show_availability(
+        Availability(
+            spot=True,
+            ondemand="bid",
+            offer=offer,
+            max_usd_per_hour=Decimal("0.50"),
+            in_use=0,
+            max_machines=1,
+            observed_at=datetime(2026, 11, 17, tzinfo=UTC),
+            refusal=None,
+        )
+    )
+    assert "at $0.3444/hour, spot (ceiling $0.50)  available" in capsys.readouterr().out
+
+
 def test_rental_keeps_identity_and_package_without_account_credentials() -> None:
     market, storage = Marketplace(), Storage()
     machine = machines(market, storage)
     machine.offer()
-    allocation = machine.create(request())
+    # AWS session credentials add the same large token to each signed URL.
+    token = "session-token-" * 130
+    links = BootstrapLinks(
+        url=f"https://fixture/bootstrap?token={token}",
+        log_url=f"https://fixture/log?token={token}",
+        worker_log_url=f"https://fixture/worker?token={token}",
+    )
+    rental = request().model_copy(update={"bootstrap": links})
+    allocation = machine.create(rental)
     assert allocation.id == "12" and allocation.usd_per_hour == Decimal("0.6")
     assert isinstance(allocation.hardware, GPU) and allocation.hardware.id == "RTX 4090"
     assert market.counts == {"POST": 1, "PUT": 1, "GET": 1}
@@ -196,8 +258,12 @@ def test_rental_keeps_identity_and_package_without_account_credentials() -> None
     assert created.cancel_unavail and created.runtype == "ssh_direct"
     assert len(created.onstart) < 4048
     assert "fixture-account-key" not in created.model_dump_json()
-    assert created.env["ETUDE_DEADLINE"]
-    with zipfile.ZipFile(io.BytesIO(base64.b64decode(created.env["ETUDE_PROGRAM"]))) as archive:
+    assert len(json.dumps(created.env)) < 32_000
+    env = market.boot_environment()
+    assert env["ETUDE_BOOTSTRAP_URL"] == links.url
+    assert rental.deadline is not None
+    assert env["ETUDE_DEADLINE"] == rental.deadline.isoformat()
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(env["ETUDE_PROGRAM"]))) as archive:
         assert "etude/launch/provisioner/providers/vast/instance.py" in archive.namelist()
         assert "etude/launch/worker/main.py" not in archive.namelist()
     assert b"fixture-not-retained" not in storage.objects["test/sessions/session/receipt.json"]
@@ -477,7 +543,7 @@ def test_vast_cohort_uses_the_worker_and_retains_outputs_before_deletion(
         assert market.created is not None
         try:
             run_courier(
-                market.created.env["ETUDE_BOOTSTRAP_URL"],
+                market.boot_environment()["ETUDE_BOOTSTRAP_URL"],
                 delete,
                 root=tmp_path / "instance",
                 send=storage,

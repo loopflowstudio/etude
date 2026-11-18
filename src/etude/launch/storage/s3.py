@@ -27,11 +27,11 @@ import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import UTC, datetime, timedelta
 from itertools import chain
-from typing import Literal
 
 from pydantic import model_validator
 
 from etude.deadline import remaining
+from etude.launch.aws import Keys, Signer, require_environment, uri_encode
 from etude.launch.logging import write_log
 from etude.launch.records import Storage
 from etude.launch.storage.transport import HTTPReply, Send, attribute, request
@@ -91,36 +91,6 @@ def _failed(what: str, status: int) -> StorageUnavailable:
 
 class AlreadyThere(Exception):
     """An object that must be written only once has been written before."""
-
-
-def _environment(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        raise StorageUnavailable(f"{name} is not set")
-    return value
-
-
-class Keys(Record):
-    access_key: str
-    secret_key: str
-    session_token: str | None = None
-
-    @staticmethod
-    def from_environment(provider: Literal["s3", "r2"]) -> Keys:
-        """The provider's standard variables: `AWS_*` for S3, `R2_*` for R2.
-
-        Long-lived keys are needed for links that outlast an hour.
-        """
-        if provider == "r2":
-            return Keys(
-                access_key=_environment("R2_ACCESS_KEY_ID"),
-                secret_key=_environment("R2_SECRET_ACCESS_KEY"),
-            )
-        return Keys(
-            access_key=_environment("AWS_ACCESS_KEY_ID"),
-            secret_key=_environment("AWS_SECRET_ACCESS_KEY"),
-            session_token=os.environ.get("AWS_SESSION_TOKEN") or None,
-        )
 
 
 class PostForm(Record):
@@ -205,14 +175,6 @@ def _get(url: str, headers: dict[str, str], send: Send) -> HTTPReply:
     raise AssertionError("read retry loop exhausted without a result")
 
 
-def _hash(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
-def _uri_encode(text: str, safe: str = "") -> str:
-    return urllib.parse.quote(text, safe="-_.~" + safe)
-
-
 class Bucket:
     """One bucket on S3, or on R2 when `account` names the Cloudflare account that holds it.
 
@@ -232,6 +194,7 @@ class Bucket:
         token: str | None = None,
     ) -> None:
         self.name, self.region, self._keys = name, region, keys
+        self._signer = Signer(keys, region)
         self.send, self._clock = send, clock
         self.account, self._token = account, token
         default = (
@@ -240,21 +203,6 @@ class Bucket:
             else f"{name}.{account}.r2.cloudflarestorage.com"
         )
         self.host = host or default
-
-    def _signing_key(self, day: str, service: str = "s3") -> bytes:
-        key = ("AWS4" + self._keys.secret_key).encode()
-        for part in (day, self.region, service, "aws4_request"):
-            key = hmac.new(key, part.encode(), hashlib.sha256).digest()
-        return key
-
-    def _signature(self, stamp: str, canonical_request: str, service: str = "s3") -> str:
-        scope = f"{stamp[:8]}/{self.region}/{service}/aws4_request"
-        to_sign = "\n".join(("AWS4-HMAC-SHA256", stamp, scope, _hash(canonical_request.encode())))
-        key = self._signing_key(stamp[:8], service)
-        return hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
-
-    def _credential(self, stamp: str, service: str = "s3") -> str:
-        return f"{self._keys.access_key}/{stamp[:8]}/{self.region}/{service}/aws4_request"
 
     def _stamp(self) -> str:
         return self._clock().astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -272,36 +220,13 @@ class Bucket:
         """One signed request, to the bucket or, with `service`, to another AWS service."""
         host = self.host if service == "s3" else f"{service}.{self.region}.amazonaws.com"
         stamp = self._stamp()
-        headers = {"host": host, "x-amz-content-sha256": _hash(body), "x-amz-date": stamp}
-        if self._keys.session_token:
-            headers["x-amz-security-token"] = self._keys.session_token
-        headers.update({name.lower(): value for name, value in (extra or {}).items()})
-        names = sorted(headers)
-        text_query = "&".join(
-            f"{_uri_encode(name)}={_uri_encode(value)}"
-            for name, value in sorted((query or {}).items())
-        )
-        canonical = "\n".join(
-            (
-                method,
-                "/" + _uri_encode(key, safe="/"),
-                text_query,
-                "".join(f"{name}:{headers[name].strip()}\n" for name in names),
-                ";".join(names),
-                headers["x-amz-content-sha256"],
-            )
-        )
-        headers["authorization"] = (
-            f"AWS4-HMAC-SHA256 Credential={self._credential(stamp, service)}, "
-            f"SignedHeaders={';'.join(names)}, "
-            f"Signature={self._signature(stamp, canonical, service)}"
-        )
-        url = f"https://{host}/{_uri_encode(key, safe='/')}" + (f"?{text_query}" if query else "")
-        del headers["host"]
+        signed = self._signer.request(method, host, key, stamp, service, body, query, extra)
         try:
             if method == "GET":
-                return _get(url, headers, self.send)
-            return self.send(method, url, body if method in ("PUT", "POST") else None, headers)
+                return _get(signed.url, signed.headers, self.send)
+            return self.send(
+                method, signed.url, body if method in ("PUT", "POST") else None, signed.headers
+            )
         except TimeoutError:
             raise StorageUnavailable(
                 f"{method} {key or '(list)'}: storage request timed out"
@@ -531,21 +456,19 @@ class Bucket:
         stamp = self._stamp()
         query = {
             "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
-            "X-Amz-Credential": self._credential(stamp),
+            "X-Amz-Credential": self._signer.credential(stamp),
             "X-Amz-Date": stamp,
             "X-Amz-Expires": str(min(seconds, WEEK)),
             "X-Amz-SignedHeaders": "host",
         }
         if self._keys.session_token:
             query["X-Amz-Security-Token"] = self._keys.session_token
-        text_query = "&".join(
-            f"{_uri_encode(n)}={_uri_encode(v)}" for n, v in sorted(query.items())
-        )
-        path = "/" + _uri_encode(key, safe="/")
+        text_query = "&".join(f"{uri_encode(n)}={uri_encode(v)}" for n, v in sorted(query.items()))
+        path = "/" + uri_encode(key, safe="/")
         canonical = "\n".join(
             (method, path, text_query, f"host:{self.host}\n", "host", "UNSIGNED-PAYLOAD")
         )
-        signature = self._signature(stamp, canonical)
+        signature = self._signer.signature(stamp, canonical)
         return f"https://{self.host}{path}?{text_query}&X-Amz-Signature={signature}"
 
     def post_form(self, prefix: str, seconds: int) -> PostForm:
@@ -553,7 +476,7 @@ class Bucket:
         stamp = self._stamp()
         fields = {
             "x-amz-algorithm": "AWS4-HMAC-SHA256",
-            "x-amz-credential": self._credential(stamp),
+            "x-amz-credential": self._signer.credential(stamp),
             "x-amz-date": stamp,
         }
         if self._keys.session_token:
@@ -570,7 +493,7 @@ class Bucket:
         }
         encoded = base64.b64encode(json.dumps(policy).encode()).decode()
         signature = hmac.new(
-            self._signing_key(stamp[:8]), encoded.encode(), hashlib.sha256
+            self._signer.signing_key(stamp[:8]), encoded.encode(), hashlib.sha256
         ).hexdigest()
         return PostForm(
             url=f"https://{self.host}/",
@@ -592,7 +515,7 @@ def open_bucket(storage: Storage, send: Send = _send) -> Bucket:
             "auto",  # R2 signs every request for this region
             keys,
             send,
-            account=_environment("R2_ACCOUNT_ID"),
+            account=require_environment("R2_ACCOUNT_ID"),
             token=os.environ.get("R2_API_TOKEN") or None,
         )
     assert storage.region is not None  # `Storage` requires one for S3

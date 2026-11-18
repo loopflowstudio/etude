@@ -61,15 +61,55 @@ uv run etude launch experiment.py --rent gpu --max-usd 2
 ```
 
 A pool names owned capacity; an on-demand names a provider template and rental
-limits. Credentials never go in those records. RunPod uses `RUNPOD_API_KEY`,
-Vast uses `VAST_API_KEY` and Lium uses `LIUM_API_KEY`. Set up bucket credentials
+limits. Credentials never go in those records. Set up bucket credentials
 as described in [tracking](tracking.md#storage). R2 uses `--provider r2`.
 
-For Vast, use `provider set vast --kind vast --storage west`; register your
-SSH public key in the provider account. For Lium, use `--kind lium` and a Lium
-provider name. Availability and image conventions differ; the developer
-[provider reference](dev/providers.md) covers those details. There is no
-cross-provider fallback.
+| Provider | `--kind` | Launcher environment | `--gpu` example | Spot |
+| --- | --- | --- | --- | --- |
+| RunPod | `runpod` | `RUNPOD_API_KEY` | `"NVIDIA L4"` | no |
+| Vast.ai | `vast` | `VAST_API_KEY` | `"RTX 4090"` | yes |
+| Lium | `lium` | `LIUM_API_KEY`, `LIUM_SSH_PUBLIC_KEY` | `"RTX 5090"` | yes |
+| AWS EC2 | `ec2` | the `AWS_*` keys your S3 storage uses | `L4` | yes |
+| Lambda Cloud | `lambda` | `LAMBDA_API_KEY`, `LAMBDA_TERMINATE_KEY` | `"A10 (24 GB PCIe)"` | no |
+
+Each provider spells GPU names its own way, and its account needs some setup
+before the first rental; the [provider reference](dev/providers.md) has both.
+There is no cross-provider fallback.
+
+### Spot machines
+
+```text
+$ uv run etude ondemand add l4 --provider aws --gpu L4 --max 1 --max-usd-per-hour 0.90
+$ uv run etude ondemand add l4-spot --provider aws --gpu L4 --spot --max 1 --max-usd-per-hour 0.70
+$ uv run etude availability l4
+l4  g6.xlarge: L4 with at least 4 vCPUs, 16 GB at $0.8226/hour (ceiling $0.90)  available  0 of 1 in use  rentable now  asked 2026-11-17 19:02:11 UTC
+$ uv run etude availability l4-spot
+l4-spot  g6.xlarge: L4 with at least 4 vCPUs, 16 GB at $0.6510/hour, spot (ceiling $0.70)  available  0 of 1 in use  rentable now  asked 2026-11-17 19:02:14 UTC
+$ uv run etude launch experiment.py --rent l4-spot --max-usd 2
+$ uv run etude status experiment/base@0
+experiment/base@0  base  running, steps 1400, ~$0.41, machine l4-spot-41840a01c3b1 (g6.xlarge: L4 with at least 4 vCPUs, 16 GB), 1 of 3 attempts used
+```
+
+`--spot` on `ondemand add` rents the provider's cheaper machines that it may
+take back at any moment. Everything else is the same: the template, the
+ceiling, `--quote`, the cost cap and cleanup. Budgets reserve the full quoted hourly rate.
+On Vast, for example, a $0.333333/hour compute bid plus $0.011111/hour
+for disk reserves $0.344444/hour. If Vast pauses the instance, Etude destroys
+it to end storage billing.
+
+When the provider takes a spot machine back, the run is retried on a new one
+from its latest delivered save; work since that save is done again. Losing a
+spot machine does not count toward the job's `max_attempts`, so the run's
+`max_hours` and `max_usd` are what bound a run that keeps losing machines.
+Save often enough that an attempt makes progress between losses.
+
+A provider that rents no spot machines accepts the on-demand and answers in
+`availability`; runs queued on it wait with that reason:
+
+```text
+$ uv run etude availability pod-spot
+pod-spot  none available: Etude rents no spot machines from RunPod  0 of 1 in use  not rentable now  asked 2026-11-17 19:03:40 UTC
+```
 
 `--max-usd` bounds the submitted allocation; each job also has its own cap.
 Quotes rent nothing. A rental has an independent deadline guardian, but a
@@ -77,6 +117,10 @@ provider outage can delay deletion and billing can exceed admission estimates.
 Storage charges are separate. See [limits](limits.md).
 
 `availability` reports the provider's stock signal; it reserves nothing. When
+nothing can be rented now it says why in the provider's terms: no stock, an
+account quota (`AWS quota 'All G and VT Spot Instance Requests' is 0 vCPUs;
+g6.xlarge needs 4`), or a GPU name the provider does not use, followed by the
+names it does. When
 the provider then declines to make the machine, launch fails with the
 provider's own words and records no run:
 

@@ -10,7 +10,9 @@ durable `Outage`; the rental is lost once the outage outlasts `OUTAGE_SECONDS`.
 
 from __future__ import annotations
 
+import base64
 import json
+import lzma
 import shlex
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -28,6 +30,7 @@ from etude.launch.provisioner.machines import (
 )
 from etude.launch.provisioner.providers.program import Program, boot_source
 from etude.launch.provisioner.providers.vast.api import (
+    BidOffer,
     Create,
     Instance,
     InstanceIdentity,
@@ -51,7 +54,7 @@ class Outage(Record):
 
 
 class VastMachines:
-    safeguards = Safeguards(start_command=True)
+    safeguards = Safeguards(machine_timer=True)
     owned = False
 
     def __init__(
@@ -72,7 +75,7 @@ class VastMachines:
         selected = self._offers[0] if self._offers else None
         return Offer(
             hardware=None if selected is None else selected.hardware,
-            usd_per_hour=Decimal(0) if selected is None else selected.dph_total,
+            usd_per_hour=Decimal(0) if selected is None else selected.price,
             available=selected is not None,
         )
 
@@ -113,7 +116,7 @@ class VastMachines:
             (
                 candidate
                 for candidate in offers
-                if candidate.dph_total <= offers[0].dph_total
+                if candidate.price <= offers[0].price
                 and (
                     candidate.end_date is None or candidate.end_date >= request.deadline.timestamp()
                 )
@@ -124,11 +127,20 @@ class VastMachines:
             raise Refused("no quoted Vast offer covers the requested rental deadline")
         image = self._template.image or STOCK_IMAGE
         env = self._program.prepare(request, image)
+        # Vast limits the combined environment. Session-token URLs repeat most of
+        # their bytes; pack the environment together, keeping the guardian offline.
+        packed = base64.b64encode(lzma.compress(json.dumps(env).encode())).decode()
+        boot = (
+            "import base64,json,lzma,os\n"
+            "os.environ.update(json.loads(lzma.decompress(base64.b64decode("
+            "os.environ.pop('ETUDE_BOOT')))))\n"
+            + boot_source("etude.launch.provisioner.providers.vast.instance")
+        )
         creation_deadline = min(request.deadline, request.startup_deadline or request.deadline)
         now = datetime.now(UTC)
         if now >= creation_deadline:
             raise Refused("startup or rental deadline expired; no Vast instance created")
-        cost = offer.dph_total * Decimal(str((request.deadline - now).total_seconds())) / 3600
+        cost = offer.price * Decimal(str((request.deadline - now).total_seconds())) / 3600
         if cost > request.cap_usd:
             raise Refused("Vast offer exceeds the reserved rental budget")
         # Receipt of intent is not a receipt of creation. Never retry the PUT,
@@ -142,11 +154,11 @@ class VastMachines:
                 offer,
                 Create(
                     image=image.resolved,
+                    price=float(offer.min_bid) if isinstance(offer, BidOffer) else None,
                     disk=self._template.disk_gb or 40,
                     label=f"etude-{request.session}",
-                    env=env,
-                    onstart="exec python3.12 -c "
-                    + shlex.quote(boot_source("etude.launch.provisioner.providers.vast.instance")),
+                    env={"ETUDE_BOOT": packed},
+                    onstart="exec python3.12 -c " + shlex.quote(boot),
                 ),
             )
             instance = self._api.instance(id)
@@ -212,7 +224,10 @@ class VastMachines:
             return True
         key = self._key(session_id, "outage")
         raw = self._bucket.get(key)
-        if current is not None and current.actual_status == "destroyed":
+        if current is not None and (
+            current.actual_status == "destroyed"
+            or (self._template.spot and current.actual_status == "stopped")
+        ):
             return False
         if current is not None and current.actual_status not in _DOWN:
             if raw is not None:
