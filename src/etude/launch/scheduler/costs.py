@@ -2,13 +2,12 @@
 
 from collections import Counter, defaultdict
 from collections.abc import Collection
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 
 from pydantic import Field
 
-from etude.launch.records import Machine, Rental, RunAttempt
+from etude.launch.records import Machine, Rental, RunAttempt, Session
 from etude.spec import Record
 
 
@@ -19,9 +18,8 @@ class Budget(Record):
     usd: Decimal = Field(allow_inf_nan=True)  # attributed dollars; unlimited without max_usd
 
 
-@dataclass(frozen=True)
-class Place:
-    """One attempt’s occupancy and the time through which it shares the bill."""
+class Place(Record):
+    """One attempt's occupancy and the time through which it shares the bill."""
 
     run: str
     start: datetime
@@ -29,14 +27,20 @@ class Place:
     held_until: datetime
 
     @classmethod
-    def from_attempt(cls, attempt: RunAttempt, claim: datetime, end: datetime) -> "Place":
-        start = max(claim, attempt.planned_at or claim)
+    def from_attempt(cls, attempt: RunAttempt, session: Session, end: datetime) -> "Place":
+        assert session.claimed_at is not None
+        start = max(session.claimed_at, attempt.planned_at or session.claimed_at)
         active = max(start, min(end, attempt.finished_at or end))
         held = active
-        if attempt.started_at is not None:
-            limit = attempt.started_at + timedelta(seconds=attempt.limit_seconds)
+        origin = attempt.started_at or (
+            max(attempt.finished_at, session.started_at or attempt.finished_at)
+            if attempt.finished_at is not None
+            else None
+        )
+        if origin is not None:
+            limit = origin + timedelta(seconds=attempt.limit_seconds)
             held = max(active, min(end, limit))
-        return cls(attempt.run, start, active, held)
+        return cls(run=attempt.run, start=start, active_until=active, held_until=held)
 
 
 def run_share(run: str, places: Collection[Place], rental: Rental, machine: Machine) -> Decimal:

@@ -53,21 +53,24 @@ def test_a_full_machine_leaves_runs_waiting_and_takes_them_as_slots_free(tmp_pat
 
 
 def test_runs_sharing_a_machine_split_its_cost_and_cancel_independently(tmp_path: Path) -> None:
-    b = bench(tmp_path, max_machines=1, slots=2)
-    first, second = (b.scheduler.queue(JOB, rent="l4")[0] for _ in range(2))
+    b = bench(tmp_path, max_machines=1, slots=3)
+    early, first, second = (b.scheduler.queue(JOB, rent="l4")[0] for _ in range(3))
     b.scheduler.tick()
+    b.scheduler.cancel(early)  # cancelled before starting
     b.run(300)
     b.scheduler.cancel(first)
     b.run(1)
+    assert b.scheduler.attempts(early)[0].started_at is None
+    assert b.scheduler.read(early).outcome == "cancelled"
     assert b.scheduler.read(first).outcome == "cancelled"
     assert b.scheduler.read(second).phase == "running"
     b.run(400)
     assert b.scheduler.read(second).outcome == "succeeded"
-    # Both places fund the survivor through its finish.
-    for run in (first, second):
-        assert round(b.scheduler.read(run).usd, 12) == round(_hours_usd(600) / 2, 12)
+    # Every placed run funds the survivor through its finish, even one cancelled before start.
+    for run in (early, first, second):
+        assert round(b.scheduler.read(run).usd, 12) == round(_hours_usd(600) / 3, 12)
     # The runs share what they occupied; idle time before the machine ended is the rental's.
-    occupied = b.scheduler.read(first).usd + b.scheduler.read(second).usd
+    occupied = sum((b.scheduler.read(r).usd for r in (early, first, second)), Decimal(0))
     assert round(occupied, 12) == round(_hours_usd(600), 12) < b.scheduler.rentals()[0].usd
 
 

@@ -2391,7 +2391,7 @@ class Scheduler:
         if rental is not None:
             end = min(end, rental.deadline)
         return {
-            attempt.id: Place.from_attempt(attempt, session.claimed_at, end)
+            attempt.id: Place.from_attempt(attempt, session, end)
             for attempt in self._store.attempts(session=session.id)
         }
 
