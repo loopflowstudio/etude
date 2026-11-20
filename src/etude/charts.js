@@ -413,15 +413,23 @@ function model(D) {
   return {T, R, JOBS, marks, markOf, jobPoints, cellOf, subjectAt, placed, positioned, atClocks, alignClock, fixedPlayers, usesSelection, panelSelection, seated, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
 }
 
-// The first curve supplies the index headline, with the page's default score,
-// result-aware selection, on its first clock.
+function curveScore(D, panel, selected) {
+  if (!panel?.score) return selected;
+  return D.scores.findIndex(s => Object.keys(panel.score).every(k => s[k] === panel.score[k]));
+}
+function headlinePanel(D) {
+  const panels = D.report.evals || [];
+  const inherited = panels.findIndex(p => p.kind === "curve" && !p.score);
+  return inherited >= 0 ? inherited : panels.findIndex(p => p.kind === "curve");
+}
 function headline(D, M) {
-  const sel = M.panelSelection((D.report.evals || []).findIndex(p => p.kind === "curve"), M.choices.length ? +M.choices[0][0] : null);
+  const panel = headlinePanel(D), score = curveScore(D, D.report.evals?.[panel], 0);
+  const sel = M.panelSelection(panel, M.choices.length ? +M.choices[0][0] : null);
   const seated = M.seated(sel);
-  const opp = seated || sel == null ? "" : (M.opponents(0, sel)[0] || [""])[0];
+  const opp = seated || sel == null ? "" : (M.opponents(score, sel)[0] || [""])[0];
   const clock = M.alignClock || "hours_since_start";
   return M.JOBS.map(j => {
-    const pts = sel == null || !D.scores.length ? [] : M.jobPoints(j, clock, M.evalValue(0, sel, {}, opp));
+    const pts = sel == null || !D.scores.length ? [] : M.jobPoints(j, clock, M.evalValue(score, sel, {}, opp));
     const done = M.evaluated(pts);
     return {job: j, points: pts, latest: done.length ? done[done.length - 1] : null, against: seated ? "as seated" : opp === "" ? "all opponents" : D.players[+opp].name};
   });

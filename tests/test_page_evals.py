@@ -1148,3 +1148,26 @@ def test_fixed_pairs_are_drawn_once_where_their_first_seat_stood(
         if p.selection == pairs and not p.split and p.commit is None
     )
     assert drawn == [("large", 100, 1), ("large", 200, 1)]
+
+
+def test_curve_can_draw_a_rate_beside_the_report_score(
+    lab: tuple[Path, Path], tmp_path: Path
+) -> None:
+    runs, _ = lab
+    file = experiment_file(
+        tmp_path,
+        "lab",
+        """
+from etude.report import Curve, Report, Score
+
+def report():
+    rate = Score(table="plays", value="won", per="won")
+    return Report(score=Score(table="plays", value="won"),
+                  evals=(Curve(score=rate), Curve(), Curve(score=rate)))
+""",
+    )
+    page = build(runs, file)
+    assert [s.per for s in page.scores] == [None, "won"]
+    assert any(0 < c.value < 1 for c in page.cells if c.score == 0)
+    rates = [c.value for c in page.cells if c.score == 1]
+    assert rates and set(rates) == {1}
