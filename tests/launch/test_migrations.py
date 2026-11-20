@@ -219,6 +219,7 @@ def test_spot_templates_require_a_scheduler_that_honors_the_market(
     upgrade(tmp_path, development=True)
     previous = tuple(m for m in migrations() if m.name != "spot_rentals")
     monkeypatch.setattr(database, "migrations", lambda: previous)
+    monkeypatch.setattr(database, "version", lambda package: "0.4.1")
     with pytest.raises(LauncherError, match="spot_rentals"):
         open_home(tmp_path)
 
@@ -337,8 +338,11 @@ def test_declared_json_break_raises_floor() -> None:
 def test_release_records_floor(
     sql: str, reason: str | None, floor: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    known = tuple(m for m in migrations() if m.floor is not None)
+    names = {"baseline", "run_resume_and_writers", "run_names"}
+    known = tuple(m for m in migrations() if m.name in names)
+    released = tuple(r for r in database.released() if r.name in names)
     change = _migration(sql, floor=None).model_copy(update={"breaks": reason})
+    monkeypatch.setattr(database, "released", lambda: released)
     monkeypatch.setattr(database, "migrations", lambda: (*known, change))
     recorded = database.release("0.5.0")
     assert recorded[-1].floor == floor
