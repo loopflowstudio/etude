@@ -1,9 +1,9 @@
 """Dollar attribution and the remaining execution budget; no lifecycle state."""
 
 from collections import Counter, defaultdict
-from collections.abc import Collection
+from collections.abc import Collection, Iterator, Mapping
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from pydantic import Field
 
@@ -27,9 +27,21 @@ class Place(Record):
     held_until: datetime
 
     @classmethod
-    def from_attempt(cls, attempt: RunAttempt, session: Session, end: datetime) -> "Place":
+    def from_attempt(
+        cls,
+        attempt: RunAttempt,
+        session: Session,
+        end: datetime,
+        *,
+        projected_from: datetime | None = None,
+    ) -> "Place":
         assert session.claimed_at is not None
         start = max(session.claimed_at, attempt.planned_at or session.claimed_at)
+        if projected_from is not None and attempt.finished_at is None:
+            projected_limit = (attempt.started_at or projected_from) + timedelta(
+                seconds=attempt.limit_seconds
+            )
+            end = min(end, max(projected_from, projected_limit))
         active = max(start, min(end, attempt.finished_at or end))
         held = active
         origin = attempt.started_at or (
@@ -43,8 +55,10 @@ class Place(Record):
         return cls(run=attempt.run, start=start, active_until=active, held_until=held)
 
 
-def run_share(run: str, places: Collection[Place], rental: Rental, machine: Machine) -> Decimal:
-    """Split occupied time by distinct runs. An empty machine releases every place."""
+def _occupied_intervals(
+    places: Collection[Place],
+) -> Iterator[tuple[datetime, datetime, Counter[str]]]:
+    """Yield each interval with its live share counts. Empty machines release every place."""
     starts: dict[datetime, list[Place]] = defaultdict(list)
     finishes: Counter[datetime] = Counter()
     expiries: dict[datetime, list[Place]] = defaultdict(list)
@@ -58,11 +72,10 @@ def run_share(run: str, places: Collection[Place], rental: Rental, machine: Mach
     active = 0
     empty_at: datetime | None = None
     counts: Counter[str] = Counter()
-    dollars = Decimal(0)
-    previous = machine.claimed_at
+    previous: datetime | None = None
     for moment in sorted(starts.keys() | finishes.keys() | expiries.keys()):
-        if previous is not None and run in counts:
-            dollars += cost_between(rental, machine, previous, moment) / len(counts)
+        if previous is not None and counts:
+            yield previous, moment, counts
         previous = moment
         active -= finishes[moment]
         if active == 0:
@@ -78,7 +91,71 @@ def run_share(run: str, places: Collection[Place], rental: Rental, machine: Mach
         active += sum(place.active_until > moment for place in arriving)
         if active:
             counts.update(place.run for place in arriving)
-    return dollars
+
+
+def run_share(run: str, places: Collection[Place], rental: Rental, machine: Machine) -> Decimal:
+    return sum(
+        (
+            cost_between(rental, machine, start, end) / len(counts)
+            for start, end, counts in _occupied_intervals(places)
+            if run in counts
+        ),
+        Decimal(0),
+    )
+
+
+def group_shares(
+    seconds: Mapping[str, int],
+    price: Decimal,
+    now: datetime,
+    peers: Collection[Place],
+    *,
+    setup_seconds: float = 0,
+    reservation_hours: int = 0,
+) -> dict[str, Decimal]:
+    """Price the requested limits together, including any earlier place held by a retry."""
+    places = list(peers)
+    for run, duration in seconds.items():
+        end = now + timedelta(seconds=setup_seconds + duration)
+        places.append(Place(run=run, start=now, active_until=end, held_until=end))
+    window = setup_seconds + max(seconds.values())
+    billed = rental_cost(price, window, reservation_hours)
+    shares = dict.fromkeys(seconds, Decimal(0))
+    for start, end, counts in _occupied_intervals(places):
+        if end <= now:
+            continue
+        duration_seconds = Decimal(str((end - max(start, now)).total_seconds()))
+        cost = (
+            billed * duration_seconds / Decimal(str(window))
+            if reservation_hours
+            else price * duration_seconds / 3600
+        )
+        share = cost / len(counts)
+        for run in shares.keys() & counts.keys():
+            shares[run] += share
+    return shares
+
+
+def rental_cost(price: Decimal, seconds: float | Decimal, reservation_hours: int) -> Decimal:
+    if not reservation_hours:
+        return price * Decimal(str(seconds)) / 3600
+    hours = Decimal(str(seconds)) / 3600
+    hours = (hours / reservation_hours).to_integral_value(
+        rounding=ROUND_CEILING
+    ) * reservation_hours
+    return price * hours
+
+
+def affordable_seconds(price: Decimal, cap: Decimal, reservation_hours: int) -> float:
+    if not price or cap.is_infinite():
+        return float("inf")
+    if reservation_hours:
+        increments = cap // (price * reservation_hours)
+        return float(increments * reservation_hours * 3600)
+    # A rental deadline has microsecond precision. Round down so its last
+    # fraction of a second cannot exceed the dollars that fund the window.
+    micros = (cap * 3_600_000_000 / price).to_integral_value(rounding=ROUND_FLOOR)
+    return float(micros / 1_000_000)
 
 
 def rental_usd(rental: Rental, machine: Machine, now: datetime) -> Decimal:

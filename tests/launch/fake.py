@@ -85,6 +85,7 @@ class FakeService:
         self.lose_reply = 0  # how many of the next creates succeed but never answer
         # A session told to finish ends this long after, running nothing added since.
         self.finish_seconds = 0.0
+        self.offers = 0
         self.creates = 0
         self.sessions: dict[str, FakeSession] = {}
         self.most_live = 0
@@ -110,6 +111,7 @@ class FakeService:
         return None
 
     def offer(self) -> Offer:
+        self.offers += 1
         self._call("provider")
         hardware = GPU(id="NVIDIA L4", min_vcpus=6, min_memory_gb=48)
         return Offer(hardware=hardware, usd_per_hour=self.usd_per_hour, available=True)

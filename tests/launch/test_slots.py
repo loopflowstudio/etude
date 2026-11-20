@@ -6,12 +6,16 @@ import time
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
+from etude.errors import LauncherError
 from etude.launch.database import launcher_file
 from etude.launch.executor import local as local_service
-from etude.launch.records import Machine, Pool
+from etude.launch.provisioner.machines import Safeguards
+from etude.launch.records import Machine, OnDemand, Pool
 from etude.launch.scheduler.loop import Scheduler
-from etude.spec import Job
-from tests.launch.fake import bench, open_database, output_bytes
+from etude.spec import Job, RunRequest
+from tests.launch.fake import L4, bench, open_database, output_bytes
 
 JOB = Job(command="train", max_hours=1, max_usd=Decimal(1))
 
@@ -180,3 +184,133 @@ def test_a_real_worker_runs_two_slots_at_once_with_their_own_outputs(tmp_path: P
     for seed, run in enumerate(runs, start=1):
         fetched = scheduler.fetch(run, "seed.txt", tmp_path / run)
         assert fetched.read_text() == f"seed {seed}\n"
+
+
+@pytest.mark.parametrize("seeds", [1, 3, 4])
+def test_strict_rental_funds_only_the_seeds_placed(tmp_path: Path, seeds: int) -> None:
+    b = bench(tmp_path, slots=3, max_machines=2, usd_per_hour="0.69")
+    requests = JOB.model_copy(update={"max_usd": Decimal("0.23")}).runs(*range(seeds))
+    if seeds == 1:
+        with pytest.raises(LauncherError, match="job dollars do not cover the hours"):
+            b.scheduler.quote(requests, rent="l4")
+        with pytest.raises(LauncherError, match="job dollars do not cover the hours"):
+            b.scheduler.launch(requests, rent="l4")
+        assert b.service.creates == 0
+        return
+    quote = b.scheduler.quote(requests, rent="l4")
+    assert [q.max_usd for q in quote.machines] == [Decimal("0.23")] * 3
+    assert all(len(q.alongside) == 2 for q in quote.machines)
+    assert b.service.creates == 0
+    runs = b.scheduler.launch(requests, rent="l4")
+    assert b.service.offers == 2 * (1 if seeds == 3 else 2)
+    assert b.service.creates == 1
+    (rental,) = b.store.rentals()
+    assert rental.cap_usd == quote.max_usd == Decimal("0.69")
+    assert (rental.deadline - b.clock()).total_seconds() == 3600
+    for run in runs[:3]:
+        (attempt,) = b.scheduler.attempts(run)
+        assert (attempt.machine, attempt.limit_seconds, attempt.limit_kind) == (
+            rental.machine,
+            3600,
+            "out_of_time",
+        )
+    if seeds == 4:
+        assert b.scheduler.read(runs[3]).phase == "queued"
+
+
+@pytest.mark.parametrize(("increment", "share"), [(0, "0.2875"), (1, "0.46")])
+def test_group_includes_setup_and_provider_rounding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, increment: int, share: str
+) -> None:
+    b = bench(tmp_path, usd_per_hour="0.69")
+    monkeypatch.setattr(
+        b.scheduler._services["runpod"],
+        "safeguards",
+        Safeguards(reservation_hours=increment),
+        raising=False,
+    )
+    b.scheduler.add_ondemand(
+        OnDemand(name="shared", template=L4, max_machines=1, slots=3, setup_seconds=900)
+    )
+    job = JOB.model_copy(update={"max_usd": Decimal(share)})
+    short = job.model_copy(update={"max_usd": Decimal(share) - Decimal("0.0001")})
+    with pytest.raises(LauncherError, match="job dollars do not cover the hours"):
+        b.scheduler.quote(short.runs(1, 2, 3), rent="shared")
+    quote = b.scheduler.quote(job.runs(1, 2, 3), rent="shared")
+    assert [q.max_usd for q in quote.machines] == [Decimal(share)] * 3
+    b.scheduler.launch(job.runs(1, 2, 3), rent="shared")
+    (rental,) = b.store.rentals()
+    assert (rental.deadline - b.clock()).total_seconds() == 4500
+    assert rental.cap_usd == quote.max_usd
+
+
+def test_joining_a_manual_rental_prices_the_peer_time_remaining(tmp_path: Path) -> None:
+    b = bench(tmp_path, slots=3, max_machines=1, usd_per_hour="0.60")
+    machine = b.scheduler.rent("l4", 2)
+    # For the first half hour all three share; the newcomer funds its last half hour alone.
+    b.scheduler.launch(JOB.model_copy(update={"max_hours": 0.5}).runs(1, 2), rent="l4")
+    job = JOB.model_copy(update={"max_usd": Decimal("0.40")})
+    with pytest.raises(LauncherError, match="job dollars do not cover the hours"):
+        b.scheduler.quote(job.model_copy(update={"max_usd": Decimal("0.39")}).runs(3), rent="l4")
+    (q,) = b.scheduler.quote(job.runs(3), rent="l4").machines
+    assert q.machine == machine and q.max_usd == Decimal("0.40")
+    (run,) = b.scheduler.launch(job.runs(3), rent="l4")
+    (attempt,) = b.scheduler.attempts(run)
+    assert attempt.machine == machine and attempt.limit_seconds == 3600
+    assert b.service.creates == 1
+
+
+@pytest.mark.parametrize(("rate", "window"), [("0.60", 4200), ("0.69", 4121.739130)])
+def test_waiting_run_funds_only_the_extension(tmp_path: Path, rate: str, window: float) -> None:
+    b = bench(tmp_path, max_machines=1, usd_per_hour=rate)
+    waiting = JOB.model_copy(update={"max_usd": Decimal("0.10")})
+    requests = [*JOB.runs(1), *waiting.runs(2)]
+    quote = b.scheduler.quote(requests, rent="l4")
+    assert [q.max_usd for q in quote.machines] == [Decimal(rate)]
+    assert quote.max_usd <= Decimal(rate) + Decimal("0.10")
+    b.scheduler.launch(requests, rent="l4")
+    (rental,) = b.store.rentals()
+    assert (rental.deadline - b.clock()).total_seconds() == window
+    assert rental.cap_usd == quote.max_usd
+
+
+def test_unfunded_place_is_replaced_before_another_offer(tmp_path: Path) -> None:
+    b = bench(tmp_path, slots=3, max_machines=1, usd_per_hour="0.69")
+    poor = JOB.model_copy(update={"max_usd": Decimal("0.01")})
+    funded = JOB.model_copy(update={"max_usd": Decimal("0.23")})
+    runs = b.scheduler.launch([*poor.runs(0), *funded.runs(1, 2, 3)], rent="l4")
+    assert b.scheduler.read(runs[0]).phase == "queued"
+    assert all(b.scheduler.attempts(r)[0].limit_seconds == 3600 for r in runs[1:])
+    assert b.service.creates == b.service.offers == 1
+
+
+def test_resume_reserves_its_unfinished_share_only_on_other_machines(tmp_path: Path) -> None:
+    b = bench(tmp_path, slots=2, max_machines=2, usd_per_hour="0.60")
+    b.service.seconds = 3600
+    job = JOB.model_copy(update={"max_usd": Decimal("0.30")})
+    run, peer = b.scheduler.launch(job.runs(1, 2), rent="l4")
+    machine = b.scheduler.read(peer).machine
+    b.run(300)
+    b.scheduler.cancel(run)
+    b.run(1)
+    assert b.scheduler.read(run).outcome == "cancelled"
+    # A two-hour target needs another machine. Its $1.20 covers the remaining
+    # execution there but cannot also fund the first rental's $0.30 place.
+    longer = RunRequest(
+        id=run,
+        seed=1,
+        job=job.model_copy(update={"max_hours": 2, "max_usd": Decimal("1.20")}),
+        resume=True,
+    )
+    with pytest.raises(LauncherError, match="job dollars do not cover the hours"):
+        b.scheduler.quote([longer], rent="l4")
+    with pytest.raises(LauncherError, match="job dollars do not cover the hours"):
+        b.scheduler.launch(longer, rent="l4")
+    # The original place can be continued on the same machine. Allow the
+    # one-second gap between stopping and rejoining by shortening the target.
+    same = RunRequest(id=run, seed=1, job=job.model_copy(update={"max_hours": 0.999}), resume=True)
+    (q,) = b.scheduler.quote([same], rent="l4").machines
+    assert q.machine == machine and Decimal("0.27") < q.max_usd < Decimal("0.28")
+    b.scheduler.launch(same, rent="l4")
+    assert b.scheduler.attempts(run)[-1].machine == machine
+    assert b.service.creates == 1

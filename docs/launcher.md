@@ -172,7 +172,9 @@ $0.90 total) and all three launch for their full hour. One seed alone on the
 same 3-slot on-demand would need all $0.90 and is refused by `launch` and
 `--quote` (`job dollars do not cover the hours`). When a full group fits and
 another underfunded run waits behind it, the funded group launches for its full
-window and the remaining run stays queued.
+window and the remaining run stays queued. Each quote line gives the placed
+run’s share. The first-wave total also includes any extra rental time funded by
+runs still waiting.
 
 Each run placed on a rental holds a **place** on the machine until its
 attempt's time limit, while at least one run is still active on the machine.
