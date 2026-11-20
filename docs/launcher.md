@@ -141,6 +141,56 @@ admitted or the run is cancelled. A reply that does not settle whether a machine
 was made (a timeout, a dropped connection, a provider error) is not a refusal:
 Etude looks that machine up before asking for another.
 
+### Sharing a machine
+
+```text
+$ uv run etude ondemand add l4x3 --provider runpod --gpu "NVIDIA L4" \
+    --vcpus 6 --memory-gb 48 --disk-gb 40 --max 1 --max-usd-per-hour 0.80 --slots 3
+$ uv run etude launch sweep.py --rent l4x3 --quote
+sweep/base@0  rent NVIDIA L4 with at least 6 vCPUs, 48 GB at $0.72/hour, 3 slots with sweep/base@1, sweep/base@2  planned rental cost $0.30
+sweep/base@1  rent NVIDIA L4 with at least 6 vCPUs, 48 GB at $0.72/hour, 3 slots with sweep/base@0, sweep/base@2  planned rental cost $0.30
+sweep/base@2  rent NVIDIA L4 with at least 6 vCPUs, 48 GB at $0.72/hour, 3 slots with sweep/base@0, sweep/base@1  planned rental cost $0.30
+planned first-wave rental cost: $0.90; nothing rented
+job rental budget: $0.90
+Rental costs assume deletion on time. Provider delays can exceed the budget; external storage charges are excluded.
+$ uv run etude launch sweep.py --rent l4x3
+$ uv run etude status
+sweep/base@0  base  running, steps 1200, shared by 3 runs, ~$0.09, machine l4x3-41840a01c3b1 (NVIDIA L4 with at least 6 vCPUs, 48 GB), 1 of 3 attempts used
+...
+```
+
+`--slots N` on `ondemand add` or `pool add` runs up to N runs at once on each
+machine (default 1). Runs share the machine's GPUs and CPUs whole; nothing is
+partitioned, so pick N for what the job leaves idle. Each run keeps its own
+outputs, log, record and delivery.
+
+Runs placed together on a rental each fund only their share of it — split
+equally among the runs actually placed there, not the configured `--slots`. In
+the example above, three 1-hour seeds with `max_usd=Decimal("0.30")` each share
+one $0.72/hour machine (1.25 hours with the default 15-minute setup window,
+$0.90 total) and all three launch for their full hour. One seed alone on the
+same 3-slot on-demand would need all $0.90 and is refused by `launch` and
+`--quote` (`job dollars do not cover the hours`). When a full group fits and
+another underfunded run waits behind it, the funded group launches for its full
+window and the remaining run stays queued.
+
+Each run placed on a rental holds a **place** on the machine until its
+attempt's time limit, while at least one run is still active on the machine.
+Occupied time is split equally among the runs holding a place then, so a peer
+that fails, is cancelled or finishes early never raises what the remaining runs
+pay. The trade-off: a run that leaves early keeps paying its share while peers
+are still working on the machine, so its dollars in `etude status` keep rising
+up to its planned share — including a short run with a loose `max_hours` (such
+as an eval beside training). Once no run is active on the machine, idle time
+belongs to no run.
+
+Queued runs placed later by `wait` or a scheduling pass are priced by their
+share of the group they join, including runs already on an open machine; if a
+run's remaining dollars still do not cover its full hours, it gets a shorter
+attempt and ends `over_budget`. See [Several runs on one
+machine](dev/providers.md#several-runs-on-one-machine) for window sizing,
+provider rounding and retries.
+
 ## Queue, launch and wait
 
 | Command | What it does |
