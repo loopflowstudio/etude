@@ -595,6 +595,7 @@ def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, co
     assert counting.snapshot().provider == 1  # one price; nothing created
     output = capsys.readouterr().out
     assert "job/base@1  new, would launch" in output
+    assert "job/base@3  new, would queue" in output  # neither machine has a slot left
     assert "machine mini  planned rental cost $0.00" in output
     assert "planned first-wave rental cost: $1.18; nothing rented" in output
     assert "job rental budget: $6.00" in output

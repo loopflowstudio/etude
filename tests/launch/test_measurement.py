@@ -122,7 +122,7 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
     # Creation also reads provider safeguards for affordable time and the reserved budget,
     # and the status it returns reads the machine's attempts for how many shared it.
     # Refusal pause and shutdown settlement add three indexed local reads.
-    assert wait == Counts(provider=4, bucket=1, database=107)  # known debt: wait advances work
+    assert wait == Counts(provider=4, bucket=1, database=106)  # known debt: wait advances work
 
 
 @pytest.mark.parametrize("history", [1, 4096])
@@ -157,19 +157,19 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
         assert [record.id for record in b.store.waiting("l4")] == [run]
         waiting = counting.snapshot()
     assert refused is not None and refused.refusal == "no capacity"
-    assert status == Counts(database=7)
+    assert status == Counts(database=6)
     assert pause == Counts(database=1)
     assert waiting == Counts(database=1)
     with counting.record():
         b.scheduler.tick()
         planning = counting.snapshot()
-    assert planning == Counts(database=49)
+    assert planning == Counts(database=48)
     assert b.service.creates == 1
     b.clock.advance(60)
     with counting.record():
         b.scheduler.tick()
         admission = counting.snapshot()
-    assert admission == Counts(provider=4, bucket=1, database=113), admission.model_dump()
+    assert admission == Counts(provider=4, bucket=1, database=112), admission.model_dump()
     assert b.scheduler.attempts(run)[-1].number == history + 1
     assert b.scheduler.read(run).attempts == 1
     since = b.clock() - timedelta(seconds=60)

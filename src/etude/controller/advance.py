@@ -322,10 +322,14 @@ def advance(
             each.decision.launched = identity if held_back is None else None
     if planned:
         if quote:
+            quoted = client.quote(planned, pool, rent=rent)
+            # A run outside the first wave would wait in the queue, as launch places it.
+            wave = {machine.run for machine in quoted.machines}
             for request in new:
-                lines[request.id] = f"{request.id}  new, would launch"
+                verb = "launch" if request.id in wave else "queue"
+                lines[request.id] = f"{request.id}  new, would {verb}"
             _print_lines(lines)
-            show_quote(client.quote(planned, pool, rent=rent))
+            show_quote(quoted)
             for decision in decisions:
                 if decision.launched:
                     decision.state = "would launch"
