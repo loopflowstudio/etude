@@ -564,57 +564,34 @@ etude launch sweep.py --rent l4x3 --quote                    # sweep/base@0  ren
 etude status                                                 # running, steps 1200, shared by 3 runs, ~$0.09
 ```
 
-`--slots N` on `ondemand add` or `pool add` lets each of its machines run up to N
-runs at once (default 1: one after another). The runs share the machine's GPUs
-and CPUs whole; nothing is partitioned, so pick N for what the job leaves idle.
-Each run keeps its own attempt folder, outputs, log, record and delivery, and
-cancelling or failing one leaves the others running.
+Each machine takes up to `--slots` runs concurrently (default 1). The runs
+share its CPUs and GPUs. Each has its own attempt folder, outputs, log and
+delivery. Etude fills free slots before renting another machine. `--max`
+counts machines.
 
-A machine is given up to N waiting runs at once (filling its slots before
-renting another; `--max` counts machines) and takes more as slots free while
-its window has time for them. A new rental's base window is `setup_seconds`
-plus its longest placed attempt, extended toward its share of the hours of
-runs still waiting after the wave only as far as those waiting runs' dollars
-cover: placed runs never pay for the extension, and waiting runs never dilute
-or fund the base window. On providers with whole-hour reservation rounding
-(such as Lium), each placed run's share is scaled to cover the rounded window.
+**Admission.** A new rental covers `setup_seconds` plus the longest placed
+attempt. Providers such as Lium round the bill to whole hours. Etude spreads
+that bill over the base window and splits each interval among the runs holding
+a place. Each run must afford its share. If one falls short, Etude replaces
+the run with the largest shortfall with the next waiting run and prices the
+group again. If no group fits, launch reports `job dollars do not cover the
+hours` and rents nothing. After placement, waiting runs can fund extra time
+on the rental. The quote includes that extension in its first-wave total.
 
-Planning and accounting both use a run's **place** on a machine. A place runs
-from when the run is placed (on a new rental, from claim, including
-`setup_seconds`) until its attempt's time limit, capped by the machine's end
-and the rental deadline. Each occupied moment of a rental is split equally
-among the distinct runs holding a place then — by places held, not by
-configured `--slots`, so a lone run on a 3-slot machine pays for all of it.
-When the last active attempt finishes, all places end, including on a rental
-kept for later work. While another attempt is still active, a run joining a
-freed slot shares with every run whose place is still held. A retry or resume
-placed back on the same machine continues the run's existing place instead of
-adding a second sharer; an explicit `launch` or `--quote` resume on another
-machine reserves the run's projected share on its open session.
+**Accounting.** A place starts at placement or machine claim, whichever is
+later. It lasts through the attempt's time limit while any attempt remains
+active, bounded by session end and rental deadline. When the machine empties,
+all places end. Each occupied interval contributes its cost once, split among
+the distinct runs holding places. A retry on the same machine counts once.
+A resume on another machine must still fund its projected share on the first.
 
-Because a place lasts through the attempt's time limit, a peer that fails, is
-cancelled or finishes early never raises the hourly rate of the runs still
-working beside it: an admitted run can use every hour it asked for within its
-`max_usd`, provided startup stays within `setup_seconds` and bills match the
-quoted rate. The runtime dollar stop remains for when they do not. A run that
-leaves early keeps paying its share while peers are still working on the
-machine, so its reported dollars in `status` keep rising up to its planned
-share; run budgets and an experiment's `--max-usd` charge that share, and the
-runs on a machine still sum to its occupied cost. A short run with a loose
-`max_hours` that finishes early beside a longer run (such as an eval beside
-training) is charged its share through its limit, lowering the longer run's
-reported dollars by the same amount while leaving the total unchanged.
-
-`launch` and `--quote` are strict: every run placed in a group must cover its
-planned share of the hours it asked for. If a group falls short, the run with
-the largest shortfall is left queued and the remaining runs are repriced; when
-no group can be funded, launch refuses with `job dollars do not cover the hours`
-and rents nothing. Queued runs placed by `tick` still size each attempt's time
-limit at the machine's full hourly rate, truncating an attempt whose remaining
-dollars do not cover the machine alone (`over_budget`), while actual spend splits
-by places held. `status` says `shared by K runs` when K actually ran together,
-and `--quote` lists each run's machine, its slots, the runs placed with it and
-its planned share.
+A run that finishes early keeps paying for its place while peers continue.
+Its peers can use their admitted hours if setup stays within the allowance and
+the provider bills at the quoted rate. Run and experiment budgets use these
+shares. The `shared by K runs` status counts peak concurrent active runs.
+Queued attempts placed by `tick` still size their time limits at the machine's
+full hourly rate and can end `over_budget`. See the [three-seed quote
+example](../launcher.md#sharing-a-machine).
 
 A pass's eval jobs are one run and take one slot, whatever their number. A
 free slot on a machine training has rented is room for them, so with

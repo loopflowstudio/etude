@@ -44,11 +44,10 @@ class Place(Record):
             end = min(end, max(projected_from, projected_limit))
         active = max(start, min(end, attempt.finished_at or end))
         held = active
-        origin = attempt.started_at or (
-            max(attempt.finished_at, session.started_at or attempt.finished_at)
-            if attempt.finished_at is not None
-            else None
-        )
+        origin = attempt.started_at
+        if origin is None and attempt.finished_at is not None:
+            # A pre-start cancellation still holds a place beside peers that start later.
+            origin = max(attempt.finished_at, session.started_at or attempt.finished_at)
         if origin is not None:
             limit = origin + timedelta(seconds=attempt.limit_seconds)
             held = max(active, min(end, limit))
@@ -137,9 +136,10 @@ def group_shares(
 
 
 def rental_cost(price: Decimal, seconds: float | Decimal, reservation_hours: int) -> Decimal:
+    duration = Decimal(str(seconds))
     if not reservation_hours:
-        return price * Decimal(str(seconds)) / 3600
-    hours = Decimal(str(seconds)) / 3600
+        return price * duration / 3600
+    hours = duration / 3600
     hours = (hours / reservation_hours).to_integral_value(
         rounding=ROUND_CEILING
     ) * reservation_hours

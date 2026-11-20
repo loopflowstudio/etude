@@ -24,7 +24,7 @@ import hashlib
 import json
 import subprocess
 import time
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -119,6 +119,20 @@ _LOG_SECONDS = 30.0
 def _limit_usd(job: Job) -> Decimal:
     """A job's dollar limit. None is allowed only where nothing can be spent."""
     return Decimal("Infinity") if job.max_usd is None else job.max_usd
+
+
+def _remaining_budget(
+    job: Job, paid: Sequence[RunAttempt], spent: Decimal, now: datetime
+) -> Budget:
+    seconds = sum(
+        max(0, ((a.finished_at or now) - a.started_at).total_seconds())
+        for a in paid
+        if a.started_at is not None
+    )
+    return Budget(
+        seconds=max(0, job.require_hours() * 3600 - seconds),
+        usd=max(Decimal(0), _limit_usd(job) - spent),
+    )
 
 
 def _utcnow() -> datetime:
@@ -498,17 +512,11 @@ class Scheduler:
         target = self._target(pool, rent)
         records = []
         labels = {}
-        for index, run in enumerate(runs):
-            self._validate_job(run.job, target)
-            addressed = (
-                run.model_copy(update={"id": run_address(run.id, run.job.experiment)})
-                if run.id
-                else run
-            )
+        requested = self._address_requests(runs, target)
+        for index, (run, addressed) in enumerate(zip(runs, requested, strict=True)):
             prior = self._resumed(addressed) if run.resume else None
-            identity = addressed.id or run_address(_id(), run.job.experiment)
-            if identity in labels:
-                raise LauncherError("a launch cannot request the same run ID twice")
+            assert addressed.id is not None
+            identity = addressed.id
             labels[identity] = (
                 run.id
                 or "@".join(
@@ -526,14 +534,12 @@ class Scheduler:
                         spec=run.job,
                         pool=target.pool,
                         rent=target.rent,
-                        resume_after=len(self._store.attempts(run=prior.id)) if prior else 0,
+                        resume_after=prior.launch.resume_after if prior else 0,
                         created_at=self._clock(),
                     ),
                     seed=run.seed,
                 )
             )
-        if not records:
-            raise LauncherError("a launch needs at least one run")
         quoted = []
         waiting_usd = Decimal(0)
         for name in (target.pool, target.rent):
@@ -577,22 +583,29 @@ class Scheduler:
         )
         return self.submit_launch(launch.id, requested, target, queued=queued)
 
+    def _address_requests(
+        self, runs: Sequence[RunRequest], target: Target
+    ) -> tuple[RunRequest, ...]:
+        if not runs:
+            raise LauncherError("a launch needs at least one run")
+        for run in runs:
+            self._validate_job(run.job, target)
+            if run.resume and run.id is None:
+                raise LauncherError("resume needs the existing run id")
+        requested = tuple(
+            run.model_copy(update={"id": run_address(run.id or _id(), run.job.experiment)})
+            for run in runs
+        )
+        if len({run.id for run in requested}) != len(requested):
+            raise LauncherError("a launch cannot request the same run ID twice")
+        return requested
+
     def prepare_launch(
         self, runs: Sequence[RunRequest], pool: str | None = None, *, rent: str | None = None
     ) -> Launch:
         """Retain valid intent before the submitting client publishes source."""
         target = self._target(pool, rent)
-        if not runs:
-            raise LauncherError("a launch needs at least one run")
-        for run in runs:
-            self._validate_job(run.job, target)
-        requested = tuple(
-            run.model_copy(update={"id": run_address(run.id or _id(), run.job.experiment)})
-            for run in runs
-        )
-        ids = tuple(str(run.id) for run in requested)
-        if len(set(ids)) != len(ids):
-            raise LauncherError("a launch cannot request the same run ID twice")
+        requested = self._address_requests(runs, target)
         launch = Launch(
             id=_id(),
             created_at=self._clock(),
@@ -921,11 +934,11 @@ class Scheduler:
         ) -> bool:
             nonlocal reason, underfunded
             available = budgets
-            peers: Sequence[Place] = ()
+            peers: Collection[Place] = ()
             if session and rental:
-                peers = list(self._places(session, rental, now, project=True).values())
+                peers = self._places(session, rental, now, project=True).values()
                 available = {
-                    r.id: self._admission_budget(r, now, committed=True, joining=session.id)
+                    r.id: self._remaining(r, now, committed=True, joining=session.id)
                     if r.launch.resume_after
                     else budgets[r.id]
                     for r in pending.values()
@@ -1330,7 +1343,7 @@ class Scheduler:
             )
         if record.launch.cancel_requested_at is not None:
             return seen.model_copy(update={"phase": "done", "outcome": "cancelled"})
-        left = self._remaining(record, now)
+        left = _remaining_budget(record.launch.spec, paid, seen.usd, now)
         # Under a second cannot be placed (`_limit`), so no retry can fit: say
         # what ended the last attempt beside why no other follows.
         if left.seconds < 1 or left.usd <= 0:
@@ -1627,9 +1640,6 @@ class Scheduler:
         )
         return declared
 
-    def _rental_cost(self, supply: OnDemand, price: Decimal, seconds: float | Decimal) -> Decimal:
-        return rental_cost(price, seconds, self._safeguards(supply).reservation_hours)
-
     def _affordable_seconds(self, supply: OnDemand, price: Decimal, cap: Decimal) -> float:
         return affordable_seconds(price, cap, self._safeguards(supply).reservation_hours)
 
@@ -1655,7 +1665,7 @@ class Scheduler:
         rental = Rental(
             machine=machine.name,
             usd_per_hour=price,
-            cap_usd=self._rental_cost(ondemand, price, life),
+            cap_usd=rental_cost(price, life, self._safeguards(ondemand).reservation_hours),
             deadline=now + timedelta(seconds=life),
             kept=kept,
         )
@@ -2319,15 +2329,16 @@ class Scheduler:
             )
             if target is None or target.value <= reached:
                 raise LauncherError("run already finished; give --until with a later target")
-        candidate = prior.model_copy(
-            update={"submission": prior.launch.model_copy(update={"spec": job})}
-        )
-        left = self._remaining(candidate, self._clock())
+        now = self._clock()
+        paid = _paid(attempts)
+        left = _remaining_budget(job, paid, self._run_usd(prior.id, paid, now), now)
         if _tries(attempts) >= job.max_attempts or left.seconds < 1 or left.usd <= 0:
             raise LauncherError(
                 "run has no remaining hours, dollars or attempts; raise its job limits"
             )
-        return prior
+        return prior.model_copy(
+            update={"submission": prior.launch.model_copy(update={"resume_after": len(attempts)})}
+        )
 
     def _freeze(self, run: RunRequest, target: Target) -> RunRecord:
         job = run.job
@@ -2352,7 +2363,6 @@ class Scheduler:
                             "cancel_requested_at": None,
                             "params": dict(run.params),
                             "smoke": run.smoke,
-                            "resume_after": len(self._store.attempts(run=prior.id)),
                         }
                     )
                 }
@@ -2382,12 +2392,12 @@ class Scheduler:
         raise LauncherError(f"run {run} has not reached a session")
 
     def _admission_budget(
-        self, run: RunRecord, now: datetime, *, committed: bool = False, joining: str | None = None
+        self, run: RunRecord, now: datetime, *, committed: bool = False
     ) -> Budget:
         # Admission sees newly frozen requests. Only an explicit resume has
         # previous allocations; fresh work needs no history queries.
         if run.launch.resume_after:
-            return self._remaining(run, now, committed=committed, joining=joining)
+            return self._remaining(run, now, committed=committed)
         return Budget(
             seconds=run.launch.spec.require_hours() * 3600, usd=_limit_usd(run.launch.spec)
         )
@@ -2396,16 +2406,8 @@ class Scheduler:
         self, run: RunRecord, now: datetime, *, committed: bool = False, joining: str | None = None
     ) -> Budget:
         attempts = _paid(self._store.attempts(run=run.id))
-        seconds = sum(
-            max(0, ((a.finished_at or now) - a.started_at).total_seconds())
-            for a in attempts
-            if a.started_at is not None
-        )
         dollars = self._run_usd(run.id, attempts, now, committed=committed, joining=joining)
-        return Budget(
-            seconds=max(0, run.launch.spec.require_hours() * 3600 - seconds),
-            usd=max(Decimal(0), _limit_usd(run.launch.spec) - dollars),
-        )
+        return _remaining_budget(run.launch.spec, attempts, dollars, now)
 
     def _places(
         self, session: Session, rental: Rental | None, now: datetime, *, project: bool = False
