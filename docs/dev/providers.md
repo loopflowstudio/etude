@@ -558,31 +558,40 @@ cannot change; add another name. `ondemand image` affects future machines.
 ### Several runs on one machine
 
 ```sh
-etude ondemand add l4x2 --provider runpod --gpu "NVIDIA L4" --vcpus 6 --memory-gb 48 \
-    --max 1 --max-usd-per-hour 0.80 --slots 2
-etude launch sweep.py --rent l4x2 --quote                    # sweep/base@1  rent ... , 2 slots with sweep/base@2  ...
-etude status                                               # running, steps 1200, shared by 2 runs, ~$0.03
+etude ondemand add l4x3 --provider runpod --gpu "NVIDIA L4" --vcpus 6 --memory-gb 48 \
+    --max 1 --max-usd-per-hour 0.80 --slots 3
+etude launch sweep.py --rent l4x3 --quote                    # sweep/base@0  rent ... , 3 slots with sweep/base@1, sweep/base@2  planned rental cost $0.30
+etude status                                                 # running, steps 1200, shared by 3 runs, ~$0.09
 ```
 
-`--slots N` on `ondemand add` or `pool add` lets each of its machines run up to N
-runs at once (default 1: one after another). The runs share the machine's GPUs
-and CPUs whole; nothing is partitioned, so pick N for what the job leaves idle.
-Each run keeps its own attempt folder, outputs, log, record and delivery, and
-cancelling or failing one leaves the others running.
+Each machine takes up to `--slots` runs concurrently (default 1). The runs
+share its CPUs and GPUs. Each has its own attempt folder, outputs, log and
+delivery. Etude fills free slots before renting another machine. `--max`
+counts machines.
 
-A new machine is given up to N waiting runs at once, and takes more as slots
-free while its window has time for them. Its window covers the longest run it
-was given, or its share of the hours of the runs waiting on its on-demand when that is
-longer (their total, divided among the machines the on-demand may still rent
-and their slots), within the runs' dollars. A launch fills a machine's slots
-before taking another; the on-demand's `--max` counts machines.
+**Admission.** A new rental covers `setup_seconds` plus the longest placed
+attempt. Providers such as Lium round the bill to whole hours. Etude spreads
+that bill over the base window and splits each interval among the runs holding
+a place. Each run must afford its share. If one falls short, Etude replaces
+the run with the largest shortfall with the next waiting run and prices the
+group again. If no group fits, launch reports `job dollars do not cover the
+hours` and rents nothing. After placement, waiting runs can fund extra time
+on the rental. The quote includes that extension in its first-wave total.
 
-Cost is split by placed time: each moment of a rental is shared equally among
-the runs on it then, and run budgets and an experiment's `--max-usd` charge that share.
-Admission and a run's own time limit still price it as if it had the machine
-alone, so a run never outspends its `max_usd`. `status` says `shared by K runs`
-when K ran together, and `--quote` lists each run's machine, its slots and the
-runs placed with it, splitting a new rental's planned cost among them.
+**Accounting.** A place starts at placement or machine claim, whichever is
+later. It lasts through the attempt's time limit while any attempt remains
+active, bounded by session end and rental deadline. When the machine empties,
+all places end. Each occupied interval contributes its cost once, split among
+the distinct runs holding places. A retry on the same machine counts once.
+A resume on another machine must still fund its projected share on the first.
+
+A run that finishes early keeps paying for its place while peers continue.
+Its peers can use their admitted hours if setup stays within the allowance and
+the provider bills at the quoted rate. Run and experiment budgets use these
+shares. The `shared by K runs` status counts peak concurrent active runs.
+Queued attempts placed by `tick` still size their time limits at the machine's
+full hourly rate and can end `over_budget`. See the [three-seed quote
+example](../launcher.md#sharing-a-machine).
 
 A pass's eval jobs are one run and take one slot, whatever their number. A
 free slot on a machine training has rented is room for them, so with

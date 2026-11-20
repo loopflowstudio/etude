@@ -176,7 +176,7 @@ def test_a_pass_leaves_known_runs_alone_and_queues_only_a_new_stage(
     measured = MeasuredStorage(source)
     with counts.record():
         advance(definition, source=measured, pool="waiting", mode="queue", max_usd=Decimal(3))
-    assert counts.snapshot() == Counts(database=7)
+    assert counts.snapshot() == Counts(database=5)
     assert (measured.listings, measured.requests) == (1, 0)
     assert len(b.scheduler.runs()) == 2
     # Stored compact spelling must match its declared job and seed.
@@ -185,7 +185,7 @@ def test_a_pass_leaves_known_runs_alone_and_queues_only_a_new_stage(
     measured = MeasuredStorage(source)
     with counts.record():
         advance(definition, source=measured, pool="waiting", mode="queue", max_usd=Decimal(3))
-    assert counts.snapshot() == Counts(database=53)
+    assert counts.snapshot() == Counts(database=48)
     assert measured.listings == 1
     assert [r.id for r in b.scheduler.runs()] == ["two/base@0", "two/base@1", "two/fine@0"]
     assert "two/base@0  finished" in capsys.readouterr().out
@@ -479,8 +479,8 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     assert re.search(r"eval free: 0 new, [1-9]\d* running", second.out)
     assert "launched_pass_failed" in second.err
     assert len(b.scheduler.runs(done=True)) == 3
-    assert first_counts == Counts(database=54)
-    assert second_counts == Counts(database=9)
+    assert first_counts == Counts(database=52)
+    assert second_counts == Counts(database=7)
     assert main(["launch", *args[1:], "--quote"]) == 0
     quoted = capsys.readouterr()
     assert f"failed runs {held.id} (--retry-failed" in quoted.out
@@ -578,7 +578,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
             assert observed_counts == Counts(git=2, database=2)
         elif command == "queue":
             # Admission no longer reads target CPUs to estimate game duration.
-            assert observed_counts == Counts(git=12, database=44)
+            assert observed_counts == Counts(git=12, database=43)
         else:
             assert observed_counts.model_copy(update={"database": 0}) == Counts(git=13)
         assert all(not key.endswith("weights.pt") for key in measured.got)

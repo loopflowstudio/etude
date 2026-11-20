@@ -56,7 +56,7 @@ class TournamentDecision:
     failed: int = 0
     played: int = 0
     launched: str | None = None
-    state: Literal["queued", "running", "would launch", "not queued"] | None = None
+    state: Literal["queued", "running", "would launch", "would queue", "not queued"] | None = None
     reason: str | None = None
     stopped: tuple[str, ...] = ()
 
@@ -320,15 +320,18 @@ def advance(
         for each in group:
             each.decision.state, each.decision.reason = held_back, reason
             each.decision.launched = identity if held_back is None else None
+    quoted = None
     if planned:
         if quote:
+            quoted = client.quote(planned, pool, rent=rent)
+            # A run outside the first wave would wait in the queue, as launch places it.
+            wave = {machine.run for machine in quoted.machines}
             for request in new:
-                lines[request.id] = f"{request.id}  new, would launch"
-            _print_lines(lines)
-            show_quote(client.quote(planned, pool, rent=rent))
+                verb = "launch" if request.id in wave else "queue"
+                lines[request.id] = f"{request.id}  new, would {verb}"
             for decision in decisions:
                 if decision.launched:
-                    decision.state = "would launch"
+                    decision.state = "would launch" if decision.launched in wave else "would queue"
         else:
             submit = client.queue if mode == "queue" else client.launch
             submit(planned, pool, rent=rent)
@@ -341,6 +344,8 @@ def advance(
                 if decision.launched:
                     decision.state = placed[decision.launched]
     _print_lines(lines)
+    if quoted is not None:
+        show_quote(quoted)
     for decision in decisions:
         _show_tournament(decision)
     if stopped_runs and not quote:

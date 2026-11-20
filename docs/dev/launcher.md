@@ -306,8 +306,9 @@ The charged hourly price replaces the quote after creation. Machine acquisition 
 hold billed dollars and the end of their last contiguous billed clock hour.
 Spend combines those bills with an estimate for uncovered time. `~` marks a
 figure containing an estimate. `machines` shows the billed and estimated
-parts, and warns if a bill exceeds the rental cap. Run shares follow time
-occupied; idle time on a kept rental belongs to the rental.
+parts, and warns if a bill exceeds the rental cap. Run shares split each
+occupied moment among the runs holding a place on the machine; idle time when
+no run is active belongs to the rental.
 
 Limits use estimates because bills arrive after each hour. Late bills correct
 evidence without changing admission decisions. Commands fetch missing bills;

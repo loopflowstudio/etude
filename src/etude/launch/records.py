@@ -547,8 +547,7 @@ class QuotedMachine(Record):
     machine: str | None  # an existing machine; None means one would be rented
     hardware: Hardware | None  # for a rental, what the provider would be asked for
     usd_per_hour: Decimal
-    # Planned cost: an equal share of a new rental's whole window among the first-wave
-    # runs placed on it, or this run's share of an existing machine.
+    # This run's share over its planned time on the machine.
     max_usd: Decimal
     slots: int = 1  # runs the machine takes at once
     alongside: tuple[str, ...] = ()  # the other first-wave runs placed on the same machine
@@ -560,10 +559,12 @@ class Quote(Record):
     machines: tuple[QuotedMachine, ...]  # the first wave, as a launch would place it
     limit_usd: Decimal | None  # job rental admission budget; None: it cannot rent
 
+    waiting_usd: Decimal = Decimal(0)  # extra window reserved for runs waiting after the wave
+
     @property
     def max_usd(self) -> Decimal:
         """Maximum admitted first-wave rental allocation, not a provider-enforced bill cap."""
-        return sum((machine.max_usd for machine in self.machines), Decimal(0))
+        return sum((machine.max_usd for machine in self.machines), self.waiting_usd)
 
 
 class LaunchRequest(Record):

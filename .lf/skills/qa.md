@@ -269,6 +269,16 @@ On a GPU the job log shows `etude: agents: … N inputs in M batches` for the sh
 List pods with `curl -H "Authorization: Bearer $RUNPOD_API_KEY"
 https://api.runpod.io/v2/pods` (`.pods[]`); `rest.runpod.io` does not resolve
 here. Other sessions' `etude-*` pods may be present; touch only your own.
+zsh does not word-split a `$W` wrapper variable: put the Doppler chain, `ETUDE_HOME`
+and `cd repo` in a small `scratch/qa/e` bash script ending `exec … etude "$@"`.
+
+Shared slots cost cents on CPU: `ondemand add cpu3 … --slots 3`, then copy the prototype
+with `seeds=(0, 1, 2)` and `max_usd=Decimal("0.006")` (a share of 0.26 h at $0.06 is
+$0.0052; one seed alone needs $0.0156 and is refused). Commit each variant in the clone.
+`etude rent cpu3 --hours 0.3 --max-usd 0.02` gives a manual machine whose free slots a
+launch fills; `etude terminate MACHINE` ends it. Read exact run dollars with
+`etude.launch.client.status(RUN).usd` (status rounds to cents). Open the lab
+`launcher.sqlite` without `?mode=ro`: read-only opens of its WAL file fail.
 
 ## Etude: a live Lium check, when a Task authorizes spend
 
