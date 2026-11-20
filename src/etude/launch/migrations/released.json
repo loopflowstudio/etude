@@ -2,5 +2,6 @@
   {"name": "baseline", "sha256": "dec7be6f73fd968e0a8fca63000b8772ae93e70962d75b87f05cc3f3fe8df3cd", "floor": "0.3.1"},
   {"name": "run_resume_and_writers", "sha256": "4456d3e766877be1ef1ddf5173e77abcd23854cc3141c34b67fd889975f453a8", "floor": "0.4.0"},
   {"name": "run_names", "sha256": "09e8ac87244db5dde27262d4986179271687a508efd210c0484da2b734486088", "floor": "0.4.0"},
-  {"name": "provider_refusal_lookup", "sha256": "ed356ec036fde970e8ecc68273e1d8e224fe2d6b39fca9aadd572ed4b8031a7e", "floor": "0.4.0"}
+  {"name": "provider_refusal_lookup", "sha256": "ed356ec036fde970e8ecc68273e1d8e224fe2d6b39fca9aadd572ed4b8031a7e", "floor": "0.4.0"},
+  {"name": "spot_rentals", "sha256": "ee513c2a474a8c6caff0eb5a519256731df0a1c2a7d10dae50392dba192cdf2c", "floor": "0.4.2"}
 ]
