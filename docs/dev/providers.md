@@ -587,10 +587,10 @@ among the distinct runs holding a place then — by places held, not by
 configured `--slots`, so a lone run on a 3-slot machine pays for all of it.
 When the last active attempt finishes, all places end, including on a rental
 kept for later work. While another attempt is still active, a run joining a
-freed slot shares with every run whose place is still held. A retry placed back on the same machine
-continues the run's existing place instead of adding a second sharer; a retry
-that no longer fits the remaining window is rented elsewhere and bounded by its
-uncommitted dollars (its earlier open place remains committed).
+freed slot shares with every run whose place is still held. A retry or resume
+placed back on the same machine continues the run's existing place instead of
+adding a second sharer; an explicit `launch` or `--quote` resume on another
+machine reserves the run's projected share on its open session.
 
 Because a place lasts through the attempt's time limit, a peer that fails, is
 cancelled or finishes early never raises the hourly rate of the runs still
@@ -609,11 +609,12 @@ reported dollars by the same amount while leaving the total unchanged.
 planned share of the hours it asked for. If a group falls short, the run with
 the largest shortfall is left queued and the remaining runs are repriced; when
 no group can be funded, launch refuses with `job dollars do not cover the hours`
-and rents nothing. Queued runs placed by `tick` use the same group pricing (on
-new rentals and when joining open sessions), truncating an underfunded attempt
-to the seconds its uncommitted dollars cover (`over_budget`). `status` says
-`shared by K runs` when K actually ran together, and `--quote` lists each
-run's machine, its slots, the runs placed with it and its planned share.
+and rents nothing. Queued runs placed by `tick` still size each attempt's time
+limit at the machine's full hourly rate, truncating an attempt whose remaining
+dollars do not cover the machine alone (`over_budget`), while actual spend splits
+by places held. `status` says `shared by K runs` when K actually ran together,
+and `--quote` lists each run's machine, its slots, the runs placed with it and
+its planned share.
 
 A pass's eval jobs are one run and take one slot, whatever their number. A
 free slot on a machine training has rented is room for them, so with

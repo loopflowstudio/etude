@@ -287,8 +287,10 @@ def test_unfunded_place_is_replaced_before_another_offer(tmp_path: Path) -> None
 def test_resume_reserves_its_unfinished_share_only_on_other_machines(tmp_path: Path) -> None:
     b = bench(tmp_path, slots=2, max_machines=2, usd_per_hour="0.60")
     b.service.seconds = 3600
-    job = JOB.model_copy(update={"max_usd": Decimal("0.30")})
-    run, peer = b.scheduler.launch(job.runs(1, 2), rent="l4")
+    job = JOB.model_copy(update={"experiment": "trial", "max_usd": Decimal("0.30")})
+    run, peer = b.scheduler.launch(
+        [RunRequest(id="s1", seed=1, job=job), RunRequest(id="s2", seed=2, job=job)], rent="l4"
+    )
     machine = b.scheduler.read(peer).machine
     b.run(300)
     b.scheduler.cancel(run)
@@ -297,7 +299,7 @@ def test_resume_reserves_its_unfinished_share_only_on_other_machines(tmp_path: P
     # A two-hour target needs another machine. Its $1.20 covers the remaining
     # execution there but cannot also fund the first rental's $0.30 place.
     longer = RunRequest(
-        id=run,
+        id="s1",
         seed=1,
         job=job.model_copy(update={"max_hours": 2, "max_usd": Decimal("1.20")}),
         resume=True,
@@ -308,7 +310,7 @@ def test_resume_reserves_its_unfinished_share_only_on_other_machines(tmp_path: P
         b.scheduler.launch(longer, rent="l4")
     # The original place can be continued on the same machine. Allow the
     # one-second gap between stopping and rejoining by shortening the target.
-    same = RunRequest(id=run, seed=1, job=job.model_copy(update={"max_hours": 0.999}), resume=True)
+    same = RunRequest(id="s1", seed=1, job=job.model_copy(update={"max_hours": 0.999}), resume=True)
     (q,) = b.scheduler.quote([same], rent="l4").machines
     assert q.machine == machine and Decimal("0.27") < q.max_usd < Decimal("0.28")
     b.scheduler.launch(same, rent="l4")

@@ -500,8 +500,13 @@ class Scheduler:
         labels = {}
         for index, run in enumerate(runs):
             self._validate_job(run.job, target)
-            prior = self._resumed(run) if run.resume else None
-            identity = run.id or _id()
+            addressed = (
+                run.model_copy(update={"id": run_address(run.id, run.job.experiment)})
+                if run.id
+                else run
+            )
+            prior = self._resumed(addressed) if run.resume else None
+            identity = addressed.id or run_address(_id(), run.job.experiment)
             if identity in labels:
                 raise LauncherError("a launch cannot request the same run ID twice")
             labels[identity] = (

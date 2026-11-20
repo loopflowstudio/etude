@@ -186,12 +186,13 @@ up to its planned share — including a short run with a loose `max_hours` (such
 as an eval beside training). When the last active attempt finishes, all places
 end. A later batch starts paying from its own placement.
 
-Queued runs placed later by `wait` or a scheduling pass are priced by their
-share of the group they join, including runs already on an open machine; if a
-run's remaining dollars still do not cover its full hours, it gets a shorter
-attempt and ends `over_budget`. See [Several runs on one
-machine](dev/providers.md#several-runs-on-one-machine) for window sizing,
-provider rounding and retries.
+Queued runs placed later by `wait` or a scheduling pass still size each
+attempt's time limit at the machine's full hourly rate (getting a shorter
+`over_budget` attempt when remaining dollars would not cover the machine
+alone), while actual spend is split among the places held on the machine. Use
+`etude launch` when each seed's `max_usd` covers only its shared slot. See
+[Several runs on one machine](dev/providers.md#several-runs-on-one-machine) for
+window sizing, provider rounding and retries.
 
 ## Queue, launch and wait
 
