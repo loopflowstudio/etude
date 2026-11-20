@@ -63,12 +63,45 @@ def test_runs_sharing_a_machine_split_its_cost_and_cancel_independently(tmp_path
     assert b.scheduler.read(second).phase == "running"
     b.run(400)
     assert b.scheduler.read(second).outcome == "succeeded"
-    # Together for 300 s, each pays half; then the second pays its 300 s alone.
-    assert b.scheduler.read(first).usd == _hours_usd(300) / 2
-    assert b.scheduler.read(second).usd == _hours_usd(300) / 2 + _hours_usd(300)
+    # Both places fund the survivor through its finish.
+    for run in (first, second):
+        assert round(b.scheduler.read(run).usd, 12) == round(_hours_usd(600) / 2, 12)
     # The runs share what they occupied; idle time before the machine ended is the rental's.
     occupied = b.scheduler.read(first).usd + b.scheduler.read(second).usd
     assert round(occupied, 12) == round(_hours_usd(600), 12) < b.scheduler.rentals()[0].usd
+
+
+def test_finished_places_never_pay_for_the_next_batch(tmp_path: Path) -> None:
+    b = bench(tmp_path, max_machines=1, slots=2, usd_per_hour="0.60")
+    machine = b.scheduler.rent("l4", 3)
+    first, second, later = (b.scheduler.queue(JOB, rent="l4")[0] for _ in range(3))
+    b.scheduler.tick()
+    b.run(600)
+    b.run(600)
+    statuses = [b.scheduler.read(run) for run in (first, second, later)]
+    assert all(s.machine == machine and s.outcome == "succeeded" for s in statuses)
+    assert [s.usd for s in statuses] == [Decimal("0.05"), Decimal("0.05"), Decimal("0.10")]
+    assert [s.shared for s in statuses] == [2, 2, 1]
+
+
+def test_a_retry_on_the_same_machine_holds_one_share(tmp_path: Path) -> None:
+    b = bench(tmp_path, max_machines=1, slots=2, usd_per_hour="0.60")
+    machine = b.scheduler.rent("l4", 3)
+    (first,) = b.scheduler.queue(JOB, rent="l4")
+    b.scheduler.tick()
+    b.run(300)
+    (peer,) = b.scheduler.queue(JOB, rent="l4")
+    b.scheduler.tick()
+    initial = b.scheduler.attempts(first)[0].id
+    b.service.outcome = lambda work: "lost" if work.attempt == initial else "succeeded"
+    b.run(300)
+    b.run(600)
+
+    assert [a.machine for a in b.scheduler.attempts(first)] == [machine, machine]
+    assert [b.scheduler.read(r).outcome for r in (first, peer)] == ["succeeded"] * 2
+    # The first run funds 300 seconds alone, then both fund the remaining 900.
+    assert b.scheduler.read(first).usd == Decimal("0.125")
+    assert b.scheduler.read(peer).usd == Decimal("0.075")
 
 
 def test_each_run_on_a_shared_machine_publishes_its_own_outputs(tmp_path: Path) -> None:

@@ -1,11 +1,14 @@
 """Dollar attribution and the remaining execution budget; no lifecycle state."""
 
-from datetime import datetime
+from collections import Counter, defaultdict
+from collections.abc import Collection
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from pydantic import Field
 
-from etude.launch.records import Machine, Rental
+from etude.launch.records import Machine, Rental, RunAttempt
 from etude.spec import Record
 
 
@@ -14,6 +17,64 @@ class Budget(Record):
 
     seconds: float  # execution time
     usd: Decimal = Field(allow_inf_nan=True)  # attributed dollars; unlimited without max_usd
+
+
+@dataclass(frozen=True)
+class Place:
+    """One attempt’s occupancy and the time through which it shares the bill."""
+
+    run: str
+    start: datetime
+    active_until: datetime
+    held_until: datetime
+
+    @classmethod
+    def from_attempt(cls, attempt: RunAttempt, claim: datetime, end: datetime) -> "Place":
+        start = max(claim, attempt.planned_at or claim)
+        active = max(start, min(end, attempt.finished_at or end))
+        held = active
+        if attempt.started_at is not None:
+            limit = attempt.started_at + timedelta(seconds=attempt.limit_seconds)
+            held = max(active, min(end, limit))
+        return cls(attempt.run, start, active, held)
+
+
+def run_share(run: str, places: Collection[Place], rental: Rental, machine: Machine) -> Decimal:
+    """Split occupied time by distinct runs. An empty machine releases every place."""
+    starts: dict[datetime, list[Place]] = defaultdict(list)
+    finishes: Counter[datetime] = Counter()
+    expiries: dict[datetime, list[Place]] = defaultdict(list)
+    for place in places:
+        if place.held_until > place.start:
+            starts[place.start].append(place)
+            if place.active_until > place.start:
+                finishes[place.active_until] += 1
+            expiries[place.held_until].append(place)
+
+    active = 0
+    empty_at: datetime | None = None
+    counts: Counter[str] = Counter()
+    dollars = Decimal(0)
+    previous = machine.claimed_at
+    for moment in sorted(starts.keys() | finishes.keys() | expiries.keys()):
+        if previous is not None and run in counts:
+            dollars += cost_between(rental, machine, previous, moment) / len(counts)
+        previous = moment
+        active -= finishes[moment]
+        if active == 0:
+            empty_at = moment
+            counts.clear()
+        else:
+            for place in expiries.get(moment, ()):
+                if empty_at is None or place.start >= empty_at:
+                    counts[place.run] -= 1
+                    if not counts[place.run]:
+                        del counts[place.run]
+        arriving = starts.get(moment, [])
+        active += sum(place.active_until > moment for place in arriving)
+        if active:
+            counts.update(place.run for place in arriving)
+    return dollars
 
 
 def rental_usd(rental: Rental, machine: Machine, now: datetime) -> Decimal:

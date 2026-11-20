@@ -585,8 +585,9 @@ from when the run is placed (on a new rental, from claim, including
 and the rental deadline. Each occupied moment of a rental is split equally
 among the distinct runs holding a place then — by places held, not by
 configured `--slots`, so a lone run on a 3-slot machine pays for all of it.
-Moments when no attempt on the machine is unfinished belong to no run, as idle
-time on a rental made by hand does. A retry placed back on the same machine
+When the last active attempt finishes, all places end, including on a rental
+kept for later work. While another attempt is still active, a run joining a
+freed slot shares with every run whose place is still held. A retry placed back on the same machine
 continues the run's existing place instead of adding a second sharer; a retry
 that no longer fits the remaining window is rented elsewhere and bounded by its
 uncommitted dollars (its earlier open place remains committed).

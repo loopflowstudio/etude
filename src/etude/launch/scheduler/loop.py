@@ -77,7 +77,7 @@ from etude.launch.records import (
     Target,
     refusal,
 )
-from etude.launch.scheduler.costs import Budget, cost_between, rental_usd
+from etude.launch.scheduler.costs import Budget, Place, rental_usd, run_share
 from etude.launch.scheduler.placement import Placement, PlannedRun
 from etude.launch.schemas import (
     Observation,
@@ -1267,7 +1267,7 @@ class Scheduler:
             until=record.launch.spec.until,
             clocks={} if last is None else last.clocks,
             tally=None if last is None else last.tally,
-            usd=sum((self._attempt_usd(a, now) for a in paid), Decimal(0)),
+            usd=self._run_usd(run, paid, now),
             attempts=_tries(attempts),
             machine=None if last is None or refused else last.machine,
             hardware=None if session is None or refused else session.hardware,
@@ -2379,59 +2379,49 @@ class Scheduler:
             for a in attempts
             if a.started_at is not None
         )
-        dollars = sum((self._attempt_usd(a, now) for a in attempts), Decimal(0))
+        dollars = self._run_usd(run.id, attempts, now)
         return Budget(
             seconds=max(0, run.launch.spec.require_hours() * 3600 - seconds),
             usd=max(Decimal(0), _limit_usd(run.launch.spec) - dollars),
         )
 
-    def _occupied(
-        self, session: Session, rental: Rental | None, now: datetime
-    ) -> dict[str, tuple[datetime, datetime]]:
-        """When each of a claimed session's attempts occupied its machine, by attempt.
-
-        An attempt occupies it from when it was placed, or the machine was
-        asked for if later, until it finished, the machine ended, or now within
-        its rental's paid window. Idle time on a kept rental belongs to no attempt.
-        """
+    def _places(self, session: Session, rental: Rental | None, now: datetime) -> dict[str, Place]:
         assert session.claimed_at is not None
-        latest = now if rental is None else min(now, rental.deadline)
-        occupied = {}
-        for attempt in self._store.attempts(session=session.id):
-            start = max(session.claimed_at, attempt.planned_at or session.claimed_at)
-            end = attempt.finished_at or session.ended_at or latest
-            occupied[attempt.id] = (start, max(start, end))
-        return occupied
+        end = min(now, session.ended_at or now)
+        if rental is not None:
+            end = min(end, rental.deadline)
+        return {
+            attempt.id: Place.from_attempt(attempt, session.claimed_at, end)
+            for attempt in self._store.attempts(session=session.id)
+        }
 
-    def _attempt_usd(self, attempt: RunAttempt, now: datetime) -> Decimal:
-        """One attempt's share of its rental.
-
-        Each moment of the rental is split equally among the attempts occupying
-        it then (`_occupied`), so runs sharing a machine split its cost by the
-        time they spent on it together.
-        """
-        session = self._store.session(attempt.session)
-        rental = self._store.rental_for(session)
-        if rental is None or session.claimed_at is None or session.refused_at is not None:
-            return Decimal(0)
-        machine = self._store.machine(session.machine)
-        occupied = self._occupied(session, rental, now)
-        start, end = occupied[attempt.id]
-        edges = sorted({t for span in occupied.values() for t in span if start <= t <= end})
+    def _run_usd(self, run: str, attempts: Sequence[RunAttempt], now: datetime) -> Decimal:
         dollars = Decimal(0)
-        for begin, finish in zip(edges, edges[1:], strict=False):
-            sharing = sum(a <= begin and finish <= b for a, b in occupied.values())
-            part = cost_between(rental, machine, begin, finish)
-            dollars += part / sharing
+        for session_id in {a.session for a in attempts}:
+            session = self._store.session(session_id)
+            rental = self._store.rental_for(session)
+            if rental is not None and session.claimed_at is not None and session.refused_at is None:
+                places = self._places(session, rental, now)
+                dollars += run_share(
+                    run, places.values(), rental, self._store.machine(session.machine)
+                )
         return dollars
 
     def _shared(
         self, attempt: RunAttempt, session: Session, rental: Rental | None, now: datetime
     ) -> int:
-        """The most attempts on this attempt's machine at once while it occupied it."""
+        """Peak concurrent runs while the attempt occupied its machine."""
         if session.claimed_at is None:
             return 1
-        occupied = self._occupied(session, rental, now)
-        start, end = occupied[attempt.id]
-        moments = [start] + [a for a, _ in occupied.values() if start < a < end]
-        return max(1, max(sum(a <= t < b for a, b in occupied.values()) for t in moments))
+        places = self._places(session, rental, now)
+        own = places[attempt.id]
+        moments = [own.start] + [
+            p.start for p in places.values() if own.start < p.start < own.active_until
+        ]
+        return max(
+            1,
+            max(
+                len({p.run for p in places.values() if p.start <= t < p.active_until})
+                for t in moments
+            ),
+        )

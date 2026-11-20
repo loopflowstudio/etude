@@ -181,8 +181,8 @@ that fails, is cancelled or finishes early never raises what the remaining runs
 pay. The trade-off: a run that leaves early keeps paying its share while peers
 are still working on the machine, so its dollars in `etude status` keep rising
 up to its planned share — including a short run with a loose `max_hours` (such
-as an eval beside training). Once no run is active on the machine, idle time
-belongs to no run.
+as an eval beside training). When the last active attempt finishes, all places
+end. A later batch starts paying from its own placement.
 
 Queued runs placed later by `wait` or a scheduling pass are priced by their
 share of the group they join, including runs already on an open machine; if a
