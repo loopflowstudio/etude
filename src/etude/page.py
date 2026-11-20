@@ -89,7 +89,7 @@ from etude.errors import EtudeError, explain
 from etude.eval.records import Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named, refuse_renamed
 from etude.records import BUILT_IN_NAMES, Record
-from etude.report import Counters, Flame, Matches, Report, Score, Series
+from etude.report import Counters, Curve, Flame, Matches, Report, Score, Series
 from etude.run import LocatedRun, as_storage, declared, located_runs, run_folders, runs, under
 from etude.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import RunData, read_all
@@ -438,15 +438,19 @@ def index(
         page = None
         if isinstance(built, Page):
             # The index draws each job's curve in the page's first view: one score, unsplit.
+            curves = [p for p in built.report.evals if isinstance(p, Curve)]
+            score = 0
+            if curves and all(p.score is not None for p in curves):
+                score = next(i for i, s in enumerate(built.scores) if s == curves[0].score)
             kept = tuple(
                 c
                 for c in built.cells
-                if c.score == 0 and not c.split and not c.fixed and c.commit is None
+                if c.score == score and not c.split and not c.fixed and c.commit is None
             )
             points = tuple(
                 p
                 for p in built.points
-                if p.value is None or (p.score == 0 and not p.split and p.commit is None)
+                if p.value is None or (p.score == score and not p.split and p.commit is None)
             )
             lean = built.training.model_copy(update={"series": {}, "bands": {}, "timers": ()})
             page = built.model_copy(update={"cells": kept, "points": points, "training": lean})
@@ -539,7 +543,7 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
         origin=origin,
         notes=(*notes, *partial, *_without_hours(trained), *evals.notes),
         training=measured,
-        scores=evals.scores or ((report.score,) if report.score is not None else ()),
+        scores=evals.scores or report.scores(),
         selections=evals.selections,
         drawn=evals.drawn,
         panel_selections=tuple(
@@ -1381,10 +1385,8 @@ def _cells(
         for (table,) in db.sql("show tables").fetchall()
         if table not in ETUDE_TABLES and table not in rollups
     }
-    scores = (
-        (report.score,)
-        if report.score is not None
-        else tuple(
+    scores = report.scores(
+        tuple(
             Score(table=table, value=name)
             for table in sorted(columns)
             for name, kind in columns[table].items()
@@ -1399,8 +1401,8 @@ def _cells(
     teams: set[str] = set()
     for number, score in enumerate(scores):
         held = columns.get(score.table, {})
-        if score.value not in held:
-            absent.append(Absent(table=score.table, column=score.value))
+        if missing := [c for c in (score.value, score.per) if c is not None and c not in held]:
+            absent.extend(Absent(table=score.table, column=c) for c in missing)
             continue
         named = [c for c in report.columns() if c in held]
         absent += [Absent(table=score.table, column=c) for c in report.columns() if c not in held]

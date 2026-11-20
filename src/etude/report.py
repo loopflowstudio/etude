@@ -95,7 +95,7 @@ class Matches(Record):
 
 class Curve(Record):
     """Scores over training, a line per job or external learner line; `split` draws one
-    chart per column value.
+    chart per column value. Set `score` to pin this curve to its own measure.
 
     Where every one of its `matches` is a `Matches(seating=...)`, each point is
     a held checkpoint's seating value, its first seat's score, where that
@@ -110,6 +110,7 @@ class Curve(Record):
 
     kind: Literal["curve"] = "curve"
     title: str = "Score"
+    score: Score | None = None
     split: str | None = None
     matches: Matches | tuple[Matches, ...] | None = None
 
@@ -260,6 +261,12 @@ class Report(Record):
     other_metrics: bool = False
     perf: tuple[MetricPanel, ...] = PERF
     ml: tuple[MetricPanel, ...] = ML
+
+    def scores(self, discovered: tuple[Score, ...] = ()) -> tuple[Score, ...]:
+        """Page score order, with the section default first and each curve's measure once."""
+        defaults = (self.score,) if self.score is not None else discovered
+        pinned = (p.score for p in self.evals if isinstance(p, Curve) and p.score is not None)
+        return tuple(dict.fromkeys((*defaults, *pinned)))
 
     def columns(self) -> tuple[str, ...]:
         """Every eval table column a panel names, in first-named order."""

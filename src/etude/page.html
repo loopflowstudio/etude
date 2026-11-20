@@ -54,7 +54,7 @@ const stepClocks = T.clocks.filter(c => c.kind === "step").map(c => c.name);
 // ---------------------------------------------------------------- evals: what compare computed
 function evalState() {
   if (!choices.some(([v]) => v === S.sel)) S.sel = choices.length ? choices[0][0] : "";
-  if (+S.score >= D.scores.length) S.score = "0";
+  if (R.score != null || !D.scores[+S.score]) S.score = "0";
   return {sel: S.sel === "" ? null : +S.sel, score: +S.score, info: D.scores[+S.score]};
 }
 const opponents = (E, sel) => M.opponents(E.score, sel);
@@ -156,31 +156,33 @@ function render() {
   const setFilter = (pairs, toggle) => { const same = Object.entries(pairs).every(([k, v]) => F[k] === v); for (const [k, v] of Object.entries(pairs)) { if (toggle && same) delete F[k]; else F[k] = v; } S.filter = JSON.stringify(F); render(); };
 
   // ---- Evals
-  const E = evalState(), ref = E.info?.reference;
+  const section = evalState();
   const ec = document.getElementById("evals-controls"); ec.replaceChildren();
   if (M.usesSelection) control(ec, "Matches", choices, "sel");
   const commits = D.commits.map(k => [k.commit, `${k.commit.slice(0, 10)} · ${k.matches} match${k.matches > 1 ? "es" : ""}`]);
   control(ec, "Played at", [["", "latest of each match"], ...commits], "commit", () => { writeHash(); location.reload(); });
-  control(ec, "Score", D.scores.map((s, i) => [String(i), `${s.table}.${s.value}`]), "score");
-  S.opp = oppFor(E, E.sel);
-  control(ec, "Opponent", opponents(E, E.sel), "opp");
+  if (R.score == null) control(ec, "Score", D.scores.map((s, i) => [String(i), `${s.table}.${s.value}`]), "score");
+  S.opp = oppFor(section, section.sel);
+  control(ec, "Opponent", opponents(section, section.sel), "opp");
   control(ec, "Anchor lines", fixedPlayers.length > 1 ? [["on", "On"], ["off", "Off"]] : [], "lines");
   control(ec, "X axis", CLOCKS, "eclock");
   const body = document.getElementById("evals-body"); body.replaceChildren();
-  const scoreName = E.info ? `${E.info.table}.${E.info.value}${E.info.per ? " per " + E.info.per : ""}` : "";
-  document.getElementById("evals-sub").textContent = !M.usesSelection ? "" : E.sel == null ? "no eval run yet" : caption(selName(D.selections[E.sel]), scoreName);
-  const eOpts = {xLabel: S.eclock, yFormat: scoreFormat, ref, sync: "evals"};
+  const nameOf = info => info ? `${info.table}.${info.value}${info.per ? " per " + info.per : ""}` : "";
+  document.getElementById("evals-sub").textContent = !M.usesSelection ? "" : section.sel == null ? "no eval run yet" : caption(selName(D.selections[section.sel]), nameOf(section.info));
   const GAPS = "○ not yet played · × failed · | not evaluated";
   // Only a job averages seeds; a line's curve is its checkpoints' own values.
   const BAND = vis.some(j => j.line == null) ? "mean over seeds · band: seed range, or one seed's 95% interval over matches" : "band: 95% interval over matches";
-  const curveOf = (j, sel, extra = {}, opp = S.opp) => jobPoints(j, S.eclock, evalValue(E, sel, extra, opp));
   const latestKey = pts => { const ok = evaluated(pts); return ok.length ? ok[ok.length - 1].key : null; };
   const keyName = k => `${M.alignClock || "checkpoint"} ${num(k)}`;
   const finalKey = j => j.line == null && j.runs.every(r => T.runs.find(x => x.name === r)?.state === "finished") ? (marks.get(j.members[0]?.key) || []).at(-1)?.align ?? null : null;
   const unselected = panel => { const m = panel.matches || {}; return node("div", "na", `No eval run holds the matches this panel names (${[m.tournament && "tournament " + m.tournament, m.seating && "seating " + m.seating, m.tag && "tag " + m.tag].filter(Boolean).join(", ")}).`); };
   if (!D.selections.length) card(body, "No evaluations", "", "full").appendChild(node("div", "na", `${D.file} defines no eval_jobs(state) yet. Define one and run etude eval on the file; its matches appear here.`));
   else for (const [k, panel] of R.evals.entries()) {
-    const sel = M.panelSelection(k, E.sel), opp = oppFor(E, sel), versus = versusOf(sel, opp), where = sel == null ? "" : selName(D.selections[sel]);
+    const number = curveScore(D, panel, section.score), E = {score: number, info: D.scores[number]};
+    const ref = E.info?.reference, scoreName = nameOf(E.info);
+    const eOpts = {xLabel: S.eclock, yFormat: scoreFormat, ref, sync: "evals"};
+    const curveOf = (j, sel, extra = {}, opp = S.opp) => jobPoints(j, S.eclock, evalValue(E, sel, extra, opp));
+    const sel = M.panelSelection(k, section.sel), opp = oppFor(E, sel), versus = versusOf(sel, opp), where = sel == null ? "" : selName(D.selections[sel]);
     const score = [scoreName, versus].filter(Boolean).join(" ");
     if (panel.kind === "curve" && !panel.split) {
       const c = card(body, panel.title, caption(where, score, BAND, GAPS), "full");
@@ -188,10 +190,10 @@ function render() {
       const host = node("div"); c.appendChild(host);
       later(() => line(host, series(j => curveOf(j, sel, {}, opp), vis), {...eOpts, refs: anchorLines(E, sel, opp), height: 260}));
     } else if (panel.kind === "curve") {
-      const c = card(body, panel.title, caption(where, `one chart per ${panel.split}`, versus), "full");
+      const c = card(body, panel.title, caption(where, `one chart per ${panel.split}`, score), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const vals = values(E, sel, panel.split);
-      if (!vals.length) { c.appendChild(node("div", "na", absentNote(panel.split))); continue; }
+      if (!vals.length) { c.appendChild(node("div", "na", absentNote(E, panel.split))); continue; }
       const grid = node("div", "grid multiples"); c.appendChild(grid);
       for (const v of vals) { const m = node("div"), host = node("div"); m.append(node("div", "mini-title", `${panel.split} = ${show(v)}`), host); grid.appendChild(m); later(() => line(host, series(j => curveOf(j, sel, {[panel.split]: v}, opp), vis), {...eOpts, refs: anchorLines(E, sel, opp, {[panel.split]: v}), compact: true, height: 140})); }
     } else if (panel.kind === "matrix") {
@@ -199,7 +201,7 @@ function render() {
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const both = (r, col) => ({[panel.rows]: r, [panel.columns]: col});
       const colsAt = values(E, sel, panel.columns, panel.rows), rowsAt = values(E, sel, panel.rows, panel.columns);
-      if (!colsAt.length || !rowsAt.length) { c.appendChild(node("div", "na", absentNote(panel.rows, panel.columns))); continue; }
+      if (!colsAt.length || !rowsAt.length) { c.appendChild(node("div", "na", absentNote(E, panel.rows, panel.columns))); continue; }
       if (!vis.some(j => j.key === S.mjob)) S.mjob = vis[0].key;
       const job = vis.find(j => j.key === S.mjob), done = evaluated(curveOf(job, sel, {}, opp)).map(p => p.key), last = finalKey(job);
       // A finished job is shown at its final checkpoint, evaluated or not; a running one at its latest evaluated.
@@ -239,7 +241,7 @@ function render() {
       const c = card(body, panel.title || `By ${panel.by}`, caption(where, commonKey != null ? `at ${keyName(commonKey)}, which every job evaluated` : "each job at its latest", versus));
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const vals = values(E, sel, panel.by);
-      if (!vals.length) { c.appendChild(node("div", "na", absentNote(panel.by))); continue; }
+      if (!vals.length) { c.appendChild(node("div", "na", absentNote(E, panel.by))); continue; }
       const rows = vals.map(v => {
         const by = vis.map(j => { const pts = curveOf(j, sel, {[panel.by]: v}, opp), k = commonKey ?? latestKey(curveOf(j, sel, {}, opp)); return [j, pts.find(p => p.key === k && !p.missing && !p.skip)]; });
         const got = by.filter(([, p]) => p); return {v, by, mean: got.length ? mean(got.map(([, p]) => p.y)) : -Infinity};
@@ -321,7 +323,7 @@ function render() {
       rampLegend(c, ref, found, `· ${met.length} fixed player${met.length > 1 ? "s" : ""}: code, or checkpoints with no position`);
     } else card(body, `Unknown panel kind ${JSON.stringify(panel.kind)}`, "not drawn");
   }
-  function absentNote(...cols) {
+  function absentNote(E, ...cols) {
     const gone = cols.filter(col => D.absent.some(a => a.table === E.info?.table && a.column === col));
     return gone.length ? `${gone.join(", ")} ${gone.length > 1 ? "are not columns" : "is not a column"} of ${E.info.table}` : "Nothing recorded for this selection";
   }

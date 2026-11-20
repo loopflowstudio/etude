@@ -80,7 +80,12 @@ from etude.report import Curve, Report, Score, Series
 def report() -> Report:
     return Report(
         score=Score(table="scores", value="won", reference=0.5),
-        evals=(Curve(),),
+        evals=(
+            Curve(title="Win rate"),
+            Curve(
+                title="Actions taken", score=Score(table="actions", value="taken", per="offered")
+            ),
+        ),
         ml=(Series(title="Loss", keys=("loss",)),),
     )
 ```
@@ -93,6 +98,7 @@ uv run etude report . --serve
 
 The report joins training progress with eval results. `Score` names the table
 and value; add `per="opportunities"` for a sum(value)/sum(per) rate.
+Each curve can pin its own score. Curves without one use the report score.
 Curves draw training progress; `Matrix(rows=..., columns=...)` and `Ranking(by=...)`
 use your table columns. `Matches(tournament=..., seating=...)` selects a panel's
 matches; `tag=` selects tagged seatings. Omit seating to show scores for any

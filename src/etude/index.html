@@ -99,7 +99,7 @@ function render() {
     if (P.notes.length) fact("Note", P.notes.join(" "));
     row.appendChild(facts);
     // The headline: each job's latest score, as its report's first curve draws it.
-    const score = node("div", "score"), info = P.scores[0];
+    const score = node("div", "score"), info = P.scores[curveScore(P, P.report.evals?.[headlinePanel(P)], 0)];
     const heads = headline(P, M);
     if (!info || !heads.some(x => x.points.length)) score.appendChild(node("span", "na", P.selections.length ? "No score yet" : "No evaluations yet"));
     else {
