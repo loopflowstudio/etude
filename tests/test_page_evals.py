@@ -33,7 +33,7 @@ from etude.eval.result import Result
 from etude.experiment import observe
 from etude.page import Drawn, OutsideTournaments, Page, PanelSelection, build
 from etude.records import ArtifactRef, Clock, Continuation, SourceKey
-from etude.report import Matches
+from etude.report import Matches, Score
 from etude.storage import DirectoryStorage, S3Storage, Storage
 from etude.train.tracking import TrainingRun
 from tests.eval.games import play, play_failing_deal_one, play_teams, play_with_evidence
@@ -1171,3 +1171,25 @@ def report():
     assert any(0 < c.value < 1 for c in page.cells if c.score == 0)
     rates = [c.value for c in page.cells if c.score == 1]
     assert rates and set(rates) == {1}
+
+
+def test_curve_score_range_fixes_the_axis_and_reaches_the_page(
+    lab: tuple[Path, Path], tmp_path: Path
+) -> None:
+    runs, _ = lab
+    file = experiment_file(
+        tmp_path,
+        "lab",
+        """
+from etude.report import Curve, Report, Score
+
+def report():
+    rate = Score(table="plays", value="won", per="won", range=(0, 1))
+    return Report(score=Score(table="plays", value="won"), evals=(Curve(score=rate), Curve()))
+""",
+    )
+    page = build(runs, file)
+    assert [s.range for s in page.scores] == [None, (0.0, 1.0)]
+    assert '"range": [0.0, 1.0]' in json.dumps(page.model_dump(mode="json"))
+    with pytest.raises(ValueError, match="low to high"):
+        Score(table="plays", value="won", range=(1, 0))

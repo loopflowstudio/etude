@@ -63,6 +63,8 @@ class Score(Record):
     a line, and the matrix's neutral colour. It is computed as
     `etude.eval.query.compare` computes it, with its interval over whole matches.
     `unit` labels the counted table rows; it does not change their granularity.
+    `range` fixes the curve's y-axis, such as (0, 1) for a rate, so that charts of
+    one kind compare at a glance; without it the axis fits the values shown.
     """
 
     table: str
@@ -70,6 +72,13 @@ class Score(Record):
     per: str | None = None
     reference: float | None = None
     unit: str = "rows"
+    range: tuple[float, float] | None = None
+
+    @model_validator(mode="after")
+    def ordered_range(self) -> Self:
+        if self.range is not None and not self.range[0] < self.range[1]:
+            raise ValueError(f"range {self.range} must run from low to high")
+        return self
 
 
 class Matches(Record):
