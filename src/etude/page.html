@@ -180,7 +180,7 @@ function render() {
   else for (const [k, panel] of R.evals.entries()) {
     const number = curveScore(D, panel, section.score), E = {score: number, info: D.scores[number]};
     const ref = E.info?.reference, scoreName = nameOf(E.info);
-    const eOpts = {xLabel: S.eclock, yFormat: scoreFormat, ref, sync: "evals"};
+    const eOpts = {xLabel: S.eclock, yFormat: scoreFormat, ref, range: E.info?.range, sync: "evals"};
     const curveOf = (j, sel, extra = {}, opp = S.opp) => jobPoints(j, S.eclock, evalValue(E, sel, extra, opp));
     const sel = M.panelSelection(k, section.sel), opp = oppFor(E, sel), versus = versusOf(sel, opp), where = sel == null ? "" : selName(D.selections[sel]);
     const score = [scoreName, versus].filter(Boolean).join(" ");

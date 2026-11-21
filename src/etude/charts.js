@@ -79,7 +79,7 @@ function isolated(ys) {
 // never bridged. A skipped point is no point of the line (undefined, which uPlot joins over).
 // A point with a `gap` is marked along the bottom: ○ not yet played, × failed or some seeds
 // only, | not evaluated. `lo`/`hi` are a band, or whiskers on a line of five points or fewer.
-// o: {height, compact, xLabel, yFormat, xFormat, ref, refs: [{y, label}], log, band, sync, dots, spark}.
+// o: {height, compact, xLabel, yFormat, xFormat, ref, refs: [{y, label}], range: [lo, hi], log, band, sync, dots, spark}.
 // Charts in one `sync` group share a cursor; dragging zooms, a double click zooms out.
 const charts = [];
 function destroyCharts() { for (const u of charts) u.destroy(); charts.length = 0; }
@@ -122,7 +122,7 @@ function line(host, series, o = {}) {
   const toPx = v => v * devicePixelRatio;
   const opts = {
     width, height, legend: {show: false}, bands, series: spec,
-    scales: {x: {time: false}, y: o.log ? {distr: 3, log: 10} : {}},
+    scales: {x: {time: false}, y: o.log ? {distr: 3, log: 10} : o.range ? {range: () => o.range} : {}},
     axes: o.spark ? [{show: false}, {show: false}] : [
       {...axis, label: o.compact ? null : o.xLabel, labelSize: o.compact ? 0 : 18, values: (u, vs, a, space, incr) => tickLabels(vs, xf, incr), space: o.compact ? 50 : 70},
       // A log axis labels its powers of ten; the ticks between stay unlabelled.
@@ -415,7 +415,8 @@ function model(D) {
 
 function curveScore(D, panel, selected) {
   if (!panel?.score) return selected;
-  return D.scores.findIndex(s => Object.keys(panel.score).every(k => s[k] === panel.score[k]));
+  // Fields such as range are arrays, so compare values, not identities.
+  return D.scores.findIndex(s => Object.keys(panel.score).every(k => JSON.stringify(s[k]) === JSON.stringify(panel.score[k])));
 }
 function headlinePanel(D) {
   const panels = D.report.evals || [];

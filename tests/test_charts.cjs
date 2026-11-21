@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const {test} = require("node:test");
 const context = vm.createContext({});
-vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\nthis.model = model; this.isolated = isolated; this.tickLabels = tickLabels; this.runMember = runMember;", context);
+vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\nthis.model = model; this.isolated = isolated; this.tickLabels = tickLabels; this.runMember = runMember; this.curveScore = curveScore;", context);
 
 function player(name, line, updates, run = null, ordinal = null) {
   return {name, line, at: {updates}, config: "{}", run, ordinal, placed: true};
@@ -387,4 +387,13 @@ test("pace plots restart boundaries as null gaps between measured intervals", ()
   const rendered = renderPage(data);
   assert.equal(rendered.plots.length, 1);
   assert.deepEqual([...rendered.plots[0].values[1]], [null, 10, null, 10]);
+});
+
+test("a curve finds its score when the score carries a range", () => {
+  const scores = [{table: "plays", value: "won", per: null, range: null},
+                  {table: "plays", value: "won", per: "won", range: [0, 1]}];
+  const D = {scores};
+  assert.equal(context.curveScore(D, {score: {table: "plays", value: "won", per: "won", range: [0, 1]}}, 0), 1);
+  assert.equal(context.curveScore(D, {score: {table: "plays", value: "won", per: "won", range: [0, 2]}}, 0), -1);
+  assert.equal(context.curveScore(D, {}, 0), 0);
 });
