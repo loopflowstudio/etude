@@ -415,7 +415,8 @@ function model(D) {
 
 function curveScore(D, panel, selected) {
   if (!panel?.score) return selected;
-  return D.scores.findIndex(s => Object.keys(panel.score).every(k => s[k] === panel.score[k]));
+  // Fields such as range are arrays, so compare values, not identities.
+  return D.scores.findIndex(s => Object.keys(panel.score).every(k => JSON.stringify(s[k]) === JSON.stringify(panel.score[k])));
 }
 function headlinePanel(D) {
   const panels = D.report.evals || [];
