@@ -518,8 +518,19 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
         source.put(local + "/outcome.json", outcome)
         server.ingest()
         assert ">finished<" in row(status("/experiments/lab/status"), local)
+        # A saved terminal outcome can lead the launcher while it releases the attempt.
+        source.put(
+            running + "/run.json",
+            RunRecord(id=running, job_name="learn", seed=0, experiment="lab")
+            .model_dump_json()
+            .encode(),
+        )
+        source.put(running + "/outcome.json", outcome)
+        server.ingest()
+        ending = row(status("/experiments/lab/status"), running)
+        assert ">finished<" in ending and ">running<" not in ending and machine in ending
         # The local outcome alone cannot close an experiment with outstanding launcher work.
-        assert "2 finished" in status("/status").split("<h2>Completed</h2>")[0]
+        assert "3 finished" in status("/status").split("<h2>Completed</h2>")[0]
         backend.scheduler.cancel(queued)
         backend.run(600)
         server.ingest()

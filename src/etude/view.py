@@ -613,7 +613,7 @@ def _run_line(row: sqlite3.Row, state: str, status: Status | None) -> str:
             if status.outcome != state and (state, status.outcome) != ("finished", "succeeded"):
                 facts.append(status.outcome)
             facts.append(status.cause)
-        elif status.phase != state:
+        elif status.phase in ("renting", "setting_up", "stopping"):
             facts.append(status.phase.replace("_", " "))
         facts.extend(launcher_facts(status, row["max_attempts"]))
     parts.extend(f"<span>{escape(fact)}</span>" for fact in facts if fact)
