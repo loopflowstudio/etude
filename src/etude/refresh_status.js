@@ -1,10 +1,11 @@
-// Pages share a visible-tab cadence. Only a changed run document needs its charts again.
+// Visible tabs check the index. A waiting report stops polling once its files arrive.
 (() => {
   const {id, dataset: {refresh, version}} = document.querySelector("[data-refresh]");
   const path = version ? location.pathname + "?observe=1" : location.pathname.replace(/\/$/, "") + "/status";
   const error = document.getElementById("status-error");
 
   async function check() {
+    let navigating = false;
     try {
       if (document.hidden) return;
       const response = await fetch(path);
@@ -17,11 +18,12 @@
 
       const current = document.getElementById(id);
       if (version) {
+        current.textContent = next.textContent;
         if (next.dataset.version !== version) {
           location.reload();
+          navigating = true;
           return;
         }
-        current.textContent = next.textContent;
         const collected = document.getElementById("console-collected");
         if (collected) {
           collected.textContent = next.dataset.collected;
@@ -37,7 +39,7 @@
     } catch (cause) {
       error.textContent = `Status refresh failed: ${cause.message}. Showing the last observation.`;
     } finally {
-      setTimeout(check, Number(refresh));
+      if (!navigating) setTimeout(check, Number(refresh));
     }
   }
   setTimeout(check, Number(refresh));

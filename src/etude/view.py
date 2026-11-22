@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import re
 import shlex
 import signal
 import sqlite3
@@ -542,7 +543,7 @@ class ChartIndex:
         ages = [f"last file write {_age(row['last_write'], now)}"]
         ages.extend(_observation_ages(row, now, launcher=status is not None))
         collected = f"Last collected {_age(row['collected'], now)}" if row["collected"] else ""
-        observation = _run_observation(token, " · ".join(ages), collected)
+        observation = _observation("run", token, " · ".join(ages), collected)
         if observe:
             return observation
         evaluation = row["kind"] == "evaluation"
@@ -580,7 +581,7 @@ class ChartIndex:
         message = f"Waiting for the run to appear in {source}."
         if error := self.read_error(selected(), self.error):
             message += " " + error
-        return _run_observation("waiting", message)
+        return _observation("run", "waiting", message)
 
     def _list_runs(
         self, remote: str | None, experiment: str | None = None
@@ -677,15 +678,16 @@ class ChartIndex:
             body = "<p>No launcher is used here.</p>"
         return _live_status(body, error=error)
 
-    def has_experiment(self, experiment: str) -> bool:
+    def report_ready(self, experiment: str, *, declared: bool) -> bool | None:
+        """Whether a known experiment has indexed files. Unknown experiments have no page."""
         with self._connect() as db:
-            return (
-                db.execute(
-                    _VISIBLE + "SELECT 1 FROM visible WHERE experiment=:experiment LIMIT 1",
-                    {"experiment": experiment, "remote": selected()},
-                ).fetchone()
-                is not None
-            )
+            row = db.execute(
+                _VISIBLE
+                + """SELECT EXISTS (SELECT 1 FROM files WHERE experiment=:experiment)
+                     WHERE :declared OR EXISTS (SELECT 1 FROM visible WHERE experiment=:experiment)""",
+                {"experiment": experiment, "declared": declared, "remote": selected()},
+            ).fetchone()
+        return bool(row[0]) if row is not None else None
 
     def experiment_status(self, experiment: str, *, declared: bool) -> str | None:
         remote = selected()
@@ -1028,9 +1030,9 @@ def _age(at: str | None, now: datetime) -> str:
     return f"{seconds} s ago"
 
 
-def _run_observation(token: str, message: str, collected: str = "") -> str:
+def _observation(page: str, token: str, message: str, collected: str = "") -> str:
     return (
-        f'<p class="context" id="run-observation" data-refresh="{_REFRESH * 1000}" '
+        f'<p class="context" id="{page}-observation" data-refresh="{_REFRESH * 1000}" '
         f'data-version="{token}" data-collected="{escape(collected)}">{escape(message)}</p>'
     )
 
@@ -1129,10 +1131,9 @@ class Server(ThreadingHTTPServer):
     def page(self, route: str, *, refresh: bool = False) -> str | None:
         url = urlsplit(route)
         path = unquote(url.path)
+        observe = parse_qs(url.query).get("observe") == ["1"]
         if path.startswith("/runs/"):
-            return self.index.run(
-                path.removeprefix("/runs/"), observe=parse_qs(url.query).get("observe") == ["1"]
-            )
+            return self.index.run(path.removeprefix("/runs/"), observe=observe)
         if path in ("/", "/status"):
             overview = self.index.experiments()
             return (
@@ -1150,14 +1151,11 @@ class Server(ThreadingHTTPServer):
         if not path.startswith("/experiments/"):
             return None
         experiment, _, component = path.removeprefix("/experiments/").partition("/")
-        declared = experiment in self.files
         if component == "report":
-            if declared or self.index.has_experiment(experiment):
-                return self._report(experiment, refresh)
-            return None
+            return self._report(experiment, refresh=refresh, observe=observe)
         if component not in ("", "status"):
             return None
-        status = self.index.experiment_status(experiment, declared=declared)
+        status = self.index.experiment_status(experiment, declared=experiment in self.files)
         if component or status is None:
             return status
         return _status_page(
@@ -1167,8 +1165,21 @@ class Server(ThreadingHTTPServer):
             after=f'<iframe id="report" title="Experiment report" src="/experiments/{quote(experiment)}/report" style="width:100%;height:80vh;border:0"></iframe>',
         )
 
-    def _report(self, experiment: str, refresh: bool) -> str:
-        """Join concurrent refreshes. A failed report leaves its last good HTML visible."""
+    def _report(self, experiment: str, *, refresh: bool, observe: bool) -> str | None:
+        """Wait for indexed files, then share the first build and explicit refreshes."""
+        ready = self.index.report_ready(experiment, declared=experiment in self.files)
+        if ready is None:
+            return None
+        if observe or not ready:
+            with self._lock:
+                available = ready or experiment in self._html
+            if not available:
+                if refresh:
+                    raise ValueError("Waiting for run files.")
+                notice = _observation("report", "waiting", "Waiting for run files.")
+                return notice if observe else _document(experiment, notice + _refresh_script())
+            if observe:
+                return _observation("report", "ready", "Building report…")
         with self._lock:
             if not refresh and experiment in self._html:
                 return self._html[experiment]
@@ -1211,10 +1222,16 @@ class _Handler(BaseHTTPRequestHandler):
         self._respond(refresh=False)
 
     def do_POST(self) -> None:  # noqa: N802
-        if not urlsplit(self.path).path.endswith("/report"):
+        if not self._is_report():
             self.send_error(405)
             return
         self._respond(refresh=True)
+
+    def _is_report(self) -> bool:
+        return (
+            re.fullmatch(r"/experiments/[^/]+/report", unquote(urlsplit(self.path).path))
+            is not None
+        )
 
     def _respond(self, *, refresh: bool) -> None:
         html: str | None = None
@@ -1225,10 +1242,17 @@ class _Handler(BaseHTTPRequestHandler):
                 # A train prints its link before the next listing can discover it.
                 html = _document("Run", self.server.index.waiting() + _refresh_script())
             body = (html or "Not found.").encode()
-        except ValueError as error:
-            body, status = explain(error).encode(), 404
-        except Exception as error:
-            body, status = explain(error).encode(), 500
+        except (Exception, SystemExit) as error:
+            reason = explain(error)
+            if not refresh and self._is_report():
+                html = _document(
+                    "Experiment report",
+                    f'<p role="status">Report build failed: {escape(reason)}</p>'
+                    '<form method="get"><button>Retry report</button></form>',
+                )
+                body, status = html.encode(), 500
+            else:
+                body, status = reason.encode(), 404 if isinstance(error, ValueError) else 500
         self.send_response(status)
         self.send_header("Content-Type", f"text/{'html' if html else 'plain'}; charset=utf-8")
         self.send_header("Cache-Control", "no-store")

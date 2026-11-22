@@ -450,4 +450,5 @@ test("a visible run updates dates in place and reloads only when its content cha
   document.hidden = false;
   await tick();
   assert.equal(navigations, 1);
+  assert.equal(tick, undefined); // A slow navigation must finish before another check.
 });

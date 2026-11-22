@@ -149,7 +149,8 @@ opened before the run appears names the source the view is watching.
 | `/status` | The experiment list used to refresh `/` |
 | `/experiments/NAME` | Jobs and runs with their state, clock, last file write and launcher placement or queue reason, plus the experiment report |
 | `/experiments/NAME/status` | The run status table used to refresh the experiment page |
-| `/experiments/NAME/report` | The experiment's report, with a **Refresh report** button |
+| `/experiments/NAME/report` | The same report pane, opened on its own |
+| `/experiments/NAME/report?observe=1` | Whether the waiting report can load |
 | `/runs/ADDRESS` | A training run’s progress, curves, console, config and checkpoints, or an evaluation’s status and link to its report |
 | `/runs/ADDRESS?observe=1` | Current source ages and the version of the run shown in the tab |
 | `/machines` | Held machines with their pool or on-demand, state, window and cost. Each occupied slot links to its run and shows its state and clock. |
@@ -157,7 +158,11 @@ opened before the run appears names the source the view is watching.
 
 **Experiments.** The experiment page opens with its run status table. The
 report loads in a separate frame so you can read status during a report build.
-Status refreshes keep your place in the report. An experiment stays open
+Before the first run files arrive, the pane shows **Waiting for run files**. Once the
+view indexes its first training or evaluation run, the visible tab builds the
+report. If the build fails, the pane shows the reason and offers **Retry report**.
+After a successful build, use **Refresh report** to see newer data. Status
+refreshes keep your place in the report. An experiment stays open
 while it has unfinished launcher work or an active file-only run. When a
 complete file listing starts at least 10 minutes after a file-only run’s
 last write and finds no outcome, the run reads **no end recorded** and

@@ -67,28 +67,33 @@ def test_a_served_page_refreshes_on_demand_only_when_its_files_change(tmp_path: 
     file = experiment_file(tmp_path / "experiments", "lab", COUNTED)
     builds = file.with_suffix(".built")  # the file runs once for every page built
     measured = MeasuredStorage(DirectoryStorage(runs))
+    with Server(measured, file, ("127.0.0.1", 0)) as first:
+        first.refresh_files()
     with Server(measured, file, ("127.0.0.1", 0)) as server:
+        indexed = builds.read_text()
+        listings = measured.listings
+        measured.got.clear()
         assert '"name": "a"' in (server.page("/experiments/lab/report") or "")
-        assert measured.listings == 1
+        assert measured.listings == listings + 1
         assert measured.got.count("lab/a/run.json") == measured.got.count("other/c/run.json") == 1
         reads = measured.requests, measured.listings
         server.page("/experiments/lab/report")
         assert (measured.requests, measured.listings) == reads
-        assert builds.read_text().count("built") == 1
+        assert builds.read_text() == indexed + "built\n"
         # A copied experiment and a delivery note beneath lab/a leave lab's report current.
         trained(runs / "lab/a", "other", "d")
         measured.put("lab/a/.shipped/note", b"delivered")
         server.page("/experiments/lab/report", refresh=True)
-        assert builds.read_text().count("built") == 1
+        assert builds.read_text() == indexed + "built\n"
         trained(runs, "lab", "b")
         assert '"name": "b"' not in (server.page("/experiments/lab/report") or "")
         assert '"name": "b"' in (server.page("/experiments/lab/report", refresh=True) or "")
-        assert builds.read_text().count("built") == 2
-        assert measured.listings == 3
+        assert builds.read_text() == indexed + "built\n" * 2
+        assert measured.listings == listings + 3
         assert measured.got.count("lab/a/run.json") == measured.got.count("lab/b/run.json") == 1
         file.write_text(COUNTED + "# edited\n")
         server.page("/experiments/lab/report", refresh=True)
-        assert builds.read_text().count("built") == 3
+        assert builds.read_text() == indexed + "built\n" * 3
 
 
 def test_refresh_reads_an_edited_neighbour_the_file_imports(tmp_path: Path) -> None:
@@ -103,6 +108,7 @@ def test_refresh_reads_an_edited_neighbour_the_file_imports(tmp_path: Path) -> N
         "def report() -> Report:\n    return Report(labels={'a': NAME})\n",
     )
     with Server(runs, file, ("127.0.0.1", 0)) as server:
+        _ingest(server)
         os.utime(helper, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
         assert '"First"' in (server.page("/experiments/lab/report") or "")
         # Same size and second: Python's bytecode cache must not hide this edit.
@@ -116,12 +122,17 @@ def test_refresh_reads_an_edited_neighbour_the_file_imports(tmp_path: Path) -> N
         assert '"Repaired name"' in (server.page("/experiments/lab/report", refresh=True) or "")
 
 
-def test_concurrent_refreshes_join_one_generation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("refresh", [False, True], ids=["first-visit", "refresh"])
+def test_first_indexed_run_starts_one_shared_report_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refresh: bool
 ) -> None:
     runs = tmp_path / "runs"
-    trained(runs, "lab", "a")
-    file = experiment_file(tmp_path, "lab", COUNTED)
+    backend = bench(home())
+    (address,) = backend.scheduler.queue(job(name="learn", experiment="lab"), rent="l4")
+    backend.store.close()
+    source = DirectoryStorage(runs)
+    measured = MeasuredStorage(source)
+    route = "/experiments/lab/report"
     started, release, joined = threading.Event(), threading.Event(), threading.Event()
     build_page = Pages.build
 
@@ -139,22 +150,31 @@ def test_concurrent_refreshes_join_one_generation(
 
     monkeypatch.setattr(Pages, "build", blocked_build)
     monkeypatch.setattr("etude.view.Future", Joined)
-    with Server(runs, file, ("127.0.0.1", 0)) as server, ThreadPoolExecutor(2) as pool:
+    with Server(measured, None, ("127.0.0.1", 0)) as server, ThreadPoolExecutor(2) as pool:
+        server.refresh_launcher()
+        assert ">queued<" in _get(server, "/experiments/lab")
+        for _ in range(2):
+            assert "Waiting for run files" in _get(server, route)
+            assert _version(_get(server, route + "?observe=1")) == "waiting"
+        assert (measured.listings, measured.requests) == (0, 0)
+        _start_run(source, address, 7, job="learn")
         _ingest(server)
-        builds = file.with_suffix(".built")
-        _publish_declarations(server)
-        before = builds.read_text()
-        first = pool.submit(server.page, "/experiments/lab/report", refresh=True)
+        reads = measured.listings, measured.requests
+        assert _version(_get(server, route + "?observe=1")) == "ready"
+        assert (measured.listings, measured.requests) == reads
+        first = pool.submit(server.page, route, refresh=refresh)
         try:
             assert started.wait(5)
-            second = pool.submit(server.page, "/experiments/lab/report", refresh=True)
+            second = pool.submit(server.page, route, refresh=refresh)
             assert joined.wait(5)
-            assert ">finished<" in (server.page("/experiments/lab") or "")
-            assert ">finished<" in (server.page("/runs/lab/a") or "")
+            assert "steps 1" in _get(server, "/experiments/lab/status")
+            assert _loss(_get(server, "/runs/" + address)) == [7]
         finally:
             release.set()
-        assert first.result(5) == second.result(5) == server.page("/experiments/lab/report")
-        assert builds.read_text() == before + "built\n"
+        original = first.result(5)
+        assert original and original == second.result(5) == _get(server, route)
+        assert _loss(original) == [7]
+        assert measured.listings == reads[0] + 1
 
 
 def test_http_refresh_reports_failures_without_replacing_the_cached_page(tmp_path: Path) -> None:
@@ -162,6 +182,7 @@ def test_http_refresh_reports_failures_without_replacing_the_cached_page(tmp_pat
     trained(runs, "lab", "a")
     file = experiment_file(tmp_path, "lab", REPORTED)
     with Server(runs, file, ("127.0.0.1", 0)) as server:
+        _ingest(server)
         worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
         worker.start()
         client = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
@@ -224,6 +245,7 @@ def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
     )
     source = MeasuredStorage(DirectoryStorage(runs))
     with Server(source, file, ("127.0.0.1", 0)) as server:
+        _ingest(server)
         first = server.page("/experiments/frontier/report") or ""
         assert all(text in first for text in ('"Width 64"', '"Standard"', '"Frontier only"'))
         reads = source.requests
@@ -288,14 +310,14 @@ def _advance_view_clock(patch: pytest.MonkeyPatch, *, minutes: int) -> None:
     patch.setattr("etude.view.datetime", Later)
 
 
-def _get(view: Server, path: str) -> str:
+def _get(view: Server, path: str, *, status: int = 200) -> str:
     # Serve one real request while the fixture controls ingestion independently.
     with ThreadPoolExecutor(1) as listener:
         handled = listener.submit(view.handle_request)
         with closing(HTTPConnection("127.0.0.1", view.server_port, timeout=5)) as client:
             client.request("GET", path)
             reply = client.getresponse()
-            assert reply.status == 200
+            assert reply.status == status
             page = reply.read().decode()
         handled.result(5)
         return page
@@ -396,6 +418,13 @@ def test_first_broken_report_shows_default_panels_and_a_sanitized_error(tmp_path
         _publish_declarations(server)
         page = server.page("/runs/lab/base@0") or ""
         assert _loss(page) == [7] and "token=[redacted]" in page and "fixture-value" not in page
+        route = "/experiments/lab/report"
+        failed = _get(server, route, status=500)
+        assert "Retry report" in failed and "token=[redacted]" in failed
+        assert "fixture-value" not in failed and "data-refresh=" not in failed
+        file.write_text(REPORTED.replace("Report()", "Report(other_metrics=True)"))
+        built = _get(server, route)
+        assert "Refresh report" in built and _loss(built) == [7]
 
 
 def test_ingestion_reads_only_the_new_block_and_publishes_its_last_point(tmp_path: Path) -> None:
@@ -584,6 +613,18 @@ def test_indexed_experiment_opens_its_default_report_separately(tmp_path: Path) 
         assert 'src="/experiments/lab/report"' in html and 'href="/runs/lab/base@0"' in html
         assert (source.requests, source.listings) == before
         assert _loss(server.page("/experiments/lab/report") or "") == [8.0]
+
+
+def test_first_evaluation_files_enable_the_report_without_training_curves(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    record = RunRecord(id="lab/duel", experiment="lab", kind="evaluation")
+    source.put("lab/duel/run.json", record.model_dump_json().encode())
+    with Server(source, None, ("127.0.0.1", 0)) as server:
+        _ingest(server)
+        route = "/experiments/lab/report"
+        assert _version(_get(server, route + "?observe=1")) == "ready"
+        report = _get(server, route)
+        assert "Refresh report" in report and "Partial results" in report
 
 
 def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Path) -> None:
@@ -907,6 +948,8 @@ def test_failed_listing_shows_fresh_queue_and_machines(
                     "No metric curves recorded" not in graph
                     and "No checkpoints recorded" not in graph
                 )
+                assert "Waiting for run files" in _get(server, "/experiments/lab/report")
+                assert "Waiting for run files" in _get(server, "/experiments/unstarted/report")
                 assert "No config recorded" not in graph
                 assert "Waiting for the first file observation." in _get(
                     server, "/experiments/unstarted/status"
@@ -1150,7 +1193,6 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
                 assert "steps 2" in status and "Launcher observation unavailable" in status
                 overview = view.page("/") or ""
                 assert 'href="/runs/local"' in overview and queued not in overview
-                assert view.index.has_experiment("local")
                 assert view.page("/experiments/lab/report") is None
                 assert view.page("/runs/" + queued) is None
                 assert (measured.listings, measured.requests, measured.bytes) == reads
