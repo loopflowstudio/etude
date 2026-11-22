@@ -13,6 +13,7 @@ from html import unescape
 from http.client import HTTPConnection
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Self
 
 import boto3  # type: ignore[import-untyped]
 import pytest
@@ -22,6 +23,7 @@ from etude.block_file import tail_key
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch.database import Database
+from etude.launch.logs import snapshot_stream
 from etude.launch.records import GPU
 from etude.launch.source import home
 from etude.page import Page, Pages
@@ -596,6 +598,33 @@ def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: 
     backend.store.close()
 
 
+def test_run_console_opens_on_the_last_500_lines_of_retained_output(tmp_path: Path) -> None:
+    backend = bench(home())
+    (run,) = backend.scheduler.queue(job(name="learn", experiment="lab"), rent="l4")
+    backend.scheduler.tick()
+    backend.run(1)
+    (attempt,) = backend.scheduler.attempts(run)
+    output = "".join(f"line <{n}>\n" for n in range(1, 601)).encode()
+    backend.store.retain_log(snapshot_stream(attempt.session, attempt.id, "job", output, False))
+    source = DirectoryStorage(tmp_path / "runs")
+    source.put(f"{run}/run.json", RunRecord(id=run, experiment="lab").model_dump_json().encode())
+    with Server(source, None, ("127.0.0.1", 0)) as server:
+        server.ingest()
+        assert "Waiting for retained console" in (server.page("/runs/" + run) or "")
+        server.ingest()
+        page = server.page("/runs/" + run) or ""
+        console = page.split('aria-label="Retained console">', 1)[1].split("</pre>", 1)[0]
+        lines = unescape(console).splitlines()
+        assert len(lines) == 500
+        assert lines[0] == "line <102>" and lines[-2] == "line <600>"
+        assert lines[-1].startswith("[snapshot incomplete")
+        assert "Some console output is missing" in page and f"etude logs --run {run}" in page
+        assert "line <1>\n" in backend.scheduler.logs(run=run).streams[-1].text
+        for section in ("console", "config", "checkpoints"):
+            assert f'href="#{section}"' in page and f'id="{section}"' in page
+    backend.store.close()
+
+
 def test_failed_launcher_read_preserves_idle_machines_while_files_advance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -612,8 +641,8 @@ def test_failed_launcher_read_preserves_idle_machines_while_files_advance(
 
     class Later(datetime):
         @classmethod
-        def now(cls, tz: tzinfo | None = None) -> datetime:
-            return datetime.now(tz) + timedelta(minutes=2)
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return super().now(tz) + timedelta(minutes=2)
 
     monkeypatch.setattr("etude.view.datetime", Later)
     monkeypatch.setattr("etude.launch.server.open_home", incompatible)

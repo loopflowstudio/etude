@@ -174,13 +174,15 @@ evaluation also shows its retained console and match count when available.
 
 Opening a launched run requests the same retained console you can read with
 `etude logs --run RUN`. The first visit can show **Waiting for retained console**
-until the next launcher poll. The console displays gaps in the retained output
-and dates the latest collection. Plain `etude train` writes its console to the
-terminal.
+until the next launcher poll. It opens at the end of the last 500 lines of
+retained output, dates the latest collection and marks gaps. Use the section
+links above the curves to jump to Console, Config or Checkpoints. Plain
+`etude train` writes its console to the terminal.
 
 **Refresh.** Visible run and experiment pages refresh every 5 seconds while
-work is open. A launched run page also waits for its final console. The local
-machine inventory refreshes every 5 seconds while visible, even when idle.
+work is open. The run page reloads with its chart choices in the URL. A
+launched run page also waits for its final console. The local machine inventory
+refreshes every 5 seconds while visible, even when idle.
 The view indexes run files in the background under `ETUDE_HOME/views`. Reading
 a run graph uses the last published index, including during a bucket scan.
 The files in your directory or bucket are the portable record.

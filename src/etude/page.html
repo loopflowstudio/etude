@@ -15,7 +15,7 @@ __PAGE_CSS__
   <div class="head"><h1 id="title"></h1><span class="pill" id="pill"></span></div>
   <div class="context" id="context"></div>
   <div class="controls"><div class="legend-jobs" id="jobs" role="group" aria-label="Jobs"></div><span id="chips" style="display:contents"></span></div>
-  <nav class="tabs" id="tabs"><a href="#evals" data-s="evals">Evals</a><a href="#perf" data-s="perf">Perf</a><a href="#ml" data-s="ml">ML details</a></nav>
+  <nav class="tabs" id="tabs"><a href="#evals" data-s="evals">Evals</a><a href="#perf" data-s="perf">Perf</a><a href="#ml" data-s="ml">ML details</a><!--view-tabs--></nav>
   <section class="sec" id="evals"><h2>Evals <span id="evals-sub"></span><div class="sec-controls" id="evals-controls"></div></h2><div class="grid" id="evals-body"></div></section>
   <section class="sec" id="perf"><h2>Perf <span id="perf-sub"></span><div class="sec-controls" id="perf-controls"></div></h2><div class="grid" id="perf-body"></div></section>
   <section class="sec" id="ml"><h2>ML details <span id="ml-sub"></span><div class="sec-controls" id="ml-controls"></div></h2><div class="grid" id="ml-body"></div></section>
@@ -518,7 +518,16 @@ function tables() {
 // Section nav highlights the section in view.
 const tabs = [...document.querySelectorAll("nav.tabs a")];
 const io = new IntersectionObserver(entries => { for (const en of entries) if (en.isIntersecting) tabs.forEach(t => t.classList.toggle("on", t.dataset.s === en.target.id)); }, {rootMargin: "-40% 0px -55% 0px"});
-["evals", "perf", "ml"].forEach(id => io.observe(document.getElementById(id)));
+for (const tab of tabs) {
+  const section = document.getElementById(tab.dataset.s);
+  io.observe(section);
+  // Jump within the run while keeping its selected clocks and filters in the hash.
+  if (D.run_charts) tab.addEventListener("click", event => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    section.scrollIntoView();
+  });
+}
 if (D.run_charts) {
   for (const selector of ["div.head", "#context", ".controls", "#evals", "[data-s=evals]", "#runs-box"]) {
     document.querySelector(selector).style.display = "none";

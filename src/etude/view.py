@@ -8,6 +8,7 @@ interrupted ingestion. Reports build on demand in separate request threads.
 
 from __future__ import annotations
 
+import shlex
 import signal
 import sqlite3
 import threading
@@ -49,6 +50,11 @@ from etude.train.read import RunData, read_located
 from etude.view_link import advertise, run_path
 
 _REFRESH = 5
+_CONSOLE_LINES = 500
+_TRAINING_TABS = "".join(
+    f'<a href="#{section.lower()}" data-s="{section.lower()}">{section}</a>'
+    for section in ("Console", "Config", "Checkpoints")
+)
 _REMOTE_STANDING = 30
 _SILENT = timedelta(minutes=10)
 _CLOCKS = TypeAdapter(dict[str, float])
@@ -66,7 +72,7 @@ CREATE TABLE IF NOT EXISTS charts (
     address TEXT PRIMARY KEY, inputs TEXT NOT NULL, reached TEXT NOT NULL, payload TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS consoles (
-    run TEXT PRIMARY KEY, body TEXT NOT NULL, collected TEXT, final_attempt INTEGER
+    run TEXT PRIMARY KEY, body TEXT NOT NULL, collected TEXT, gaps INTEGER NOT NULL, final_attempt INTEGER
 );
 CREATE TABLE IF NOT EXISTS observation (
     id INTEGER PRIMARY KEY, at TEXT NOT NULL, launcher_at TEXT, last_loop TEXT, server TEXT, machines TEXT
@@ -310,12 +316,15 @@ class ChartIndex:
                 (s.observed_at for s in snapshot.streams if s.observed_at), default=None
             )
             db.execute(
-                """INSERT OR REPLACE INTO consoles(run,body,collected,final_attempt)
-                   VALUES(?,?,?,?)""",
+                """INSERT OR REPLACE INTO consoles(run,body,collected,gaps,final_attempt)
+                   VALUES(?,?,?,?,?)""",
                 (
                     status.run,
-                    render_logs(snapshot),
+                    "\n".join(render_logs(snapshot).splitlines()[-_CONSOLE_LINES:]),
                     collected.isoformat() if collected else None,
+                    any(
+                        s.truncated or not s.received or s.retrieval_error for s in snapshot.streams
+                    ),
                     status.attempts if status.done and snapshot.settled else None,
                 ),
             )
@@ -325,7 +334,7 @@ class ChartIndex:
             row = db.execute(
                 """
                 SELECT runs.*, charts.payload, observation.at, observation.launcher_at, observation.last_loop,
-                       consoles.body, consoles.collected, consoles.final_attempt AS console_attempt FROM runs
+                       consoles.body, consoles.collected, consoles.gaps, consoles.final_attempt AS console_attempt FROM runs
                 LEFT JOIN consoles ON consoles.run=runs.launched_as
                 LEFT JOIN charts USING(address) JOIN observation ON observation.id=1
                 WHERE runs.address=? OR runs.launched_as=?
@@ -362,24 +371,16 @@ class ChartIndex:
                 self._wanted.add(row["launched_as"])
         if _is_open(status, state) or awaiting_console or self.error:
             heading += _reload()
-        console = (
-            "<p>Launcher observation unavailable.</p>"
-            if self._launcher_error and self._launcher_at is None
-            else "<p>Console was not recorded.</p>"
+        below = _console(
+            row, now, unavailable=bool(self._launcher_error and self._launcher_at is None)
         )
-        if row["launched_as"]:
-            console = "<p>Waiting for retained console.</p>"
-            if row["body"] is not None:
-                console = f'<pre class="console" tabindex="0" aria-label="Retained console">{escape(row["body"])}</pre>'
-                if row["collected"]:
-                    console = f"<p>Last collected {_age(row['collected'], now)}</p>" + console
-        below = f'<section class="sec"><h2>Console</h2>{console}</section>'
         if evaluation:
             return _document(address, heading + (below if status else ""))
         below += row["details"]
         if row["payload"] is None:
-            return _document(address, heading + "<p>No metric curves recorded.</p>" + below)
-        return render_run(address, row["payload"], heading, below)
+            tabs = f'<nav class="tabs" aria-label="Run sections">{_TRAINING_TABS}</nav>'
+            return _document(address, heading + tabs + "<p>No metric curves recorded.</p>" + below)
+        return render_run(address, row["payload"], heading, below, _TRAINING_TABS)
 
     def _list_runs(
         self, experiment: str | None = None
@@ -691,6 +692,32 @@ def _position(
     return f"{clock} {number(clocks[clock])}" if clock else ""
 
 
+def _console(row: sqlite3.Row, now: datetime, *, unavailable: bool) -> str:
+    console = (
+        "<p>Launcher observation unavailable.</p>"
+        if unavailable
+        else "<p>Console was not recorded.</p>"
+    )
+    if row["launched_as"]:
+        console = "<p>Waiting for retained console.</p>"
+        if row["body"] is not None:
+            console = (
+                '<pre id="retained-output" class="console" tabindex="0" aria-label="Retained console">'
+                f"{escape(row['body'])}</pre>"
+                '<script>{const output = document.getElementById("retained-output");'
+                "output.scrollTop = output.scrollHeight;}</script>"
+            )
+            if row["gaps"]:
+                console += "<p>Some console output is missing from retention.</p>"
+            if row["collected"]:
+                console = f"<p>Last collected {_age(row['collected'], now)}</p>" + console
+        console += (
+            f"<p>Showing up to {_CONSOLE_LINES} lines. Read the full retained console with "
+            f"<code>etude logs --run {escape(shlex.quote(row['launched_as']))}</code></p>"
+        )
+    return f'<section class="sec" id="console"><h2>Console</h2>{console}</section>'
+
+
 def _run_details(stored: RunData | None, item: Standing | None) -> str:
     config = stored.file.config_json if stored and stored.file else None
     source = ""
@@ -726,7 +753,7 @@ def _run_details(stored: RunData | None, item: Standing | None) -> str:
         if rows
         else "<p>No checkpoints recorded.</p>"
     )
-    return f'<section class="sec"><h2>Config</h2>{shown}{source}</section><section class="sec"><h2>Checkpoints</h2>{checkpoints}</section>'
+    return f'<section class="sec" id="config"><h2>Config</h2>{shown}{source}</section><section class="sec" id="checkpoints"><h2>Checkpoints</h2>{checkpoints}</section>'
 
 
 def _age(at: str | None, now: datetime) -> str:

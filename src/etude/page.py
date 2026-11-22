@@ -557,9 +557,9 @@ def run_chart_data(storage: Storage, data: RunData, report: Report) -> str:
     return _payload(page.model_dump(mode="json") | {"run_charts": True}, None)
 
 
-def render_run(address: str, charts: str, heading: str, details: str) -> str:
+def render_run(address: str, charts: str, heading: str, details: str, tabs: str) -> str:
     """Show already-indexed chart data alongside the current run status."""
-    return _inline("page.html", address, charts, heading, details)
+    return _inline("page.html", address, charts, heading, details, tabs)
 
 
 def _assemble(
@@ -1666,7 +1666,9 @@ def _payload(data: dict[str, object], refresh: float | None) -> str:
     return json.dumps(data | stamp, allow_nan=False).replace("<", "\\u003c")
 
 
-def _inline(template: str, title: str, payload: str, heading: str = "", details: str = "") -> str:
+def _inline(
+    template: str, title: str, payload: str, heading: str = "", details: str = "", tabs: str = ""
+) -> str:
     here = Path(__file__).parent
     # Substitute in the template once; run data and console text can contain any marker.
     fields = {
@@ -1678,6 +1680,7 @@ def _inline(template: str, title: str, payload: str, heading: str = "", details:
         "__DATA__": payload,
         "<!--view-heading-->": heading,
         "<!--view-details-->": details,
+        "<!--view-tabs-->": tabs,
     }
     return re.sub(
         "|".join(map(re.escape, fields)), lambda m: fields[m[0]], (here / template).read_text()

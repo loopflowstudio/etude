@@ -40,10 +40,10 @@ select { font: inherit; font-size: 13px; color: var(--ink); background: var(--su
 .seg button[aria-pressed=true] { background: var(--wash); color: var(--ink); font-weight: 500; }
 .chip { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 4px 6px 4px 10px; border-radius: 6px; background: var(--wash); border: 1px solid var(--line); }
 .chip button { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
-nav.tabs { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--page) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); margin: 8px -16px 0; padding: 0 16px; display: flex; gap: 22px; }
+nav.tabs { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--page) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); margin: 8px -16px 0; padding: 0 16px; display: flex; gap: 22px; overflow-x: auto; white-space: nowrap; }
 nav.tabs a { color: var(--ink-2); text-decoration: none; font-size: 14px; padding: 12px 0 10px; border-bottom: 2px solid transparent; }
 nav.tabs a.on { color: var(--ink); border-bottom-color: var(--ink); font-weight: 500; }
-section.sec { padding-top: 26px; }
+section.sec { padding-top: 26px; scroll-margin-top: 3rem; }
 section.sec > h2 { font-size: 16px; font-weight: 600; margin: 0 0 4px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 section.sec > h2 > span { color: var(--muted); font-size: 13px; font-weight: 400; }
 .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 14px; }
