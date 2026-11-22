@@ -37,6 +37,7 @@ from etude.cache import Cache
 from etude.errors import explain
 from etude.experiment import state_of
 from etude.home import home
+from etude.identity import run_address
 from etude.jobs import EvalRunSummary, TrainingRunSummary
 from etude.launch.listing import describe_machine, launcher_facts, machine_warning
 from etude.launch.logs import ConsoleTail
@@ -81,8 +82,8 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS launcher_address ON runs(launched_as,experiment) WHERE launched_as IS NOT NULL;
 CREATE INDEX IF NOT EXISTS experiment_runs ON runs(experiment, address);
 CREATE TABLE IF NOT EXISTS files (
-    address TEXT PRIMARY KEY, experiment TEXT NOT NULL, inputs TEXT, reached TEXT,
-    preferred TEXT, metadata TEXT NOT NULL
+    address TEXT PRIMARY KEY, experiment TEXT NOT NULL, inputs TEXT NOT NULL, reached TEXT,
+    preferred TEXT, last_write TEXT, metadata TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS experiment_files ON files(experiment,address);
 CREATE TABLE IF NOT EXISTS charts (
@@ -126,12 +127,6 @@ _VISIBLE = f"""{_OBSERVED}, visible AS (
 
 
 @dataclass(frozen=True)
-class _RunFiles:
-    versions: str
-    data: RunData
-
-
-@dataclass(frozen=True)
 class _PendingReport:
     previous: str | None
     future: Future[ReportDeclaration]
@@ -172,7 +167,6 @@ class ChartIndex:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(_SCHEMA)
         self._cache = Cache()
-        self._files: dict[str, dict[str, _RunFiles]] = {}
         self._declarations = ThreadPoolExecutor(1, thread_name_prefix="view-report")
         self._reports: dict[Path, _PendingReport] = {}
         self._ssh = ThreadPoolExecutor(1, thread_name_prefix="view-launcher")
@@ -245,26 +239,6 @@ class ChartIndex:
             row = db.execute("SELECT file_error FROM observation WHERE id=1").fetchone()
             return row[0] if row else None
 
-    def _read_run(self, storage: ListedStorage, members: list[str], run: LocatedRun) -> _RunFiles:
-        # Compare listed versions, including removals and replacement at one
-        # key. The point reader resolves compaction, attempts and duplicate copies.
-        digest = sha256()
-        for key in members:
-            digest.update(f"{key}\0{storage.objects[key]}\0".encode())
-        version = digest.hexdigest()
-        previous = self._files.get(run.file.experiment, {}).get(run.name)
-        if previous and previous.versions == version:
-            if previous.data.last_write == run.last_write:
-                return previous
-            # An open block may advance the write time without changing the sealed curves.
-            return _RunFiles(
-                version, previous.data.model_copy(update={"last_write": run.last_write})
-            )
-        # Lazy block reads keep this listing alive. Keep only this run's keys.
-        local = ListedStorage(self.source, {k: storage.objects[k] for k in members}, self._cache)
-        data = read_located(local, run, sorted(members), whole_blocks=True)
-        return _RunFiles(version, data)
-
     def refresh_launcher(self) -> None:
         remote = selected()
         answer = self._poll_launcher(remote)
@@ -322,14 +296,12 @@ class ChartIndex:
             except BlockingIOError:
                 return
             try:
-                current = self._read_files()
                 with self._connect() as db:
-                    self._prepare_files(db, current, files)
+                    self._prepare_files(db, files)
                     # Release the preparation snapshot before reading the latest launcher.
                     db.commit()
                     db.execute("BEGIN IMMEDIATE")
                     self._publish_files(db, discovery_error)
-                self._files = current
             except Exception as failure:
                 with self._connect() as db:
                     db.execute(
@@ -337,23 +309,6 @@ class ChartIndex:
                            ON CONFLICT(id) DO UPDATE SET file_error=excluded.file_error""",
                         (explain(failure),),
                     )
-
-    def _read_files(self) -> dict[str, dict[str, _RunFiles]]:
-        objects = self.source.versions("")
-        storage = ListedStorage(self.source, objects, self._cache)
-        keys = sorted(objects)
-        runs = located_runs(storage, keys, objects=objects)
-        roots = {folder for run in runs for folder in run.folders}
-        members: dict[str, list[str]] = defaultdict(list)
-        for key in keys:
-            folder = owning_folder(key, roots)
-            if folder and not key.endswith(".open"):
-                members[folder].append(key)
-        files: dict[str, dict[str, _RunFiles]] = defaultdict(dict)
-        for run in runs:
-            keys = [key for folder in run.folders for key in members[folder]]
-            files[run.file.experiment][run.name] = self._read_run(storage, keys, run)
-        return files
 
     def _report(self, db: sqlite3.Connection, experiment: str, file: Path | None) -> Report:
         if file is None:
@@ -385,90 +340,70 @@ class ChartIndex:
             )
         return accepted.report if accepted else DEFAULT_REPORT
 
-    def _prepare_files(
-        self, db: sqlite3.Connection, files: dict[str, dict[str, _RunFiles]], paths: dict[str, Path]
-    ) -> None:
-        # Stage metadata and only changed payloads on disk, one chart at a time.
-        # These tables are private to this connection until publication.
+    def _prepare_files(self, db: sqlite3.Connection, paths: dict[str, Path]) -> None:
+        # Every listed run supplies its address and write date. Only changed
+        # inputs need metadata and a new chart. Stage one payload at a time on disk.
         db.execute("PRAGMA temp_store=FILE")
-        db.execute("CREATE TEMP TABLE changed_charts AS SELECT * FROM charts WHERE 0")
-        db.execute("CREATE TEMP TABLE next_files AS SELECT * FROM files WHERE 0")
+        db.execute("CREATE TEMP TABLE next_files AS SELECT *, NULL AS payload FROM files WHERE 0")
         db.execute("CREATE UNIQUE INDEX temp.file_address ON next_files(address)")
         db.execute("CREATE TEMP TABLE next_declarations AS SELECT * FROM declarations")
         db.execute("CREATE UNIQUE INDEX temp.declared_experiment ON next_declarations(experiment)")
-        previous = {
-            row["address"]: row for row in db.execute("SELECT address,inputs,reached FROM files")
-        }
         for row in db.execute("SELECT experiment,file FROM declarations"):
             path = Path(row["file"])
             if paths.get(row["experiment"]) != path:
                 db.execute("DELETE FROM next_declarations WHERE experiment=?", (row["experiment"],))
                 if pending := self._reports.pop(path, None):
                     pending.future.cancel()
-        for experiment, stored in files.items():
-            report = (
-                self._report(db, experiment, paths.get(experiment))
-                if any(f.data.file and f.data.file.kind != "evaluation" for f in stored.values())
-                else DEFAULT_REPORT
-            )
-            panels = report.model_dump_json(include=report.model_fields_set)
-            for run_files in stored.values():
-                data = run_files.data
-                address = data.address
-                inputs = reached = None
-                if data.file and data.file.kind != "evaluation":
-                    inputs = run_files.versions + panels
-                    prior = previous.get(address)
-                    if prior and prior["inputs"] == inputs:
-                        reached = prior["reached"]
-                    else:
-                        # Rendering materializes block arrays. Cache only the metadata.
-                        run = data.model_copy()
-                        payload = run_chart_data(self.source, run, report)
-                        reached = _CLOCKS.dump_json(run.reached).decode()
-                        db.execute(
-                            "INSERT INTO changed_charts(address,payload) VALUES(?,?)",
-                            (address, payload),
-                        )
-                db.execute(
-                    """INSERT INTO next_files(address,experiment,inputs,reached,preferred,metadata)
-                       VALUES(?,?,?,?,?,?)""",
-                    (
-                        address,
-                        experiment,
-                        inputs,
-                        reached,
-                        report.clock,
-                        data.model_dump_json(round_trip=True),
-                    ),
-                )
 
-        # Only the file-pass owner writes files. These differences remain valid
-        # while the launcher publishes new placements.
-        db.execute(
-            "CREATE TEMP TABLE changed_files AS SELECT * FROM next_files EXCEPT SELECT * FROM files"
-        )
-        db.execute("""CREATE TEMP TABLE removed_files AS SELECT address,experiment FROM files
-                      WHERE NOT EXISTS (SELECT 1 FROM next_files
-                          WHERE next_files.address=files.address AND next_files.experiment=files.experiment)""")
+        objects = self.source.versions("")
+        storage = ListedStorage(self.source, objects, self._cache)
+        keys = sorted(objects)
+        runs = located_runs(storage, keys, objects=objects)
+        roots = {folder for run in runs for folder in run.folders}
+        members: dict[str, list[str]] = defaultdict(list)
+        for key in keys:
+            if not key.endswith(".open") and (folder := owning_folder(key, roots)):
+                members[folder].append(key)
+        previous = dict(db.execute("SELECT address,inputs FROM files"))
+        reports: dict[str, Report] = {}
+        for run in runs:
+            experiment = run.file.experiment
+            report = None
+            if run.file.kind != "evaluation":
+                if experiment not in reports:
+                    reports[experiment] = self._report(db, experiment, paths.get(experiment))
+                report = reports[experiment]
+            sealed = sorted(key for folder in run.folders for key in members[folder])
+            _stage_run(db, storage, run, sealed, report, previous)
 
     def _publish_files(self, db: sqlite3.Connection, discovery_error: str | None) -> None:
-        changed = {
-            r[0]
-            for r in db.execute(
-                "SELECT experiment FROM changed_files UNION SELECT experiment FROM removed_files"
-            )
-        }
+        removed = db.execute(
+            """DELETE FROM files WHERE NOT EXISTS
+               (SELECT 1 FROM next_files n WHERE n.address=files.address AND n.experiment=files.experiment)
+               RETURNING experiment"""
+        ).fetchall()
+        # An open block can advance the last write without changing a sealed curve.
+        redated = db.execute(
+            """UPDATE files SET last_write=n.last_write FROM next_files n
+               WHERE n.address=files.address AND n.metadata IS NULL AND files.last_write IS NOT n.last_write
+               RETURNING experiment"""
+        ).fetchall()
+        rebuilt = db.execute(
+            """INSERT OR REPLACE INTO files(address,experiment,inputs,reached,preferred,last_write,metadata)
+               SELECT address,experiment,inputs,reached,preferred,last_write,metadata
+               FROM next_files WHERE metadata IS NOT NULL RETURNING experiment"""
+        ).fetchall()
+        changed = {row[0] for rows in (removed, redated, rebuilt) for row in rows}
         if _select_launcher(db, selected()):
             changed.update(_launched_experiments(db))
-        db.execute("DELETE FROM files WHERE address IN (SELECT address FROM removed_files)")
-        db.execute("""INSERT OR REPLACE INTO files(address,experiment,inputs,reached,preferred,metadata)
-                      SELECT * FROM changed_files""")
-        db.execute("""DELETE FROM charts WHERE address IN
-                      (SELECT address FROM removed_files UNION ALL SELECT address FROM changed_files WHERE inputs IS NULL)""")
-        db.execute(
-            "INSERT OR REPLACE INTO charts(address,payload) SELECT address,payload FROM changed_charts"
-        )
+        if removed or rebuilt:
+            db.execute(
+                "DELETE FROM charts WHERE address NOT IN (SELECT address FROM files WHERE reached IS NOT NULL)"
+            )
+            db.execute(
+                """INSERT OR REPLACE INTO charts(address,payload)
+                   SELECT address,payload FROM next_files WHERE payload IS NOT NULL"""
+            )
         db.execute(
             """DELETE FROM declarations WHERE experiment NOT IN (SELECT experiment FROM next_declarations)"""
         )
@@ -492,7 +427,8 @@ class ChartIndex:
             standing[held.record.experiment][held.record.id] = held
         for experiment in experiments:
             rows = db.execute(
-                "SELECT address,metadata,reached,preferred FROM files WHERE experiment=? ORDER BY address",
+                """SELECT address, json_set(metadata, '$.last_write', last_write) AS metadata,
+                          reached, preferred FROM files WHERE experiment=? ORDER BY address""",
                 (experiment,),
             )
             files = {row["address"]: row for row in rows}
@@ -764,6 +700,44 @@ class ChartIndex:
                 report=observation["report_error"] if observation else None,
             ),
         )
+
+
+def _stage_run(
+    db: sqlite3.Connection,
+    storage: ListedStorage,
+    run: LocatedRun,
+    sealed: list[str],
+    report: Report | None,
+    previous: dict[str, str],
+) -> None:
+    address = run_address(run.file.id, run.file.experiment)
+    digest = sha256()
+    for key in sealed:
+        digest.update(f"{key}\0{storage.objects[key]}\0".encode())
+    if report is not None:
+        digest.update(report.model_dump_json(include=report.model_fields_set).encode())
+    inputs = digest.hexdigest()
+    metadata = reached = payload = None
+    if previous.get(address) != inputs:
+        data = read_located(storage, run, sealed, whole_blocks=True)
+        metadata = data.model_dump_json(exclude={"last_write"}, round_trip=True)
+        if report is not None:
+            payload = run_chart_data(storage.storage, data, report)
+            reached = _CLOCKS.dump_json(data.reached).decode()
+    db.execute(
+        """INSERT INTO next_files(address,experiment,inputs,reached,preferred,last_write,metadata,payload)
+           VALUES(?,?,?,?,?,?,?,?)""",
+        (
+            address,
+            run.file.experiment,
+            inputs,
+            reached,
+            report.clock if report else None,
+            run.last_write.isoformat() if run.last_write else None,
+            metadata,
+            payload,
+        ),
+    )
 
 
 def _launched_experiments(db: sqlite3.Connection) -> set[str]:

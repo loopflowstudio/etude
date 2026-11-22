@@ -234,6 +234,25 @@ def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
         )
 
 
+def _start_run(
+    source: DirectoryStorage,
+    address: str,
+    loss: float,
+    *,
+    job: str | None = None,
+    seed: int | None = None,
+) -> None:
+    record = RunRecord(
+        id=address,
+        experiment=address.partition("/")[0],
+        job_name=job,
+        seed=seed,
+        clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
+    )
+    source.put(address + "/run.json", record.model_dump_json().encode())
+    _seal(source.root / address, 0, loss)
+
+
 def _seal(root: Path, sequence: int, loss: float) -> str:
     writer = "123456abcdef"
     builder = Builder(["steps"])
@@ -286,14 +305,7 @@ def test_report_edits_and_a_restart_leave_both_experiments_publishing(
 ) -> None:
     source = DirectoryStorage(tmp_path / "runs")
     for name in ("lab", "other"):
-        address = name + "/base@0"
-        record = RunRecord(
-            id=address,
-            experiment=name,
-            clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
-        )
-        source.put(address + "/run.json", record.model_dump_json().encode())
-        _seal(source.root / address, 0, 7)
+        _start_run(source, name + "/base@0", 7)
     folder = tmp_path / "experiments"
     authored = (
         "from etude.report import Report, Series\n\n"
@@ -375,13 +387,7 @@ def test_first_broken_report_shows_default_panels_and_a_sanitized_error(tmp_path
 def test_ingestion_reads_only_the_new_block_and_publishes_its_last_point(tmp_path: Path) -> None:
     source = DirectoryStorage(tmp_path / "runs")
     root = source.root / "lab/base@0"
-    record = RunRecord(
-        id="lab/base@0",
-        experiment="lab",
-        clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
-    )
-    source.put("lab/base@0/run.json", record.model_dump_json().encode())
-    _seal(root, 0, 7.0)
+    _start_run(source, "lab/base@0", 7)
     measured = MeasuredStorage(source)
     with Server(measured, None, ("127.0.0.1", 0)) as server:
         _ingest(server)
@@ -395,6 +401,33 @@ def test_ingestion_reads_only_the_new_block_and_publishes_its_last_point(tmp_pat
         assert measured.got == ["lab/base@0/" + added]
         assert (measured.requests, measured.listings) == (before[0] + 1, before[1] + 1)
         assert _loss(server.page("/runs/lab/base@0") or "") == [7.0, 3.0]
+
+
+def test_a_reopened_view_dates_open_files_without_rereading_sealed_data(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    address = "lab/base@0"
+    with open_run(experiment="lab", run="base@0", directory=source.root, clocks=["steps"]) as run:
+        run.log({"loss": 7}, steps=1)
+    source.delete(address + "/outcome.json")
+    for key in source.keys(""):
+        os.utime(source.root / key, (100, 100))
+    measured = MeasuredStorage(source)
+    with Server(measured, None, ("127.0.0.1", 0)) as first:
+        _ingest(first)
+        page = first.page("/runs/" + address) or ""
+        assert ">no end recorded<" in page and _loss(page) == [7]
+
+    # Keep the published index across restart with an empty object cache.
+    (home() / "cache").rename(home() / "evicted")
+    source.put(address + "/pending.open", b"unsealed")
+    measured.got.clear()
+    before = measured.listings, measured.requests
+    with Server(measured, None, ("127.0.0.1", 0)) as reopened:
+        _ingest(reopened)
+        page = reopened.page("/runs/" + address) or ""
+        assert ">running<" in page and "steps 1" in page and _loss(page) == [7]
+        assert measured.got == [address + "/run.json"]
+        assert (measured.listings, measured.requests) == (before[0] + 1, before[1] + 1)
 
 
 def test_graph_requests_reuse_the_published_generation_after_interruption(tmp_path: Path) -> None:
@@ -434,18 +467,7 @@ def test_an_interrupted_writer_never_exposes_half_a_generation(
 ) -> None:
     source = DirectoryStorage(tmp_path / "runs")
     for name in ("a", "b"):
-        address = "lab/" + name
-        source.put(
-            address + "/run.json",
-            RunRecord(
-                id=address,
-                experiment="lab",
-                clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
-            )
-            .model_dump_json()
-            .encode(),
-        )
-        _seal(source.root / address, 0, 5)
+        _start_run(source, "lab/" + name, 5)
 
     measured = MeasuredStorage(source)
     with Server(measured, None, ("127.0.0.1", 0)) as writer:
@@ -526,13 +548,7 @@ def test_two_files_with_one_name_leave_runs_refreshing(tmp_path: Path) -> None:
     experiment_file(folder / "copy", "lab", REPORTED)
     source = DirectoryStorage(tmp_path / "runs")
     root = source.root / "lab/base@0"
-    record = RunRecord(
-        id="lab/base@0",
-        experiment="lab",
-        clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
-    )
-    source.put("lab/base@0/run.json", record.model_dump_json().encode())
-    _seal(root, 0, 7.0)
+    _start_run(source, "lab/base@0", 7)
     with Server(source, folder, ("127.0.0.1", 0)) as server:
         _ingest(server)
         _seal(root, 1, 3.0)
@@ -566,18 +582,7 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
     (home() / "server-heartbeat").write_text((datetime.now(UTC) - timedelta(hours=2)).isoformat())
     source = DirectoryStorage(tmp_path / "runs")
     local = "lab/local@0"
-    source.put(
-        local + "/run.json",
-        RunRecord(
-            id=local,
-            experiment="lab",
-            job_name="baseline",
-            clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
-        )
-        .model_dump_json()
-        .encode(),
-    )
-    _seal(source.root / local, 0, 7)
+    _start_run(source, local, 7, job="baseline")
     evaluation = "lab/duel"
     source.put(
         evaluation + "/run.json",
@@ -676,19 +681,7 @@ def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: 
     rentals = {row.machine.name: row.runs for row in fleet if row.cost}
     assert rentals == {machine: (first, second), idle: ()}
     source = DirectoryStorage(tmp_path / "runs")
-    source.put(
-        first + "/run.json",
-        RunRecord(
-            id=first,
-            experiment="lab",
-            job_name="learn",
-            seed=0,
-            clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
-        )
-        .model_dump_json()
-        .encode(),
-    )
-    _seal(source.root / first, 0, 8)
+    _start_run(source, first, 8, job="learn", seed=0)
     measured = MeasuredStorage(source)
     with Server(measured, None, ("127.0.0.1", 0)) as server:
         _ingest(server)
@@ -761,19 +754,7 @@ def test_failed_listing_shows_fresh_queue_and_machines(
 ) -> None:
     backend = bench(home())
     source = DirectoryStorage(tmp_path / "runs")
-    source.put(
-        "lab/compact/run.json",
-        RunRecord(
-            id="lab/compact",
-            experiment="lab",
-            job_name="base",
-            seed=0,
-            clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
-        )
-        .model_dump_json()
-        .encode(),
-    )
-    _seal(source.root / "lab/compact", 0, 7)
+    _start_run(source, "lab/compact", 7, job="base", seed=0)
     source.put(
         "lab/compact/outcome.json",
         RunOutcome(state="finished", counters=RunCounters()).model_dump_json().encode(),
@@ -839,19 +820,7 @@ def test_held_file_pass_publishes_launcher_and_joins_latest_placement_on_release
     backend = bench(home())
     source = DirectoryStorage(tmp_path / "runs")
     address = "lab/learn@0"
-    source.put(
-        address + "/run.json",
-        RunRecord(
-            id=address,
-            experiment="lab",
-            job_name="learn",
-            seed=0,
-            clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
-        )
-        .model_dump_json()
-        .encode(),
-    )
-    _seal(source.root / address, 0, 7)
+    _start_run(source, address, 7, job="learn", seed=0)
     measured = MeasuredStorage(source)
     entered, release = threading.Event(), threading.Event()
 
@@ -918,13 +887,7 @@ def test_failed_launcher_read_after_restart_preserves_queue_while_files_advance(
     (queued,) = backend.scheduler.queue(job(name="learn", experiment="lab"), rent="l4")
     backend.store.close()
     source = DirectoryStorage(tmp_path / "runs")
-    record = RunRecord(
-        id="local",
-        experiment="local",
-        clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
-    )
-    source.put("local/run.json", record.model_dump_json().encode())
-    _seal(source.root / "local", 0, 7)
+    _start_run(source, "local", 7)
     with Server(source, None, ("127.0.0.1", 0)) as server:
         _ingest(server)
         assert ">queued<" in (server.page("/runs/" + queued) or "")
@@ -974,13 +937,7 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
     second = LauncherObservation.read((queued,))
     backend.store.close()
     source = DirectoryStorage(tmp_path / "runs")
-    record = RunRecord(
-        id="local",
-        experiment="local",
-        clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
-    )
-    source.put("local/run.json", record.model_dump_json().encode())
-    _seal(source.root / "local", 0, 7)
+    _start_run(source, "local", 7)
     measured = MeasuredStorage(source)
     endpoint = home() / "server"
     endpoint.write_text("first")

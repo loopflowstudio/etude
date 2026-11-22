@@ -206,29 +206,25 @@ standing, heartbeat and requested console tails in one SSH exchange at most
 once every 30 seconds. Each tail carries the last 500 lines of the CLI transcript,
 the latest collection time and any gaps across the retained streams.
 
-The view retains the selected launcher's dated `LauncherObservation` under
-`ETUDE_HOME/views`, with console tails stored separately. File and launcher
-observations have independent dates. Either source can publish while the other
-is pending or has failed. Each publication
-uses `state_of` to join the two observations. The index retains run declarations,
-outcomes, checkpoint metadata and sealed clock positions so a launcher poll can
-resolve compact run addresses and preserve terminal outcomes after a restart.
-An outstanding SSH exchange or a failed launcher read leaves its observation
-available. A successful empty answer releases previously held runs.
-Each indexed run keeps its file state, sealed position and details. A page
-applies the launcher fields and resolves launcher aliases only when its selected
-endpoint matches the committed observation.
+The view indexes files and launcher standing independently under
+`ETUDE_HOME/views`. Each file pass compares the listed object versions and
+accepted report panels with the previous pass, including after a restart. One
+reader per index stages updated run metadata and charts in a private SQLite
+table. A write to an open block advances the run's last write while the chart
+keeps its sealed position. Local report declarations run separately. Each
+experiment keeps its last accepted panels through an incomplete edit.
 
-Local report declarations are evaluated separately from the file writer.
-The index keeps each experiment's last accepted panels and source versions.
-One file pass per index lists storage and stages changed curves outside the SQLite
-publication transaction. At commit it reads the current launcher standing and
-publishes file membership, curves and joined runs together. A failed pass records
-its error and preserves the previous file date. Launcher polls publish standing,
-inventory and requested console tails without listing storage or reading charts.
-Status and graph requests read the last committed generation throughout ingestion.
-Opening a run requests its retained console for the next poll. Refreshing the
-experiment report builds it separately from the indexed status table.
+At commit, either publisher joins its new facts with the other source's last
+observation through `state_of`. Stored declarations, outcomes and checkpoints
+preserve compact addresses and terminal states. A failed file pass records its
+error and keeps the previous file generation and date. A failed launcher poll
+keeps that endpoint's last successful standing, inventory and console tails.
+A successful empty reply releases previously held runs.
+
+Status and graph requests read the committed index. A page applies placement,
+launcher aliases and console only when the observation matches the selected
+endpoint. Opening a run requests its console for the next launcher poll.
+Refreshing the experiment report builds it separately.
 
 ## Upgrading Etude
 
