@@ -90,7 +90,7 @@ from etude.eval.records import Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named, refuse_renamed
 from etude.records import BUILT_IN_NAMES, Record
 from etude.report import Counters, Curve, Flame, Matches, Report, Score, Series
-from etude.run import LocatedRun, as_storage, declared, located_runs, run_folders, runs, under
+from etude.run import RunListing, as_storage, declared, run_folders, under
 from etude.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import RunData, read_all
 from etude.train.report import Training, training
@@ -488,18 +488,17 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
     names = _run_file(file)
     report, origin, notes = _report(names.get("report"), file)
     flames = tuple(panel.prefix for panel in (*report.perf, *report.ml) if isinstance(panel, Flame))
-    listed = storage.keys("")
-    declarations = located_runs(storage, listed)
+    listing = RunListing.read(storage)
     data = read_all(
         storage,
         experiment,
         metrics=None if report.other_metrics else frozenset(report.keys()),
         prefixes=flames,
-        keys=listed,
-        declarations=declarations,
+        keys=listing.keys,
+        declarations=listing.declarations,
     )
     if not data:
-        held = sorted({name for name, _ in runs(storage)})
+        held = sorted({run.file.experiment for run in listing.declarations})
         raise ValueError(
             f"no runs of {experiment!r} in {_source_name(storage)}"
             + (f"; it holds {', '.join(held)}" if held else "; it holds no runs")
@@ -512,7 +511,7 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
             raise EtudeError("experiment_eval_is_not_a_function", 422) from ValueError(file)
         want = found
     evals = (
-        _read_evals(storage, experiment, report, want, data, keys=listed, declarations=declarations)
+        _read_evals(storage, experiment, report, want, data, listing)
         if want is not None or len(trained) < len(data)
         else _Evals()
     )
@@ -699,9 +698,7 @@ def _read_evals(
     report: Report,
     want: Callable[..., object] | None,
     data: Sequence[RunData],
-    *,
-    keys: Sequence[str],
-    declarations: Sequence[LocatedRun],
+    listing: RunListing,
 ) -> _Evals:
     # The optional `eval` extra (DuckDB, and the etude.eval modules over it), imported where
     # it is used: only an experiment with evaluations reads it, so a report without loads none.
@@ -709,9 +706,7 @@ def _read_evals(
     from etude.experiment import state_of  # noqa: PLC0415
 
     state = state_of(data, experiment)
-    held, refused = _held_tournaments(
-        want, state, storage, experiment, keys=keys, declarations=declarations
-    )
+    held, refused = _held_tournaments(want, state, storage, experiment, listing)
     db = statsdb(experiment, storage)
     try:
         saved = _saved_checkpoints(db)
@@ -760,9 +755,7 @@ def _held_tournaments(
     state: ExperimentState,
     storage: Storage,
     experiment: str,
-    *,
-    keys: Sequence[str] | None = None,
-    declarations: Sequence[LocatedRun] | None = None,
+    listing: RunListing,
 ) -> tuple[list[_HeldTournament], tuple[str, ...]]:
     """Each tournament as held so far, and a note for each one drawn otherwise than asked.
 
@@ -784,9 +777,9 @@ def _held_tournaments(
             wanted.setdefault(tournament.definition.name, tournament)
     refused: list[str] = []
     # Read once for every tournament drawn: a page plays nothing, so nothing changes meanwhile.
-    keys = storage.keys("") if keys is None else keys
-    declarations = located_runs(storage, keys) if declarations is None else declarations
-    runs = stored_runs(experiment, storages=[storage], keys=keys, declarations=declarations)
+    runs = stored_runs(
+        experiment, storages=[storage], keys=listing.keys, declarations=listing.declarations
+    )
     for name, held in runs.tournaments().items():
         try:
             recorded = assemble(held)
@@ -814,8 +807,7 @@ def _held_tournaments(
             TournamentRun(tournament=t.definition, checkpoints=t.checkpoints)
             for t in wanted.values()
         ],
-        keys=keys,
-        declarations=declarations,
+        listing=listing,
     )
     held_tournaments = []
     for name, given in sorted(wanted.items()):

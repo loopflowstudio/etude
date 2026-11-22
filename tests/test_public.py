@@ -21,7 +21,7 @@ SURFACE: dict[str, tuple[str, ...]] = {
     "etude.checkpoints": tuple("CheckpointRef CheckpointRecord PolicyKey".split()),
     "etude.records": tuple("Record ArtifactRef Clock SourceKey".split()),
     "etude.storage": tuple(
-        "default_root storage_from_uri Storage DirectoryStorage S3Storage".split()
+        "default_root storage_from_uri Storage DirectoryStorage S3Storage ObjectVersion".split()
     ),
     "etude.stopping": ("Stopped",),
     "etude.errors": tuple("EtudeError LauncherError".split()),

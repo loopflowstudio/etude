@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from contextlib import nullcontext
+from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -482,6 +484,7 @@ def test_saved_stop_keeps_the_launchers_continuation_state(
     training.finish("stopped", timeout=30)
     (stopped,) = observe(bucket, "ppo").runs
     assert stopped.state == "stopped"
+    assert stopped.status is None
     launcher = _Launcher()
     launcher.launched.append(
         RunRequest(
@@ -494,6 +497,8 @@ def test_saved_stop_keeps_the_launchers_continuation_state(
     monkeypatch.setattr(client, "standing", launcher.standing)
     (continued,) = observe(bucket, "ppo").runs
     assert continued.state == phase
+    assert continued.status == launcher.status(f"ppo/{stopped.name}")
+    assert continued.last_write == stopped.last_write
 
 
 def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
@@ -903,6 +908,8 @@ def test_saved_eval_outcomes_keep_the_launchers_continuation_state(
     monkeypatch.setattr(client, "standing", launcher.standing)
     (run,) = observe(bucket, "ppo").eval_runs
     assert run.name == "ladder"
+    assert run.last_write is not None
+    assert run.status == (None if phase == "absent" else launcher.status("ppo/ladder"))
     assert run.state == (
         phase if outcome == "stopped" and phase not in {"absent", "succeeded"} else outcome
     )
@@ -983,6 +990,7 @@ def test_launcher_phase_preserves_compact_training_addresses_and_terminal_outcom
     monkeypatch.setattr(client, "standing", launcher.standing)
     (run,) = observe(bucket, "ppo").runs
     assert run.name == "ppo@0"
+    assert run.status == launcher.status("ppo/base@0")
     assert run.state == (phase if outcome == "stopped" and phase != "succeeded" else outcome)
 
 
@@ -1017,3 +1025,45 @@ def test_unstored_summaries_use_local_names_and_accept_both_lookup_spellings(
     assert (run.name, run.line, run.state) == ("base@0", "base@0", phase)
     (evaluation,) = state.eval_runs
     assert (evaluation.name, evaluation.state) == ("ladder-123", phase)
+    for summary, address in ((run, "ppo/base@0"), (evaluation, "ppo/ladder-123")):
+        assert summary.status == launcher.status(address)
+        assert summary.last_write is None
+
+
+def test_observe_dates_each_runs_files_across_copies_from_one_listing(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path)
+    started = 1_700_000_000
+    for folder, address, kind, seconds in (
+        ("lab", "lab", "training", 0),
+        ("copied/lab", "lab", "training", 10),
+        ("lab/eval@0", "lab/eval@0", "evaluation", 20),
+    ):
+        key = f"{folder}/run.json"
+        source.put(
+            key, RunRecord(id=address, experiment="lab", kind=kind).model_dump_json().encode()
+        )
+        os.utime(tmp_path / key, (started + seconds, started + seconds))
+    for key, seconds in (
+        ("copied/lab/out/current", 15),
+        ("lab/eval@0/artifacts/plays", 30),
+        ("lab/.shipped/bucket/run.json.sent", 50),
+    ):
+        source.put(key, b"")
+        os.utime(tmp_path / key, (started + seconds, started + seconds))
+
+    measured = MeasuredStorage(source)
+    state = observe(measured, "lab")
+    assert state.run("lab").last_write == datetime.fromtimestamp(started + 15, UTC)
+    assert state.eval_runs[0].last_write == datetime.fromtimestamp(started + 30, UTC)
+    assert (measured.listings, measured.requests) == (1, 3)
+
+
+def test_storage_with_opaque_versions_reports_an_unknown_write_time(tmp_path: Path) -> None:
+    class Undated(DirectoryStorage):
+        def versions(self, prefix: str) -> dict[str, str]:
+            return {key: str(tag) for key, tag in super().versions(prefix).items()}
+
+    source = Undated(tmp_path)
+    source.put("lab/run.json", RunRecord(id="lab", experiment="lab").model_dump_json().encode())
+    run = observe(source, "lab").run("lab")
+    assert run.state == "running" and run.last_write is None

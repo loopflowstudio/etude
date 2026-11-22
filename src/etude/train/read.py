@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from functools import cached_property
 from hashlib import sha256
 from pathlib import Path
@@ -45,7 +46,7 @@ from etude.records import (
     RunRecord,
     RunWriter,
 )
-from etude.run import LocatedRun, as_storage, located_runs, run_folders, under
+from etude.run import LocatedRun, RunListing, as_storage, run_folders, under
 from etude.storage import Storage, run_prefix
 from etude.train.block import (
     COUNT,
@@ -104,6 +105,8 @@ class RunData(Arrays):
     checkpoints: tuple[CheckpointRecord, ...]
     # Every process that wrote to this run, in start order.
     writers: tuple[RunWriter, ...]
+    # Latest modification in this run's listed folders, when the source supplied dates.
+    last_write: datetime | None = None
     _read_blocks: Callable[[], tuple[StoredBlock, ...]] = PrivateAttr()
     _read_out: Callable[[], tuple[OutMember, ...]] = PrivateAttr(default=tuple)
 
@@ -728,11 +731,12 @@ def read_all(
 
     With `metrics`, retain only these keys and `prefixes`, reading each
     immutable block once instead of the cumulative metric indexes.
+    A caller supplying its own keys and declarations also supplies any write dates.
     """
     storage = as_storage(source)
-    keys = sorted(storage.keys("") if keys is None else keys)
+    listing = RunListing.read(storage, keys=keys, declarations=declarations)
     data = []
-    for located in located_runs(storage, keys) if declarations is None else declarations:
+    for located in listing.declarations:
         file = located.file
         if experiment in (None, file.experiment):
             data.append(
@@ -741,8 +745,8 @@ def read_all(
                     file.experiment,
                     located.name,
                     located.folders,
-                    keys,
-                    run_file=file,
+                    listing.keys,
+                    declaration=located,
                     metrics=metrics,
                     prefixes=prefixes,
                 )
@@ -753,28 +757,16 @@ def read_all(
 def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
     """One run's declaration, state, rows and checkpoints. Rows not yet sealed are not read."""
     storage = as_storage(source)
-    keys = sorted(storage.keys(""))
     run = run.removeprefix(experiment + "/")
-    file, folders = _located(storage, keys, experiment, run)
-    return _read(storage, experiment, run, folders, keys, run_file=file)
-
-
-def _located(
-    storage: Storage, keys: Sequence[str], experiment: str, run: str
-) -> tuple[RunRecord | None, Sequence[str]]:
-    """The run's declaration and folders within one experiment.
-
-    Folders another experiment declared are not this run's. A name nobody has
-    declared keeps its folders: historical metrics were written without one.
-    """
-    run = run.removeprefix(experiment + "/")
-    identities = located_runs(storage, keys, run=run)
-    for located in identities:
+    listing = RunListing.read(storage, run=run)
+    for located in listing.declarations:
         if located.file.experiment == experiment:
-            return located.file, located.folders
-    if identities:
-        return None, ()
-    return None, run_folders(keys).get(run, [run_prefix(run)])
+            return _read(
+                storage, experiment, run, located.folders, listing.keys, declaration=located
+            )
+    # Only a name nobody declared can hold historical rows without a declaration.
+    folders = [] if listing.declarations else run_folders(listing.keys).get(run, [run_prefix(run)])
+    return _read(storage, experiment, run, folders, listing.keys, declaration=None)
 
 
 def _named(keys: Sequence[str], folders: Sequence[str]) -> list[tuple[str, str]]:
@@ -877,11 +869,12 @@ def _read(
     folders: Sequence[str],
     listing: Sequence[str],
     *,
-    run_file: RunRecord | None,
+    declaration: LocatedRun | None,
     metrics: frozenset[str] | None = None,
     prefixes: tuple[str, ...] = (),
 ) -> RunData:
     """The run's records from `listing`, the source's sorted keys; its blocks once used."""
+    run_file = declaration.file if declaration else None
     keys = _named(listing, folders)
     present = set(keys)
     records = _records(storage, keys)
@@ -911,6 +904,7 @@ def _read(
         experiment=experiment,
         name=run,
         file=run_file,
+        last_write=declaration.last_write if declaration else None,
         outcome=outcome,
         # A later attempt continues its run's ordinals; each is kept once.
         checkpoints=_hours(

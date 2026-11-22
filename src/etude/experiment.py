@@ -21,7 +21,7 @@ from etude.eval.records import Benchmark, Line, Match, TournamentRun
 from etude.launch import client
 from etude.launch.records import Standing
 from etude.records import RunOutcome
-from etude.run import LocatedRun, located_runs
+from etude.run import LocatedRun, RunListing
 from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
 from etude.train.report import job_names
@@ -54,8 +54,7 @@ def read_tournament_lines(
     state: jobs.ExperimentState,
     tournaments: Sequence[TournamentRun],
     *,
-    keys: Sequence[str] | None = None,
-    declarations: Sequence[LocatedRun] | None = None,
+    listing: RunListing,
 ) -> tuple[Line, ...]:
     """Read the lines reachable by these tournaments, sharing one source discovery."""
     named: set[str] = set()
@@ -71,12 +70,12 @@ def read_tournament_lines(
         )
     found = list(state.lines)
     if others := named - {state.experiment}:
-        keys = source.keys("") if keys is None else keys
-        declarations = located_runs(source, keys) if declarations is None else declarations
         for name in sorted(others):
             found.extend(
                 line.seen_from(state.experiment)
-                for line in observe(source, name, keys=keys, declarations=declarations).lines
+                for line in observe(
+                    source, name, keys=listing.keys, declarations=listing.declarations
+                ).lines
             )
     return tuple(found)
 
@@ -141,12 +140,14 @@ def state_of(
                 checkpoints=saved,
                 seed=data.file.seed if data.file else None,
                 _data=data,
+                last_write=data.last_write,
             )
         )
     eval_runs = [
         jobs.EvalRunSummary(
             name=d.name,
             state=_stored_state(d.outcome),
+            last_write=d.last_write,
         )
         for d in every
         if d.file is not None and d.experiment == experiment and d.file.kind == "evaluation"
@@ -184,6 +185,8 @@ def state_of(
                         item,
                     ),
                     matches=matches,
+                    status=status,
+                    last_write=prior.last_write if prior else None,
                 )
             )
         else:
@@ -207,11 +210,12 @@ def state_of(
                         seed=record.seed,
                         state=_launcher_state("running", item),
                         checkpoints=jobs.Checkpoints(),
+                        status=status,
                     )
                 )
             else:
                 runs[runs.index(prior_training)] = replace(
-                    prior_training, state=_launcher_state(prior_training.state, item)
+                    prior_training, state=_launcher_state(prior_training.state, item), status=status
                 )
     return jobs.ExperimentState(
         experiment=experiment, runs=tuple(runs), eval_runs=tuple(eval_runs), committed_usd=committed

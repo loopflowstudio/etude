@@ -62,7 +62,12 @@ def test_a_folder_listed_without_a_declaration_is_not_asked_for_one(tmp_path: Pa
         for key in local.keys(""):
             if not key.startswith("cache/"):
                 bucket.put(key, local.get(key))
-        assert [run.name for run in read_all(bucket)] == ["r"]
+        measured = MeasuredStorage(bucket)
+        (observed,) = read_all(measured)
+        assert observed.name == "r"
+        objects = client.list_objects_v2(Bucket="runs", Prefix="e/r/")["Contents"]
+        assert observed.last_write == max(item["LastModified"] for item in objects)
+        assert measured.listings == 1
         assert client.requests == len(client.read) == 3  # declaration, attempt, state
         client.requests = 0
         assert runs(bucket) == [("e", "r")]

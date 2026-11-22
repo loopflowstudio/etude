@@ -53,7 +53,14 @@ from etude.records import (
     RunWriter,
     Tally,
 )
-from etude.storage import DirectoryStorage, Storage, run_directory, run_prefix, storage_from_uri
+from etude.storage import (
+    DirectoryStorage,
+    ObjectVersion,
+    Storage,
+    run_directory,
+    run_prefix,
+    storage_from_uri,
+)
 
 
 class Run:
@@ -549,10 +556,42 @@ class LocatedRun(Record):
     name: str
     file: RunRecord
     folders: tuple[str, ...]
+    last_write: datetime | None = None
+
+
+@dataclass(frozen=True)
+class RunListing:
+    """One storage listing, with declared run identities and their latest file writes."""
+
+    keys: list[str]
+    declarations: Sequence[LocatedRun]
+
+    @classmethod
+    def read(
+        cls,
+        storage: Storage,
+        *,
+        run: str | None = None,
+        keys: Sequence[str] | None = None,
+        declarations: Sequence[LocatedRun] | None = None,
+    ) -> RunListing:
+        objects = None
+        if keys is None:
+            objects = storage.versions("")
+            keys = sorted(objects)
+        else:
+            keys = sorted(keys)
+        if declarations is None:
+            declarations = located_runs(storage, keys, run=run, objects=objects)
+        return cls(keys, declarations)
 
 
 def located_runs(
-    storage: Storage, keys: Sequence[str], *, run: str | None = None
+    storage: Storage,
+    keys: Sequence[str],
+    *,
+    run: str | None = None,
+    objects: Mapping[str, str] | None = None,
 ) -> list[LocatedRun]:
     """Group copies by declared experiment and run, never by the folder name alone.
 
@@ -563,6 +602,11 @@ def located_runs(
     """
     listed = set(keys)
     by_name = run_folders(keys)
+    writes = (
+        _last_writes(objects, {folder for folders in by_name.values() for folder in folders})
+        if objects is not None
+        else {}
+    )
     if run is not None:
         by_name = {run: by_name.get(run, [])}
     found: dict[tuple[str, str], tuple[RunRecord, list[str]]] = {}
@@ -572,9 +616,32 @@ def located_runs(
             if file is not None:
                 found.setdefault((file.experiment, name), (file, []))[1].append(folder)
     return [
-        LocatedRun(name=name, file=file, folders=tuple(folders))
+        LocatedRun(
+            name=name,
+            file=file,
+            folders=tuple(folders),
+            last_write=max((writes[f] for f in folders if f in writes), default=None),
+        )
         for (_, name), (file, folders) in sorted(found.items(), key=lambda item: item[0])
     ]
+
+
+def _last_writes(objects: Mapping[str, str], roots: set[str]) -> dict[str, datetime]:
+    """Attribute a file to its nearest run, including copies and jobs below a compact run."""
+    writes: dict[str, datetime] = {}
+    for key, version in objects.items():
+        if not isinstance(version, ObjectVersion) or version.modified is None:
+            continue
+        at = version.modified
+        parent, _, name = key.rpartition("/")
+        while parent and not name.startswith("."):
+            folder = parent + "/"
+            if folder in roots:
+                if folder not in writes or writes[folder] < at:
+                    writes[folder] = at
+                break
+            parent, _, name = parent.rpartition("/")
+    return writes
 
 
 def report_progress(

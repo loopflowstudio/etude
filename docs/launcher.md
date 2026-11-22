@@ -24,6 +24,14 @@ Later passes see new checkpoints and submit their eval matches. Supply finite
 `max_hours` and `max_usd` on jobs that can rent. Training seeds make independent
 runs; eval seeds are indices in the match generator's panel.
 
+Inside a declaration, `state.run("base@0").state` gives the training run's
+state. Its `status` holds the launcher's retained phase, machine, clocks and
+cost when the launcher knows the run. Its `last_write` gives the latest UTC
+modification time among its stored files, including copies. Evaluation runs
+in `state.eval_runs` carry the same fields. A file-only run has `status=None`.
+A queued run with no files has `last_write=None`, as does a listing without
+modification times.
+
 `Job` is also available from `etude.spec` for arbitrary shell commands. Its
 `inputs`, `environment`, `prepare`, `runtime`, `setup` and `cleanup`
 control execution. Typed jobs derive their command from an importable Python

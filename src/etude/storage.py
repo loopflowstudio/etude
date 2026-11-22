@@ -19,9 +19,10 @@ import os
 import shutil
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from stat import S_ISREG
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, Self
 from urllib.parse import quote, unquote, urlsplit
 
 from etude.cache import Artifact, Cache, Fetched
@@ -32,7 +33,14 @@ from etude.identity import SAFE_NAME, run_address
 from etude.records import RunRecord
 from etude.storage_timeout import StorageUnavailable, socket_timeout
 
-__all__ = ("default_root", "storage_from_uri", "Storage", "DirectoryStorage", "S3Storage")
+__all__ = (
+    "default_root",
+    "storage_from_uri",
+    "Storage",
+    "DirectoryStorage",
+    "S3Storage",
+    "ObjectVersion",
+)
 
 
 def run_prefix(run: str) -> str:
@@ -67,6 +75,24 @@ class Storage(Protocol):
     def keys(self, prefix: str) -> list[str]: ...
 
     def versions(self, prefix: str) -> dict[str, str]: ...
+
+
+class ObjectVersion(str):
+    """A storage version tag with its listing's modification time, if supplied.
+
+    Tags remain strings so existing Storage implementations and consumers can
+    compare or persist them. An opaque string supplies no evidence of age.
+    """
+
+    __slots__ = ("modified",)
+    modified: datetime | None
+
+    def __new__(cls, tag: str, modified: datetime | None = None) -> Self:
+        if modified is not None and modified.utcoffset() is None:
+            raise ValueError("an object's modification time must include a time zone")
+        version = super().__new__(cls, tag)
+        version.modified = modified.astimezone(UTC) if modified is not None else None
+        return version
 
 
 class DirectoryStorage:
@@ -117,7 +143,7 @@ class DirectoryStorage:
         base = self._path(prefix) if prefix else self.root
         if not base.is_dir():
             return {}
-        found = {}
+        found: dict[str, str] = {}
         for path in base.rglob("*"):
             if path.name.endswith(".partial"):
                 continue
@@ -126,7 +152,9 @@ class DirectoryStorage:
             except FileNotFoundError:
                 continue  # replaced or removed while listed
             if S_ISREG(stat.st_mode):
-                found[path.relative_to(self.root).as_posix()] = f"{stat.st_mtime_ns}:{stat.st_size}"
+                found[path.relative_to(self.root).as_posix()] = ObjectVersion(
+                    f"{stat.st_mtime_ns}:{stat.st_size}", datetime.fromtimestamp(stat.st_mtime, UTC)
+                )
         return found
 
 
@@ -240,7 +268,9 @@ class S3Storage:
             for page in pages:
                 for item in page.get("Contents", []):
                     tag = f"{item.get('ETag')}:{item.get('Size')}:{item.get('LastModified')}"
-                    found[item["Key"][len(self.prefix) :]] = tag
+                    found[item["Key"][len(self.prefix) :]] = ObjectVersion(
+                        tag, item.get("LastModified")
+                    )
             return found
 
         return _storage_request(collect)

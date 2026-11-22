@@ -41,7 +41,7 @@ from etude.jobs import (
 from etude.launch import client
 from etude.launch.listing import show_quote
 from etude.launch.server import selected
-from etude.run import located_runs
+from etude.run import RunListing
 from etude.spec import Job, RunRequest, Smoke, Until
 from etude.storage import Storage, default_root
 
@@ -160,9 +160,8 @@ def advance(
     """One pass. Existing addresses stay put; explicit retries preserve delivered matches."""
     if max_usd is not None and (not max_usd.is_finite() or max_usd < 0):
         raise LauncherError("--max-usd must be a finite, nonnegative dollar limit")
-    listed = source.keys("")
-    declarations = located_runs(source, listed)
-    state = observe(source, experiment.name, keys=listed, declarations=declarations)
+    listing = RunListing.read(source)
+    state = observe(source, experiment.name, keys=listing.keys, declarations=listing.declarations)
     committed = state.committed_usd
     print(
         f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: "
@@ -218,8 +217,7 @@ def advance(
         source,
         state,
         [job.recorded() for job in jobs],
-        keys=listed,
-        declarations=declarations,
+        listing=listing,
     )
     smoke = Smoke()
     if smoke_file_first and not quote:
@@ -245,7 +243,9 @@ def advance(
     decisions: list[TournamentDecision] = []
     stopped_runs: set[str] = set()
     stored = (
-        StoredRuns.read(experiment.name, source, keys=listed, declarations=declarations)
+        StoredRuns.read(
+            experiment.name, source, keys=listing.keys, declarations=listing.declarations
+        )
         if jobs
         else None
     )

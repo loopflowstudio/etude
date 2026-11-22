@@ -18,6 +18,7 @@ import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from fnmatch import fnmatchcase
 from functools import cached_property
@@ -76,6 +77,7 @@ from etude.eval.run import (
 )
 from etude.eval.tournament import _evaluating_tournament
 from etude.identity import stored_owner
+from etude.launch.records import Status
 from etude.out import MEMBERSHIP, OutFile, OutFiles, OutMember
 from etude.records import ArtifactRef, Record, RunRecord, SourceKey
 from etude.run import as_storage, located_runs
@@ -177,6 +179,8 @@ class TrainingRunSummary:
     seed: int | None = None
     # Launcher-only runs have no stored data. Copies keep the same lazy storage read.
     _data: RunData | None = field(default=None, repr=False, compare=False)
+    status: Status | None = field(default=None, hash=False)
+    last_write: datetime | None = None
 
     @cached_property
     def out(self) -> OutMembers:
@@ -197,6 +201,8 @@ class EvalRunSummary:
     name: str
     state: Literal["queued", "running", "stopped", "finished", "failed"]
     matches: tuple[str, ...] = ()
+    status: Status | None = field(default=None, hash=False)
+    last_write: datetime | None = None
 
 
 @dataclass(frozen=True)
