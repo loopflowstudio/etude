@@ -26,7 +26,7 @@ import numpy as np
 
 from etude.checkpoints import CheckpointRecord
 from etude.records import BUILT_IN_CLOCKS, BUILT_IN_NAMES, HOURS_SINCE_START, Clock, Record
-from etude.train.read import Floats, RunData, lines
+from etude.train.read import Buckets, Floats, RunData, lines
 
 BUCKETS = 120
 
@@ -144,10 +144,7 @@ def _started(run: RunData) -> float:
     return min(starts.values()) / 1000 if starts else 0.0
 
 
-def _trace(run: RunData, metric: str, clock: str) -> Trace | None:
-    reduced = run.chart(metric, clock, BUCKETS)
-    if not len(reduced):
-        return None
+def _trace(run: RunData, reduced: Buckets) -> Trace:
     return Trace(
         owner=run.name,
         x=_rounded((reduced.x_first + reduced.x_last) / 2, 7),
@@ -156,9 +153,10 @@ def _trace(run: RunData, metric: str, clock: str) -> Trace | None:
     )
 
 
-def _band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Trace | None:
+def _band(
+    job: str, present: Sequence[tuple[RunData, Buckets]], metric: str, clock: str
+) -> Trace | None:
     """The mean of the seeds' bucket means over a shared span, banded by their range."""
-    present = [(run, chart) for run in members if len(chart := run.chart(metric, clock, BUCKETS))]
     if len(present) < 2:
         return None
     low = min(float(chart.x_first[0]) for _, chart in present)
@@ -370,23 +368,26 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
     for run in data:
         metrics.update(dict.fromkeys(run.metrics()))
     jobs = _jobs(data)
-    members = {job.name: [run for run in data if run.name in job.runs] for job in jobs}
+    job_of = {name: job.name for job in jobs for name in job.runs}
     series: dict[str, dict[str, tuple[Trace, ...]]] = {}
     bands: dict[str, dict[str, tuple[Trace, ...]]] = {}
     for clock in clocks:
         for metric in metrics:
-            traces = [
-                trace
-                for run in data
-                if clock in BUILT_IN_NAMES or clock in {c.name for c in run.clocks}
-                if (trace := _trace(run, metric, clock)) is not None
-            ]
+            # The traces and the seed band's span both use each run's own bucket endpoints.
+            charts: dict[str, list[tuple[RunData, Buckets]]] = {job.name: [] for job in jobs}
+            traces = []
+            for run in data:
+                reduced = run.chart(metric, clock, BUCKETS)
+                if len(reduced):
+                    charts[job_of[run.name]].append((run, reduced))
+                    if clock in BUILT_IN_NAMES or clock in {c.name for c in run.clocks}:
+                        traces.append(_trace(run, reduced))
             if traces:
                 series.setdefault(clock, {})[metric] = tuple(traces)
             means = [
                 band
-                for job, runs in members.items()
-                if (band := _band(job, runs, metric, clock)) is not None
+                for job, present in charts.items()
+                if (band := _band(job, present, metric, clock)) is not None
             ]
             if means:
                 bands.setdefault(clock, {})[metric] = tuple(means)

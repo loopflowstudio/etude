@@ -48,6 +48,33 @@ def test_reports_fetch_each_runs_metadata_once(tmp_path: Path) -> None:
     assert measured.listings == 1
 
 
+def test_seed_band_reuses_the_run_traces_to_find_its_span(tmp_path: Path) -> None:
+    writer = "abcdef123456"
+    for seed, last in enumerate((2, 4)):
+        with open_run(
+            experiment="e",
+            run=f"arm@{seed}",
+            job="arm",
+            seed=seed,
+            clocks=["step"],
+            directory=tmp_path,
+        ) as run:
+            root = run.out.parent
+        block = Builder(["step"])
+        for step in (0, last):
+            block.add(step, {"step": float(step)}, {"loss": step + 2 * seed})
+        write_block(root, block_key(2, 0, 0, writer), block.columns(writer, 0))
+
+    measured = MeasuredStorage(DirectoryStorage(tmp_path))
+    file = experiment_file(tmp_path / "experiments", "e")
+    training = build(measured, file).training
+    assert [trace.mean for trace in training.series["step"]["loss"]] == [[0, 2], [2, 6]]
+    (band,) = training.bands["step"]["loss"]
+    assert band.mean == [1, 2, 6] and band.seeds == [2, 1, 1]
+    # Two arrays per seed for its own trace, then two on the shared span.
+    assert measured.ranges == 8
+
+
 def test_a_folder_listed_without_a_declaration_is_not_asked_for_one(tmp_path: Path) -> None:
     with open_run(experiment="e", run="r", clocks=[], directory=tmp_path):
         pass
