@@ -226,8 +226,12 @@ A successful empty reply releases previously held runs.
 Status and graph requests read the committed index. Only a successful launcher
 poll replaces the retained endpoint. Pages show its placement, aliases and
 console when it matches the selected endpoint. Opening a run requests its
-console for the next launcher poll. Refreshing the experiment report builds it
-separately.
+console for the next launcher poll until the last attempt’s transcript settles.
+A visible run tab reads the same indexed row every five seconds. Its change
+token covers the sealed inputs and report panels, displayed run facts, retained
+console and errors. The check skips the chart table. When only source ages
+advance, the browser updates their labels in place. Refreshing the experiment
+report builds it separately.
 
 ## Upgrading Etude
 

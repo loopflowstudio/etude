@@ -9,6 +9,7 @@ build on demand in separate request threads.
 from __future__ import annotations
 
 import fcntl
+import json
 import shlex
 import signal
 import sqlite3
@@ -29,7 +30,7 @@ from itertools import groupby
 from operator import itemgetter
 from pathlib import Path
 from types import FrameType
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from pydantic import TypeAdapter
 
@@ -487,19 +488,22 @@ class ChartIndex:
             "DELETE FROM consoles WHERE NOT EXISTS (SELECT 1 FROM runs WHERE launched_as=consoles.run)"
         )
 
-    def run(self, address: str) -> str | None:
+    def run(self, address: str, *, observe: bool = False) -> str | None:
         remote = selected()
+        # The document reads its chart in the same snapshot as its change token.
+        payload = (
+            "NULL" if observe else "(SELECT payload FROM charts WHERE address=visible.address)"
+        )
         with self._connect() as db:
             row = db.execute(
                 _VISIBLE
-                + """
-                SELECT visible.*, charts.payload, declarations.error AS report_error,
-                       declarations.accepted IS NULL AND declarations.file IS NOT NULL AS pending_report,
+                + f"""
+                SELECT visible.*, {payload} AS payload, files.inputs, declarations.error AS report_error,
                        consoles.body, consoles.collected, consoles.gaps, consoles.final_attempt AS console_attempt
                 FROM visible
                 LEFT JOIN consoles ON consoles.run=visible.launched_as
                 LEFT JOIN declarations USING(experiment)
-                LEFT JOIN charts USING(address)
+                LEFT JOIN files USING(address)
                 WHERE address=coalesce(
                     (SELECT address FROM runs WHERE address=:address),
                     (SELECT address FROM runs WHERE launched_as=:address AND (SELECT matches FROM observed))
@@ -508,12 +512,42 @@ class ChartIndex:
                 {"remote": remote, "address": address},
             ).fetchone()
         if row is None:
-            return None
+            return self.waiting() if observe else None
         now = datetime.now(UTC)
         state = _display_state(row)
         status = _status(row)
-        details = [f"last write {_age(row['last_write'], now)}"]
-        details.extend(_observation_ages(row, now, launcher=bool(row["launched_as"])))
+        run_line = _run_line(row, state, status)
+        error = self.read_error(remote, row["file_error"], report=row["report_error"])
+        # Session shutdown can still retain final logs after the run itself ended.
+        if status is not None and (not status.done or row["console_attempt"] != status.attempts):
+            with self._console_lock:
+                if remote == self._server:
+                    self._wanted.add(row["launched_as"])
+
+        # inputs identifies the sealed files and their report panels. Hash the displayed
+        # launcher facts at their rendered precision so a sub-cent change leaves the chart mounted.
+        facts = (
+            row["address"],
+            row["experiment"],
+            row["kind"],
+            row["inputs"],
+            run_line,
+            row["config"],
+            row["source"],
+            row["launched_as"],
+            row["body"],
+            row["gaps"],
+            bool(row["at"]),
+            bool(row["launcher_at"]),
+            error,
+        )
+        token = sha256(json.dumps(facts, ensure_ascii=False).encode()).hexdigest()
+        ages = [f"last file write {_age(row['last_write'], now)}"]
+        ages.extend(_observation_ages(row, now, launcher=status is not None))
+        collected = f"Last collected {_age(row['collected'], now)}" if row["collected"] else ""
+        observation = _run_observation(token, " · ".join(ages), collected)
+        if observe:
+            return observation
         evaluation = row["kind"] == "evaluation"
         experiment = escape(row["experiment"])
         page = f"/experiments/{quote(row['experiment'])}"
@@ -521,8 +555,7 @@ class ChartIndex:
         heading = (
             f'<a href="{page}">{experiment}</a>'
             f'<header class="head"><h1>{title}</h1></header>'
-            f"<p>{_run_line(row, state, status)}</p>"
-            f'<p class="context">{escape(" · ".join(details))}</p>'
+            f"<p>{run_line}</p>{observation}{_refresh_script()}"
         )
         if evaluation:
             heading += f'<p>Scores are in the <a href="{page}#report">{experiment} report</a>.</p>'
@@ -531,29 +564,11 @@ class ChartIndex:
                 f"<p>The last file observation found at least {_SILENT // timedelta(minutes=1)} "
                 "minutes without a write.</p>"
             )
-        error = self.read_error(remote, row["file_error"], report=row["report_error"])
         if error:
             heading += f'<p role="status">{escape(error)}</p>'
-        # Session shutdown can still retain final logs after the run itself ended.
-        awaiting_console = status is not None and (
-            not status.done or row["console_attempt"] != status.attempts
-        )
-        if awaiting_console:
-            with self._console_lock:
-                if remote == self._server:
-                    self._wanted.add(row["launched_as"])
-        if (
-            _is_open(status, state)
-            or awaiting_console
-            or error
-            or row["at"] is None
-            or row["pending_report"]
-            or row["launcher_at"] is None
-        ):
-            heading += _reload()
         if evaluation and status is None:
             return _document(address, heading)
-        below = _console(row, now)
+        below = _console(row, collected)
         if evaluation:
             return _document(address, heading + below)
         below += _run_details(row)
@@ -562,6 +577,13 @@ class ChartIndex:
             curves = "No metric curves recorded." if row["at"] else _UNREAD.format("Curves")
             return _document(address, heading + tabs + f"<p>{curves}</p>" + below)
         return render_run(address, row["payload"], heading, below, _TRAINING_TABS)
+
+    def waiting(self) -> str:
+        source = self.source.uri("run.json").removesuffix("run.json")
+        message = f"Waiting for the run to appear in {source}."
+        if error := self.read_error(selected(), self.error):
+            message += " " + error
+        return _run_observation("waiting", message)
 
     def _list_runs(
         self, remote: str | None, experiment: str | None = None
@@ -632,11 +654,6 @@ class ChartIndex:
             body = "<p>Waiting for the first observation.</p>"
         return _live_status(
             body,
-            active=bool(opened)
-            or not rows
-            or observation is None
-            or observation["at"] is None
-            or observation["launcher_at"] is None,
             stale=stale,
             error=self.read_error(remote, observation["file_error"] if observation else None),
         )
@@ -646,13 +663,11 @@ class ChartIndex:
             return _live_status(
                 f"<p>The launcher database is on {escape(remote)}. "
                 "Run <code>etude machines</code> to list its machines.</p>",
-                active=False,
             )
         with self._connect() as db:
             row = db.execute(
                 "SELECT at,file_error,launcher_at,last_loop,machines FROM observation WHERE id=1 AND server IS NULL"
             ).fetchone()
-        active = True
         error = self.read_error(None, row["file_error"] if row else None)
         if row is None or (row["launcher_at"] is None and not error):
             body = "<p>Waiting for the first local observation.</p>"
@@ -663,8 +678,7 @@ class ChartIndex:
             body = "<p>Machine listing unavailable.</p>"
         else:
             body = "<p>No launcher is used here.</p>"
-            active = False
-        return _live_status(body, active=active, error=error)
+        return _live_status(body, error=error)
 
     def has_experiment(self, experiment: str) -> bool:
         with self._connect() as db:
@@ -682,16 +696,12 @@ class ChartIndex:
         if not declared and not rows:
             return None
         now = datetime.now(UTC)
-        active = (
-            observation is None or observation["at"] is None or observation["launcher_at"] is None
-        )
         stale = False
         body = []
         for row in rows:
             state = _display_state(row)
             stale |= state == "no end recorded"
             status = _status(row)
-            active |= _is_open(status, state)
             address = row["address"]
             body.append(
                 f"<tr><td>{escape(row['job'])}</td>"
@@ -699,7 +709,7 @@ class ChartIndex:
                 f"<td>{_run_line(row, state, status)}</td><td>{_age(row['last_write'], now)}</td></tr>"
             )
         if body:
-            table = _table(("Job", "Run", "Status", "Last write"), body)
+            table = _table(("Job", "Run", "Status", "Last file write"), body)
         elif observation and observation["at"]:
             table = "<p>No runs recorded.</p>"
         else:
@@ -712,7 +722,6 @@ class ChartIndex:
             '<section class="sec"><h2>Run status</h2>'
             f'{table}<p class="context">{escape(ages)}</p>'
             '<p class="lbl">No machine samples recorded.</p></section>',
-            active=active,
             stale=stale,
             error=self.read_error(
                 remote,
@@ -872,7 +881,7 @@ def _is_open(status: Status | None, state: str) -> bool:
     return not status.done if status else state in ("queued", "running")
 
 
-def _live_status(body: str, *, active: bool, stale: bool = False, error: str | None = None) -> str:
+def _live_status(body: str, *, stale: bool = False, error: str | None = None) -> str:
     if error:
         body = f'<p role="status">{escape(error)}</p>' + body
     if stale:
@@ -880,8 +889,7 @@ def _live_status(body: str, *, active: bool, stale: bool = False, error: str | N
             f"<p>Runs with no launcher record show “no end recorded” after "
             f"a file observation confirms {_SILENT // timedelta(minutes=1)} minutes without a write.</p>"
         )
-    refresh = f' data-refresh="{_REFRESH * 1000}"' if active or error else ""
-    return f'<div id="experiment-status"{refresh}>{body}</div>'
+    return f'<div id="experiment-status" data-refresh="{_REFRESH * 1000}">{body}</div>'
 
 
 def _table(columns: tuple[str, ...], rows: list[str]) -> str:
@@ -894,7 +902,7 @@ def _table(columns: tuple[str, ...], rows: list[str]) -> str:
 
 def _experiments_table(title: str, rows: list[str]) -> str:
     table = (
-        _table(("Experiment", "Runs", "Last write"), rows)
+        _table(("Experiment", "Runs", "Last file write"), rows)
         if rows
         else f"<p>No {title.lower()} experiments.</p>"
     )
@@ -902,11 +910,10 @@ def _experiments_table(title: str, rows: list[str]) -> str:
 
 
 def _status_page(title: str, status: str, *, before: str = "", after: str = "") -> str:
-    script = Path(__file__).with_name("refresh_status.js").read_text()
     return _document(
         title,
         f'{before}<header class="head"><h1>{escape(title)}</h1></header>{status}'
-        f'<p id="status-error" role="status"></p><script>{script}</script>{after}',
+        f"{_refresh_script()}{after}",
     )
 
 
@@ -919,7 +926,9 @@ def _display_state(row: sqlite3.Row) -> str:
 
 
 def _observation_ages(row: sqlite3.Row, now: datetime, *, launcher: bool) -> list[str]:
-    ages = [f"indexed {_age(row['at'], now)}" if row["at"] else "File observation unavailable"]
+    ages = [
+        f"files observed {_age(row['at'], now)}" if row["at"] else "File observation unavailable"
+    ]
     if row["launcher_at"] is None:
         ages.append("Launcher observation unavailable")
     elif launcher:
@@ -943,7 +952,7 @@ def _position(clocks: dict[str, float], preferred: str | None, target: Until | N
     return f"{clock} {number(clocks[clock])}" if clock else ""
 
 
-def _console(row: sqlite3.Row, now: datetime) -> str:
+def _console(row: sqlite3.Row, collected: str) -> str:
     if row["body"] is not None:
         console = (
             '<pre id="retained-output" class="console" tabindex="0" aria-label="Retained console">'
@@ -953,8 +962,8 @@ def _console(row: sqlite3.Row, now: datetime) -> str:
         )
         if row["gaps"]:
             console += "<p>Some console output is missing from retention.</p>"
-        if row["collected"]:
-            console = f"<p>Last collected {_age(row['collected'], now)}</p>" + console
+        hidden = "" if collected else " hidden"
+        console = f'<p id="console-collected"{hidden}>{collected}</p>' + console
     elif row["launched_as"]:
         console = "<p>Waiting for retained console.</p>"
     elif row["launcher_at"] is None:
@@ -1022,8 +1031,16 @@ def _age(at: str | None, now: datetime) -> str:
     return f"{seconds} s ago"
 
 
-def _reload() -> str:
-    return f"<script>setInterval(() => {{ if (!document.hidden) location.reload(); }}, {_REFRESH * 1000});</script>"
+def _run_observation(token: str, message: str, collected: str = "") -> str:
+    return (
+        f'<p class="context" id="run-observation" data-refresh="{_REFRESH * 1000}" '
+        f'data-version="{token}" data-collected="{escape(collected)}">{escape(message)}</p>'
+    )
+
+
+def _refresh_script() -> str:
+    script = Path(__file__).with_name("refresh_status.js").read_text()
+    return f'<p id="status-error" role="status"></p><script>{script}</script>'
 
 
 def _document(title: str, body: str) -> str:
@@ -1113,9 +1130,12 @@ class Server(ThreadingHTTPServer):
                 stop.set()
 
     def page(self, route: str, *, refresh: bool = False) -> str | None:
-        path = unquote(urlsplit(route).path)
+        url = urlsplit(route)
+        path = unquote(url.path)
         if path.startswith("/runs/"):
-            return self.index.run(path.removeprefix("/runs/"))
+            return self.index.run(
+                path.removeprefix("/runs/"), observe=parse_qs(url.query).get("observe") == ["1"]
+            )
         if path in ("/", "/status"):
             overview = self.index.experiments()
             return (
@@ -1206,12 +1226,7 @@ class _Handler(BaseHTTPRequestHandler):
             status = 200 if html else 404
             if html is None and urlsplit(self.path).path.startswith("/runs/"):
                 # A train prints its link before the next listing can discover it.
-                index = self.server.index
-                source = index.source.uri("run.json").removesuffix("run.json")
-                message = f"Waiting for the run to appear in {source}."
-                if error := index.read_error(selected(), index.error):
-                    message += " " + error
-                html = _document("Run", f'<p role="status">{escape(message)}</p>{_reload()}')
+                html = _document("Run", self.server.index.waiting() + _refresh_script())
             body = (html or "Not found.").encode()
         except ValueError as error:
             body, status = explain(error).encode(), 404

@@ -268,6 +268,10 @@ def _loss(html: str) -> list[float | None]:
     return page.training.series["steps"]["loss"][0].mean
 
 
+def _version(html: str) -> str:
+    return html.split('data-version="', 1)[1].split('"', 1)[0]
+
+
 def _ingest(view: Server) -> None:
     # Drive one pass of each independent poll, without waiting for the next cadence.
     view.refresh_launcher()
@@ -401,7 +405,7 @@ def test_ingestion_reads_only_the_new_block_and_publishes_its_last_point(tmp_pat
     with Server(measured, None, ("127.0.0.1", 0)) as server:
         _ingest(server)
         first = server.page("/runs/lab/base@0") or ""
-        assert ">running<" in first and "last write" in first and _loss(first) == [7.0]
+        assert ">running<" in first and "last file write" in first and _loss(first) == [7.0]
         assert "Console was not recorded." in first
         before = measured.requests, measured.listings
         measured.got.clear()
@@ -628,7 +632,7 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
         eval_page = status("/runs/" + evaluation)
         assert f"Evaluation · {evaluation}" in eval_page and ">finished<" in eval_page
         assert 'href="/experiments/lab#report">lab report</a>' in eval_page
-        assert "last write" in eval_page
+        assert "last file write" in eval_page
         assert all(
             text not in eval_page
             for text in ("No metric curves", "Checkpoints", "<h2>Config", "<h2>Console")
@@ -668,7 +672,7 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
         opened, completed = settled.split("<h2>Completed</h2>")
         assert "No open experiments." in opened and 'href="/experiments/lab"' in completed
         assert "3 finished" in completed and "1 failed" in completed
-        assert "data-refresh" not in settled
+        assert 'data-refresh="5000"' in settled
     backend.store.close()
 
 
@@ -786,7 +790,7 @@ def test_incomplete_directory_listing_keeps_file_facts_until_recovery(
         assert address in opened and queued in opened
         for page in (graph, status, overview):
             assert (
-                "indexed 11 min ago" in page
+                "files observed 11 min ago" in page
                 and "Run files: PermissionError: cannot traverse lab" in page
             )
         assert (measured.listings, measured.requests, measured.bytes) == reads
@@ -844,7 +848,7 @@ def test_slow_listing_dates_silence_from_when_the_listing_began(
     with Server(source, None, ("127.0.0.1", 0)) as server:
         _ingest(server)
         graph = _get(server, "/runs/lab/base@0")
-        assert "indexed 11 min ago" in graph and ">running<" in graph
+        assert "files observed 11 min ago" in graph and ">running<" in graph
 
 
 @pytest.mark.parametrize("warm", [True, False], ids=["reopened", "first-start"])
@@ -885,7 +889,9 @@ def test_failed_listing_shows_fresh_queue_and_machines(
             for path in ("/", "/experiments/lab/status"):
                 page = _get(server, path)
                 assert queued in page and "fixture listing unavailable" in page
-                assert ("indexed 2 min ago" if warm else "File observation unavailable") in page
+                assert (
+                    "files observed 2 min ago" if warm else "File observation unavailable"
+                ) in page
             assert ">studio</th>" in (server.page("/machines") or "")
             graph = _get(server, "/runs/" + alias)
             if warm:
@@ -934,6 +940,17 @@ def test_held_file_pass_publishes_launcher_and_joins_latest_placement_on_release
     measured = MeasuredStorage(source)
     entered, release = threading.Event(), threading.Event()
 
+    read = LauncherObservation.read
+    console_tails = 0
+
+    def count_tails(consoles: tuple[str, ...], *, machines: bool) -> LauncherObservation:
+        nonlocal console_tails
+        observation = read(consoles, machines=machines)
+        console_tails += len(observation.consoles)
+        return observation
+
+    monkeypatch.setattr(LauncherObservation, "read", staticmethod(count_tails))
+
     def hold() -> None:
         entered.set()
         if not release.wait(10):
@@ -979,6 +996,32 @@ def test_held_file_pass_publishes_launcher_and_joins_latest_placement_on_release
                 assert address in _get(other, "/machines/status")
                 server.refresh_launcher()
                 assert "log of " in _get(server, "/runs/" + address)
+                backend.run(700)
+                server.refresh_launcher()
+                _get(server, "/runs/" + address + "?observe=1")
+                server.refresh_launcher()
+                settled = _get(server, "/runs/" + address)
+                assert (
+                    ">finished<" in settled
+                    and "snapshot complete" in settled
+                    and _loss(settled) == [7]
+                )
+                status = _get(server, "/experiments/lab/status")
+                overview = _get(server, "/status")
+                assert "steps 1" in status and "1 finished" in overview
+                assert all('data-refresh="5000"' in page for page in (settled, status, overview))
+                tails_at_finish = console_tails
+                assert tails_at_finish > 0
+                _advance_view_clock(monkeypatch, minutes=2)
+                for _ in range(3):
+                    check = _get(server, "/runs/" + address + "?observe=1")
+                    assert _version(check) == _version(settled) and len(check.encode()) < 1024
+                    assert "files observed 2 min ago" in check and "Last collected" in check
+                    server.refresh_launcher()
+                assert console_tails == tails_at_finish
+                (next_run,) = backend.scheduler.queue(job(name="next", experiment="lab"), rent="l4")
+                server.refresh_launcher()
+                assert next_run in _get(server, "/status")
                 assert measured.requests == reads
                 assert measured.listings == before + 1
             finally:
@@ -986,6 +1029,9 @@ def test_held_file_pass_publishes_launcher_and_joins_latest_placement_on_release
             held.result(5)
         graph = server.page("/runs/" + address) or ""
         assert machine in graph and "steps 2" in graph and _loss(graph) == [7, 3]
+        check = _get(server, "/runs/" + address + "?observe=1")
+        assert _version(settled) != _version(check) == _version(graph)
+        assert "steps 2" in _get(server, "/experiments/lab/status")
     backend.store.close()
 
 
@@ -1097,7 +1143,7 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
                 reads = measured.listings, measured.requests, measured.bytes
                 graph = view.page("/runs/local") or ""
                 assert _loss(graph) == [7, 3] and "steps 2" in graph
-                assert "Launcher observation unavailable" in graph and "indexed " in graph
+                assert "Launcher observation unavailable" in graph and "files observed " in graph
                 assert 'src="/experiments/local/report"' in (view.page("/experiments/local") or "")
                 status = view.page("/experiments/local/status") or ""
                 assert "steps 2" in status and "Launcher observation unavailable" in status
@@ -1157,12 +1203,12 @@ def test_machines_without_a_launcher_or_with_a_selected_server(
         _ingest(server)
         reads = source.listings, source.requests, source.bytes
         absent = server.page("/machines/status") or ""
-        assert "No launcher is used here." in absent and "data-refresh" not in absent
+        assert "No launcher is used here." in absent and 'data-refresh="5000"' in absent
         (home() / "server").write_text("team@fixture")
         monkeypatch.delenv("ETUDE_SERVER_LOCAL", raising=False)
         html = server.page("/machines") or ""
         assert "team@fixture" in html and "<code>etude machines</code>" in html
-        assert "No launcher" not in html and 'data-refresh="5000"' not in html
+        assert "No launcher" not in html and 'data-refresh="5000"' in html
         assert (source.listings, source.requests, source.bytes) == reads
 
 
@@ -1204,11 +1250,11 @@ def test_experiments_group_by_activity_and_date_the_latest_write(tmp_path: Path)
         updated = server.page("/status") or ""
         opened, completed = updated.split("<h2>Completed</h2>")
         assert "No open experiments." in opened and 'href="/experiments/lab"' in completed
-        assert "1 finished" in completed and "data-refresh" not in updated
+        assert "1 finished" in completed and 'data-refresh="5000"' in updated
         assert (measured.listings, measured.requests, measured.bytes) == reads
 
 
-def test_silent_file_run_stops_refreshing_without_a_recorded_end(tmp_path: Path) -> None:
+def test_silent_file_run_reopens_on_the_next_observation(tmp_path: Path) -> None:
     source = DirectoryStorage(tmp_path / "runs")
     key = "lab/base@0/run.json"
     source.put(key, RunRecord(id="lab/base@0", experiment="lab").model_dump_json().encode())
@@ -1217,14 +1263,20 @@ def test_silent_file_run_stops_refreshing_without_a_recorded_end(tmp_path: Path)
         _ingest(server)
         html = server.page("/runs/lab/base@0") or ""
         assert ">no end recorded<" in html
-        assert "last write" in html and "at least 10 minutes" in html
-        assert "}, 5000);" not in html
+        assert "last file write" in html and "at least 10 minutes" in html
+        assert _version(_get(server, "/runs/lab/base@0?observe=1")) == _version(html)
         status = server.page("/experiments/lab/status") or ""
         assert (
             ">no end recorded<" in status
             and "10 minutes" in status
-            and "data-refresh" not in status
+            and 'data-refresh="5000"' in status
         )
+        _seal(source.root / "lab/base@0", 0, 7)
+        server.refresh_files()
+        observed = _get(server, "/runs/lab/base@0?observe=1")
+        assert _version(observed) != _version(html)
+        current = _get(server, "/runs/lab/base@0")
+        assert _version(current) == _version(observed) and ">running<" in current
 
 
 def test_selected_server_status_prints_the_view_running_here(
@@ -1347,7 +1399,10 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
         # The old launcher's spelling is an alias for this compact stored run.
         endpoint.write_text("other")
         assert server.page(route) is None
+        assert _version(_get(server, route + "?observe=1")) == "waiting"
+        check = _get(server, "/runs/lab/compact?observe=1")
         stored = server.page("/runs/lab/compact") or ""
+        assert _version(page) != _version(check) == _version(stored)
         assert "&lt;writer&gt;" in stored and "steps-12" in stored
         assert "steps 12" in stored and _loss(stored) == [7]
         assert "Launcher observation unavailable" in stored
@@ -1372,6 +1427,6 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
         _publish_ssh(server)
         finished = server.page(route) or ""
         assert ">finished<" in finished and "snapshot complete" in finished
-        assert "}, 5000);" not in finished and exchanges == 3
+        assert _version(_get(server, route + "?observe=1")) == _version(finished) and exchanges == 3
     assert "local" in {pool.name for pool in backend.scheduler.pools()}
     backend.store.close()

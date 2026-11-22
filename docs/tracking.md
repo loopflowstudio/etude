@@ -145,12 +145,13 @@ opened before the run appears names the source the view is watching.
 
 | Path | What you see |
 | --- | --- |
-| `/` | Experiments grouped into Open and Completed, with run counts by state, latest write and links to open runs |
+| `/` | Experiments grouped into Open and Completed, with run counts by state, latest file write and links to open runs |
 | `/status` | The experiment list used to refresh `/` |
-| `/experiments/NAME` | Jobs and runs with their state, clock, last write and launcher placement or queue reason, plus the experiment report |
+| `/experiments/NAME` | Jobs and runs with their state, clock, last file write and launcher placement or queue reason, plus the experiment report |
 | `/experiments/NAME/status` | The run status table used to refresh the experiment page |
 | `/experiments/NAME/report` | The experiment's report, with a **Refresh report** button |
 | `/runs/ADDRESS` | A training run’s progress, curves, console, config and checkpoints, or an evaluation’s status and link to its report |
+| `/runs/ADDRESS?observe=1` | Current source ages and the version of the run shown in the tab |
 | `/machines` | Held machines with their pool or on-demand, state, window and cost. Each occupied slot links to its run and shows its state and clock. |
 | `/machines/status` | The inventory used to refresh the Machines page |
 
@@ -168,7 +169,7 @@ remaining metrics in first-logged order. Checkpoints show the clock positions
 at which they were saved. For a launched run, the page also shows placement,
 hardware, cost, attempts and source revision when available. All four pages
 show the launcher’s clock until run files appear, then the sealed file position.
-`Last write` dates the run files and `indexed` dates the start of the last successful listing.
+`last file write` dates the run files and `files observed` dates the start of the last successful listing.
 A recorded scheduler heartbeat appears as `last loop`. When the file and
 launcher observations differ by more than 5 seconds, `launcher observed` dates the launcher facts.
 
@@ -182,10 +183,12 @@ retained output, dates the latest collection and marks gaps. Use the section
 links above the curves to jump to Console, Config or Checkpoints. Plain
 `etude train` writes its console to the terminal.
 
-**Refresh.** Visible run and experiment pages refresh every 5 seconds while
-work is open. The run page reloads with its chart choices in the URL. A
-launched run page also waits for its final console. The local machine inventory
-refreshes every 5 seconds while visible, even when idle.
+**Refresh.** Every 5 seconds, a visible tab checks the view’s index. A finished
+run can still receive its final metrics, and an idle overview can show a newly
+queued job. When only dates change, the run page updates them in place. When
+run details or chart inputs change, the page reloads with its chart choices
+in the URL. The experiment report stays mounted while status updates. A failed
+check keeps the current page visible and retries on the next check.
 The view indexes run files in the background under `ETUDE_HOME/views`. Reading
 a run graph uses the last published index, including during a bucket scan.
 While storage is slow or unavailable, new queue entries, placement, retained console

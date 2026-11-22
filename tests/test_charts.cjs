@@ -397,3 +397,54 @@ test("a curve finds its score when the score carries a range", () => {
   assert.equal(context.curveScore(D, {score: {table: "plays", value: "won", per: "won", range: [0, 2]}}, 0), -1);
   assert.equal(context.curveScore(D, {}, 0), 0);
 });
+
+test("a visible run updates dates in place and reloads only when its content changes", async () => {
+  const observation = {
+    id: "run-observation", dataset: {refresh: "5000", version: "step-1"},
+    textContent: "files observed 1 min ago",
+  };
+  const collected = {}, error = {};
+  const document = {
+    hidden: false,
+    querySelector: () => observation,
+    getElementById: id => ({"run-observation": observation, "console-collected": collected, "status-error": error})[id],
+    // Supply the fragment the browser would parse from the successful response.
+    createElement: () => ({content: {firstElementChild: next}}),
+  };
+  const next = {
+    id: observation.id, dataset: {version: "step-1", collected: "Last collected 2 min ago"},
+    textContent: "files observed 2 min ago",
+  };
+  const url = "/runs/lab/base@0";
+  let tick, requests = [], navigations = 0, status = 503;
+  const browser = vm.createContext({
+    document,
+    location: {pathname: url, reload: () => navigations++},
+    fetch: async path => {
+      requests.push(path);
+      return {ok: status === 200, status, text: async () => ""};
+    },
+    setTimeout: (callback, delay) => {
+      assert.equal(delay, 5000);
+      tick = () => { tick = undefined; return callback(); };
+    },
+  });
+  vm.runInContext(fs.readFileSync("src/etude/refresh_status.js", "utf8"), browser);
+
+  await tick();
+  assert.match(error.textContent, /503/);
+  assert.equal(observation.textContent, "files observed 1 min ago");
+  status = 200;
+  await tick();
+  assert.equal(error.textContent, "");
+  assert.equal(observation.textContent, "files observed 2 min ago");
+  assert.equal(collected.textContent, "Last collected 2 min ago");
+  next.dataset.version = "step-2";
+  document.hidden = true;
+  await tick();
+  assert.equal(navigations, 0);
+  assert.deepEqual(requests, [url + "?observe=1", url + "?observe=1"]);
+  document.hidden = false;
+  await tick();
+  assert.equal(navigations, 1);
+});
