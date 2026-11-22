@@ -337,14 +337,16 @@ class ChartIndex:
         details.extend(_observation_ages(row, now, launcher=bool(row["launched_as"])))
         evaluation = row["kind"] == "evaluation"
         experiment = escape(row["experiment"])
-        link = f"{experiment} experiment report" if evaluation else experiment
+        page = f"/experiments/{quote(row['experiment'])}"
         title = f"Evaluation · {escape(address)}" if evaluation else escape(address)
         heading = (
-            f'<a href="/experiments/{quote(row["experiment"])}">{link}</a>'
+            f'<a href="{page}">{experiment}</a>'
             f'<header class="head"><h1>{title}</h1></header>'
             f"<p>{_run_line(row, state, status)}</p>"
             f'<p class="context">{escape(" · ".join(details))}</p>'
         )
+        if evaluation:
+            heading += f'<p>Scores are in the <a href="{page}#report">{experiment} report</a>.</p>'
         if state == "no end recorded":
             heading += f"<p>No new file for at least {_SILENT // timedelta(minutes=1)} minutes.</p>"
         if self.error:
@@ -870,7 +872,7 @@ class Server(ThreadingHTTPServer):
             experiment,
             status,
             before='<a href="/">Experiments</a>',
-            after=f'<iframe title="Experiment report" src="/experiments/{quote(experiment)}/report" style="width:100%;height:80vh;border:0"></iframe>',
+            after=f'<iframe id="report" title="Experiment report" src="/experiments/{quote(experiment)}/report" style="width:100%;height:80vh;border:0"></iframe>',
         )
 
     def _report(self, experiment: str, refresh: bool) -> str:
