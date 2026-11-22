@@ -100,6 +100,11 @@ PID; stop that exact process before finishing). `train`, `launch` and `status RU
 print `view: …/runs/ADDRESS` only while it is up. A paced plain `train(config)`
 (sleep 0.2 s per update, 300 updates) gives time to watch a run page refresh in
 place; Playwright `page.wait_for_timeout` and rereading `body` shows the clock rise.
+Count each tab's full reloads with `page.on("load", …)`: a run tab reloads when a
+block seals and stops once the final block lands; `/`, experiment and Machines tabs
+update in place, so one load each while new work appears. A finished plain run trains
+again only with `etude train FILE --resume --until updates=N` (plain re-train refuses
+`run_name_taken`). Launching in a fresh lab needs `etude database upgrade --development` first.
 To see "no end recorded" without waiting 10 minutes, SIGKILL the train's process
 group and `touch -t` its run folder's files into the past. The QA home sits inside
 the lab, so the view must not count `home/sessions/…/src` copies as experiments.
