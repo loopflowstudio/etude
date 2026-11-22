@@ -22,6 +22,7 @@ __PAGE_CSS__
   <details id="runs-box"><summary>Runs</summary><div class="scroll"><table id="runs"></table></div></details>
   <details id="coverage-box"><summary>Evaluated checkpoints</summary><div class="scroll"><table id="coverage"></table></div></details>
   <details id="failures-box" open><summary>Failed matches</summary><div class="scroll"><table id="failures"></table></div></details>
+  <!--view-details-->
 </div>
 <script type="application/json" id="data">__DATA__</script>
 <script>__UPLOT_JS__</script>
@@ -520,8 +521,12 @@ const io = new IntersectionObserver(entries => { for (const en of entries) if (e
 ["evals", "perf", "ml"].forEach(id => io.observe(document.getElementById(id)));
 if (D.run_charts) {
   const position = T.runs[0]?.at || {};
-  const clock = (firstClock in position) ? firstClock : Object.keys(position)[0];
-  if (clock) document.getElementById("run-position").textContent = `${clock} ${num(position[clock])}`;
+  const progress = document.getElementById("run-position");
+  const clock = progress.dataset.clock || ((firstClock in position) ? firstClock : Object.keys(position)[0]);
+  if (clock in position) {
+    const target = progress.dataset.target;
+    progress.textContent = target ? `${clock} ${position[clock]} / ${target}` : `${clock} ${num(position[clock])}`;
+  }
   for (const selector of ["div.head", "#context", ".controls", "#evals", "[data-s=evals]", "#runs-box"]) {
     document.querySelector(selector).style.display = "none";
   }

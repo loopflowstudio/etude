@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import threading
+from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import UTC, datetime, timedelta
+from html import unescape
 from http.client import HTTPConnection
 from pathlib import Path
+from types import SimpleNamespace
 
 import boto3  # type: ignore[import-untyped]
 import pytest
@@ -15,15 +20,21 @@ from moto import mock_aws
 
 from etude.block_file import tail_key
 from etude.cli import main
+from etude.launch.records import GPU
 from etude.launch.source import home
 from etude.page import Page, Pages, build
 from etude.records import Clock, RunRecord
+from etude.spec import RunRequest
 from etude.storage import DirectoryStorage, S3Storage, Storage
 from etude.train.block import Builder
 from etude.train.tracking import write_block
 from etude.view import Server
 from etude.view_link import advertise, print_view
 from tests.experiments import experiment_file
+from tests.launch.fake import bench
+from tests.launch.test_scheduler import _reporting, job
+from tests.launch.test_source import git
+from tests.launch.test_source import repository as repository
 from tests.run.storage import CountedClient, MeasuredStorage
 from tests.test_page import REPORTED, trained
 from tests.train.tracking import open_run
@@ -265,6 +276,7 @@ def test_ingestion_reads_only_the_new_block_and_publishes_its_last_point(tmp_pat
         server.ingest()
         first = server.page("/runs/lab/base@0") or ""
         assert ">running<" in first and "last write" in first and _loss(first) == [7.0]
+        assert "Console was not recorded." in first
         before = measured.requests, measured.listings
         measured.got.clear()
         added = _seal(root, 1, 3.0)
@@ -380,3 +392,100 @@ def test_selected_server_status_prints_the_view_running_here(
         "lab/base@0  base  running",
         "view: http://localhost:1234/runs/lab/base@0",
     ]
+
+
+def test_run_page_serves_the_selected_launchers_retained_console_and_stored_details(
+    tmp_path: Path, repository: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, _ = repository
+    remote = tmp_path / "launcher"
+    backend = bench(remote)
+    spec = job(
+        name="base",
+        experiment="lab",
+        repo=str(repo),
+        until="steps=40",
+        config='{"queued":"config"}',
+        max_attempts=2,
+    )
+    (identity,) = backend.scheduler.queue(RunRequest(id="base@0", seed=0, job=spec), rent="l4")
+    source = MeasuredStorage(DirectoryStorage(tmp_path / "runs"))
+    (remote / "server-heartbeat").write_text((datetime.now(UTC) - timedelta(hours=2)).isoformat())
+    (home() / "server").write_text("fixture")
+    monkeypatch.delenv("ETUDE_SERVER_LOCAL", raising=False)
+    exchanges = 0
+    elapsed = 0
+    monkeypatch.setattr("etude.view.time", SimpleNamespace(monotonic=lambda: elapsed))
+
+    def exchange(
+        address: str, argv: Sequence[str], *, input: bytes, capture_output: bool
+    ) -> subprocess.CompletedProcess[bytes]:
+        nonlocal exchanges
+        exchanges += 1
+        return subprocess.run(
+            [sys.executable, "-m", "etude", *argv],
+            input=input,
+            capture_output=capture_output,
+            env={**os.environ, "ETUDE_HOME": str(remote), "ETUDE_SERVER_LOCAL": "1"},
+            check=True,
+        )
+
+    monkeypatch.setattr("etude.launch.server._ssh", exchange)
+    with Server(source, None, ("127.0.0.1", 0)) as server:
+        server.ingest()
+        route = "/runs/" + identity
+        queued = unescape(server.page(route) or "")
+        assert ">queued<" in queued and '{"queued":"config"}' in queued
+        assert "Target steps 40" in queued and "Waiting for retained console" in queued
+        backend.scheduler.tick()
+        _reporting(backend, log_bytes=100)
+        backend.run(1)
+        (attempt,) = backend.scheduler.attempts(identity)
+        backend.store.record_hardware(
+            backend.store.session(attempt.session),
+            GPU(id="NVIDIA L4", min_vcpus=6, min_memory_gb=48),
+        )
+        weights = tmp_path / "weights"
+        weights.write_bytes(b"saved")
+        with open_run(
+            experiment="lab",
+            run="base@0",
+            job="base",
+            seed=0,
+            clocks=["steps"],
+            config={"label": "<writer>"},
+            directory=tmp_path / "runs",
+        ) as writer:
+            writer.log({"loss": 7}, steps=12)
+            writer.checkpoint(weights, {"steps": 12})
+            server.ingest()
+            assert exchanges == 1
+            elapsed += 30
+            server.ingest()
+            reads = source.requests, source.listings
+            page = server.page(route) or ""
+            assert f"log of {attempt.id}" in page and "output not received" in page
+            assert (
+                "Last collected" in page
+                and "last loop 2 h ago" in page
+                and "launcher observed" in page
+            )
+            assert "&lt;writer&gt;" in page and "<writer>" not in page
+            assert "steps 12" in page and "<td>1</td>" in page
+            assert "steps-12" in page and 'data-target="40"' in page
+            assert git(repo, "rev-parse", "HEAD") in page and "on main" in page
+            assert (
+                attempt.machine in page
+                and "L4" in page
+                and "1 of 2 attempts used" in page
+                and "~$0." in page
+            )
+            assert (source.requests, source.listings, exchanges) == (*reads, 2)
+        backend.run(700)
+        elapsed += 30
+        server.ingest()
+        finished = server.page(route) or ""
+        assert ">finished<" in finished and "snapshot complete" in finished
+        assert "}, 5000);" not in finished and exchanges == 3
+    assert "local" in {pool.name for pool in backend.scheduler.pools()}
+    backend.store.close()

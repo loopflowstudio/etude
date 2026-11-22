@@ -33,13 +33,15 @@ from etude.errors import explain
 from etude.experiment import state_of
 from etude.identity import run_address
 from etude.jobs import EvalRunSummary, ExperimentState, TrainingRunSummary
-from etude.launch.client import standing
+from etude.launch.listing import describe_status
+from etude.launch.logs import render as render_logs
 from etude.launch.records import Standing
-from etude.launch.server import selected
-from etude.launch.source import home
+from etude.launch.server import LauncherObservation, PythonClient, selected
+from etude.launch.source import home, line
 from etude.page import Pages, read_report, render, render_run, report_sources, run_chart_data
 from etude.report import Report
 from etude.run import LocatedRun, as_storage, located_runs, owning_folder
+from etude.spec import number
 from etude.storage import ListedStorage, Storage
 from etude.train.read import RunData, read_located
 from etude.view_link import advertise
@@ -47,6 +49,26 @@ from etude.view_link import advertise
 _REFRESH = 5
 _REMOTE_STANDING = 30
 _SILENT = timedelta(minutes=10)
+
+# A changed schema starts a fresh rebuildable index.
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS runs (
+    address TEXT PRIMARY KEY, experiment TEXT NOT NULL, state TEXT NOT NULL,
+    last_write TEXT, launcher TEXT, launched_as TEXT, final_attempt INTEGER,
+    position TEXT NOT NULL, details TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS launcher_address ON runs(launched_as);
+CREATE INDEX IF NOT EXISTS experiment_runs ON runs(experiment, address);
+CREATE TABLE IF NOT EXISTS charts (
+    address TEXT PRIMARY KEY, inputs TEXT NOT NULL, payload TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS consoles (
+    run TEXT PRIMARY KEY, body TEXT NOT NULL, collected TEXT, final_attempt INTEGER
+);
+CREATE TABLE IF NOT EXISTS observation (
+    id INTEGER PRIMARY KEY, at TEXT NOT NULL, launcher_at TEXT, last_loop TEXT, server TEXT
+);
+"""
 
 
 @dataclass
@@ -61,29 +83,26 @@ class ChartIndex:
         # A view of edited report code and one using the default panels may
         # run side by side. Neither may serve the other's last generation.
         identity = "\0".join(
-            (source.uri("run.json"), str(path.resolve()) if path else "", version("etude-sdk"))
+            (
+                source.uri("run.json"),
+                str(path.resolve()) if path else "",
+                version("etude-sdk"),
+                _SCHEMA,
+            )
         )
         directory = home() / "views"
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.database = directory / (sha256(identity.encode()).hexdigest() + ".sqlite")
         with self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
-            db.executescript("""
-                CREATE TABLE IF NOT EXISTS runs (
-                    address TEXT PRIMARY KEY, experiment TEXT NOT NULL, state TEXT NOT NULL,
-                    last_write TEXT, launcher TEXT, launched_as TEXT
-                );
-                CREATE INDEX IF NOT EXISTS launcher_address ON runs(launched_as);
-                CREATE INDEX IF NOT EXISTS experiment_runs ON runs(experiment, address);
-                CREATE TABLE IF NOT EXISTS charts (
-                    address TEXT PRIMARY KEY, inputs TEXT NOT NULL, payload TEXT NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS observation (id INTEGER PRIMARY KEY, at TEXT NOT NULL, launcher_at TEXT);
-            """)
+            db.executescript(_SCHEMA)
         self._cache = Cache()
         self._files: dict[str, _RunFiles] = {}
         self._reports: dict[Path | None, tuple[tuple[tuple[str, int, int], ...], Report]] = {}
-        self._standing: tuple[Standing, ...] = ()
+        self._launcher = LauncherObservation()
+        self._wanted: set[str] = set()
+        self._console_lock = threading.Lock()
+        self._server: str | None = None
         self._launcher_at: datetime | None = None
         self._next_standing = 0.0
         self._launcher_error: str | None = None
@@ -99,13 +118,21 @@ class ChartIndex:
         if time.monotonic() >= self._next_standing:
             remote = selected()
             try:
-                self._standing = standing()
+                with self._console_lock:
+                    wanted, self._wanted = self._wanted, set()
+                consoles = tuple(sorted(wanted))
+                self._launcher = (
+                    PythonClient(remote).observation(consoles)
+                    if remote
+                    else LauncherObservation.read(consoles)
+                )
+                self._server = remote
                 self._launcher_at = datetime.now(UTC)
                 self._launcher_error = None
             except Exception as error:
                 self._launcher_error = explain(error)
             self._next_standing = time.monotonic() + (_REMOTE_STANDING if remote else 0)
-        return self._standing
+        return self._launcher.runs
 
     def _read_run(self, storage: ListedStorage, members: list[str], run: LocatedRun) -> _RunFiles:
         # Compare listed versions, including removals and replacement at one
@@ -138,6 +165,9 @@ class ChartIndex:
                 return
             with self._connect() as db:
                 self._ingest(db, files)
+            # A selected server is polled less often than storage. Its large console
+            # snapshots have been published and can be released between polls.
+            self._launcher = self._launcher.model_copy(update={"consoles": {}})
 
     def _ingest(self, db: sqlite3.Connection, files: dict[str, Path]) -> None:
         observed = datetime.now(UTC)
@@ -210,42 +240,69 @@ class ChartIndex:
         db.executemany(
             "DELETE FROM charts WHERE address=?", ((a,) for a in indexed.keys() - present)
         )
-        self._publish_states(db, states, by_experiment)
+        launched = {item.record.id: item for item in self._launcher.runs}
+        self._publish_states(db, states, by_experiment, launched)
+        # An address on a different selected server can belong to a different run.
+        if db.execute(
+            "SELECT 1 FROM observation WHERE id=1 AND server IS NOT ?", (self._server,)
+        ).fetchone():
+            db.execute("DELETE FROM consoles")
+        for run, snapshot in self._launcher.consoles.items():
+            collected = max(
+                (s.observed_at for s in snapshot.streams if s.observed_at), default=None
+            )
+            db.execute(
+                "INSERT OR REPLACE INTO consoles(run,body,collected,final_attempt) VALUES(?,?,?,?)",
+                (
+                    run,
+                    render_logs(snapshot),
+                    collected.isoformat() if collected else None,
+                    launched[run].status.attempts if snapshot.settled else None,
+                ),
+            )
         db.execute(
-            "INSERT OR REPLACE INTO observation(id,at,launcher_at) VALUES(1,?,?)",
-            (observed.isoformat(), self._launcher_at.isoformat() if self._launcher_at else None),
+            "DELETE FROM consoles WHERE NOT EXISTS (SELECT 1 FROM runs WHERE launched_as=consoles.run)"
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO observation(id,at,launcher_at,last_loop,server) VALUES(1,?,?,?,?)",
+            (
+                observed.isoformat(),
+                self._launcher_at.isoformat() if self._launcher_at else None,
+                self._launcher.last_loop.isoformat() if self._launcher.last_loop else None,
+                self._server,
+            ),
         )
         self._files = current
         self.error = self._launcher_error
 
     @staticmethod
     def _publish_states(
-        db: sqlite3.Connection, states: list[ExperimentState], data: dict[str, list[RunData]]
+        db: sqlite3.Connection,
+        states: list[ExperimentState],
+        data: dict[str, list[RunData]],
+        launched: dict[str, Standing],
     ) -> None:
         removed = {row[0] for row in db.execute("SELECT address FROM runs")}
         for state in states:
-            addresses = {
-                r.name: run_address(r.file.id, state.experiment)
-                for r in data[state.experiment]
-                if r.file
-            }
+            files = {r.name: r for r in data[state.experiment]}
             runs: tuple[TrainingRunSummary | EvalRunSummary, ...] = (*state.runs, *state.eval_runs)
             for run in runs:
                 status = run.status
-                address = addresses.get(run.name) or (
-                    status.run if status else run_address(run.name, state.experiment)
-                )
-                detail = None if status is None else str(status)
-                if status and status.machine:
-                    detail = f"{detail} · {status.machine}"
+                item = launched[status.run] if status else None
+                stored = files.get(run.name)
+                address = status.run if status else run_address(run.name, state.experiment)
+                if stored and stored.file:
+                    address = run_address(stored.file.id, state.experiment)
+                detail = describe_status(item.status, item.record) if item else None
                 removed.discard(address)
                 db.execute(
                     """
-                    INSERT INTO runs(address,experiment,state,last_write,launcher,launched_as) VALUES (?,?,?,?,?,?)
+                    INSERT INTO runs(address,experiment,state,last_write,launcher,launched_as,final_attempt,position,details) VALUES (?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(address) DO UPDATE SET experiment=excluded.experiment,
-                      state=excluded.state,last_write=excluded.last_write,launcher=excluded.launcher,launched_as=excluded.launched_as
-                    WHERE (experiment,state,last_write,launcher,launched_as) IS NOT
-                          (excluded.experiment,excluded.state,excluded.last_write,excluded.launcher,excluded.launched_as)
+                      state=excluded.state,last_write=excluded.last_write,launcher=excluded.launcher,launched_as=excluded.launched_as,
+                      final_attempt=excluded.final_attempt,position=excluded.position,details=excluded.details
+                    WHERE (experiment,state,last_write,launcher,launched_as,final_attempt,position,details) IS NOT
+                          (excluded.experiment,excluded.state,excluded.last_write,excluded.launcher,excluded.launched_as,excluded.final_attempt,excluded.position,excluded.details)
                     """,
                     (
                         address,
@@ -254,6 +311,9 @@ class ChartIndex:
                         run.last_write.isoformat() if run.last_write else None,
                         detail,
                         status.run if status else None,
+                        status.attempts if status and status.done else None,
+                        _position(item),
+                        _run_details(stored, item),
                     ),
                 )
         db.executemany("DELETE FROM runs WHERE address=?", ((a,) for a in removed))
@@ -262,7 +322,9 @@ class ChartIndex:
         with self._connect() as db:
             row = db.execute(
                 """
-                SELECT runs.*, charts.payload, observation.at, observation.launcher_at FROM runs
+                SELECT runs.*, charts.payload, observation.at, observation.launcher_at, observation.last_loop,
+                       consoles.body, consoles.collected, consoles.final_attempt AS console_attempt FROM runs
+                LEFT JOIN consoles ON consoles.run=runs.launched_as
                 LEFT JOIN charts USING(address) JOIN observation ON observation.id=1
                 WHERE runs.address=? OR runs.launched_as=?
                 """,
@@ -287,6 +349,14 @@ class ChartIndex:
                 f"indexed {_age(datetime.fromisoformat(row['at']), now)}",
             ]
         )
+        if row["launched_as"]:
+            with self._console_lock:
+                self._wanted.add(row["launched_as"])
+            heartbeat = row["last_loop"]
+            details.append(
+                "last loop "
+                + (_age(datetime.fromisoformat(heartbeat), now) if heartbeat else "unknown")
+            )
         if row["launcher"] and row["launcher_at"]:
             details.append(
                 f"launcher observed {_age(datetime.fromisoformat(row['launcher_at']), now)}"
@@ -295,17 +365,36 @@ class ChartIndex:
             f'<a href="/experiments/{quote(row["experiment"])}">{escape(row["experiment"])}</a>'
             f'<header class="head"><h1>{escape(address)}</h1><span class="pill">{escape(state)}</span></header>'
             f'<p class="context">{escape(" · ".join(details))}</p>'
-            '<p id="run-position"></p>'
+            f"{row['position']}"
         )
         if state == "no end recorded":
             heading += f"<p>No new file for at least {_SILENT // timedelta(minutes=1)} minutes.</p>"
         if self.error:
             heading += f'<p role="status">{escape(self.error)}</p>'
-        if state in ("queued", "running") or self.error:
+        # Session shutdown can still retain final logs after the run itself ended.
+        awaiting_console = row["launched_as"] and (
+            row["final_attempt"] is None or row["console_attempt"] != row["final_attempt"]
+        )
+        if state in ("queued", "running") or awaiting_console or self.error:
             heading += _reload()
+        console = (
+            "<p>Launcher observation unavailable.</p>"
+            if self._launcher_error and self._launcher_at is None
+            else "<p>Console was not recorded.</p>"
+        )
+        if row["launched_as"]:
+            console = "<p>Waiting for retained console.</p>"
+            if row["body"] is not None:
+                console = f'<pre class="console" tabindex="0" aria-label="Retained console">{escape(row["body"])}</pre>'
+                if row["collected"]:
+                    console = (
+                        f"<p>Last collected {_age(datetime.fromisoformat(row['collected']), now)}</p>"
+                        + console
+                    )
+        below = f'<section class="sec"><h2>Console</h2>{console}</section>' + row["details"]
         if row["payload"] is None:
-            return _document(address, heading + "<p>No metric curves recorded.</p>")
-        return render_run(address, row["payload"], heading)
+            return _document(address, heading + "<p>No metric curves recorded.</p>" + below)
+        return render_run(address, row["payload"], heading, below)
 
     def experiments(self) -> list[str]:
         with self._connect() as db:
@@ -322,6 +411,51 @@ class ChartIndex:
                     "SELECT address FROM runs WHERE experiment=? ORDER BY address", (experiment,)
                 )
             ]
+
+
+def _position(item: Standing | None) -> str:
+    if item is None or (target := item.status.until) is None:
+        return '<p id="run-position"></p>'
+    value = number(target.value)
+    at = item.status.clocks.get(target.clock)
+    position = (
+        f"Target {target.clock} {value}" if at is None else f"{target.clock} {number(at)} / {value}"
+    )
+    return f'<p id="run-position" data-clock="{escape(target.clock)}" data-target="{value}">{position}</p>'
+
+
+def _run_details(stored: RunData | None, item: Standing | None) -> str:
+    config = stored.file.config_json if stored and stored.file else None
+    source = ""
+    if item:
+        record = item.record
+        if config is None:
+            config = record.config_json
+        job = record.launch.spec
+        if job.repo and job.revision:
+            provenance = line(record.launch.source, job.revision)
+            source = f"<p>Source {escape(provenance)}</p>"
+            if record.launch.source:
+                source += f"<p>Commit <code>{escape(job.revision)}</code></p>"
+    shown = (
+        f'<pre class="scroll">{escape(config)}</pre>'
+        if config is not None
+        else "<p>No config recorded.</p>"
+    )
+    rows = []
+    for checkpoint in stored.checkpoints if stored else ():
+        clocks = ", ".join(f"{k} {number(v)}" for k, v in checkpoint.at.items())
+        rows.append(
+            f"<tr><td>{checkpoint.ordinal}</td><td>{escape(checkpoint.name)}</td><td>{escape(clocks)}</td></tr>"
+        )
+    checkpoints = (
+        '<div class="scroll"><table><thead><tr><th>Ordinal</th><th>Checkpoint</th><th>Clock position</th></tr></thead><tbody>'
+        + "".join(rows)
+        + "</tbody></table></div>"
+        if rows
+        else "<p>No checkpoints recorded.</p>"
+    )
+    return f'<section class="sec"><h2>Config</h2>{shown}{source}</section><section class="sec"><h2>Checkpoints</h2>{checkpoints}</section>'
 
 
 def _age(at: datetime | None, now: datetime) -> str:

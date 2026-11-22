@@ -162,8 +162,12 @@ experiment's `report()` `ml` and `perf` panels for that run, then every other
 logged metric in first-logged order; nothing is rearranged in the browser, so
 everyone on the same link sees the same page. Below the curves are the retained
 launcher console (with its age and any gaps; plain `etude train` runs note that
-no console was recorded), the stored config and source commit, and saved
-checkpoints.
+no console was recorded), the stored config and source commit, and each saved
+checkpoint with its clock positions. Opening a run requests its console for the
+next launcher observation. The console shows what `etude logs --run` retained,
+including output collected while the job was running. `Last collected` dates the
+most recently collected stream. `Last loop` dates the scheduler's heartbeat and
+`launcher observed` dates the view's last successful read.
 
 An experiment stays open while the launcher holds an unfinished run of it, or
 while a run with no launcher record and no recorded end wrote within the last

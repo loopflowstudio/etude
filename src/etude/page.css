@@ -109,6 +109,7 @@ table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
 th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
 th { color: var(--ink-2); font-weight: 500; } td.n { text-align: right; }
 .scroll { overflow-x: auto; }
+pre.console { max-height: 28rem; overflow: auto; }
 details { margin-top: 18px; } details summary { cursor: pointer; color: var(--ink-2); }
 .chart-empty { padding: 40px 0; text-align: center; }
 .uplot { font-family: inherit; } .u-select { background: color-mix(in srgb, var(--ink) 8%, transparent); }

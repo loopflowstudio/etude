@@ -618,7 +618,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             from etude.launch import server
 
             if argv == ["--server-request"]:
-                return server.receive(launch_cli.default())
+                return server.receive(launch_cli.default)
             # The server command chooses the server, so `set` and `unset` run here.
             local = argv[:2] in (["server", "set"], ["server", "unset"])
             if not local and (address := server.selected()):

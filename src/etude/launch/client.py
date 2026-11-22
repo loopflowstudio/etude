@@ -26,7 +26,7 @@ from pathlib import Path
 
 from etude.errors import LauncherError
 from etude.launch.aws import Keys
-from etude.launch.database import launcher_file, open_home
+from etude.launch.database import open_home
 from etude.launch.executor import Execution, Executor, local
 from etude.launch.provisioner.machines import Machines, OwnedMachine, Safeguards
 from etude.launch.provisioner.providers.ec2.api import EC2API, location
@@ -51,7 +51,7 @@ from etude.launch.records import (
     Storage,
 )
 from etude.launch.scheduler.loop import Scheduler
-from etude.launch.server import PythonClient, selected
+from etude.launch.server import PythonClient, retained_scheduler, selected
 from etude.launch.source import home
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
 from etude.launch.storage.bucket import BucketJournal
@@ -272,10 +272,5 @@ def standing(
     address = None if local else selected()
     if address:
         return PythonClient(address).standing(experiment, job=job)
-    if not launcher_file(home()).exists():
-        return ()
-    store = open_home(home())
-    try:
-        return Scheduler(store, {}).standing(experiment, job=job)
-    finally:
-        store.close()
+    with retained_scheduler() as reader:
+        return reader.standing(experiment, job=job) if reader is not None else ()

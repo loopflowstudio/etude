@@ -5,21 +5,26 @@ from collections.abc import Sequence
 from decimal import Decimal
 
 from etude.identity import run_address
-from etude.launch.records import Availability, Machine, Quote
+from etude.launch.records import Availability, Machine, Quote, Status
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.server import PythonClient, selected
 from etude.launch.source import line
+from etude.records import RunRecord
+
+
+def describe_status(status: Status, record: RunRecord) -> str:
+    where = f", machine {status.machine}" if status.machine else ""
+    where += f" ({status.hardware})" if status.hardware else ""
+    if status.attempts:
+        where += f", {status.attempts} of {record.launch.spec.max_attempts} attempts used"
+    return str(status) + where
 
 
 def show_runs(scheduler: Scheduler | PythonClient, ids: Sequence[str]) -> None:
     for run in ids:
         status = scheduler.read(run)
-        where = f", machine {status.machine}" if status.machine else ""
-        where += f" ({status.hardware})" if status.hardware else ""
         record = scheduler.record(run)
-        if status.attempts:
-            where += f", {status.attempts} of {record.launch.spec.max_attempts} attempts used"
-        print(run, record.name, str(status) + where, sep="  ")
+        print(run, record.name, describe_status(status, record), sep="  ")
         if record.launch.spec.repo is not None:
             print("  source: " + line(record.launch.source, record.launch.spec.revision or "HEAD"))
         if record.launch.smoke.outcome != "not_smoked":

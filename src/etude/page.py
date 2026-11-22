@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 import runpy
 import sys
 import threading
@@ -556,9 +557,9 @@ def run_chart_data(storage: Storage, data: RunData, report: Report) -> str:
     return _payload(page.model_dump(mode="json") | {"run_charts": True}, None)
 
 
-def render_run(address: str, charts: str, heading: str) -> str:
+def render_run(address: str, charts: str, heading: str, details: str) -> str:
     """Show already-indexed chart data alongside the current run status."""
-    return _inline("page.html", address, charts, heading)
+    return _inline("page.html", address, charts, heading, details)
 
 
 def _assemble(
@@ -1667,23 +1668,22 @@ def _payload(data: dict[str, object], refresh: float | None) -> str:
     return json.dumps(data | stamp, allow_nan=False).replace("<", "\\u003c")
 
 
-def _inline(template: str, title: str, payload: str, heading: str = "") -> str:
+def _inline(template: str, title: str, payload: str, heading: str = "", details: str = "") -> str:
     here = Path(__file__).parent
-    # Each placeholder is replaced once, the data last, so its text is never taken for one.
-    html = (here / template).read_text()
-    for name, text in (
-        ("__UPLOT_CSS__", (here / "vendor/uPlot.min.css").read_text()),
-        ("__PAGE_CSS__", (here / "page.css").read_text()),
-        ("__UPLOT_JS__", (here / "vendor/uPlot.iife.min.js").read_text()),
-        ("__CHARTS_JS__", (here / "charts.js").read_text()),
-        ("__TITLE__", escape(title)),
-        ("__DATA__", payload),
-    ):
-        before, found, after = html.partition(name)
-        if not found:
-            raise AssertionError(f"{template} has no {name}")
-        html = before + text + after
-    return html.replace("<!--view-heading-->", heading, 1)
+    # Substitute in the template once; run data and console text can contain any marker.
+    fields = {
+        "__UPLOT_CSS__": (here / "vendor/uPlot.min.css").read_text(),
+        "__PAGE_CSS__": (here / "page.css").read_text(),
+        "__UPLOT_JS__": (here / "vendor/uPlot.iife.min.js").read_text(),
+        "__CHARTS_JS__": (here / "charts.js").read_text(),
+        "__TITLE__": escape(title),
+        "__DATA__": payload,
+        "<!--view-heading-->": heading,
+        "<!--view-details-->": details,
+    }
+    return re.sub(
+        "|".join(map(re.escape, fields)), lambda m: fields[m[0]], (here / template).read_text()
+    )
 
 
 def target(storage: Storage, experiment: str, out: Path | None = None) -> Path:
