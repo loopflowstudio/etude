@@ -340,6 +340,9 @@ _MACHINES = """SELECT m.name, m.pool, m.ondemand, m.kind, m.cost_usd, m.expires_
 _SESSIONS = """SELECT w.*, COALESCE(m.pool, m.ondemand) AS supply
     FROM sessions w JOIN machines m ON m.name = w.machine"""
 _RENTALS = "SELECT r.* FROM rentals r"
+_OPEN_SESSION_MACHINES = (
+    "SELECT machine FROM sessions WHERE ended_at IS NULL AND refused_at IS NULL"
+)
 
 
 def _machine_from_row(row: sqlite3.Row) -> Machine:
@@ -845,9 +848,9 @@ class Database:
             filters.append("(m.pool = ? OR m.ondemand = ?)")
             params = (supply, supply)
         if held_only:
-            filters.append("""m.deleted_at IS NULL AND m.name IN (
+            filters.append(f"""m.deleted_at IS NULL AND m.name IN (
                 SELECT name FROM machines WHERE pool IS NOT NULL UNION ALL
-                SELECT machine FROM sessions WHERE ended_at IS NULL AND refused_at IS NULL
+                {_OPEN_SESSION_MACHINES}
             )""")
         where = " WHERE " + " AND ".join(filters) if filters else ""
         rows = self._db.execute(f"{_MACHINES}{where} ORDER BY m.rowid", params)
@@ -1117,11 +1120,7 @@ class Database:
 
     def rental_for(self, session: Session) -> Rental | None:
         """Paid window, if this working session runs on a rented machine."""
-        return self.rental(session.machine)
-
-    def rental(self, machine: str) -> Rental | None:
-        """A machine owns at most one paid window."""
-        row = self._db.execute(f"{_RENTALS} WHERE r.machine=?", (machine,)).fetchone()
+        row = self._db.execute(f"{_RENTALS} WHERE r.machine=?", (session.machine,)).fetchone()
         return None if row is None else Rental.model_validate(dict(row))
 
     def rented_session(self, machine: str) -> Session:
@@ -1133,8 +1132,9 @@ class Database:
             raise LauncherError(f"machine {machine!r} has no rental")
         return _session_from_row(row)
 
-    def rentals(self) -> tuple[Rental, ...]:
-        return tuple(Rental.model_validate(dict(row)) for row in self._db.execute(_RENTALS))
+    def rentals(self, *, held_only: bool = False) -> tuple[Rental, ...]:
+        where = f" WHERE r.machine IN ({_OPEN_SESSION_MACHINES})" if held_only else ""
+        return tuple(Rental.model_validate(dict(row)) for row in self._db.execute(_RENTALS + where))
 
     def allocated_runs(self) -> dict[str, list[str]]:
         """Only unfinished attempts occupy a slot, even when a run awaits another try."""

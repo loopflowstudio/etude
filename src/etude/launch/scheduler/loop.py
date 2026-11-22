@@ -425,21 +425,20 @@ class Scheduler:
     def machine_statuses(self, *, ended: bool = False) -> tuple[MachineStatus, ...]:
         """Machines in CLI order, with their current allocations. All reads are local."""
         with self._store.reading():
-            return self._machine_statuses(ended)
-
-    def _machine_statuses(self, ended: bool) -> tuple[MachineStatus, ...]:
-        now = self._clock()
+            now = self._clock()
+            supplies: tuple[Supply, ...] = (*self.pools(), *self.ondemands())
+            machines = self._store.machines(held_only=not ended)
+            windows = {r.machine: r for r in self._store.rentals(held_only=not ended)}
+            allocated = self._store.allocated_runs()
         by_supply: dict[str, list[Machine]] = {}
-        for machine in self._store.machines(held_only=not ended):
+        for machine in machines:
             by_supply.setdefault(machine.supply, []).append(machine)
-        allocated = self._store.allocated_runs()
         statuses = []
-        supplies: tuple[Supply, ...] = (*self.pools(), *self.ondemands())
         for supply in supplies:
             for machine in by_supply.get(supply.name, []):
                 cost = None
                 if machine.kind == "rented" and machine.refused_at is None:
-                    rental = self._store.rental(machine.name)
+                    rental = windows.get(machine.name)
                     if rental is None:
                         continue
                     cost = price_rental(rental, machine, now)

@@ -75,7 +75,8 @@ import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from html import escape
 from importlib.util import cache_from_source
@@ -358,12 +359,12 @@ class Pages:
     reflects them.
     """
 
-    def __init__(self, source: Storage | Path | str, *, known: Collection[Path] = ()) -> None:
+    def __init__(self, source: Storage | Path | str) -> None:
         self.storage = as_storage(source)
         here = DirectoryStorage(default_root())
         self._places = list({each.name: each for each in (self.storage, here)}.values())
-        self._built: dict[tuple[Path | None, str], tuple[_Inputs, Page]] = {}
-        self._known = set(known)
+        self._built: dict[tuple[Path | None, str], _BuiltPage] = {}
+        self._known: set[Path] = set()
         # Each folder's experiment by place and prefix, with its declaration's version.
         self._declared: dict[tuple[str, str], tuple[str, str | None]] = {}
 
@@ -371,17 +372,13 @@ class Pages:
         """`build`'s page, kept from the last call while its inputs are the same."""
         return self._build(file, self._listings(), experiment)
 
-    def find_files(self, directory: Path) -> list[Path]:
-        """Discover experiments, retaining known files through incomplete edits."""
-        found = experiment_files(directory, known=self._known)
-        self._known.update(found)
-        return found
-
     def build_each(self, directory: Path) -> dict[Path, Page | str]:
         """Each experiment file's page, or why it could not be built, so one never hides the rest."""
         listings = self._listings()
         built: dict[Path, Page | str] = {}
-        for file in self.find_files(directory):
+        files = experiment_files(directory, known=self._known)
+        self._known.update(files)
+        for file in files:
             try:
                 built[file] = self._build(file, listings)
             except Exception as error:
@@ -397,19 +394,17 @@ class Pages:
     ) -> Page:
         name = _experiment_name(file, experiment)
         key = (file, name)
-        if file is not None and not file.is_file():
-            # The build says why there is no page.
-            return build(self.storage, file, experiment=name)
         runs = tuple(
             self._versions(place, name, listed)
             for place, listed in zip(self._places, listings, strict=True)
         )
         kept = self._built.get(key)
-        if kept is not None and kept[0] == _Inputs(files=report_sources(file), runs=runs):
-            return kept[1]
-        page = build(self.storage, file, experiment=name)
-        # After the build, so the neighbours this run imported are among its inputs.
-        self._built[key] = (_Inputs(files=report_sources(file), runs=runs), page)
+        sources = _source_versions(file, kept.sources if kept else ())
+        if kept is not None and kept.sources == sources and kept.runs == runs:
+            return kept.page
+        loaded = _ReportFile(file, sources)
+        page = _build_page(self.storage, name, loaded)
+        self._built[key] = _BuiltPage(page, loaded.sources, runs)
         return page
 
     def _versions(
@@ -436,11 +431,11 @@ class Pages:
 
 
 @dataclass(frozen=True)
-class _Inputs:
-    """What a page is built from, as `Pages` compares it."""
+class _BuiltPage:
+    """One successful report and the source files and run objects that went into it."""
 
-    # The experiment file and its imported neighbours: (path, modification time in ns, bytes).
-    files: SourceVersions
+    page: Page
+    sources: SourceVersions
     # Per place: (key, version) of each object in the experiment's runs' folders.
     runs: tuple[tuple[tuple[str, str], ...], ...]
 
@@ -508,11 +503,12 @@ def build(
     holds no run of this one, and `EtudeError` for a file that is not an
     experiment's.
     """
-    storage = as_storage(source)
-    experiment = _experiment_name(file, experiment)
-    with _author_imports:
-        names = _run_file(file) if file else {}
-        report, origin, notes = _report(names.get("report"), file)
+    name = _experiment_name(file, experiment)
+    return _build_page(as_storage(source), name, _ReportFile(file))
+
+
+def _build_page(storage: Storage, experiment: str, loaded: _ReportFile) -> Page:
+    report = loaded.report
     listing = RunListing.read(storage)
     data = read_all(
         storage,
@@ -529,15 +525,9 @@ def build(
             + (f"; it holds {', '.join(held)}" if held else "; it holds no runs")
         )
     trained = [run for run in data if run.file is None or run.file.kind != "evaluation"]
-    found = names.get("eval_jobs")
-    want: Callable[..., object] | None = None
-    if found is not None:
-        if not callable(found):
-            raise EtudeError("experiment_eval_is_not_a_function", 422) from ValueError(file)
-        want = found
     evals = (
-        _read_evals(storage, experiment, report, want, data, listing)
-        if want is not None or len(trained) < len(data)
+        _read_evals(storage, experiment, loaded, data, listing)
+        if loaded.eval_jobs is not None or len(trained) < len(data)
         else _Evals()
     )
     # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
@@ -545,7 +535,16 @@ def build(
     partial = (
         (f"Partial results: no recorded end yet for {', '.join(unended)}.",) if unended else ()
     )
-    return _assemble(experiment, file, storage, report, origin, (*notes, *partial), trained, evals)
+    return _assemble(
+        experiment,
+        loaded.path,
+        storage,
+        report,
+        loaded.origin,
+        (*loaded.notes, *partial),
+        trained,
+        evals,
+    )
 
 
 def _flames(report: Report) -> tuple[str, ...]:
@@ -563,18 +562,45 @@ class ReportDeclaration(Record):
         )
 
 
+class _ReportFile:
+    """The authored declarations for this build and the sources they used."""
+
+    def __init__(self, path: Path | None, before: SourceVersions | None = None) -> None:
+        self.path = path
+        self._before = before
+        self.sources: SourceVersions = ()
+        with self._imports():
+            names = _run_file(path) if path else {}
+            self.report, self.origin, self.notes = _report(names.get("report"), path)
+            self.eval_jobs = names.get("eval_jobs")
+
+    @contextmanager
+    def _imports(self) -> Iterator[None]:
+        # Capture imports when each authored call returns. Another experiment
+        # can replace them while this page reads runs or builds its tables.
+        with _author_imports:
+            yield
+            if self.path and self._before is not None:
+                paths = {self.path.resolve(), *_neighbours(self.path).values()}
+                paths.update(Path(p) for p, _, _ in self.sources)
+                self.sources = _versions(paths, observed=(*self._before, *self.sources))
+
+    def tournaments(self, state: ExperimentState) -> list[Tournament]:
+        if self.eval_jobs is None:
+            return []
+        if not callable(self.eval_jobs):
+            raise EtudeError("experiment_eval_is_not_a_function", 422) from ValueError(self.path)
+        with self._imports():
+            return _wanted(self.eval_jobs, state)
+
+
 def read_report(file: Path, accepted: ReportDeclaration | None) -> ReportDeclaration:
-    """Reuse panels until one of their sources changes. Only report readers take the author lock."""
-    if accepted and report_sources(file, known=accepted.sources) == accepted.sources:
+    """Reuse accepted panels until one of their sources changes."""
+    sources = _source_versions(file, accepted.sources if accepted else ())
+    if accepted and sources == accepted.sources:
         return accepted
-    with _author_imports:
-        before = report_sources(file, known=accepted.sources if accepted else None)
-        report = _report(_run_file(file).get("report"), file)[0]
-        # Preserve the earlier version of a source edited while report() ran.
-        # Newly imported neighbours first become visible after the read.
-        known = {source[0]: source for source in before}
-        sources = tuple(known.get(source[0], source) for source in report_sources(file))
-        return ReportDeclaration(report=report, sources=sources)
+    loaded = _ReportFile(file, sources)
+    return ReportDeclaration(report=loaded.report, sources=loaded.sources)
 
 
 def run_chart_data(storage: Storage, data: RunData, report: Report) -> str:
@@ -691,8 +717,8 @@ def _neighbours(file: Path) -> dict[str, Path]:
 
     A repository's shared report modules sit beside its experiments' folder, not
     below it, so an edited one is reread too. Etude's own modules are never
-    included: the page's records must stay the classes it checks against, even
-    when experiments sit in an Etude checkout.
+    included: their records must keep their identity. The process entry point
+    also stays loaded when its file lies inside an Etude checkout.
     """
     folder = str(_repository(file)) + "/"
     installed = tuple(
@@ -707,7 +733,7 @@ def _neighbours(file: Path) -> dict[str, Path]:
         resolved = str(Path(source).resolve())
         if not resolved.startswith(folder) or resolved.startswith(installed):
             continue
-        if name == "etude" or name.startswith("etude."):
+        if name in ("__main__", "etude") or name.startswith("etude."):
             continue
         parts = Path(resolved[len(folder) :]).parts[:-1]
         if not any(p.startswith(".") or p in ("site-packages", "__pycache__") for p in parts):
@@ -724,13 +750,18 @@ def _repository(file: Path) -> Path:
     return folder
 
 
-def report_sources(file: Path | None, *, known: SourceVersions | None = None) -> SourceVersions:
-    """What a kept page's files are compared by; a deleted neighbour reads as absent."""
-    if file is None:
-        return ()
+def _source_versions(file: Path | None, known: SourceVersions) -> SourceVersions:
+    paths = {file.resolve(), *(Path(p) for p, _, _ in known)} if file else set()
+    return _versions(paths)
+
+
+def _versions(paths: set[Path], *, observed: SourceVersions = ()) -> SourceVersions:
+    kept = {Path(entry[0]): entry for entry in observed}
     found = []
-    neighbours = _neighbours(file).values() if known is None else (Path(p) for p, _, _ in known)
-    for path in sorted({file.resolve(), *neighbours}):
+    for path in sorted(paths):
+        if path in kept:
+            found.append(kept[path])
+            continue
         try:
             stat = path.stat()
         except FileNotFoundError:
@@ -779,8 +810,7 @@ class _Evals:
 def _read_evals(
     storage: Storage,
     experiment: str,
-    report: Report,
-    want: Callable[..., object] | None,
+    loaded: _ReportFile,
     data: Sequence[RunData],
     listing: RunListing,
 ) -> _Evals:
@@ -790,7 +820,10 @@ def _read_evals(
     from etude.experiment import state_of  # noqa: PLC0415
 
     state = state_of(data, experiment)
-    held, refused = _held_tournaments(want, state, storage, experiment, listing)
+    report = loaded.report
+    held, refused = _held_tournaments(
+        loaded.tournaments(state), state, storage, experiment, listing
+    )
     db = statsdb(experiment, storage)
     try:
         saved = _saved_checkpoints(db)
@@ -835,7 +868,7 @@ class _HeldTournament:
 
 
 def _held_tournaments(
-    want: Callable[..., object] | None,
+    tournaments: Sequence[Tournament],
     state: ExperimentState,
     storage: Storage,
     experiment: str,
@@ -856,9 +889,8 @@ def _held_tournaments(
     from etude.experiment import read_tournament_lines  # noqa: PLC0415 - optional eval dependency
 
     wanted: dict[str, Tournament] = {}
-    if want is not None:
-        for tournament in _wanted(want, state):
-            wanted.setdefault(tournament.definition.name, tournament)
+    for tournament in tournaments:
+        wanted.setdefault(tournament.definition.name, tournament)
     refused: list[str] = []
     # Read once for every tournament drawn: a page plays nothing, so nothing changes meanwhile.
     runs = stored_runs(experiment, storages=[storage], listing=listing)

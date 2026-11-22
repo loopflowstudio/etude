@@ -1,9 +1,9 @@
 """Live run and experiment pages. One ingestion loop publishes the chart index for all readers.
 
 Report declarations and selected-server observations arrive independently. The index
-keeps their last accepted values. state_of joins launcher standing to fresh files. Publication is one SQLite transaction
-in WAL mode. Readers keep the last committed generation through a slow or
-interrupted ingestion. Reports build on demand in separate request threads.
+keeps their last accepted values. Each WAL transaction publishes fresh run files
+joined to launcher standing by state_of. Readers see the last complete generation
+during ingestion. Reports build on demand in separate request threads.
 """
 
 from __future__ import annotations
@@ -46,6 +46,7 @@ from etude.page import (
     DEFAULT_REPORT,
     Pages,
     ReportDeclaration,
+    experiment_files,
     read_report,
     render,
     render_run,
@@ -177,16 +178,27 @@ class ChartIndex:
             with self._console_lock:
                 self._wanted.clear()
                 self._server = remote
-        if self._remote_read is None:
-            if remote and time.monotonic() < self._next_standing:
+        if remote and self._remote_read is None and time.monotonic() < self._next_standing:
+            return None
+        try:
+            if self._remote_read is None:
+                with self._console_lock:
+                    consoles = tuple(sorted(self._wanted))
+                    self._wanted.clear()
+                if remote is None:
+                    self._launcher_error = None
+                    return _LauncherRead.read(None, consoles)
+                self._remote_read = self._ssh.submit(_LauncherRead.read, remote, consoles)
+            if not self._remote_read.done():
                 return None
-            with self._console_lock:
-                consoles = tuple(sorted(self._wanted))
-                self._wanted.clear()
-            if remote is None:
-                return _LauncherRead.read(None, consoles)
-            self._remote_read = self._ssh.submit(_LauncherRead.read, remote, consoles)
-        return self._remote_read.result() if self._remote_read.done() else None
+            answer = self._remote_read.result()
+        except Exception as error:
+            self._launcher_error = explain(error)
+            self._remote_read = None
+            self._next_standing = time.monotonic() + _REMOTE_STANDING
+            return None
+        self._launcher_error = None
+        return answer
 
     def _read_run(self, storage: ListedStorage, members: list[str], run: LocatedRun) -> _RunFiles:
         # Compare listed versions, including removals and replacement at one
@@ -222,13 +234,7 @@ class ChartIndex:
                 raise
             observed = datetime.now(UTC)
             remote = selected()
-            failed = False
-            try:
-                answer = self._poll_launcher(remote)
-            except Exception as error:
-                answer = None
-                failed = True
-                self._launcher_error = explain(error)
+            answer = self._poll_launcher(remote)
             current = self._read_files()
             launcher = self._retain_launcher(db, remote, observed, answer)
             self._index_runs(db, current, files, launcher)
@@ -240,9 +246,8 @@ class ChartIndex:
             db.execute(
                 "DELETE FROM consoles WHERE NOT EXISTS (SELECT 1 FROM runs WHERE launched_as=consoles.run)"
             )
-        if answer:
-            self._launcher_error = None
-        if self._remote_read and (answer or failed):
+        # Keep a completed SSH reply until the transaction containing it commits.
+        if self._remote_read and answer is not None:
             self._remote_read = None
             self._next_standing = time.monotonic() + _REMOTE_STANDING
         self.error = self._launcher_error
@@ -381,36 +386,34 @@ class ChartIndex:
                ON CONFLICT(id) DO UPDATE SET at=excluded.at""",
             (observed.isoformat(), remote),
         )
-        if (
-            answer is None
-            or db.execute(
-                "SELECT 1 FROM observation WHERE id=1 AND launcher_at>=?", (answer.at.isoformat(),)
-            ).fetchone()
-        ):
-            standing = db.execute("SELECT standing FROM observation WHERE id=1").fetchone()[0]
-            return (
-                LauncherObservation.model_validate_json(standing)
-                if standing
-                else LauncherObservation()
+        if answer is not None:
+            launcher = answer.observation
+            stamp = answer.at.isoformat()
+            # A second view may have published a newer reply while this SSH read was pending.
+            updated = db.execute(
+                """UPDATE observation SET standing=?,launcher_at=?,last_loop=?
+                   WHERE id=1 AND (launcher_at IS NULL OR launcher_at<?)""",
+                (
+                    launcher.model_dump_json(exclude={"consoles"}, round_trip=True),
+                    stamp,
+                    launcher.last_loop.isoformat() if launcher.last_loop else None,
+                    stamp,
+                ),
             )
-        launcher = answer.observation
-        db.execute(
-            "UPDATE observation SET standing=?,launcher_at=?,last_loop=? WHERE id=1",
-            (
-                launcher.model_dump_json(exclude={"consoles"}, round_trip=True),
-                answer.at.isoformat(),
-                launcher.last_loop.isoformat() if launcher.last_loop else None,
-            ),
+            if updated.rowcount:
+                db.executemany(
+                    """INSERT OR REPLACE INTO consoles(run,body,collected,gaps,final_attempt)
+                       VALUES(:run,:body,:collected,:gaps,:final_attempt)""",
+                    (
+                        tail.model_dump(mode="json") | {"run": run}
+                        for run, tail in launcher.consoles.items()
+                    ),
+                )
+                return launcher
+        standing = db.execute("SELECT standing FROM observation WHERE id=1").fetchone()[0]
+        return (
+            LauncherObservation.model_validate_json(standing) if standing else LauncherObservation()
         )
-        db.executemany(
-            """INSERT OR REPLACE INTO consoles(run,body,collected,gaps,final_attempt)
-               VALUES(:run,:body,:collected,:gaps,:final_attempt)""",
-            (
-                tail.model_dump(mode="json") | {"run": run}
-                for run, tail in launcher.consoles.items()
-            ),
-        )
-        return launcher
 
     def run(self, address: str) -> str | None:
         with self._connect() as db:
@@ -469,7 +472,7 @@ class ChartIndex:
             heading += _reload()
         if evaluation and status is None:
             return _document(address, heading)
-        below = _console(row, now, unavailable=row["launcher_at"] is None)
+        below = _console(row, now)
         if evaluation:
             return _document(address, heading + below)
         below += row["details"]
@@ -561,10 +564,10 @@ class ChartIndex:
             )
         with self._connect() as db:
             row = db.execute(
-                "SELECT at,launcher_at,last_loop,server,machines FROM observation WHERE id=1"
+                "SELECT at,launcher_at,last_loop,machines FROM observation WHERE id=1 AND server IS NULL"
             ).fetchone()
         active = True
-        if row is None or row["server"] is not None:
+        if row is None:
             body = "<p>Waiting for the first local observation.</p>"
         elif row["machines"] is not None:
             ages = " · ".join(_observation_ages(row, datetime.now(UTC), launcher=True))
@@ -802,7 +805,7 @@ def _position(
     return f"{clock} {number(clocks[clock])}" if clock else ""
 
 
-def _console(row: sqlite3.Row, now: datetime, *, unavailable: bool) -> str:
+def _console(row: sqlite3.Row, now: datetime) -> str:
     if row["body"] is not None:
         console = (
             '<pre id="retained-output" class="console" tabindex="0" aria-label="Retained console">'
@@ -816,7 +819,7 @@ def _console(row: sqlite3.Row, now: datetime, *, unavailable: bool) -> str:
             console = f"<p>Last collected {_age(row['collected'], now)}</p>" + console
     elif row["launched_as"]:
         console = "<p>Waiting for retained console.</p>"
-    elif unavailable:
+    elif row["launcher_at"] is None:
         console = "<p>Launcher observation unavailable.</p>"
     else:
         console = "<p>Console was not recorded.</p>"
@@ -894,7 +897,7 @@ class Server(ThreadingHTTPServer):
         self.path = path.absolute() if path else None
         self.index = ChartIndex(as_storage(source), path)
         self.files = self.index.declared_files()
-        self.pages = Pages(source, known=self.files.values())
+        self.pages = Pages(source)
         self._find_files()
         self._building = threading.Lock()
         self._lock = threading.Lock()
@@ -926,7 +929,11 @@ class Server(ThreadingHTTPServer):
         if self.path is None:
             return None
         try:
-            files = self.pages.find_files(self.path) if self.path.is_dir() else [self.path]
+            files = (
+                experiment_files(self.path, known=self.files.values())
+                if self.path.is_dir()
+                else [self.path]
+            )
         except Exception as error:
             return explain(error)
         self.files = {file.stem: file for file in files}

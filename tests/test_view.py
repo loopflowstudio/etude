@@ -644,11 +644,13 @@ def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: 
     backend.run(1)
     machine = backend.scheduler.read(first).machine
     assert machine and backend.scheduler.read(second).machine == machine
+    idle = backend.scheduler.rent("l4", hours=1)
     (queued,) = backend.scheduler.queue(RunRequest(id="learn@2", seed=2, job=spec), rent="l4")
     with Counting(backend.store, backend.service).record() as count:
         fleet = backend.scheduler.machine_statuses()
     assert count.snapshot() == Counts(database=7)
-    assert next(row.runs for row in fleet if row.machine.name == machine) == (first, second)
+    rentals = {row.machine.name: row.runs for row in fleet if row.cost}
+    assert rentals == {machine: (first, second), idle: ()}
     source = DirectoryStorage(tmp_path / "runs")
     source.put(
         first + "/run.json",

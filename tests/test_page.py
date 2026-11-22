@@ -69,6 +69,42 @@ def test_the_report_is_the_files_and_the_experiment_is_named_for_it(tmp_path: Pa
     assert [run.name for run in page.training.runs] == ["a"]
 
 
+def test_edit_during_report_build_is_used_on_the_next_refresh(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    trained(runs, "lab", "a")
+    # The declaration edits its file after Python has loaded its first version.
+    replacement = (
+        "from etude.report import Report\ndef report(): return Report(baseline='second')\n"
+    )
+    file = experiment_file(
+        tmp_path / "experiments",
+        "lab",
+        "from pathlib import Path\nfrom etude.report import Report\n"
+        f"def report():\n    Path(__file__).write_text({replacement!r})\n"
+        "    return Report(baseline='first')\n",
+    )
+    pages = Pages(runs)
+    assert pages.build(file).report.baseline == "first"
+    assert pages.build(file).report.baseline == "second"
+
+
+def test_refresh_tracks_a_helper_first_imported_by_eval_jobs(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    trained(runs, "lab", "a")
+    folder = tmp_path / "experiments"
+    helper = experiment_file(folder, "late_report_jobs", "JOBS = []\n")
+    file = experiment_file(
+        folder,
+        "lab",
+        "def eval_jobs(state):\n    from late_report_jobs import JOBS\n    return JOBS\n",
+    )
+    pages = Pages(runs)
+    assert pages.build(file).experiment == "lab"
+    helper.write_text("raise ValueError('edited evaluation declaration')\n")
+    with pytest.raises(ValueError, match="edited evaluation declaration"):
+        pages.build(file)
+
+
 def test_checkpoints_with_no_etude_clock_are_named_with_the_reason(tmp_path: Path) -> None:
     runs = tmp_path / "runs"
     run = open_run(
