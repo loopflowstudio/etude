@@ -145,6 +145,14 @@ before any successful file pass. Do not name a driver after a standard module
 while the one local slot is busy; use `etude queue` for a queued entry. `etude wait`
 returns once the runs it started with end, so drive a later queue entry with another wait.
 
+A directory source with an incomplete listing needs no bucket: under the view's
+`home/track`, `mkdir -p locked/inner && chmod 000 locked` beside the runs (never the
+run's own folder, which its writer needs), and `chmod 755` to recover; restore it in a
+`finally`. The "no end recorded" rule needs a real 10-minute window, so give that
+driver its own background run. Start long drivers with the shell tool's background
+option, not `nohup … &`: a shell `&` job ignores SIGINT and every child it spawns
+inherits that, so `etude view` then looks hung on SIGINT. SIGTERM stops it either way.
+
 For interruption, make a separate lab copy with an author-controlled pause
 (`time.sleep(0.1)` per update) and more updates. Drive `uv run etude train
 experiment.py` with a Python subprocess driver: `etude train` prints no progress
