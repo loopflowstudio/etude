@@ -675,8 +675,8 @@ def usage(
 @kind(Kind.read)
 def database_status() -> None:
     """Read this computer's schema; never initialize or migrate it."""
+    from etude.home import home
     from etude.launch.database import inspect
-    from etude.launch.source import home
 
     state = inspect(home())
     print(f"database {state.path}")
@@ -701,8 +701,8 @@ def database_upgrade(
     ] = False,
 ) -> None:
     """Explicitly initialize or upgrade this computer's database without scheduling."""
+    from etude.home import home
     from etude.launch.database import upgrade
-    from etude.launch.source import home
 
     result = upgrade(home(), timeout=timeout, development=development)
     print(f"database {result.path}")

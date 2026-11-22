@@ -27,11 +27,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from etude.errors import LauncherError
+from etude.home import home
 from etude.launch.database import open_home, upgrade
 from etude.launch.executor import local
 from etude.launch.logs import render
 from etude.launch.scheduler.loop import Scheduler
-from etude.launch.source import home
 from etude.spec import Job, RunRequest, Smoke, SmokeStep, job_id
 
 # Kept under ETUDE_HOME by content key with their own locks: shared with the real home.

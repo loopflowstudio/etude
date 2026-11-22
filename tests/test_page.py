@@ -184,6 +184,7 @@ def test_a_folder_holding_etude_home_ignores_the_sources_it_retains(
 ) -> None:
     folder = tmp_path / "lab"
     monkeypatch.setenv("ETUDE_HOME", str(folder / "home"))
+    monkeypatch.setenv("ETUDE_TRACK_DIR", str(folder / "runs"))
     experiment_file(folder, "paced", REPORTED)
     # A launch keeps a copy of the source for each attempt under Etude's home.
     experiment_file(folder / "home/sessions/a1/attempts/b2/src", "paced", REPORTED)

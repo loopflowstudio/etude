@@ -67,6 +67,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from etude.deadline import remaining
+from etude.home import home
 
 _CHUNK = 65536
 # One resumable range; transports may read it in concurrent parts.
@@ -279,7 +280,7 @@ class Cache:
     ) -> None:
         if max_bytes < 0:
             raise ValueError("cache allowance must be nonnegative")
-        self.root = root or Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser() / "cache"
+        self.root = root or home() / "cache"
         self.max_bytes = max_bytes
         self._stamps: dict[tuple[Path, Content], _Stamp] = {}
 

@@ -66,7 +66,6 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
-import os
 import tempfile
 import threading
 import warnings
@@ -114,6 +113,7 @@ from etude.eval.records import (
     player_checkpoint,
 )
 from etude.eval.run import ETUDE_TABLES
+from etude.home import home
 from etude.identity import SAFE_NAME
 from etude.records import Digest, Record, RunOutcome
 from etude.run import as_storage, declared, run_folders, under
@@ -195,9 +195,8 @@ def statsdb(
 
 
 def _kept_path(experiment: str, storage: Storage) -> Path:
-    home = Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser()
     store = hashlib.sha256(storage.name.encode()).hexdigest()[:16]
-    return home / "statsdb" / f"{experiment}.{store}.duckdb"
+    return home() / "statsdb" / f"{experiment}.{store}.duckdb"
 
 
 def _schema(db: duckdb.DuckDBPyConnection) -> int | None:

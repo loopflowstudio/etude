@@ -34,12 +34,12 @@ EVAL_READERS = tuple(
         # recognises experiment files as `etude launch` does (`etude.experiment_file`).
         (
             ["report", "{directory}/pilot.py", "--source", "{directory}"],
-            31,  # shared run identity, delivery and job specification: the checkpoint records runs and evals share
+            32,  # run identity, delivery, job specification and Etude's home
             ("boto3", "duckdb", *EVAL_READERS, "etude.train.tracking"),
         ),
         (
             ["sync", "--directory", "{directory}"],
-            19,  # shared run and job specification: out membership
+            20,  # run and job specification, out membership and Etude's home
             ("boto3", "numpy", "etude.page", "etude.train.report"),
         ),
         (
@@ -47,7 +47,7 @@ EVAL_READERS = tuple(
             # etude.out, etude.stopping for Stopped, etude.train.state for saves and
             # etude.checkpoints for the records a run publishes, and
             # etude.identity for config and seed validation shared with the launcher.
-            26,
+            27,
             ("boto3", "etude.page", "etude.train.report"),
         ),
     ],

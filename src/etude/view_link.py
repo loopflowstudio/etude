@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from typing import TextIO
 from urllib.parse import quote
 
-from etude.launch.source import home
+from etude.home import home
 
 
 @contextmanager

@@ -34,13 +34,14 @@ from pydantic import TypeAdapter
 from etude.cache import Cache
 from etude.errors import explain
 from etude.experiment import state_of
+from etude.home import home
 from etude.identity import run_address
 from etude.jobs import EvalRunSummary, TrainingRunSummary
 from etude.launch.listing import describe_machine, launcher_facts, machine_warning
-from etude.launch.logs import render as render_logs
+from etude.launch.logs import ConsoleTail
 from etude.launch.records import MachineStatus, Standing, Status
 from etude.launch.server import LauncherObservation, PythonClient, selected
-from etude.launch.source import home, line
+from etude.launch.source import line
 from etude.page import Pages, read_report, render, render_run, report_sources, run_chart_data
 from etude.report import Report
 from etude.run import LocatedRun, as_storage, located_runs, owning_folder
@@ -50,7 +51,6 @@ from etude.train.read import RunData, read_located
 from etude.view_link import advertise, run_path
 
 _REFRESH = 5
-_CONSOLE_LINES = 500
 _TRAINING_TABS = "".join(
     f'<a href="#{section.lower()}" data-s="{section.lower()}">{section}</a>'
     for section in ("Console", "Config", "Checkpoints")
@@ -307,27 +307,14 @@ class ChartIndex:
                 _machines_table(db, machines) if machines is not None else None,
             ),
         )
-        for item in self._launcher.runs:
-            status = item.status
-            snapshot = self._launcher.consoles.get(status.run)
-            if snapshot is None:
-                continue
-            collected = max(
-                (s.observed_at for s in snapshot.streams if s.observed_at), default=None
-            )
-            db.execute(
-                """INSERT OR REPLACE INTO consoles(run,body,collected,gaps,final_attempt)
-                   VALUES(?,?,?,?,?)""",
-                (
-                    status.run,
-                    "\n".join(render_logs(snapshot).splitlines()[-_CONSOLE_LINES:]),
-                    collected.isoformat() if collected else None,
-                    any(
-                        s.truncated or not s.received or s.retrieval_error for s in snapshot.streams
-                    ),
-                    status.attempts if status.done and snapshot.settled else None,
-                ),
-            )
+        db.executemany(
+            """INSERT OR REPLACE INTO consoles(run,body,collected,gaps,final_attempt)
+               VALUES(:run,:body,:collected,:gaps,:final_attempt)""",
+            (
+                tail.model_dump(mode="json") | {"run": run}
+                for run, tail in self._launcher.consoles.items()
+            ),
+        )
 
     def run(self, address: str) -> str | None:
         with self._connect() as db:
@@ -371,11 +358,13 @@ class ChartIndex:
                 self._wanted.add(row["launched_as"])
         if _is_open(status, state) or awaiting_console or self.error:
             heading += _reload()
+        if evaluation and status is None:
+            return _document(address, heading)
         below = _console(
             row, now, unavailable=bool(self._launcher_error and self._launcher_at is None)
         )
         if evaluation:
-            return _document(address, heading + (below if status else ""))
+            return _document(address, heading + below)
         below += row["details"]
         if row["payload"] is None:
             tabs = f'<nav class="tabs" aria-label="Run sections">{_TRAINING_TABS}</nav>'
@@ -441,9 +430,7 @@ class ChartIndex:
             body += f'<p class="context">{escape(" · ".join(ages))}</p>'
         else:
             body = "<p>Waiting for the first observation.</p>"
-        if self.error:
-            body += f'<p role="status">{escape(self.error)}</p>'
-        return _live_status(body, active=bool(opened) or not rows or bool(self.error), stale=stale)
+        return _live_status(body, active=bool(opened) or not rows, stale=stale, error=self.error)
 
     def machines(self) -> str:
         if remote := selected():
@@ -467,9 +454,7 @@ class ChartIndex:
         else:
             body = "<p>No launcher is used here.</p>"
             active = False
-        if self.error:
-            body += f'<p role="status">{escape(self.error)}</p>'
-        return _live_status(body, active=active)
+        return _live_status(body, active=active, error=self.error)
 
     def has_experiment(self, experiment: str) -> bool:
         with self._connect() as db:
@@ -485,7 +470,7 @@ class ChartIndex:
         if not declared and not rows:
             return None
         now = datetime.now(UTC)
-        active = observation is None or bool(self.error)
+        active = observation is None
         stale = False
         body = []
         for row in rows:
@@ -500,10 +485,7 @@ class ChartIndex:
                 f"<td>{_run_line(row, state, status)}</td><td>{_age(row['last_write'], now)}</td></tr>"
             )
         if body:
-            table = (
-                '<div class="scroll"><table><thead><tr><th>Job</th><th>Run</th><th>Status</th>'
-                "<th>Last write</th></tr></thead><tbody>" + "".join(body) + "</tbody></table></div>"
-            )
+            table = _table(("Job", "Run", "Status", "Last write"), body)
         elif observation:
             table = "<p>No runs recorded.</p>"
         else:
@@ -512,13 +494,13 @@ class ChartIndex:
         if observation:
             launcher = any(row["status"] for row in rows)
             ages = " · ".join(_observation_ages(observation, now, launcher=launcher))
-        error = f'<p role="status">{escape(self.error)}</p>' if self.error else ""
         return _live_status(
             '<section class="sec"><h2>Run status</h2>'
-            f'{error}{table}<p class="context">{escape(ages)}</p>'
+            f'{table}<p class="context">{escape(ages)}</p>'
             '<p class="lbl">No machine samples recorded.</p></section>',
             active=active,
             stale=stale,
+            error=self.error,
         )
 
 
@@ -591,12 +573,7 @@ def _machines_table(db: sqlite3.Connection, machines: tuple[MachineStatus, ...])
             f'<tr><th scope="row">{escape(machine.name)}</th><td>{escape(machine.supply)}</td>'
             f"<td>{description}</td><td>{''.join(runs) or 'Idle'}</td></tr>"
         )
-    return (
-        '<div class="scroll"><table><thead><tr><th>Machine</th><th>Pool or on-demand</th>'
-        "<th>State, window and cost</th><th>Runs</th></tr></thead><tbody>"
-        + "".join(rows)
-        + "</tbody></table></div>"
-    )
+    return _table(("Machine", "Pool or on-demand", "State, window and cost", "Runs"), rows)
 
 
 def _status(row: sqlite3.Row) -> Status | None:
@@ -624,20 +601,29 @@ def _is_open(status: Status | None, state: str) -> bool:
     return not status.done if status else state in ("queued", "running")
 
 
-def _live_status(body: str, *, active: bool, stale: bool = False) -> str:
+def _live_status(body: str, *, active: bool, stale: bool = False, error: str | None = None) -> str:
+    if error:
+        body = f'<p role="status">{escape(error)}</p>' + body
     if stale:
         body += (
             f"<p>Runs with no launcher record show “no end recorded” after "
             f"{_SILENT // timedelta(minutes=1)} minutes without a write.</p>"
         )
-    refresh = f' data-refresh="{_REFRESH * 1000}"' if active else ""
+    refresh = f' data-refresh="{_REFRESH * 1000}"' if active or error else ""
     return f'<div id="experiment-status"{refresh}>{body}</div>'
+
+
+def _table(columns: tuple[str, ...], rows: list[str]) -> str:
+    headers = "".join(f"<th>{escape(column)}</th>" for column in columns)
+    return (
+        f'<div class="scroll"><table><thead><tr>{headers}</tr></thead>'
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
+    )
 
 
 def _experiments_table(title: str, rows: list[str]) -> str:
     table = (
-        '<div class="scroll"><table><thead><tr><th>Experiment</th><th>Runs</th>'
-        "<th>Last write</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>"
+        _table(("Experiment", "Runs", "Last write"), rows)
         if rows
         else f"<p>No {title.lower()} experiments.</p>"
     )
@@ -693,26 +679,26 @@ def _position(
 
 
 def _console(row: sqlite3.Row, now: datetime, *, unavailable: bool) -> str:
-    console = (
-        "<p>Launcher observation unavailable.</p>"
-        if unavailable
-        else "<p>Console was not recorded.</p>"
-    )
-    if row["launched_as"]:
+    if row["body"] is not None:
+        console = (
+            '<pre id="retained-output" class="console" tabindex="0" aria-label="Retained console">'
+            f"{escape(row['body'])}</pre>"
+            '<script>{const output = document.getElementById("retained-output");'
+            "output.scrollTop = output.scrollHeight;}</script>"
+        )
+        if row["gaps"]:
+            console += "<p>Some console output is missing from retention.</p>"
+        if row["collected"]:
+            console = f"<p>Last collected {_age(row['collected'], now)}</p>" + console
+    elif row["launched_as"]:
         console = "<p>Waiting for retained console.</p>"
-        if row["body"] is not None:
-            console = (
-                '<pre id="retained-output" class="console" tabindex="0" aria-label="Retained console">'
-                f"{escape(row['body'])}</pre>"
-                '<script>{const output = document.getElementById("retained-output");'
-                "output.scrollTop = output.scrollHeight;}</script>"
-            )
-            if row["gaps"]:
-                console += "<p>Some console output is missing from retention.</p>"
-            if row["collected"]:
-                console = f"<p>Last collected {_age(row['collected'], now)}</p>" + console
+    elif unavailable:
+        console = "<p>Launcher observation unavailable.</p>"
+    else:
+        console = "<p>Console was not recorded.</p>"
+    if row["launched_as"]:
         console += (
-            f"<p>Showing up to {_CONSOLE_LINES} lines. Read the full retained console with "
+            f"<p>Showing up to {ConsoleTail.max_lines} lines. Read the full retained console with "
             f"<code>etude logs --run {escape(shlex.quote(row['launched_as']))}</code></p>"
         )
     return f'<section class="sec" id="console"><h2>Console</h2>{console}</section>'
@@ -747,9 +733,7 @@ def _run_details(stored: RunData | None, item: Standing | None) -> str:
             f"<tr><td>{checkpoint.ordinal}</td><td>{escape(checkpoint.name)}</td><td>{escape(clocks)}</td></tr>"
         )
     checkpoints = (
-        '<div class="scroll"><table><thead><tr><th>Ordinal</th><th>Checkpoint</th><th>Clock position</th></tr></thead><tbody>'
-        + "".join(rows)
-        + "</tbody></table></div>"
+        _table(("Ordinal", "Checkpoint", "Clock position"), rows)
         if rows
         else "<p>No checkpoints recorded.</p>"
     )

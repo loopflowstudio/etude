@@ -29,6 +29,7 @@ from etude.cache import Artifact, Cache, Fetched, Source
 from etude.carriage import immutable
 from etude.deadline import call, remaining
 from etude.errors import EtudeError
+from etude.home import home
 from etude.identity import SAFE_NAME, run_address
 from etude.records import RunRecord
 from etude.storage_timeout import StorageUnavailable, socket_timeout
@@ -434,7 +435,7 @@ def default_root() -> Path:
     given = os.environ.get("ETUDE_TRACK_DIR")
     if given:
         return Path(given)
-    return Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser() / "track"
+    return home() / "track"
 
 
 def run_directory(directory: Path | str | None, experiment: str, run: str) -> tuple[Path, Path]:

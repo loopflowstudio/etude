@@ -202,7 +202,9 @@ standing, requested consoles and local machine inventory in one database
 snapshot. It reads the heartbeat from `server-heartbeat`. The scheduler's
 `MachineStatus` records supply both `etude machines` and the view. Each
 unfinished attempt occupies a slot. With a selected server, the view batches
-standing, heartbeat and consoles in one SSH exchange at most once every 30 seconds.
+standing, heartbeat and requested console tails in one SSH exchange at most
+once every 30 seconds. Each tail carries the last 500 lines of the CLI transcript,
+the latest collection time and any gaps across the retained streams.
 
 The view joins that observation with the run files in one SQLite transaction
 under `ETUDE_HOME/views`. Status and graph requests can read the last committed

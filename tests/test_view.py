@@ -22,10 +22,11 @@ from moto import mock_aws
 from etude.block_file import tail_key
 from etude.cli import main
 from etude.errors import LauncherError
+from etude.home import home
 from etude.launch.database import Database
 from etude.launch.logs import snapshot_stream
 from etude.launch.records import GPU
-from etude.launch.source import home
+from etude.launch.server import LauncherObservation
 from etude.page import Page, Pages
 from etude.records import Clock, RunCounters, RunOutcome, RunRecord
 from etude.spec import RunRequest
@@ -82,26 +83,6 @@ def test_a_served_page_refreshes_on_demand_only_when_its_files_change(tmp_path: 
         file.write_text(COUNTED + "# edited\n")
         server.page("/experiments/lab/report", refresh=True)
         assert builds.read_text().count("built") == 3
-
-
-def test_refresh_failure_preserves_the_last_page_and_recovers(tmp_path: Path) -> None:
-    runs = tmp_path / "runs"
-    trained(runs, "lab", "a")
-    file = experiment_file(tmp_path, "lab", REPORTED)
-    with Server(runs, file, ("127.0.0.1", 0)) as server:
-        original = server.page("/experiments/lab/report")
-        assert original is not None
-        assert '"refresh": null' in original and 'id="refresh-report"' in original
-        file.write_text("raise RuntimeError('broken report')\n")
-        with pytest.raises(RuntimeError, match="broken report"):
-            server.page("/experiments/lab/report", refresh=True)
-        assert (
-            server.page("/experiments/lab/report") == original
-        )  # includes its original generation timestamp
-        file.write_text(REPORTED.replace("Report()", 'Report(labels={"a": "Readable"})'))
-        refreshed = server.page("/experiments/lab/report", refresh=True)
-        assert refreshed != original and '"Readable"' in (refreshed or "")
-        assert server.page("/experiments/lab/report") == refreshed
 
 
 def test_refresh_reads_an_edited_neighbour_the_file_imports(tmp_path: Path) -> None:
@@ -182,6 +163,7 @@ def test_http_refresh_reports_failures_without_replacing_the_cached_page(tmp_pat
             reply = client.getresponse()
             assert reply.status == 200 and reply.getheader("Cache-Control") == "no-store"
             original = reply.read()
+            assert b'"refresh": null' in original and b'id="refresh-report"' in original
             client.request("GET", "/runs/absent")
             waiting = client.getresponse()
             assert waiting.status == 404 and runs.as_uri() in waiting.read().decode()
@@ -194,10 +176,13 @@ def test_http_refresh_reports_failures_without_replacing_the_cached_page(tmp_pat
             client.request("GET", "/experiments/lab/report")
             reply = client.getresponse()
             assert reply.status == 200 and reply.read() == original
-            file.write_text(REPORTED)
+            file.write_text(REPORTED.replace("Report()", 'Report(labels={"a": "Readable"})'))
             client.request("POST", "/experiments/lab/report")
             reply = client.getresponse()
-            assert reply.status == 200 and b'id="refresh-report"' in reply.read()
+            refreshed = reply.read()
+            assert reply.status == 200 and b'"Readable"' in refreshed
+            client.request("GET", "/experiments/lab/report")
+            assert client.getresponse().read() == refreshed
         finally:
             client.close()
             server.shutdown()
@@ -617,6 +602,9 @@ def test_run_console_opens_on_the_last_500_lines_of_retained_output(tmp_path: Pa
     (attempt,) = backend.scheduler.attempts(run)
     output = "".join(f"line <{n}>\n" for n in range(1, 601)).encode()
     backend.store.retain_log(snapshot_stream(attempt.session, attempt.id, "job", output, False))
+    # This is the payload a selected server sends in its batched response.
+    wire = LauncherObservation.read((run,)).model_dump_json()
+    assert wire.count("line <") == 499 and "line <600>" in wire
     source = DirectoryStorage(tmp_path / "runs")
     source.put(f"{run}/run.json", RunRecord(id=run, experiment="lab").model_dump_json().encode())
     with Server(source, None, ("127.0.0.1", 0)) as server:

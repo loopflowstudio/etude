@@ -27,8 +27,10 @@ from pydantic import Field, RootModel, TypeAdapter
 
 from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError, explain
+from etude.home import home
 from etude.launch.database import launcher_file, open_home
 from etude.launch.errors import LaunchError, SchemaAdvanced
+from etude.launch.logs import ConsoleTail
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import (
     Launch,
@@ -40,7 +42,7 @@ from etude.launch.records import (
     Target,
 )
 from etude.launch.scheduler.loop import Scheduler
-from etude.launch.source import freeze, home, retain, source_archive, stored
+from etude.launch.source import freeze, retain, source_archive, stored
 from etude.launch.ssh import (
     _INSTALL_CODE,
     EncodedOutput,
@@ -116,7 +118,7 @@ class LauncherObservation(Record):
     runs: tuple[Standing, ...] = ()
     machines: tuple[MachineStatus, ...] | None = None
     last_loop: datetime | None = None
-    consoles: dict[str, LogSnapshot] = Field(default_factory=dict)
+    consoles: dict[str, ConsoleTail] = Field(default_factory=dict)
 
     @classmethod
     def read(cls, consoles: tuple[str, ...], *, machines: bool = False) -> LauncherObservation:
@@ -130,7 +132,9 @@ class LauncherObservation(Record):
                 machines=scheduler.machine_statuses() if machines else None,
                 last_loop=last_loop(),
                 consoles={
-                    item.record.id: scheduler.logs(run=item.record.id)
+                    item.record.id: ConsoleTail.from_snapshot(
+                        scheduler.logs(run=item.record.id), item.status
+                    )
                     for item in runs
                     if item.record.id in requested
                 },

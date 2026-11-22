@@ -25,6 +25,7 @@ from functools import cache
 from pathlib import Path
 
 from etude.errors import LauncherError
+from etude.home import home
 from etude.launch.aws import Keys
 from etude.launch.database import open_home
 from etude.launch.executor import Execution, Executor, local
@@ -52,7 +53,6 @@ from etude.launch.records import (
 )
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.server import PythonClient, retained_scheduler, selected
-from etude.launch.source import home
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, _send, open_bucket

@@ -87,6 +87,7 @@ from pydantic import JsonValue
 from etude.errors import EtudeError, explain
 from etude.eval.records import Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named, refuse_renamed
+from etude.home import home
 from etude.records import BUILT_IN_NAMES, Record
 from etude.report import Counters, Curve, Flame, Matches, Report, Score, Series
 from etude.run import RunListing, as_storage, declared, run_folders, under
@@ -320,13 +321,17 @@ def experiment_files(directory: Path, *, known: Collection[Path] = ()) -> list[P
     Etude's home is skipped: the sources it retains for launched runs are copies.
     Raises `EtudeError("experiment_named_twice")` for two files with one stem.
     """
-    home = default_root().parent.resolve()
-    found: dict[str, Path] = {}
-    for path in sorted(directory.rglob("*.py")):
-        parts = path.relative_to(directory).parts
-        if any(part.startswith(".") or part == "__pycache__" for part in parts):
+    retained = home().resolve()
+    candidates: list[Path] = []
+    for folder, subdirs, names in directory.walk():
+        if folder.resolve().is_relative_to(retained):
+            subdirs.clear()
             continue
-        if path.resolve().is_relative_to(home):
+        subdirs[:] = [d for d in subdirs if not d.startswith(".") and d != "__pycache__"]
+        candidates.extend(folder / n for n in names if n.endswith(".py") and not n.startswith("."))
+    found: dict[str, Path] = {}
+    for path in sorted(candidates):
+        if path.is_symlink() and (not path.is_file() or path.resolve().is_relative_to(retained)):
             continue
         if path not in known and experiment_named(path) is None:
             continue
