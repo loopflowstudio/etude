@@ -14,7 +14,7 @@ import secrets
 import threading
 import time
 from bisect import bisect_left
-from collections.abc import Container, Iterator, Mapping, Sequence
+from collections.abc import Callable, Container, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from hashlib import file_digest, sha256
@@ -594,14 +594,23 @@ def located_runs(
     run: str | None = None,
     objects: Mapping[str, str] | None = None,
 ) -> list[LocatedRun]:
-    """Group copies by declared experiment and run, never by the folder name alone.
+    listed = objects if objects is not None else set(keys)
+    return group_runs(
+        keys, lambda folder: declared(storage, folder, listed), run=run, objects=objects
+    )
 
-    Historical flat and machine-nested folders join the same identity, which
-    keeps the first copy's declaration. Each listed declaration is read once;
-    undeclared folders cannot claim an identity. Sorted by experiment and run;
-    `run` keeps only folders of that name.
+
+def group_runs(
+    keys: Sequence[str],
+    declaration: Callable[[str], RunRecord | None],
+    *,
+    run: str | None = None,
+    objects: Mapping[str, str] | None = None,
+) -> list[LocatedRun]:
+    """Group folders by declared experiment and run, keeping the first copy's declaration.
+
+    A report watcher can reuse a folder's declaration while its listed version holds.
     """
-    listed = set(keys)
     by_name = run_folders(keys)
     writes = (
         _last_writes(objects, {folder for folders in by_name.values() for folder in folders})
@@ -613,7 +622,7 @@ def located_runs(
     found: dict[tuple[str, str], tuple[RunRecord, list[str]]] = {}
     for name, folders in by_name.items():
         for folder in folders:
-            file = declared(storage, folder, listed)
+            file = declaration(folder)
             if file is not None:
                 found.setdefault((file.experiment, name), (file, []))[1].append(folder)
     return [

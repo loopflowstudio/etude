@@ -35,7 +35,7 @@ from etude.block_file import BlockFile, parse, select
 from etude.carriage import checkpoint_key
 from etude.checkpoints import CheckpointRecord
 from etude.errors import EtudeError
-from etude.identity import stored_owner
+from etude.identity import run_address, stored_owner
 from etude.out import MEMBERSHIP, OutFiles, OutMember
 from etude.records import (
     HOURS_SINCE_START,
@@ -109,6 +109,11 @@ class RunData(Arrays):
     last_write: datetime | None = None
     _read_blocks: Callable[[], tuple[StoredBlock, ...]] = PrivateAttr()
     _read_out: Callable[[], tuple[OutMember, ...]] = PrivateAttr(default=tuple)
+
+    @property
+    def address(self) -> str:
+        """Preserve a declared address's spelling, including older compact runs."""
+        return run_address(self.file.id if self.file else self.name, self.experiment)
 
     @property
     def stored_state(self) -> Literal["running", "stopped", "finished", "failed"]:

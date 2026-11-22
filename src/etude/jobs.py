@@ -187,8 +187,8 @@ class TrainingRunSummary:
         """The full spelling held by the launcher or written in the run declaration."""
         if self.status:
             return self.status.run
-        if self._data and self._data.file:
-            return run_address(self._data.file.id, self.experiment)
+        if self._data:
+            return self._data.address
         return run_address(self.name, self.experiment)
 
     @cached_property

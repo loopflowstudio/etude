@@ -35,7 +35,6 @@ from etude.cache import Cache
 from etude.errors import explain
 from etude.experiment import state_of
 from etude.home import home
-from etude.identity import run_address
 from etude.jobs import EvalRunSummary, TrainingRunSummary
 from etude.launch.listing import describe_machine, launcher_facts, machine_warning
 from etude.launch.logs import ConsoleTail
@@ -52,9 +51,10 @@ from etude.page import (
     render_run,
     run_chart_data,
 )
+from etude.records import RunRecord
 from etude.report import Report
 from etude.run import LocatedRun, as_storage, located_runs, owning_folder
-from etude.spec import number
+from etude.spec import Until, number
 from etude.storage import ListedStorage, Storage
 from etude.train.read import RunData, read_located
 from etude.view_link import advertise, run_path
@@ -226,11 +226,10 @@ class ChartIndex:
         self._launcher_error = None
         return answer
 
-    def read_error(self, remote: str | None) -> str:
+    def read_error(self, remote: str | None, *, report: str | None = None) -> str:
         launcher = self._launcher_error
-        return "\n".join(
-            filter(None, (self.error, launcher[1] if launcher and launcher[0] == remote else None))
-        )
+        selected_error = launcher[1] if launcher and launcher[0] == remote else None
+        return "\n".join(filter(None, (self.error, selected_error, report)))
 
     def _read_run(self, storage: ListedStorage, members: list[str], run: LocatedRun) -> _RunFiles:
         # Compare listed versions, including removals and replacement at one
@@ -367,12 +366,12 @@ class ChartIndex:
             for run in runs:
                 inputs = stored.get(run.name)
                 data = inputs.data if inputs else None
-                item = retained[run.status.run] if run.status else None
-                if data and data.file:
-                    address = run_address(data.file.id, experiment)
+                record = retained[run.status.run].record if run.status else None
+                if data:
+                    address = data.address
                 else:
-                    assert item is not None  # Every summary has files or a launcher record.
-                    address = item.record.id
+                    assert record is not None  # Every summary has files or a launcher record.
+                    address = record.id
                 reached: dict[str, float] = {}
                 if isinstance(run, TrainingRunSummary) and report and inputs:
                     reached = self._chart(db, address, inputs, report, charts.pop(address, None))
@@ -382,7 +381,7 @@ class ChartIndex:
                     experiment,
                     run,
                     data,
-                    item,
+                    record,
                     reached,
                     report.clock if report else None,
                 )
@@ -496,7 +495,7 @@ class ChartIndex:
             heading += f'<p>Scores are in the <a href="{page}#report">{experiment} report</a>.</p>'
         if state == "no end recorded":
             heading += f"<p>No new file for at least {_SILENT // timedelta(minutes=1)} minutes.</p>"
-        error = "\n".join(filter(None, (self.read_error(remote), row["report_error"])))
+        error = self.read_error(remote, report=row["report_error"])
         if error:
             heading += f'<p role="status">{escape(error)}</p>'
         # Session shutdown can still retain final logs after the run itself ended.
@@ -674,11 +673,8 @@ class ChartIndex:
             '<p class="lbl">No machine samples recorded.</p></section>',
             active=active,
             stale=stale,
-            error="\n".join(
-                filter(
-                    None,
-                    (self.read_error(remote), observation["report_error"] if observation else None),
-                )
+            error=self.read_error(
+                remote, report=observation["report_error"] if observation else None
             ),
         )
 
@@ -689,12 +685,14 @@ def _store_run(
     experiment: str,
     run: TrainingRunSummary | EvalRunSummary,
     stored: RunData | None,
-    item: Standing | None,
+    record: RunRecord | None,
     reached: dict[str, float],
     preferred: str | None,
 ) -> None:
-    training = isinstance(run, TrainingRunSummary)
     file = stored.file if stored else None
+    job = record.launch.spec if record else None
+    status = run.status
+    training = isinstance(run, TrainingRunSummary)
     file_job = None
     if file:
         file_job = (
@@ -702,6 +700,12 @@ def _store_run(
             if isinstance(run, TrainingRunSummary)
             else file.job_name or file.job or "Evaluation"
         )
+
+    # Once files exist, even an empty sealed clock belongs to them. The
+    # launcher can still supply a target on a different clock.
+    clocks = status.clocks if stored is None and status else reached
+    if stored and preferred not in clocks:
+        preferred = next((c.name for c in stored.clocks if c.name in clocks), None)
     file_config = file.config_json if file else None
     fields = {
         "address": address,
@@ -710,19 +714,17 @@ def _store_run(
         "last_write": run.last_write.isoformat() if run.last_write else None,
         "file_job": file_job,
         "file_state": stored.stored_state if stored else None,
-        "file_position": _position(None, reached, preferred, stored) if stored else None,
+        "file_position": _position(clocks, preferred) if stored else None,
         "file_config": file_config,
         "checkpoints": _checkpoints(stored) if stored and training else None,
-        "launched_as": item.record.id if item else None,
-        "launcher_job": (item.record.launch.spec.name or "Evaluation")
-        if item and not (file and training)
-        else None,
-        "launcher_state": run.state if item else None,
-        "launcher_position": _position(item, reached, preferred, stored) if item else None,
-        "launcher_config": item.record.config_json if item and file_config is None else None,
-        "source": _source(item) if item and training else None,
-        "status": run.status.model_dump_json() if run.status else None,
-        "max_attempts": item.record.launch.spec.max_attempts if item else None,
+        "launched_as": status.run if status else None,
+        "launcher_job": (job.name or "Evaluation") if job and not (file and training) else None,
+        "launcher_state": run.state if status else None,
+        "launcher_position": _position(clocks, preferred, status.until) if status else None,
+        "launcher_config": record.config_json if record and file_config is None else None,
+        "source": _source(record) if record and training else None,
+        "status": status.model_dump_json() if status else None,
+        "max_attempts": job.max_attempts if job else None,
     }
     # Keep unchanged rows out of the WAL. Only the fixed column names form SQL.
     columns = ",".join(fields)
@@ -849,20 +851,13 @@ def _observation_ages(row: sqlite3.Row, now: datetime, *, launcher: bool) -> lis
     return ages
 
 
-def _position(
-    item: Standing | None, reached: dict[str, float], preferred: str | None, stored: RunData | None
-) -> str:
-    clocks = reached if stored is not None or item is None else item.status.clocks
-    if item and (target := item.status.until):
+def _position(clocks: dict[str, float], preferred: str | None, target: Until | None = None) -> str:
+    if target:
         limit = number(target.value)
         at = clocks.get(target.clock)
-        return (
-            f"Target {target.clock} {limit}"
-            if at is None
-            else f"{target.clock} {number(at)} / {limit}"
-        )
-    if preferred not in clocks and stored:
-        preferred = next((c.name for c in stored.clocks if c.name in clocks), None)
+        if at is None:
+            return f"Target {target.clock} {limit}"
+        return f"{target.clock} {number(at)} / {limit}"
     clock = preferred if preferred in clocks else next(iter(clocks), None)
     return f"{clock} {number(clocks[clock])}" if clock else ""
 
@@ -893,8 +888,7 @@ def _console(row: sqlite3.Row, now: datetime) -> str:
     return f'<section class="sec" id="console"><h2>Console</h2>{console}</section>'
 
 
-def _source(item: Standing) -> str:
-    record = item.record
+def _source(record: RunRecord) -> str:
     job = record.launch.spec
     if not job.repo or not job.revision:
         return ""

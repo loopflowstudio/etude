@@ -68,6 +68,8 @@ def test_a_served_page_refreshes_on_demand_only_when_its_files_change(tmp_path: 
     measured = MeasuredStorage(DirectoryStorage(runs))
     with Server(measured, file, ("127.0.0.1", 0)) as server:
         assert '"name": "a"' in (server.page("/experiments/lab/report") or "")
+        assert measured.listings == 1
+        assert measured.got.count("lab/a/run.json") == measured.got.count("other/c/run.json") == 1
         reads = measured.requests, measured.listings
         server.page("/experiments/lab/report")
         assert (measured.requests, measured.listings) == reads
@@ -80,6 +82,8 @@ def test_a_served_page_refreshes_on_demand_only_when_its_files_change(tmp_path: 
         assert '"name": "b"' not in (server.page("/experiments/lab/report") or "")
         assert '"name": "b"' in (server.page("/experiments/lab/report", refresh=True) or "")
         assert builds.read_text().count("built") == 2
+        assert measured.listings == 3
+        assert measured.got.count("lab/a/run.json") == measured.got.count("lab/b/run.json") == 1
         file.write_text(COUNTED + "# edited\n")
         server.page("/experiments/lab/report", refresh=True)
         assert builds.read_text().count("built") == 3

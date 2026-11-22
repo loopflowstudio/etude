@@ -78,6 +78,7 @@ from collections import Counter
 from collections.abc import Callable, Collection, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import cached_property
 from html import escape
 from importlib.util import cache_from_source
 from pathlib import Path
@@ -89,9 +90,9 @@ from etude.errors import EtudeError, explain
 from etude.eval.records import Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named, refuse_renamed
 from etude.home import home
-from etude.records import BUILT_IN_NAMES, Record
+from etude.records import BUILT_IN_NAMES, Record, RunRecord
 from etude.report import Counters, Curve, Flame, Matches, Report, Score, Series
-from etude.run import RunListing, as_storage, declared, run_folders, under
+from etude.run import RunListing, as_storage, declared, group_runs, under
 from etude.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import RunData, read_all
 from etude.train.report import Training, training
@@ -346,6 +347,42 @@ def experiment_files(directory: Path, *, known: Collection[Path] = ()) -> list[P
     return list(found.values())
 
 
+class _ReportListing:
+    """One place's version listing, shared by every report in this build."""
+
+    def __init__(self, place: Storage, known: dict[str, tuple[str, RunRecord | None]]) -> None:
+        self.place = place
+        self.objects = place.versions("")
+        for key in known.keys() - self.objects.keys():
+            del known[key]
+        self.known = known
+
+    @cached_property
+    def runs(self) -> RunListing:
+        keys = sorted(self.objects)
+        return RunListing(keys, group_runs(keys, self._declaration, objects=self.objects))
+
+    def _declaration(self, folder: str) -> RunRecord | None:
+        key = folder + "run.json"
+        version = self.objects.get(key)
+        if version is None:
+            return None
+        kept = self.known.get(key)
+        if kept is None or kept[0] != version:
+            kept = (version, declared(self.place, folder, self.objects))
+            self.known[key] = kept
+        return kept[1]
+
+    def versions(self, experiment: str) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (key, self.objects[key])
+            for run in self.runs.declarations
+            if run.file.experiment == experiment
+            for folder in run.folders
+            for key in under(self.runs.keys, folder)
+        )
+
+
 class Pages:
     """Experiments' pages from one source, each built again only when its inputs change.
 
@@ -354,19 +391,17 @@ class Pages:
     (`Storage.versions`): under the source, and under this computer's runs
     directory, whose eval runs count too (`etude.eval.tournament.played`).
     Checking them is one listing of each, plus a run's declaration the first
-    time its version is seen, so an unchanged page costs no new bucket bytes;
-    a changed one is built from the files as they are, so a page always
-    reflects them.
+    time its version is seen. Changed reports in the same build reuse that
+    listing for run discovery.
     """
 
     def __init__(self, source: Storage | Path | str) -> None:
         self.storage = as_storage(source)
         here = DirectoryStorage(default_root())
-        self._places = list({each.name: each for each in (self.storage, here)}.values())
+        self._places = [self.storage] if here.name == self.storage.name else [self.storage, here]
         self._built: dict[tuple[Path | None, str], _BuiltPage] = {}
         self._known: set[Path] = set()
-        # Each folder's experiment by place and prefix, with its declaration's version.
-        self._declared: dict[tuple[str, str], tuple[str, str | None]] = {}
+        self._declared: dict[str, dict[str, tuple[str, RunRecord | None]]] = {}
 
     def build(self, file: Path | None, *, experiment: str | None = None) -> Page:
         """`build`'s page, kept from the last call while its inputs are the same."""
@@ -386,48 +421,26 @@ class Pages:
                 built[file] = explain(error)
         return built
 
-    def _listings(self) -> list[dict[str, str]]:
-        return [place.versions("") for place in self._places]
+    def _listings(self) -> list[_ReportListing]:
+        return [
+            _ReportListing(place, self._declared.setdefault(place.name, {}))
+            for place in self._places
+        ]
 
     def _build(
-        self, file: Path | None, listings: Sequence[dict[str, str]], experiment: str | None = None
+        self, file: Path | None, listings: Sequence[_ReportListing], experiment: str | None = None
     ) -> Page:
         name = _experiment_name(file, experiment)
         key = (file, name)
-        runs = tuple(
-            self._versions(place, name, listed)
-            for place, listed in zip(self._places, listings, strict=True)
-        )
+        runs = tuple(listing.versions(name) for listing in listings)
         kept = self._built.get(key)
         sources = _source_versions(file, kept.sources if kept else ())
         if kept is not None and kept.sources == sources and kept.runs == runs:
             return kept.page
         loaded = _ReportFile(file, sources)
-        page = _build_page(self.storage, name, loaded)
+        page = _build_page(self.storage, name, loaded, listings[0].runs)
         self._built[key] = _BuiltPage(page, loaded.sources, runs)
         return page
-
-    def _versions(
-        self, place: Storage, experiment: str, listed: dict[str, str]
-    ) -> tuple[tuple[str, str], ...]:
-        """The version of every object in the folders of the experiment's runs in one place."""
-        keys = sorted(listed)
-        found: list[tuple[str, str]] = []
-        for folders in run_folders(keys).values():
-            for folder in folders:
-                if self._experiment(place, folder, listed) == experiment:
-                    found.extend((key, listed[key]) for key in under(keys, folder))
-        return tuple(found)
-
-    def _experiment(self, place: Storage, folder: str, listed: dict[str, str]) -> str | None:
-        """The run's experiment, from its declaration, read again only once it has changed."""
-        version = listed.get(folder + "run.json", "")
-        kept = self._declared.get((place.name, folder))
-        if kept is None or kept[0] != version:
-            file = declared(place, folder, listed)
-            kept = (version, None if file is None else file.experiment)
-            self._declared[place.name, folder] = kept
-        return kept[1]
 
 
 @dataclass(frozen=True)
@@ -504,12 +517,14 @@ def build(
     experiment's.
     """
     name = _experiment_name(file, experiment)
-    return _build_page(as_storage(source), name, _ReportFile(file))
+    storage = as_storage(source)
+    return _build_page(storage, name, _ReportFile(file), RunListing.read(storage))
 
 
-def _build_page(storage: Storage, experiment: str, loaded: _ReportFile) -> Page:
+def _build_page(
+    storage: Storage, experiment: str, loaded: _ReportFile, listing: RunListing
+) -> Page:
     report = loaded.report
-    listing = RunListing.read(storage)
     data = read_all(
         storage,
         experiment,
