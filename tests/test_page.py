@@ -645,3 +645,50 @@ def eval_jobs(state):
         assert measured.got.count(f"frontier/small@{seed}/checkpoints/updates-100.json") == 1
         assert measured.got.count(f"frontier/small@{seed}/outcome.json") == 1
     assert not any(key.endswith("weights.pt") for key in measured.got)
+
+
+def test_page_cache_reuses_unchanged_build_and_invalidates_on_external_data_edit(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    with open_run(
+        experiment="lab",
+        run="a",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=runs,
+    ) as run:
+        run.log({"loss": 1.0}, updates=1)
+    label = tmp_path / "label.txt"
+    label.write_text("First")
+    file = experiment_file(
+        tmp_path / "experiments",
+        "lab",
+        f"""
+from pathlib import Path
+from etude.report import Report
+
+def report() -> Report:
+    return Report(labels={{"a": Path({str(label)!r}).read_text().strip()}})
+""",
+    )
+    first_source = MeasuredStorage(DirectoryStorage(runs))
+    first = build(first_source, file)
+    assert first.report.labels == {"a": "First"}
+    assert any(
+        key.endswith((".blk", ".tail", ".index.json", ".permanent.json"))
+        for key in first_source.got
+    )
+
+    # Unchanged inputs: reuses the persisted Page without touching any metric block or index.
+    second_source = MeasuredStorage(DirectoryStorage(runs))
+    second = build(second_source, file)
+    assert second == first
+    assert not any(
+        key.endswith((".blk", ".tail", ".index.json", ".permanent.json"))
+        for key in second_source.got
+    )
+
+    # Editing a non-Python file read by report() invalidates the cache on the very next build.
+    label.write_text("Edited")
+    third = build(DirectoryStorage(runs), file)
+    assert third.report.labels == {"a": "Edited"}

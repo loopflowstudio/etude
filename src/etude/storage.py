@@ -310,25 +310,54 @@ class S3Storage:
             prefixes.sort()
             return part, prefixes
 
-        def first_page(target: str) -> tuple[dict[str, str], str | None]:
+        def first_two_pages(target: str) -> tuple[dict[str, str], str | None, str | None]:
             remaining()
             page = self.client.list_objects_v2(Bucket=self.bucket, Prefix=target)
-            items = {item["Key"][strip:]: tag(item) for item in page.get("Contents", [])}
-            return items, page.get("NextContinuationToken") if page.get("IsTruncated") else None
+            contents = page.get("Contents", [])
+            items = {item["Key"][strip:]: tag(item) for item in contents}
+            if not page.get("IsTruncated"):
+                return items, None, None
+            remaining()
+            page2 = self.client.list_objects_v2(
+                Bucket=self.bucket, Prefix=target, ContinuationToken=page["NextContinuationToken"]
+            )
+            contents2 = page2.get("Contents", [])
+            for item in contents2:
+                items[item["Key"][strip:]] = tag(item)
+            if not page2.get("IsTruncated"):
+                return items, None, None
+            last_key = (
+                contents2[-1]["Key"] if contents2 else (contents[-1]["Key"] if contents else None)
+            )
+            return items, page2.get("NextContinuationToken"), last_key
 
         def submit_sharded(
-            pool: ThreadPoolExecutor, target: str, prefixes: list[str]
+            pool: ThreadPoolExecutor,
+            target: str,
+            prefixes: list[str],
+            *,
+            after: str | None = None,
         ) -> list[tuple[str, Any]]:
-            shards = 16
+            # Skip prefixes already covered completely by earlier pages.
+            remaining_prefixes = (
+                [p for p in prefixes if p > after or after.startswith(p)]
+                if after is not None
+                else prefixes
+            )
+            if not remaining_prefixes:
+                return []
+            shards = min(48, len(remaining_prefixes))
             tasks: list[tuple[str, Any]] = []
             for idx in range(shards):
-                lo_i = idx * len(prefixes) // shards
-                hi_i = (idx + 1) * len(prefixes) // shards
+                lo_i = idx * len(remaining_prefixes) // shards
+                hi_i = (idx + 1) * len(remaining_prefixes) // shards
                 if lo_i >= hi_i:
                     continue
-                lo = prefixes[lo_i]
-                hi = prefixes[hi_i] if hi_i < len(prefixes) else None
-                start_after = lo[:-1] if idx > 0 else None
+                lo = remaining_prefixes[lo_i]
+                hi = remaining_prefixes[hi_i] if hi_i < len(remaining_prefixes) else None
+                start_after: str | None = (
+                    after if idx == 0 and after is not None else (lo[:-1] if idx > 0 else None)
+                )
                 tasks.append((lo, pool.submit(list_range, target, start_after, hi)))
             return tasks
 
@@ -340,33 +369,50 @@ class S3Storage:
             part, prefixes = list_delimiter(base)
             if not prefixes:
                 return part
-            with ThreadPoolExecutor(max_workers=16) as pool:
+            with ThreadPoolExecutor(max_workers=32) as pool:
                 if len(prefixes) >= 32:
                     for lo, fut in submit_sharded(pool, base, prefixes):
                         for key, value in fut.result().items():
                             if (self.prefix + key) >= lo:
                                 part[key] = value
                     return part
-                first_futures = [(sub, pool.submit(first_page, sub)) for sub in prefixes]
-                truncated: list[str] = []
+                first_futures = [(sub, pool.submit(first_two_pages, sub)) for sub in prefixes]
+                truncated: list[tuple[str, str, str | None]] = []
                 for sub, page_fut in first_futures:
-                    items, next_token = page_fut.result()
-                    if next_token is None:
-                        part.update(items)
-                    else:
-                        truncated.append(sub)
+                    items, next_token, last_key = page_fut.result()
+                    part.update(items)
+                    if next_token is not None:
+                        truncated.append((sub, next_token, last_key))
                 if not truncated:
                     return part
-                delim_futures = [(sub, pool.submit(list_delimiter, sub)) for sub in truncated]
+                delim_futures = [
+                    (sub, next_token, last_key, pool.submit(list_delimiter, sub))
+                    for sub, next_token, last_key in truncated
+                ]
                 range_tasks: list[tuple[str | None, Any]] = []
-                for sub, delim_fut in delim_futures:
+                for sub, next_token, last_key, delim_fut in delim_futures:
                     direct, sub_prefixes = delim_fut.result()
                     part.update(direct)
                     if len(sub_prefixes) >= 32:
-                        range_tasks.extend(submit_sharded(pool, sub, sub_prefixes))
-                    else:
+                        range_tasks.extend(submit_sharded(pool, sub, sub_prefixes, after=last_key))
+                    elif len(sub_prefixes) >= 2:
                         for child in sub_prefixes:
-                            range_tasks.append((None, pool.submit(list_range, child)))
+                            if (
+                                last_key is not None
+                                and child < last_key
+                                and not last_key.startswith(child)
+                            ):
+                                continue
+                            sa = (
+                                last_key
+                                if last_key is not None and last_key.startswith(child)
+                                else None
+                            )
+                            range_tasks.append((None, pool.submit(list_range, child, sa)))
+                    else:
+                        range_tasks.append(
+                            (None, pool.submit(list_range, sub, None, None, next_token))
+                        )
                 for bound, fut in range_tasks:
                     for key, value in fut.result().items():
                         if bound is None or (self.prefix + key) >= bound:
@@ -462,7 +508,7 @@ def _client(provider: Literal["s3", "r2"]) -> Any:
     except ImportError:
         raise EtudeError(f"{provider}_requires_boto3", 422) from None
     timeout = socket_timeout()
-    config = Config(connect_timeout=timeout, read_timeout=timeout, max_pool_connections=32)
+    config = Config(connect_timeout=timeout, read_timeout=timeout, max_pool_connections=64)
     if provider == "s3":
         return boto3.client("s3", config=config)
     try:

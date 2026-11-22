@@ -67,10 +67,13 @@ never import each other.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
+import os
 import runpy
 import sys
+import tempfile
 import threading
 import time
 from collections import Counter
@@ -85,11 +88,12 @@ from importlib.util import cache_from_source
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 
 from etude.errors import EtudeError, explain
 from etude.eval.records import Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named, refuse_renamed
+from etude.identity import SAFE_NAME
 from etude.records import BUILT_IN_NAMES, Record
 from etude.report import Counters, Curve, Flame, Matches, Report, Score, Series
 from etude.run import LocatedRun, as_storage, declared, located_runs, run_folders, under
@@ -506,6 +510,125 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
     return _build_page(storage, file, experiment=experiment, listed=listed)
 
 
+# Bump whenever derived Page fields change without changing inputs.
+_PAGE_CACHE_VERSION = 1
+
+
+def _page_cache_path(experiment: str, storage: Storage) -> Path:
+    home = Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser()
+    store = hashlib.sha256(storage.name.encode()).hexdigest()[:16]
+    stem = (
+        f"{experiment}.{store}"
+        if SAFE_NAME.match(experiment)
+        else hashlib.sha256(f"{experiment}\0{storage.name}".encode()).hexdigest()[:24]
+    )
+    return home / "pages" / f"{stem}.json"
+
+
+def _page_cache_key(
+    *,
+    experiment: str,
+    file: Path,
+    source: str,
+    report: Report,
+    origin: str | None,
+    notes: Sequence[str],
+    versions: Mapping[str, str],
+    has_evals: bool,
+    state: ExperimentState | None,
+    wanted: Sequence[Tournament],
+    local_versions: Sequence[tuple[str, str]],
+) -> str:
+    """Digest of every evaluated input that determines `Page`, including external files read by code."""
+    digest = hashlib.sha256()
+    digest.update(
+        json.dumps(
+            {
+                "v": _PAGE_CACHE_VERSION,
+                "experiment": experiment,
+                "file": str(file),
+                "source": source,
+                "report": report.model_dump(mode="json"),
+                "ml_set": "ml" in report.model_fields_set,
+                "origin": origin,
+                "notes": list(notes),
+                "has_evals": has_evals,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    )
+    for key, version in sorted(versions.items()):
+        digest.update(b"\0")
+        digest.update(key.encode())
+        digest.update(b"=")
+        digest.update(version.encode())
+    if has_evals:
+        for tournament in wanted:
+            digest.update(b"\0T")
+            digest.update(tournament.model_dump_json().encode())
+        for key, version in local_versions:
+            digest.update(b"\0L")
+            digest.update(key.encode())
+            digest.update(b"=")
+            digest.update(version.encode())
+        if state is not None:
+            digest.update(b"\0S")
+            digest.update(
+                json.dumps(
+                    {
+                        "committed_usd": str(state.committed_usd),
+                        "runs": [
+                            [
+                                r.name,
+                                r.state,
+                                r.job,
+                                r.launch,
+                                r.line,
+                                r.seed,
+                                [c.model_dump(mode="json") for c in r.checkpoints],
+                            ]
+                            for r in state.runs
+                        ],
+                        "eval_runs": [[e.name, e.state, list(e.matches)] for e in state.eval_runs],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            )
+    return digest.hexdigest()
+
+
+def _load_cached_page(path: Path, expected_key: str) -> Page | None:
+    try:
+        with path.open("rb") as stream:
+            first = stream.readline().rstrip(b"\r\n").decode("ascii", errors="strict")
+            if first != expected_key:
+                return None
+            return Page.model_validate_json(stream.read())
+    except (FileNotFoundError, OSError, UnicodeDecodeError, ValidationError):
+        return None
+
+
+def _save_cached_page(path: Path, cache_key: str, page: Page) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "wb", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as partial:
+            name = Path(partial.name)
+            try:
+                partial.write(cache_key.encode("ascii"))
+                partial.write(b"\n")
+                partial.write(page.model_dump_json().encode("utf-8"))
+            except BaseException:
+                name.unlink(missing_ok=True)
+                raise
+        os.replace(name, path)
+    except OSError:
+        pass
+
+
 def _build_page(
     storage: Storage,
     file: Path,
@@ -542,11 +665,49 @@ def _build_page(
             if not callable(found):
                 raise EtudeError("experiment_eval_is_not_a_function", 422) from ValueError(file)
             want = found
+        has_evals = want is not None or len(trained) < len(data)
+        state: ExperimentState | None = None
+        wanted: list[Tournament] = []
+        local_versions: list[tuple[str, str]] = []
+        if has_evals:
+            from etude.experiment import state_of  # noqa: PLC0415
+
+            state = state_of(data, experiment)
+            if want is not None:
+                wanted = _wanted(want, state)
+            here = DirectoryStorage(default_root())
+            if here.name != storage.name:
+                local_versions = sorted(here.versions("").items())
+        source_name = _source_name(storage)
+        cache_path = _page_cache_path(experiment, storage)
+        cache_key = _page_cache_key(
+            experiment=experiment,
+            file=file,
+            source=source_name,
+            report=report,
+            origin=origin,
+            notes=notes,
+            versions=versions,
+            has_evals=has_evals,
+            state=state,
+            wanted=wanted,
+            local_versions=local_versions,
+        )
+        if (cached := _load_cached_page(cache_path, cache_key)) is not None:
+            return cached
         evals = (
             _read_evals(
-                storage, experiment, report, want, data, keys=keys, declarations=declarations
+                storage,
+                experiment,
+                report,
+                want,
+                data,
+                keys=keys,
+                declarations=declarations,
+                state=state,
+                asked_tournaments=wanted,
             )
-            if want is not None or len(trained) < len(data)
+            if has_evals
             else _Evals()
         )
         # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
@@ -568,10 +729,10 @@ def _build_page(
                 )
             }
         )
-    return Page(
+    page = Page(
         experiment=experiment,
         file=str(file),
-        source=_source_name(storage),
+        source=source_name,
         report=report,
         origin=origin,
         notes=(*notes, *partial, *_without_hours(trained), *evals.notes),
@@ -592,6 +753,8 @@ def _build_page(
         latest_result_ms=evals.latest_result_ms,
         absent=evals.absent,
     )
+    _save_cached_page(cache_path, cache_key, page)
+    return page
 
 
 def _without_hours(trained: Sequence[RunData]) -> tuple[str, ...]:
@@ -735,20 +898,30 @@ def _read_evals(
     *,
     keys: Sequence[str],
     declarations: Sequence[LocatedRun],
+    state: ExperimentState | None = None,
+    asked_tournaments: Sequence[Tournament] | None = None,
 ) -> _Evals:
     # The optional `eval` extra (DuckDB, and the etude.eval modules over it), imported where
     # it is used: only an experiment with evaluations reads it, so a report without loads none.
     from etude.eval.query import _open_statsdb  # noqa: PLC0415
     from etude.experiment import state_of  # noqa: PLC0415
 
-    state = state_of(data, experiment)
+    resolved_state = state_of(data, experiment) if state is None else state
     held, refused = _held_tournaments(
-        want, state, storage, experiment, keys=keys, declarations=declarations
+        want,
+        resolved_state,
+        storage,
+        experiment,
+        keys=keys,
+        declarations=declarations,
+        asked_tournaments=asked_tournaments,
     )
     db = _open_statsdb(experiment, storage, keys=keys)
     try:
         saved = _saved_checkpoints(db)
-        players, placement = _players(db, saved, {run.name: run.line for run in state.runs})
+        players, placement = _players(
+            db, saved, {run.name: run.line for run in resolved_state.runs}
+        )
         outside = _load(db, held, players)
         commits = _commits(db)
         selections, notes = _selections(held, report, outside=outside)
@@ -796,6 +969,7 @@ def _held_tournaments(
     *,
     keys: Sequence[str] | None = None,
     declarations: Sequence[LocatedRun] | None = None,
+    asked_tournaments: Sequence[Tournament] | None = None,
 ) -> tuple[list[_HeldTournament], tuple[str, ...]]:
     """Each tournament as held so far, and a note for each one drawn otherwise than asked.
 
@@ -812,7 +986,10 @@ def _held_tournaments(
     from etude.experiment import read_tournament_lines  # noqa: PLC0415 - optional eval dependency
 
     wanted: dict[str, Tournament] = {}
-    if want is not None:
+    if asked_tournaments is not None:
+        for tournament in asked_tournaments:
+            wanted.setdefault(tournament.definition.name, tournament)
+    elif want is not None:
         for tournament in _wanted(want, state):
             wanted.setdefault(tournament.definition.name, tournament)
     refused: list[str] = []
