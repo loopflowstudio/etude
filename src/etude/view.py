@@ -679,7 +679,11 @@ def _run_details(stored: RunData | None, item: Standing | None) -> str:
     )
     rows = []
     for checkpoint in stored.checkpoints if stored else ():
-        clocks = ", ".join(f"{k} {number(v)}" for k, v in checkpoint.at.items())
+        # Wall clocks are fractional hours; four significant digits read as a position.
+        clocks = ", ".join(
+            f"{k} {number(v) if float(v).is_integer() else f'{v:.4g}'}"
+            for k, v in checkpoint.at.items()
+        )
         rows.append(
             f"<tr><td>{checkpoint.ordinal}</td><td>{escape(checkpoint.name)}</td><td>{escape(clocks)}</td></tr>"
         )
@@ -723,25 +727,39 @@ class Server(ThreadingHTTPServer):
         self.path = path
         self.pages = Pages(source)
         self.index = ChartIndex(as_storage(source), path)
-        self.files = self._find_files()
+        self.files: dict[str, Path] = {}
+        self._find_files()
         self._building = threading.Lock()
         self._lock = threading.Lock()
         self._html: dict[str, str] = {}
         self._pending: dict[str, Future[str]] = {}
         super().__init__(address, _Handler)
 
-    def _find_files(self) -> dict[str, Path]:
+    def _find_files(self) -> str | None:
+        """Update `files`, or say why the folder's files cannot be told apart.
+
+        The last known files keep their reports meanwhile; runs come from the
+        source and keep refreshing.
+        """
         if self.path is None:
-            return {}
-        files = self.pages.find_files(self.path) if self.path.is_dir() else [self.path]
-        return {file.stem: file for file in files}
+            return None
+        try:
+            files = self.pages.find_files(self.path) if self.path.is_dir() else [self.path]
+        except Exception as error:
+            return explain(error)
+        self.files = {file.stem: file for file in files}
+        return None
 
     def ingest(self) -> None:
+        unfound = self._find_files()
         try:
-            self.files = self._find_files()
             self.index.refresh(self.files)
         except Exception as error:
             self.index.error = explain(error)
+            return
+        # A poll skipped for a concurrent view keeps the previous error, which may hold it.
+        if unfound and unfound not in (self.index.error or ""):
+            self.index.error = "\n".join(filter(None, (self.index.error, unfound)))
 
     def serve_forever(self, poll_interval: float = 0.5) -> None:
         stop = threading.Event()
@@ -833,6 +851,11 @@ class _Handler(BaseHTTPRequestHandler):
     server: Server
 
     def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/favicon.ico":
+            # Browsers ask on every page; the view has no icon and says so without an error.
+            self.send_response(204)
+            self.end_headers()
+            return
         self._respond(refresh=False)
 
     def do_POST(self) -> None:  # noqa: N802

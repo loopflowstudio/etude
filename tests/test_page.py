@@ -179,6 +179,17 @@ def test_a_folder_holds_the_files_that_define_eval_or_report_and_none_is_run(
         experiment_files(folder)
 
 
+def test_a_folder_holding_etude_home_ignores_the_sources_it_retains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "lab"
+    monkeypatch.setenv("ETUDE_HOME", str(folder / "home"))
+    experiment_file(folder, "paced", REPORTED)
+    # A launch keeps a copy of the source for each attempt under Etude's home.
+    experiment_file(folder / "home/sessions/a1/attempts/b2/src", "paced", REPORTED)
+    assert experiment_files(folder) == [folder / "paced.py"]
+
+
 def test_a_folders_report_is_an_index_of_its_experiments_pages(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

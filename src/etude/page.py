@@ -317,12 +317,16 @@ def experiment_files(directory: Path, *, known: Collection[Path] = ()) -> list[P
 
     A file is recognised by its text, without running it (`experiment_named`);
     Previously recognised files stay experiments until removed, even while being edited.
+    Etude's home is skipped: the sources it retains for launched runs are copies.
     Raises `EtudeError("experiment_named_twice")` for two files with one stem.
     """
+    home = default_root().parent.resolve()
     found: dict[str, Path] = {}
     for path in sorted(directory.rglob("*.py")):
         parts = path.relative_to(directory).parts
         if any(part.startswith(".") or part == "__pycache__" for part in parts):
+            continue
+        if path.resolve().is_relative_to(home):
             continue
         if path not in known and experiment_named(path) is None:
             continue

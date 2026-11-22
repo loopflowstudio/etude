@@ -396,6 +396,27 @@ def test_bucket_listing_validates_held_objects_without_another_get(tmp_path: Pat
             assert client.requests == reads + 1
 
 
+def test_two_files_with_one_name_leave_runs_refreshing(tmp_path: Path) -> None:
+    folder = tmp_path / "experiments"
+    experiment_file(folder, "lab", REPORTED)
+    experiment_file(folder / "copy", "lab", REPORTED)
+    source = DirectoryStorage(tmp_path / "runs")
+    root = source.root / "lab/base@0"
+    record = RunRecord(
+        id="lab/base@0",
+        experiment="lab",
+        clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
+    )
+    source.put("lab/base@0/run.json", record.model_dump_json().encode())
+    _seal(root, 0, 7.0)
+    with Server(source, folder, ("127.0.0.1", 0)) as server:
+        server.ingest()
+        _seal(root, 1, 3.0)
+        server.ingest()
+        assert _loss(server.page("/runs/lab/base@0") or "") == [7.0, 3.0]
+        assert "experiment_named_twice" in (server.page("/status") or "")
+
+
 def test_indexed_experiment_opens_its_default_report_separately(tmp_path: Path) -> None:
     with open_run(experiment="lab", run="base@0", clocks=["steps"], directory=tmp_path) as run:
         run.log({"loss": 8}, steps=1)
