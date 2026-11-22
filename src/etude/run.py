@@ -521,7 +521,8 @@ def run_folders(keys: Sequence[str]) -> dict[str, list[str]]:
 
 def under(keys: Sequence[str], prefix: str) -> Iterator[str]:
     """The keys under `prefix` of a sorted listing."""
-    for key in keys[bisect_left(keys, prefix) :]:
+    for position in range(bisect_left(keys, prefix), len(keys)):
+        key = keys[position]
         if not key.startswith(prefix):
             return
         yield key
@@ -626,21 +627,25 @@ def located_runs(
     ]
 
 
+def owning_folder(key: str, roots: set[str]) -> str | None:
+    """The nearest run that owns this visible file. Hidden delivery bookkeeping has no owner."""
+    parent, _, name = key.rpartition("/")
+    while parent and not name.startswith("."):
+        folder = parent + "/"
+        if folder in roots:
+            return folder
+        parent, _, name = parent.rpartition("/")
+    return None
+
+
 def _last_writes(objects: Mapping[str, str], roots: set[str]) -> dict[str, datetime]:
-    """Attribute a file to its nearest run, including copies and jobs below a compact run."""
     writes: dict[str, datetime] = {}
     for key, version in objects.items():
         if not isinstance(version, ObjectVersion) or version.modified is None:
             continue
-        at = version.modified
-        parent, _, name = key.rpartition("/")
-        while parent and not name.startswith("."):
-            folder = parent + "/"
-            if folder in roots:
-                if folder not in writes or writes[folder] < at:
-                    writes[folder] = at
-                break
-            parent, _, name = parent.rpartition("/")
+        folder = owning_folder(key, roots)
+        if folder is not None and (folder not in writes or writes[folder] < version.modified):
+            writes[folder] = version.modified
     return writes
 
 

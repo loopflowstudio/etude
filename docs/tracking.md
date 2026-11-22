@@ -176,7 +176,9 @@ and the browser tab is visible, stopping once everything shown has ended or the
 tab is hidden; the report component loads asynchronously and refreshes on
 demand. Your run files in your directory or bucket remain the portable record
 you own; any local cache or index the view keeps is derived for sub-second
-chart loads.
+chart loads. The view indexes in the background and publishes a complete generation
+under `ETUDE_HOME/views`. Opening a run reads that generation immediately, even
+while the next bucket listing or report build is in progress.
 
 `etude view` binds `127.0.0.1:8765` (`--host`, `--port` override it) and has no
 login. It advances nothing, rents nothing, never migrates the launcher database,

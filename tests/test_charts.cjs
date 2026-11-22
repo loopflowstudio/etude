@@ -257,19 +257,17 @@ test("refresh failure leaves the page visible and a later success reloads once",
   let reloads = 0, requests = 0, fail = true;
   const browser = vm.createContext({
     document: {getElementById: () => status},
-    location: {pathname: "/lab", reload: () => { reloads++; }},
+    location: {pathname: "/experiments/lab/report", reload: () => { reloads++; }},
     fetch: async () => { requests++; return {ok: !fail, text: async () => "source unavailable"}; },
   });
-  vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\nthis.refreshPage = refreshPage;", browser);
+  vm.runInContext(fs.readFileSync("src/etude/view.js", "utf8"), browser);
   assert.equal(requests, 0); // loading the chart script never polls
-  await browser.refreshPage(true);
+  await browser.refreshReport();
   assert.equal(requests, 1); assert.equal(reloads, 0);
   assert.match(status.textContent, /Refresh failed: source unavailable.*last successful generation/);
   fail = false;
-  await browser.refreshPage(true);
+  await browser.refreshReport();
   assert.equal(requests, 2); assert.equal(reloads, 1);
-  await browser.refreshPage(false);
-  assert.equal(requests, 2); assert.equal(reloads, 2); // snapshots only reload
 });
 
 // A seating held for checkpoints of line "learner": each one's point (`Page.points`), scored

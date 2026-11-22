@@ -25,7 +25,7 @@ from stat import S_ISREG
 from typing import Any, Literal, Protocol, Self
 from urllib.parse import quote, unquote, urlsplit
 
-from etude.cache import Artifact, Cache, Fetched
+from etude.cache import Artifact, Cache, Fetched, Source
 from etude.carriage import immutable
 from etude.deadline import call, remaining
 from etude.errors import EtudeError
@@ -84,13 +84,17 @@ class ObjectVersion(str):
     compare or persist them. An opaque string supplies no evidence of age.
     """
 
-    __slots__ = ("modified",)
+    __slots__ = ("modified", "etag")
+    etag: str | None
     modified: datetime | None
 
-    def __new__(cls, tag: str, modified: datetime | None = None) -> Self:
+    def __new__(
+        cls, tag: str, modified: datetime | None = None, *, etag: str | None = None
+    ) -> Self:
         if modified is not None and modified.utcoffset() is None:
             raise ValueError("an object's modification time must include a time zone")
         version = super().__new__(cls, tag)
+        version.etag = etag
         version.modified = modified.astimezone(UTC) if modified is not None else None
         return version
 
@@ -269,17 +273,59 @@ class S3Storage:
                 for item in page.get("Contents", []):
                     tag = f"{item.get('ETag')}:{item.get('Size')}:{item.get('LastModified')}"
                     found[item["Key"][len(self.prefix) :]] = ObjectVersion(
-                        tag, item.get("LastModified")
+                        tag, item.get("LastModified"), etag=item.get("ETag")
                     )
             return found
 
         return _storage_request(collect)
 
 
+class ListedStorage:
+    """Read objects against a listing using the same verified cache as every bucket reader.
+
+    A matching listed version answers a mutable object's freshness check. Bucket
+    locators and ETags are identical to those of unlisted readers. A compaction
+    race can be retried by the next ingestion with a fresh listing.
+    """
+
+    def __init__(self, storage: Storage, objects: dict[str, str], cache: Cache) -> None:
+        self.storage, self.objects = storage, objects
+        self.cache = storage.cache if isinstance(storage, S3Storage) else cache
+        self.name = storage.name
+        self.uri = storage.uri
+        self.put, self.put_file, self.delete = storage.put, storage.put_file, storage.delete
+
+    def versions(self, prefix: str) -> dict[str, str]:
+        return {k: v for k, v in self.objects.items() if k.startswith(prefix)}
+
+    def keys(self, prefix: str) -> list[str]:
+        return sorted(k for k in self.objects if k.startswith(prefix))
+
+    def _object(self, key: str) -> tuple[Artifact, Source]:
+        version = self.objects.get(key)
+        if version is None:
+            raise FileNotFoundError(key)
+        if isinstance(self.storage, S3Storage):
+            etag = version.etag if isinstance(version, ObjectVersion) else None
+            return self.storage._artifact(key), _Object(self.storage, key, listed_etag=etag)
+        return Artifact(location=self.uri(key), immutable=immutable(key)), _StoredFile(
+            self.storage, key, version=version
+        )
+
+    def get(self, key: str) -> bytes:
+        artifact, source = self._object(key)
+        return self.cache.read(artifact, source)
+
+    def get_range(self, key: str, start: int, length: int) -> bytes:
+        artifact, source = self._object(key)
+        return self.cache.read(artifact, source, start=start, length=length)
+
+
 class _Object:
     """One bucket object, read for the cache; reads reused from it go unrecorded."""
 
-    def __init__(self, storage: S3Storage, key: str) -> None:
+    def __init__(self, storage: S3Storage, key: str, *, listed_etag: str | None = None) -> None:
+        self.listed_etag = listed_etag
         self.storage, self.key = storage, key
 
     def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
@@ -293,7 +339,7 @@ class _Object:
         return found
 
     def changed(self, etag: str) -> Fetched | None:
-        return self._get({"IfNoneMatch": etag})
+        return None if self.listed_etag == etag else self._get({"IfNoneMatch": etag})
 
     def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
         pass
@@ -427,17 +473,26 @@ def storage_from_uri(uri: str | Path) -> Storage:
 
 
 class _StoredFile:
-    """Transport for a file with a declared length; the cache verifies its content."""
+    """A file transport. A listing supplies a version; a declared artifact supplies a size."""
 
-    def __init__(self, storage: Storage, key: str, size: int) -> None:
+    def __init__(
+        self, storage: Storage, key: str, size: int | None = None, *, version: str | None = None
+    ) -> None:
+        self.version = version
         self.storage, self.key, self.size = storage, key, size
 
     def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
-        stop = self.size if end is None else min(end + 1, self.size)
-        return Fetched(self.storage.get_range(self.key, start, stop - start), None)
+        stop = end + 1 if end is not None else self.size
+        if stop is None:
+            body = self.storage.get(self.key)[start:]
+        else:
+            if self.size is not None:
+                stop = min(stop, self.size)
+            body = self.storage.get_range(self.key, start, stop - start)
+        return Fetched(body, self.version)
 
     def changed(self, etag: str) -> Fetched | None:
-        return self.read(0, None, None)
+        return None if etag == self.version else self.read(0, None, None)
 
     def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
         pass

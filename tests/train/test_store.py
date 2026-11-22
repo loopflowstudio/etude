@@ -790,7 +790,7 @@ def test_watched_reports_read_each_bucket_file_once_per_computer(tmp_path: Path)
         client.create_bucket(Bucket="etude-watched")
         assert sync(local, storages=[S3Storage("etude-watched", client=client)]) == {}
         written = client.stored("etude-watched")
-        # `etude report --watch` and `etude report --serve` build the page every few seconds.
+        # `etude report --watch` builds the page every few seconds.
         file = experiment_file(tmp_path / "experiments", "e")
         first = build(S3Storage("etude-watched", client=client), file)
         assert 0 < client.bytes <= written

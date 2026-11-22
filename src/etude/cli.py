@@ -316,6 +316,24 @@ def smoke_experiment(
 
 @app.command()
 @kind(Kind.wait)
+def view(
+    path: Annotated[
+        Path | None, typer.Argument(exists=True, readable=True, help="an experiment file or folder")
+    ] = None,
+    source: Annotated[str | None, typer.Option(help="a runs directory or bucket URI")] = None,
+    host: Annotated[str, typer.Option(help="the address to bind")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(min=0, max=65535)] = 8765,
+) -> None:
+    """Serve live run charts and experiment reports from the selected source."""
+    # This command alone loads the live index and HTTP server.
+    from etude.storage import default_root, storage_from_uri
+    from etude.view import serve
+
+    serve(storage_from_uri(source or default_root()), path, (host, port))
+
+
+@app.command()
+@kind(Kind.wait)
 def report(
     path: Annotated[
         Path,
@@ -345,16 +363,9 @@ def report(
         float | None,
         typer.Option(
             min=0.1,
-            help="rewrite it every SECONDS, and the open page reloads; with --serve, how often "
-            "the page refreshes (no timer by default)",
+            help="rewrite it every SECONDS, and reload the open page",
         ),
     ] = None,
-    serve: Annotated[
-        bool,
-        typer.Option(help="serve it with refresh on demand, and write nothing"),
-    ] = False,
-    host: Annotated[str, typer.Option(help="with --serve; it has no login")] = "127.0.0.1",
-    port: Annotated[int, typer.Option(help="with --serve")] = 8765,
 ) -> None:
     """Draw an experiment's evals, perf and ML details as one HTML page, from its runs' files.
 
@@ -366,25 +377,12 @@ def report(
     import time
     import webbrowser
 
-    from etude.page import Page, Pages, Server, index, render, render_index, target, write
+    from etude.page import Page, Pages, index, render, render_index, target, write
     from etude.storage import default_root, storage_from_uri
 
     if experiment is not None and path.is_dir():
         raise ValueError("--experiment needs one Python file")
     storage = storage_from_uri(source or default_root())
-    if serve:
-        server = Server(storage, path, (host, port), refresh=watch, experiment=experiment)
-        address = f"http://{host}:{server.server_port}/"
-        print(address, flush=True)
-        if open_:
-            webbrowser.open(address)
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            server.server_close()
-        return
     shown: object = None
     # A watched page is built again only once its files change.
     pages = Pages(storage, experiment=experiment)
@@ -603,6 +601,8 @@ _HERE = (
     "worker",
     "logs",
     "report",
+    "status",
+    "view",
     "checkpoints",
     "sync",
     "convert-eval",

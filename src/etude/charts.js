@@ -458,28 +458,3 @@ function latestActivity(D) {
   for (const m of D.training.checkpoints) times.push(((started.get(m.run) ?? 0) + m.elapsed) * 1000);
   return Math.max(...times) || null;
 }
-
-// A refresh is explicit, including when a timer was explicitly requested. Ordinary
-// reloads only view cached HTML. On failure the current DOM and timestamp survive.
-let refreshing = false;
-async function refreshPage(served) {
-  if (!served) { location.reload(); return; }
-  if (refreshing) return;
-  refreshing = true;
-  const status = document.getElementById("refresh-status");
-  if (status) status.textContent = "Refreshing…";
-  try {
-    const response = await fetch(location.pathname, {method: "POST"});
-    if (!response.ok) throw new Error(await response.text());
-    location.reload();
-  } catch (error) {
-    if (status) status.textContent = `Refresh failed: ${error.message}. Showing the last successful generation.`;
-  } finally { refreshing = false; }
-}
-function refreshControl(host, served) {
-  if (!served) return;
-  const button = node("button", null, "Refresh"), status = node("span");
-  status.id = "refresh-status"; status.setAttribute("role", "status");
-  button.onclick = () => refreshPage(true);
-  host.append(button, status);
-}

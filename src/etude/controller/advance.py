@@ -44,6 +44,7 @@ from etude.launch.server import selected
 from etude.run import RunListing
 from etude.spec import Job, RunRequest, Smoke, Until
 from etude.storage import Storage, default_root
+from etude.view_link import print_view
 
 
 @dataclass
@@ -117,13 +118,6 @@ def _resumed(
     return request, Decimal(0)
 
 
-def _print_lines(lines: dict[str | None, str]) -> None:
-    """Print the training lines in declared order, once, and forget them."""
-    for line in lines.values():
-        print(line)
-    lines.clear()
-
-
 def _queued(request: RunRequest, experiment: str) -> TrainingRunSummary:
     assert request.id is not None
     name = request.id.removeprefix(experiment + "/")
@@ -174,6 +168,7 @@ def advance(
     requests: list[RunRequest] = []
     # One line per declared run, keyed by address; a new run's line waits for its placement.
     lines: dict[str | None, str] = {}
+    links: dict[str | None, str] = {}
     if mode != "local" and callable(experiment.training):
         assert experiment.file is not None
         requests = read_training_jobs(
@@ -191,8 +186,9 @@ def advance(
             if resume:
                 request, released = _resumed(request, experiment.name, until)
                 committed -= released
-            elif known := format_known_run(request, find_training_run(request, state)):
-                lines[request.id] = known
+            elif (prior := find_training_run(request, state)) is not None:
+                lines[request.id] = format_known_run(request, prior)
+                links[request.id] = prior.address
                 continue
             if not _fits(request.job, committed, max_usd):
                 lines[request.id] = (
@@ -211,7 +207,8 @@ def advance(
             jobs = asked(experiment.eval, asking)
         except EtudeError:
             # A policy of a run this pass left out (`--max-usd`) is missing; say which and why.
-            _print_lines(lines)
+            for line in lines.values():
+                print(line)
             raise
     policy_lines = read_tournament_lines(
         source,
@@ -334,7 +331,8 @@ def advance(
                     decision.state = "would launch" if decision.launched in wave else "would queue"
         else:
             submit = client.queue if mode == "queue" else client.launch
-            submit(planned, pool, rent=rent)
+            for launched in submit(planned, pool, rent=rent):
+                links[launched] = launched
             placed: dict[str | None, Literal["queued", "running"]] = {
                 item.record.id: item.placement for item in client.standing(experiment.name)
             }
@@ -343,11 +341,17 @@ def advance(
             for decision in decisions:
                 if decision.launched:
                     decision.state = placed[decision.launched]
-    _print_lines(lines)
+    for listed_id, line in lines.items():
+        print(line)
+        if not quote and listed_id in links:
+            print_view(links[listed_id])
     if quoted is not None:
         show_quote(quoted)
     for decision in decisions:
         _show_tournament(decision)
+    for address in dict.fromkeys(d.launched for d in decisions if d.launched):
+        if address and address in links:
+            print_view(address)
     if stopped_runs and not quote:
         raise EtudeError("launched_pass_failed", 409, detail=", ".join(sorted(stopped_runs)))
     return decisions

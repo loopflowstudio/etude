@@ -740,18 +740,33 @@ def read_all(
         file = located.file
         if experiment in (None, file.experiment):
             data.append(
-                _read(
-                    storage,
-                    file.experiment,
-                    located.name,
-                    located.folders,
-                    listing.keys,
-                    declaration=located,
-                    metrics=metrics,
-                    prefixes=prefixes,
-                )
+                read_located(storage, located, listing.keys, metrics=metrics, prefixes=prefixes)
             )
     return sorted(data, key=lambda one: (one.experiment, one.name))
+
+
+def read_located(
+    storage: Storage,
+    run: LocatedRun,
+    keys: Sequence[str],
+    *,
+    metrics: frozenset[str] | None = None,
+    prefixes: tuple[str, ...] = (),
+    whole_blocks: bool = False,
+) -> RunData:
+    """Read a declaration's copies from a sorted listing. A whole-run chart
+    build traverses every numeric column, so it may acquire each block whole."""
+    return _read(
+        storage,
+        run.file.experiment,
+        run.name,
+        run.folders,
+        keys,
+        declaration=run,
+        metrics=metrics,
+        prefixes=prefixes,
+        whole_blocks=whole_blocks,
+    )
 
 
 def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
@@ -761,9 +776,7 @@ def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
     listing = RunListing.read(storage, run=run)
     for located in listing.declarations:
         if located.file.experiment == experiment:
-            return _read(
-                storage, experiment, run, located.folders, listing.keys, declaration=located
-            )
+            return read_located(storage, located, listing.keys)
     # Only a name nobody declared can hold historical rows without a declaration.
     folders = [] if listing.declarations else run_folders(listing.keys).get(run, [run_prefix(run)])
     return _read(storage, experiment, run, folders, listing.keys, declaration=None)
@@ -872,6 +885,7 @@ def _read(
     declaration: LocatedRun | None,
     metrics: frozenset[str] | None = None,
     prefixes: tuple[str, ...] = (),
+    whole_blocks: bool = False,
 ) -> RunData:
     """The run's records from `listing`, the source's sorted keys; its blocks once used."""
     run_file = declaration.file if declaration else None
@@ -914,7 +928,9 @@ def _read(
         ),
         writers=writers,
     )
-    data._read_blocks = lambda: _blocks(storage, folders, keys, writers, metrics, prefixes)
+    data._read_blocks = lambda: _blocks(
+        storage, folders, keys, writers, metrics, prefixes, whole_blocks
+    )
     data._read_out = lambda: _read_out(storage, experiment, run, folders, present)
     return data
 
@@ -952,16 +968,17 @@ def _blocks(
     writers: Sequence[RunWriter],
     metrics: frozenset[str] | None,
     prefixes: tuple[str, ...],
+    whole_blocks: bool,
 ) -> tuple[StoredBlock, ...]:
     """The run's metric blocks in write order, listing again when compaction removed one."""
     blocks: list[StoredBlock] = []
     for retry in range(3):
         try:
             blocks = []
-            for chosen in _selected(storage, keys, indexes=metrics is None):
+            for chosen in _selected(storage, keys, indexes=metrics is None and not whole_blocks):
                 folder, file, description = chosen.folder, chosen.file, chosen.description
-                if description is None and file.level < 2 and metrics is None:
-                    # A recent block: small, and in no manifest, so take it whole.
+                if whole_blocks or (description is None and file.level < 2 and metrics is None):
+                    # All columns are needed, or this small recent block has no manifest.
                     blocks.append(fetch(storage, folder, file.key))
                     continue
                 if description is None:

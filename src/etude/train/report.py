@@ -158,6 +158,8 @@ def _trace(run: RunData, metric: str, clock: str) -> Trace | None:
 
 def _band(job: str, members: Sequence[RunData], metric: str, clock: str) -> Trace | None:
     """The mean of the seeds' bucket means over a shared span, banded by their range."""
+    if len(members) < 2:
+        return None
     present = [(run, chart) for run in members if len(chart := run.chart(metric, clock, BUCKETS))]
     if len(present) < 2:
         return None

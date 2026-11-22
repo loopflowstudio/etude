@@ -207,10 +207,8 @@ def find_training_run(request: RunRequest, state: ExperimentState) -> TrainingRu
     )
 
 
-def format_known_run(request: RunRequest, prior: TrainingRunSummary | None) -> str | None:
-    """The pass's line for a known run; None when the address is new."""
-    if prior is None:
-        return None
+def format_known_run(request: RunRequest, prior: TrainingRunSummary) -> str:
+    """The pass's line for a known run."""
     line = f"{request.id}  {prior.state}"
     if prior.state in {"failed", "stopped"}:
         line += f"; --job {request.job.name} --seed {request.seed} --resume"

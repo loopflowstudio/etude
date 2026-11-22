@@ -11,6 +11,7 @@ __PAGE_CSS__
 </head>
 <body>
 <div class="wrap">
+  <!--view-heading-->
   <div class="head"><h1 id="title"></h1><span class="pill" id="pill"></span></div>
   <div class="context" id="context"></div>
   <div class="controls"><div class="legend-jobs" id="jobs" role="group" aria-label="Jobs"></div><span id="chips" style="display:contents"></span></div>
@@ -133,7 +134,6 @@ function render() {
   if (D.environments.length > 1) kv("Environments", D.environments.map(e => e.name + (Object.keys(e.config).length ? " " + JSON.stringify(e.config) : "")).join(", "));
   if (D.latest_result_ms != null) kv("Latest result", `${when(D.latest_result_ms)} (${ago(D.latest_result_ms, D.generated_ms)} this page)`);
   kv("Read", `${when(D.generated_ms)} from ${D.source}`);
-  refreshControl(ctx, D.served);
   if (D.refresh) {
     const l = node("label", "chip"), box = node("input"); box.type = "checkbox"; box.checked = S.live === "1";
     box.onchange = () => { S.live = box.checked ? "1" : "0"; writeHash(); };
@@ -518,9 +518,17 @@ function tables() {
 const tabs = [...document.querySelectorAll("nav.tabs a")];
 const io = new IntersectionObserver(entries => { for (const en of entries) if (en.isIntersecting) tabs.forEach(t => t.classList.toggle("on", t.dataset.s === en.target.id)); }, {rootMargin: "-40% 0px -55% 0px"});
 ["evals", "perf", "ml"].forEach(id => io.observe(document.getElementById(id)));
+if (D.run_charts) {
+  const position = T.runs[0]?.at || {};
+  const clock = (firstClock in position) ? firstClock : Object.keys(position)[0];
+  if (clock) document.getElementById("run-position").textContent = `${clock} ${num(position[clock])}`;
+  for (const selector of ["div.head", "#context", ".controls", "#evals", "[data-s=evals]", "#runs-box"]) {
+    document.querySelector(selector).style.display = "none";
+  }
+}
 render();
 let pending; addEventListener("resize", () => { clearTimeout(pending); pending = setTimeout(render, 120); });
-if (D.refresh) setInterval(() => { if (S.live === "1" && !document.hidden) refreshPage(D.served); }, D.refresh * 1000);
+if (D.refresh) setInterval(() => { if (S.live === "1" && !document.hidden) location.reload(); }, D.refresh * 1000);
 </script>
 </body>
 </html>

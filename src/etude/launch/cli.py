@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -87,12 +88,28 @@ def status(
     job: Annotated[str | None, typer.Option(help="select a job")] = None,
 ) -> None:
     """Show where runs stand, as of the server loop's last pass."""
+    from etude.identity import run_address
     from etude.launch import server
     from etude.launch.listing import resolve_runs, show_runs
+    from etude.view_link import print_view
 
+    if address := server.selected():
+        args = ["status", *(runs or [])]
+        if experiment is not None:
+            args += ["--experiment", experiment]
+        if job is not None:
+            args += ["--job", job]
+        result = server.forward(address, args)
+        if not result:
+            for name in runs or ():
+                print_view(run_address(name, experiment))
+        raise typer.Exit(result)
     scheduler = default()
     selected = resolve_runs(scheduler, runs or [], experiment=experiment, job=job)
     show_runs(scheduler, selected)
+    if runs and not os.environ.get("ETUDE_SERVER_LOCAL"):
+        for name in selected:
+            print_view(name)
     server.show_freshness(scheduler)
 
 

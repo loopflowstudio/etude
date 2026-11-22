@@ -75,10 +75,8 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Collection, Sequence
-from concurrent.futures import Future
 from dataclasses import dataclass
 from html import escape
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.util import cache_from_source
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -100,6 +98,10 @@ if TYPE_CHECKING:
 
     from etude.eval.tournament import Played
     from etude.jobs import ExperimentState
+
+
+# An authored file and its sibling imports share sys.modules across request threads.
+_author_imports = threading.RLock()
 
 
 class Placement(Record):
@@ -349,14 +351,14 @@ class Pages:
         self.storage = as_storage(source)
         here = DirectoryStorage(default_root())
         self._places = list({each.name: each for each in (self.storage, here)}.values())
-        self._built: dict[Path, tuple[_Inputs, Page]] = {}
+        self._built: dict[tuple[Path | None, str], tuple[_Inputs, Page]] = {}
         self._known: set[Path] = set()
         # Each folder's experiment by place and prefix, with its declaration's version.
         self._declared: dict[tuple[str, str], tuple[str, str | None]] = {}
 
-    def build(self, file: Path) -> Page:
+    def build(self, file: Path | None, *, experiment: str | None = None) -> Page:
         """`build`'s page, kept from the last call while its inputs are the same."""
-        return self._build(file, self._listings())
+        return self._build(file, self._listings(), experiment)
 
     def find_files(self, directory: Path) -> list[Path]:
         """Discover experiments, retaining known files through incomplete edits."""
@@ -379,20 +381,24 @@ class Pages:
     def _listings(self) -> list[dict[str, str]]:
         return [place.versions("") for place in self._places]
 
-    def _build(self, file: Path, listings: Sequence[dict[str, str]]) -> Page:
-        if not file.is_file():
+    def _build(
+        self, file: Path | None, listings: Sequence[dict[str, str]], experiment: str | None = None
+    ) -> Page:
+        name = _experiment_name(file, experiment or self.experiment)
+        key = (file, name)
+        if file is not None and not file.is_file():
             # The build says why there is no page.
-            return build(self.storage, file, experiment=self.experiment)
+            return build(self.storage, file, experiment=name)
         runs = tuple(
-            self._versions(place, self.experiment or file.stem, listed)
+            self._versions(place, name, listed)
             for place, listed in zip(self._places, listings, strict=True)
         )
-        kept = self._built.get(file)
-        if kept is not None and kept[0] == _Inputs(files=_sources(file), runs=runs):
+        kept = self._built.get(key)
+        if kept is not None and kept[0] == _Inputs(files=report_sources(file), runs=runs):
             return kept[1]
-        page = build(self.storage, file, experiment=self.experiment)
+        page = build(self.storage, file, experiment=name)
         # After the build, so the neighbours this run imported are among its inputs.
-        self._built[file] = (_Inputs(files=_sources(file), runs=runs), page)
+        self._built[key] = (_Inputs(files=report_sources(file), runs=runs), page)
         return page
 
     def _versions(
@@ -475,7 +481,17 @@ def _source_name(storage: Storage) -> str:
     return storage.name
 
 
-def build(source: Storage | Path | str, file: Path, *, experiment: str | None = None) -> Page:
+def _experiment_name(file: Path | None, experiment: str | None) -> str:
+    if experiment is not None:
+        return experiment
+    if file is None:
+        raise ValueError("a default report needs an experiment name")
+    return file.stem
+
+
+def build(
+    source: Storage | Path | str, file: Path | None, *, experiment: str | None = None
+) -> Page:
     """The page of the experiment `file` names, from the runs under `source`.
 
     The file is run each time, so an edited `report()` shows on the next
@@ -484,10 +500,11 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
     experiment's.
     """
     storage = as_storage(source)
-    experiment = experiment or file.stem
-    names = _run_file(file)
-    report, origin, notes = _report(names.get("report"), file)
-    flames = tuple(panel.prefix for panel in (*report.perf, *report.ml) if isinstance(panel, Flame))
+    experiment = _experiment_name(file, experiment)
+    with _author_imports:
+        names = _run_file(file) if file else {}
+        report, origin, notes = _report(names.get("report"), file)
+    flames = _flames(report)
     listing = RunListing.read(storage)
     data = read_all(
         storage,
@@ -520,7 +537,41 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
     partial = (
         (f"Partial results: no recorded end yet for {', '.join(unended)}.",) if unended else ()
     )
-    measured = training(trained, prefixes=flames)
+    return _assemble(experiment, file, storage, report, origin, (*notes, *partial), trained, evals)
+
+
+def _flames(report: Report) -> tuple[str, ...]:
+    return tuple(panel.prefix for panel in (*report.perf, *report.ml) if isinstance(panel, Flame))
+
+
+def read_report(file: Path | None) -> Report:
+    """Read a local chart declaration, or use the default panels."""
+    with _author_imports:
+        return _report(_run_file(file).get("report") if file else None, file)[0]
+
+
+def run_chart_data(storage: Storage, data: RunData, report: Report) -> str:
+    """Render the report's metric panels for one run with every logged metric available."""
+    page = _assemble(data.experiment, None, storage, report, None, (), [data], _Evals())
+    return _payload(page.model_dump(mode="json") | {"run_charts": True}, None)
+
+
+def render_run(address: str, charts: str, heading: str) -> str:
+    """Show already-indexed chart data alongside the current run status."""
+    return _inline("page.html", address, charts, heading)
+
+
+def _assemble(
+    experiment: str,
+    file: Path | None,
+    storage: Storage,
+    report: Report,
+    origin: str | None,
+    notes: tuple[str, ...],
+    trained: Sequence[RunData],
+    evals: _Evals,
+) -> Page:
+    measured = training(trained, prefixes=_flames(report))
     if "ml" not in report.model_fields_set:
         # Defaults offer the RL metrics that exist; explicit panels still
         # diagnose missing keys, including a misspelt metric name.
@@ -536,11 +587,11 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
         )
     return Page(
         experiment=experiment,
-        file=str(file),
+        file=str(file) if file else experiment,
         source=_source_name(storage),
         report=report,
         origin=origin,
-        notes=(*notes, *partial, *_without_hours(trained), *evals.notes),
+        notes=(*notes, *_without_hours(trained), *evals.notes),
         training=measured,
         scores=evals.scores or report.scores(),
         selections=evals.selections,
@@ -646,8 +697,10 @@ def _repository(file: Path) -> Path:
     return folder
 
 
-def _sources(file: Path) -> tuple[tuple[str, int, int], ...]:
+def report_sources(file: Path | None) -> tuple[tuple[str, int, int], ...]:
     """What a kept page's files are compared by; a deleted neighbour reads as absent."""
+    if file is None:
+        return ()
     found = []
     for path in sorted({file.resolve(), *_neighbours(file).values()}):
         try:
@@ -658,11 +711,14 @@ def _sources(file: Path) -> tuple[tuple[str, int, int], ...]:
     return tuple(found)
 
 
-def _report(made: object, file: Path) -> tuple[Report, str | None, tuple[str, ...]]:
+def _report(made: object, file: Path | None) -> tuple[Report, str | None, tuple[str, ...]]:
     if made is None:
         # Nothing is declared, so the page draws everything logged rather than nothing.
+        if file is None:
+            return Report(other_metrics=True), None, ()
         note = f"{file.name} defines no report(), so this is the default report."
         return Report(other_metrics=True), None, (note,)
+    assert file is not None
     if not callable(made):
         raise EtudeError("experiment_report_is_not_a_function", 422) from ValueError(file)
     report = made()
@@ -1594,22 +1650,25 @@ def _failures(
     )
 
 
-def render(page: Page, *, refresh: float | None = None, served: bool = False) -> str:
-    """The page as one HTML file; `refresh` is the seconds between the open page reloading."""
-    return _inline("page.html", page.experiment, page.model_dump(mode="json"), refresh, served)
+def render(page: Page, *, refresh: float | None = None, heading: str = "") -> str:
+    """The report as one HTML file; a watched file reloads every `refresh` seconds."""
+    return _inline(
+        "page.html", page.experiment, _payload(page.model_dump(mode="json"), refresh), heading
+    )
 
 
-def render_index(found: Index, *, refresh: float | None = None, served: bool = False) -> str:
+def render_index(found: Index, *, refresh: float | None = None) -> str:
     """The index as one HTML file, like a page."""
-    return _inline("index.html", "Experiments", found.model_dump(mode="json"), refresh, served)
+    return _inline("index.html", "Experiments", _payload(found.model_dump(mode="json"), refresh))
 
 
-def _inline(
-    template: str, title: str, data: dict[str, object], refresh: float | None, served: bool
-) -> str:
+def _payload(data: dict[str, object], refresh: float | None) -> str:
+    stamp = {"generated_ms": time.time_ns() // 1_000_000, "refresh": refresh}
+    return json.dumps(data | stamp, allow_nan=False).replace("<", "\\u003c")
+
+
+def _inline(template: str, title: str, payload: str, heading: str = "") -> str:
     here = Path(__file__).parent
-    stamp = {"generated_ms": time.time_ns() // 1_000_000, "refresh": refresh, "served": served}
-    payload = json.dumps(data | stamp, allow_nan=False)
     # Each placeholder is replaced once, the data last, so its text is never taken for one.
     html = (here / template).read_text()
     for name, text in (
@@ -1618,13 +1677,13 @@ def _inline(
         ("__UPLOT_JS__", (here / "vendor/uPlot.iife.min.js").read_text()),
         ("__CHARTS_JS__", (here / "charts.js").read_text()),
         ("__TITLE__", escape(title)),
-        ("__DATA__", payload.replace("</", "<\\/")),
+        ("__DATA__", payload),
     ):
         before, found, after = html.partition(name)
         if not found:
             raise AssertionError(f"{template} has no {name}")
         html = before + text + after
-    return html
+    return html.replace("<!--view-heading-->", heading, 1)
 
 
 def target(storage: Storage, experiment: str, out: Path | None = None) -> Path:
@@ -1642,105 +1701,3 @@ def write(html: str, path: Path) -> Path:
     partial.write_text(html)
     partial.replace(path)
     return path
-
-
-class Server(ThreadingHTTPServer):
-    """Serves an experiment file's page at `/`, or a folder's index at `/` and each of its
-    experiments at `/STEM`. Views reuse HTML; explicit refreshes join one generation.
-
-    It has no login: keep it on this computer unless told otherwise.
-    """
-
-    def __init__(
-        self,
-        source: Storage | Path | str,
-        path: Path,
-        address: tuple[str, int],
-        *,
-        refresh: float | None = None,
-        experiment: str | None = None,
-    ) -> None:
-        super().__init__(address, _Handler)
-        self.pages, self.path, self.refresh = Pages(source, experiment=experiment), path, refresh
-        # Requests are handled on threads; a page is built by one at a time.
-        self._building = threading.Lock()
-        self._lock = threading.Lock()
-        self._html: dict[str, str] = {}
-        self._pending: dict[str, Future[str | None]] = {}
-
-    def page(self, route: str = "/", *, refresh: bool = False) -> str | None:
-        """Reuse a generated page, or join its refresh. A failure preserves the last HTML."""
-        with self._lock:
-            if not refresh and route in self._html:
-                return self._html[route]
-            pending = self._pending.get(route)
-            owner = pending is None
-            if pending is None:
-                pending = Future()
-                self._pending[route] = pending
-        if owner:
-            try:
-                # Pages shares imported experiment files and input state across routes.
-                with self._building:
-                    html = self._render(route)
-                with self._lock:
-                    if html is not None:
-                        self._html[route] = html
-                    pending.set_result(html)
-                    del self._pending[route]
-            except BaseException as error:
-                with self._lock:
-                    pending.set_exception(error)
-                    del self._pending[route]
-        return pending.result()
-
-    def _render(self, route: str) -> str | None:
-        if not self.path.is_dir():
-            if route != "/":
-                return None
-            return render(self.pages.build(self.path), refresh=self.refresh, served=True)
-        if route == "/":
-            built = self.pages.build_each(self.path)
-            # Index facts and links must describe the same generation. Keep a
-            # failed detail's last successful page, while its index row says why.
-            with self._lock:
-                for file, page in built.items():
-                    if isinstance(page, Page):
-                        self._html[f"/{file.stem}"] = render(
-                            page, refresh=self.refresh, served=True
-                        )
-            found = index(self.pages.storage, built, href=lambda stem: f"/{stem}")
-            return render_index(found, refresh=self.refresh, served=True)
-        for file in self.pages.find_files(self.path):
-            if route == f"/{file.stem}":
-                return render(self.pages.build(file), refresh=self.refresh, served=True)
-        return None
-
-
-class _Handler(BaseHTTPRequestHandler):
-    server: Server
-
-    def do_GET(self) -> None:  # noqa: N802 - the name http.server calls
-        self._respond(refresh=False)
-
-    def do_POST(self) -> None:  # noqa: N802 - the name http.server calls
-        self._respond(refresh=True)
-
-    def _respond(self, *, refresh: bool) -> None:
-        try:
-            served = self.server.page(self.path.split("?", 1)[0], refresh=refresh)
-            found, body = served is not None, (served or "Not found.").encode()
-            status = 200 if found else 404
-        except ValueError as error:  # no runs of the experiment yet
-            found, body, status = False, explain(error).encode(), 404
-        except Exception as error:
-            found, body, status = False, explain(error).encode(), 500
-        self.send_response(status)
-        self.send_header("Content-Type", f"text/{'html' if found else 'plain'}; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format: str, *args: object) -> None:
-        """Requests are not printed; the command's own output stays readable."""

@@ -76,7 +76,7 @@ from etude.eval.run import (
     play_together,
 )
 from etude.eval.tournament import _evaluating_tournament
-from etude.identity import stored_owner
+from etude.identity import run_address, stored_owner
 from etude.launch.records import Status
 from etude.out import MEMBERSHIP, OutFile, OutFiles, OutMember
 from etude.records import ArtifactRef, Record, RunRecord, SourceKey
@@ -181,6 +181,15 @@ class TrainingRunSummary:
     _data: RunData | None = field(default=None, repr=False, compare=False)
     status: Status | None = field(default=None, hash=False)
     last_write: datetime | None = None
+
+    @property
+    def address(self) -> str:
+        """The full spelling held by the launcher or written in the run declaration."""
+        if self.status:
+            return self.status.run
+        if self._data and self._data.file:
+            return run_address(self._data.file.id, self.experiment)
+        return run_address(self.name, self.experiment)
 
     @cached_property
     def out(self) -> OutMembers:
