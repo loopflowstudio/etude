@@ -151,7 +151,10 @@ those commands print nothing extra.
 An experiment page (`/experiments/NAME`) combines operational status (what has
 run or completed, where each active run is, and clocks) with the experiment's
 `report()` charts on one page. The two components load asynchronously so a
-slow report build never blocks live status.
+slow report build never blocks live status. The status table lists each job and
+links to each run. Each row shows the run's clock position, its last file write,
+and the launcher's placement or queue reason when available. Status updates
+keep the report open at your selection.
 
 A run page (`/runs/ADDRESS`) shows its state (`queued`, `running`, `stopped`, `finished`,
 `failed`) with launcher detail when launched (such as `running · setting up on

@@ -1,4 +1,4 @@
-"""Live run pages. One ingestion loop publishes the chart index for all readers.
+"""Live run and experiment pages. One ingestion loop publishes the chart index for all readers.
 
 Run files and launcher standing are joined by state_of. Only derived chart data
 and display facts live in the index. Publication is one SQLite transaction
@@ -28,6 +28,8 @@ from pathlib import Path
 from types import FrameType
 from urllib.parse import quote, unquote, urlsplit
 
+from pydantic import TypeAdapter
+
 from etude.cache import Cache
 from etude.errors import explain
 from etude.experiment import state_of
@@ -49,18 +51,19 @@ from etude.view_link import advertise
 _REFRESH = 5
 _REMOTE_STANDING = 30
 _SILENT = timedelta(minutes=10)
+_CLOCKS = TypeAdapter(dict[str, float])
 
 # A changed schema starts a fresh rebuildable index.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
-    address TEXT PRIMARY KEY, experiment TEXT NOT NULL, state TEXT NOT NULL,
+    address TEXT PRIMARY KEY, experiment TEXT NOT NULL, job TEXT NOT NULL, state TEXT NOT NULL,
     last_write TEXT, launcher TEXT, launched_as TEXT, final_attempt INTEGER,
     position TEXT NOT NULL, details TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS launcher_address ON runs(launched_as);
 CREATE INDEX IF NOT EXISTS experiment_runs ON runs(experiment, address);
 CREATE TABLE IF NOT EXISTS charts (
-    address TEXT PRIMARY KEY, inputs TEXT NOT NULL, payload TEXT NOT NULL
+    address TEXT PRIMARY KEY, inputs TEXT NOT NULL, reached TEXT NOT NULL, payload TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS consoles (
     run TEXT PRIMARY KEY, body TEXT NOT NULL, collected TEXT, final_attempt INTEGER
@@ -194,12 +197,17 @@ class ChartIndex:
             # launcher released any previously indexed run.
             self.error = self._launcher_error
             return
-        indexed = dict(db.execute("SELECT address, inputs FROM charts"))
+        # A changed launcher target can use sealed clocks without decoding the curves.
+        indexed = {
+            row["address"]: row for row in db.execute("SELECT address,inputs,reached FROM charts")
+        }
+        positions: dict[str, dict[str, float]] = {}
         # Stage large payloads outside the main database, one run at a time.
         db.execute("PRAGMA temp_store=FILE")
-        db.execute("CREATE TEMP TABLE changed(address TEXT, inputs TEXT, payload TEXT)")
+        db.execute(
+            "CREATE TEMP TABLE changed(address TEXT, inputs TEXT, reached TEXT, payload TEXT)"
+        )
         current: dict[str, _RunFiles] = {}
-        present: set[str] = set()
         reports: dict[str, Report] = {}
         for located in runs:
             experiment = located.file.experiment
@@ -221,27 +229,33 @@ class ChartIndex:
                 reports[experiment] = kept[1]
             report = reports[experiment]
             fingerprint = inputs.versions + report.model_dump_json(exclude_unset=True)
-            present.add(address)
-            if indexed.get(address) != fingerprint:
+            previous = indexed.get(address)
+            if previous is None or previous["inputs"] != fingerprint:
                 # Rendering may materialize block arrays. Only metadata lives
                 # through to the next poll; raw bytes belong to the shared cache.
-                payload = run_chart_data(self.source, inputs.data.model_copy(), report)
+                chart_run = inputs.data.model_copy()
+                payload = run_chart_data(self.source, chart_run, report)
+                reached = chart_run.reached
+                del chart_run
                 db.execute(
-                    "INSERT INTO changed(address,inputs,payload) VALUES (?,?,?)",
-                    (address, fingerprint, payload),
+                    "INSERT INTO changed(address,inputs,reached,payload) VALUES (?,?,?,?)",
+                    (address, fingerprint, _CLOCKS.dump_json(reached).decode(), payload),
                 )
+            else:
+                reached = _CLOCKS.validate_json(previous["reached"])
+            positions[address] = reached
         states = [
             state_of(by_experiment[name], name, retained=tuple(retained[name]))
             for name in sorted(by_experiment.keys() | retained.keys())
         ]
         db.execute(
-            "INSERT OR REPLACE INTO charts(address,inputs,payload) SELECT address,inputs,payload FROM changed"
+            "INSERT OR REPLACE INTO charts(address,inputs,reached,payload) SELECT address,inputs,reached,payload FROM changed"
         )
         db.executemany(
-            "DELETE FROM charts WHERE address=?", ((a,) for a in indexed.keys() - present)
+            "DELETE FROM charts WHERE address=?", ((a,) for a in indexed.keys() - positions.keys())
         )
         launched = {item.record.id: item for item in self._launcher.runs}
-        self._publish_states(db, states, by_experiment, launched)
+        self._publish_states(db, states, by_experiment, launched, positions, reports)
         # An address on a different selected server can belong to a different run.
         if db.execute(
             "SELECT 1 FROM observation WHERE id=1 AND server IS NOT ?", (self._server,)
@@ -281,6 +295,8 @@ class ChartIndex:
         states: list[ExperimentState],
         data: dict[str, list[RunData]],
         launched: dict[str, Standing],
+        positions: dict[str, dict[str, float]],
+        reports: dict[str, Report],
     ) -> None:
         removed = {row[0] for row in db.execute("SELECT address FROM runs")}
         for state in states:
@@ -294,25 +310,39 @@ class ChartIndex:
                 if stored and stored.file:
                     address = run_address(stored.file.id, state.experiment)
                 detail = describe_status(item.status, item.record) if item else None
+                job: str | None
+                if isinstance(run, TrainingRunSummary):
+                    job = run.job
+                elif item:
+                    job = item.record.launch.spec.name
+                else:
+                    job = (stored.file.job_name or stored.job) if stored and stored.file else None
+                report = reports.get(state.experiment)
                 removed.discard(address)
                 db.execute(
                     """
-                    INSERT INTO runs(address,experiment,state,last_write,launcher,launched_as,final_attempt,position,details) VALUES (?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(address) DO UPDATE SET experiment=excluded.experiment,
+                    INSERT INTO runs(address,experiment,job,state,last_write,launcher,launched_as,final_attempt,position,details) VALUES (?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(address) DO UPDATE SET experiment=excluded.experiment,job=excluded.job,
                       state=excluded.state,last_write=excluded.last_write,launcher=excluded.launcher,launched_as=excluded.launched_as,
                       final_attempt=excluded.final_attempt,position=excluded.position,details=excluded.details
-                    WHERE (experiment,state,last_write,launcher,launched_as,final_attempt,position,details) IS NOT
-                          (excluded.experiment,excluded.state,excluded.last_write,excluded.launcher,excluded.launched_as,excluded.final_attempt,excluded.position,excluded.details)
+                    WHERE (experiment,job,state,last_write,launcher,launched_as,final_attempt,position,details) IS NOT
+                          (excluded.experiment,excluded.job,excluded.state,excluded.last_write,excluded.launcher,excluded.launched_as,excluded.final_attempt,excluded.position,excluded.details)
                     """,
                     (
                         address,
                         state.experiment,
+                        job or "Evaluation",
                         run.state,
                         run.last_write.isoformat() if run.last_write else None,
                         detail,
                         status.run if status else None,
                         status.attempts if status and status.done else None,
-                        _position(item),
+                        _position(
+                            item,
+                            positions.get(address, {}),
+                            report.clock if report else None,
+                            stored,
+                        ),
                         _run_details(stored, item),
                     ),
                 )
@@ -333,39 +363,18 @@ class ChartIndex:
         if row is None:
             return None
         now = datetime.now(UTC)
-        last = datetime.fromisoformat(row["last_write"]) if row["last_write"] else None
-        state = row["state"]
-        if (
-            state == "running"
-            and row["launcher"] is None
-            and last is not None
-            and now - last >= _SILENT
-        ):
-            state = "no end recorded"
+        state = _display_state(row, now)
         details = [row["launcher"]] if row["launcher"] else []
-        details.extend(
-            [
-                f"last write {_age(last, now)}",
-                f"indexed {_age(datetime.fromisoformat(row['at']), now)}",
-            ]
-        )
+        details.append(f"last write {_age(row['last_write'], now)}")
+        details.extend(_observation_ages(row, now, launcher=bool(row["launched_as"])))
         if row["launched_as"]:
             with self._console_lock:
                 self._wanted.add(row["launched_as"])
-            heartbeat = row["last_loop"]
-            details.append(
-                "last loop "
-                + (_age(datetime.fromisoformat(heartbeat), now) if heartbeat else "unknown")
-            )
-        if row["launcher"] and row["launcher_at"]:
-            details.append(
-                f"launcher observed {_age(datetime.fromisoformat(row['launcher_at']), now)}"
-            )
         heading = (
             f'<a href="/experiments/{quote(row["experiment"])}">{escape(row["experiment"])}</a>'
             f'<header class="head"><h1>{escape(address)}</h1><span class="pill">{escape(state)}</span></header>'
             f'<p class="context">{escape(" · ".join(details))}</p>'
-            f"{row['position']}"
+            f"<p>{escape(row['position'])}</p>"
         )
         if state == "no end recorded":
             heading += f"<p>No new file for at least {_SILENT // timedelta(minutes=1)} minutes.</p>"
@@ -387,10 +396,7 @@ class ChartIndex:
             if row["body"] is not None:
                 console = f'<pre class="console" tabindex="0" aria-label="Retained console">{escape(row["body"])}</pre>'
                 if row["collected"]:
-                    console = (
-                        f"<p>Last collected {_age(datetime.fromisoformat(row['collected']), now)}</p>"
-                        + console
-                    )
+                    console = f"<p>Last collected {_age(row['collected'], now)}</p>" + console
         below = f'<section class="sec"><h2>Console</h2>{console}</section>' + row["details"]
         if row["payload"] is None:
             return _document(address, heading + "<p>No metric curves recorded.</p>" + below)
@@ -403,25 +409,110 @@ class ChartIndex:
                 for row in db.execute("SELECT DISTINCT experiment FROM runs ORDER BY experiment")
             ]
 
-    def addresses(self, experiment: str) -> list[str]:
+    def has_experiment(self, experiment: str) -> bool:
         with self._connect() as db:
-            return [
-                row[0]
-                for row in db.execute(
-                    "SELECT address FROM runs WHERE experiment=? ORDER BY address", (experiment,)
-                )
-            ]
+            return (
+                db.execute(
+                    "SELECT 1 FROM runs WHERE experiment=? LIMIT 1", (experiment,)
+                ).fetchone()
+                is not None
+            )
+
+    def experiment_status(self, experiment: str, *, declared: bool) -> str | None:
+        # Read one generation, including its observation when a declared file has no runs.
+        with self._connect() as db:
+            rows = db.execute(
+                """
+                SELECT address,job,state,position,launcher,last_write,final_attempt,at,launcher_at,last_loop
+                FROM observation LEFT JOIN runs ON runs.experiment=?
+                WHERE observation.id=1 ORDER BY address
+                """,
+                (experiment,),
+            ).fetchall()
+        if not declared and (not rows or rows[0]["address"] is None):
+            return None
+        now = datetime.now(UTC)
+        active = not rows or bool(self.error)
+        stale = False
+        body = []
+        for row in rows:
+            if row["address"] is None:
+                continue
+            state = _display_state(row, now)
+            stale |= state == "no end recorded"
+            active |= state in ("queued", "running") or (
+                row["launcher"] is not None and row["final_attempt"] is None
+            )
+            address = row["address"]
+            body.append(
+                f"<tr><td>{escape(row['job'])}</td>"
+                f'<td><a href="/runs/{quote(address, safe="/@=")}">{escape(address)}</a></td>'
+                f"<td>{escape(state)}</td><td>{escape(row['position'] or '—')}</td>"
+                f"<td>{escape(row['launcher'] or '—')}</td><td>{_age(row['last_write'], now)}</td></tr>"
+            )
+        if body:
+            table = (
+                '<div class="scroll"><table><thead><tr><th>Job</th><th>Run</th><th>State</th>'
+                "<th>Clock position</th><th>Launcher</th><th>Last write</th></tr></thead><tbody>"
+                + "".join(body)
+                + "</tbody></table></div>"
+            )
+        elif rows:
+            table = "<p>No runs recorded.</p>"
+        else:
+            table = "<p>Waiting for the first observation.</p>"
+        ages = ""
+        if rows:
+            launcher = any(row["launcher"] for row in rows)
+            ages = " · ".join(_observation_ages(rows[0], now, launcher=launcher))
+        error = f'<p role="status">{escape(self.error)}</p>' if self.error else ""
+        silence = (
+            f"<p>Runs with no launcher record show “no end recorded” after "
+            f"{_SILENT // timedelta(minutes=1)} minutes without a write.</p>"
+            if stale
+            else ""
+        )
+        refresh = f' data-refresh="{_REFRESH * 1000}"' if active else ""
+        return (
+            f'<section id="experiment-status" class="sec"{refresh}><h2>Run status</h2>'
+            f'{error}{table}<p class="context">{escape(ages)}</p>{silence}'
+            '<p class="lbl">No machine samples recorded.</p></section>'
+        )
 
 
-def _position(item: Standing | None) -> str:
-    if item is None or (target := item.status.until) is None:
-        return '<p id="run-position"></p>'
-    value = number(target.value)
-    at = item.status.clocks.get(target.clock)
-    position = (
-        f"Target {target.clock} {value}" if at is None else f"{target.clock} {number(at)} / {value}"
-    )
-    return f'<p id="run-position" data-clock="{escape(target.clock)}" data-target="{value}">{position}</p>'
+def _display_state(row: sqlite3.Row, now: datetime) -> str:
+    state: str = row["state"]
+    if state == "running" and row["launcher"] is None and row["last_write"]:
+        if now - datetime.fromisoformat(row["last_write"]) >= _SILENT:
+            return "no end recorded"
+    return state
+
+
+def _observation_ages(row: sqlite3.Row, now: datetime, *, launcher: bool) -> list[str]:
+    ages = [f"indexed {_age(row['at'], now)}"]
+    if launcher:
+        ages.append(f"last loop {_age(row['last_loop'], now)}")
+        if row["launcher_at"]:
+            ages.append(f"launcher observed {_age(row['launcher_at'], now)}")
+    return ages
+
+
+def _position(
+    item: Standing | None, reached: dict[str, float], preferred: str | None, stored: RunData | None
+) -> str:
+    clocks = (item.status.clocks if item else {}) | reached
+    if item and (target := item.status.until):
+        limit = number(target.value)
+        at = clocks.get(target.clock)
+        return (
+            f"Target {target.clock} {limit}"
+            if at is None
+            else f"{target.clock} {number(at)} / {limit}"
+        )
+    if preferred not in clocks and stored:
+        preferred = next((c.name for c in stored.clocks if c.name in clocks), None)
+    clock = preferred if preferred in clocks else next(iter(clocks), None)
+    return f"{clock} {number(clocks[clock])}" if clock else ""
 
 
 def _run_details(stored: RunData | None, item: Standing | None) -> str:
@@ -458,10 +549,10 @@ def _run_details(stored: RunData | None, item: Standing | None) -> str:
     return f'<section class="sec"><h2>Config</h2>{shown}{source}</section><section class="sec"><h2>Checkpoints</h2>{checkpoints}</section>'
 
 
-def _age(at: datetime | None, now: datetime) -> str:
+def _age(at: str | None, now: datetime) -> str:
     if at is None:
         return "unknown"
-    seconds = max(0, int((now - at).total_seconds()))
+    seconds = max(0, int((now - datetime.fromisoformat(at)).total_seconds()))
     for unit, scale in (("d", 86400), ("h", 3600), ("min", 60)):
         if seconds >= scale:
             return f"{seconds // scale} {unit} ago"
@@ -542,19 +633,22 @@ class Server(ThreadingHTTPServer):
         if not path.startswith("/experiments/"):
             return None
         experiment, _, component = path.removeprefix("/experiments/").partition("/")
-        runs = self.index.addresses(experiment)
-        if not runs and experiment not in self.files:
-            return None
+        declared = experiment in self.files
         if component == "report":
-            return self._report(experiment, refresh)
-        if component:
+            if declared or self.index.has_experiment(experiment):
+                return self._report(experiment, refresh)
             return None
-        links = "".join(
-            f'<li><a href="/runs/{quote(r, safe="/@=")}">{escape(r)}</a></li>' for r in runs
-        )
+        if component not in ("", "status"):
+            return None
+        status = self.index.experiment_status(experiment, declared=declared)
+        if component or status is None:
+            return status
+        script = Path(__file__).with_name("experiment_status.js").read_text()
         return _document(
             experiment,
-            f"<h1>{escape(experiment)}</h1><ul>{links}</ul>"
+            f'<a href="/">Experiments</a><header class="head"><h1>{escape(experiment)}</h1></header>{status}'
+            '<p id="status-error" role="status"></p>'
+            f"<script>{script}</script>"
             f'<iframe title="Experiment report" src="/experiments/{quote(experiment)}/report" style="width:100%;height:80vh;border:0"></iframe>',
         )
 

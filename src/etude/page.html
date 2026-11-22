@@ -520,13 +520,6 @@ const tabs = [...document.querySelectorAll("nav.tabs a")];
 const io = new IntersectionObserver(entries => { for (const en of entries) if (en.isIntersecting) tabs.forEach(t => t.classList.toggle("on", t.dataset.s === en.target.id)); }, {rootMargin: "-40% 0px -55% 0px"});
 ["evals", "perf", "ml"].forEach(id => io.observe(document.getElementById(id)));
 if (D.run_charts) {
-  const position = T.runs[0]?.at || {};
-  const progress = document.getElementById("run-position");
-  const clock = progress.dataset.clock || ((firstClock in position) ? firstClock : Object.keys(position)[0]);
-  if (clock in position) {
-    const target = progress.dataset.target;
-    progress.textContent = target ? `${clock} ${position[clock]} / ${target}` : `${clock} ${num(position[clock])}`;
-  }
   for (const selector of ["div.head", "#context", ".controls", "#evals", "[data-s=evals]", "#runs-box"]) {
     document.querySelector(selector).style.display = "none";
   }

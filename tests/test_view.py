@@ -23,7 +23,7 @@ from etude.cli import main
 from etude.launch.records import GPU
 from etude.launch.source import home
 from etude.page import Page, Pages, build
-from etude.records import Clock, RunRecord
+from etude.records import Clock, RunCounters, RunOutcome, RunRecord
 from etude.spec import RunRequest
 from etude.storage import DirectoryStorage, S3Storage, Storage
 from etude.train.block import Builder
@@ -160,6 +160,7 @@ def test_concurrent_refreshes_join_one_generation(
             assert started.wait(5)
             second = pool.submit(server.page, "/experiments/lab/report", refresh=True)
             assert joined.wait(5)
+            assert ">finished<" in (server.page("/experiments/lab") or "")
             assert ">finished<" in (server.page("/runs/lab/a") or "")
         finally:
             release.set()
@@ -305,6 +306,10 @@ def test_graph_requests_reuse_the_published_generation_after_interruption(tmp_pa
         reads = measured.listings, measured.requests, measured.bytes
         page = restarted.page("/runs/lab/base@0") or ""
         assert _loss(page) == [1] and ">finished<" in page and 'role="status"' in page
+        status = restarted.page("/experiments/lab/status") or ""
+        assert (
+            ">finished<" in status and 'role="status"' in status and 'data-refresh="5000"' in status
+        )
         assert (measured.listings, measured.requests, measured.bytes) == reads
         outcome.write_bytes(saved)
         restarted.ingest()
@@ -362,6 +367,71 @@ def test_indexed_experiment_opens_its_default_report_separately(tmp_path: Path) 
         assert _loss(server.page("/experiments/lab/report") or "") == [8.0]
 
 
+def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Path) -> None:
+    backend = bench(home())
+    spec = job(name="learn", experiment="lab", until="steps=40")
+    (running,) = backend.scheduler.queue(RunRequest(id="learn@0", seed=0, job=spec), rent="l4")
+    backend.scheduler.tick()
+    backend.run(1)
+    machine = backend.scheduler.read(running).machine
+    assert machine
+    (queued,) = backend.scheduler.queue(RunRequest(id="learn@1", seed=1, job=spec), rent="l4")
+    (home() / "server-heartbeat").write_text((datetime.now(UTC) - timedelta(hours=2)).isoformat())
+    source = DirectoryStorage(tmp_path / "runs")
+    local = "lab/local@0"
+    source.put(
+        local + "/run.json",
+        RunRecord(
+            id=local,
+            experiment="lab",
+            job_name="baseline",
+            clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
+        )
+        .model_dump_json()
+        .encode(),
+    )
+    _seal(source.root / local, 0, 7)
+    evaluation = "lab/duel"
+    source.put(
+        evaluation + "/run.json",
+        RunRecord(id=evaluation, experiment="lab", kind="evaluation", job_name="score")
+        .model_dump_json()
+        .encode(),
+    )
+    outcome = RunOutcome(state="finished", counters=RunCounters()).model_dump_json().encode()
+    source.put(evaluation + "/outcome.json", outcome)
+    measured = MeasuredStorage(source)
+    with Server(measured, None, ("127.0.0.1", 0)) as server:
+
+        def status(path: str) -> str:
+            reads = measured.listings, measured.requests, measured.bytes
+            html = server.page(path)
+            assert html is not None
+            assert (measured.listings, measured.requests, measured.bytes) == reads
+            return html
+
+        def row(html: str, address: str) -> str:
+            return next(r for r in html.split("</tr>") if f'href="/runs/{address}"' in r)
+
+        server.ingest()
+        html = status("/experiments/lab")
+        assert ">running<" in row(html, running) and machine in row(html, running)
+        assert ">learn<" in row(html, queued) and ">queued<" in row(html, queued)
+        assert "Target steps 40" in row(html, queued) and "queued (" in row(html, queued)
+        assert ">baseline<" in row(html, local) and ">steps 1<" in row(html, local)
+        assert ">score<" in row(html, evaluation) and ">finished<" in row(html, evaluation)
+        assert "last loop 2 h ago" in html and 'src="/experiments/lab/report"' in html
+        _seal(source.root / local, 1, 3)
+        server.ingest()
+        updated = status("/experiments/lab/status")
+        assert ">steps 2<" in row(updated, local) and ">running<" in row(updated, local)
+        assert 'data-refresh="5000"' in updated and "<iframe" not in updated
+        source.put(local + "/outcome.json", outcome)
+        server.ingest()
+        assert ">finished<" in row(status("/experiments/lab/status"), local)
+    backend.store.close()
+
+
 def test_silent_file_run_stops_refreshing_without_a_recorded_end(tmp_path: Path) -> None:
     source = DirectoryStorage(tmp_path / "runs")
     key = "lab/base@0/run.json"
@@ -373,6 +443,12 @@ def test_silent_file_run_stops_refreshing_without_a_recorded_end(tmp_path: Path)
         assert ">no end recorded<" in html
         assert "last write" in html and "at least 10 minutes" in html
         assert "}, 5000);" not in html
+        status = server.page("/experiments/lab/status") or ""
+        assert (
+            ">no end recorded<" in status
+            and "10 minutes" in status
+            and "data-refresh" not in status
+        )
 
 
 def test_selected_server_status_prints_the_view_running_here(
@@ -472,7 +548,7 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
             )
             assert "&lt;writer&gt;" in page and "<writer>" not in page
             assert "steps 12" in page and "<td>1</td>" in page
-            assert "steps-12" in page and 'data-target="40"' in page
+            assert "steps-12" in page and "steps 12 / 40" in page
             assert git(repo, "rev-parse", "HEAD") in page and "on main" in page
             assert (
                 attempt.machine in page
