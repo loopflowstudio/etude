@@ -152,6 +152,11 @@ On `/`, each experiment shows its run counts by state and its latest file
 write. Open runs have links, clock positions and launcher placement when
 available. Follow the experiment link for its full run history and report.
 
+Follow **Machines** from `/` to see each held machine’s pool or on-demand,
+state, window and cost. Its occupied slots link to the runs holding them and
+show their latest clock positions. The local machine list refreshes every
+5 seconds while visible, including when the machines are idle.
+
 An experiment page (`/experiments/NAME`) combines operational status (what has
 run or completed, where each active run is, and clocks) with the experiment's
 `report()` charts on one page. The two components load asynchronously so a

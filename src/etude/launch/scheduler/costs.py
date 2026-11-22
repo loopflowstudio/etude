@@ -7,7 +7,7 @@ from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 
 from pydantic import Field
 
-from etude.launch.records import Machine, Rental, RunAttempt, Session
+from etude.launch.records import Machine, Rental, RentalCost, RunAttempt, Session
 from etude.spec import Record
 
 
@@ -158,12 +158,31 @@ def affordable_seconds(price: Decimal, cap: Decimal, reservation_hours: int) -> 
     return float(micros / 1_000_000)
 
 
-def rental_usd(rental: Rental, machine: Machine, now: datetime) -> Decimal:
-    """Estimate an unconfirmed machine through its paid deadline."""
-    if machine.claimed_at is None or machine.refused_at is not None:
-        return Decimal(0)
-    end = machine.deleted_at or min(now, rental.deadline)
-    return cost_between(rental, machine, machine.claimed_at, end)
+def has_unbilled_time(rental: Rental, machine: Machine, now: datetime) -> bool:
+    return (
+        rental.usd_per_hour > 0
+        and machine.claimed_at is not None
+        and machine.refused_at is None
+        and (
+            rental.billed_through is None
+            or rental.billed_through < (machine.deleted_at or min(now, rental.deadline))
+        )
+    )
+
+
+def price_rental(rental: Rental, machine: Machine, now: datetime) -> RentalCost:
+    """Combine retained bills and uncovered time through deletion or the paid deadline."""
+    usd = Decimal(0)
+    if machine.claimed_at is not None and machine.refused_at is None:
+        end = machine.deleted_at or min(now, rental.deadline)
+        usd = cost_between(rental, machine, machine.claimed_at, end)
+    return RentalCost(
+        rental=rental,
+        usd=usd,
+        estimated=has_unbilled_time(rental, machine, now),
+        unbilled_usd=usd - rental.billed_usd,
+        over_cap=rental.billed_usd > rental.cap_usd,
+    )
 
 
 def cost_between(r: Rental, machine: Machine, start: datetime, end: datetime) -> Decimal:

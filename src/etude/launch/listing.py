@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from decimal import Decimal
 
 from etude.identity import run_address
-from etude.launch.records import Availability, Machine, Quote, Status
+from etude.launch.records import Availability, Machine, MachineStatus, Quote, Status
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.server import PythonClient, selected
 from etude.launch.source import line
@@ -97,61 +97,49 @@ def show_ondemands(scheduler: Scheduler) -> None:
         print(each.name, "; ".join(parts) + _marks(scheduler, each.name), sep="  ")
 
 
+def describe_machine(status: MachineStatus) -> str:
+    """The same state, window and dollars appear in the machine list and live view."""
+    machine = status.machine
+    if machine.kind != "rented":
+        where = f" ({_here()})" if machine.kind == "local" else ""
+        expiry = "never expires"
+        if machine.expires_at is not None:
+            verb = "expired" if machine.expired(status.observed_at) else "expires"
+            expiry = f"{verb} {machine.expires_at:%Y-%m-%d %H:%M} UTC"
+        return f"{status.state}, owned{where}, ${machine.cost_usd:.2f} committed, {expiry}"
+    if machine.refused_at is not None:
+        return f"unavailable, nothing rented {machine.refused_at:%Y-%m-%d %H:%M} UTC"
+    spent = status.cost
+    assert spent is not None  # A listed rental has either a refusal or a paid window.
+    rental = spent.rental
+    cost = f"{'~' if spent.estimated else ''}${spent.usd:.2f}"
+    if rental.billed_through is not None:
+        cost = f"${rental.billed_usd:.4f} billed" + (
+            f" + ~${spent.unbilled_usd:.4f}" if spent.estimated else ""
+        )
+    window = (
+        f"rented, ended {machine.deleted_at:%Y-%m-%d %H:%M} UTC"
+        if machine.deleted_at
+        else f"rented until {rental.deadline:%Y-%m-%d %H:%M} UTC"
+    )
+    if status.spot:
+        window += ", spot"
+    hardware = f"{machine.hardware}, " if machine.hardware else ""
+    return f"{status.state}, {hardware}{window}, {cost}"
+
+
+def machine_warning(status: MachineStatus) -> str | None:
+    spent = status.cost
+    if spent and spent.over_cap:
+        return f"warning: {status.machine.name} bill exceeds its ${spent.rental.cap_usd:.4f} cap"
+    return None
+
+
 def show_machines(scheduler: Scheduler, *, ended: bool) -> None:
-    """One line per machine: owned with its cost and expiry, or rented with its window and cost."""
-    windows = {cost.rental.machine: cost for cost in scheduler.rentals()}
-    now = scheduler.now()
-    for each in scheduler.pools():
-        for machine in scheduler.machines(each.name):
-            where = f" ({_here()})" if machine.kind == "local" else ""
-            if machine.expires_at is None:
-                expiry = "never expires"
-            elif machine.expired(now):
-                expiry = f"expired {machine.expires_at:%Y-%m-%d %H:%M} UTC"
-            else:
-                expiry = f"expires {machine.expires_at:%Y-%m-%d %H:%M} UTC"
-            print(
-                machine.name,
-                each.name,
-                f"{machine.state(now, off=each.off)}, owned{where}, ${machine.cost_usd:.2f} committed, {expiry}",
-                sep="  ",
-            )
-    for ondemand in scheduler.ondemands():
-        for machine in scheduler.machines(ondemand.name):
-            if not machine.held and not ended:
-                continue
-            if machine.refused_at is not None:
-                print(
-                    machine.name,
-                    ondemand.name,
-                    f"unavailable, nothing rented {machine.refused_at:%Y-%m-%d %H:%M} UTC",
-                    sep="  ",
-                )
-                continue
-            if machine.name not in windows:
-                continue
-            spent = windows[machine.name]
-            rental = spent.rental
-            cost = f"{'~' if spent.estimated else ''}${spent.usd:.2f}"
-            if rental.billed_through is not None:
-                cost = f"${rental.billed_usd:.4f} billed" + (
-                    f" + ~${spent.unbilled_usd:.4f}" if spent.estimated else ""
-                )
-            if machine.deleted_at is not None:
-                window = f"rented, ended {machine.deleted_at:%Y-%m-%d %H:%M} UTC"
-            else:
-                window = f"rented until {rental.deadline:%Y-%m-%d %H:%M} UTC"
-            if ondemand.template.spot:
-                window += ", spot"
-            hardware = f"{machine.hardware}, " if machine.hardware else ""
-            print(
-                machine.name,
-                ondemand.name,
-                f"{machine.state(now)}, {hardware}{window}, {cost}",
-                sep="  ",
-            )
-            if spent.over_cap:
-                print(f"warning: {machine.name} bill exceeds its ${rental.cap_usd:.4f} cap")
+    for status in scheduler.machine_statuses(ended=ended):
+        print(status.machine.name, status.machine.supply, describe_machine(status), sep="  ")
+        if warning := machine_warning(status):
+            print(warning)
 
 
 def show_quote(quote: Quote) -> None:

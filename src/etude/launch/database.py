@@ -556,6 +556,18 @@ class Database:
         self._db.close()
 
     @contextmanager
+    def reading(self) -> Iterator[None]:
+        """Keep related reads on one committed snapshot while the loop changes allocations."""
+        if self._db.in_transaction:
+            yield
+        else:
+            self._db.execute("BEGIN")
+            try:
+                yield
+            finally:
+                self._db.rollback()
+
+    @contextmanager
     def _together(self) -> Iterator[None]:
         """Several statements that land together or not at all, on the schema this process knows.
 
@@ -823,11 +835,22 @@ class Database:
             raise LauncherError(f"no machine named {name!r}")
         return _machine_from_row(row)
 
-    def machines(self, supply: str) -> tuple[Machine, ...]:
-        """A pool's machines, or every machine ever rented from an on-demand."""
-        rows = self._db.execute(
-            f"{_MACHINES} WHERE m.pool = ? OR m.ondemand = ? ORDER BY m.rowid", (supply, supply)
-        )
+    def machines(
+        self, supply: str | None = None, *, held_only: bool = False
+    ) -> tuple[Machine, ...]:
+        """Machines in registration order. Held rentals have a live, unrefused session."""
+        filters = []
+        params: tuple[str, ...] = ()
+        if supply is not None:
+            filters.append("(m.pool = ? OR m.ondemand = ?)")
+            params = (supply, supply)
+        if held_only:
+            filters.append("""m.deleted_at IS NULL AND m.name IN (
+                SELECT name FROM machines WHERE pool IS NOT NULL UNION ALL
+                SELECT machine FROM sessions WHERE ended_at IS NULL AND refused_at IS NULL
+            )""")
+        where = " WHERE " + " AND ".join(filters) if filters else ""
+        rows = self._db.execute(f"{_MACHINES}{where} ORDER BY m.rowid", params)
         return tuple(_machine_from_row(row) for row in rows)
 
     # Jobs and runs
@@ -1094,7 +1117,11 @@ class Database:
 
     def rental_for(self, session: Session) -> Rental | None:
         """Paid window, if this working session runs on a rented machine."""
-        row = self._db.execute(f"{_RENTALS} WHERE r.machine=?", (session.machine,)).fetchone()
+        return self.rental(session.machine)
+
+    def rental(self, machine: str) -> Rental | None:
+        """A machine owns at most one paid window."""
+        row = self._db.execute(f"{_RENTALS} WHERE r.machine=?", (machine,)).fetchone()
         return None if row is None else Rental.model_validate(dict(row))
 
     def rented_session(self, machine: str) -> Session:
@@ -1108,6 +1135,15 @@ class Database:
 
     def rentals(self) -> tuple[Rental, ...]:
         return tuple(Rental.model_validate(dict(row)) for row in self._db.execute(_RENTALS))
+
+    def allocated_runs(self) -> dict[str, list[str]]:
+        """Only unfinished attempts occupy a slot, even when a run awaits another try."""
+        allocated: dict[str, list[str]] = {}
+        for machine, run in self._db.execute(
+            "SELECT machine,run FROM attempts WHERE outcome IS NULL ORDER BY machine,run"
+        ):
+            allocated.setdefault(machine, []).append(run)
+        return allocated
 
     def machine_busy(self, machine: str) -> bool:
         """Allocation authority: any unfinished attempt holds its machine."""

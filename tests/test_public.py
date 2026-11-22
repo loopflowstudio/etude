@@ -47,7 +47,7 @@ SURFACE: dict[str, tuple[str, ...]] = {
     ),
     "etude.launch.records": tuple(
         "MachineTemplate OnDemand Provider Pool Storage Image GPU CPU Availability Offer Status "
-        "Quote Diagnostic Machine RentalCost LogStream Standing".split()
+        "Quote Diagnostic Machine MachineStatus RentalCost LogStream Standing".split()
     ),
     "etude.launch.database": tuple("Database inspect upgrade Schema Upgrade".split()),
     "etude.launch.provisioner.images": ("resolve_image",),

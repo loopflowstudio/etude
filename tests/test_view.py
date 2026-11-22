@@ -20,6 +20,8 @@ from moto import mock_aws
 
 from etude.block_file import tail_key
 from etude.cli import main
+from etude.errors import LauncherError
+from etude.launch.database import Database
 from etude.launch.records import GPU
 from etude.launch.source import home
 from etude.page import Page, Pages, build
@@ -31,6 +33,7 @@ from etude.train.tracking import write_block
 from etude.view import Server
 from etude.view_link import advertise, print_view
 from tests.experiments import experiment_file
+from tests.launch.counting import Counting, Counts
 from tests.launch.fake import bench
 from tests.launch.test_scheduler import _reporting, job
 from tests.launch.test_source import git
@@ -450,6 +453,107 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
         assert "3 finished" in completed and "1 failed" in completed
         assert "data-refresh" not in settled
     backend.store.close()
+
+
+def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: Path) -> None:
+    backend = bench(home(), slots=2)
+    backend.scheduler.add_machine("bench", "bench")
+    spec = job(name="learn", experiment="lab", until="steps=40")
+    first, second = backend.scheduler.queue(
+        [RunRequest(id=f"learn@{seed}", seed=seed, job=spec) for seed in (0, 1)], rent="l4"
+    )
+    backend.scheduler.tick()
+    backend.run(1)
+    machine = backend.scheduler.read(first).machine
+    assert machine and backend.scheduler.read(second).machine == machine
+    (queued,) = backend.scheduler.queue(RunRequest(id="learn@2", seed=2, job=spec), rent="l4")
+    with Counting(backend.store, backend.service).record() as count:
+        fleet = backend.scheduler.machine_statuses()
+    assert count.snapshot() == Counts(database=7)
+    assert next(row.runs for row in fleet if row.machine.name == machine) == (first, second)
+    source = DirectoryStorage(tmp_path / "runs")
+    source.put(
+        first + "/run.json",
+        RunRecord(
+            id=first,
+            experiment="lab",
+            job_name="learn",
+            seed=0,
+            clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
+        )
+        .model_dump_json()
+        .encode(),
+    )
+    _seal(source.root / first, 0, 8)
+    measured = MeasuredStorage(source)
+    with Server(measured, None, ("127.0.0.1", 0)) as server:
+        server.ingest()
+        reads = measured.listings, measured.requests, measured.bytes
+        assert 'href="/machines"' in (server.page("/") or "")
+        html = server.page("/machines") or ""
+        row = next(r for r in html.split("</tr>") if f">{machine}</th>" in r)
+        assert "rented until" in row and "~$" in row and ">l4</td>" in row
+        assert all(f'href="/runs/{address}"' in row for address in (first, second))
+        assert "running" in row and "steps 1 / 40" in row and queued not in html
+        assert "Idle" in html and "never expires" in html and "last loop" in html
+        assert 'data-refresh="5000"' in html
+        assert (measured.listings, measured.requests, measured.bytes) == reads
+
+        _seal(source.root / first, 1, 4)
+        server.ingest()
+        reads = measured.listings, measured.requests, measured.bytes
+        assert "steps 2 / 40" in (server.page("/machines/status") or "")
+        assert (measured.listings, measured.requests, measured.bytes) == reads
+        backend.scheduler.cancel(queued)
+        backend.run(600)
+        server.ingest()
+        settled = server.page("/machines/status") or ""
+        assert machine not in settled and first not in settled and "Idle" in settled
+    backend.store.close()
+
+
+def test_failed_launcher_read_preserves_idle_machines_while_files_advance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = bench(home())
+    backend.scheduler.add_machine("studio", "studio")
+    backend.store.close()
+    source = DirectoryStorage(tmp_path / "runs")
+    with Server(source, None, ("127.0.0.1", 0)) as server:
+        server.ingest()
+        assert ">studio</th>" in (server.page("/machines") or "")
+
+    def incompatible(path: Path) -> Database:
+        raise LauncherError("fixture needs etude database upgrade")
+
+    monkeypatch.setattr("etude.launch.server.open_home", incompatible)
+    source.put(
+        "local/run.json", RunRecord(id="local", experiment="local").model_dump_json().encode()
+    )
+    with Server(source, None, ("127.0.0.1", 0)) as restarted:
+        restarted.ingest()
+        listing = restarted.page("/machines/status") or ""
+        assert ">studio</th>" in listing and "launcher observed" in listing
+        assert "etude database upgrade" in listing
+        assert 'href="/runs/local"' in (restarted.page("/") or "")
+
+
+def test_machines_without_a_launcher_or_with_a_selected_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "file-only"))
+    source = MeasuredStorage(DirectoryStorage(tmp_path / "runs"))
+    with Server(source, None, ("127.0.0.1", 0)) as server:
+        server.ingest()
+        reads = source.listings, source.requests, source.bytes
+        absent = server.page("/machines/status") or ""
+        assert "No launcher is used here." in absent and "data-refresh" not in absent
+        (home() / "server").write_text("team@fixture")
+        monkeypatch.delenv("ETUDE_SERVER_LOCAL", raising=False)
+        html = server.page("/machines") or ""
+        assert "team@fixture" in html and "<code>etude machines</code>" in html
+        assert "No launcher" not in html and 'data-refresh="5000"' not in html
+        assert (source.listings, source.requests, source.bytes) == reads
 
 
 def test_experiments_group_by_activity_and_date_the_latest_write(tmp_path: Path) -> None:

@@ -37,9 +37,9 @@ from etude.errors import explain
 from etude.experiment import state_of
 from etude.identity import run_address
 from etude.jobs import EvalRunSummary, ExperimentState, TrainingRunSummary
-from etude.launch.listing import describe_status
+from etude.launch.listing import describe_machine, describe_status, machine_warning
 from etude.launch.logs import render as render_logs
-from etude.launch.records import Standing
+from etude.launch.records import MachineStatus, Standing
 from etude.launch.server import LauncherObservation, PythonClient, selected
 from etude.launch.source import home, line
 from etude.page import Pages, read_report, render, render_run, report_sources, run_chart_data
@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS charts (
 CREATE TABLE IF NOT EXISTS consoles (
     run TEXT PRIMARY KEY, body TEXT NOT NULL, collected TEXT, final_attempt INTEGER
 );
+CREATE TABLE IF NOT EXISTS machine_list (id INTEGER PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS observation (
     id INTEGER PRIMARY KEY, at TEXT NOT NULL, launcher_at TEXT, last_loop TEXT, server TEXT
 );
@@ -129,7 +130,7 @@ class ChartIndex:
                 self._launcher = (
                     PythonClient(remote).observation(consoles)
                     if remote
-                    else LauncherObservation.read(consoles)
+                    else LauncherObservation.read(consoles, machines=True)
                 )
                 self._server = remote
                 self._launcher_at = datetime.now(UTC)
@@ -258,6 +259,13 @@ class ChartIndex:
         )
         launched = {item.record.id: item for item in self._launcher.runs}
         self._publish_states(db, states, by_experiment, launched, positions, reports)
+        if self._launcher.machines is not None:
+            db.execute(
+                "INSERT OR REPLACE INTO machine_list(id,body) VALUES(1,?)",
+                (_machines_table(db, self._launcher.machines),),
+            )
+        elif self._launcher_error is None:
+            db.execute("DELETE FROM machine_list")
         # An address on a different selected server can belong to a different run.
         if db.execute(
             "SELECT 1 FROM observation WHERE id=1 AND server IS NOT ?", (self._server,)
@@ -280,7 +288,11 @@ class ChartIndex:
             "DELETE FROM consoles WHERE NOT EXISTS (SELECT 1 FROM runs WHERE launched_as=consoles.run)"
         )
         db.execute(
-            "INSERT OR REPLACE INTO observation(id,at,launcher_at,last_loop,server) VALUES(1,?,?,?,?)",
+            """INSERT INTO observation(id,at,launcher_at,last_loop,server) VALUES(1,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET at=excluded.at,
+                 launcher_at=coalesce(excluded.launcher_at, observation.launcher_at),
+                 last_loop=CASE WHEN excluded.launcher_at IS NULL THEN observation.last_loop ELSE excluded.last_loop END,
+                 server=CASE WHEN excluded.launcher_at IS NULL THEN observation.server ELSE excluded.server END""",
             (
                 observed.isoformat(),
                 self._launcher_at.isoformat() if self._launcher_at else None,
@@ -459,6 +471,34 @@ class ChartIndex:
             body += f'<p role="status">{escape(self.error)}</p>'
         return _live_status(body, active=bool(opened or self.error) or not rows, stale=stale)
 
+    def machines(self) -> str:
+        if remote := selected():
+            return _live_status(
+                f"<p>The launcher database is on {escape(remote)}. "
+                "Run <code>etude machines</code> to list its machines.</p>",
+                active=False,
+                stale=False,
+            )
+        with self._connect() as db:
+            row = db.execute(
+                """SELECT observation.*, machine_list.body FROM observation
+                   LEFT JOIN machine_list USING(id) WHERE observation.id=1"""
+            ).fetchone()
+        active = True
+        if row is None or row["server"] is not None:
+            body = "<p>Waiting for the first local observation.</p>"
+        elif row["body"] is not None:
+            ages = " · ".join(_observation_ages(row, datetime.now(UTC), launcher=True))
+            body = row["body"] + f'<p class="context">{escape(ages)}</p>'
+        elif self.error:
+            body = "<p>Machine listing unavailable.</p>"
+        else:
+            body = "<p>No launcher is used here.</p>"
+            active = False
+        if self.error:
+            body += f'<p role="status">{escape(self.error)}</p>'
+        return _live_status(body, active=active, stale=False)
+
     def has_experiment(self, experiment: str) -> bool:
         with self._connect() as db:
             return (
@@ -521,6 +561,38 @@ class ChartIndex:
             active=active,
             stale=stale,
         )
+
+
+def _machines_table(db: sqlite3.Connection, machines: tuple[MachineStatus, ...]) -> str:
+    if not machines:
+        return "<p>No machines held.</p>"
+    rows = []
+    for status in machines:
+        machine = status.machine
+        runs = []
+        for run in status.runs:
+            row = db.execute(
+                "SELECT address,state,position FROM runs WHERE launched_as=?", (run,)
+            ).fetchone()
+            address = row["address"] if row else run
+            detail = " · ".join(filter(None, (row["state"], row["position"]))) if row else ""
+            runs.append(
+                f'<div><a href="/runs/{quote(address, safe="/@=")}">{escape(address)}</a>'
+                f"{(' · ' + escape(detail)) if detail else ''}</div>"
+            )
+        description = escape(describe_machine(status))
+        if warning := machine_warning(status):
+            description += f"<div>{escape(warning)}</div>"
+        rows.append(
+            f'<tr><th scope="row">{escape(machine.name)}</th><td>{escape(machine.supply)}</td>'
+            f"<td>{description}</td><td>{''.join(runs) or 'Idle'}</td></tr>"
+        )
+    return (
+        '<div class="scroll"><table><thead><tr><th>Machine</th><th>Pool or on-demand</th>'
+        "<th>State, window and cost</th><th>Runs</th></tr></thead><tbody>"
+        + "".join(rows)
+        + "</tbody></table></div>"
+    )
 
 
 def _is_open(row: sqlite3.Row, state: str) -> bool:
@@ -699,7 +771,18 @@ class Server(ThreadingHTTPServer):
             return self.index.run(path.removeprefix("/runs/"))
         if path in ("/", "/status"):
             overview = self.index.experiments()
-            return _status_page("Experiments", overview) if path == "/" else overview
+            return (
+                _status_page("Experiments", overview, before='<a href="/machines">Machines</a>')
+                if path == "/"
+                else overview
+            )
+        if path in ("/machines", "/machines/status"):
+            listing = self.index.machines()
+            return (
+                _status_page("Machines", listing, before='<a href="/">Experiments</a>')
+                if path == "/machines"
+                else listing
+            )
         if not path.startswith("/experiments/"):
             return None
         experiment, _, component = path.removeprefix("/experiments/").partition("/")

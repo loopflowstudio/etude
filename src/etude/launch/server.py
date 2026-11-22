@@ -33,6 +33,7 @@ from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import (
     Launch,
     LogSnapshot,
+    MachineStatus,
     Quote,
     Standing,
     Status,
@@ -113,11 +114,12 @@ class ObservationRequest(Record):
 
 class LauncherObservation(Record):
     runs: tuple[Standing, ...] = ()
+    machines: tuple[MachineStatus, ...] | None = None
     last_loop: datetime | None = None
     consoles: dict[str, LogSnapshot] = Field(default_factory=dict)
 
     @classmethod
-    def read(cls, consoles: tuple[str, ...]) -> LauncherObservation:
+    def read(cls, consoles: tuple[str, ...], *, machines: bool = False) -> LauncherObservation:
         with retained_scheduler() as scheduler:
             if scheduler is None:
                 return cls()
@@ -125,6 +127,7 @@ class LauncherObservation(Record):
             requested = set(consoles)
             return cls(
                 runs=runs,
+                machines=scheduler.machine_statuses() if machines else None,
                 last_loop=last_loop(),
                 consoles={
                     item.record.id: scheduler.logs(run=item.record.id)
@@ -142,7 +145,8 @@ def retained_scheduler() -> Iterator[Scheduler | None]:
         return
     store = open_home(home())
     try:
-        yield Scheduler(store, {})
+        with store.reading():
+            yield Scheduler(store, {})
     finally:
         store.close()
 

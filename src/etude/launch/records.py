@@ -61,6 +61,7 @@ __all__ = (
     "Quote",
     "Diagnostic",
     "Machine",
+    "MachineStatus",
     "RentalCost",
     "LogStream",
     "Standing",
@@ -317,6 +318,9 @@ class Target(Record):
     rent: str | None = None
 
 
+MachineState = Literal["starting", "available", "unavailable", "deleted"]
+
+
 class Machine(Record):
     """A machine you own, in a pool, or one rented from an on-demand.
 
@@ -357,7 +361,7 @@ class Machine(Record):
         now: datetime,
         *,
         off: bool = False,
-    ) -> Literal["starting", "available", "unavailable", "deleted"]:
+    ) -> MachineState:
         """Acquisition state at `now`; pool withdrawal also makes a machine unavailable."""
         if self.deleted_at is not None:
             return "deleted"
@@ -406,6 +410,21 @@ class RentalCost(Record):
     estimated: bool  # part of `usd` is an estimate
     unbilled_usd: Decimal  # the estimated part: `usd` beyond its retained bills
     over_cap: bool  # its bills exceed its cap
+
+
+class MachineStatus(Record):
+    """A machine at observation time, its paid window and the runs holding its slots."""
+
+    machine: Machine
+    observed_at: datetime
+    pool_off: bool
+    spot: bool
+    cost: RentalCost | None
+    runs: tuple[str, ...]
+
+    @property
+    def state(self) -> MachineState:
+        return self.machine.state(self.observed_at, off=self.pool_off)
 
 
 class Session(Record):
