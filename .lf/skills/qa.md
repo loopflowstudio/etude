@@ -124,6 +124,18 @@ writes and restore it after. `etude server set` refuses an unreachable host, so 
 failed launcher read with `chmod 0 home/launcher.sqlite` across a view restart (stop
 `etude wait` first) and restore `0644` before finishing.
 
+To drive the experiment page's report pane, give the experiment's `report()` QA
+instrumentation: append a line to a gitignored log per call, `time.sleep(3)`, and raise
+while a gitignored `FAIL` file exists. The log counts declaration reads as well as builds
+(one of each per view start and source version). Open `/experiments/NAME` and
+`/experiments/NAME/report` before launching: both read "Waiting for run files.", then
+"Building report…", then the failure with **Retry report**; remove `FAIL` and click it.
+The pane is the `#report` iframe (`page.frame_locator("#report")`); count its reloads with
+`page.on("framenavigated", …)` for frames other than `page.main_frame`. Two concurrent
+POSTs to the report URL should add one `report()` call. Poll `/experiments/NAME/status`
+twice a second through a live run and require no "Run files:" note: a writer folds its
+tails between the view's listing and its read.
+
 A real selected server needs no root: run a user sshd on this Mac
 (`/usr/sbin/sshd -f CONFIG`) with `Port 2222`, `ListenAddress 127.0.0.1`, a fresh
 `HostKey`, `AuthorizedKeysFile` holding `~/.ssh/id_ed25519.pub`, `UsePAM no`,

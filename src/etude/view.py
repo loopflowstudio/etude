@@ -181,6 +181,8 @@ class ChartIndex:
         self._server = selected()
         self._next_standing = 0.0
         self._launcher_error: tuple[str | None, str] | None = None
+        # Runs whose listed blocks were gone when read, by address, from the last pass.
+        self._vanished: dict[str, str] = {}
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -310,11 +312,20 @@ class ChartIndex:
                 return
             try:
                 with self._connect() as db:
-                    observed_at = self._prepare_files(db, files)
+                    observed_at, vanished = self._prepare_files(db, files)
                     # Release the preparation snapshot before reading the latest launcher.
                     db.commit()
                     db.execute("BEGIN IMMEDIATE")
-                    self._publish_files(db, observed_at, discovery_error)
+                    # A writer folding its tails explains one miss; the next listing
+                    # names the replacement. A miss on consecutive passes is a gap.
+                    persistent = [
+                        f"Run files: {address}: {reason}"
+                        for address, reason in vanished.items()
+                        if address in self._vanished
+                    ]
+                    error = "\n".join(filter(None, (discovery_error, *persistent))) or None
+                    self._publish_files(db, observed_at, error)
+                    self._vanished = vanished
             except Exception as failure:
                 with self._connect() as db:
                     db.execute(
@@ -353,7 +364,9 @@ class ChartIndex:
             )
         return accepted.report if accepted else DEFAULT_REPORT
 
-    def _prepare_files(self, db: sqlite3.Connection, paths: dict[str, Path]) -> datetime:
+    def _prepare_files(
+        self, db: sqlite3.Connection, paths: dict[str, Path]
+    ) -> tuple[datetime, dict[str, str]]:
         # Every listed run supplies its address and write date. Only changed
         # inputs need metadata and a new chart. Stage one payload at a time on disk.
         db.execute("PRAGMA temp_store=FILE")
@@ -375,6 +388,7 @@ class ChartIndex:
         listing = RunListing.read(storage, objects=objects)
         previous = dict(db.execute("SELECT address,inputs FROM files"))
         reports: dict[str, Report] = {}
+        vanished: dict[str, str] = {}
         for run in listing.declarations:
             experiment = run.file.experiment
             report = None
@@ -385,9 +399,20 @@ class ChartIndex:
             sealed = sorted(
                 key for key in listing.keys_in(run.folders) if not key.endswith(".open")
             )
-            _stage_run(db, storage, run, sealed, report, previous)
+            try:
+                _stage_run(db, storage, run, sealed, report, previous)
+            except FileNotFoundError as missing:
+                # A live writer replaced a listed block after this listing began.
+                # The run keeps its published facts; its other runs still advance.
+                address = run_address(run.file.id, run.file.experiment)
+                vanished[address] = explain(missing)
+                db.execute(
+                    """INSERT INTO next_files(address,experiment,inputs,last_write)
+                       SELECT address,experiment,inputs,last_write FROM files WHERE address=?""",
+                    (address,),
+                )
 
-        return observed_at
+        return observed_at, vanished
 
     def _publish_files(
         self, db: sqlite3.Connection, observed_at: datetime, discovery_error: str | None

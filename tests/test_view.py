@@ -540,6 +540,41 @@ def test_an_interrupted_writer_never_exposes_half_a_generation(
         assert _loss(writer.page("/runs/lab/b") or "") == [5, 3]
 
 
+def test_a_block_folded_after_the_listing_holds_only_its_run_for_one_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    for name in ("a", "b"):
+        _start_run(source, "lab/" + name, 5)
+    with Server(source, None, ("127.0.0.1", 0)) as server:
+        _ingest(server)
+        _seal(source.root / "lab/a", 1, 4)
+        tail = "lab/b/" + _seal(source.root / "lab/b", 1, 3)
+        get = source.get
+
+        def folded(key: str) -> bytes:
+            # The writer folds this tail into a block between the listing and the read.
+            if key == tail:
+                (source.root / tail).unlink(missing_ok=True)
+            return get(key)
+
+        monkeypatch.setattr(source, "get", folded)
+        _ingest(server)
+        assert server.index.error is None
+        assert _loss(server.page("/runs/lab/a") or "") == [5, 4]
+        assert _loss(server.page("/runs/lab/b") or "") == [5]
+        # A listed block missing again on the next pass is a gap, and the page says so.
+        _seal(source.root / "lab/b", 1, 3)
+        _ingest(server)
+        assert server.index.error and "lab/b" in server.index.error
+        assert _loss(server.page("/runs/lab/a") or "") == [5, 4]
+        monkeypatch.setattr(source, "get", get)
+        _seal(source.root / "lab/b", 1, 3)
+        _ingest(server)
+        assert server.index.error is None
+        assert _loss(server.page("/runs/lab/b") or "") == [5, 3]
+
+
 def test_view_links_follow_only_the_live_owner(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
