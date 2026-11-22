@@ -69,14 +69,13 @@ def read_tournament_lines(
             if c.policy is not None and c.policy.experiment is not None
         )
     found = list(state.lines)
-    if others := named - {state.experiment}:
-        for name in sorted(others):
-            found.extend(
-                line.seen_from(state.experiment)
-                for line in observe(
-                    source, name, keys=listing.keys, declarations=listing.declarations
-                ).lines
-            )
+    for name in sorted(named - {state.experiment}):
+        found.extend(
+            line.seen_from(state.experiment)
+            for line in observe(
+                source, name, keys=listing.keys, declarations=listing.declarations
+            ).lines
+        )
     return tuple(found)
 
 

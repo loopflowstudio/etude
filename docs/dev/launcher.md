@@ -204,8 +204,9 @@ snapshot. It reads the heartbeat from `server-heartbeat`. The scheduler's
 unfinished attempt occupies a slot. With a selected server, the view batches
 standing, heartbeat and consoles in one SSH exchange at most once every 30 seconds.
 
-The view joins that observation with the run files and publishes a generation
-under `ETUDE_HOME/views`. Status and graph requests read the published index.
+The view joins that observation with the run files in one SQLite transaction
+under `ETUDE_HOME/views`. Status and graph requests can read the last committed
+generation throughout ingestion.
 Opening a run requests its retained console for the next poll. Refreshing the
 experiment report builds it separately from the indexed status table.
 

@@ -1,10 +1,10 @@
-"""An experiment's report page, and an index of every experiment in a folder: built, written or served.
+"""Build and render an experiment report or a folder's printable index.
 
     storage = storage_from_uri("r2://bucket/runs")
     page = build(storage, Path("experiments/ppo.py"))
     write(render(page), target(storage, "ppo"))  # ./reports/ppo.html
     pages = Pages(storage).build_each(Path("experiments"))  # every experiment file there
-    write(render_index(index(storage, pages, href=lambda stem: f"{stem}.html")), target(storage, "index"))
+    write(render_index(index(storage, pages)), target(storage, "index"))
 
 The file defaults the experiment to its stem; an explicit name overrides it. It may define `report()`
 (`etude.report.Report`) and `eval_jobs(state)` (`etude.experiment`). Without
@@ -347,8 +347,7 @@ class Pages:
     reflects them.
     """
 
-    def __init__(self, source: Storage | Path | str, *, experiment: str | None = None) -> None:
-        self.experiment = experiment
+    def __init__(self, source: Storage | Path | str) -> None:
         self.storage = as_storage(source)
         here = DirectoryStorage(default_root())
         self._places = list({each.name: each for each in (self.storage, here)}.values())
@@ -385,7 +384,7 @@ class Pages:
     def _build(
         self, file: Path | None, listings: Sequence[dict[str, str]], experiment: str | None = None
     ) -> Page:
-        name = _experiment_name(file, experiment or self.experiment)
+        name = _experiment_name(file, experiment)
         key = (file, name)
         if file is not None and not file.is_file():
             # The build says why there is no page.
@@ -435,9 +434,7 @@ class _Inputs:
     runs: tuple[tuple[tuple[str, str], ...], ...]
 
 
-def index(
-    source: Storage | Path | str, pages: dict[Path, Page | str], *, href: Callable[[str], str]
-) -> Index:
+def index(source: Storage | Path | str, pages: dict[Path, Page | str]) -> Index:
     """The index of built pages. Each page keeps all but its line data, which the index never draws."""
     storage = as_storage(source)
     entries = []
@@ -465,7 +462,7 @@ def index(
             Entry(
                 file=str(file),
                 experiment=file.stem,
-                href=href(file.stem),
+                href=f"{file.stem}.html",
                 page=page,
                 error=None if isinstance(built, Page) else built,
             )
@@ -505,13 +502,12 @@ def build(
     with _author_imports:
         names = _run_file(file) if file else {}
         report, origin, notes = _report(names.get("report"), file)
-    flames = _flames(report)
     listing = RunListing.read(storage)
     data = read_all(
         storage,
         experiment,
         metrics=None if report.other_metrics else frozenset(report.keys()),
-        prefixes=flames,
+        prefixes=_flames(report),
         keys=listing.keys,
         declarations=listing.declarations,
     )
@@ -715,10 +711,10 @@ def report_sources(file: Path | None) -> tuple[tuple[str, int, int], ...]:
 def _report(made: object, file: Path | None) -> tuple[Report, str | None, tuple[str, ...]]:
     if made is None:
         # Nothing is declared, so the page draws everything logged rather than nothing.
-        if file is None:
-            return Report(other_metrics=True), None, ()
-        note = f"{file.name} defines no report(), so this is the default report."
-        return Report(other_metrics=True), None, (note,)
+        notes = (
+            (f"{file.name} defines no report(), so this is the default report.",) if file else ()
+        )
+        return Report(other_metrics=True), None, notes
     assert file is not None
     if not callable(made):
         raise EtudeError("experiment_report_is_not_a_function", 422) from ValueError(file)
@@ -834,9 +830,7 @@ def _held_tournaments(
             wanted.setdefault(tournament.definition.name, tournament)
     refused: list[str] = []
     # Read once for every tournament drawn: a page plays nothing, so nothing changes meanwhile.
-    runs = stored_runs(
-        experiment, storages=[storage], keys=listing.keys, declarations=listing.declarations
-    )
+    runs = stored_runs(experiment, storages=[storage], listing=listing)
     for name, held in runs.tournaments().items():
         try:
             recorded = assemble(held)

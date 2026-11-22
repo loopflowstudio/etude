@@ -385,7 +385,7 @@ def report(
     storage = storage_from_uri(source or default_root())
     shown: object = None
     # A watched page is built again only once its files change.
-    pages = Pages(storage, experiment=experiment)
+    pages = Pages(storage)
     try:
         while True:
             current: Page | dict[Path, Page | str] | None
@@ -393,7 +393,7 @@ def report(
                 current = pages.build_each(path)
             else:
                 try:
-                    current = pages.build(path)
+                    current = pages.build(path, experiment=experiment)
                 except ValueError:
                     if watch is None:
                         raise
@@ -409,7 +409,7 @@ def report(
                     for file, built in current.items():
                         if isinstance(built, Page):
                             write(render(built, refresh=watch), target(storage, file.stem, out))
-                    found = index(storage, current, href=lambda stem: f"{stem}.html")
+                    found = index(storage, current)
                     written = write(
                         render_index(found, refresh=watch), target(storage, "index", out)
                     )

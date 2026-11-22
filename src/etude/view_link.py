@@ -43,16 +43,16 @@ def _directory_lock(root: Path) -> Iterator[None]:
         os.close(fd)
 
 
+def run_path(address: str) -> str:
+    return "/runs/" + quote(address, safe="/@=")
+
+
 def print_view(run: str, *, file: TextIO | None = None) -> None:
     try:
         with (home() / "view").open() as stream:
             try:
                 fcntl.flock(stream, fcntl.LOCK_SH | fcntl.LOCK_NB)
             except BlockingIOError:
-                print(
-                    f"view: {stream.read().strip()}/runs/{quote(run, safe='/@=')}",
-                    file=file,
-                    flush=True,
-                )
+                print(f"view: {stream.read().strip()}{run_path(run)}", file=file, flush=True)
     except FileNotFoundError:
         pass

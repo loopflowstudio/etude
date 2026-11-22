@@ -189,7 +189,7 @@ def test_a_folders_report_is_an_index_of_its_experiments_pages(
     experiment_file(folder, "broken", "def report(): ...\n\nraise RuntimeError('typo')\n")
     experiment_file(folder, "fresh", REPORTED)
     built = Pages(runs).build_each(folder)
-    found = index(runs, built, href=lambda stem: f"{stem}.html")
+    found = index(runs, built)
     rows = {entry.experiment: entry for entry in found.entries}
     assert rows["broken"].page is None
     assert rows["broken"].error is not None and "RuntimeError: typo" in rows["broken"].error
@@ -269,9 +269,9 @@ def test_report_experiment_override_selects_runs_and_names_the_output(
     for name, score in (("coin", 1), ("wide", 9)):
         with open_run(experiment=name, run=name, directory=source) as run:
             run.log({"score": score}, updates=1)
-    pages = Pages(source, experiment="wide")
-    assert pages.build(file).experiment == "wide"
-    assert pages.build(file).training == build(source, file, experiment="wide").training
+    page = Pages(source).build(file, experiment="wide")
+    assert page.experiment == "wide"
+    assert page.training == build(source, file, experiment="wide").training
     assert main(["report", str(file), "--experiment", "wide", "--source", str(source)]) == 0
     assert capsys.readouterr().out.strip() == str(source / "reports/wide.html")
     assert (source / "reports/wide.html").is_file()

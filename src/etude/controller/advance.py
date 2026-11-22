@@ -167,8 +167,7 @@ def advance(
     new: list[RunRequest] = []
     requests: list[RunRequest] = []
     # One line per declared run, keyed by address; a new run's line waits for its placement.
-    lines: dict[str | None, str] = {}
-    links: dict[str | None, str] = {}
+    lines: dict[str | None, tuple[str, str | None]] = {}
     if mode != "local" and callable(experiment.training):
         assert experiment.file is not None
         requests = read_training_jobs(
@@ -187,16 +186,16 @@ def advance(
                 request, released = _resumed(request, experiment.name, until)
                 committed -= released
             elif (prior := find_training_run(request, state)) is not None:
-                lines[request.id] = format_known_run(request, prior)
-                links[request.id] = prior.address
+                lines[request.id] = format_known_run(request, prior), prior.address
                 continue
             if not _fits(request.job, committed, max_usd):
                 lines[request.id] = (
-                    f"{request.id}  new, not queued: --max-usd {max_usd} (${committed:.2f} committed)"
+                    f"{request.id}  new, not queued: --max-usd {max_usd} (${committed:.2f} committed)",
+                    None,
                 )
                 continue
             new.append(request)
-            lines[request.id] = f"{request.id}  new"
+            lines[request.id] = f"{request.id}  new", None
             committed += request.job.max_usd or Decimal(0)
     jobs: list[EvalJob] = []
     if experiment.eval is not None and evaluate:
@@ -207,7 +206,7 @@ def advance(
             jobs = asked(experiment.eval, asking)
         except EtudeError:
             # A policy of a run this pass left out (`--max-usd`) is missing; say which and why.
-            for line in lines.values():
+            for line, _ in lines.values():
                 print(line)
             raise
     policy_lines = read_tournament_lines(
@@ -239,13 +238,7 @@ def advance(
     taken = {f"{experiment.name}/{run.name}" for run in state.eval_runs}
     decisions: list[TournamentDecision] = []
     stopped_runs: set[str] = set()
-    stored = (
-        StoredRuns.read(
-            experiment.name, source, keys=listing.keys, declarations=listing.declarations
-        )
-        if jobs
-        else None
-    )
+    stored = StoredRuns.read(experiment.name, source, listing=listing) if jobs else None
     groups: dict[str, list[_PendingEvaluation]] = {}
     for declaration in jobs:
         recorded = declaration.recorded()
@@ -325,32 +318,31 @@ def advance(
             wave = {machine.run for machine in quoted.machines}
             for request in new:
                 verb = "launch" if request.id in wave else "queue"
-                lines[request.id] = f"{request.id}  new, would {verb}"
+                lines[request.id] = f"{request.id}  new, would {verb}", None
             for decision in decisions:
                 if decision.launched:
                     decision.state = "would launch" if decision.launched in wave else "would queue"
         else:
             submit = client.queue if mode == "queue" else client.launch
-            for launched in submit(planned, pool, rent=rent):
-                links[launched] = launched
+            submit(planned, pool, rent=rent)
             placed: dict[str | None, Literal["queued", "running"]] = {
                 item.record.id: item.placement for item in client.standing(experiment.name)
             }
             for request in new:
-                lines[request.id] = f"{request.id}  new, {placed[request.id]}"
+                lines[request.id] = f"{request.id}  new, {placed[request.id]}", request.id
             for decision in decisions:
                 if decision.launched:
                     decision.state = placed[decision.launched]
-    for listed_id, line in lines.items():
+    for line, address in lines.values():
         print(line)
-        if not quote and listed_id in links:
-            print_view(links[listed_id])
+        if not quote and address is not None:
+            print_view(address)
     if quoted is not None:
         show_quote(quoted)
     for decision in decisions:
         _show_tournament(decision)
-    for address in dict.fromkeys(d.launched for d in decisions if d.launched):
-        if address and address in links:
+    if not quote:
+        for address in dict.fromkeys(d.launched for d in decisions if d.launched is not None):
             print_view(address)
     if stopped_runs and not quote:
         raise EtudeError("launched_pass_failed", 409, detail=", ".join(sorted(stopped_runs)))

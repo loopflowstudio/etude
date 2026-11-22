@@ -414,9 +414,8 @@ while the view is running. The experiment page shows job status immediately
 and loads the report separately. The Machines page shows held machines,
 their windows and costs, and which runs occupy their slots.
 
-`etude report` writes printable HTML and folder indexes. Its `--serve`,
-`--host` and `--port` options are removed. Serve pages with `etude view` and
-pass `--source` to select the run directory or bucket. Existing launchers
+`etude report` writes printable HTML and folder indexes. For live pages, use
+`etude view --source SOURCE` to select a run directory or bucket. Existing launchers
 need `etude database upgrade` for the new machine inventory indexes.
 See the [live view guide](../docs/tracking.md#live-view).
 

@@ -254,19 +254,21 @@ test("score tooltips name the interval and row unit without changing values", ()
 
 test("refresh failure leaves the page visible and a later success reloads once", async () => {
   const status = {textContent: ""};
+  const button = {};
   let reloads = 0, requests = 0, fail = true;
   const browser = vm.createContext({
-    document: {getElementById: () => status},
+    document: {getElementById: id => id === "refresh-report" ? button : status},
     location: {pathname: "/experiments/lab/report", reload: () => { reloads++; }},
     fetch: async () => { requests++; return {ok: !fail, text: async () => "source unavailable"}; },
   });
-  vm.runInContext(fs.readFileSync("src/etude/view.js", "utf8"), browser);
+  vm.runInContext(fs.readFileSync("src/etude/refresh_report.js", "utf8"), browser);
   assert.equal(requests, 0); // loading the chart script never polls
-  await browser.refreshReport();
+  await button.onclick();
   assert.equal(requests, 1); assert.equal(reloads, 0);
   assert.match(status.textContent, /Refresh failed: source unavailable.*last successful generation/);
+  assert.equal(button.disabled, false);
   fail = false;
-  await browser.refreshReport();
+  await button.onclick();
   assert.equal(requests, 2); assert.equal(reloads, 1);
 });
 

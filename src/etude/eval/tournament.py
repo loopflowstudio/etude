@@ -41,7 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
+from pydantic import BaseModel, JsonValue, TypeAdapter
 
 from etude.checkpoints import CheckpointRef, seen_from
 from etude.errors import EtudeError
@@ -72,8 +72,8 @@ from etude.eval.records import (
 )
 from etude.eval.run import ETUDE_TABLES, EvalRun, _evaluating_matches
 from etude.eval.schedule import ordered
-from etude.records import Digest, Record, RunRecord
-from etude.run import LocatedRun, declare, run_folders, under
+from etude.records import Digest, Record
+from etude.run import RunListing, declare, declared, run_folders, under
 from etude.storage import DirectoryStorage, Storage, default_root
 
 __all__ = ("evaluating", "scores", "ScorePoint", "Scores")
@@ -308,25 +308,30 @@ class StoredRuns:
         experiment: str,
         place: Storage,
         *,
-        keys: Sequence[str] | None = None,
-        declarations: Sequence[LocatedRun] | None = None,
+        listing: RunListing | None = None,
     ) -> StoredRuns:
         """Read one source, optionally using the caller's existing listing."""
-        keys = sorted(place.keys("") if keys is None else keys)
+        keys = listing.keys if listing is not None else sorted(place.keys(""))
         listed = set(keys)
-        declared = {
-            folder: item.file.experiment for item in declarations or () for folder in item.folders
-        }
+        by_run = (
+            {
+                run.name: run.folders
+                for run in listing.declarations
+                if run.file.experiment == experiment
+            }
+            if listing is not None
+            else run_folders(keys)
+        )
         folders: list[_Folder] = []
-        for run, held_in in sorted(run_folders(keys).items()):
+        for run, held_in in sorted(by_run.items()):
             for folder in held_in:
                 held_file = folder + TOURNAMENT_FILE in listed
                 if not held_file and folder + _ENVIRONMENT_FILE not in listed:
                     continue
-                if (
-                    declared.get(folder) if declarations is not None else _experiment(place, folder)
-                ) != experiment:
-                    continue
+                if listing is None:
+                    record = declared(place, folder, listed)
+                    if record is None or record.experiment != experiment:
+                        continue
                 names = tuple(key[len(folder) :] for key in under(keys, folder))
                 if held_file:
                     held = TournamentRun.model_validate_json(
@@ -373,25 +378,21 @@ def stored_runs(
     *,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
-    keys: Sequence[str] | None = None,
-    declarations: Sequence[LocatedRun] | None = None,
+    listing: RunListing | None = None,
 ) -> StoredRuns:
     """The experiment's eval runs in this computer's eval folder and `storages`.
 
-    `keys` and `declarations` are one storage's existing listing, so they
-    need exactly one entry in `storages`; that storage is not listed again.
+    A supplied listing belongs to the single entry in `storages`.
     """
-    if (keys is not None or declarations is not None) and len(storages) != 1:
+    if listing is not None and len(storages) != 1:
         raise EtudeError("listing_needs_one_storage", 422)
     base = Path(directory) if directory is not None else default_root()
     places = {each.name: each for each in [DirectoryStorage(base), *storages]}
     folders = [
         folder
         for place in places.values()
-        for folder in (
-            StoredRuns.read(experiment, place, keys=keys, declarations=declarations)
-            if storages and place is storages[0]
-            else StoredRuns.read(experiment, place)
+        for folder in StoredRuns.read(
+            experiment, place, listing=listing if storages and place is storages[0] else None
         ).folders()
     ]
     return StoredRuns(experiment, folders)
@@ -580,14 +581,6 @@ def _stored(tournament: Benchmark | RoundRobin, runs: StoredRuns) -> _Stored:
             for c in player_checkpoints(p)
         ),
     )
-
-
-def _experiment(place: Storage, folder: str) -> str | None:
-    """The experiment a run folder's `run.json` names; None before it arrives."""
-    try:
-        return RunRecord.model_validate_json(place.get(folder + "run.json")).experiment
-    except (FileNotFoundError, ValidationError):
-        return None
 
 
 @contextmanager

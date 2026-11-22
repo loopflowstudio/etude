@@ -24,10 +24,10 @@ from etude.errors import LauncherError
 from etude.launch.database import Database
 from etude.launch.records import GPU
 from etude.launch.source import home
-from etude.page import Page, Pages, build
+from etude.page import Page, Pages
 from etude.records import Clock, RunCounters, RunOutcome, RunRecord
 from etude.spec import RunRequest
-from etude.storage import DirectoryStorage, S3Storage, Storage
+from etude.storage import DirectoryStorage, S3Storage
 from etude.train.block import Builder
 from etude.train.tracking import write_block
 from etude.view import Server
@@ -63,8 +63,7 @@ def test_a_served_page_refreshes_on_demand_only_when_its_files_change(tmp_path: 
     file = experiment_file(tmp_path / "experiments", "lab", COUNTED)
     builds = file.with_suffix(".built")  # the file runs once for every page built
     measured = MeasuredStorage(DirectoryStorage(runs))
-    server = Server(measured, file, ("127.0.0.1", 0))
-    try:
+    with Server(measured, file, ("127.0.0.1", 0)) as server:
         assert '"name": "a"' in (server.page("/experiments/lab/report") or "")
         reads = measured.requests, measured.listings
         server.page("/experiments/lab/report")
@@ -81,8 +80,6 @@ def test_a_served_page_refreshes_on_demand_only_when_its_files_change(tmp_path: 
         file.write_text(COUNTED + "# edited\n")
         server.page("/experiments/lab/report", refresh=True)
         assert builds.read_text().count("built") == 3
-    finally:
-        server.server_close()
 
 
 def test_refresh_failure_preserves_the_last_page_and_recovers(tmp_path: Path) -> None:
@@ -135,21 +132,18 @@ def test_concurrent_refreshes_join_one_generation(
 ) -> None:
     runs = tmp_path / "runs"
     trained(runs, "lab", "a")
-    file = experiment_file(tmp_path, "lab", REPORTED)
+    file = experiment_file(tmp_path, "lab", COUNTED)
     started, release, joined = threading.Event(), threading.Event(), threading.Event()
     build_page = Pages.build
-    generations = 0
 
-    def blocked_build(self: Pages, path: Path | None) -> Page:
-        nonlocal generations
-        generations += 1
+    def blocked_build(self: Pages, path: Path | None, *, experiment: str | None = None) -> Page:
         started.set()
         if not release.wait(5):
             raise TimeoutError("test generation was not released")
-        return build_page(self, path)
+        return build_page(self, path, experiment=experiment)
 
-    class Joined(Future[str | None]):
-        def result(self, timeout: float | None = None) -> str | None:
+    class Joined(Future[str]):
+        def result(self, timeout: float | None = None) -> str:
             # Only the waiter reaches result() while the owner is still building.
             joined.set()
             return super().result(timeout)
@@ -158,6 +152,8 @@ def test_concurrent_refreshes_join_one_generation(
     monkeypatch.setattr("etude.view.Future", Joined)
     with Server(runs, file, ("127.0.0.1", 0)) as server, ThreadPoolExecutor(2) as pool:
         server.ingest()
+        builds = file.with_suffix(".built")
+        before = builds.read_text()
         first = pool.submit(server.page, "/experiments/lab/report", refresh=True)
         try:
             assert started.wait(5)
@@ -168,7 +164,7 @@ def test_concurrent_refreshes_join_one_generation(
         finally:
             release.set()
         assert first.result(5) == second.result(5) == server.page("/experiments/lab/report")
-        assert generations == 1
+        assert builds.read_text() == before + "built\n"
 
 
 def test_http_refresh_reports_failures_without_replacing_the_cached_page(tmp_path: Path) -> None:
@@ -207,15 +203,6 @@ def test_http_refresh_reports_failures_without_replacing_the_cached_page(tmp_pat
 def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    generations: list[Path | None] = []
-
-    def counted(
-        storage: Storage | Path | str, file: Path | None, *, experiment: str | None = None
-    ) -> Page:
-        generations.append(file)
-        return build(storage, file, experiment=experiment)
-
-    monkeypatch.setattr("etude.page.build", counted)
     runs = tmp_path / "runs"
     trained(runs, "frontier", "a")
     repository = tmp_path / "lab"
@@ -230,7 +217,7 @@ def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
         "    return Report(labels={'a': 'Width 64'}, evals=(Matrix(title='Standard', rows='deck', columns='opponent'), *evals))\n",
     )
     # As an editable install of the repository puts it on the path.
-    sys.path.insert(0, str(repository))
+    monkeypatch.syspath_prepend(repository)
     file = experiment_file(
         repository / "experiments",
         "frontier",
@@ -238,16 +225,17 @@ def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
         "\n\ndef report() -> Report:\n"
         "    return standard_report(evals=(Matrix(title='Frontier only', rows='deck', columns='seat'),))\n",
     )
-    with Server(runs, file, ("127.0.0.1", 0)) as server:
+    source = MeasuredStorage(DirectoryStorage(runs))
+    with Server(source, file, ("127.0.0.1", 0)) as server:
         first = server.page("/experiments/frontier/report") or ""
         assert all(text in first for text in ('"Width 64"', '"Standard"', '"Frontier only"'))
+        reads = source.requests
         server.page("/experiments/frontier/report", refresh=True)
-        assert len(generations) == 1  # nothing changed, so nothing is rebuilt
+        assert source.requests == reads
         shared.write_text(shared.read_text().replace("Standard", "Edited standard"))
         assert '"Edited standard"' in (
             server.page("/experiments/frontier/report", refresh=True) or ""
         )
-        assert len(generations) == 2
 
 
 def _seal(root: Path, sequence: int, loss: float) -> str:
@@ -320,6 +308,54 @@ def test_graph_requests_reuse_the_published_generation_after_interruption(tmp_pa
         outcome.write_bytes(saved)
         restarted.ingest()
         assert restarted.index.error is None
+
+
+def test_an_interrupted_writer_never_exposes_half_a_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    for name in ("a", "b"):
+        address = "lab/" + name
+        source.put(
+            address + "/run.json",
+            RunRecord(
+                id=address,
+                experiment="lab",
+                clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
+            )
+            .model_dump_json()
+            .encode(),
+        )
+        _seal(source.root / address, 0, 5)
+
+    measured = MeasuredStorage(source)
+    with Server(measured, None, ("127.0.0.1", 0)) as writer:
+        writer.ingest()
+        _seal(source.root / "lab/a", 1, 4)
+        tail = "lab/b/" + _seal(source.root / "lab/b", 1, 3)
+        get = source.get
+        reader_points: list[float | None] = []
+        with monkeypatch.context() as patch:
+
+            def interrupted(key: str) -> bytes:
+                if key != tail:
+                    return get(key)
+                # Chart A has been updated inside the writer's transaction.
+                with Server(measured, None, ("127.0.0.1", 0)) as reader:
+                    reader.ingest()
+                    reader_points.extend(_loss(reader.page("/runs/lab/a") or ""))
+                raise OSError("interrupted reading the second chart")
+
+            patch.setattr(source, "get", interrupted)
+            before = measured.listings
+            writer.ingest()
+        assert measured.listings == before + 1
+        assert reader_points == [5]
+        assert writer.index.error and "interrupted reading the second chart" in writer.index.error
+        assert _loss(writer.page("/runs/lab/a") or "") == [5]
+        writer.ingest()
+        assert _loss(writer.page("/runs/lab/a") or "") == [5, 4]
+        assert _loss(writer.page("/runs/lab/b") or "") == [5, 3]
 
 
 def test_view_links_follow_only_the_live_owner(
