@@ -46,7 +46,7 @@ from etude.records import (
     RunRecord,
     RunWriter,
 )
-from etude.run import LocatedRun, RunListing, as_storage, run_folders, under
+from etude.run import LocatedRun, RunListing, as_storage, located_runs, under
 from etude.storage import Storage, run_prefix
 from etude.train.block import (
     COUNT,
@@ -743,14 +743,18 @@ def read_all(
     A caller supplying its own keys and declarations also supplies any write dates.
     """
     storage = as_storage(source)
-    listing = RunListing.read(storage, keys=keys, declarations=declarations)
+    if keys is None and declarations is None:
+        listing = RunListing.read(storage)
+        keys, declarations = listing.keys, listing.declarations
+    else:
+        keys = sorted(storage.versions("") if keys is None else keys)
+        if declarations is None:
+            declarations = located_runs(storage, keys)
     data = []
-    for located in listing.declarations:
+    for located in declarations:
         file = located.file
         if experiment in (None, file.experiment):
-            data.append(
-                read_located(storage, located, listing.keys, metrics=metrics, prefixes=prefixes)
-            )
+            data.append(read_located(storage, located, keys, metrics=metrics, prefixes=prefixes))
     return sorted(data, key=lambda one: (one.experiment, one.name))
 
 
@@ -787,7 +791,7 @@ def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
         if located.file.experiment == experiment:
             return read_located(storage, located, listing.keys)
     # Only a name nobody declared can hold historical rows without a declaration.
-    folders = [] if listing.declarations else run_folders(listing.keys).get(run, [run_prefix(run)])
+    folders = [] if listing.declarations else listing.folders.get(run, [run_prefix(run)])
     return _read(storage, experiment, run, folders, listing.keys, declaration=None)
 
 

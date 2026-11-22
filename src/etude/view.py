@@ -56,7 +56,7 @@ from etude.page import (
 )
 from etude.records import RunRecord
 from etude.report import Report
-from etude.run import LocatedRun, as_storage, located_runs, owning_folder
+from etude.run import LocatedRun, RunListing, as_storage
 from etude.spec import Until, number
 from etude.storage import ListedStorage, Storage
 from etude.train.read import RunData, read_located
@@ -261,34 +261,42 @@ class ChartIndex:
     def _publish_launcher(
         self, db: sqlite3.Connection, remote: str | None, answer: _LauncherRead
     ) -> None:
-        _select_launcher(db, remote)
         launcher = answer.observation
         stamp = answer.at.isoformat()
-        # Another view can publish a newer answer before this poll acquires the writer.
-        updated = db.execute(
-            """UPDATE observation SET launcher_at=?, last_loop=?, standing=?
-               WHERE id=1 AND (launcher_at IS NULL OR launcher_at<?)""",
+        previous = db.execute("SELECT server,launcher_at FROM observation WHERE id=1").fetchone()
+        if previous and previous["server"] != remote:
+            # Different launchers can reuse a run address. Its console belongs to the old one.
+            db.execute("DELETE FROM consoles")
+        elif previous and previous["launcher_at"] and previous["launcher_at"] >= stamp:
+            return  # Another view has already published a newer answer.
+
+        db.execute(
+            """INSERT INTO observation(id,server,launcher_at,last_loop,standing) VALUES(1,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET server=excluded.server,launcher_at=excluded.launcher_at,
+                   last_loop=excluded.last_loop,standing=excluded.standing""",
             (
+                remote,
                 stamp,
                 launcher.last_loop.isoformat() if launcher.last_loop else None,
                 launcher.model_dump_json(exclude={"consoles"}, round_trip=True),
-                stamp,
             ),
         )
-        if updated.rowcount:
-            db.executemany(
-                """INSERT OR REPLACE INTO consoles(run,body,collected,gaps,final_attempt)
-                   VALUES(:run,:body,:collected,:gaps,:final_attempt)""",
-                (
-                    tail.model_dump(mode="json") | {"run": run}
-                    for run, tail in launcher.consoles.items()
-                ),
-            )
-            self._publish_runs(
-                db,
-                launcher,
-                _launched_experiments(db) | {s.record.experiment for s in launcher.runs},
-            )
+        db.executemany(
+            """INSERT OR REPLACE INTO consoles(run,body,collected,gaps,final_attempt)
+               VALUES(:run,:body,:collected,:gaps,:final_attempt)""",
+            (
+                tail.model_dump(mode="json") | {"run": run}
+                for run, tail in launcher.consoles.items()
+            ),
+        )
+        previous_experiments = db.execute(
+            "SELECT DISTINCT experiment FROM runs WHERE launched_as IS NOT NULL"
+        )
+        self._publish_runs(
+            db,
+            launcher,
+            {row[0] for row in previous_experiments} | {s.record.experiment for s in launcher.runs},
+        )
 
     def refresh_files(self, files: dict[str, Path], discovery_error: str | None) -> None:
         # File ownership spans storage I/O. A competing view can still publish its launcher.
@@ -361,23 +369,22 @@ class ChartIndex:
         observed_at = datetime.now(UTC)
         objects = self.source.versions("")
         storage = ListedStorage(self.source, objects, self._cache)
-        keys = sorted(objects)
-        runs = located_runs(storage, keys, objects=objects)
-        roots = {folder for run in runs for folder in run.folders}
-        members: dict[str, list[str]] = defaultdict(list)
-        for key in keys:
-            if not key.endswith(".open") and (folder := owning_folder(key, roots)):
-                members[folder].append(key)
+        listing = RunListing.read(storage, objects=objects)
         previous = dict(db.execute("SELECT address,inputs FROM files"))
         reports: dict[str, Report] = {}
-        for run in runs:
+        for run in listing.declarations:
             experiment = run.file.experiment
             report = None
             if run.file.kind != "evaluation":
                 if experiment not in reports:
                     reports[experiment] = self._report(db, experiment, paths.get(experiment))
                 report = reports[experiment]
-            sealed = sorted(key for folder in run.folders for key in members[folder])
+            sealed = sorted(
+                key
+                for folder in run.folders
+                for key in listing.members[folder]
+                if not key.endswith(".open")
+            )
             _stage_run(db, storage, run, sealed, report, previous)
 
         return observed_at
@@ -402,8 +409,6 @@ class ChartIndex:
                FROM next_files WHERE metadata IS NOT NULL RETURNING experiment"""
         ).fetchall()
         changed = {row[0] for rows in (removed, redated, rebuilt) for row in rows}
-        if _select_launcher(db, selected()):
-            changed.update(_launched_experiments(db))
         if removed or rebuilt:
             db.execute(
                 "DELETE FROM charts WHERE address NOT IN (SELECT address FROM files WHERE reached IS NOT NULL)"
@@ -417,8 +422,11 @@ class ChartIndex:
         )
         db.execute("""INSERT OR REPLACE INTO declarations(experiment,file,accepted,error)
                       SELECT * FROM next_declarations EXCEPT SELECT * FROM declarations""")
+        # File scans use the retained standing. Only a launcher reply replaces its endpoint.
         row = db.execute(
-            "UPDATE observation SET at=?,file_error=? WHERE id=1 RETURNING standing",
+            """INSERT INTO observation(id,at,file_error) VALUES(1,?,?)
+               ON CONFLICT(id) DO UPDATE SET at=excluded.at,file_error=excluded.file_error
+               RETURNING standing""",
             (observed_at.isoformat(), discovery_error),
         ).fetchone()
         if changed:
@@ -750,25 +758,6 @@ def _stage_run(
             payload,
         ),
     )
-
-
-def _launched_experiments(db: sqlite3.Connection) -> set[str]:
-    return {
-        row[0] for row in db.execute("SELECT experiment FROM runs WHERE launched_as IS NOT NULL")
-    }
-
-
-def _select_launcher(db: sqlite3.Connection, remote: str | None) -> bool:
-    """Keep the file observation while retiring a different endpoint's standing and tails."""
-    db.execute("INSERT OR IGNORE INTO observation(id,server) VALUES(1,?)", (remote,))
-    if db.execute(
-        """UPDATE observation SET server=?,launcher_at=NULL,last_loop=NULL,standing=NULL,machines=NULL
-           WHERE id=1 AND server IS NOT ?""",
-        (remote, remote),
-    ).rowcount:
-        db.execute("DELETE FROM consoles")
-        return True
-    return False
 
 
 def _store_run(

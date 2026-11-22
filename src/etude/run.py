@@ -17,8 +17,9 @@ from bisect import bisect_left
 from collections.abc import Callable, Container, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from functools import cached_property
 from hashlib import file_digest, sha256
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Literal
 
@@ -493,29 +494,25 @@ def run_folders(keys: Sequence[str]) -> dict[str, list[str]]:
     and a bucket can hold a launcher's other files beside them. Taking a
     listing already made lets a reader list a source once.
     """
-    found: dict[str, dict[str, None]] = {}
+    candidates: dict[str, str] = {}
     for key in keys:
         parts = key.split("/")
         for index in range(1, len(parts)):
-            last = index == len(parts) - 1
-            if (parts[index] in RUN_FOLDERS and not last) or (last and parts[index] in RUN_FILES):
-                found.setdefault(parts[index - 1], {})["/".join(parts[:index]) + "/"] = None
+            markers = RUN_FILES if index == len(parts) - 1 else RUN_FOLDERS
+            if parts[index] in markers:
+                candidates["/".join(parts[:index]) + "/"] = parts[index - 1]
                 break
-    roots = {folder for folders in found.values() for folder in folders}
+
     result: dict[str, list[str]] = {}
-    for run, folders in found.items():
-        kept = [
-            folder
-            for folder in folders
-            if not any(
-                parent.as_posix() + "/" in roots
-                and PurePosixPath(folder).relative_to(parent).parts[0] in RUN_DATA
-                for parent in PurePosixPath(folder).parents
-                if parent != PurePosixPath(".")
-            )
-        ]
-        if kept:
-            result[run] = kept
+    for folder, name in candidates.items():
+        # A run.json below another run's out or artifacts is payload.
+        parts = folder.rstrip("/").split("/")
+        if any(
+            part in RUN_DATA and "/".join(parts[:index]) + "/" in candidates
+            for index, part in enumerate(parts[1:], start=1)
+        ):
+            continue
+        result.setdefault(name, []).append(folder)
     return result
 
 
@@ -560,83 +557,78 @@ class LocatedRun(Record):
     last_write: datetime | None = None
 
 
-@dataclass(frozen=True)
 class RunListing:
-    """One storage listing, with declared run identities and their latest file writes."""
+    """One source discovery. Copies share a declaration and each visible object has one owner."""
 
-    keys: list[str]
-    declarations: Sequence[LocatedRun]
+    def __init__(
+        self,
+        keys: Sequence[str],
+        declaration: Callable[[str], RunRecord | None],
+        *,
+        run: str | None = None,
+        objects: Mapping[str, str] | None = None,
+    ) -> None:
+        self.keys = keys
+        self.folders = run_folders(keys)
+        by_name = self.folders if run is None else {run: self.folders.get(run, [])}
+        found: dict[tuple[str, str], tuple[RunRecord, list[str]]] = {}
+        for name, folders in by_name.items():
+            for folder in folders:
+                if (file := declaration(folder)) is not None:
+                    found.setdefault((file.experiment, name), (file, []))[1].append(folder)
+        self.declarations = [
+            LocatedRun(
+                name=name,
+                file=file,
+                folders=tuple(folders),
+                last_write=self._last_write(folders, objects) if objects is not None else None,
+            )
+            for (_, name), (file, folders) in sorted(found.items())
+        ]
 
     @classmethod
     def read(
-        cls,
-        storage: Storage,
-        *,
-        run: str | None = None,
-        keys: Sequence[str] | None = None,
-        declarations: Sequence[LocatedRun] | None = None,
+        cls, storage: Storage, *, objects: Mapping[str, str] | None = None, run: str | None = None
     ) -> RunListing:
-        objects = None
-        if keys is None:
+        if objects is None:
             objects = storage.versions("")
-            keys = sorted(objects)
-        else:
-            keys = sorted(keys)
-        if declarations is None:
-            declarations = located_runs(storage, keys, run=run, objects=objects)
-        return cls(keys, declarations)
+        return cls(
+            sorted(objects),
+            lambda folder: declared(storage, folder, objects),
+            run=run,
+            objects=objects,
+        )
+
+    @cached_property
+    def members(self) -> dict[str, list[str]]:
+        members: dict[str, list[str]] = {
+            folder: [] for folders in self.folders.values() for folder in folders
+        }
+        for key in self.keys:
+            if (folder := _owning_folder(key, members)) is not None:
+                members[folder].append(key)
+        return members
+
+    def _last_write(self, folders: Sequence[str], objects: Mapping[str, str]) -> datetime | None:
+        versions = (objects[key] for folder in folders for key in self.members[folder])
+        return max(
+            (
+                v.modified
+                for v in versions
+                if isinstance(v, ObjectVersion) and v.modified is not None
+            ),
+            default=None,
+        )
 
 
 def located_runs(
-    storage: Storage,
-    keys: Sequence[str],
-    *,
-    run: str | None = None,
-    objects: Mapping[str, str] | None = None,
+    storage: Storage, keys: Sequence[str], *, run: str | None = None
 ) -> list[LocatedRun]:
-    listed = objects if objects is not None else set(keys)
-    return group_runs(
-        keys, lambda folder: declared(storage, folder, listed), run=run, objects=objects
-    )
+    listed = set(keys)
+    return RunListing(keys, lambda folder: declared(storage, folder, listed), run=run).declarations
 
 
-def group_runs(
-    keys: Sequence[str],
-    declaration: Callable[[str], RunRecord | None],
-    *,
-    run: str | None = None,
-    objects: Mapping[str, str] | None = None,
-) -> list[LocatedRun]:
-    """Group folders by declared experiment and run, keeping the first copy's declaration.
-
-    A report watcher can reuse a folder's declaration while its listed version holds.
-    """
-    by_name = run_folders(keys)
-    writes = (
-        _last_writes(objects, {folder for folders in by_name.values() for folder in folders})
-        if objects is not None
-        else {}
-    )
-    if run is not None:
-        by_name = {run: by_name.get(run, [])}
-    found: dict[tuple[str, str], tuple[RunRecord, list[str]]] = {}
-    for name, folders in by_name.items():
-        for folder in folders:
-            file = declaration(folder)
-            if file is not None:
-                found.setdefault((file.experiment, name), (file, []))[1].append(folder)
-    return [
-        LocatedRun(
-            name=name,
-            file=file,
-            folders=tuple(folders),
-            last_write=max((writes[f] for f in folders if f in writes), default=None),
-        )
-        for (_, name), (file, folders) in sorted(found.items(), key=lambda item: item[0])
-    ]
-
-
-def owning_folder(key: str, roots: set[str]) -> str | None:
+def _owning_folder(key: str, roots: Container[str]) -> str | None:
     """The nearest run that owns this visible file. Hidden delivery bookkeeping has no owner."""
     parent, _, name = key.rpartition("/")
     while parent and not name.startswith("."):
@@ -645,17 +637,6 @@ def owning_folder(key: str, roots: set[str]) -> str | None:
             return folder
         parent, _, name = parent.rpartition("/")
     return None
-
-
-def _last_writes(objects: Mapping[str, str], roots: set[str]) -> dict[str, datetime]:
-    writes: dict[str, datetime] = {}
-    for key, version in objects.items():
-        if not isinstance(version, ObjectVersion) or version.modified is None:
-            continue
-        folder = owning_folder(key, roots)
-        if folder is not None and (folder not in writes or writes[folder] < version.modified):
-            writes[folder] = version.modified
-    return writes
 
 
 def report_progress(

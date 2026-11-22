@@ -223,10 +223,11 @@ uses the start of the last successful listing. A failed launcher poll
 keeps that endpoint's last successful standing, inventory and console tails.
 A successful empty reply releases previously held runs.
 
-Status and graph requests read the committed index. A page applies placement,
-launcher aliases and console only when the observation matches the selected
-endpoint. Opening a run requests its console for the next launcher poll.
-Refreshing the experiment report builds it separately.
+Status and graph requests read the committed index. Only a successful launcher
+poll replaces the retained endpoint. Pages show its placement, aliases and
+console when it matches the selected endpoint. Opening a run requests its
+console for the next launcher poll. Refreshing the experiment report builds it
+separately.
 
 ## Upgrading Etude
 

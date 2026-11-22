@@ -92,7 +92,7 @@ from etude.experiment_file import experiment_named, refuse_renamed
 from etude.home import home
 from etude.records import BUILT_IN_NAMES, Record, RunRecord
 from etude.report import Counters, Curve, Flame, Matches, Report, Score, Series
-from etude.run import RunListing, as_storage, declared, group_runs, under
+from etude.run import RunListing, as_storage, declared, under
 from etude.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import RunData, read_all
 from etude.train.report import Training, training
@@ -360,7 +360,7 @@ class _ReportListing:
     @cached_property
     def runs(self) -> RunListing:
         keys = sorted(self.objects)
-        return RunListing(keys, group_runs(keys, self._declaration, objects=self.objects))
+        return RunListing(keys, self._declaration, objects=self.objects)
 
     def _declaration(self, folder: str) -> RunRecord | None:
         key = folder + "run.json"

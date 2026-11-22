@@ -7,7 +7,7 @@ from decimal import Decimal
 from etude.identity import run_address
 from etude.launch.records import Availability, Machine, MachineStatus, Quote, Status
 from etude.launch.scheduler.loop import Scheduler
-from etude.launch.server import PythonClient, selected
+from etude.launch.server import PythonClient
 from etude.launch.source import line
 from etude.records import RunRecord
 
@@ -61,7 +61,7 @@ def resolve_runs(
 
 def _here() -> str:
     """What to call the machine that holds the database, as its owner would read it."""
-    return "the server" if (os.environ.get("ETUDE_SERVER_LOCAL") or selected()) else "this computer"
+    return "the server" if os.environ.get("ETUDE_SERVER_LOCAL") else "this computer"
 
 
 def _machine_name(machine: Machine) -> str:

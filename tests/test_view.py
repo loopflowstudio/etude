@@ -429,6 +429,8 @@ def test_a_reopened_view_dates_open_files_without_rereading_sealed_data(tmp_path
     # Keep the published index across restart with an empty object cache.
     (home() / "cache").rename(home() / "evicted")
     source.put(address + "/pending.open", b"unsealed")
+    # A nested run's metrics can arrive before its declaration. They belong to that run.
+    _seal(source.root / address / "child", 0, 99)
     measured.got.clear()
     before = measured.listings, measured.requests
     with Server(measured, None, ("127.0.0.1", 0)) as reopened:
@@ -1124,6 +1126,10 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
         assert _loss(server.page("/runs/local") or "") == [7, 3, 1]
         assert "steps 3" in (server.page("/experiments/local/status") or "")
         assert exchanges == 3
+        # A file pass during the outage did not discard the first launcher's dated answer.
+        endpoint.write_text("first")
+        prior = server.page("/runs/" + queued) or ""
+        assert ">queued<" in prior and 'id="retained-output"' in prior
         endpoint.write_text("third")
         assert "second is offline" not in (server.page("/runs/local") or "")
         endpoint.write_text("second")
