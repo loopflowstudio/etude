@@ -9,6 +9,7 @@ uv add 'etude-sdk[eval]'                 # Python 3.12, in your project
 uv run etude train experiment.py        # your train(config), locally
 uv run etude eval experiment.py         # your play(match, agents), locally
 uv run etude report experiment.py --open
+uv run etude view                       # live view of runs, experiments and machines
 ```
 
 The smallest training file (`experiment.py`) is:
@@ -34,7 +35,7 @@ and games.
 
 Start with [a complete runnable experiment](docs/getting-started.md). Continue
 with [training](docs/training.md), [evaluation](docs/evaluation.md),
-[tracking and reports](docs/tracking.md), [renting machines](docs/launcher.md),
+[tracking, live view and reports](docs/tracking.md), [renting machines](docs/launcher.md),
 and [limits](docs/limits.md). [Hanabi](docs/hanabi.md) is a cooperative PyTorch
 example. Import supported names from their defining modules; each module's
 `__all__` lists its public surface.

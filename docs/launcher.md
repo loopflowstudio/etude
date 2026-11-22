@@ -204,6 +204,7 @@ window sizing, provider rounding and retries.
 | `status`, `machines`, `logs` | Reads retained evidence; prints freshness/incompleteness. |
 | `wait` | Advances work until the selected runs finish and the machines rented for them are deleted. |
 | `logs --run RUN --follow --timeout SECONDS` | Collects new logs and follows them. |
+| `view [PATH]` | Serves live pages for runs, experiments, reports and machines; schedules and rents nothing. |
 | `cancel RUN` | Requests cancellation and cleanup. |
 | `fetch RUN FILE DIRECTORY` | Copies one file the run wrote into `DIRECTORY` and verifies its fingerprint. |
 
@@ -255,8 +256,12 @@ explains recovery and retention.
 The optional SSH server keeps the scheduler running independently of this
 terminal. Configure it with `etude server` commands; `etude server --help`
 lists setup, selection and run operations. Client calls use the selected server;
-tracking reads and reports still read their explicit local or bucket source.
-The server needs the provider credentials; jobs receive only scoped grants.
+tracking reads, reports and `etude view` still read their explicit local or
+bucket source. With a server selected, a local `etude view` shows experiments
+and runs in full (asking the server at most every 30 seconds) while `/machines`
+points to `etude machines`; `etude server run` never serves pages itself. See
+[live view](tracking.md#live-view). The server needs the provider credentials;
+jobs receive only scoped grants.
 
 ## Upgrading Etude
 

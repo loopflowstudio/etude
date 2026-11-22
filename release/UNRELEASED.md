@@ -402,6 +402,27 @@ Tracking's queue/block sizing and metric-name limit are implementation policy;
 `track` no longer exposes those tuning parameters. Rental attribution always
 uses retained billed coverage; its unused alternate arithmetic switch is gone.
 
+## Live view
+
+```text
+$ uv run etude view examples &
+http://127.0.0.1:8765/
+$ uv run etude launch examples/prototype.py
+prototype: state from file:///.../.etude/track: 0 training runs, 0 eval runs
+prototype/coin@0  new, running
+view: http://127.0.0.1:8765/runs/prototype/coin@0
+```
+
+`etude view [PATH]` replaces `etude report --serve` with a live view of runs,
+experiments and machines at `/`, `/experiments/NAME`, `/runs/ADDRESS` and
+`/machines`. `/experiments/NAME` combines live operational status and the
+experiment's `report()` charts on one page, loading the two components
+asynchronously. While `etude view` runs, `train`, `launch`, `queue` and
+`status RUN` print a `view:` link to each run's page. Live status and run views
+refresh every 5 seconds while anything shown is open and the tab is visible;
+`etude report` continues to write self-contained static HTML reports and folder
+indexes. See [live view](../docs/tracking.md#live-view).
+
 ## Removed commands, options and helpers
 
 These had no caller in Etude and are outside what the guides teach. Each line
@@ -424,3 +445,4 @@ names what to use now.
 | `run.checkpoint_due(every)` | compare `run.at("running_hours")` with your own next mark |
 | `rent`, `terminate`, `availability`, `diagnostics` in `etude.launch.client` | the `etude rent`, `terminate` and `availability` commands; `logs(...).diagnostics` |
 | `Planned`, `PlannedPoint` report panels | removed; plot a schedule as a logged metric with `Series` |
+| `etude report PATH --serve [--host] [--port]` | `etude view [PATH] [--host] [--port]`; static reports keep `etude report PATH [--watch]` |

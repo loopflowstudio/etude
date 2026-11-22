@@ -195,7 +195,10 @@ empty queue. It records the last completed pass in `server-heartbeat` beside
 the database. `etude server` and `status` warn when work is waiting and no
 pass has completed in 30 seconds. Slow provider operations may also cause this
 warning. `wait` still exits when its runs finish. Workers read their own disk or
-bucket inboxes; they never need a reachable address for the server.
+bucket inboxes; they never need a reachable address for the server. `etude
+server run` never serves web pages: `etude view` runs as a separate process so
+authored `report()` code and report builds cannot stall machine deletion, and
+viewing runs never starts a loop that can rent.
 
 ## Upgrading Etude
 
@@ -888,7 +891,7 @@ loop's last pass and prints when that was (`last loop: ...`); run `etude wait` o
 | --- | --- | --- | --- |
 | Read | `status`, `runs`, `logs`, `pools`, `ondemands`, `machines`, `providers`, `storages`, `server`, `usage` | database only | immediate answer with freshness |
 | Ask | `queue`, `cancel`, `terminate`, `rent`, `pool` and `ondemand` mutations, `default`, `machine add`, `provider set`, `storage add` | database only | recorded intent and an id where applicable |
-| Wait | `wait`, `launch` (with or without `--quote` or `--resume`), `availability`, `fetch`, `logs --follow`, `source`, `continue` | other machines with a time limit | completion or the limit |
+| Wait | `wait`, `launch` (with or without `--quote` or `--resume`), `availability`, `fetch`, `logs --follow`, `source`, `continue`, `report`, `view` | other machines with a time limit | completion or the limit |
 
 Server selection mutations are asks. `worker` and `server run` are waits
 because they deliberately execute long-lived loops; they retain their existing
@@ -902,7 +905,9 @@ home and touches neither the database nor another machine. `train` is the same
 kind: it calls a file's `train` here, writes the run to this computer's runs
 directory, and needs no provider key, launcher database or network; `--seconds`
 is its optional limit. `queue --smoke` and
-`launch --smoke` run it first, on this computer.
+`launch --smoke` run it first, on this computer. `view` is a wait because it
+reads buckets and serves HTTP until interrupted; it advances nothing, rents
+nothing, never migrates the database and needs no provider key.
 
 The full expectation also gives external work to the scheduler loop, makes asks
 safe to repeat with caller-chosen identities, restricts waits to watching, bounds

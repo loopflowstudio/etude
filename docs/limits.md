@@ -29,9 +29,11 @@ failure recovery requires.
 - A match must return rows to count as done. Caught forward failures still
   propagate to retention. Ordinary game failures need `--retry-failed`;
   transient infrastructure failures can retry automatically.
-- Logs and status are retained evidence, not live remote probes. Reads show
-  freshness. Only explicit waits collect remote facts; expiry of a wait does
-  not prove remote work was cancelled.
+- Logs, status and `etude view` show retained evidence, not live remote probes.
+  Reads show freshness. Only explicit waits collect remote facts; expiry of a
+  wait does not prove remote work was cancelled. `etude view` binds `127.0.0.1`
+  with no login, records no console for plain `etude train`, and does not yet
+  record machine system metrics (GPU, CPU, memory).
 - Time/dollar caps bound admitted rental allocations, not provider bills.
   Outages can delay deletion. External storage/transfer/API costs are excluded.
   An EC2 machine reading or writing a bucket outside its AWS region (any R2
