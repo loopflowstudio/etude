@@ -221,7 +221,7 @@ class ChartIndex:
                 return None
             answer = self._remote_read.result()
         except Exception as error:
-            self._launcher_error = (remote, explain(error))
+            self._launcher_error = (remote, f"Launcher: {explain(error)}")
             self._remote_read = None
             self._next_standing = time.monotonic() + _REMOTE_STANDING
             return None
@@ -252,7 +252,7 @@ class ChartIndex:
                 if remote == selected():
                     self._publish_launcher(db, remote, answer)
         except Exception as error:
-            self._launcher_error = (remote, explain(error))
+            self._launcher_error = (remote, f"Launcher: {explain(error)}")
             return
         if self._remote_read:
             self._remote_read = None
@@ -317,7 +317,7 @@ class ChartIndex:
                     db.execute(
                         """INSERT INTO observation(id,file_error) VALUES(1,?)
                            ON CONFLICT(id) DO UPDATE SET file_error=excluded.file_error""",
-                        (explain(failure),),
+                        (f"Run files: {explain(failure)}",),
                     )
 
     def _report(self, db: sqlite3.Connection, experiment: str, file: Path | None) -> Report:
@@ -1080,7 +1080,7 @@ class Server(ThreadingHTTPServer):
                 else [self.path]
             )
         except Exception as error:
-            return explain(error)
+            return f"Experiment files: {explain(error)}"
         self.files = {file.stem: file for file in files}
         return None
 

@@ -785,7 +785,10 @@ def test_incomplete_directory_listing_keeps_file_facts_until_recovery(
         opened, _ = overview.split("<h2>Completed</h2>")
         assert address in opened and queued in opened
         for page in (graph, status, overview):
-            assert "indexed 11 min ago" in page and "cannot traverse lab" in page
+            assert (
+                "indexed 11 min ago" in page
+                and "Run files: PermissionError: cannot traverse lab" in page
+            )
         assert (measured.listings, measured.requests, measured.bytes) == reads
 
     with Server(measured, None, ("127.0.0.1", 0)) as server:
