@@ -130,7 +130,8 @@ coin's training curve, config and checkpoint.
 read-only view. `PATH` is a Python file or folder containing the experiment's
 `report()` declaration. Omit it to use the default report. `--source` chooses
 where to read run files from. It defaults to this computer's runs directory
-and accepts a directory, `s3://bucket/prefix` or `r2://bucket/prefix`.
+and accepts a directory (as a path or the `file://` address Etude prints),
+`s3://bucket/prefix` or `r2://bucket/prefix`.
 Bucket sources need read credentials. Viewing requires no machine-provider key.
 The view listens on `127.0.0.1:8765` by default and prints its address.
 

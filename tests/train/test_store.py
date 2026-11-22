@@ -829,6 +829,15 @@ def test_a_long_run_uploads_a_small_multiple_of_what_it_finally_stores(tmp_path:
     assert stored < measured.written <= 3 * stored
 
 
+def test_a_printed_directory_uri_reads_the_same_runs_as_its_path(tmp_path: Path) -> None:
+    folder = tmp_path / "runs with space"
+    DirectoryStorage(folder).put("lab/a/run.json", b"{}")
+    printed = DirectoryStorage(folder).uri("run.json").removesuffix("/run.json")
+    assert storage_from_uri(printed).keys("") == ["lab/a/run.json"]
+    with pytest.raises(ValueError, match="no other host"):
+        storage_from_uri("file://elsewhere/runs")
+
+
 def test_an_r2_uri_reaches_the_accounts_endpoint_with_r2_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

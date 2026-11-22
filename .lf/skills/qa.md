@@ -119,6 +119,19 @@ writes and restore it after. `etude server set` refuses an unreachable host, so 
 failed launcher read with `chmod 0 home/launcher.sqlite` across a view restart (stop
 `etude wait` first) and restore `0644` before finishing.
 
+A real selected server needs no root: run a user sshd on this Mac
+(`/usr/sbin/sshd -f CONFIG`) with `Port 2222`, `ListenAddress 127.0.0.1`, a fresh
+`HostKey`, `AuthorizedKeysFile` holding `~/.ssh/id_ed25519.pub`, `UsePAM no`,
+`StrictModes no` and `SetEnv ETUDE_HOME=/tmp/…/home`, so the server side never opens
+`~/.etude`. Put an `ssh` shim first on `PATH` (for the client, `etude view` and
+`etude wait`) that execs `/usr/bin/ssh -p 2222 -o StrictHostKeyChecking=accept-new
+-o UserKnownHostsFile=… -o BatchMode=yes "$@"`. Initialise the server's home with
+`etude database upgrade --development` under its `ETUDE_HOME`, then `etude server set
+jack@127.0.0.1`. Its pool is `server`, a server launch needs `--source`, and its
+local machine delivers to the server's `home/track` whatever `--source` says; view
+those files with `--source file:///…/home/track`. Killing the sshd PID gives a failed
+launcher read; `etude server unset` and the PID ends it.
+
 For interruption, make a separate lab copy with an author-controlled pause
 (`time.sleep(0.1)` per update) and more updates. Drive `uv run etude train
 experiment.py` with a Python subprocess driver: `etude train` prints no progress

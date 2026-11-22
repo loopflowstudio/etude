@@ -463,13 +463,21 @@ def run_directory(directory: Path | str | None, experiment: str, run: str) -> tu
 
 
 def storage_from_uri(uri: str | Path) -> Storage:
-    """`s3://bucket/prefix` or `r2://bucket/prefix` is a bucket; anything else is a directory."""
+    """`s3://bucket/prefix` or `r2://bucket/prefix` is a bucket; anything else is a directory.
+
+    A directory may be a path or the `file://` URI that `DirectoryStorage.uri` prints.
+    """
     text = str(uri)
     providers: tuple[Literal["s3", "r2"], ...] = ("s3", "r2")
     for provider in providers:
         if text.startswith(f"{provider}://"):
             bucket, _, prefix = text.removeprefix(f"{provider}://").partition("/")
             return S3Storage(bucket, prefix, provider=provider)
+    if text.startswith("file://"):
+        parsed = urlsplit(text)
+        if parsed.netloc not in ("", "localhost"):
+            raise ValueError(f"a file URI names no other host: {text}")
+        return DirectoryStorage(unquote(parsed.path))
     return DirectoryStorage(text)
 
 
