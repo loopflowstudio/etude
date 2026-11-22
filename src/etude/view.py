@@ -14,7 +14,7 @@ import signal
 import sqlite3
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future
 from contextlib import closing, contextmanager
@@ -24,6 +24,8 @@ from hashlib import sha256
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import version
+from itertools import groupby
+from operator import itemgetter
 from pathlib import Path
 from types import FrameType
 from urllib.parse import quote, unquote, urlsplit
@@ -402,12 +404,60 @@ class ChartIndex:
             return _document(address, heading + "<p>No metric curves recorded.</p>" + below)
         return render_run(address, row["payload"], heading, below)
 
-    def experiments(self) -> list[str]:
+    def experiments(self) -> str:
         with self._connect() as db:
-            return [
-                row[0]
-                for row in db.execute("SELECT DISTINCT experiment FROM runs ORDER BY experiment")
-            ]
+            db.execute("BEGIN")
+            observation = db.execute("SELECT * FROM observation WHERE id=1").fetchone()
+            rows = db.execute(
+                """
+                SELECT experiment,address,state,position,launcher,final_attempt,last_write
+                FROM runs ORDER BY experiment,address
+                """
+            ).fetchall()
+        now = datetime.now(UTC)
+        opened: list[str] = []
+        completed: list[str] = []
+        stale = False
+        for name, runs in groupby(rows, itemgetter("experiment")):
+            counts: Counter[str] = Counter()
+            active = []
+            latest: str | None = None
+            for run in runs:
+                state = _display_state(run, now)
+                counts[state] += 1
+                # The index stores UTC write times in ISO order.
+                written = run["last_write"]
+                if written and (latest is None or written > latest):
+                    latest = written
+                if _is_open(run, state):
+                    address = run["address"]
+                    detail = " · ".join(filter(None, (run["position"], run["launcher"] or state)))
+                    active.append(
+                        f'<div><a href="/runs/{quote(address, safe="/@=")}">{escape(address)}</a>'
+                        f" · {escape(detail)}</div>"
+                    )
+            totals = " · ".join(f"{counts[state]} {escape(state)}" for state in sorted(counts))
+            stale |= "no end recorded" in counts
+            group = opened if active else completed
+            group.append(
+                f'<tr><th scope="row"><a href="/experiments/{quote(name)}">{escape(name)}</a></th>'
+                f"<td>{totals}{''.join(active)}</td><td>{_age(latest, now)}</td></tr>"
+            )
+        if observation:
+            body = (
+                _experiments_table("Open", opened) + _experiments_table("Completed", completed)
+                if rows
+                else "<p>Waiting for runs.</p>"
+            )
+            ages = _observation_ages(
+                observation, now, launcher=any(row["launcher"] for row in rows)
+            )
+            body += f'<p class="context">{escape(" · ".join(ages))}</p>'
+        else:
+            body = "<p>Waiting for the first observation.</p>"
+        if self.error:
+            body += f'<p role="status">{escape(self.error)}</p>'
+        return _live_status(body, active=bool(opened or self.error) or not rows, stale=stale)
 
     def has_experiment(self, experiment: str) -> bool:
         with self._connect() as db:
@@ -440,9 +490,7 @@ class ChartIndex:
                 continue
             state = _display_state(row, now)
             stale |= state == "no end recorded"
-            active |= state in ("queued", "running") or (
-                row["launcher"] is not None and row["final_attempt"] is None
-            )
+            active |= _is_open(row, state)
             address = row["address"]
             body.append(
                 f"<tr><td>{escape(row['job'])}</td>"
@@ -466,18 +514,48 @@ class ChartIndex:
             launcher = any(row["launcher"] for row in rows)
             ages = " · ".join(_observation_ages(rows[0], now, launcher=launcher))
         error = f'<p role="status">{escape(self.error)}</p>' if self.error else ""
-        silence = (
+        return _live_status(
+            '<section class="sec"><h2>Run status</h2>'
+            f'{error}{table}<p class="context">{escape(ages)}</p>'
+            '<p class="lbl">No machine samples recorded.</p></section>',
+            active=active,
+            stale=stale,
+        )
+
+
+def _is_open(row: sqlite3.Row, state: str) -> bool:
+    return state in ("queued", "running") or (
+        row["launcher"] is not None and row["final_attempt"] is None
+    )
+
+
+def _live_status(body: str, *, active: bool, stale: bool) -> str:
+    if stale:
+        body += (
             f"<p>Runs with no launcher record show “no end recorded” after "
             f"{_SILENT // timedelta(minutes=1)} minutes without a write.</p>"
-            if stale
-            else ""
         )
-        refresh = f' data-refresh="{_REFRESH * 1000}"' if active else ""
-        return (
-            f'<section id="experiment-status" class="sec"{refresh}><h2>Run status</h2>'
-            f'{error}{table}<p class="context">{escape(ages)}</p>{silence}'
-            '<p class="lbl">No machine samples recorded.</p></section>'
-        )
+    refresh = f' data-refresh="{_REFRESH * 1000}"' if active else ""
+    return f'<div id="experiment-status"{refresh}>{body}</div>'
+
+
+def _experiments_table(title: str, rows: list[str]) -> str:
+    table = (
+        '<div class="scroll"><table><thead><tr><th>Experiment</th><th>Runs</th>'
+        "<th>Last write</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>"
+        if rows
+        else f"<p>No {title.lower()} experiments.</p>"
+    )
+    return f'<section class="sec"><h2>{title}</h2>{table}</section>'
+
+
+def _status_page(title: str, status: str, *, before: str = "", after: str = "") -> str:
+    script = Path(__file__).with_name("experiment_status.js").read_text()
+    return _document(
+        title,
+        f'{before}<header class="head"><h1>{escape(title)}</h1></header>{status}'
+        f'<p id="status-error" role="status"></p><script>{script}</script>{after}',
+    )
 
 
 def _display_state(row: sqlite3.Row, now: datetime) -> str:
@@ -619,17 +697,9 @@ class Server(ThreadingHTTPServer):
         path = unquote(urlsplit(route).path)
         if path.startswith("/runs/"):
             return self.index.run(path.removeprefix("/runs/"))
-        if path == "/":
-            names = sorted(set(self.index.experiments()) | self.files.keys())
-            links = "".join(
-                f'<li><a href="/experiments/{quote(n)}">{escape(n)}</a></li>' for n in names
-            )
-            message = escape(self.index.error or "Waiting for runs.")
-            return _document(
-                "Experiments",
-                "<h1>Experiments</h1>"
-                + (f"<ul>{links}</ul>" if names else f"<p>{message}</p>{_reload()}"),
-            )
+        if path in ("/", "/status"):
+            overview = self.index.experiments()
+            return _status_page("Experiments", overview) if path == "/" else overview
         if not path.startswith("/experiments/"):
             return None
         experiment, _, component = path.removeprefix("/experiments/").partition("/")
@@ -643,13 +713,11 @@ class Server(ThreadingHTTPServer):
         status = self.index.experiment_status(experiment, declared=declared)
         if component or status is None:
             return status
-        script = Path(__file__).with_name("experiment_status.js").read_text()
-        return _document(
+        return _status_page(
             experiment,
-            f'<a href="/">Experiments</a><header class="head"><h1>{escape(experiment)}</h1></header>{status}'
-            '<p id="status-error" role="status"></p>'
-            f"<script>{script}</script>"
-            f'<iframe title="Experiment report" src="/experiments/{quote(experiment)}/report" style="width:100%;height:80vh;border:0"></iframe>',
+            status,
+            before='<a href="/">Experiments</a>',
+            after=f'<iframe title="Experiment report" src="/experiments/{quote(experiment)}/report" style="width:100%;height:80vh;border:0"></iframe>',
         )
 
     def _report(self, experiment: str, refresh: bool) -> str | None:

@@ -148,6 +148,10 @@ those commands print nothing extra.
 | `/runs/ADDRESS` | One run, live: state, curves, console, config and checkpoints |
 | `/machines` | Machines held now, their windows and costs, and the runs on each |
 
+On `/`, each experiment shows its run counts by state and its latest file
+write. Open runs have links, clock positions and launcher placement when
+available. Follow the experiment link for its full run history and report.
+
 An experiment page (`/experiments/NAME`) combines operational status (what has
 run or completed, where each active run is, and clocks) with the experiment's
 `report()` charts on one page. The two components load asynchronously so a

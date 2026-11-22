@@ -310,6 +310,9 @@ def test_graph_requests_reuse_the_published_generation_after_interruption(tmp_pa
         assert (
             ">finished<" in status and 'role="status"' in status and 'data-refresh="5000"' in status
         )
+        overview = restarted.page("/") or ""
+        assert "1 finished" in overview and 'data-refresh="5000"' in overview
+        assert restarted.index.error in unescape(overview)
         assert (measured.listings, measured.requests, measured.bytes) == reads
         outcome.write_bytes(saved)
         restarted.ingest()
@@ -421,15 +424,74 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
         assert ">baseline<" in row(html, local) and ">steps 1<" in row(html, local)
         assert ">score<" in row(html, evaluation) and ">finished<" in row(html, evaluation)
         assert "last loop 2 h ago" in html and 'src="/experiments/lab/report"' in html
+        overview = status("/")
+        opened, completed = overview.split("<h2>Completed</h2>")
+        assert 'href="/experiments/lab"' in opened and "No completed experiments." in completed
+        assert all(count in opened for count in ("1 queued", "2 running", "1 finished"))
+        assert all(f'href="/runs/{address}"' in opened for address in (running, queued, local))
+        assert machine in opened and "steps 1" in opened and "last loop 2 h ago" in overview
         _seal(source.root / local, 1, 3)
         server.ingest()
         updated = status("/experiments/lab/status")
         assert ">steps 2<" in row(updated, local) and ">running<" in row(updated, local)
         assert 'data-refresh="5000"' in updated and "<iframe" not in updated
+        assert "steps 2" in status("/status")
         source.put(local + "/outcome.json", outcome)
         server.ingest()
         assert ">finished<" in row(status("/experiments/lab/status"), local)
+        # The local outcome alone cannot close an experiment with outstanding launcher work.
+        assert "2 finished" in status("/status").split("<h2>Completed</h2>")[0]
+        backend.scheduler.cancel(queued)
+        backend.run(600)
+        server.ingest()
+        settled = status("/status")
+        opened, completed = settled.split("<h2>Completed</h2>")
+        assert "No open experiments." in opened and 'href="/experiments/lab"' in completed
+        assert "3 finished" in completed and "1 failed" in completed
+        assert "data-refresh" not in settled
     backend.store.close()
+
+
+def test_experiments_group_by_activity_and_date_the_latest_write(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    unused = experiment_file(tmp_path, "unstarted", COUNTED)
+    measured = MeasuredStorage(source)
+    with Server(measured, unused, ("127.0.0.1", 0)) as server:
+        assert "Waiting for the first observation." in (server.page("/") or "")
+        server.ingest()
+        empty = server.page("/status") or ""
+        assert "Waiting for runs." in empty and 'data-refresh="5000"' in empty
+        now = datetime.now(UTC).timestamp()
+        for name, experiment, age in (
+            ("archived/base", "archived", 3 * 86400 + 10),
+            ("lab/base", "lab", 130),
+            ("lab/earlier", "lab", 7200),
+        ):
+            key = name + "/run.json"
+            source.put(key, RunRecord(id=name, experiment=experiment).model_dump_json().encode())
+            os.utime(source.root / key, (now - age, now - age))
+        server.ingest()
+        reads = measured.listings, measured.requests, measured.bytes
+        page = server.page("/") or ""
+        opened, completed = page.split("<h2>Completed</h2>")
+        assert 'href="/experiments/lab"' in opened and ">2 min ago<" in opened
+        assert 'href="/experiments/archived"' in completed and ">3 d ago<" in completed
+        assert "1 running" in opened and all(
+            "1 no end recorded" in part for part in (opened, completed)
+        )
+        assert "unstarted" not in page and not unused.with_suffix(".built").exists()
+        assert (measured.listings, measured.requests, measured.bytes) == reads
+        source.put(
+            "lab/base/outcome.json",
+            RunOutcome(state="finished", counters=RunCounters()).model_dump_json().encode(),
+        )
+        server.ingest()
+        reads = measured.listings, measured.requests, measured.bytes
+        updated = server.page("/status") or ""
+        opened, completed = updated.split("<h2>Completed</h2>")
+        assert "No open experiments." in opened and 'href="/experiments/lab"' in completed
+        assert "1 finished" in completed and "data-refresh" not in updated
+        assert (measured.listings, measured.requests, measured.bytes) == reads
 
 
 def test_silent_file_run_stops_refreshing_without_a_recorded_end(tmp_path: Path) -> None:
