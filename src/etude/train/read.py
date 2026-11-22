@@ -25,7 +25,7 @@ from datetime import datetime
 from functools import cached_property
 from hashlib import sha256
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -109,6 +109,10 @@ class RunData(Arrays):
     last_write: datetime | None = None
     _read_blocks: Callable[[], tuple[StoredBlock, ...]] = PrivateAttr()
     _read_out: Callable[[], tuple[OutMember, ...]] = PrivateAttr(default=tuple)
+
+    @property
+    def stored_state(self) -> Literal["running", "stopped", "finished", "failed"]:
+        return self.outcome.state if self.outcome else "running"
 
     @cached_property
     def out(self) -> tuple[OutMember, ...]:

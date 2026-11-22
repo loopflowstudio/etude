@@ -71,9 +71,10 @@ _CLOCKS = TypeAdapter(dict[str, float])
 # A changed schema starts a fresh rebuildable index.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
-    address TEXT PRIMARY KEY, experiment TEXT NOT NULL, job TEXT NOT NULL, state TEXT NOT NULL,
-    last_write TEXT, status TEXT, launched_as TEXT, max_attempts INTEGER,
-    position TEXT NOT NULL, kind TEXT NOT NULL, details TEXT NOT NULL
+    address TEXT PRIMARY KEY, experiment TEXT NOT NULL, kind TEXT NOT NULL, last_write TEXT,
+    file_job TEXT, file_state TEXT, file_position TEXT, file_config TEXT, checkpoints TEXT,
+    launched_as TEXT, launcher_job TEXT, launcher_state TEXT, launcher_position TEXT,
+    launcher_config TEXT, source TEXT, status TEXT, max_attempts INTEGER
 );
 CREATE INDEX IF NOT EXISTS launcher_address ON runs(launched_as);
 CREATE INDEX IF NOT EXISTS experiment_runs ON runs(experiment, address);
@@ -89,6 +90,31 @@ CREATE TABLE IF NOT EXISTS observation (
 CREATE TABLE IF NOT EXISTS declarations (
     experiment TEXT PRIMARY KEY, file TEXT NOT NULL, accepted TEXT, error TEXT
 );
+"""
+
+
+# A file generation survives a change of launcher. Its optional launcher columns
+# all belong to the endpoint in the observation committed in the same transaction.
+_OBSERVED = """
+WITH observed AS (
+    SELECT at, server IS :remote AS matches,
+           CASE WHEN server IS :remote THEN launcher_at END AS launcher_at,
+           CASE WHEN server IS :remote THEN last_loop END AS last_loop
+    FROM observation WHERE id=1
+)
+"""
+_VISIBLE = f"""{_OBSERVED}, visible AS (
+    SELECT address, experiment, kind, last_write, at, launcher_at, last_loop, checkpoints,
+           coalesce(CASE WHEN matches THEN launcher_job END, file_job) AS job,
+           coalesce(CASE WHEN matches THEN launcher_state END, file_state) AS state,
+           coalesce(CASE WHEN matches THEN launcher_position END, file_position) AS position,
+           coalesce(file_config, CASE WHEN matches THEN launcher_config END) AS config,
+           CASE WHEN matches THEN source END AS source,
+           CASE WHEN matches THEN launched_as END AS launched_as,
+           CASE WHEN matches THEN status END AS status,
+           CASE WHEN matches THEN max_attempts END AS max_attempts
+    FROM observed CROSS JOIN runs WHERE file_state IS NOT NULL OR matches
+)
 """
 
 
@@ -148,7 +174,7 @@ class ChartIndex:
         self._console_lock = threading.Lock()
         self._server = selected()
         self._next_standing = 0.0
-        self._launcher_error: str | None = None
+        self._launcher_error: tuple[str | None, str] | None = None
         self.error: str | None = None
 
     @contextmanager
@@ -193,12 +219,18 @@ class ChartIndex:
                 return None
             answer = self._remote_read.result()
         except Exception as error:
-            self._launcher_error = explain(error)
+            self._launcher_error = (remote, explain(error))
             self._remote_read = None
             self._next_standing = time.monotonic() + _REMOTE_STANDING
             return None
         self._launcher_error = None
         return answer
+
+    def read_error(self, remote: str | None) -> str:
+        launcher = self._launcher_error
+        return "\n".join(
+            filter(None, (self.error, launcher[1] if launcher and launcher[0] == remote else None))
+        )
 
     def _read_run(self, storage: ListedStorage, members: list[str], run: LocatedRun) -> _RunFiles:
         # Compare listed versions, including removals and replacement at one
@@ -250,7 +282,7 @@ class ChartIndex:
         if self._remote_read and answer is not None:
             self._remote_read = None
             self._next_standing = time.monotonic() + _REMOTE_STANDING
-        self.error = self._launcher_error
+        self.error = None
         self._files = current
 
     def _read_files(self) -> dict[str, dict[str, _RunFiles]]:
@@ -344,8 +376,16 @@ class ChartIndex:
                 reached: dict[str, float] = {}
                 if isinstance(run, TrainingRunSummary) and report and inputs:
                     reached = self._chart(db, address, inputs, report, charts.pop(address, None))
-                position = _position(item, reached, report.clock if report else None, data)
-                _store_run(db, address, experiment, run, data, item, position)
+                _store_run(
+                    db,
+                    address,
+                    experiment,
+                    run,
+                    data,
+                    item,
+                    reached,
+                    report.clock if report else None,
+                )
                 removed.discard(address)
         db.executemany("DELETE FROM charts WHERE address=?", ((a,) for a in charts))
         db.executemany("DELETE FROM runs WHERE address=?", ((a,) for a in removed))
@@ -416,19 +456,24 @@ class ChartIndex:
         )
 
     def run(self, address: str) -> str | None:
+        remote = selected()
         with self._connect() as db:
             row = db.execute(
-                """
-                SELECT runs.*, charts.payload, declarations.error AS report_error,
+                _VISIBLE
+                + """
+                SELECT visible.*, charts.payload, declarations.error AS report_error,
                        declarations.accepted IS NULL AND declarations.file IS NOT NULL AS pending_report,
-                       observation.server, observation.at, observation.launcher_at, observation.last_loop,
-                       consoles.body, consoles.collected, consoles.gaps, consoles.final_attempt AS console_attempt FROM runs
-                LEFT JOIN consoles ON consoles.run=runs.launched_as
+                       consoles.body, consoles.collected, consoles.gaps, consoles.final_attempt AS console_attempt
+                FROM visible
+                LEFT JOIN consoles ON consoles.run=visible.launched_as
                 LEFT JOIN declarations USING(experiment)
-                LEFT JOIN charts USING(address) JOIN observation ON observation.id=1 AND observation.server IS ?
-                WHERE runs.address=? OR runs.launched_as=?
+                LEFT JOIN charts USING(address)
+                WHERE address=coalesce(
+                    (SELECT address FROM runs WHERE address=:address),
+                    (SELECT address FROM runs WHERE launched_as=:address AND (SELECT matches FROM observed))
+                )
                 """,
-                (selected(), address, address),
+                {"remote": remote, "address": address},
             ).fetchone()
         if row is None:
             return None
@@ -451,7 +496,7 @@ class ChartIndex:
             heading += f'<p>Scores are in the <a href="{page}#report">{experiment} report</a>.</p>'
         if state == "no end recorded":
             heading += f"<p>No new file for at least {_SILENT // timedelta(minutes=1)} minutes.</p>"
-        error = "\n".join(filter(None, (self.error, row["report_error"])))
+        error = "\n".join(filter(None, (self.read_error(remote), row["report_error"])))
         if error:
             heading += f'<p role="status">{escape(error)}</p>'
         # Session shutdown can still retain final logs after the run itself ended.
@@ -460,7 +505,7 @@ class ChartIndex:
         )
         if awaiting_console:
             with self._console_lock:
-                if row["server"] == self._server:
+                if remote == self._server:
                     self._wanted.add(row["launched_as"])
         if (
             _is_open(status, state)
@@ -475,39 +520,42 @@ class ChartIndex:
         below = _console(row, now)
         if evaluation:
             return _document(address, heading + below)
-        below += row["details"]
+        below += _run_details(row)
         if row["payload"] is None:
             tabs = f'<nav class="tabs" aria-label="Run sections">{_TRAINING_TABS}</nav>'
             return _document(address, heading + tabs + "<p>No metric curves recorded.</p>" + below)
         return render_run(address, row["payload"], heading, below, _TRAINING_TABS)
 
     def _list_runs(
-        self, experiment: str | None = None
+        self, remote: str | None, experiment: str | None = None
     ) -> tuple[sqlite3.Row | None, list[sqlite3.Row]]:
         # Both tables and their ages come from one generation. Leave large chart,
         # console and machine payloads out of these reads.
-        query = (
-            "SELECT experiment,address,job,state,position,status,max_attempts,last_write FROM runs"
+        query = _VISIBLE + (
+            "SELECT experiment,address,job,state,position,status,max_attempts,last_write FROM visible"
         )
+        params = {"experiment": experiment, "remote": remote}
         with self._connect() as db:
             db.execute("BEGIN")
             observation = db.execute(
-                """SELECT at,last_loop,launcher_at,
-                          (SELECT error FROM declarations WHERE experiment=?) AS report_error
-                   FROM observation WHERE id=1 AND server IS ?""",
-                (experiment, selected()),
+                _OBSERVED
+                + """SELECT at,last_loop,launcher_at,
+                          (SELECT error FROM declarations WHERE experiment=:experiment) AS report_error
+                   FROM observed""",
+                params,
             ).fetchone()
             if observation is None:
                 return None, []
             rows = (
-                db.execute(query + " ORDER BY experiment,address")
+                db.execute(query + " ORDER BY experiment,address", params)
                 if experiment is None
-                else db.execute(query + " WHERE experiment=? ORDER BY address", (experiment,))
+                else db.execute(query + " WHERE experiment=:experiment ORDER BY address", params)
             )
             return observation, rows.fetchall()
 
     def experiments(self) -> str:
-        observation, rows = self._list_runs()
+        remote = selected()
+        observation, rows = self._list_runs(remote)
         now = datetime.now(UTC)
         opened: list[str] = []
         completed: list[str] = []
@@ -552,7 +600,7 @@ class ChartIndex:
             or observation is None
             or observation["launcher_at"] is None,
             stale=stale,
-            error=self.error,
+            error=self.read_error(remote),
         )
 
     def machines(self) -> str:
@@ -567,31 +615,32 @@ class ChartIndex:
                 "SELECT at,launcher_at,last_loop,machines FROM observation WHERE id=1 AND server IS NULL"
             ).fetchone()
         active = True
+        error = self.read_error(None)
         if row is None:
             body = "<p>Waiting for the first local observation.</p>"
         elif row["machines"] is not None:
             ages = " · ".join(_observation_ages(row, datetime.now(UTC), launcher=True))
             body = row["machines"] + f'<p class="context">{escape(ages)}</p>'
-        elif self.error:
+        elif error:
             body = "<p>Machine listing unavailable.</p>"
         else:
             body = "<p>No launcher is used here.</p>"
             active = False
-        return _live_status(body, active=active, error=self.error)
+        return _live_status(body, active=active, error=error)
 
     def has_experiment(self, experiment: str) -> bool:
         with self._connect() as db:
             return (
                 db.execute(
-                    """SELECT 1 FROM runs JOIN observation ON observation.id=1
-                       WHERE experiment=? AND observation.server IS ? LIMIT 1""",
-                    (experiment, selected()),
+                    _VISIBLE + "SELECT 1 FROM visible WHERE experiment=:experiment LIMIT 1",
+                    {"experiment": experiment, "remote": selected()},
                 ).fetchone()
                 is not None
             )
 
     def experiment_status(self, experiment: str, *, declared: bool) -> str | None:
-        observation, rows = self._list_runs(experiment)
+        remote = selected()
+        observation, rows = self._list_runs(remote, experiment)
         if not declared and not rows:
             return None
         now = datetime.now(UTC)
@@ -626,7 +675,10 @@ class ChartIndex:
             active=active,
             stale=stale,
             error="\n".join(
-                filter(None, (self.error, observation["report_error"] if observation else None))
+                filter(
+                    None,
+                    (self.read_error(remote), observation["report_error"] if observation else None),
+                )
             ),
         )
 
@@ -638,39 +690,47 @@ def _store_run(
     run: TrainingRunSummary | EvalRunSummary,
     stored: RunData | None,
     item: Standing | None,
-    position: str,
+    reached: dict[str, float],
+    preferred: str | None,
 ) -> None:
-    status = run.status
-    job: str | None
-    if isinstance(run, TrainingRunSummary):
-        job = run.job
-    elif item:
-        job = item.record.launch.spec.name
-    else:
-        job = (stored.file.job_name or stored.job) if stored and stored.file else None
+    training = isinstance(run, TrainingRunSummary)
+    file = stored.file if stored else None
+    file_job = None
+    if file:
+        file_job = (
+            run.job
+            if isinstance(run, TrainingRunSummary)
+            else file.job_name or file.job or "Evaluation"
+        )
+    file_config = file.config_json if file else None
+    fields = {
+        "address": address,
+        "experiment": experiment,
+        "kind": "training" if training else "evaluation",
+        "last_write": run.last_write.isoformat() if run.last_write else None,
+        "file_job": file_job,
+        "file_state": stored.stored_state if stored else None,
+        "file_position": _position(None, reached, preferred, stored) if stored else None,
+        "file_config": file_config,
+        "checkpoints": _checkpoints(stored) if stored and training else None,
+        "launched_as": item.record.id if item else None,
+        "launcher_job": (item.record.launch.spec.name or "Evaluation")
+        if item and not (file and training)
+        else None,
+        "launcher_state": run.state if item else None,
+        "launcher_position": _position(item, reached, preferred, stored) if item else None,
+        "launcher_config": item.record.config_json if item and file_config is None else None,
+        "source": _source(item) if item and training else None,
+        "status": run.status.model_dump_json() if run.status else None,
+        "max_attempts": item.record.launch.spec.max_attempts if item else None,
+    }
+    # Keep unchanged rows out of the WAL. Only the fixed column names form SQL.
+    columns = ",".join(fields)
+    values = ",".join(":" + key for key in fields)
     db.execute(
-        """
-        -- EXCEPT leaves unchanged rows alone, including rows with missing launcher facts.
-        INSERT OR REPLACE INTO runs(address,experiment,job,state,last_write,status,
-                                    launched_as,max_attempts,position,kind,details)
-        SELECT ?,?,?,?,?,?,?,?,?,?,?
-        EXCEPT SELECT address,experiment,job,state,last_write,status,
-                      launched_as,max_attempts,position,kind,details FROM runs WHERE address=?
-        """,
-        (
-            address,
-            experiment,
-            job or "Evaluation",
-            run.state,
-            run.last_write.isoformat() if run.last_write else None,
-            status.model_dump_json() if status else None,
-            status.run if status else None,
-            item.record.launch.spec.max_attempts if item else None,
-            position,
-            "training" if isinstance(run, TrainingRunSummary) else "evaluation",
-            _run_details(stored, item) if isinstance(run, TrainingRunSummary) else "",
-            address,
-        ),
+        f"INSERT OR REPLACE INTO runs({columns}) SELECT {values} "
+        f"EXCEPT SELECT {columns} FROM runs WHERE address=:address",
+        fields,
     )
 
 
@@ -687,7 +747,8 @@ def _machines_table(db: sqlite3.Connection, machines: tuple[MachineStatus, ...])
         runs = []
         for run in status.runs:
             row = db.execute(
-                "SELECT address,state,position,status,max_attempts FROM runs WHERE launched_as=?",
+                """SELECT address,launcher_state AS state,launcher_position AS position,status,max_attempts
+                   FROM runs WHERE launched_as=?""",
                 (run,),
             ).fetchone()
             address = row["address"] if row else run
@@ -776,13 +837,14 @@ def _display_state(row: sqlite3.Row, now: datetime) -> str:
 
 def _observation_ages(row: sqlite3.Row, now: datetime, *, launcher: bool) -> list[str]:
     ages = [f"indexed {_age(row['at'], now)}"]
-    if launcher:
+    if row["launcher_at"] is None:
+        ages.append("Launcher observation unavailable")
+    elif launcher:
         if row["last_loop"]:
             ages.append(f"last loop {_age(row['last_loop'], now)}")
-        if row["launcher_at"] and (
-            datetime.fromisoformat(row["at"]) - datetime.fromisoformat(row["launcher_at"])
-            > timedelta(seconds=_REFRESH)
-        ):
+        if datetime.fromisoformat(row["at"]) - datetime.fromisoformat(
+            row["launcher_at"]
+        ) > timedelta(seconds=_REFRESH):
             ages.append(f"launcher observed {_age(row['launcher_at'], now)}")
     return ages
 
@@ -820,7 +882,7 @@ def _console(row: sqlite3.Row, now: datetime) -> str:
     elif row["launched_as"]:
         console = "<p>Waiting for retained console.</p>"
     elif row["launcher_at"] is None:
-        console = "<p>Launcher observation unavailable.</p>"
+        console = "<p>Waiting for the selected launcher.</p>"
     else:
         console = "<p>Console was not recorded.</p>"
     if row["launched_as"]:
@@ -831,26 +893,20 @@ def _console(row: sqlite3.Row, now: datetime) -> str:
     return f'<section class="sec" id="console"><h2>Console</h2>{console}</section>'
 
 
-def _run_details(stored: RunData | None, item: Standing | None) -> str:
-    config = stored.file.config_json if stored and stored.file else None
-    source = ""
-    if item:
-        record = item.record
-        if config is None:
-            config = record.config_json
-        job = record.launch.spec
-        if job.repo and job.revision:
-            provenance = line(record.launch.source, job.revision)
-            source = f"<p>Source {escape(provenance)}</p>"
-            if record.launch.source:
-                source += f"<p>Commit <code>{escape(job.revision)}</code></p>"
-    shown = (
-        f'<pre class="scroll">{escape(config)}</pre>'
-        if config is not None
-        else "<p>No config recorded.</p>"
-    )
+def _source(item: Standing) -> str:
+    record = item.record
+    job = record.launch.spec
+    if not job.repo or not job.revision:
+        return ""
+    source = f"<p>Source {escape(line(record.launch.source, job.revision))}</p>"
+    if record.launch.source:
+        source += f"<p>Commit <code>{escape(job.revision)}</code></p>"
+    return source
+
+
+def _checkpoints(stored: RunData) -> str | None:
     rows = []
-    for checkpoint in stored.checkpoints if stored else ():
+    for checkpoint in stored.checkpoints:
         # Wall clocks are fractional hours; four significant digits read as a position.
         clocks = ", ".join(
             f"{k} {number(v) if float(v).is_integer() else f'{v:.4g}'}"
@@ -859,11 +915,18 @@ def _run_details(stored: RunData | None, item: Standing | None) -> str:
         rows.append(
             f"<tr><td>{checkpoint.ordinal}</td><td>{escape(checkpoint.name)}</td><td>{escape(clocks)}</td></tr>"
         )
-    checkpoints = (
-        _table(("Ordinal", "Checkpoint", "Clock position"), rows)
-        if rows
-        else "<p>No checkpoints recorded.</p>"
+    return _table(("Ordinal", "Checkpoint", "Clock position"), rows) if rows else None
+
+
+def _run_details(row: sqlite3.Row) -> str:
+    config = row["config"]
+    shown = (
+        f'<pre class="scroll">{escape(config)}</pre>'
+        if config is not None
+        else "<p>No config recorded.</p>"
     )
+    source = row["source"] or ""
+    checkpoints = row["checkpoints"] or "<p>No checkpoints recorded.</p>"
     return f'<section class="sec" id="config"><h2>Config</h2>{shown}{source}</section><section class="sec" id="checkpoints"><h2>Checkpoints</h2>{checkpoints}</section>'
 
 
@@ -1064,8 +1127,8 @@ class _Handler(BaseHTTPRequestHandler):
                 index = self.server.index
                 source = index.source.uri("run.json").removesuffix("run.json")
                 message = f"Waiting for the run to appear in {source}."
-                if index.error:
-                    message += " " + index.error
+                if error := index.read_error(selected()):
+                    message += " " + error
                 html = _document("Run", f'<p role="status">{escape(message)}</p>{_reload()}')
             body = (html or "Not found.").encode()
         except ValueError as error:

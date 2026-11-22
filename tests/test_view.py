@@ -789,6 +789,10 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
     backend = bench(home())
     (queued,) = backend.scheduler.queue(job(name="learn", experiment="lab"), rent="l4")
     held = LauncherObservation.read((queued,))
+    backend.scheduler.tick()
+    _reporting(backend, log_bytes=100)
+    backend.run(1)
+    second = LauncherObservation.read((queued,))
     backend.store.close()
     source = DirectoryStorage(tmp_path / "runs")
     record = RunRecord(
@@ -813,7 +817,7 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
         if client.address == "second":
             if not elapsed:
                 raise LauncherError("second is offline")
-            return held.model_copy(update={"consoles": {}})
+            return second if queued in consoles else second.model_copy(update={"consoles": {}})
         if exchanges == 1:
             return held
         started.set()
@@ -842,24 +846,61 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
             assert ">queued<" in (server.page("/runs/" + queued) or "")
             assert (measured.listings, measured.requests, measured.bytes, exchanges) == (*reads, 2)
             assert not ended.is_set()
+            report_route = "/experiments/local/report"
+            cached_report = server.page(report_route)
+            assert cached_report
             endpoint.write_text("second")
-            # Even before its first file pass the new endpoint cannot serve the old console.
-            assert server.page("/runs/" + queued) is None
-            server.ingest()
-            assert queued not in (server.page("/status") or "")
+            _seal(source.root / "local", 2, 1)
+
+            def file_pages(view: Server) -> None:
+                reads = measured.listings, measured.requests, measured.bytes
+                graph = view.page("/runs/local") or ""
+                assert _loss(graph) == [7, 3] and "steps 2" in graph
+                assert "Launcher observation unavailable" in graph and "indexed " in graph
+                assert 'src="/experiments/local/report"' in (view.page("/experiments/local") or "")
+                status = view.page("/experiments/local/status") or ""
+                assert "steps 2" in status and "Launcher observation unavailable" in status
+                overview = view.page("/") or ""
+                assert 'href="/runs/local"' in overview and queued not in overview
+                assert view.index.has_experiment("local")
+                assert view.page("/experiments/lab/report") is None
+                assert view.page("/runs/" + queued) is None
+                assert (measured.listings, measured.requests, measured.bytes) == reads
+
+            file_pages(server)
+            with Server(measured, None, ("127.0.0.1", 0)) as restarted:
+                file_pages(restarted)
+
+            def unavailable(prefix: str) -> dict[str, str]:
+                raise OSError("fixture listing unavailable")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(source, "versions", unavailable)
+                server.ingest()
+                file_pages(server)
+                assert server.page(report_route) == cached_report
+                assert "fixture listing unavailable" in (server.page("/runs/local") or "")
         finally:
             release.set()
         _publish_ssh(server)
         assert "second is offline" in (server.page("/status") or "")
         assert server.page("/runs/" + queued) is None
-        assert _loss(server.page("/runs/local") or "") == [7, 3]
+        assert _loss(server.page("/runs/local") or "") == [7, 3, 1]
+        assert "steps 3" in (server.page("/experiments/local/status") or "")
         assert exchanges == 3
+        endpoint.write_text("third")
+        assert "second is offline" not in (server.page("/runs/local") or "")
+        endpoint.write_text("second")
         elapsed += 30
         server.ingest()
         _publish_ssh(server)
         page = server.page("/runs/" + queued) or ""
-        assert ">queued<" in page and "Waiting for retained console" in page
+        assert ">running<" in page and "Waiting for retained console" in page
         assert 'id="retained-output"' not in page and "second is offline" not in page
+        elapsed += 30
+        server.ingest()
+        _publish_ssh(server)
+        assert "log of " in (server.page("/runs/" + queued) or "")
 
 
 def test_machines_without_a_launcher_or_with_a_selected_server(
@@ -977,7 +1018,8 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
     (identity,) = backend.scheduler.queue(RunRequest(id="base@0", seed=0, job=spec), rent="l4")
     source = MeasuredStorage(DirectoryStorage(tmp_path / "runs"))
     (remote / "server-heartbeat").write_text((datetime.now(UTC) - timedelta(hours=2)).isoformat())
-    (home() / "server").write_text("fixture")
+    endpoint = home() / "server"
+    endpoint.write_text("fixture")
     monkeypatch.delenv("ETUDE_SERVER_LOCAL", raising=False)
     exchanges = 0
     elapsed = 0
@@ -1016,7 +1058,7 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
         weights.write_bytes(b"saved")
         with open_run(
             experiment="lab",
-            run="base@0",
+            run="compact",
             job="base",
             seed=0,
             clocks=["steps"],
@@ -1025,30 +1067,60 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
         ) as writer:
             writer.log({"loss": 7}, steps=12)
             writer.checkpoint(weights, {"steps": 12})
-            server.ingest()
-            assert exchanges == 1
-            elapsed += 30
-            server.ingest()
-            _publish_ssh(server)
-            reads = source.requests, source.listings
-            page = server.page(route) or ""
-            assert f"log of {attempt.id}" in page and "output not received" in page
-            assert (
-                "Last collected" in page
-                and "last loop 2 h ago" in page
-                and "launcher observed" not in page
+        # A courier can deliver sealed metrics and checkpoints ahead of the outcome.
+        outcome = tmp_path / "runs/lab/compact/outcome.json"
+        pending = outcome.rename(tmp_path / "pending-outcome.json")
+        server.ingest()
+        assert exchanges == 1
+        assert ">queued<" in (server.page("/runs/lab/compact") or "")
+        endpoint.write_text("other")
+        assert ">running<" in (server.page("/runs/lab/compact") or "")
+        endpoint.write_text("fixture")
+        elapsed += 30
+        server.ingest()
+        _publish_ssh(server)
+        reads = source.requests, source.listings
+        page = server.page(route) or ""
+        assert f"log of {attempt.id}" in page and "output not received" in page
+        assert (
+            "Last collected" in page
+            and "last loop 2 h ago" in page
+            and "launcher observed" not in page
+        )
+        assert "&lt;writer&gt;" in page and "<writer>" not in page
+        assert "steps 12" in page and "<td>1</td>" in page
+        assert "steps-12" in page and "steps 12 / 40" in page
+        revision = git(repo, "rev-parse", "HEAD")
+        assert revision in page and "on main" in page
+        assert (
+            attempt.machine in page
+            and "L4" in page
+            and "1 of 2 attempts used" in page
+            and "~$0." in page
+        )
+        assert (source.requests, source.listings, exchanges) == (*reads, 2)
+        # The old launcher's spelling is an alias for this compact stored run.
+        endpoint.write_text("other")
+        assert server.page(route) is None
+        stored = server.page("/runs/lab/compact") or ""
+        assert "&lt;writer&gt;" in stored and "steps-12" in stored
+        assert "steps 12" in stored and _loss(stored) == [7]
+        assert "Launcher observation unavailable" in stored
+        assert all(
+            old not in stored
+            for old in (
+                "steps 12 / 40",
+                attempt.machine,
+                "last loop",
+                "of 2 attempts",
+                "on main",
+                'id="retained-output"',
+                revision,
             )
-            assert "&lt;writer&gt;" in page and "<writer>" not in page
-            assert "steps 12" in page and "<td>1</td>" in page
-            assert "steps-12" in page and "steps 12 / 40" in page
-            assert git(repo, "rev-parse", "HEAD") in page and "on main" in page
-            assert (
-                attempt.machine in page
-                and "L4" in page
-                and "1 of 2 attempts used" in page
-                and "~$0." in page
-            )
-            assert (source.requests, source.listings, exchanges) == (*reads, 2)
+        )
+        assert (source.requests, source.listings, exchanges) == (*reads, 2)
+        endpoint.write_text("fixture")
+        pending.rename(outcome)
         backend.run(700)
         elapsed += 30
         server.ingest()

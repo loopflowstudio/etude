@@ -211,6 +211,9 @@ The view retains the selected launcher's dated `LauncherObservation` under
 joins the latest available standing to fresh runs through `state_of`.
 An outstanding SSH exchange or a failed launcher read leaves its observation
 available. A successful empty answer releases previously held runs.
+Each indexed run keeps its file state, sealed position and details. A page
+applies the launcher fields and resolves launcher aliases only when its selected
+endpoint matches the committed observation.
 
 Local report declarations are evaluated separately from the file writer.
 The index keeps each experiment's last accepted panels and source versions.

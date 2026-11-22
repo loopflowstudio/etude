@@ -198,7 +198,9 @@ Without a launcher database the view reads runs from files, and Machines says
 server for run status and requested consoles at most once every 30 seconds.
 While a reply is pending or a read fails, the view joins fresh run files to
 the last successful observation from that launcher, including after a restart.
-A failed read shows its reason. Selecting another server clears the old
-placement and console.
+A failed read shows its reason. Selecting another launcher leaves your indexed
+runs and charts visible. The view clears the previous launcher’s placement,
+queued jobs and console. It keeps showing your files while it waits for the
+selected launcher.
 Use `--source` to select the matching run files. The Machines page names the
 selected server and directs you to `etude machines`.

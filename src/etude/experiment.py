@@ -20,7 +20,6 @@ from etude.errors import EtudeError
 from etude.eval.records import Benchmark, Line, Match, TournamentRun
 from etude.launch import client
 from etude.launch.records import Standing
-from etude.records import RunOutcome
 from etude.run import LocatedRun, RunListing
 from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
@@ -135,7 +134,7 @@ def state_of(
                 job=job[data.name].name,
                 launch=job[data.name].launch,
                 line=line[data.name],
-                state=_stored_state(data.outcome),
+                state=data.stored_state,
                 checkpoints=saved,
                 seed=data.file.seed if data.file else None,
                 _data=data,
@@ -145,7 +144,7 @@ def state_of(
     eval_runs = [
         jobs.EvalRunSummary(
             name=d.name,
-            state=_stored_state(d.outcome),
+            state=d.stored_state,
             last_write=d.last_write,
         )
         for d in every
@@ -215,12 +214,6 @@ def state_of(
     return jobs.ExperimentState(
         experiment=experiment, runs=tuple(runs), eval_runs=tuple(eval_runs), committed_usd=committed
     )
-
-
-def _stored_state(
-    outcome: RunOutcome | None,
-) -> Literal["running", "stopped", "finished", "failed"]:
-    return outcome.state if outcome is not None else "running"
 
 
 def _launcher_state(
