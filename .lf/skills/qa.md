@@ -113,6 +113,11 @@ A `nohup uv run etude view … &` ignores SIGINT; stop the view by sending SIGTE
 Python driver and send SIGINT, which is what Ctrl-C does. A launched run's console reaches
 its page only when the loop collects it, about every 30 s, so a page shows a stale tail
 between collections; check its "Last collected" age rather than expecting each refresh to move.
+`etude launch` refuses a plain `train(config)` file; declare `training_jobs()` for a
+launched run. To see a broken `report()`, write a syntax error into the file while a run
+writes and restore it after. `etude server set` refuses an unreachable host, so reach a
+failed launcher read with `chmod 0 home/launcher.sqlite` across a view restart (stop
+`etude wait` first) and restore `0644` before finishing.
 
 For interruption, make a separate lab copy with an author-controlled pause
 (`time.sleep(0.1)` per update) and more updates. Drive `uv run etude train

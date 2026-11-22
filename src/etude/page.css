@@ -30,7 +30,10 @@ code, .mono { font: 12px ui-monospace, Menlo, monospace; }
 .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink-2); white-space: nowrap; }
 .context { display: flex; flex-wrap: wrap; gap: 6px 20px; margin: 10px 0 0; color: var(--ink-2); font-size: 13px; align-items: center; }
 .context b { color: var(--ink); font-weight: 500; }
-.note { flex-basis: 100%; color: var(--ink); background: var(--wash); border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+.note, p[role=status] { flex-basis: 100%; color: var(--ink); background: var(--wash); border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+/* A live page's failure: an explained error, then its frames on their own lines. */
+p[role=status] { white-space: pre-line; overflow-wrap: anywhere; }
+p[role=status]:empty { display: none; }
 .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 18px 0; }
 .sec-controls { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; font-weight: 400; }
 .lbl { color: var(--muted); font-size: 13px; }
