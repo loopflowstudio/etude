@@ -187,8 +187,18 @@ The view indexes run files in the background under `ETUDE_HOME/views`. Reading
 a run graph uses the last published index, including during a bucket scan.
 The files in your directory or bucket are the portable record.
 
+You can edit `report()` while runs are writing. Their clocks and curves keep
+advancing while the view reads the edit. If it fails, the affected experiment
+and run pages show the error. Run charts keep the last working panels,
+including after a restart, and use default panels until the first successful
+declaration. A later index pass publishes the repaired panels.
+
 Without a launcher database the view reads runs from files, and Machines says
 “No launcher is used here.” With `etude server set`, the view polls the selected
 server for run status and requested consoles at most once every 30 seconds.
+While a reply is pending or a read fails, the view joins fresh run files to
+the last successful observation from that launcher, including after a restart.
+A failed read shows its reason. Selecting another server clears the old
+placement and console.
 Use `--source` to select the matching run files. The Machines page names the
 selected server and directs you to `etude machines`.

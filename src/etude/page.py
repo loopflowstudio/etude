@@ -104,6 +104,8 @@ if TYPE_CHECKING:
 
 # An authored file and its sibling imports share sys.modules across request threads.
 _author_imports = threading.RLock()
+DEFAULT_REPORT = Report(other_metrics=True)
+type SourceVersions = tuple[tuple[str, int, int], ...]
 
 
 class Placement(Record):
@@ -356,12 +358,12 @@ class Pages:
     reflects them.
     """
 
-    def __init__(self, source: Storage | Path | str) -> None:
+    def __init__(self, source: Storage | Path | str, *, known: Collection[Path] = ()) -> None:
         self.storage = as_storage(source)
         here = DirectoryStorage(default_root())
         self._places = list({each.name: each for each in (self.storage, here)}.values())
         self._built: dict[tuple[Path | None, str], tuple[_Inputs, Page]] = {}
-        self._known: set[Path] = set()
+        self._known = set(known)
         # Each folder's experiment by place and prefix, with its declaration's version.
         self._declared: dict[tuple[str, str], tuple[str, str | None]] = {}
 
@@ -438,7 +440,7 @@ class _Inputs:
     """What a page is built from, as `Pages` compares it."""
 
     # The experiment file and its imported neighbours: (path, modification time in ns, bytes).
-    files: tuple[tuple[str, int, int], ...]
+    files: SourceVersions
     # Per place: (key, version) of each object in the experiment's runs' folders.
     runs: tuple[tuple[tuple[str, str], ...], ...]
 
@@ -550,10 +552,29 @@ def _flames(report: Report) -> tuple[str, ...]:
     return tuple(panel.prefix for panel in (*report.perf, *report.ml) if isinstance(panel, Flame))
 
 
-def read_report(file: Path | None) -> Report:
-    """Read a local chart declaration, or use the default panels."""
+class ReportDeclaration(Record):
+    report: Report
+    sources: SourceVersions
+
+    def encoded(self) -> str:
+        # An omitted ml selects the available defaults. Nested panels need their kind on disk.
+        return self.model_dump_json(
+            include={"sources": True, "report": self.report.model_fields_set}
+        )
+
+
+def read_report(file: Path, accepted: ReportDeclaration | None) -> ReportDeclaration:
+    """Reuse panels until one of their sources changes. Only report readers take the author lock."""
+    if accepted and report_sources(file, known=accepted.sources) == accepted.sources:
+        return accepted
     with _author_imports:
-        return _report(_run_file(file).get("report") if file else None, file)[0]
+        before = report_sources(file, known=accepted.sources if accepted else None)
+        report = _report(_run_file(file).get("report"), file)[0]
+        # Preserve the earlier version of a source edited while report() ran.
+        # Newly imported neighbours first become visible after the read.
+        known = {source[0]: source for source in before}
+        sources = tuple(known.get(source[0], source) for source in report_sources(file))
+        return ReportDeclaration(report=report, sources=sources)
 
 
 def run_chart_data(storage: Storage, data: RunData, report: Report) -> str:
@@ -703,12 +724,13 @@ def _repository(file: Path) -> Path:
     return folder
 
 
-def report_sources(file: Path | None) -> tuple[tuple[str, int, int], ...]:
+def report_sources(file: Path | None, *, known: SourceVersions | None = None) -> SourceVersions:
     """What a kept page's files are compared by; a deleted neighbour reads as absent."""
     if file is None:
         return ()
     found = []
-    for path in sorted({file.resolve(), *_neighbours(file).values()}):
+    neighbours = _neighbours(file).values() if known is None else (Path(p) for p, _, _ in known)
+    for path in sorted({file.resolve(), *neighbours}):
         try:
             stat = path.stat()
         except FileNotFoundError:
@@ -723,7 +745,7 @@ def _report(made: object, file: Path | None) -> tuple[Report, str | None, tuple[
         notes = (
             (f"{file.name} defines no report(), so this is the default report.",) if file else ()
         )
-        return Report(other_metrics=True), None, notes
+        return DEFAULT_REPORT, None, notes
     assert file is not None
     if not callable(made):
         raise EtudeError("experiment_report_is_not_a_function", 422) from ValueError(file)

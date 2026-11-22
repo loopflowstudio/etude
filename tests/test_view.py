@@ -7,7 +7,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime, timedelta, tzinfo
 from html import unescape
 from http.client import HTTPConnection
@@ -26,8 +26,8 @@ from etude.home import home
 from etude.launch.database import Database
 from etude.launch.logs import snapshot_stream
 from etude.launch.records import GPU
-from etude.launch.server import LauncherObservation
-from etude.page import Page, Pages
+from etude.launch.server import LauncherObservation, PythonClient
+from etude.page import Page, Pages, _run_file
 from etude.records import Clock, RunCounters, RunOutcome, RunRecord
 from etude.spec import RunRequest
 from etude.storage import DirectoryStorage, S3Storage
@@ -136,6 +136,7 @@ def test_concurrent_refreshes_join_one_generation(
     with Server(runs, file, ("127.0.0.1", 0)) as server, ThreadPoolExecutor(2) as pool:
         server.ingest()
         builds = file.with_suffix(".built")
+        _publish_declarations(server)
         before = builds.read_text()
         first = pool.submit(server.page, "/experiments/lab/report", refresh=True)
         try:
@@ -241,6 +242,110 @@ def _loss(html: str) -> list[float | None]:
     payload = html.split('<script type="application/json" id="data">')[1].split("</script>")[0]
     page = Page.model_validate_json(payload, extra="ignore")
     return page.training.series["steps"]["loss"][0].mean
+
+
+def _publish_declarations(server: Server) -> None:
+    # Tests drive the real ingestion loop one generation at a time.
+    _, pending = wait([reading.future for reading in server.index._reports.values()], timeout=5)
+    assert not pending
+    server.ingest()
+
+
+def _publish_ssh(server: Server) -> None:
+    if future := server.index._remote_read:
+        assert wait((future,), timeout=10).done
+        server.ingest()
+
+
+def test_report_edits_and_a_restart_leave_both_experiments_publishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    for name in ("lab", "other"):
+        address = name + "/base@0"
+        record = RunRecord(
+            id=address,
+            experiment=name,
+            clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
+        )
+        source.put(address + "/run.json", record.model_dump_json().encode())
+        _seal(source.root / address, 0, 7)
+    folder = tmp_path / "experiments"
+    authored = (
+        "from etude.report import Report, Series\n\n"
+        "def report() -> Report:\n"
+        "    return Report(ml=(Series(title='Lab loss', keys=('loss',)),))\n"
+    )
+    file = experiment_file(folder, "lab", authored)
+    measured = MeasuredStorage(source)
+    lab = "/runs/lab/base@0"
+    with Server(measured, folder, ("127.0.0.1", 0)) as server:
+        server.ingest()
+        _publish_declarations(server)
+        assert '"Lab loss"' in (server.page(lab) or "")
+
+    # Folder discovery must still recognise the previously accepted, now unparseable file.
+    file.write_text("def report(\n")
+    started, release, ended = threading.Event(), threading.Event(), threading.Event()
+
+    def held(path: Path) -> dict[str, object]:
+        # read_report holds the actual author-import lock while executing the file.
+        started.set()
+        try:
+            if not release.wait(5):
+                raise TimeoutError("report was not released")
+            return _run_file(path)
+        finally:
+            ended.set()
+
+    monkeypatch.setattr("etude.page._run_file", held)
+    with Server(measured, folder, ("127.0.0.1", 0)) as server:
+        server.ingest()
+        try:
+            assert started.wait(5)
+            for name in ("lab", "other"):
+                _seal(source.root / name / "base@0", 1, 3)
+            server.ingest()
+            reads = measured.listings, measured.requests, measured.bytes
+            for name in ("lab", "other"):
+                assert _loss(server.page(f"/runs/{name}/base@0") or "") == [7, 3]
+                assert "steps 2" in (server.page(f"/experiments/{name}/status") or "")
+            assert '"Lab loss"' in (server.page(lab) or "")
+            assert (measured.listings, measured.requests, measured.bytes) == reads
+            assert not ended.is_set()
+        finally:
+            release.set()
+        _publish_declarations(server)
+        assert "SyntaxError" in (server.page("/experiments/lab/status") or "")
+        page = server.page(lab) or ""
+        assert "SyntaxError" in page and '"Lab loss"' in page
+        assert "SyntaxError" not in (server.page("/experiments/other/status") or "")
+        assert "SyntaxError" not in (server.page("/runs/other/base@0") or "")
+        for name in ("lab", "other"):
+            _seal(source.root / name / "base@0", 2, 1)
+        server.ingest()
+        for name in ("lab", "other"):
+            assert _loss(server.page(f"/runs/{name}/base@0") or "") == [7, 3, 1]
+            assert "steps 3" in (server.page(f"/experiments/{name}/status") or "")
+        file.write_text(authored.replace("Lab loss", "Repaired loss"))
+        # One read may already have observed the broken edit.
+        _publish_declarations(server)
+        _publish_declarations(server)
+        page = server.page(lab) or ""
+        assert "SyntaxError" not in page and '"Repaired loss"' in page and _loss(page) == [7, 3, 1]
+
+
+def test_first_broken_report_shows_default_panels_and_a_sanitized_error(tmp_path: Path) -> None:
+    file = experiment_file(tmp_path, "lab", "raise ValueError('token=fixture-value')\n")
+    with open_run(
+        experiment="lab", run="base@0", directory=tmp_path / "runs", clocks=["steps"]
+    ) as run:
+        run.log({"loss": 7}, steps=1)
+    with Server(tmp_path / "runs", file, ("127.0.0.1", 0)) as server:
+        server.ingest()
+        _publish_declarations(server)
+        page = server.page("/runs/lab/base@0") or ""
+        assert _loss(page) == [7] and "token=[redacted]" in page and "fixture-value" not in page
 
 
 def test_ingestion_reads_only_the_new_block_and_publishes_its_last_point(tmp_path: Path) -> None:
@@ -624,15 +729,25 @@ def test_run_console_opens_on_the_last_500_lines_of_retained_output(tmp_path: Pa
     backend.store.close()
 
 
-def test_failed_launcher_read_preserves_idle_machines_while_files_advance(
+def test_failed_launcher_read_after_restart_preserves_queue_while_files_advance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     backend = bench(home())
     backend.scheduler.add_machine("studio", "studio")
+    (queued,) = backend.scheduler.queue(job(name="learn", experiment="lab"), rent="l4")
     backend.store.close()
     source = DirectoryStorage(tmp_path / "runs")
+    record = RunRecord(
+        id="local",
+        experiment="local",
+        clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
+    )
+    source.put("local/run.json", record.model_dump_json().encode())
+    _seal(source.root / "local", 0, 7)
     with Server(source, None, ("127.0.0.1", 0)) as server:
         server.ingest()
+        assert ">queued<" in (server.page("/runs/" + queued) or "")
+        assert _loss(server.page("/runs/local") or "") == [7]
         assert ">studio</th>" in (server.page("/machines") or "")
 
     def incompatible(path: Path) -> Database:
@@ -645,15 +760,104 @@ def test_failed_launcher_read_preserves_idle_machines_while_files_advance(
 
     monkeypatch.setattr("etude.view.datetime", Later)
     monkeypatch.setattr("etude.launch.server.open_home", incompatible)
-    source.put(
-        "local/run.json", RunRecord(id="local", experiment="local").model_dump_json().encode()
-    )
+    _seal(source.root / "local", 1, 3)
     with Server(source, None, ("127.0.0.1", 0)) as restarted:
         restarted.ingest()
         listing = restarted.page("/machines/status") or ""
         assert ">studio</th>" in listing and "launcher observed 2 min ago" in listing
         assert "etude database upgrade" in listing
-        assert 'href="/runs/local"' in (restarted.page("/") or "")
+        queued_page = restarted.page("/runs/" + queued) or ""
+        assert ">queued<" in queued_page and "launcher observed 2 min ago" in queued_page
+        assert _loss(restarted.page("/runs/local") or "") == [7, 3]
+        assert "steps 2" in (restarted.page("/experiments/local/status") or "")
+        # An endpoint with no launcher database returns a successful, empty observation.
+        monkeypatch.setattr(
+            "etude.launch.server.LauncherObservation.read",
+            lambda consoles, *, machines: LauncherObservation(),
+        )
+        restarted.ingest()
+        assert restarted.page("/runs/" + queued) is None
+        assert ">studio</th>" not in (restarted.page("/machines/status") or "")
+        assert "etude database upgrade" not in (restarted.page("/status") or "")
+
+
+def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = bench(home())
+    (queued,) = backend.scheduler.queue(job(name="learn", experiment="lab"), rent="l4")
+    held = LauncherObservation.read((queued,))
+    backend.store.close()
+    source = DirectoryStorage(tmp_path / "runs")
+    record = RunRecord(
+        id="local",
+        experiment="local",
+        clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
+    )
+    source.put("local/run.json", record.model_dump_json().encode())
+    _seal(source.root / "local", 0, 7)
+    measured = MeasuredStorage(source)
+    endpoint = home() / "server"
+    endpoint.write_text("first")
+    monkeypatch.delenv("ETUDE_SERVER_LOCAL", raising=False)
+    started, release, ended = threading.Event(), threading.Event(), threading.Event()
+    exchanges = 0
+    elapsed = 0
+    monkeypatch.setattr("etude.view.time", SimpleNamespace(monotonic=lambda: elapsed))
+
+    def exchange(client: PythonClient, consoles: tuple[str, ...]) -> LauncherObservation:
+        nonlocal exchanges
+        exchanges += 1
+        if client.address == "second":
+            if not elapsed:
+                raise LauncherError("second is offline")
+            return held.model_copy(update={"consoles": {}})
+        if exchanges == 1:
+            return held
+        started.set()
+        try:
+            if not release.wait(5):
+                raise TimeoutError("SSH was not released")
+            return held
+        finally:
+            ended.set()
+
+    monkeypatch.setattr(PythonClient, "observation", exchange)
+    with Server(measured, None, ("127.0.0.1", 0)) as server:
+        server.ingest()
+        _publish_ssh(server)
+        assert ">queued<" in (server.page("/runs/" + queued) or "")
+        assert 'id="retained-output"' in (server.page("/runs/" + queued) or "")
+    with Server(measured, None, ("127.0.0.1", 0)) as server:
+        server.ingest()
+        try:
+            assert started.wait(5)
+            _seal(source.root / "local", 1, 3)
+            server.ingest()
+            reads = measured.listings, measured.requests, measured.bytes
+            assert _loss(server.page("/runs/local") or "") == [7, 3]
+            assert "steps 2" in (server.page("/experiments/local/status") or "")
+            assert ">queued<" in (server.page("/runs/" + queued) or "")
+            assert (measured.listings, measured.requests, measured.bytes, exchanges) == (*reads, 2)
+            assert not ended.is_set()
+            endpoint.write_text("second")
+            # Even before its first file pass the new endpoint cannot serve the old console.
+            assert server.page("/runs/" + queued) is None
+            server.ingest()
+            assert queued not in (server.page("/status") or "")
+        finally:
+            release.set()
+        _publish_ssh(server)
+        assert "second is offline" in (server.page("/status") or "")
+        assert server.page("/runs/" + queued) is None
+        assert _loss(server.page("/runs/local") or "") == [7, 3]
+        assert exchanges == 3
+        elapsed += 30
+        server.ingest()
+        _publish_ssh(server)
+        page = server.page("/runs/" + queued) or ""
+        assert ">queued<" in page and "Waiting for retained console" in page
+        assert 'id="retained-output"' not in page and "second is offline" not in page
 
 
 def test_machines_without_a_launcher_or_with_a_selected_server(
@@ -793,6 +997,7 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
     monkeypatch.setattr("etude.launch.server._ssh", exchange)
     with Server(source, None, ("127.0.0.1", 0)) as server:
         server.ingest()
+        _publish_ssh(server)
         route = "/runs/" + identity
         queued = unescape(server.page(route) or "")
         assert ">queued<" in queued and '{"queued":"config"}' in queued
@@ -822,6 +1027,7 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
             assert exchanges == 1
             elapsed += 30
             server.ingest()
+            _publish_ssh(server)
             reads = source.requests, source.listings
             page = server.page(route) or ""
             assert f"log of {attempt.id}" in page and "output not received" in page
@@ -844,6 +1050,7 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
         backend.run(700)
         elapsed += 30
         server.ingest()
+        _publish_ssh(server)
         finished = server.page(route) or ""
         assert ">finished<" in finished and "snapshot complete" in finished
         assert "}, 5000);" not in finished and exchanges == 3

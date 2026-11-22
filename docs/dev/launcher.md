@@ -206,9 +206,16 @@ standing, heartbeat and requested console tails in one SSH exchange at most
 once every 30 seconds. Each tail carries the last 500 lines of the CLI transcript,
 the latest collection time and any gaps across the retained streams.
 
-The view joins that observation with the run files in one SQLite transaction
-under `ETUDE_HOME/views`. Status and graph requests can read the last committed
-generation throughout ingestion.
+The view retains the selected launcher's dated `LauncherObservation` under
+`ETUDE_HOME/views`, with console tails stored separately. Each file pass
+joins the latest available standing to fresh runs through `state_of`.
+An outstanding SSH exchange or a failed launcher read leaves its observation
+available. A successful empty answer releases previously held runs.
+
+Local report declarations are evaluated separately from the file writer.
+The index keeps each experiment's last accepted panels and source versions.
+One SQLite transaction publishes curves, runs and placement together.
+Status and graph requests read the last committed generation throughout ingestion.
 Opening a run requests its retained console for the next poll. Refreshing the
 experiment report builds it separately from the indexed status table.
 

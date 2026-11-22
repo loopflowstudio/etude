@@ -1,7 +1,7 @@
 """Live run and experiment pages. One ingestion loop publishes the chart index for all readers.
 
-Run files and launcher standing are joined by state_of. Only derived chart data
-and display facts live in the index. Publication is one SQLite transaction
+Report declarations and selected-server observations arrive independently. The index
+keeps their last accepted values. state_of joins launcher standing to fresh files. Publication is one SQLite transaction
 in WAL mode. Readers keep the last committed generation through a slow or
 interrupted ingestion. Reports build on demand in separate request threads.
 """
@@ -15,7 +15,7 @@ import threading
 import time
 from collections import Counter, defaultdict
 from collections.abc import Iterator
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -42,7 +42,15 @@ from etude.launch.logs import ConsoleTail
 from etude.launch.records import MachineStatus, Standing, Status
 from etude.launch.server import LauncherObservation, PythonClient, selected
 from etude.launch.source import line
-from etude.page import Pages, read_report, render, render_run, report_sources, run_chart_data
+from etude.page import (
+    DEFAULT_REPORT,
+    Pages,
+    ReportDeclaration,
+    read_report,
+    render,
+    render_run,
+    run_chart_data,
+)
 from etude.report import Report
 from etude.run import LocatedRun, as_storage, located_runs, owning_folder
 from etude.spec import number
@@ -75,7 +83,10 @@ CREATE TABLE IF NOT EXISTS consoles (
     run TEXT PRIMARY KEY, body TEXT NOT NULL, collected TEXT, gaps INTEGER NOT NULL, final_attempt INTEGER
 );
 CREATE TABLE IF NOT EXISTS observation (
-    id INTEGER PRIMARY KEY, at TEXT NOT NULL, launcher_at TEXT, last_loop TEXT, server TEXT, machines TEXT
+    id INTEGER PRIMARY KEY, at TEXT NOT NULL, launcher_at TEXT, last_loop TEXT, server TEXT, machines TEXT, standing TEXT
+);
+CREATE TABLE IF NOT EXISTS declarations (
+    experiment TEXT PRIMARY KEY, file TEXT NOT NULL, accepted TEXT, error TEXT
 );
 """
 
@@ -84,6 +95,27 @@ CREATE TABLE IF NOT EXISTS observation (
 class _RunFiles:
     versions: str
     data: RunData
+
+
+@dataclass(frozen=True)
+class _PendingReport:
+    previous: str | None
+    future: Future[ReportDeclaration]
+
+
+@dataclass(frozen=True)
+class _LauncherRead:
+    at: datetime
+    observation: LauncherObservation
+
+    @classmethod
+    def read(cls, remote: str | None, consoles: tuple[str, ...]) -> _LauncherRead:
+        observation = (
+            PythonClient(remote).observation(consoles)
+            if remote
+            else LauncherObservation.read(consoles, machines=True)
+        )
+        return cls(datetime.now(UTC), observation)
 
 
 class ChartIndex:
@@ -107,12 +139,13 @@ class ChartIndex:
             db.executescript(_SCHEMA)
         self._cache = Cache()
         self._files: dict[str, dict[str, _RunFiles]] = {}
-        self._reports: dict[Path | None, tuple[tuple[tuple[str, int, int], ...], Report]] = {}
-        self._launcher = LauncherObservation()
+        self._declarations = ThreadPoolExecutor(1, thread_name_prefix="view-report")
+        self._reports: dict[Path, _PendingReport] = {}
+        self._ssh = ThreadPoolExecutor(1, thread_name_prefix="view-launcher")
+        self._remote_read: Future[_LauncherRead] | None = None
         self._wanted: set[str] = set()
         self._console_lock = threading.Lock()
-        self._server: str | None = None
-        self._launcher_at: datetime | None = None
+        self._server = selected()
         self._next_standing = 0.0
         self._launcher_error: str | None = None
         self.error: str | None = None
@@ -123,25 +156,37 @@ class ChartIndex:
             db.row_factory = sqlite3.Row
             yield db
 
-    def _poll_launcher(self) -> None:
-        if time.monotonic() < self._next_standing:
-            return
-        remote = selected()
-        try:
-            with self._console_lock:
-                wanted, self._wanted = self._wanted, set()
-            consoles = tuple(sorted(wanted))
-            self._launcher = (
-                PythonClient(remote).observation(consoles)
-                if remote
-                else LauncherObservation.read(consoles, machines=True)
-            )
-            self._server = remote
-            self._launcher_at = datetime.now(UTC)
+    def close(self) -> None:
+        self._declarations.shutdown(cancel_futures=True)
+        self._ssh.shutdown(cancel_futures=True)
+
+    def declared_files(self) -> dict[str, Path]:
+        with self._connect() as db:
+            return {
+                row[0]: Path(row[1])
+                for row in db.execute("SELECT experiment,file FROM declarations")
+            }
+
+    def _poll_launcher(self, remote: str | None) -> _LauncherRead | None:
+        if remote != self._server:
+            if self._remote_read:
+                self._remote_read.cancel()
+            self._remote_read = None
+            self._next_standing = 0
             self._launcher_error = None
-        except Exception as error:
-            self._launcher_error = explain(error)
-        self._next_standing = time.monotonic() + (_REMOTE_STANDING if remote else 0)
+            with self._console_lock:
+                self._wanted.clear()
+                self._server = remote
+        if self._remote_read is None:
+            if remote and time.monotonic() < self._next_standing:
+                return None
+            with self._console_lock:
+                consoles = tuple(sorted(self._wanted))
+                self._wanted.clear()
+            if remote is None:
+                return _LauncherRead.read(None, consoles)
+            self._remote_read = self._ssh.submit(_LauncherRead.read, remote, consoles)
+        return self._remote_read.result() if self._remote_read.done() else None
 
     def _read_run(self, storage: ListedStorage, members: list[str], run: LocatedRun) -> _RunFiles:
         # Compare listed versions, including removals and replacement at one
@@ -176,23 +221,32 @@ class ChartIndex:
                     return
                 raise
             observed = datetime.now(UTC)
-            self._poll_launcher()
-            if (
-                self._launcher_error
-                and self._launcher_at is None
-                and db.execute(
-                    "SELECT 1 FROM runs WHERE launched_as IS NOT NULL LIMIT 1"
-                ).fetchone()
-            ):
-                # On restart, an unavailable launcher has not released its indexed runs.
-                self.error = self._launcher_error
-                return
+            remote = selected()
+            failed = False
+            try:
+                answer = self._poll_launcher(remote)
+            except Exception as error:
+                answer = None
+                failed = True
+                self._launcher_error = explain(error)
             current = self._read_files()
-            self._index_runs(db, current, files)
-            self._publish_observation(db, observed)
+            launcher = self._retain_launcher(db, remote, observed, answer)
+            self._index_runs(db, current, files, launcher)
+            machines = launcher.machines
+            db.execute(
+                "UPDATE observation SET machines=? WHERE id=1",
+                (_machines_table(db, machines) if machines is not None else None,),
+            )
+            db.execute(
+                "DELETE FROM consoles WHERE NOT EXISTS (SELECT 1 FROM runs WHERE launched_as=consoles.run)"
+            )
+        if answer:
+            self._launcher_error = None
+        if self._remote_read and (answer or failed):
+            self._remote_read = None
+            self._next_standing = time.monotonic() + _REMOTE_STANDING
         self.error = self._launcher_error
         self._files = current
-        self._launcher = self._launcher.model_copy(update={"consoles": {}})
 
     def _read_files(self) -> dict[str, dict[str, _RunFiles]]:
         objects = self.source.versions("")
@@ -211,23 +265,55 @@ class ChartIndex:
             files[run.file.experiment][run.name] = self._read_run(storage, keys, run)
         return files
 
-    def _report(self, file: Path | None) -> Report:
-        kept = self._reports.get(file)
-        if kept is None or kept[0] != report_sources(file):
-            report = read_report(file)
-            # Loading the declaration can import new neighbours.
-            kept = self._reports[file] = (report_sources(file), report)
-        return kept[1]
+    def _report(self, db: sqlite3.Connection, experiment: str, file: Path | None) -> Report:
+        if file is None:
+            return DEFAULT_REPORT
+        row = db.execute(
+            "SELECT accepted,error FROM declarations WHERE experiment=?", (experiment,)
+        ).fetchone()
+        encoded = row["accepted"] if row else None
+        accepted = ReportDeclaration.model_validate_json(encoded) if encoded else None
+        pending = self._reports.get(file)
+        if pending is None or pending.future.done():
+            error = row["error"] if row else None
+            # Another view may have accepted newer panels during this read.
+            if pending and pending.previous == encoded:
+                try:
+                    accepted = pending.future.result()
+                    encoded = accepted.encoded()
+                    error = None
+                except (Exception, SystemExit) as failure:
+                    error = f"Report declaration: {explain(failure)}"
+            if row is None or (encoded, error) != (row["accepted"], row["error"]):
+                db.execute(
+                    """INSERT OR REPLACE INTO declarations(experiment,file,accepted,error)
+                       VALUES(?,?,?,?)""",
+                    (experiment, str(file), encoded, error),
+                )
+            self._reports[file] = _PendingReport(
+                encoded, self._declarations.submit(read_report, file, accepted)
+            )
+        return accepted.report if accepted else DEFAULT_REPORT
 
     def _index_runs(
-        self, db: sqlite3.Connection, files: dict[str, dict[str, _RunFiles]], paths: dict[str, Path]
+        self,
+        db: sqlite3.Connection,
+        files: dict[str, dict[str, _RunFiles]],
+        paths: dict[str, Path],
+        launcher: LauncherObservation,
     ) -> None:
+        for row in db.execute("SELECT experiment,file FROM declarations").fetchall():
+            path = Path(row["file"])
+            if paths.get(row["experiment"]) != path:
+                db.execute("DELETE FROM declarations WHERE experiment=?", (row["experiment"],))
+                if pending := self._reports.pop(path, None):
+                    pending.future.cancel()
         removed = {row[0] for row in db.execute("SELECT address FROM runs")}
         charts = {
             row["address"]: row for row in db.execute("SELECT address,inputs,reached FROM charts")
         }
         standing: dict[str, dict[str, Standing]] = defaultdict(dict)
-        for held in self._launcher.runs:
+        for held in launcher.runs:
             standing[held.record.experiment][held.record.id] = held
         for experiment in sorted(files.keys() | standing.keys()):
             stored = files.get(experiment, {})
@@ -236,7 +322,7 @@ class ChartIndex:
                 [f.data for f in stored.values()], experiment, retained=tuple(retained.values())
             )
             report = (
-                self._report(paths.get(experiment))
+                self._report(db, experiment, paths.get(experiment))
                 if any(r.name in stored for r in state.runs)
                 else None
             )
@@ -267,7 +353,7 @@ class ChartIndex:
         report: Report,
         previous: sqlite3.Row | None,
     ) -> dict[str, float]:
-        inputs = files.versions + report.model_dump_json(exclude_unset=True)
+        inputs = files.versions + report.model_dump_json(include=report.model_fields_set)
         if previous is not None and previous["inputs"] == inputs:
             return _CLOCKS.validate_json(previous["reached"])
         # Charting materializes block arrays. Keep only metadata on the cached RunData.
@@ -280,31 +366,40 @@ class ChartIndex:
         )
         return reached
 
-    def _publish_observation(self, db: sqlite3.Connection, observed: datetime) -> None:
-        if self._launcher_at is None:
-            # On a failed first poll, advance only the file observation.
-            db.execute(
-                """INSERT INTO observation(id,at) VALUES(1,?)
-                   ON CONFLICT(id) DO UPDATE SET at=excluded.at""",
-                (observed.isoformat(),),
-            )
-            return
-        # An address can belong to another run after switching servers.
+    def _retain_launcher(
+        self,
+        db: sqlite3.Connection,
+        remote: str | None,
+        observed: datetime,
+        answer: _LauncherRead | None,
+    ) -> LauncherObservation:
+        # Only a successful read replaces the standing for this endpoint, even when empty.
+        if db.execute("DELETE FROM observation WHERE server IS NOT ?", (remote,)).rowcount:
+            db.execute("DELETE FROM consoles")
         db.execute(
-            """DELETE FROM consoles WHERE EXISTS (SELECT 1 FROM observation WHERE server IS NOT ?)
-               OR NOT EXISTS (SELECT 1 FROM runs WHERE launched_as=consoles.run)""",
-            (self._server,),
+            """INSERT INTO observation(id,at,server) VALUES(1,?,?)
+               ON CONFLICT(id) DO UPDATE SET at=excluded.at""",
+            (observed.isoformat(), remote),
         )
-        machines = self._launcher.machines
+        if (
+            answer is None
+            or db.execute(
+                "SELECT 1 FROM observation WHERE id=1 AND launcher_at>=?", (answer.at.isoformat(),)
+            ).fetchone()
+        ):
+            standing = db.execute("SELECT standing FROM observation WHERE id=1").fetchone()[0]
+            return (
+                LauncherObservation.model_validate_json(standing)
+                if standing
+                else LauncherObservation()
+            )
+        launcher = answer.observation
         db.execute(
-            """INSERT OR REPLACE INTO observation(id,at,launcher_at,last_loop,server,machines)
-               VALUES (1,?,?,?,?,?)""",
+            "UPDATE observation SET standing=?,launcher_at=?,last_loop=? WHERE id=1",
             (
-                observed.isoformat(),
-                self._launcher_at.isoformat(),
-                self._launcher.last_loop.isoformat() if self._launcher.last_loop else None,
-                self._server,
-                _machines_table(db, machines) if machines is not None else None,
+                launcher.model_dump_json(exclude={"consoles"}, round_trip=True),
+                answer.at.isoformat(),
+                launcher.last_loop.isoformat() if launcher.last_loop else None,
             ),
         )
         db.executemany(
@@ -312,21 +407,25 @@ class ChartIndex:
                VALUES(:run,:body,:collected,:gaps,:final_attempt)""",
             (
                 tail.model_dump(mode="json") | {"run": run}
-                for run, tail in self._launcher.consoles.items()
+                for run, tail in launcher.consoles.items()
             ),
         )
+        return launcher
 
     def run(self, address: str) -> str | None:
         with self._connect() as db:
             row = db.execute(
                 """
-                SELECT runs.*, charts.payload, observation.at, observation.launcher_at, observation.last_loop,
+                SELECT runs.*, charts.payload, declarations.error AS report_error,
+                       declarations.accepted IS NULL AND declarations.file IS NOT NULL AS pending_report,
+                       observation.server, observation.at, observation.launcher_at, observation.last_loop,
                        consoles.body, consoles.collected, consoles.gaps, consoles.final_attempt AS console_attempt FROM runs
                 LEFT JOIN consoles ON consoles.run=runs.launched_as
-                LEFT JOIN charts USING(address) JOIN observation ON observation.id=1
+                LEFT JOIN declarations USING(experiment)
+                LEFT JOIN charts USING(address) JOIN observation ON observation.id=1 AND observation.server IS ?
                 WHERE runs.address=? OR runs.launched_as=?
                 """,
-                (address, address),
+                (selected(), address, address),
             ).fetchone()
         if row is None:
             return None
@@ -349,22 +448,28 @@ class ChartIndex:
             heading += f'<p>Scores are in the <a href="{page}#report">{experiment} report</a>.</p>'
         if state == "no end recorded":
             heading += f"<p>No new file for at least {_SILENT // timedelta(minutes=1)} minutes.</p>"
-        if self.error:
-            heading += f'<p role="status">{escape(self.error)}</p>'
+        error = "\n".join(filter(None, (self.error, row["report_error"])))
+        if error:
+            heading += f'<p role="status">{escape(error)}</p>'
         # Session shutdown can still retain final logs after the run itself ended.
         awaiting_console = status is not None and (
             not status.done or row["console_attempt"] != status.attempts
         )
         if awaiting_console:
             with self._console_lock:
-                self._wanted.add(row["launched_as"])
-        if _is_open(status, state) or awaiting_console or self.error:
+                if row["server"] == self._server:
+                    self._wanted.add(row["launched_as"])
+        if (
+            _is_open(status, state)
+            or awaiting_console
+            or error
+            or row["pending_report"]
+            or row["launcher_at"] is None
+        ):
             heading += _reload()
         if evaluation and status is None:
             return _document(address, heading)
-        below = _console(
-            row, now, unavailable=bool(self._launcher_error and self._launcher_at is None)
-        )
+        below = _console(row, now, unavailable=row["launcher_at"] is None)
         if evaluation:
             return _document(address, heading + below)
         below += row["details"]
@@ -384,8 +489,13 @@ class ChartIndex:
         with self._connect() as db:
             db.execute("BEGIN")
             observation = db.execute(
-                "SELECT at,last_loop,launcher_at FROM observation WHERE id=1"
+                """SELECT at,last_loop,launcher_at,
+                          (SELECT error FROM declarations WHERE experiment=?) AS report_error
+                   FROM observation WHERE id=1 AND server IS ?""",
+                (experiment, selected()),
             ).fetchone()
+            if observation is None:
+                return None, []
             rows = (
                 db.execute(query + " ORDER BY experiment,address")
                 if experiment is None
@@ -432,7 +542,15 @@ class ChartIndex:
             body += f'<p class="context">{escape(" · ".join(ages))}</p>'
         else:
             body = "<p>Waiting for the first observation.</p>"
-        return _live_status(body, active=bool(opened) or not rows, stale=stale, error=self.error)
+        return _live_status(
+            body,
+            active=bool(opened)
+            or not rows
+            or observation is None
+            or observation["launcher_at"] is None,
+            stale=stale,
+            error=self.error,
+        )
 
     def machines(self) -> str:
         if remote := selected():
@@ -462,7 +580,9 @@ class ChartIndex:
         with self._connect() as db:
             return (
                 db.execute(
-                    "SELECT 1 FROM runs WHERE experiment=? LIMIT 1", (experiment,)
+                    """SELECT 1 FROM runs JOIN observation ON observation.id=1
+                       WHERE experiment=? AND observation.server IS ? LIMIT 1""",
+                    (experiment, selected()),
                 ).fetchone()
                 is not None
             )
@@ -472,7 +592,7 @@ class ChartIndex:
         if not declared and not rows:
             return None
         now = datetime.now(UTC)
-        active = observation is None
+        active = observation is None or observation["launcher_at"] is None
         stale = False
         body = []
         for row in rows:
@@ -502,7 +622,9 @@ class ChartIndex:
             '<p class="lbl">No machine samples recorded.</p></section>',
             active=active,
             stale=stale,
-            error=self.error,
+            error="\n".join(
+                filter(None, (self.error, observation["report_error"] if observation else None))
+            ),
         )
 
 
@@ -769,10 +891,10 @@ class Server(ThreadingHTTPServer):
     def __init__(
         self, source: Storage | Path | str, path: Path | None, address: tuple[str, int]
     ) -> None:
-        self.path = path
-        self.pages = Pages(source)
+        self.path = path.absolute() if path else None
         self.index = ChartIndex(as_storage(source), path)
-        self.files: dict[str, Path] = {}
+        self.files = self.index.declared_files()
+        self.pages = Pages(source, known=self.files.values())
         self._find_files()
         self._building = threading.Lock()
         self._lock = threading.Lock()
@@ -791,6 +913,7 @@ class Server(ThreadingHTTPServer):
     def server_close(self) -> None:
         try:
             self._address.close()
+            self.index.close()
         finally:
             super().server_close()
 
