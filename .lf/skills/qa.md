@@ -95,8 +95,19 @@ uv run etude smoke experiment.py
 Require one finished training run (`experiment/coin@0`), eight played matches,
 no replay on the second eval, a report under `home/track/reports/`, and smoke
 success. Inspect the report in a browser; its charts render in JavaScript.
-For live refresh use `uv run etude report experiment.py --serve --port PORT`;
-stop the exact process you started before finishing.
+For the live view run `uv run etude view . --port PORT` in the lab (record its
+PID; stop that exact process before finishing). `train`, `launch` and `status RUN`
+print `view: …/runs/ADDRESS` only while it is up. A paced plain `train(config)`
+(sleep 0.2 s per update, 300 updates) gives time to watch a run page refresh in
+place; Playwright `page.wait_for_timeout` and rereading `body` shows the clock rise.
+To see "no end recorded" without waiting 10 minutes, SIGKILL the train's process
+group and `touch -t` its run folder's files into the past. The QA home sits inside
+the lab, so the view must not count `home/sessions/…/src` copies as experiments.
+When neither browser extension is connected, drive headless system Chrome:
+`uv run --python 3.12 --with playwright --no-project python driver.py` with
+`p.chromium.launch(channel="chrome")`; no browser download is needed. For older run
+files, `cp -cR ~/.etude/track` into a private folder and pass it as `--source` with a
+private `ETUDE_HOME`.
 
 For interruption, make a separate lab copy with an author-controlled pause
 (`time.sleep(0.1)` per update) and more updates. Drive `uv run etude train
