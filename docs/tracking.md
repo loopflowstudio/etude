@@ -166,9 +166,9 @@ remaining metrics in first-logged order. Checkpoints show the clock positions
 at which they were saved. For a launched run, the page also shows placement,
 hardware, cost, attempts and source revision when available. All four pages
 show the launcher’s clock until run files appear, then the sealed file position.
-`Last write` dates the run files and `indexed` dates the index pass. A recorded
-scheduler heartbeat appears as `last loop`. When the last successful launcher
-read trails the index pass by more than 5 seconds, `launcher observed` dates it.
+`Last write` dates the run files and `indexed` dates the last successful file pass.
+A recorded scheduler heartbeat appears as `last loop`. When the file and
+launcher observations differ by more than 5 seconds, `launcher observed` dates the launcher facts.
 
 An evaluation run links to its experiment report for scores. A launched
 evaluation also shows its retained console and match count when available.
@@ -186,7 +186,12 @@ launched run page also waits for its final console. The local machine inventory
 refreshes every 5 seconds while visible, even when idle.
 The view indexes run files in the background under `ETUDE_HOME/views`. Reading
 a run graph uses the last published index, including during a bucket scan.
-The files in your directory or bucket are the portable record.
+While storage is slow or unavailable, new queue entries, placement, retained console
+and local machine inventory still appear. Charts keep their last indexed position,
+including after a view restart. Before the first successful file pass, the view shows
+known launcher runs with **File observation unavailable**. When storage recovers,
+the clock and curves advance together. The files in your directory or bucket are
+the portable record.
 
 You can edit `report()` while runs are writing. Their clocks and curves keep
 advancing while the view reads the edit. If it fails, the affected experiment

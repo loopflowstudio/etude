@@ -8,6 +8,7 @@ import sys
 import threading
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, wait
+from contextlib import closing
 from datetime import UTC, datetime, timedelta, tzinfo
 from html import unescape
 from http.client import HTTPConnection
@@ -138,7 +139,7 @@ def test_concurrent_refreshes_join_one_generation(
     monkeypatch.setattr(Pages, "build", blocked_build)
     monkeypatch.setattr("etude.view.Future", Joined)
     with Server(runs, file, ("127.0.0.1", 0)) as server, ThreadPoolExecutor(2) as pool:
-        server.ingest()
+        _ingest(server)
         builds = file.with_suffix(".built")
         _publish_declarations(server)
         before = builds.read_text()
@@ -248,17 +249,36 @@ def _loss(html: str) -> list[float | None]:
     return page.training.series["steps"]["loss"][0].mean
 
 
+def _ingest(view: Server) -> None:
+    # Drive one pass of each independent poll, without waiting for the next cadence.
+    view.refresh_launcher()
+    view.refresh_files()
+
+
+def _get(view: Server, path: str) -> str:
+    # Serve one real request while the fixture controls ingestion independently.
+    with ThreadPoolExecutor(1) as listener:
+        handled = listener.submit(view.handle_request)
+        with closing(HTTPConnection("127.0.0.1", view.server_port, timeout=5)) as client:
+            client.request("GET", path)
+            reply = client.getresponse()
+            assert reply.status == 200
+            page = reply.read().decode()
+        handled.result(5)
+        return page
+
+
 def _publish_declarations(server: Server) -> None:
     # Tests drive the real ingestion loop one generation at a time.
     _, pending = wait([reading.future for reading in server.index._reports.values()], timeout=5)
     assert not pending
-    server.ingest()
+    _ingest(server)
 
 
 def _publish_ssh(server: Server) -> None:
     if future := server.index._remote_read:
         assert wait((future,), timeout=10).done
-        server.ingest()
+        _ingest(server)
 
 
 def test_report_edits_and_a_restart_leave_both_experiments_publishing(
@@ -284,7 +304,7 @@ def test_report_edits_and_a_restart_leave_both_experiments_publishing(
     measured = MeasuredStorage(source)
     lab = "/runs/lab/base@0"
     with Server(measured, folder, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         _publish_declarations(server)
         assert '"Lab loss"' in (server.page(lab) or "")
 
@@ -304,12 +324,12 @@ def test_report_edits_and_a_restart_leave_both_experiments_publishing(
 
     monkeypatch.setattr("etude.page._run_file", held)
     with Server(measured, folder, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         try:
             assert started.wait(5)
             for name in ("lab", "other"):
                 _seal(source.root / name / "base@0", 1, 3)
-            server.ingest()
+            _ingest(server)
             reads = measured.listings, measured.requests, measured.bytes
             for name in ("lab", "other"):
                 assert _loss(server.page(f"/runs/{name}/base@0") or "") == [7, 3]
@@ -327,7 +347,7 @@ def test_report_edits_and_a_restart_leave_both_experiments_publishing(
         assert "SyntaxError" not in (server.page("/runs/other/base@0") or "")
         for name in ("lab", "other"):
             _seal(source.root / name / "base@0", 2, 1)
-        server.ingest()
+        _ingest(server)
         for name in ("lab", "other"):
             assert _loss(server.page(f"/runs/{name}/base@0") or "") == [7, 3, 1]
             assert "steps 3" in (server.page(f"/experiments/{name}/status") or "")
@@ -346,7 +366,7 @@ def test_first_broken_report_shows_default_panels_and_a_sanitized_error(tmp_path
     ) as run:
         run.log({"loss": 7}, steps=1)
     with Server(tmp_path / "runs", file, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         _publish_declarations(server)
         page = server.page("/runs/lab/base@0") or ""
         assert _loss(page) == [7] and "token=[redacted]" in page and "fixture-value" not in page
@@ -364,14 +384,14 @@ def test_ingestion_reads_only_the_new_block_and_publishes_its_last_point(tmp_pat
     _seal(root, 0, 7.0)
     measured = MeasuredStorage(source)
     with Server(measured, None, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         first = server.page("/runs/lab/base@0") or ""
         assert ">running<" in first and "last write" in first and _loss(first) == [7.0]
         assert "Console was not recorded." in first
         before = measured.requests, measured.listings
         measured.got.clear()
         added = _seal(root, 1, 3.0)
-        server.ingest()
+        _ingest(server)
         assert measured.got == ["lab/base@0/" + added]
         assert (measured.requests, measured.listings) == (before[0] + 1, before[1] + 1)
         assert _loss(server.page("/runs/lab/base@0") or "") == [7.0, 3.0]
@@ -384,14 +404,14 @@ def test_graph_requests_reuse_the_published_generation_after_interruption(tmp_pa
         run.log({"loss": 1}, steps=1)
     measured = MeasuredStorage(storage)
     with Server(measured, None, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         assert _loss(server.page("/runs/lab/base@0") or "") == [1]
     # An unparseable replacement interrupts a cold writer before publication.
     outcome = root / "outcome.json"
     saved = outcome.read_bytes()
     outcome.write_text("{")
     with Server(measured, None, ("127.0.0.1", 0)) as restarted:
-        restarted.ingest()
+        _ingest(restarted)
         assert restarted.index.error
         reads = measured.listings, measured.requests, measured.bytes
         page = restarted.page("/runs/lab/base@0") or ""
@@ -405,7 +425,7 @@ def test_graph_requests_reuse_the_published_generation_after_interruption(tmp_pa
         assert restarted.index.error in unescape(overview)
         assert (measured.listings, measured.requests, measured.bytes) == reads
         outcome.write_bytes(saved)
-        restarted.ingest()
+        _ingest(restarted)
         assert restarted.index.error is None
 
 
@@ -429,7 +449,7 @@ def test_an_interrupted_writer_never_exposes_half_a_generation(
 
     measured = MeasuredStorage(source)
     with Server(measured, None, ("127.0.0.1", 0)) as writer:
-        writer.ingest()
+        _ingest(writer)
         _seal(source.root / "lab/a", 1, 4)
         tail = "lab/b/" + _seal(source.root / "lab/b", 1, 3)
         get = source.get
@@ -439,20 +459,20 @@ def test_an_interrupted_writer_never_exposes_half_a_generation(
             def interrupted(key: str) -> bytes:
                 if key != tail:
                     return get(key)
-                # Chart A has been updated inside the writer's transaction.
+                # Another view reads the published pair while the next pair is incomplete.
                 with Server(measured, None, ("127.0.0.1", 0)) as reader:
-                    reader.ingest()
+                    _ingest(reader)
                     reader_points.extend(_loss(reader.page("/runs/lab/a") or ""))
                 raise OSError("interrupted reading the second chart")
 
             patch.setattr(source, "get", interrupted)
             before = measured.listings
-            writer.ingest()
+            _ingest(writer)
         assert measured.listings == before + 1
         assert reader_points == [5]
         assert writer.index.error and "interrupted reading the second chart" in writer.index.error
         assert _loss(writer.page("/runs/lab/a") or "") == [5]
-        writer.ingest()
+        _ingest(writer)
         assert _loss(writer.page("/runs/lab/a") or "") == [5, 4]
         assert _loss(writer.page("/runs/lab/b") or "") == [5, 3]
 
@@ -466,10 +486,10 @@ def test_view_links_follow_only_the_live_owner(
     assert capsys.readouterr().out == ""
     with Server(tmp_path, None, ("127.0.0.1", 0)) as first:
         with Server(tmp_path, None, ("127.0.0.1", 0)) as second:
-            first.ingest()
+            _ingest(first)
             print_view("lab/base@0")
             assert capsys.readouterr().out.strip() == f"view: {second.origin}/runs/lab/base@0"
-        first.ingest()
+        _ingest(first)
         print_view("lab/base@0")
         assert capsys.readouterr().out.strip() == f"view: {first.origin}/runs/lab/base@0"
     assert not address.exists()
@@ -488,15 +508,15 @@ def test_bucket_listing_validates_held_objects_without_another_get(tmp_path: Pat
             if not key.endswith("outcome.json"):
                 bucket.put(key, local.get(key))
         with Server(bucket, None, ("127.0.0.1", 0)) as server:
-            server.ingest()
+            _ingest(server)
             assert ">running<" in (server.page("/runs/lab/base@0") or "")
             reads = client.requests
             bucket.put("lab/base@0/outcome.json", local.get("lab/base@0/outcome.json"))
-            server.ingest()
+            _ingest(server)
             assert client.requests == reads + 1
             html = server.page("/runs/lab/base@0") or ""
             assert ">finished<" in html and _loss(html) == [2.0]
-            server.ingest()
+            _ingest(server)
             assert client.requests == reads + 1
 
 
@@ -514,9 +534,9 @@ def test_two_files_with_one_name_leave_runs_refreshing(tmp_path: Path) -> None:
     source.put("lab/base@0/run.json", record.model_dump_json().encode())
     _seal(root, 0, 7.0)
     with Server(source, folder, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         _seal(root, 1, 3.0)
-        server.ingest()
+        _ingest(server)
         assert _loss(server.page("/runs/lab/base@0") or "") == [7.0, 3.0]
         assert "experiment_named_twice" in (server.page("/status") or "")
 
@@ -526,7 +546,7 @@ def test_indexed_experiment_opens_its_default_report_separately(tmp_path: Path) 
         run.log({"loss": 8}, steps=1)
     source = MeasuredStorage(DirectoryStorage(tmp_path))
     with Server(source, None, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         before = (source.requests, source.listings)
         html = server.page("/experiments/lab") or ""
         assert 'src="/experiments/lab/report"' in html and 'href="/runs/lab/base@0"' in html
@@ -580,7 +600,7 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
         def row(html: str, address: str) -> str:
             return next(r for r in html.split("</tr>") if f'href="/runs/{address}"' in r)
 
-        server.ingest()
+        _ingest(server)
         html = status("/experiments/lab")
         assert ">running<" in row(html, running) and machine in row(html, running)
         assert ">learn<" in row(html, queued) and ">queued<" in row(html, queued)
@@ -604,13 +624,13 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
         assert all(f'href="/runs/{address}"' in opened for address in (running, queued, local))
         assert machine in opened and "steps 1" in opened and "last loop 2 h ago" in overview
         _seal(source.root / local, 1, 3)
-        server.ingest()
+        _ingest(server)
         updated = status("/experiments/lab/status")
         assert ">steps 2<" in row(updated, local) and ">running<" in row(updated, local)
         assert 'data-refresh="5000"' in updated and "<iframe" not in updated
         assert "steps 2" in status("/status")
         source.put(local + "/outcome.json", outcome)
-        server.ingest()
+        _ingest(server)
         assert ">finished<" in row(status("/experiments/lab/status"), local)
         # A saved terminal outcome can lead the launcher while it releases the attempt.
         source.put(
@@ -620,14 +640,14 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
             .encode(),
         )
         source.put(running + "/outcome.json", outcome)
-        server.ingest()
+        _ingest(server)
         ending = row(status("/experiments/lab/status"), running)
         assert ">finished<" in ending and ">running<" not in ending and machine in ending
         # The local outcome alone cannot close an experiment with outstanding launcher work.
         assert "3 finished" in status("/status").split("<h2>Completed</h2>")[0]
         backend.scheduler.cancel(queued)
         backend.run(600)
-        server.ingest()
+        _ingest(server)
         settled = status("/status")
         opened, completed = settled.split("<h2>Completed</h2>")
         assert "No open experiments." in opened and 'href="/experiments/lab"' in completed
@@ -671,7 +691,7 @@ def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: 
     _seal(source.root / first, 0, 8)
     measured = MeasuredStorage(source)
     with Server(measured, None, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         reads = measured.listings, measured.requests, measured.bytes
         assert 'href="/machines"' in (server.page("/") or "")
         html = server.page("/machines") or ""
@@ -693,13 +713,13 @@ def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: 
         assert (measured.listings, measured.requests, measured.bytes) == reads
 
         _seal(source.root / first, 1, 4)
-        server.ingest()
+        _ingest(server)
         reads = measured.listings, measured.requests, measured.bytes
         assert "steps 2 / 40" in (server.page("/machines/status") or "")
         assert (measured.listings, measured.requests, measured.bytes) == reads
         backend.scheduler.cancel(queued)
         backend.run(600)
-        server.ingest()
+        _ingest(server)
         settled = server.page("/machines/status") or ""
         assert machine not in settled and first not in settled and "Idle" in settled
     backend.store.close()
@@ -719,9 +739,9 @@ def test_run_console_opens_on_the_last_500_lines_of_retained_output(tmp_path: Pa
     source = DirectoryStorage(tmp_path / "runs")
     source.put(f"{run}/run.json", RunRecord(id=run, experiment="lab").model_dump_json().encode())
     with Server(source, None, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         assert "Waiting for retained console" in (server.page("/runs/" + run) or "")
-        server.ingest()
+        _ingest(server)
         page = server.page("/runs/" + run) or ""
         console = page.split('aria-label="Retained console">', 1)[1].split("</pre>", 1)[0]
         lines = unescape(console).splitlines()
@@ -732,6 +752,161 @@ def test_run_console_opens_on_the_last_500_lines_of_retained_output(tmp_path: Pa
         assert "line <1>\n" in backend.scheduler.logs(run=run).streams[-1].text
         for section in ("console", "config", "checkpoints"):
             assert f'href="#{section}"' in page and f'id="{section}"' in page
+    backend.store.close()
+
+
+@pytest.mark.parametrize("warm", [True, False], ids=["reopened", "first-start"])
+def test_failed_listing_shows_fresh_queue_and_machines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm: bool
+) -> None:
+    backend = bench(home())
+    source = DirectoryStorage(tmp_path / "runs")
+    source.put(
+        "lab/compact/run.json",
+        RunRecord(
+            id="lab/compact",
+            experiment="lab",
+            job_name="base",
+            seed=0,
+            clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
+        )
+        .model_dump_json()
+        .encode(),
+    )
+    _seal(source.root / "lab/compact", 0, 7)
+    source.put(
+        "lab/compact/outcome.json",
+        RunOutcome(state="finished", counters=RunCounters()).model_dump_json().encode(),
+    )
+    measured = MeasuredStorage(source)
+    if warm:
+        with Server(measured, None, ("127.0.0.1", 0)) as first:
+            _ingest(first)
+            assert _loss(first.page("/runs/lab/compact") or "") == [7]
+
+    class Later(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return super().now(tz) + timedelta(minutes=2)
+
+    def unavailable(prefix: str) -> dict[str, str]:
+        raise OSError("fixture listing unavailable")
+
+    monkeypatch.setattr("etude.view.datetime", Later)
+    (alias,) = backend.scheduler.queue(job(name="base", experiment="lab"), rent="l4")
+    (queued,) = backend.scheduler.queue(job(name="learn", experiment="lab"), rent="l4")
+    backend.scheduler.add_machine("studio", "studio")
+    backend.store.close()
+    with monkeypatch.context() as patch:
+        patch.setattr(source, "versions", unavailable)
+        with Server(measured, None, ("127.0.0.1", 0)) as server:
+            _ingest(server)
+            reads = measured.listings, measured.requests
+            assert ">queued<" in _get(server, "/runs/" + queued)
+            for path in ("/", "/experiments/lab/status"):
+                page = _get(server, path)
+                assert queued in page and "fixture listing unavailable" in page
+                assert ("indexed 2 min ago" if warm else "File observation unavailable") in page
+            assert ">studio</th>" in (server.page("/machines") or "")
+            graph = _get(server, "/runs/" + alias)
+            if warm:
+                assert ">finished<" in graph and "steps 1" in graph and _loss(graph) == [7]
+                status = server.page("/experiments/lab/status") or ""
+                assert status.count("/runs/lab/compact") == 1 and f"/runs/{alias}" not in status
+            else:
+                assert ">queued<" in graph and "File observation unavailable" in graph
+            assert (measured.listings, measured.requests) == reads
+    with Server(measured, None, ("127.0.0.1", 0)) as recovered:
+        overview = recovered.page("/") or ""
+        assert queued in overview and "fixture listing unavailable" in overview
+        _seal(source.root / "lab/compact", 1, 3)
+        _ingest(recovered)
+        graph = recovered.page("/runs/" + alias) or ""
+        assert ">finished<" in graph and _loss(graph) == [7, 3] and "steps 2" in graph
+        assert queued in (recovered.page("/") or "") and "fixture listing unavailable" not in graph
+        for key in source.keys(""):
+            source.delete(key)
+        _ingest(recovered)
+        assert recovered.page("/runs/lab/compact") is None
+        assert ">queued<" in (recovered.page("/runs/" + alias) or "")
+        assert ">studio</th>" in (recovered.page("/machines/status") or "")
+
+
+@pytest.mark.parametrize("held_at", ["listing", "new block"])
+def test_held_file_pass_publishes_launcher_and_joins_latest_placement_on_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, held_at: str
+) -> None:
+    backend = bench(home())
+    source = DirectoryStorage(tmp_path / "runs")
+    address = "lab/learn@0"
+    source.put(
+        address + "/run.json",
+        RunRecord(
+            id=address,
+            experiment="lab",
+            job_name="learn",
+            seed=0,
+            clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
+        )
+        .model_dump_json()
+        .encode(),
+    )
+    _seal(source.root / address, 0, 7)
+    measured = MeasuredStorage(source)
+    entered, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        entered.set()
+        if not release.wait(10):
+            raise TimeoutError("fixture file pass was not released")
+
+    with Server(measured, None, ("127.0.0.1", 0)) as server:
+        _ingest(server)
+        tail = address + "/" + _seal(source.root / address, 1, 3)
+        before = measured.listings
+        with Server(measured, None, ("127.0.0.1", 0)) as other, ThreadPoolExecutor(1) as pool:
+            if held_at == "listing":
+                versions = source.versions
+
+                def listing(prefix: str) -> dict[str, str]:
+                    hold()
+                    return versions(prefix)
+
+                monkeypatch.setattr(source, "versions", listing)
+            else:
+                get = source.get
+
+                def block(key: str) -> bytes:
+                    if key == tail:
+                        hold()
+                    return get(key)
+
+                monkeypatch.setattr(source, "get", block)
+            held = pool.submit(server.refresh_files)
+            try:
+                assert entered.wait(5)
+                (queued,) = backend.scheduler.queue(job(name="learn", experiment="lab"), rent="l4")
+                assert queued == address
+                backend.scheduler.tick()
+                _reporting(backend, log_bytes=100)
+                backend.run(1)
+                machine = backend.scheduler.read(address).machine
+                assert machine
+                reads = measured.requests
+                server.refresh_launcher()
+                graph = _get(server, "/runs/" + address)
+                assert machine in graph and "steps 1" in graph and _loss(graph) == [7]
+                _ingest(other)
+                assert address in _get(other, "/machines/status")
+                server.refresh_launcher()
+                assert "log of " in _get(server, "/runs/" + address)
+                assert measured.requests == reads
+                assert measured.listings == before + 1
+            finally:
+                release.set()
+            held.result(5)
+        graph = server.page("/runs/" + address) or ""
+        assert machine in graph and "steps 2" in graph and _loss(graph) == [7, 3]
     backend.store.close()
 
 
@@ -751,7 +926,7 @@ def test_failed_launcher_read_after_restart_preserves_queue_while_files_advance(
     source.put("local/run.json", record.model_dump_json().encode())
     _seal(source.root / "local", 0, 7)
     with Server(source, None, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         assert ">queued<" in (server.page("/runs/" + queued) or "")
         assert _loss(server.page("/runs/local") or "") == [7]
         assert ">studio</th>" in (server.page("/machines") or "")
@@ -768,7 +943,7 @@ def test_failed_launcher_read_after_restart_preserves_queue_while_files_advance(
     monkeypatch.setattr("etude.launch.server.open_home", incompatible)
     _seal(source.root / "local", 1, 3)
     with Server(source, None, ("127.0.0.1", 0)) as restarted:
-        restarted.ingest()
+        _ingest(restarted)
         listing = restarted.page("/machines/status") or ""
         assert ">studio</th>" in listing and "launcher observed 2 min ago" in listing
         assert "etude database upgrade" in listing
@@ -781,7 +956,7 @@ def test_failed_launcher_read_after_restart_preserves_queue_while_files_advance(
             "etude.launch.server.LauncherObservation.read",
             lambda consoles, *, machines: LauncherObservation(),
         )
-        restarted.ingest()
+        _ingest(restarted)
         assert restarted.page("/runs/" + queued) is None
         assert ">studio</th>" not in (restarted.page("/machines/status") or "")
         assert "etude database upgrade" not in (restarted.page("/status") or "")
@@ -834,16 +1009,16 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
 
     monkeypatch.setattr(PythonClient, "observation", exchange)
     with Server(measured, None, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         _publish_ssh(server)
         assert ">queued<" in (server.page("/runs/" + queued) or "")
         assert 'id="retained-output"' in (server.page("/runs/" + queued) or "")
     with Server(measured, None, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         try:
             assert started.wait(5)
             _seal(source.root / "local", 1, 3)
-            server.ingest()
+            _ingest(server)
             reads = measured.listings, measured.requests, measured.bytes
             assert _loss(server.page("/runs/local") or "") == [7, 3]
             assert "steps 2" in (server.page("/experiments/local/status") or "")
@@ -880,7 +1055,7 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
 
             with monkeypatch.context() as patch:
                 patch.setattr(source, "versions", unavailable)
-                server.ingest()
+                _ingest(server)
                 file_pages(server)
                 assert server.page(report_route) == cached_report
                 assert "fixture listing unavailable" in (server.page("/runs/local") or "")
@@ -896,13 +1071,13 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
         assert "second is offline" not in (server.page("/runs/local") or "")
         endpoint.write_text("second")
         elapsed += 30
-        server.ingest()
+        _ingest(server)
         _publish_ssh(server)
         page = server.page("/runs/" + queued) or ""
         assert ">running<" in page and "Waiting for retained console" in page
         assert 'id="retained-output"' not in page and "second is offline" not in page
         elapsed += 30
-        server.ingest()
+        _ingest(server)
         _publish_ssh(server)
         assert "log of " in (server.page("/runs/" + queued) or "")
 
@@ -913,7 +1088,7 @@ def test_machines_without_a_launcher_or_with_a_selected_server(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "file-only"))
     source = MeasuredStorage(DirectoryStorage(tmp_path / "runs"))
     with Server(source, None, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         reads = source.listings, source.requests, source.bytes
         absent = server.page("/machines/status") or ""
         assert "No launcher is used here." in absent and "data-refresh" not in absent
@@ -931,7 +1106,7 @@ def test_experiments_group_by_activity_and_date_the_latest_write(tmp_path: Path)
     measured = MeasuredStorage(source)
     with Server(measured, unused, ("127.0.0.1", 0)) as server:
         assert "Waiting for the first observation." in (server.page("/") or "")
-        server.ingest()
+        _ingest(server)
         empty = server.page("/status") or ""
         assert "Waiting for runs." in empty and 'data-refresh="5000"' in empty
         now = datetime.now(UTC).timestamp()
@@ -943,7 +1118,7 @@ def test_experiments_group_by_activity_and_date_the_latest_write(tmp_path: Path)
             key = name + "/run.json"
             source.put(key, RunRecord(id=name, experiment=experiment).model_dump_json().encode())
             os.utime(source.root / key, (now - age, now - age))
-        server.ingest()
+        _ingest(server)
         reads = measured.listings, measured.requests, measured.bytes
         page = server.page("/") or ""
         opened, completed = page.split("<h2>Completed</h2>")
@@ -958,7 +1133,7 @@ def test_experiments_group_by_activity_and_date_the_latest_write(tmp_path: Path)
             "lab/base/outcome.json",
             RunOutcome(state="finished", counters=RunCounters()).model_dump_json().encode(),
         )
-        server.ingest()
+        _ingest(server)
         reads = measured.listings, measured.requests, measured.bytes
         updated = server.page("/status") or ""
         opened, completed = updated.split("<h2>Completed</h2>")
@@ -973,7 +1148,7 @@ def test_silent_file_run_stops_refreshing_without_a_recorded_end(tmp_path: Path)
     source.put(key, RunRecord(id="lab/base@0", experiment="lab").model_dump_json().encode())
     os.utime(source.root / key, (100, 100))
     with Server(source, None, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         html = server.page("/runs/lab/base@0") or ""
         assert ">no end recorded<" in html
         assert "last write" in html and "at least 10 minutes" in html
@@ -1044,7 +1219,7 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
 
     monkeypatch.setattr("etude.launch.server._ssh", exchange)
     with Server(source, None, ("127.0.0.1", 0)) as server:
-        server.ingest()
+        _ingest(server)
         _publish_ssh(server)
         route = "/runs/" + identity
         queued = unescape(server.page(route) or "")
@@ -1074,14 +1249,14 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
         # A courier can deliver sealed metrics and checkpoints ahead of the outcome.
         outcome = tmp_path / "runs/lab/compact/outcome.json"
         pending = outcome.rename(tmp_path / "pending-outcome.json")
-        server.ingest()
+        _ingest(server)
         assert exchanges == 1
         assert ">queued<" in (server.page("/runs/lab/compact") or "")
         endpoint.write_text("other")
         assert ">running<" in (server.page("/runs/lab/compact") or "")
         endpoint.write_text("fixture")
         elapsed += 30
-        server.ingest()
+        _ingest(server)
         _publish_ssh(server)
         reads = source.requests, source.listings
         page = server.page(route) or ""
@@ -1127,7 +1302,7 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
         pending.rename(outcome)
         backend.run(700)
         elapsed += 30
-        server.ingest()
+        _ingest(server)
         _publish_ssh(server)
         finished = server.page(route) or ""
         assert ">finished<" in finished and "snapshot complete" in finished
