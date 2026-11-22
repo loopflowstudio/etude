@@ -6,9 +6,9 @@ import os
 import subprocess
 import sys
 import threading
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from contextlib import closing
+from contextlib import AbstractContextManager, closing
 from datetime import UTC, datetime, timedelta, tzinfo
 from html import unescape
 from http.client import HTTPConnection
@@ -272,6 +272,15 @@ def _ingest(view: Server) -> None:
     # Drive one pass of each independent poll, without waiting for the next cadence.
     view.refresh_launcher()
     view.refresh_files()
+
+
+def _advance_view_clock(patch: pytest.MonkeyPatch, *, minutes: int) -> None:
+    class Later(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return super().now(tz) + timedelta(minutes=minutes)
+
+    patch.setattr("etude.view.datetime", Later)
 
 
 def _get(view: Server, path: str) -> str:
@@ -748,6 +757,91 @@ def test_run_console_opens_on_the_last_500_lines_of_retained_output(tmp_path: Pa
     backend.store.close()
 
 
+def test_incomplete_directory_listing_keeps_file_facts_until_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    address = "lab/base@0"
+    _start_run(source, address, 7)
+    source.put("readable/note", b"another subtree")
+    measured = MeasuredStorage(source)
+    backend = bench(home())
+    scandir = os.scandir
+
+    def deny_lab(path: str | Path) -> AbstractContextManager[Iterator[os.DirEntry[str]]]:
+        if path in (source.root / "lab", str(source.root / "lab")):
+            raise PermissionError("cannot traverse lab")
+        return scandir(path)
+
+    def check_outage(server: Server) -> None:
+        reads = measured.listings, measured.requests, measured.bytes
+        graph = _get(server, "/runs/" + address)
+        assert ">running<" in graph and "steps 1" in graph and _loss(graph) == [7]
+        status = _get(server, "/experiments/lab/status")
+        assert address in status and ">running<" in status and "steps 1" in status
+        overview = _get(server, "/status")
+        opened, _ = overview.split("<h2>Completed</h2>")
+        assert address in opened and queued in opened
+        for page in (graph, status, overview):
+            assert "indexed 11 min ago" in page and "cannot traverse lab" in page
+        assert (measured.listings, measured.requests, measured.bytes) == reads
+
+    with Server(measured, None, ("127.0.0.1", 0)) as server:
+        _ingest(server)
+        report_path = "/experiments/lab/report"
+        original = _get(server, report_path)
+        monkeypatch.setattr(os, "scandir", deny_lab)
+        _advance_view_clock(monkeypatch, minutes=11)
+        server.refresh_files()
+        (queued,) = backend.scheduler.queue(job(name="learn", experiment="other"), rent="l4")
+        backend.store.close()
+        server.refresh_launcher()
+        check_outage(server)
+        with pytest.raises(PermissionError, match="cannot traverse lab"):
+            server.page(report_path, refresh=True)
+        assert _get(server, report_path) == original
+
+    with Server(measured, None, ("127.0.0.1", 0)) as reopened:
+        check_outage(reopened)
+        reopened.refresh_files()
+        check_outage(reopened)
+        monkeypatch.setattr(os, "scandir", scandir)
+        reopened.refresh_files()
+        graph = _get(reopened, "/runs/" + address)
+        assert ">no end recorded<" in graph and "cannot traverse lab" not in graph
+        assert "lab" in _get(reopened, "/status").split("<h2>Completed</h2>")[1]
+        block = _seal(source.root / address, 1, 3)
+        stamp = (datetime.now(UTC) + timedelta(minutes=11)).timestamp()
+        os.utime(source.root / address / block, (stamp, stamp))
+        reopened.refresh_files()
+        graph = _get(reopened, "/runs/" + address)
+        assert ">running<" in graph and "steps 2" in graph and _loss(graph) == [7, 3]
+        for key in source.keys(""):
+            source.delete(key)
+        reopened.refresh_files()
+        assert reopened.page("/runs/" + address) is None
+        assert queued in _get(reopened, "/status")
+
+
+def test_slow_listing_dates_silence_from_when_the_listing_began(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    _start_run(source, "lab/base@0", 7)
+    versions = source.versions
+
+    def delayed(prefix: str) -> dict[str, str]:
+        listed = versions(prefix)
+        _advance_view_clock(monkeypatch, minutes=11)
+        return listed
+
+    monkeypatch.setattr(source, "versions", delayed)
+    with Server(source, None, ("127.0.0.1", 0)) as server:
+        _ingest(server)
+        graph = _get(server, "/runs/lab/base@0")
+        assert "indexed 11 min ago" in graph and ">running<" in graph
+
+
 @pytest.mark.parametrize("warm", [True, False], ids=["reopened", "first-start"])
 def test_failed_listing_shows_fresh_queue_and_machines(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, warm: bool
@@ -760,30 +854,29 @@ def test_failed_listing_shows_fresh_queue_and_machines(
         RunOutcome(state="finished", counters=RunCounters()).model_dump_json().encode(),
     )
     measured = MeasuredStorage(source)
+    declaration = experiment_file(tmp_path, "unstarted", COUNTED)
     if warm:
-        with Server(measured, None, ("127.0.0.1", 0)) as first:
+        with Server(measured, declaration, ("127.0.0.1", 0)) as first:
             _ingest(first)
             assert _loss(first.page("/runs/lab/compact") or "") == [7]
-
-    class Later(datetime):
-        @classmethod
-        def now(cls, tz: tzinfo | None = None) -> Self:
-            return super().now(tz) + timedelta(minutes=2)
 
     def unavailable(prefix: str) -> dict[str, str]:
         raise OSError("fixture listing unavailable")
 
-    monkeypatch.setattr("etude.view.datetime", Later)
+    _advance_view_clock(monkeypatch, minutes=2)
     (alias,) = backend.scheduler.queue(job(name="base", experiment="lab"), rent="l4")
-    (queued,) = backend.scheduler.queue(job(name="learn", experiment="lab"), rent="l4")
+    (queued,) = backend.scheduler.queue(
+        job(name="learn", experiment="lab", config='{"rate":3}'), rent="l4"
+    )
     backend.scheduler.add_machine("studio", "studio")
     backend.store.close()
     with monkeypatch.context() as patch:
         patch.setattr(source, "versions", unavailable)
-        with Server(measured, None, ("127.0.0.1", 0)) as server:
+        with Server(measured, declaration, ("127.0.0.1", 0)) as server:
             _ingest(server)
             reads = measured.listings, measured.requests
-            assert ">queued<" in _get(server, "/runs/" + queued)
+            supplied = unescape(_get(server, "/runs/" + queued))
+            assert ">queued<" in supplied and '{"rate":3}' in supplied
             for path in ("/", "/experiments/lab/status"):
                 page = _get(server, path)
                 assert queued in page and "fixture listing unavailable" in page
@@ -796,10 +889,18 @@ def test_failed_listing_shows_fresh_queue_and_machines(
                 assert status.count("/runs/lab/compact") == 1 and f"/runs/{alias}" not in status
             else:
                 assert ">queued<" in graph and "File observation unavailable" in graph
-                assert "Curves appear once the view has read the run files" in graph
-                assert "No metric curves recorded" not in graph
+                for detail in ("Config details", "Curves", "Checkpoints"):
+                    assert f"{detail} appear once the view has read the run files." in graph
+                assert (
+                    "No metric curves recorded" not in graph
+                    and "No checkpoints recorded" not in graph
+                )
+                assert "No config recorded" not in graph
+                assert "Waiting for the first file observation." in _get(
+                    server, "/experiments/unstarted/status"
+                )
             assert (measured.listings, measured.requests) == reads
-    with Server(measured, None, ("127.0.0.1", 0)) as recovered:
+    with Server(measured, declaration, ("127.0.0.1", 0)) as recovered:
         overview = recovered.page("/") or ""
         assert queued in overview and "fixture listing unavailable" in overview
         _seal(source.root / "lab/compact", 1, 3)
@@ -811,6 +912,8 @@ def test_failed_listing_shows_fresh_queue_and_machines(
             source.delete(key)
         _ingest(recovered)
         assert recovered.page("/runs/lab/compact") is None
+        assert "No config recorded." in _get(recovered, "/runs/" + alias)
+        assert "No runs recorded." in _get(recovered, "/experiments/unstarted/status")
         assert ">queued<" in (recovered.page("/runs/" + alias) or "")
         assert ">studio</th>" in (recovered.page("/machines/status") or "")
 
@@ -899,12 +1002,7 @@ def test_failed_launcher_read_after_restart_preserves_queue_while_files_advance(
     def incompatible(path: Path) -> Database:
         raise LauncherError("fixture needs etude database upgrade")
 
-    class Later(datetime):
-        @classmethod
-        def now(cls, tz: tzinfo | None = None) -> Self:
-            return super().now(tz) + timedelta(minutes=2)
-
-    monkeypatch.setattr("etude.view.datetime", Later)
+    _advance_view_clock(monkeypatch, minutes=2)
     monkeypatch.setattr("etude.launch.server.open_home", incompatible)
     _seal(source.root / "local", 1, 3)
     with Server(source, None, ("127.0.0.1", 0)) as restarted:

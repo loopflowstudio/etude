@@ -299,11 +299,11 @@ class ChartIndex:
                 return
             try:
                 with self._connect() as db:
-                    self._prepare_files(db, files)
+                    observed_at = self._prepare_files(db, files)
                     # Release the preparation snapshot before reading the latest launcher.
                     db.commit()
                     db.execute("BEGIN IMMEDIATE")
-                    self._publish_files(db, discovery_error)
+                    self._publish_files(db, observed_at, discovery_error)
             except Exception as failure:
                 with self._connect() as db:
                     db.execute(
@@ -342,7 +342,7 @@ class ChartIndex:
             )
         return accepted.report if accepted else DEFAULT_REPORT
 
-    def _prepare_files(self, db: sqlite3.Connection, paths: dict[str, Path]) -> None:
+    def _prepare_files(self, db: sqlite3.Connection, paths: dict[str, Path]) -> datetime:
         # Every listed run supplies its address and write date. Only changed
         # inputs need metadata and a new chart. Stage one payload at a time on disk.
         db.execute("PRAGMA temp_store=FILE")
@@ -357,6 +357,8 @@ class ChartIndex:
                 if pending := self._reports.pop(path, None):
                     pending.future.cancel()
 
+        # A slow pass can only confirm silence as of the start of its listing.
+        observed_at = datetime.now(UTC)
         objects = self.source.versions("")
         storage = ListedStorage(self.source, objects, self._cache)
         keys = sorted(objects)
@@ -378,7 +380,11 @@ class ChartIndex:
             sealed = sorted(key for folder in run.folders for key in members[folder])
             _stage_run(db, storage, run, sealed, report, previous)
 
-    def _publish_files(self, db: sqlite3.Connection, discovery_error: str | None) -> None:
+        return observed_at
+
+    def _publish_files(
+        self, db: sqlite3.Connection, observed_at: datetime, discovery_error: str | None
+    ) -> None:
         removed = db.execute(
             """DELETE FROM files WHERE NOT EXISTS
                (SELECT 1 FROM next_files n WHERE n.address=files.address AND n.experiment=files.experiment)
@@ -413,7 +419,7 @@ class ChartIndex:
                       SELECT * FROM next_declarations EXCEPT SELECT * FROM declarations""")
         row = db.execute(
             "UPDATE observation SET at=?,file_error=? WHERE id=1 RETURNING standing",
-            (datetime.now(UTC).isoformat(), discovery_error),
+            (observed_at.isoformat(), discovery_error),
         ).fetchone()
         if changed:
             launcher = (
@@ -496,7 +502,7 @@ class ChartIndex:
         if row is None:
             return None
         now = datetime.now(UTC)
-        state = _display_state(row, now)
+        state = _display_state(row)
         status = _status(row)
         details = [f"last write {_age(row['last_write'], now)}"]
         details.extend(_observation_ages(row, now, launcher=bool(row["launched_as"])))
@@ -513,7 +519,10 @@ class ChartIndex:
         if evaluation:
             heading += f'<p>Scores are in the <a href="{page}#report">{experiment} report</a>.</p>'
         if state == "no end recorded":
-            heading += f"<p>No new file for at least {_SILENT // timedelta(minutes=1)} minutes.</p>"
+            heading += (
+                f"<p>The last file observation found at least {_SILENT // timedelta(minutes=1)} "
+                "minutes without a write.</p>"
+            )
         error = self.read_error(remote, row["file_error"], report=row["report_error"])
         if error:
             heading += f'<p role="status">{escape(error)}</p>'
@@ -552,7 +561,7 @@ class ChartIndex:
         # Both tables and their ages come from one generation. Leave large chart,
         # console and machine payloads out of these reads.
         query = _VISIBLE + (
-            "SELECT experiment,address,job,state,position,status,max_attempts,last_write FROM visible"
+            "SELECT experiment,address,job,state,position,status,max_attempts,last_write,at FROM visible"
         )
         params = {"experiment": experiment, "remote": remote}
         with self._connect() as db:
@@ -585,7 +594,7 @@ class ChartIndex:
             active = []
             latest: str | None = None
             for run in runs:
-                state = _display_state(run, now)
+                state = _display_state(run)
                 counts[state] += 1
                 # The index stores UTC write times in ISO order.
                 written = run["last_write"]
@@ -671,7 +680,7 @@ class ChartIndex:
         stale = False
         body = []
         for row in rows:
-            state = _display_state(row, now)
+            state = _display_state(row)
             stale |= state == "no end recorded"
             status = _status(row)
             active |= _is_open(status, state)
@@ -683,10 +692,10 @@ class ChartIndex:
             )
         if body:
             table = _table(("Job", "Run", "Status", "Last write"), body)
-        elif observation:
+        elif observation and observation["at"]:
             table = "<p>No runs recorded.</p>"
         else:
-            table = "<p>Waiting for the first observation.</p>"
+            table = "<p>Waiting for the first file observation.</p>"
         ages = ""
         if observation:
             launcher = any(row["status"] for row in rows)
@@ -880,7 +889,7 @@ def _live_status(body: str, *, active: bool, stale: bool = False, error: str | N
     if stale:
         body += (
             f"<p>Runs with no launcher record show “no end recorded” after "
-            f"{_SILENT // timedelta(minutes=1)} minutes without a write.</p>"
+            f"a file observation confirms {_SILENT // timedelta(minutes=1)} minutes without a write.</p>"
         )
     refresh = f' data-refresh="{_REFRESH * 1000}"' if active or error else ""
     return f'<div id="experiment-status"{refresh}>{body}</div>'
@@ -912,10 +921,10 @@ def _status_page(title: str, status: str, *, before: str = "", after: str = "") 
     )
 
 
-def _display_state(row: sqlite3.Row, now: datetime) -> str:
+def _display_state(row: sqlite3.Row) -> str:
     state: str = row["state"]
     if state == "running" and row["status"] is None and row["last_write"]:
-        if now - datetime.fromisoformat(row["last_write"]) >= _SILENT:
+        if datetime.fromisoformat(row["at"]) - datetime.fromisoformat(row["last_write"]) >= _SILENT:
             return "no end recorded"
     return state
 
@@ -997,11 +1006,14 @@ def _checkpoints(stored: RunData) -> str | None:
 
 def _run_details(row: sqlite3.Row) -> str:
     config = row["config"]
-    shown = (
-        f'<pre class="scroll">{escape(config)}</pre>'
-        if config is not None
-        else "<p>No config recorded.</p>"
-    )
+    if config is not None:
+        shown = f'<pre class="scroll">{escape(config)}</pre>'
+    else:
+        shown = (
+            "<p>No config recorded.</p>"
+            if row["at"]
+            else f"<p>{_UNREAD.format('Config details')}</p>"
+        )
     source = row["source"] or ""
     checkpoints = row["checkpoints"] or (
         "<p>No checkpoints recorded.</p>"

@@ -144,22 +144,32 @@ class DirectoryStorage:
         return sorted(self.versions(prefix))
 
     def versions(self, prefix: str) -> dict[str, str]:
-        """Each file's modification time and size: a replaced file changes one or both."""
-        base = self._path(prefix) if prefix else self.root
-        if not base.is_dir():
-            return {}
+        """List file times and sizes. An unreadable subtree invalidates the listing."""
+        pending = [self._path(prefix) if prefix else self.root]
         found: dict[str, str] = {}
-        for path in base.rglob("*"):
-            if path.name.endswith(".partial"):
-                continue
+        while pending:
+            folder = pending.pop()
             try:
-                stat = path.stat()
-            except FileNotFoundError:
-                continue  # replaced or removed while listed
-            if S_ISREG(stat.st_mode):
-                found[path.relative_to(self.root).as_posix()] = ObjectVersion(
-                    f"{stat.st_mtime_ns}:{stat.st_size}", datetime.fromtimestamp(stat.st_mtime, UTC)
-                )
+                entries = os.scandir(folder)
+            except (FileNotFoundError, NotADirectoryError):
+                continue  # Missing prefix or a directory removed during traversal.
+            with entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(folder / entry.name)
+                            continue
+                        if entry.name.endswith(".partial"):
+                            continue
+                        stat = entry.stat()
+                    except FileNotFoundError:
+                        continue  # Dangling symlink or file removed while listed.
+                    if S_ISREG(stat.st_mode):
+                        key = (folder / entry.name).relative_to(self.root).as_posix()
+                        found[key] = ObjectVersion(
+                            f"{stat.st_mtime_ns}:{stat.st_size}",
+                            datetime.fromtimestamp(stat.st_mtime, UTC),
+                        )
         return found
 
 

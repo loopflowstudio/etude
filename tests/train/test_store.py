@@ -829,6 +829,17 @@ def test_a_long_run_uploads_a_small_multiple_of_what_it_finally_stores(tmp_path:
     assert stored < measured.written <= 3 * stored
 
 
+def test_directory_listing_skips_missing_prefixes_and_disappeared_targets(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path)
+    source.put("lab/kept", b"complete")
+    source.put("lab/covered", b"replaced")
+    (tmp_path / "lab" / "link").symlink_to("covered")
+    assert source.keys("lab") == ["lab/covered", "lab/kept", "lab/link"]
+    source.delete("lab/covered")
+    assert source.keys("lab") == ["lab/kept"]
+    assert source.keys("missing") == []
+
+
 def test_a_printed_directory_uri_reads_the_same_runs_as_its_path(tmp_path: Path) -> None:
     folder = tmp_path / "runs with space"
     DirectoryStorage(folder).put("lab/a/run.json", b"{}")

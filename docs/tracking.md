@@ -157,16 +157,18 @@ opened before the run appears names the source the view is watching.
 **Experiments.** The experiment page opens with its run status table. The
 report loads in a separate frame so you can read status during a report build.
 Status refreshes keep your place in the report. An experiment stays open
-while it has unfinished launcher work or an active file-only run. After
-10 minutes without a write, a file-only run with no recorded outcome reads
-**no end recorded** and stops keeping the experiment open.
+while it has unfinished launcher work or an active file-only run. When a
+complete file listing starts at least 10 minutes after a file-only run’s
+last write and finds no outcome, the run reads **no end recorded** and
+stops keeping the experiment open. During a storage outage, the run keeps
+its last observed state.
 
 **Runs.** A training run draws its `report()` `perf` and `ml` panels, followed by the
 remaining metrics in first-logged order. Checkpoints show the clock positions
 at which they were saved. For a launched run, the page also shows placement,
 hardware, cost, attempts and source revision when available. All four pages
 show the launcher’s clock until run files appear, then the sealed file position.
-`Last write` dates the run files and `indexed` dates the last successful file pass.
+`Last write` dates the run files and `indexed` dates the start of the last successful listing.
 A recorded scheduler heartbeat appears as `last loop`. When the file and
 launcher observations differ by more than 5 seconds, `launcher observed` dates the launcher facts.
 
@@ -189,9 +191,12 @@ a run graph uses the last published index, including during a bucket scan.
 While storage is slow or unavailable, new queue entries, placement, retained console
 and local machine inventory still appear. Charts keep their last indexed position,
 including after a view restart. Before the first successful file pass, the view shows
-known launcher runs with **File observation unavailable**. When storage recovers,
-the clock and curves advance together. The files in your directory or bucket are
-the portable record.
+known launcher runs with **File observation unavailable**. It shows any config
+the launcher supplied. Missing config, curves and checkpoints wait for the
+files. A declared experiment with no known runs says **Waiting for the first
+file observation**. A failed **Refresh report** leaves the last report visible.
+When storage recovers, the clock and curves advance together. The files in
+your directory or bucket are the portable record.
 
 You can edit `report()` while runs are writing. Their clocks and curves keep
 advancing while the view reads the edit. If it fails, the affected experiment
