@@ -230,8 +230,11 @@ console for the next launcher poll until the last attempt’s transcript settles
 A visible run tab reads the same indexed row every five seconds. Its change
 token covers the sealed inputs and report panels, displayed run facts, retained
 console and errors. The check skips the chart table. When only source ages
-advance, the browser updates their labels in place. Refreshing the experiment
-report builds it separately.
+advance, the browser updates their labels in place.
+
+The first indexed training or evaluation run makes its experiment report
+ready to build. Concurrent requests share one build. During an explicit
+refresh, readers can still open the previous report until the new HTML is ready.
 
 ## Upgrading Etude
 

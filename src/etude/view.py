@@ -51,6 +51,7 @@ from etude.page import (
     Pages,
     ReportDeclaration,
     experiment_files,
+    read_asset,
     read_report,
     render,
     render_run,
@@ -683,11 +684,13 @@ class ChartIndex:
         with self._connect() as db:
             row = db.execute(
                 _VISIBLE
-                + """SELECT EXISTS (SELECT 1 FROM files WHERE experiment=:experiment)
-                     WHERE :declared OR EXISTS (SELECT 1 FROM visible WHERE experiment=:experiment)""",
+                + """SELECT CASE
+                        WHEN EXISTS (SELECT 1 FROM files WHERE experiment=:experiment) THEN 1
+                        WHEN :declared OR EXISTS (SELECT 1 FROM visible WHERE experiment=:experiment) THEN 0
+                     END""",
                 {"experiment": experiment, "declared": declared, "remote": selected()},
             ).fetchone()
-        return bool(row[0]) if row is not None else None
+        return bool(row[0]) if row[0] is not None else None
 
     def experiment_status(self, experiment: str, *, declared: bool) -> str | None:
         remote = selected()
@@ -1038,12 +1041,12 @@ def _observation(page: str, token: str, message: str, collected: str = "") -> st
 
 
 def _refresh_script() -> str:
-    script = Path(__file__).with_name("refresh_status.js").read_text()
+    script = read_asset("refresh_status.js")
     return f'<p id="status-error" role="status"></p><script>{script}</script>'
 
 
 def _document(title: str, body: str) -> str:
-    css = Path(__file__).with_name("page.css").read_text()
+    css = read_asset("page.css")
     return (
         f'<!doctype html><html lang="en"><meta charset="utf-8">'
         f'<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -1058,7 +1061,7 @@ class Server(ThreadingHTTPServer):
         self.path = path.absolute() if path else None
         self.index = ChartIndex(as_storage(source), path)
         self.files = self.index.declared_files()
-        self.pages = Pages(source)
+        self.pages = Pages(self.index.source)
         self._find_files()
         self._building = threading.Lock()
         self._lock = threading.Lock()
@@ -1170,44 +1173,45 @@ class Server(ThreadingHTTPServer):
         ready = self.index.report_ready(experiment, declared=experiment in self.files)
         if ready is None:
             return None
-        if observe or not ready:
-            with self._lock:
-                available = ready or experiment in self._html
-            if not available:
+        with self._lock:
+            html = self._html.get(experiment)
+            if not ready and html is None:
                 if refresh:
                     raise ValueError("Waiting for run files.")
                 notice = _observation("report", "waiting", "Waiting for run files.")
                 return notice if observe else _document(experiment, notice + _refresh_script())
             if observe:
                 return _observation("report", "ready", "Building report…")
+            if not refresh and html is not None:
+                return html
+            shared = self._pending.get(experiment)
+            if shared is None:
+                self._pending[experiment] = Future()
+        if shared is not None:
+            return shared.result()
+
+        # Use the first request's thread so the server can close its listening
+        # socket while an authored report is still building.
+        try:
+            with self._building:
+                html = self._build_report(experiment)
+        except BaseException as error:
+            with self._lock:
+                self._pending.pop(experiment).set_exception(error)
+            raise
         with self._lock:
-            if not refresh and experiment in self._html:
-                return self._html[experiment]
-            pending = self._pending.get(experiment)
-            owner = pending is None
-            if pending is None:
-                pending = Future()
-                self._pending[experiment] = pending
-        if owner:
-            try:
-                with self._building:
-                    file = self.files.get(experiment)
-                    page = self.pages.build(file, experiment=experiment)
-                    control = (
-                        '<button id="refresh-report">Refresh report</button> '
-                        '<span id="refresh-status" role="status"></span>'
-                        f"<script>{Path(__file__).with_name('refresh_report.js').read_text()}</script>"
-                    )
-                    html = render(page, heading=control)
-                with self._lock:
-                    self._html[experiment] = html
-                    pending.set_result(html)
-                    del self._pending[experiment]
-            except BaseException as error:
-                with self._lock:
-                    pending.set_exception(error)
-                    del self._pending[experiment]
-        return pending.result()
+            self._html[experiment] = html
+            self._pending.pop(experiment).set_result(html)
+        return html
+
+    def _build_report(self, experiment: str) -> str:
+        page = self.pages.build(self.files.get(experiment), experiment=experiment)
+        control = (
+            '<button id="refresh-report">Refresh report</button> '
+            '<span id="refresh-status" role="status"></span>'
+            f"<script>{read_asset('refresh_report.js')}</script>"
+        )
+        return render(page, heading=control)
 
 
 class _Handler(BaseHTTPRequestHandler):

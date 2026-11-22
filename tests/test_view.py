@@ -123,7 +123,7 @@ def test_refresh_reads_an_edited_neighbour_the_file_imports(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize("refresh", [False, True], ids=["first-visit", "refresh"])
-def test_first_indexed_run_starts_one_shared_report_build(
+def test_readers_share_the_first_report_build_and_each_refresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refresh: bool
 ) -> None:
     runs = tmp_path / "runs"
@@ -144,12 +144,9 @@ def test_first_indexed_run_starts_one_shared_report_build(
 
     class Joined(Future[str]):
         def result(self, timeout: float | None = None) -> str:
-            # Only the waiter reaches result() while the owner is still building.
             joined.set()
             return super().result(timeout)
 
-    monkeypatch.setattr(Pages, "build", blocked_build)
-    monkeypatch.setattr("etude.view.Future", Joined)
     with Server(measured, None, ("127.0.0.1", 0)) as server, ThreadPoolExecutor(2) as pool:
         server.refresh_launcher()
         assert ">queued<" in _get(server, "/experiments/lab")
@@ -162,19 +159,29 @@ def test_first_indexed_run_starts_one_shared_report_build(
         reads = measured.listings, measured.requests
         assert _version(_get(server, route + "?observe=1")) == "ready"
         assert (measured.listings, measured.requests) == reads
+        previous = _get(server, route) if refresh else None
+        expected = [7, 3] if refresh else [7]
+        if previous:
+            _seal(runs / address, 1, 3)
+            server.refresh_files()
+        listings = measured.listings
+        monkeypatch.setattr(Pages, "build", blocked_build)
+        monkeypatch.setattr("etude.view.Future", Joined)
         first = pool.submit(server.page, route, refresh=refresh)
         try:
             assert started.wait(5)
             second = pool.submit(server.page, route, refresh=refresh)
             assert joined.wait(5)
-            assert "steps 1" in _get(server, "/experiments/lab/status")
-            assert _loss(_get(server, "/runs/" + address)) == [7]
+            if previous:
+                assert _get(server, route) == previous
+            assert f"steps {len(expected)}" in _get(server, "/experiments/lab/status")
+            assert _loss(_get(server, "/runs/" + address)) == expected
         finally:
             release.set()
         original = first.result(5)
         assert original and original == second.result(5) == _get(server, route)
-        assert _loss(original) == [7]
-        assert measured.listings == reads[0] + 1
+        assert _loss(original) == expected
+        assert measured.listings == listings + 1
 
 
 def test_http_refresh_reports_failures_without_replacing_the_cached_page(tmp_path: Path) -> None:
@@ -185,34 +192,19 @@ def test_http_refresh_reports_failures_without_replacing_the_cached_page(tmp_pat
         _ingest(server)
         worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
         worker.start()
-        client = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
         try:
-            client.request("GET", "/experiments/lab/report")
-            reply = client.getresponse()
-            assert reply.status == 200 and reply.getheader("Cache-Control") == "no-store"
-            original = reply.read()
-            assert b'"refresh": null' in original and b'id="refresh-report"' in original
-            client.request("GET", "/runs/absent")
-            waiting = client.getresponse()
-            assert waiting.status == 404 and runs.as_uri() in waiting.read().decode()
+            route = "/experiments/lab/report"
+            original = _request(server, route)
+            assert '"refresh": null' in original and 'id="refresh-report"' in original
+            assert runs.as_uri() in _request(server, "/runs/absent", status=404)
             file.write_text("raise RuntimeError('cannot generate token=fixture-credential')\n")
-            client.request("POST", "/experiments/lab/report")
-            reply = client.getresponse()
-            error = reply.read()
-            assert reply.status == 500 and b"cannot generate token=[redacted]" in error
-            assert b"fixture-credential" not in error
-            client.request("GET", "/experiments/lab/report")
-            reply = client.getresponse()
-            assert reply.status == 200 and reply.read() == original
+            error = _request(server, route, method="POST", status=500)
+            assert "cannot generate token=[redacted]" in error and "fixture-credential" not in error
+            assert _request(server, route) == original
             file.write_text(REPORTED.replace("Report()", 'Report(labels={"a": "Readable"})'))
-            client.request("POST", "/experiments/lab/report")
-            reply = client.getresponse()
-            refreshed = reply.read()
-            assert reply.status == 200 and b'"Readable"' in refreshed
-            client.request("GET", "/experiments/lab/report")
-            assert client.getresponse().read() == refreshed
+            refreshed = _request(server, route, method="POST")
+            assert '"Readable"' in refreshed and _request(server, route) == refreshed
         finally:
-            client.close()
             server.shutdown()
             worker.join(timeout=5)
             assert not worker.is_alive()
@@ -310,15 +302,19 @@ def _advance_view_clock(patch: pytest.MonkeyPatch, *, minutes: int) -> None:
     patch.setattr("etude.view.datetime", Later)
 
 
+def _request(view: Server, path: str, *, method: str = "GET", status: int = 200) -> str:
+    with closing(HTTPConnection("127.0.0.1", view.server_port, timeout=5)) as client:
+        client.request(method, path)
+        with client.getresponse() as reply:
+            assert reply.status == status and reply.getheader("Cache-Control") == "no-store"
+            return reply.read().decode()
+
+
 def _get(view: Server, path: str, *, status: int = 200) -> str:
     # Serve one real request while the fixture controls ingestion independently.
     with ThreadPoolExecutor(1) as listener:
         handled = listener.submit(view.handle_request)
-        with closing(HTTPConnection("127.0.0.1", view.server_port, timeout=5)) as client:
-            client.request("GET", path)
-            reply = client.getresponse()
-            assert reply.status == status
-            page = reply.read().decode()
+        page = _request(view, path, status=status)
         handled.result(5)
         return page
 

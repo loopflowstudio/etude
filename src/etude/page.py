@@ -78,7 +78,7 @@ from collections import Counter
 from collections.abc import Callable, Collection, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cache, cached_property
 from html import escape
 from importlib.util import cache_from_source
 from pathlib import Path
@@ -1739,25 +1739,28 @@ def _payload(data: dict[str, object], refresh: float | None) -> str:
     return json.dumps(data | stamp, allow_nan=False).replace("<", "\\u003c")
 
 
+@cache
+def read_asset(name: str) -> str:
+    """Read a packaged page asset once. Authored report sources are versioned separately."""
+    return (Path(__file__).parent / name).read_text(encoding="utf-8")
+
+
 def _inline(
     template: str, title: str, payload: str, heading: str = "", details: str = "", tabs: str = ""
 ) -> str:
-    here = Path(__file__).parent
     # Substitute in the template once; run data and console text can contain any marker.
     fields = {
-        "__UPLOT_CSS__": (here / "vendor/uPlot.min.css").read_text(),
-        "__PAGE_CSS__": (here / "page.css").read_text(),
-        "__UPLOT_JS__": (here / "vendor/uPlot.iife.min.js").read_text(),
-        "__CHARTS_JS__": (here / "charts.js").read_text(),
+        "__UPLOT_CSS__": read_asset("vendor/uPlot.min.css"),
+        "__PAGE_CSS__": read_asset("page.css"),
+        "__UPLOT_JS__": read_asset("vendor/uPlot.iife.min.js"),
+        "__CHARTS_JS__": read_asset("charts.js"),
         "__TITLE__": escape(title),
         "__DATA__": payload,
         "<!--view-heading-->": heading,
         "<!--view-details-->": details,
         "<!--view-tabs-->": tabs,
     }
-    return re.sub(
-        "|".join(map(re.escape, fields)), lambda m: fields[m[0]], (here / template).read_text()
-    )
+    return re.sub("|".join(map(re.escape, fields)), lambda m: fields[m[0]], read_asset(template))
 
 
 def target(storage: Storage, experiment: str, out: Path | None = None) -> Path:
