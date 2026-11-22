@@ -796,6 +796,8 @@ def test_failed_listing_shows_fresh_queue_and_machines(
                 assert status.count("/runs/lab/compact") == 1 and f"/runs/{alias}" not in status
             else:
                 assert ">queued<" in graph and "File observation unavailable" in graph
+                assert "Curves appear once the view has read the run files" in graph
+                assert "No metric curves recorded" not in graph
             assert (measured.listings, measured.requests) == reads
     with Server(measured, None, ("127.0.0.1", 0)) as recovered:
         overview = recovered.page("/") or ""

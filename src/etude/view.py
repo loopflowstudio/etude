@@ -69,6 +69,8 @@ _TRAINING_TABS = "".join(
 )
 _REMOTE_STANDING = 30
 _SILENT = timedelta(minutes=10)
+# Before the first successful file pass, absence in the index is not absence in storage.
+_UNREAD = "{} appear once the view has read the run files."
 _CLOCKS = TypeAdapter(dict[str, float])
 
 # A changed schema starts a fresh rebuildable index.
@@ -540,7 +542,8 @@ class ChartIndex:
         below += _run_details(row)
         if row["payload"] is None:
             tabs = f'<nav class="tabs" aria-label="Run sections">{_TRAINING_TABS}</nav>'
-            return _document(address, heading + tabs + "<p>No metric curves recorded.</p>" + below)
+            curves = "No metric curves recorded." if row["at"] else _UNREAD.format("Curves")
+            return _document(address, heading + tabs + f"<p>{curves}</p>" + below)
         return render_run(address, row["payload"], heading, below, _TRAINING_TABS)
 
     def _list_runs(
@@ -1000,7 +1003,11 @@ def _run_details(row: sqlite3.Row) -> str:
         else "<p>No config recorded.</p>"
     )
     source = row["source"] or ""
-    checkpoints = row["checkpoints"] or "<p>No checkpoints recorded.</p>"
+    checkpoints = row["checkpoints"] or (
+        "<p>No checkpoints recorded.</p>"
+        if row["at"]
+        else f"<p>{_UNREAD.format('Checkpoints')}</p>"
+    )
     return f'<section class="sec" id="config"><h2>Config</h2>{shown}{source}</section><section class="sec" id="checkpoints"><h2>Checkpoints</h2>{checkpoints}</section>'
 
 

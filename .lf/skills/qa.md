@@ -132,6 +132,19 @@ local machine delivers to the server's `home/track` whatever `--source` says; vi
 those files with `--source file:///…/home/track`. Killing the sshd PID gives a failed
 launcher read; `etude server unset` and the PID ends it.
 
+To take the view's run storage away and bring it back without spend, put a bucket on
+this Mac: `uv run --no-project --python 3.12 --with "moto[server]" moto_server -p 5055`,
+create a bucket of three or more characters, and give only the view a small asyncio TCP
+forwarder (`:5056` to `:5055`) through `AWS_ENDPOINT_URL=http://127.0.0.1:5056` with
+dummy `AWS_*` keys (the lab needs `etude-sdk[eval,s3]`). Run `etude view . --source
+s3://BUCKET/runs`. Local launches still write `home/track`, so a driver thread uploads
+changed files there straight to `:5055`, standing in for delivery. Killing the forwarder is
+the outage; starting it again is recovery. A never-reached prefix shows a fresh index
+before any successful file pass. Do not name a driver after a standard module
+(`queue.py` shadows the `queue` that boto3 imports). `etude launch --pool local` refuses
+while the one local slot is busy; use `etude queue` for a queued entry. `etude wait`
+returns once the runs it started with end, so drive a later queue entry with another wait.
+
 For interruption, make a separate lab copy with an author-controlled pause
 (`time.sleep(0.1)` per update) and more updates. Drive `uv run etude train
 experiment.py` with a Python subprocess driver: `etude train` prints no progress
