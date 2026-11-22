@@ -195,10 +195,19 @@ empty queue. It records the last completed pass in `server-heartbeat` beside
 the database. `etude server` and `status` warn when work is waiting and no
 pass has completed in 30 seconds. Slow provider operations may also cause this
 warning. `wait` still exits when its runs finish. Workers read their own disk or
-bucket inboxes; they never need a reachable address for the server. `etude
-server run` never serves web pages: `etude view` runs as a separate process so
-authored `report()` code and report builds cannot stall machine deletion, and
-viewing runs never starts a loop that can rent.
+bucket inboxes; they never need a reachable address for the server.
+
+`etude view` serves HTTP in a separate process. Its background poll reads
+standing, requested consoles and local machine inventory in one database
+snapshot. It reads the heartbeat from `server-heartbeat`. The scheduler's
+`MachineStatus` records supply both `etude machines` and the view. Each
+unfinished attempt occupies a slot. With a selected server, the view batches
+standing, heartbeat and consoles in one SSH exchange at most once every 30 seconds.
+
+The view joins that observation with the run files and publishes a generation
+under `ETUDE_HOME/views`. Status and graph requests read the published index.
+Opening a run requests its retained console for the next poll. Refreshing the
+experiment report builds it separately from the indexed status table.
 
 ## Upgrading Etude
 
@@ -237,6 +246,9 @@ compatibility problem. `Upgrade` records backups, applied migrations, exports
 and reader requirements. Existing files are backed up before SQL changes;
 recovery snapshots are retained without automatic pruning. A failed migration
 rolls back its transaction. Rerun the explicit upgrade after resolving the error.
+
+The live inventory's additive migration, `live_machine_inventory.sql`, creates
+indexes for machines, sessions and allocated attempts.
 
 A backup restores database facts, not provider state: stop scheduling and
 reconcile live machines and attempts before restoring or resuming any queue.

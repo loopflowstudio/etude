@@ -213,7 +213,7 @@ window sizing, provider rounding and retries.
 | `status`, `machines`, `logs` | Reads retained evidence; prints freshness/incompleteness. |
 | `wait` | Advances work until the selected runs finish and the machines rented for them are deleted. |
 | `logs --run RUN --follow --timeout SECONDS` | Collects new logs and follows them. |
-| `view [PATH]` | Serves live pages for runs, experiments, reports and machines; schedules and rents nothing. |
+| `view [PATH]` | Shows run progress and the machines holding each run. |
 | `cancel RUN` | Requests cancellation and cleanup. |
 | `fetch RUN FILE DIRECTORY` | Copies one file the run wrote into `DIRECTORY` and verifies its fingerprint. |
 
@@ -265,16 +265,20 @@ explains recovery and retention.
 The optional SSH server keeps the scheduler running independently of this
 terminal. Configure it with `etude server` commands; `etude server --help`
 lists setup, selection and run operations. Client calls use the selected server;
-tracking reads, reports and `etude view` still read their explicit local or
-bucket source. With a server selected, a local `etude view` shows experiments
-and runs in full (asking the server at most every 30 seconds) while `/machines`
-points to `etude machines`; `etude server run` never serves pages itself. See
-[live view](tracking.md#live-view). The server needs the provider credentials;
-jobs receive only scoped grants.
+tracking and reports read the chosen directory or bucket. A local `etude view`
+polls the selected server for run placement, scheduler heartbeat and requested
+consoles at most once every 30 seconds. Pass `--source` to read the corresponding
+run files. For a selected server, `/machines` names the host and points to
+`etude machines`. With a local launcher, that page shows machine windows and
+costs and links each occupied slot to its run. See the [live view guide](tracking.md#live-view).
+
+The server holds the provider credentials. Jobs receive only scoped grants.
 
 ## Upgrading Etude
 
 Run `etude database upgrade` explicitly when installing a newer release.
+The live machine inventory adds indexes to the launcher database. Run the
+upgrade on the computer holding that database, including a selected server.
 Ordinary reads never migrate your operational `launcher.sqlite` or silently
 select a backup. Mixed client/worker releases must meet the release's reader
 floor. Keep the running server's version aligned with its database.

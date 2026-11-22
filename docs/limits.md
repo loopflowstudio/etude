@@ -31,9 +31,12 @@ failure recovery requires.
   transient infrastructure failures can retry automatically.
 - Logs, status and `etude view` show retained evidence, not live remote probes.
   Reads show freshness. Only explicit waits collect remote facts; expiry of a
-  wait does not prove remote work was cancelled. `etude view` binds `127.0.0.1`
-  with no login, records no console for plain `etude train`, and does not yet
-  record machine system metrics (GPU, CPU, memory).
+  wait does not prove remote work was cancelled.
+- The live view has no login. Its default bind address is `127.0.0.1`. Run
+  consoles depend on launcher retention. Plain `etude train` writes output
+  only to the terminal. Machine CPU, GPU and memory samples are unavailable.
+  A file-only run with no outcome shows **no end recorded** after 10 minutes
+  without a write. A later write can make it appear open again.
 - Time/dollar caps bound admitted rental allocations, not provider bills.
   Outages can delay deletion. External storage/transfer/API costs are excluded.
   An EC2 machine reading or writing a bucket outside its AWS region (any R2

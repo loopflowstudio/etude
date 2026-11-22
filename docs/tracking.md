@@ -116,91 +116,70 @@ fields and [record semantics](dev/tracking.md) when developing Etude itself.
 
 ## Live view
 
-```text
-$ uv run etude view examples &
-http://127.0.0.1:8765/
-$ uv run etude launch examples/prototype.py
-prototype: state from file:///.../.etude/track: 0 training runs, 0 eval runs
-prototype/coin@0  new, running
-view: http://127.0.0.1:8765/runs/prototype/coin@0
-$ uv run etude status prototype/coin@0
-prototype/coin@0  coin  running, updates 40, machine this computer, 1 of 3 attempts used
-view: http://127.0.0.1:8765/runs/prototype/coin@0
+Leave the view running in one terminal.
+
+```sh
+uv run etude view examples/prototype.py
 ```
 
-`etude view [PATH]` serves live pages for runs, experiments, reports and
-machines. Pass a file or folder as `PATH` so experiment reports and run-page
-metric panels follow your `report()` declarations; without `PATH`, pages use the
-default report. Use `--source s3://bucket/runs` (or `r2://...` or another
-directory) to watch runs in a bucket; by default it reads this computer's runs
-directory.
+In a second terminal, run `uv run etude train examples/prototype.py`. Open the
+link it prints, `http://127.0.0.1:8765/runs/prototype/coin@0`, to see the
+coin's training curve, config and checkpoint.
 
-While `etude view` is running, it writes its address to `ETUDE_HOME/view` and
-removes it on exit. `train`, `launch`, `queue` and `status RUN` then print a
-`view:` link to each run's page (`/runs/EXPERIMENT/JOB@SEED`, or
-`/runs/EXPERIMENT` for a plain `train(config)` file); when no view is running,
-those commands print nothing extra.
+`etude view [PATH] [--source SOURCE] [--host HOST] [--port PORT]` serves a
+read-only view. `PATH` is a Python file or folder containing the experiment's
+`report()` declaration. Omit it to use the default report. `--source` chooses
+where to read run files from. It defaults to this computer's runs directory
+and accepts a directory, `s3://bucket/prefix` or `r2://bucket/prefix`.
+Bucket sources need read credentials. Viewing requires no machine-provider key.
+The view listens on `127.0.0.1:8765` by default and prints its address.
 
-| Path | Page |
+While the view advertises its address in `ETUDE_HOME/view`, `train`, `launch`,
+`queue` and `status RUN` print a `view:` link for each run. A declared run
+uses `EXPERIMENT/JOB@SEED`, such as `prototype/coin@0`. For a file defining
+only `train(config)`, the address is the experiment name. `train --json`
+prints the link on stderr.
+
+| Path | What you see |
 | --- | --- |
-| `/` | Experiments: open first, then completed |
-| `/experiments/NAME` | One experiment: live status (jobs, runs, machines, clocks) and its `report()` charts loaded asynchronously on the same page |
-| `/runs/ADDRESS` | One run, live: state, curves, console, config and checkpoints |
-| `/machines` | Machines held now, their windows and costs, and the runs on each |
+| `/` | Experiments grouped into Open and Completed, with run counts by state, latest write and links to open runs |
+| `/status` | The experiment list used to refresh `/` |
+| `/experiments/NAME` | Jobs and runs with their state, clock, last write and launcher placement or queue reason, plus the experiment report |
+| `/experiments/NAME/status` | The run status table used to refresh the experiment page |
+| `/experiments/NAME/report` | The experiment's report, with a **Refresh report** button |
+| `/runs/ADDRESS` | One run's state, clock progress, curves, console, config and checkpoints |
+| `/machines` | Held machines with their pool or on-demand, state, window and cost. Each occupied slot links to its run and shows its state and clock. |
+| `/machines/status` | The inventory used to refresh the Machines page |
 
-On `/`, each experiment shows its run counts by state and its latest file
-write. Open runs have links, clock positions and launcher placement when
-available. Follow the experiment link for its full run history and report.
+**Experiments.** The experiment page opens with its run status table. The
+report loads in a separate frame so you can read status during a report build.
+Status refreshes keep your place in the report. An experiment stays open
+while it has unfinished launcher work or an active file-only run. After
+10 minutes without a write, a file-only run with no recorded outcome reads
+**no end recorded** and stops keeping the experiment open.
 
-Follow **Machines** from `/` to see each held machine’s pool or on-demand,
-state, window and cost. Its occupied slots link to the runs holding them and
-show their latest clock positions. The local machine list refreshes every
-5 seconds while visible, including when the machines are idle.
+**Runs.** A training run draws its `report()` `perf` and `ml` panels, followed by the
+remaining metrics in first-logged order. Checkpoints show the clock positions
+at which they were saved. For a launched run, the page also shows placement,
+hardware, cost, attempts and source revision when available. `Last write`
+dates the run files, `last loop` dates the scheduler heartbeat and
+`launcher observed` dates the view's last successful launcher read.
 
-An experiment page (`/experiments/NAME`) combines operational status (what has
-run or completed, where each active run is, and clocks) with the experiment's
-`report()` charts on one page. The two components load asynchronously so a
-slow report build never blocks live status. The status table lists each job and
-links to each run. Each row shows the run's clock position, its last file write,
-and the launcher's placement or queue reason when available. Status updates
-keep the report open at your selection.
+Opening a launched run requests the same retained console you can read with
+`etude logs --run RUN`. The first visit can show **Waiting for retained console**
+until the next launcher poll. The console displays gaps in the retained output
+and dates the latest collection. Plain `etude train` writes its console to the
+terminal.
 
-A run page (`/runs/ADDRESS`) shows its state (`queued`, `running`, `stopped`, `finished`,
-`failed`) with launcher detail when launched (such as `running · setting up on
-gpu-41840a` or `failed · out_of_time`), clock progress against its target,
-machine and hardware, dollars, attempts, and source ages (`last write` from run
-files and `last loop` from the launcher). Its metric curves draw the
-experiment's `report()` `ml` and `perf` panels for that run, then every other
-logged metric in first-logged order; nothing is rearranged in the browser, so
-everyone on the same link sees the same page. Below the curves are the retained
-launcher console (with its age and any gaps; plain `etude train` runs note that
-no console was recorded), the stored config and source commit, and each saved
-checkpoint with its clock positions. Opening a run requests its console for the
-next launcher observation. The console shows what `etude logs --run` retained,
-including output collected while the job was running. `Last collected` dates the
-most recently collected stream. `Last loop` dates the scheduler's heartbeat and
-`launcher observed` dates the view's last successful read.
+**Refresh.** Visible run and experiment pages refresh every 5 seconds while
+work is open. A launched run page also waits for its final console. The local
+machine inventory refreshes every 5 seconds while visible, even when idle.
+The view indexes run files in the background under `ETUDE_HOME/views`. Reading
+a run graph uses the last published index, including during a bucket scan.
+The files in your directory or bucket are the portable record.
 
-An experiment stays open while the launcher holds an unfinished run of it, or
-while a run with no launcher record and no recorded end wrote within the last
-10 minutes. A run with no launcher record and no recorded end that has been
-silent longer reads `no end recorded · last write ...`, leaves open, and stops
-keeping pages refreshing.
-
-Live status and run views refresh every 5 seconds while anything shown is open
-and the browser tab is visible, stopping once everything shown has ended or the
-tab is hidden; the report component loads asynchronously and refreshes on
-demand. Your run files in your directory or bucket remain the portable record
-you own; any local cache or index the view keeps is derived for sub-second
-chart loads. The view indexes in the background and publishes a complete generation
-under `ETUDE_HOME/views`. Opening a run reads that generation immediately, even
-while the next bucket listing or report build is in progress.
-
-`etude view` binds `127.0.0.1:8765` (`--host`, `--port` override it) and has no
-login. It advances nothing, rents nothing, never migrates the launcher database,
-never connects to running machines, and needs no provider keys (bucket sources
-still need bucket read credentials). Without a launcher database, runs are shown
-from files and `/machines` says no launcher is used here. With a remote server
-selected (`etude server set`), runs and experiments appear in full (asking the
-server at most every 30 seconds) while `/machines` points to `etude machines`.
-Machine system metrics (GPU, CPU and memory samples) are not yet recorded.
+Without a launcher database the view reads runs from files, and Machines says
+“No launcher is used here.” With `etude server set`, the view polls the selected
+server for run status and requested consoles at most once every 30 seconds.
+Use `--source` to select the matching run files. The Machines page names the
+selected server and directs you to `etude machines`.
