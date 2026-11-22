@@ -1067,3 +1067,15 @@ def test_storage_with_opaque_versions_reports_an_unknown_write_time(tmp_path: Pa
     source.put("lab/run.json", RunRecord(id="lab", experiment="lab").model_dump_json().encode())
     run = observe(source, "lab").run("lab")
     assert run.state == "running" and run.last_write is None
+
+
+def test_successful_training_launch_without_run_files_is_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = _Launcher()
+    launcher.launched.append(
+        RunRequest(id="lab/command", job=Job(name="command", experiment="lab", command="true"))
+    )
+    launcher.outcome = "succeeded"
+    monkeypatch.setattr(client, "standing", launcher.standing)
+    assert observe(DirectoryStorage(tmp_path), "lab").run("command").state == "finished"

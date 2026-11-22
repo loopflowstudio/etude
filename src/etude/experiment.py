@@ -177,11 +177,7 @@ def state_of(
                 jobs.EvalRunSummary(
                     name=name,
                     state=_launcher_state(
-                        prior.state
-                        if prior
-                        else "finished"
-                        if status.done and status.outcome == "succeeded"
-                        else "running",
+                        prior.state if prior else "running",
                         item,
                     ),
                     matches=matches,
@@ -235,5 +231,7 @@ def _launcher_state(
     if state in {"finished", "failed"}:
         return state
     if item.status.done:
-        return state if item.status.outcome == "succeeded" else "failed"
+        if item.status.outcome == "succeeded":
+            return "stopped" if state == "stopped" else "finished"
+        return "failed"
     return item.placement
