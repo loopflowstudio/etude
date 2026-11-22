@@ -108,6 +108,11 @@ When neither browser extension is connected, drive headless system Chrome:
 `p.chromium.launch(channel="chrome")`; no browser download is needed. For older run
 files, `cp -cR ~/.etude/track` into a private folder and pass it as `--source` with a
 private `ETUDE_HOME`.
+A `nohup uv run etude view … &` ignores SIGINT; stop the view by sending SIGTERM to its
+`.venv/bin/etude` child (`pgrep -P UV_PID`), or start `.venv/bin/etude view` from a
+Python driver and send SIGINT, which is what Ctrl-C does. A launched run's console reaches
+its page only when the loop collects it, about every 30 s, so a page shows a stale tail
+between collections; check its "Last collected" age rather than expecting each refresh to move.
 
 For interruption, make a separate lab copy with an author-controlled pause
 (`time.sleep(0.1)` per update) and more updates. Drive `uv run etude train
