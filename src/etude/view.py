@@ -15,7 +15,7 @@ import time
 from collections import Counter, defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future
-from contextlib import closing, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -757,7 +757,21 @@ class Server(ThreadingHTTPServer):
         self._lock = threading.Lock()
         self._html: dict[str, str] = {}
         self._pending: dict[str, Future[str]] = {}
+        self._address = ExitStack()
         super().__init__(address, _Handler)
+        host = address[0] if address[0] not in ("", "0.0.0.0") else "127.0.0.1"
+        self.origin = f"http://{host}:{self.server_port}"
+        try:
+            self._reclaim = self._address.enter_context(advertise(self.origin))
+        except BaseException:
+            self.server_close()
+            raise
+
+    def server_close(self) -> None:
+        try:
+            self._address.close()
+        finally:
+            super().server_close()
 
     def _find_files(self) -> str | None:
         """Update `files`, or say why the folder's files cannot be told apart.
@@ -777,6 +791,7 @@ class Server(ThreadingHTTPServer):
     def ingest(self) -> None:
         unfound = self._find_files()
         try:
+            self._reclaim()
             self.index.refresh(self.files)
         except Exception as error:
             self.index.error = explain(error)
@@ -895,10 +910,12 @@ class _Handler(BaseHTTPRequestHandler):
             status = 200 if html else 404
             if html is None and urlsplit(self.path).path.startswith("/runs/"):
                 # A train prints its link before the next listing can discover it.
-                message = escape(
-                    self.server.index.error or "Waiting for the run to appear in the index."
-                )
-                html = _document("Run", f'<p role="status">{message}</p>{_reload()}')
+                index = self.server.index
+                source = index.source.uri("run.json").removesuffix("run.json")
+                message = f"Waiting for the run to appear in {source}."
+                if index.error:
+                    message += " " + index.error
+                html = _document("Run", f'<p role="status">{escape(message)}</p>{_reload()}')
             body = (html or "Not found.").encode()
         except ValueError as error:
             body, status = explain(error).encode(), 404
@@ -917,18 +934,15 @@ class _Handler(BaseHTTPRequestHandler):
 
 def serve(source: Storage, path: Path | None, address: tuple[str, int]) -> None:
     with Server(source, path, address) as server:
-        host = address[0] if address[0] not in ("", "0.0.0.0") else "127.0.0.1"
-        origin = f"http://{host}:{server.server_port}"
 
         def stop_view(signum: int, frame: FrameType | None) -> None:
             raise KeyboardInterrupt
 
-        with advertise(origin):
-            previous = signal.signal(signal.SIGTERM, stop_view)
-            try:
-                print(origin + "/", flush=True)
-                server.serve_forever()
-            except KeyboardInterrupt:
-                pass
-            finally:
-                signal.signal(signal.SIGTERM, previous)
+        previous = signal.signal(signal.SIGTERM, stop_view)
+        try:
+            print(server.origin + "/", flush=True)
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            signal.signal(signal.SIGTERM, previous)

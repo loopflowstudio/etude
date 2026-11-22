@@ -180,6 +180,9 @@ def test_http_refresh_reports_failures_without_replacing_the_cached_page(tmp_pat
             reply = client.getresponse()
             assert reply.status == 200 and reply.getheader("Cache-Control") == "no-store"
             original = reply.read()
+            client.request("GET", "/runs/absent")
+            waiting = client.getresponse()
+            assert waiting.status == 404 and runs.as_uri() in waiting.read().decode()
             file.write_text("raise RuntimeError('cannot generate token=fixture-credential')\n")
             client.request("POST", "/experiments/lab/report")
             reply = client.getresponse()
@@ -365,9 +368,14 @@ def test_view_links_follow_only_the_live_owner(
     address.write_text("http://stale.invalid")
     print_view("lab/base@0")
     assert capsys.readouterr().out == ""
-    with advertise("http://localhost:1234"):
+    with Server(tmp_path, None, ("127.0.0.1", 0)) as first:
+        with Server(tmp_path, None, ("127.0.0.1", 0)) as second:
+            first.ingest()
+            print_view("lab/base@0")
+            assert capsys.readouterr().out.strip() == f"view: {second.origin}/runs/lab/base@0"
+        first.ingest()
         print_view("lab/base@0")
-        assert capsys.readouterr().out.strip() == "view: http://localhost:1234/runs/lab/base@0"
+        assert capsys.readouterr().out.strip() == f"view: {first.origin}/runs/lab/base@0"
     assert not address.exists()
 
 

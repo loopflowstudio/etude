@@ -138,7 +138,9 @@ While the view advertises its address in `ETUDE_HOME/view`, `train`, `launch`,
 `queue` and `status RUN` print a `view:` link for each run. A declared run
 uses `EXPERIMENT/JOB@SEED`, such as `prototype/coin@0`. For a file defining
 only `train(config)`, the address is the experiment name. `train --json`
-prints the link on stderr.
+prints the link on stderr. Starting a second view redirects links to it. When
+it closes, a surviving view advertises again at its next index pass. A link
+opened before the run appears names the source the view is watching.
 
 | Path | What you see |
 | --- | --- |
