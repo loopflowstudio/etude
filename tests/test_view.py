@@ -8,7 +8,7 @@ import sys
 import threading
 from collections.abc import Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from html import unescape
 from http.client import HTTPConnection
 from pathlib import Path
@@ -480,7 +480,8 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
         html = status("/experiments/lab")
         assert ">running<" in row(html, running) and machine in row(html, running)
         assert ">learn<" in row(html, queued) and ">queued<" in row(html, queued)
-        assert "Target steps 40" in row(html, queued) and "queued (" in row(html, queued)
+        reason = backend.scheduler.read(queued).reason
+        assert reason and reason in row(html, queued) and "Target steps 40" in row(html, queued)
         assert ">baseline<" in row(html, local) and ">steps 1<" in row(html, local)
         assert ">score<" in row(html, evaluation) and ">finished<" in row(html, evaluation)
         assert "last loop 2 h ago" in html and 'src="/experiments/lab/report"' in html
@@ -520,6 +521,7 @@ def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: 
         [RunRequest(id=f"learn@{seed}", seed=seed, job=spec) for seed in (0, 1)], rent="l4"
     )
     backend.scheduler.tick()
+    _reporting(backend, clocks={"steps": 2})
     backend.run(1)
     machine = backend.scheduler.read(first).machine
     assert machine and backend.scheduler.read(second).machine == machine
@@ -552,7 +554,16 @@ def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: 
         assert "rented until" in row and "~$" in row and ">l4</td>" in row
         assert all(f'href="/runs/{address}"' in row for address in (first, second))
         assert "running" in row and "steps 1 / 40" in row and queued not in html
-        assert "Idle" in html and "never expires" in html and "last loop" in html
+        assert "Idle" in html and "never expires" in html
+        assert backend.scheduler.read(first).clocks == {"steps": 2}
+        header = (server.page("/runs/" + first) or "").split("</header>", 1)[1]
+        line = header.split("<p>", 1)[1].split("</p>", 1)[0]
+        assert line.count("running") == line.count("steps") == 1
+        assert "steps 1 / 40" in line and machine in line
+        for path in ("/", "/experiments/lab", "/machines"):
+            page = server.page(path) or ""
+            assert line in page and "last loop" not in page and "launcher observed" not in page
+        assert "steps 2 / 40" in (server.page("/runs/" + second) or "")
         assert 'data-refresh="5000"' in html
         assert (measured.listings, measured.requests, measured.bytes) == reads
 
@@ -583,6 +594,12 @@ def test_failed_launcher_read_preserves_idle_machines_while_files_advance(
     def incompatible(path: Path) -> Database:
         raise LauncherError("fixture needs etude database upgrade")
 
+    class Later(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            return datetime.now(tz) + timedelta(minutes=2)
+
+    monkeypatch.setattr("etude.view.datetime", Later)
     monkeypatch.setattr("etude.launch.server.open_home", incompatible)
     source.put(
         "local/run.json", RunRecord(id="local", experiment="local").model_dump_json().encode()
@@ -590,7 +607,7 @@ def test_failed_launcher_read_preserves_idle_machines_while_files_advance(
     with Server(source, None, ("127.0.0.1", 0)) as restarted:
         restarted.ingest()
         listing = restarted.page("/machines/status") or ""
-        assert ">studio</th>" in listing and "launcher observed" in listing
+        assert ">studio</th>" in listing and "launcher observed 2 min ago" in listing
         assert "etude database upgrade" in listing
         assert 'href="/runs/local"' in (restarted.page("/") or "")
 
@@ -767,7 +784,7 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
             assert (
                 "Last collected" in page
                 and "last loop 2 h ago" in page
-                and "launcher observed" in page
+                and "launcher observed" not in page
             )
             assert "&lt;writer&gt;" in page and "<writer>" not in page
             assert "steps 12" in page and "<td>1</td>" in page

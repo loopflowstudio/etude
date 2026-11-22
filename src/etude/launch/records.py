@@ -531,7 +531,7 @@ class Status(Record):
     def done(self) -> bool:
         return self.phase == "done"
 
-    def __str__(self) -> str:
+    def phase_and_clock(self) -> str:
         if self.phase == "queued":
             head = f"queued ({self.reason})"
         elif self.phase == "done":
@@ -540,18 +540,27 @@ class Status(Record):
             head = self.phase
         clock = self.until.clock if self.until else next(iter(self.clocks), None)
         at = f", {clock} {number(self.clocks[clock])}" if clock in self.clocks else ""
+        return head + at
+
+    def facts(self) -> list[str]:
+        """Counted work, shared placement, spend and delivery evidence."""
+        facts = []
         if self.tally is not None:
             # A finished job has no time left to give, whatever its last pace.
             shown = self.tally.model_copy(update={"per_hour": None}) if self.done else self.tally
-            at += f", {shown}"
-        shared = f", shared by {self.shared} runs" if self.shared > 1 else ""
-        delivery = ""
+            facts.append(str(shown))
+        if self.shared > 1:
+            facts.append(f"shared by {self.shared} runs")
+        facts.append(f"{'~' if self.estimated else ''}${self.usd:.2f}")
         if self.delivery_age_seconds is not None:
-            delivery = (
-                f", no delivery confirmed for {self.delivery_age_seconds / 60:.1f} minutes"
+            facts.append(
+                f"no delivery confirmed for {self.delivery_age_seconds / 60:.1f} minutes"
                 " (retained evidence; collection may be stale)"
             )
-        return f"{head}{at}{shared}, {'~' if self.estimated else ''}${self.usd:.2f}{delivery}"
+        return facts
+
+    def __str__(self) -> str:
+        return ", ".join([self.phase_and_clock(), *self.facts()])
 
 
 class QuotedMachine(Record):

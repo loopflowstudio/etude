@@ -12,12 +12,22 @@ from etude.launch.source import line
 from etude.records import RunRecord
 
 
-def describe_status(status: Status, record: RunRecord) -> str:
-    where = f", machine {status.machine}" if status.machine else ""
-    where += f" ({status.hardware})" if status.hardware else ""
+def launcher_facts(status: Status, max_attempts: int) -> list[str]:
+    """Launcher details shared by a CLI status and an indexed run line."""
+    facts = status.facts()
+    if status.machine:
+        facts.append(f"machine {status.machine}")
+    if status.hardware:
+        facts[-1] += f" ({status.hardware})"
     if status.attempts:
-        where += f", {status.attempts} of {record.launch.spec.max_attempts} attempts used"
-    return str(status) + where
+        facts.append(f"{status.attempts} of {max_attempts} attempts used")
+    return facts
+
+
+def describe_status(status: Status, record: RunRecord) -> str:
+    return ", ".join(
+        [status.phase_and_clock(), *launcher_facts(status, record.launch.spec.max_attempts)]
+    )
 
 
 def show_runs(scheduler: Scheduler | PythonClient, ids: Sequence[str]) -> None:

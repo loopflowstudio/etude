@@ -35,9 +35,9 @@ from etude.errors import explain
 from etude.experiment import state_of
 from etude.identity import run_address
 from etude.jobs import EvalRunSummary, TrainingRunSummary
-from etude.launch.listing import describe_machine, describe_status, machine_warning
+from etude.launch.listing import describe_machine, launcher_facts, machine_warning
 from etude.launch.logs import render as render_logs
-from etude.launch.records import MachineStatus, Standing
+from etude.launch.records import MachineStatus, Standing, Status
 from etude.launch.server import LauncherObservation, PythonClient, selected
 from etude.launch.source import home, line
 from etude.page import Pages, read_report, render, render_run, report_sources, run_chart_data
@@ -57,7 +57,7 @@ _CLOCKS = TypeAdapter(dict[str, float])
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     address TEXT PRIMARY KEY, experiment TEXT NOT NULL, job TEXT NOT NULL, state TEXT NOT NULL,
-    last_write TEXT, launcher TEXT, launched_as TEXT, final_attempt INTEGER,
+    last_write TEXT, status TEXT, launched_as TEXT, max_attempts INTEGER,
     position TEXT NOT NULL, details TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS launcher_address ON runs(launched_as);
@@ -301,19 +301,22 @@ class ChartIndex:
                 _machines_table(db, machines) if machines is not None else None,
             ),
         )
-        for run, snapshot in self._launcher.consoles.items():
+        for item in self._launcher.runs:
+            status = item.status
+            snapshot = self._launcher.consoles.get(status.run)
+            if snapshot is None:
+                continue
             collected = max(
                 (s.observed_at for s in snapshot.streams if s.observed_at), default=None
             )
             db.execute(
                 """INSERT OR REPLACE INTO consoles(run,body,collected,final_attempt)
-                   SELECT launched_as,?,?,CASE WHEN ? THEN final_attempt END
-                   FROM runs WHERE launched_as=?""",
+                   VALUES(?,?,?,?)""",
                 (
+                    status.run,
                     render_logs(snapshot),
                     collected.isoformat() if collected else None,
-                    snapshot.settled,
-                    run,
+                    status.attempts if status.done and snapshot.settled else None,
                 ),
             )
 
@@ -333,27 +336,27 @@ class ChartIndex:
             return None
         now = datetime.now(UTC)
         state = _display_state(row, now)
-        details = [row["launcher"]] if row["launcher"] else []
-        details.append(f"last write {_age(row['last_write'], now)}")
+        status = _status(row)
+        details = [f"last write {_age(row['last_write'], now)}"]
         details.extend(_observation_ages(row, now, launcher=bool(row["launched_as"])))
         heading = (
             f'<a href="/experiments/{quote(row["experiment"])}">{escape(row["experiment"])}</a>'
-            f'<header class="head"><h1>{escape(address)}</h1><span class="pill">{escape(state)}</span></header>'
+            f'<header class="head"><h1>{escape(address)}</h1></header>'
+            f"<p>{_run_line(row, state, status)}</p>"
             f'<p class="context">{escape(" · ".join(details))}</p>'
-            f"<p>{escape(row['position'])}</p>"
         )
         if state == "no end recorded":
             heading += f"<p>No new file for at least {_SILENT // timedelta(minutes=1)} minutes.</p>"
         if self.error:
             heading += f'<p role="status">{escape(self.error)}</p>'
         # Session shutdown can still retain final logs after the run itself ended.
-        awaiting_console = row["launched_as"] and (
-            row["final_attempt"] is None or row["console_attempt"] != row["final_attempt"]
+        awaiting_console = status is not None and (
+            not status.done or row["console_attempt"] != status.attempts
         )
         if awaiting_console:
             with self._console_lock:
                 self._wanted.add(row["launched_as"])
-        if state in ("queued", "running") or awaiting_console or self.error:
+        if _is_open(status, state) or awaiting_console or self.error:
             heading += _reload()
         console = (
             "<p>Launcher observation unavailable.</p>"
@@ -376,7 +379,9 @@ class ChartIndex:
     ) -> tuple[sqlite3.Row | None, list[sqlite3.Row]]:
         # Both tables and their ages come from one generation. Leave large chart,
         # console and machine payloads out of these reads.
-        query = "SELECT experiment,address,job,state,position,launcher,final_attempt,last_write FROM runs"
+        query = (
+            "SELECT experiment,address,job,state,position,status,max_attempts,last_write FROM runs"
+        )
         with self._connect() as db:
             db.execute("BEGIN")
             observation = db.execute(
@@ -406,10 +411,11 @@ class ChartIndex:
                 written = run["last_write"]
                 if written and (latest is None or written > latest):
                     latest = written
-                if _is_open(run, state):
+                status = _status(run)
+                if _is_open(status, state):
                     address = run["address"]
-                    detail = " · ".join(filter(None, (run["position"], run["launcher"] or state)))
-                    active.append(f"<div>{_run_link(address)} · {escape(detail)}</div>")
+                    detail = _run_line(run, state, status)
+                    active.append(f"<div>{_run_link(address)} · {detail}</div>")
             totals = " · ".join(f"{counts[state]} {escape(state)}" for state in sorted(counts))
             stale |= "no end recorded" in counts
             group = opened if active else completed
@@ -423,9 +429,7 @@ class ChartIndex:
                 if rows
                 else "<p>Waiting for runs.</p>"
             )
-            ages = _observation_ages(
-                observation, now, launcher=any(row["launcher"] for row in rows)
-            )
+            ages = _observation_ages(observation, now, launcher=any(row["status"] for row in rows))
             body += f'<p class="context">{escape(" · ".join(ages))}</p>'
         else:
             body = "<p>Waiting for the first observation.</p>"
@@ -479,20 +483,18 @@ class ChartIndex:
         for row in rows:
             state = _display_state(row, now)
             stale |= state == "no end recorded"
-            active |= _is_open(row, state)
+            status = _status(row)
+            active |= _is_open(status, state)
             address = row["address"]
             body.append(
                 f"<tr><td>{escape(row['job'])}</td>"
                 f"<td>{_run_link(address)}</td>"
-                f"<td>{escape(state)}</td><td>{escape(row['position'] or '—')}</td>"
-                f"<td>{escape(row['launcher'] or '—')}</td><td>{_age(row['last_write'], now)}</td></tr>"
+                f"<td>{_run_line(row, state, status)}</td><td>{_age(row['last_write'], now)}</td></tr>"
             )
         if body:
             table = (
-                '<div class="scroll"><table><thead><tr><th>Job</th><th>Run</th><th>State</th>'
-                "<th>Clock position</th><th>Launcher</th><th>Last write</th></tr></thead><tbody>"
-                + "".join(body)
-                + "</tbody></table></div>"
+                '<div class="scroll"><table><thead><tr><th>Job</th><th>Run</th><th>Status</th>'
+                "<th>Last write</th></tr></thead><tbody>" + "".join(body) + "</tbody></table></div>"
             )
         elif observation:
             table = "<p>No runs recorded.</p>"
@@ -500,7 +502,7 @@ class ChartIndex:
             table = "<p>Waiting for the first observation.</p>"
         ages = ""
         if observation:
-            launcher = any(row["launcher"] for row in rows)
+            launcher = any(row["status"] for row in rows)
             ages = " · ".join(_observation_ages(observation, now, launcher=launcher))
         error = f'<p role="status">{escape(self.error)}</p>' if self.error else ""
         return _live_status(
@@ -532,11 +534,11 @@ def _store_run(
     db.execute(
         """
         -- EXCEPT leaves unchanged rows alone, including rows with missing launcher facts.
-        INSERT OR REPLACE INTO runs(address,experiment,job,state,last_write,launcher,
-                                    launched_as,final_attempt,position,details)
+        INSERT OR REPLACE INTO runs(address,experiment,job,state,last_write,status,
+                                    launched_as,max_attempts,position,details)
         SELECT ?,?,?,?,?,?,?,?,?,?
-        EXCEPT SELECT address,experiment,job,state,last_write,launcher,
-                      launched_as,final_attempt,position,details FROM runs WHERE address=?
+        EXCEPT SELECT address,experiment,job,state,last_write,status,
+                      launched_as,max_attempts,position,details FROM runs WHERE address=?
         """,
         (
             address,
@@ -544,9 +546,9 @@ def _store_run(
             job or "Evaluation",
             run.state,
             run.last_write.isoformat() if run.last_write else None,
-            describe_status(item.status, item.record) if item else None,
+            status.model_dump_json() if status else None,
             status.run if status else None,
-            status.attempts if status and status.done else None,
+            item.record.launch.spec.max_attempts if item else None,
             position,
             _run_details(stored, item),
             address,
@@ -567,13 +569,12 @@ def _machines_table(db: sqlite3.Connection, machines: tuple[MachineStatus, ...])
         runs = []
         for run in status.runs:
             row = db.execute(
-                "SELECT address,state,position FROM runs WHERE launched_as=?", (run,)
+                "SELECT address,state,position,status,max_attempts FROM runs WHERE launched_as=?",
+                (run,),
             ).fetchone()
             address = row["address"] if row else run
-            detail = " · ".join(filter(None, (row["state"], row["position"]))) if row else ""
-            runs.append(
-                f"<div>{_run_link(address)}{(' · ' + escape(detail)) if detail else ''}</div>"
-            )
+            detail = _run_line(row, row["state"], _status(row)) if row else ""
+            runs.append(f"<div>{_run_link(address)}{(' · ' + detail) if detail else ''}</div>")
         description = escape(describe_machine(status))
         if warning := machine_warning(status):
             description += f"<div>{escape(warning)}</div>"
@@ -589,10 +590,29 @@ def _machines_table(db: sqlite3.Connection, machines: tuple[MachineStatus, ...])
     )
 
 
-def _is_open(row: sqlite3.Row, state: str) -> bool:
-    return state in ("queued", "running") or (
-        row["launcher"] is not None and row["final_attempt"] is None
-    )
+def _status(row: sqlite3.Row) -> Status | None:
+    return Status.model_validate_json(row["status"]) if row["status"] is not None else None
+
+
+def _run_line(row: sqlite3.Row, state: str, status: Status | None) -> str:
+    parts = [f'<span class="pill">{escape(state)}</span>']
+    facts = [row["position"]]
+    if status:
+        if status.phase == "queued":
+            facts.append(status.reason)
+        elif status.done:
+            if status.outcome != state and (state, status.outcome) != ("finished", "succeeded"):
+                facts.append(status.outcome)
+            facts.append(status.cause)
+        elif status.phase != state:
+            facts.append(status.phase.replace("_", " "))
+        facts.extend(launcher_facts(status, row["max_attempts"]))
+    parts.extend(f"<span>{escape(fact)}</span>" for fact in facts if fact)
+    return " · ".join(parts)
+
+
+def _is_open(status: Status | None, state: str) -> bool:
+    return not status.done if status else state in ("queued", "running")
 
 
 def _live_status(body: str, *, active: bool, stale: bool = False) -> str:
@@ -626,7 +646,7 @@ def _status_page(title: str, status: str, *, before: str = "", after: str = "") 
 
 def _display_state(row: sqlite3.Row, now: datetime) -> str:
     state: str = row["state"]
-    if state == "running" and row["launcher"] is None and row["last_write"]:
+    if state == "running" and row["status"] is None and row["last_write"]:
         if now - datetime.fromisoformat(row["last_write"]) >= _SILENT:
             return "no end recorded"
     return state
@@ -635,8 +655,12 @@ def _display_state(row: sqlite3.Row, now: datetime) -> str:
 def _observation_ages(row: sqlite3.Row, now: datetime, *, launcher: bool) -> list[str]:
     ages = [f"indexed {_age(row['at'], now)}"]
     if launcher:
-        ages.append(f"last loop {_age(row['last_loop'], now)}")
-        if row["launcher_at"]:
+        if row["last_loop"]:
+            ages.append(f"last loop {_age(row['last_loop'], now)}")
+        if row["launcher_at"] and (
+            datetime.fromisoformat(row["at"]) - datetime.fromisoformat(row["launcher_at"])
+            > timedelta(seconds=_REFRESH)
+        ):
             ages.append(f"launcher observed {_age(row['launcher_at'], now)}")
     return ages
 
@@ -644,7 +668,7 @@ def _observation_ages(row: sqlite3.Row, now: datetime, *, launcher: bool) -> lis
 def _position(
     item: Standing | None, reached: dict[str, float], preferred: str | None, stored: RunData | None
 ) -> str:
-    clocks = (item.status.clocks if item else {}) | reached
+    clocks = reached if stored is not None or item is None else item.status.clocks
     if item and (target := item.status.until):
         limit = number(target.value)
         at = clocks.get(target.clock)

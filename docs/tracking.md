@@ -161,9 +161,11 @@ while it has unfinished launcher work or an active file-only run. After
 **Runs.** A training run draws its `report()` `perf` and `ml` panels, followed by the
 remaining metrics in first-logged order. Checkpoints show the clock positions
 at which they were saved. For a launched run, the page also shows placement,
-hardware, cost, attempts and source revision when available. `Last write`
-dates the run files, `last loop` dates the scheduler heartbeat and
-`launcher observed` dates the view's last successful launcher read.
+hardware, cost, attempts and source revision when available. All four pages
+show the launcher’s clock until run files appear, then the sealed file position.
+`Last write` dates the run files and `indexed` dates the index pass. A recorded
+scheduler heartbeat appears as `last loop`. When the last successful launcher
+read trails the index pass by more than 5 seconds, `launcher observed` dates it.
 
 Opening a launched run requests the same retained console you can read with
 `etude logs --run RUN`. The first visit can show **Waiting for retained console**
