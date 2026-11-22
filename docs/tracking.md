@@ -149,7 +149,7 @@ opened before the run appears names the source the view is watching.
 | `/experiments/NAME` | Jobs and runs with their state, clock, last write and launcher placement or queue reason, plus the experiment report |
 | `/experiments/NAME/status` | The run status table used to refresh the experiment page |
 | `/experiments/NAME/report` | The experiment's report, with a **Refresh report** button |
-| `/runs/ADDRESS` | One run's state, clock progress, curves, console, config and checkpoints |
+| `/runs/ADDRESS` | A training run’s progress, curves, console, config and checkpoints, or an evaluation’s status and link to its report |
 | `/machines` | Held machines with their pool or on-demand, state, window and cost. Each occupied slot links to its run and shows its state and clock. |
 | `/machines/status` | The inventory used to refresh the Machines page |
 
@@ -168,6 +168,9 @@ show the launcher’s clock until run files appear, then the sealed file positio
 `Last write` dates the run files and `indexed` dates the index pass. A recorded
 scheduler heartbeat appears as `last loop`. When the last successful launcher
 read trails the index pass by more than 5 seconds, `launcher observed` dates it.
+
+An evaluation run links to its experiment report for scores. A launched
+evaluation also shows its retained console and match count when available.
 
 Opening a launched run requests the same retained console you can read with
 `etude logs --run RUN`. The first visit can show **Waiting for retained console**

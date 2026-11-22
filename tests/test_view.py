@@ -493,6 +493,14 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
         assert ">baseline<" in row(html, local) and ">steps 1<" in row(html, local)
         assert ">score<" in row(html, evaluation) and ">finished<" in row(html, evaluation)
         assert "last loop 2 h ago" in html and 'src="/experiments/lab/report"' in html
+        eval_page = status("/runs/" + evaluation)
+        assert f"Evaluation · {evaluation}" in eval_page and ">finished<" in eval_page
+        assert 'href="/experiments/lab">lab experiment report</a>' in eval_page
+        assert "last write" in eval_page
+        assert all(
+            text not in eval_page
+            for text in ("No metric curves", "Checkpoints", "<h2>Config", "<h2>Console")
+        )
         overview = status("/")
         opened, completed = overview.split("<h2>Completed</h2>")
         assert 'href="/experiments/lab"' in opened and "No completed experiments." in completed

@@ -58,7 +58,7 @@ _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     address TEXT PRIMARY KEY, experiment TEXT NOT NULL, job TEXT NOT NULL, state TEXT NOT NULL,
     last_write TEXT, status TEXT, launched_as TEXT, max_attempts INTEGER,
-    position TEXT NOT NULL, details TEXT NOT NULL
+    position TEXT NOT NULL, kind TEXT NOT NULL, details TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS launcher_address ON runs(launched_as);
 CREATE INDEX IF NOT EXISTS experiment_runs ON runs(experiment, address);
@@ -339,9 +339,13 @@ class ChartIndex:
         status = _status(row)
         details = [f"last write {_age(row['last_write'], now)}"]
         details.extend(_observation_ages(row, now, launcher=bool(row["launched_as"])))
+        evaluation = row["kind"] == "evaluation"
+        experiment = escape(row["experiment"])
+        link = f"{experiment} experiment report" if evaluation else experiment
+        title = f"Evaluation · {escape(address)}" if evaluation else escape(address)
         heading = (
-            f'<a href="/experiments/{quote(row["experiment"])}">{escape(row["experiment"])}</a>'
-            f'<header class="head"><h1>{escape(address)}</h1></header>'
+            f'<a href="/experiments/{quote(row["experiment"])}">{link}</a>'
+            f'<header class="head"><h1>{title}</h1></header>'
             f"<p>{_run_line(row, state, status)}</p>"
             f'<p class="context">{escape(" · ".join(details))}</p>'
         )
@@ -369,7 +373,10 @@ class ChartIndex:
                 console = f'<pre class="console" tabindex="0" aria-label="Retained console">{escape(row["body"])}</pre>'
                 if row["collected"]:
                     console = f"<p>Last collected {_age(row['collected'], now)}</p>" + console
-        below = f'<section class="sec"><h2>Console</h2>{console}</section>' + row["details"]
+        below = f'<section class="sec"><h2>Console</h2>{console}</section>'
+        if evaluation:
+            return _document(address, heading + (below if status else ""))
+        below += row["details"]
         if row["payload"] is None:
             return _document(address, heading + "<p>No metric curves recorded.</p>" + below)
         return render_run(address, row["payload"], heading, below)
@@ -535,10 +542,10 @@ def _store_run(
         """
         -- EXCEPT leaves unchanged rows alone, including rows with missing launcher facts.
         INSERT OR REPLACE INTO runs(address,experiment,job,state,last_write,status,
-                                    launched_as,max_attempts,position,details)
-        SELECT ?,?,?,?,?,?,?,?,?,?
+                                    launched_as,max_attempts,position,kind,details)
+        SELECT ?,?,?,?,?,?,?,?,?,?,?
         EXCEPT SELECT address,experiment,job,state,last_write,status,
-                      launched_as,max_attempts,position,details FROM runs WHERE address=?
+                      launched_as,max_attempts,position,kind,details FROM runs WHERE address=?
         """,
         (
             address,
@@ -550,7 +557,8 @@ def _store_run(
             status.run if status else None,
             item.record.launch.spec.max_attempts if item else None,
             position,
-            _run_details(stored, item),
+            "training" if isinstance(run, TrainingRunSummary) else "evaluation",
+            _run_details(stored, item) if isinstance(run, TrainingRunSummary) else "",
             address,
         ),
     )
