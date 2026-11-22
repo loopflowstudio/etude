@@ -63,12 +63,15 @@ reads as `seat`. Results from different environments are never pooled.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import itertools
 import json
 import os
+import shutil
 import tempfile
 import threading
+import time
 import warnings
 from collections import defaultdict
 from collections.abc import Container, Iterable, Iterator, Mapping, Sequence
@@ -83,6 +86,7 @@ from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from etude.carriage import EVAL_BLOCK_INDEX, EVAL_BLOCK_PACK
 from etude.checkpoints import CheckpointRecord
+from etude.deadline import remaining
 from etude.errors import EtudeError
 from etude.eval.block import (
     BLOCK_FILE,
@@ -160,38 +164,212 @@ def statsdb(
 
     `store` is a directory or bucket searched at any depth; by default, where
     runs are written on this computer. `rebuild` deletes the kept file first,
-    so everything is read again. One process opens a kept file at a time:
-    another open raises `EtudeError("statsdb_in_use")`.
+    so everything is read again. Returned connections are read-only so concurrent
+    renders and queries share one kept file without blocking; only catch-up
+    writes, publishing a new file atomically when readers hold the old one.
 
     `rollups` are held from now on beside those blocks bring: a block that
     lacks one has its partial totals summed once from its tables and kept
     here, never written to the store. A name held with another definition
     raises `rollup_conflict`.
     """
-    # Imported here: DuckDB is the optional `eval` extra.
-    import duckdb  # noqa: PLC0415
+    return _open_statsdb(experiment, store, rebuild=rebuild, rollups=rollups)
 
+
+def _open_statsdb(
+    experiment: str,
+    store: Storage | Path | str | None = None,
+    *,
+    rebuild: bool = False,
+    rollups: Sequence[Rollup] = (),
+    keys: Sequence[str] | None = None,
+) -> duckdb.DuckDBPyConnection:
+    """Open `experiment`'s kept database read-only, catching up first only when needed."""
     if not SAFE_NAME.match(experiment):
         raise EtudeError("unsafe_run_or_experiment_name", 422)
     storage = as_storage(default_root() if store is None else store)
     path = _kept_path(experiment, storage)
-    if rebuild:
-        path.unlink(missing_ok=True)
+    listed_keys = sorted(storage.keys("") if keys is None else keys)
+    if not rebuild and path.exists():
+        db = _connect_read_only(path)
+        try:
+            if not _needs_catch_up(db, experiment, listed_keys, rollups):
+                return db
+        except BaseException:
+            db.close()
+            raise
+        db.close()
     path.parent.mkdir(parents=True, exist_ok=True)
+    with _statsdb_lock(path, exclusive=True):
+        if not rebuild and path.exists():
+            db = _connect_read_only(path)
+            try:
+                if not _needs_catch_up(db, experiment, listed_keys, rollups):
+                    return db
+            except BaseException:
+                db.close()
+                raise
+            db.close()
+        _write_catch_up(path, experiment, storage, rollups, listed_keys, rebuild=rebuild)
+    return _connect_read_only(path)
+
+
+@contextmanager
+def _statsdb_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
+    """Coordinate writers and readers waiting on a brief in-place catch-up."""
+    lock_path = path.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    with lock_path.open("a") as lock:
+        while True:
+            remaining()
+            try:
+                fcntl.flock(lock, mode | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                time.sleep(remaining(0.05) or 0.05)
+        yield
+
+
+def _connect_read_only(path: Path) -> duckdb.DuckDBPyConnection:
+    """Open `path` read-only, waiting once if an Etude writer is finishing an in-place catch-up."""
+    # Imported here: DuckDB is the optional `eval` extra.
+    import duckdb  # noqa: PLC0415
+
+    target = path.resolve()
     try:
-        db = duckdb.connect(path)
+        return duckdb.connect(target, read_only=True)
     except duckdb.IOException as locked:
-        raise EtudeError("statsdb_in_use", 409) from locked
-    if _schema(db) not in (None, SCHEMA):
-        db.close()
-        path.unlink()
-        db = duckdb.connect(path)
+        with _statsdb_lock(path, exclusive=False):
+            pass
+        try:
+            return duckdb.connect(path.resolve(), read_only=True)
+        except duckdb.IOException:
+            raise EtudeError("statsdb_in_use", 409) from locked
+
+
+def _write_catch_up(
+    path: Path,
+    experiment: str,
+    storage: Storage,
+    rollups: Sequence[Rollup],
+    keys: Sequence[str],
+    *,
+    rebuild: bool,
+) -> None:
+    """Catch `path` up in place when uncontested, or publish a new generation when readers hold it."""
+    # Imported here: DuckDB is the optional `eval` extra.
+    import duckdb  # noqa: PLC0415
+
+    current = path.resolve() if path.exists() else None
+    if not rebuild and current is not None:
+        try:
+            db = duckdb.connect(current)
+        except (duckdb.IOException, duckdb.ConnectionException):
+            db = None
+        if db is not None:
+            try:
+                if _schema(db) in (None, SCHEMA):
+                    _catch_up(db, experiment, storage, rollups, keys=keys)
+                    db.execute("checkpoint")
+                    return
+            finally:
+                db.close()
+    generation = path.with_name(f"{path.stem}.g{time.time_ns()}.{os.getpid()}.duckdb")
+    wal = generation.with_name(generation.name + ".wal")
+    link = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.link")
     try:
-        _catch_up(db, experiment, storage, rollups)
+        generation.unlink(missing_ok=True)
+        wal.unlink(missing_ok=True)
+        if not rebuild and current is not None:
+            shutil.copy2(current, generation)
+            source_wal = current.with_name(current.name + ".wal")
+            if source_wal.exists():
+                shutil.copy2(source_wal, wal)
+        db = duckdb.connect(generation)
+        try:
+            if _schema(db) not in (None, SCHEMA):
+                db.close()
+                generation.unlink(missing_ok=True)
+                wal.unlink(missing_ok=True)
+                db = duckdb.connect(generation)
+            _catch_up(db, experiment, storage, rollups, keys=keys)
+            db.execute("checkpoint")
+        finally:
+            db.close()
+        wal.unlink(missing_ok=True)
+        link.unlink(missing_ok=True)
+        # Swap a symlink to the new generation so in-process and cross-process readers get a fresh
+        # realpath while open readers keep using the previous generation's inode until close.
+        link.symlink_to(generation.name)
+        os.replace(link, path)
+        if current is not None and current != path and current != generation:
+            current.unlink(missing_ok=True)
+            current.with_name(current.name + ".wal").unlink(missing_ok=True)
+        path.with_name(path.name + ".wal").unlink(missing_ok=True)
     except BaseException:
-        db.close()
+        link.unlink(missing_ok=True)
+        generation.unlink(missing_ok=True)
+        wal.unlink(missing_ok=True)
         raise
-    return db
+
+
+def _needs_catch_up(
+    db: duckdb.DuckDBPyConnection,
+    experiment: str,
+    keys: Sequence[str],
+    rollups: Sequence[Rollup],
+) -> bool:
+    """Whether `keys` or `rollups` contain anything `db` has not ingested yet."""
+    if _schema(db) != SCHEMA:
+        return True
+    if rollups:
+        held_rollups = dict(db.execute("select name, digest from kept.rollups").fetchall())
+        if any(held_rollups.get(rollup.name) != rollup.digest for rollup in rollups):
+            return True
+    listed = set(keys)
+    folders_by_run = run_folders(keys)
+    declarations = dict(db.execute("select folder, experiment from kept.declarations").fetchall())
+    ours_by_run: dict[str, list[str]] = {}
+    for run, folders in folders_by_run.items():
+        ours: list[str] = []
+        for folder in folders:
+            if folder not in declarations:
+                if folder + "run.json" in listed:
+                    return True
+                continue
+            if declarations[folder] == experiment:
+                ours.append(folder)
+        if ours:
+            ours_by_run[run] = ours
+    if not ours_by_run:
+        return False
+    kinds = dict(db.execute("select run, kind from kept.runs").fetchall())
+    envs = {run for (run,) in db.execute("select run from kept.environments").fetchall()}
+    seen_by_run: dict[str, set[str]] = {}
+    for run, name in db.execute("select run, name from kept.seen").fetchall():
+        seen_by_run.setdefault(run, set()).add(name)
+    for run, folders in ours_by_run.items():
+        if run not in kinds:
+            return True
+        eval_run = kinds[run] == KIND
+        if eval_run and run not in envs:
+            if any(folder + _ENVIRONMENT_FILE in listed for folder in folders):
+                return True
+            continue
+        seen = seen_by_run.get(run, set())
+        for place in folders:
+            prefix_len = len(place)
+            for key in under(keys, place):
+                if key[prefix_len:] not in seen:
+                    return True
+    if db.execute(
+        "select 1 from kept.rollups r cross join kept.blocks b"
+        " anti join kept.summed s on s.name = r.name and s.run = b.run and s.block = b.block"
+        " limit 1"
+    ).fetchone():
+        return True
+    return False
 
 
 def _kept_path(experiment: str, storage: Storage) -> Path:
@@ -202,7 +380,7 @@ def _kept_path(experiment: str, storage: Storage) -> Path:
 
 def _schema(db: duckdb.DuckDBPyConnection) -> int | None:
     found = db.execute(
-        "select 1 from information_schema.tables where table_schema = 'kept' and table_name = 'statsdb'"
+        "select 1 from duckdb_tables() where schema_name = 'kept' and table_name = 'statsdb'"
     ).fetchone()
     if found is None:
         return None
@@ -264,7 +442,12 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
 
 
 def _catch_up(
-    db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage, rollups: Sequence[Rollup]
+    db: duckdb.DuckDBPyConnection,
+    experiment: str,
+    storage: Storage,
+    rollups: Sequence[Rollup],
+    *,
+    keys: Sequence[str] | None = None,
 ) -> None:
     """Read what arrived in `storage` since the last open, in one transaction.
 
@@ -272,7 +455,7 @@ def _catch_up(
     Taking in a block is a fixed number of statements however many matches
     and blobs it holds: rows arrive as one file each (`etude.eval.block.stage`).
     """
-    keys = sorted(storage.keys(""))
+    keys = sorted(storage.keys("") if keys is None else keys)
     listed = set(keys)
     folders_by_run = run_folders(keys)
     db.execute("begin")
@@ -283,32 +466,34 @@ def _catch_up(
         for rollup in rollups:
             _hold(db, rollup)
         declarations = dict(
-            db.execute(
-                "select folder, experiment from kept.declarations "
-                "where folder in (select unnest(?::VARCHAR[]))",
-                [[folder for folders in folders_by_run.values() for folder in folders]],
-            ).fetchall()
+            db.execute("select folder, experiment from kept.declarations").fetchall()
         )
+        kinds = dict(db.execute("select run, kind from kept.runs").fetchall())
+        envs = {run for (run,) in db.execute("select run from kept.environments").fetchall()}
+        seen_by_run: dict[str, set[str]] = {}
+        for run, name in db.execute("select run, name from kept.seen").fetchall():
+            seen_by_run.setdefault(run, set()).add(name)
         changed = created
         with tempfile.TemporaryDirectory(prefix="etude-statsdb-") as copies:
             for run, folders in sorted(folders_by_run.items()):
                 folders = [
                     folder
                     for folder in folders
-                    if _ours(db, storage, run, folder, listed, experiment, declarations)
+                    if _ours(db, storage, run, folder, listed, experiment, declarations, kinds)
                 ]
                 if not folders:
                     continue
-                eval_run = _kind(db, run) == KIND
-                if eval_run and not _environment(db, storage, run, folders):
-                    continue  # an eval run counts once its environment arrives
+                eval_run = kinds[run] == KIND
+                if eval_run and run not in envs:
+                    if not _environment(db, storage, run, folders):
+                        continue  # an eval run counts once its environment arrives
+                    envs.add(run)
                 # One run may be copied to several places; a file's name is the same in each.
                 located: dict[str, str] = {}
                 for place in folders:
                     for key in under(keys, place):
                         located.setdefault(key[len(place) :], place)
-                seen = {name for (name,) in db.execute(
-                    "select name from kept.seen where run = ?", [run]).fetchall()}  # fmt: skip
+                seen = seen_by_run.get(run, set())
                 new = sorted(located.keys() - seen)
                 if eval_run:
                     for name in new:
@@ -328,12 +513,13 @@ def _catch_up(
                         _ended(db, storage, run, located[outcome], outcome)
                         changed = True
                     _sum_missing(db, storage, run, located, Path(copies), experiment=experiment)
-                else:
+                elif new:
                     changed |= _training_checkpoints(db, storage, run, experiment, located, new)
-                _put(db, "kept.seen", {"run": "VARCHAR", "name": "VARCHAR"},
-                     [[run, name] for name in new])  # fmt: skip
-                # A name seen before passed this check when it was first read.
-                _refuse_unconverted(db, run, new)
+                if new:
+                    _put(db, "kept.seen", {"run": "VARCHAR", "name": "VARCHAR"},
+                         [[run, name] for name in new])  # fmt: skip
+                    # A name seen before passed this check when it was first read.
+                    _refuse_unconverted(db, run, new)
         if changed:
             _summaries(db)
         db.execute("commit")
@@ -349,7 +535,8 @@ def _ours(
     folder: str,
     listed: Container[str],
     experiment: str,
-    declarations: Mapping[str, str],
+    declarations: dict[str, str],
+    kinds: dict[str, str | None],
 ) -> bool:
     """Select a folder by its own declaration; retain each declaration once."""
     if folder in declarations:
@@ -357,9 +544,11 @@ def _ours(
     declaration = declared(storage, folder, listed)
     if declaration is None:
         return False
+    declarations[folder] = declaration.experiment
     db.execute("insert into kept.declarations values (?, ?)", [folder, declaration.experiment])
     if declaration.experiment != experiment:
         return False
+    kinds.setdefault(run, declaration.kind)
     db.execute(
         "insert into kept.runs values (?, ?, ?, null) on conflict do nothing",
         [run, experiment, declaration.kind],
@@ -404,12 +593,6 @@ def _environment(
         )
         return True
     return False
-
-
-def _kind(db: duckdb.DuckDBPyConnection, run: str) -> str:
-    found = db.execute("select kind from kept.runs where run = ?", [run]).fetchone()
-    assert found is not None, "the run's declaration was read first"
-    return str(found[0])
 
 
 def _training_checkpoints(
@@ -869,7 +1052,7 @@ def _sum_missing(
 def _exists(db: duckdb.DuckDBPyConnection, schema: str, table: str) -> bool:
     return bool(
         db.execute(
-            f"select 1 from information_schema.tables where table_schema = {quote(schema)}"
+            f"select 1 from duckdb_tables() where schema_name = {quote(schema)}"
             f" and table_name = {quote(table)}"
         ).fetchone()
     )
@@ -1157,7 +1340,7 @@ class Comparison(Record):
     matches: int
 
 
-def compare(
+def _compare_rows(
     db: duckdb.DuckDBPyConnection,
     *,
     table: str,
@@ -1165,39 +1348,47 @@ def compare(
     per: str | None = None,
     where: str | None = None,
     by: Sequence[str] = (),
-) -> list[Comparison]:
-    """Every subject against every opponent, and against all, on `table`'s `value` column.
+    has_groups: bool | None = None,
+) -> list[tuple[object, ...]]:
+    """Per-match `(environment, subject, opponent, *by, run, match, numerator, denominator, rows)`.
 
-    The value is sum(`value`) / sum(`per`), or the mean of `value` without
-    `per`, over rows matching the SQL condition `where`, split by the columns
-    `by`. The 95% interval is a percentile bootstrap resampling whole matches,
-    so a match's correlated games move together; its seed is fixed.
+    Aggregates `table` by `(run, match, seat, "group", *by)` before joining seats and
+    groups so large game tables collapse to one row per match-seat before expansion.
     """
     for name in (table, value, *([per] if per else []), *by):
         if not IDENTIFIER.match(name):
             raise EtudeError("column_name_refused", 422) from ValueError(name)
     if table in ETUDE_TABLES:
         raise EtudeError("compare_needs_an_author_table", 422)
+    if has_groups is None:
+        has_groups = db.execute('select 1 from "groups" limit 1').fetchone() is not None
+    by_cols = "".join(f', "{name}"' for name in by)
     split = "".join(f', r."{name}"' for name in by)
-    found = db.execute(
-        f"""
+    per_expr = f'"{per}"' if per else "1"
+    if has_groups:
+        query = f"""
         with r as (
-            select row_number() over () as _row, run, match, seat, "group",
-                cast("{value}" as DOUBLE) as _value,
-                cast({f'"{per}"' if per else 1} as DOUBLE) as _per
-                {"".join(f', "{name}"' for name in by)}
+            select run, match, seat, "group" {by_cols},
+                sum(cast("{value}" as DOUBLE)) as _value,
+                sum(cast({per_expr} as DOUBLE)) as _per,
+                count(*) as _rows
             from "{table}"
             where "{value}" is not null and ({where or "true"})
+            group by all
+        ),
+        r_id as (
+            select row_number() over () as _row, * from r
         ),
         teams as (
             select g.run, g.match, g."group", list(s.player order by s.player) as team
             from "groups" g join seats s using (run, match, seat)
+            where (g.run, g.match) in (select distinct run, match from r)
             group by all
         ),
         subjects as (
-            select r.*, [s.player] as subject from r join seats s using (run, match, seat)
+            select r.*, [s.player] as subject from r_id r join seats s using (run, match, seat)
             union all by name
-            select r.*, t.team as subject from r join teams t using (run, match, "group")
+            select r.*, t.team as subject from r_id r join teams t using (run, match, "group")
         ),
         opponents as (
             select distinct x._row, [s.player] as opponent
@@ -1215,30 +1406,122 @@ def compare(
             select x.*, o.opponent from subjects x join opponents o using (_row)
         )
         select n.environment, r.subject, r.opponent {split}, r.run, r.match,
-            sum(r._value) as numerator, sum(r._per) as denominator, count(*) as rows
+            sum(r._value) as numerator, sum(r._per) as denominator, sum(r._rows) as rows
         from pairs r join runs n using (run)
         group by all
         """
-    ).fetchall()
+    else:
+        query = f"""
+        with r as (
+            select run, match, seat {by_cols},
+                sum(cast("{value}" as DOUBLE)) as _value,
+                sum(cast({per_expr} as DOUBLE)) as _per,
+                count(*) as _rows
+            from "{table}"
+            where "{value}" is not null and seat is not null and ({where or "true"})
+            group by all
+        ),
+        subjects as (
+            select r.*, [s.player] as subject from r join seats s using (run, match, seat)
+        ),
+        match_opponents as (
+            select distinct x.run, x.match, x.seat, [s.player] as opponent
+            from (select distinct run, match, seat from subjects) x
+            join seats s on s.run = x.run and s.match = x.match and s.seat <> x.seat
+        ),
+        pairs as (
+            select x.*, null::VARCHAR[] as opponent from subjects x
+            union all
+            select x.*, o.opponent from subjects x join match_opponents o using (run, match, seat)
+        )
+        select n.environment, r.subject, r.opponent {split}, r.run, r.match,
+            sum(r._value) as numerator, sum(r._per) as denominator, sum(r._rows) as rows
+        from pairs r join runs n using (run)
+        group by all
+        """
+    return db.execute(query).fetchall()
+
+
+def _estimate_groups[K](
+    units: Mapping[K, Mapping[tuple[str, str], tuple[float, float]]],
+) -> dict[K, Estimate]:
+    """Estimate every group's ratio and bootstrap interval, batching groups of equal unit count."""
+    by_size: dict[int, list[K]] = defaultdict(list)
+    for key, matches in units.items():
+        if matches:
+            by_size[len(matches)].append(key)
+    results: dict[K, Estimate] = {}
+    for size, keys in by_size.items():
+        if size == 1:
+            for key in keys:
+                ((numerator, denominator),) = units[key].values()
+                if denominator != 0.0:
+                    results[key] = Estimate(float(numerator / denominator), None)
+            continue
+        weights = _weights(size)
+        # Bound temporary (REPLICATES x chunk) matrix size while vectorizing BLAS multiplies.
+        chunk_size = 2048
+        for offset in range(0, len(keys), chunk_size):
+            batch = keys[offset : offset + chunk_size]
+            numerators = np.empty((size, len(batch)), dtype=np.float64)
+            denominators = np.empty((size, len(batch)), dtype=np.float64)
+            for col, key in enumerate(batch):
+                matches = units[key]
+                for row, match_key in enumerate(sorted(matches)):
+                    numerators[row, col], denominators[row, col] = matches[match_key]
+            opportunities = denominators.sum(axis=0)
+            held = np.flatnonzero(opportunities)
+            if not len(held):
+                continue
+            num_h = numerators[:, held]
+            den_h = denominators[:, held]
+            values = num_h.sum(axis=0) / opportunities[held]
+            resampled = weights @ den_h
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ratios = np.where(resampled > 0, (weights @ num_h) / resampled, np.nan)
+            lows, highs = _percentiles(ratios, (2.5, 97.5))
+            for idx, col in enumerate(held.tolist()):
+                results[batch[col]] = Estimate(
+                    float(values[idx]), (float(lows[idx]), float(highs[idx]))
+                )
+    return results
+
+
+def compare(
+    db: duckdb.DuckDBPyConnection,
+    *,
+    table: str,
+    value: str,
+    per: str | None = None,
+    where: str | None = None,
+    by: Sequence[str] = (),
+) -> list[Comparison]:
+    """Every subject against every opponent, and against all, on `table`'s `value` column.
+
+    The value is sum(`value`) / sum(`per`), or the mean of `value` without
+    `per`, over rows matching the SQL condition `where`, split by the columns
+    `by`. The 95% interval is a percentile bootstrap resampling whole matches,
+    so a match's correlated games move together; its seed is fixed.
+    """
+    found = _compare_rows(db, table=table, value=value, per=per, where=where, by=by)
     # Per comparison, per match (run, match), its resampling unit: [numerator, denominator];
     # and the rows counted.
     units: dict[tuple[object, ...], dict[tuple[str, str], tuple[float, float]]] = {}
     rows: dict[tuple[object, ...], int] = {}
     for environment, subject, opponent, *rest in found:
         values, (run, match, numerator, denominator, count) = rest[: len(by)], rest[len(by) :]
-        held = None if opponent is None else tuple(opponent)
-        key = (environment, tuple(subject), held, *values)
-        units.setdefault(key, {})[(run, match)] = (float(numerator), float(denominator))
-        rows[key] = rows.get(key, 0) + count
+        held = None if opponent is None else tuple(cast(Sequence[str], opponent))
+        key = (environment, tuple(cast(Sequence[str], subject)), held, *values)
+        units.setdefault(key, {})[(str(run), str(match))] = (
+            float(cast(float, numerator)),
+            float(cast(float, denominator)),
+        )
+        rows[key] = rows.get(key, 0) + int(cast(int, count))
+    estimated = _estimate_groups(units)
     comparisons: list[Comparison] = []
     for key in sorted(units, key=lambda k: tuple("" if v is None else repr(v) for v in k)):
-        matches = units[key]
-        [estimated] = estimate(
-            list(matches),
-            [[numerator] for numerator, _ in matches.values()],
-            [[denominator] for _, denominator in matches.values()],
-        )
-        if estimated is None:
+        result = estimated.get(key)
+        if result is None:
             continue
         environment, subject, opponent, *values = key
         comparisons.append(
@@ -1248,8 +1531,8 @@ def compare(
                 opponent=cast(tuple[str, ...] | None, opponent),
                 # DuckDB returns plain values for the author's scalar columns.
                 split=dict(zip(by, cast(list[JsonValue], values))),
-                value=estimated.value,
-                interval=estimated.interval,
+                value=result.value,
+                interval=result.interval,
                 rows=rows[key],
                 matches=len(units[key]),
             )

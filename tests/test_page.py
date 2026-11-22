@@ -638,7 +638,7 @@ def eval_jobs(state):
     page = build(measured, file)
     assert [(c.tournament, c.unplayed) for c in page.coverage] == [("first", 2), ("second", 2)]
     assert measured.requests == 16  # 12 discovery reads, four existing statsdb reads
-    assert measured.listings == 2
+    assert measured.listings == 1
     for seed in (0, 1):
         # Two tournaments share the external checkpoint/outcome reads. Statsdb separately
         # reads declarations to retain its own experiment membership.

@@ -20,6 +20,7 @@ import math
 import statistics
 from collections import Counter
 from collections.abc import Sequence
+from contextlib import ExitStack
 from typing import Literal
 
 import numpy as np
@@ -360,36 +361,63 @@ def _timers(run: RunData, prefix: str) -> Timers | None:
 def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Training:
     """What the page draws from these runs; `prefixes` name the timer trees to sum."""
     clocks: dict[str, Clock] = {}
+    run_clocks: dict[str, set[str]] = {}
     for run in data:
+        declared_names: set[str] = set()
         for declared in run.clocks:
             clocks.setdefault(declared.name, declared)
+            declared_names.add(declared.name)
+        run_clocks[run.name] = declared_names
     clocks.update({clock.name: clock for clock in BUILT_IN_CLOCKS})
     metrics: dict[str, None] = {}
+    run_metrics: dict[str, set[str]] = {}
     for run in data:
-        metrics.update(dict.fromkeys(run.metrics()))
+        names = run.metrics()
+        metrics.update(dict.fromkeys(names))
+        run_metrics[run.name] = set(names)
     jobs = _jobs(data)
-    job_of = {name: job.name for job in jobs for name in job.runs}
+    by_name = {run.name: run for run in data}
+    unique_prefixes = tuple(dict.fromkeys(prefixes))
+    traces_by_key: dict[tuple[str, str], dict[str, Trace]] = {}
+    bands_by_key: dict[tuple[str, str], list[Trace]] = {}
+    timers_by_key: dict[tuple[str, str], Timers] = {}
+    # Process one job's runs at a time so each block is read once and freed before the next job.
+    for job in jobs:
+        members = [by_name[name] for name in job.runs]
+        job_metrics = [
+            metric for metric in metrics if any(metric in run_metrics[r.name] for r in members)
+        ]
+        with ExitStack() as stack:
+            for run in members:
+                stack.enter_context(run._reading_blocks())
+            for clock in clocks:
+                for metric in job_metrics:
+                    present: list[tuple[RunData, Buckets]] = []
+                    for run in members:
+                        if metric not in run_metrics[run.name]:
+                            continue
+                        reduced = run.chart(metric, clock, BUCKETS)
+                        if len(reduced):
+                            present.append((run, reduced))
+                            if clock in BUILT_IN_NAMES or clock in run_clocks[run.name]:
+                                traces_by_key.setdefault((clock, metric), {})[run.name] = _trace(
+                                    run, reduced
+                                )
+                    if (band := _band(job.name, present, metric, clock)) is not None:
+                        bands_by_key.setdefault((clock, metric), []).append(band)
+            for prefix in unique_prefixes:
+                for run in members:
+                    if (found := _timers(run, prefix)) is not None:
+                        timers_by_key[(prefix, run.name)] = found
     series: dict[str, dict[str, tuple[Trace, ...]]] = {}
     bands: dict[str, dict[str, tuple[Trace, ...]]] = {}
     for clock in clocks:
         for metric in metrics:
-            # The traces and the seed band's span both use each run's own bucket endpoints.
-            charts: dict[str, list[tuple[RunData, Buckets]]] = {job.name: [] for job in jobs}
-            traces = []
-            for run in data:
-                reduced = run.chart(metric, clock, BUCKETS)
-                if len(reduced):
-                    charts[job_of[run.name]].append((run, reduced))
-                    if clock in BUILT_IN_NAMES or clock in {c.name for c in run.clocks}:
-                        traces.append(_trace(run, reduced))
-            if traces:
-                series.setdefault(clock, {})[metric] = tuple(traces)
-            means = [
-                band
-                for job, present in charts.items()
-                if (band := _band(job, present, metric, clock)) is not None
-            ]
-            if means:
+            if (by_run := traces_by_key.get((clock, metric))) is not None:
+                ordered = tuple(by_run[run.name] for run in data if run.name in by_run)
+                if ordered:
+                    series.setdefault(clock, {})[metric] = ordered
+            if (means := bands_by_key.get((clock, metric))) is not None:
                 bands.setdefault(clock, {})[metric] = tuple(means)
     return Training(
         clocks=tuple(clocks.values()),
@@ -400,9 +428,9 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
         series=series,
         bands=bands,
         timers=tuple(
-            found
-            for prefix in dict.fromkeys(prefixes)
+            timers_by_key[(prefix, run.name)]
+            for prefix in unique_prefixes
             for run in data
-            if (found := _timers(run, prefix)) is not None
+            if (prefix, run.name) in timers_by_key
         ),
     )

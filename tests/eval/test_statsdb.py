@@ -455,3 +455,36 @@ def test_legacy_queued_evaluation_keeps_its_workers_original_checkpoint_identity
     )
     (result,) = hold_group(EvalGroup(evaluations=(spec,)), directory=tmp_path)
     assert result.played == 0 and result.skipped == 1
+
+
+def test_statsdb_allows_concurrent_readers_and_catches_up_while_a_reader_is_open(
+    tmp_path: Path,
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    players = pair(tmp_path)
+    play_matches(
+        experiment="cards",
+        environment=DUEL,
+        play=play,
+        matches=deals(players, 0, 1),
+        run="a",
+        directory=tmp_path / "a",
+        storages=[bucket],
+    )
+    with statsdb("cards", bucket) as reader_one, statsdb("cards", bucket) as reader_two:
+        assert reader_one.sql("select count(*) from matches").fetchone() == (2,)
+        assert reader_two.sql("select count(*) from matches").fetchone() == (2,)
+        # New results arrive while readers hold the previous snapshot open.
+        play_matches(
+            experiment="cards",
+            environment=DUEL,
+            play=play,
+            matches=deals(players, 2),
+            run="b",
+            directory=tmp_path / "b",
+            storages=[bucket],
+        )
+        with statsdb("cards", bucket) as updated:
+            assert updated.sql("select count(*) from matches").fetchone() == (3,)
+        # Existing readers keep reading their snapshot undisturbed.
+        assert reader_one.sql("select count(*) from matches").fetchone() == (2,)

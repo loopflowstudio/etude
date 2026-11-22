@@ -71,8 +71,9 @@ def test_seed_band_reuses_the_run_traces_to_find_its_span(tmp_path: Path) -> Non
     assert [trace.mean for trace in training.series["step"]["loss"]] == [[0, 2], [2, 6]]
     (band,) = training.bands["step"]["loss"]
     assert band.mean == [1, 2, 6] and band.seeds == [2, 1, 1]
-    # Two arrays per seed for its own trace, then two on the shared span.
-    assert measured.ranges == 8
+    # Each seed's block is loaded once in full during training(), never via per-array range reads.
+    assert measured.ranges == 0
+    assert sum(key.endswith(".blk") for key in measured.got) == 4  # describe + one load per seed
 
 
 def test_a_folder_listed_without_a_declaration_is_not_asked_for_one(tmp_path: Path) -> None:
@@ -817,14 +818,17 @@ def test_watched_reports_read_each_bucket_file_once_per_computer(tmp_path: Path)
         first = build(S3Storage("etude-watched", client=client), file)
         assert 0 < client.bytes <= written
         read_once = client.bytes
+        requests_once = client.requests
         for _ in range(5):
             assert build(S3Storage("etude-watched", client=client), file) == first
         assert client.bytes == read_once
+        assert client.requests == requests_once
         # Kept between builds, a page is checked by publication alone while nothing changes.
         pages = Pages(S3Storage("etude-watched", client=client))
         for _ in range(3):
             assert pages.build(file) == first
         assert client.bytes == read_once
+        assert client.requests == requests_once
 
 
 def test_a_long_run_uploads_a_small_multiple_of_what_it_finally_stores(tmp_path: Path) -> None:
@@ -1048,3 +1052,25 @@ def test_placing_a_checkpoint_verifies_and_reuses_its_bytes(
         with pytest.raises(ContentMismatch):
             place_artifact(wrong, tmp_path / "refused")
         assert not (tmp_path / "refused").exists()
+
+
+def test_parallel_s3_versions_lists_truncated_nested_bucket_completely(tmp_path: Path) -> None:
+    boto3 = pytest.importorskip("boto3")
+    with mock_aws():
+        client = boto3.client("s3", region_name="us-east-1")
+        client.create_bucket(Bucket="big")
+        expected: set[str] = set()
+        # Exceed S3's 1,000-object page limit across top-level runs and >32 nested eval runs.
+        for i in range(4):
+            key = f"jobs/exp/train-{i}/run.json"
+            client.put_object(Bucket="big", Key=key, Body=b"{}")
+            expected.add(key.removeprefix("jobs/exp/"))
+        for i in range(40):
+            for j in range(26):
+                key = f"jobs/exp/exp/eval-{i:02d}/b-{j:02d}.json"
+                client.put_object(Bucket="big", Key=key, Body=b"{}")
+                expected.add(key.removeprefix("jobs/exp/"))
+        storage = S3Storage("big", "jobs/exp", client=client, cache=Cache(tmp_path / "cache"))
+        listed = storage.versions("")
+        assert set(listed) == expected
+        assert len(listed) == 4 + 40 * 26

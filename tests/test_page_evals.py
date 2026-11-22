@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from hashlib import sha256
 from pathlib import Path
 
+import duckdb
 import pytest
 from moto import mock_aws
 
@@ -19,7 +20,7 @@ from etude.controller.advance import advance
 from etude.controller.declarations import read_experiment
 from etude.errors import EtudeError
 from etude.eval.match import environment
-from etude.eval.query import compare, statsdb
+from etude.eval.query import _kept_path, compare, statsdb
 from etude.eval.records import (
     Benchmark,
     CheckpointPlayer,
@@ -483,10 +484,11 @@ def test_mixed_execution_fills_requested_games_and_replays_count_once(
             "select m.run, m.seed, m.execution, s.commit from matches m join seats s"
             " using (run, match) where s.seat = 0 order by m.run"
         ).fetchall()
-        # A schema-8 cache has no execution column; rebuilding must recover provenance.
-        db.execute("drop index matches_identity")
-        db.execute("alter table matches drop column execution")
-        db.execute("update kept.statsdb set schema = 8")
+    # A schema-8 cache has no execution column; rebuilding must recover provenance.
+    with duckdb.connect(_kept_path("lab", DirectoryStorage(runs))) as legacy:
+        legacy.execute("drop index matches_identity")
+        legacy.execute("alter table matches drop column execution")
+        legacy.execute("update kept.statsdb set schema = 8")
     with statsdb("lab", runs) as db:
         assert (
             db.sql(
@@ -1027,7 +1029,7 @@ def test_a_report_draws_what_eval_runs_recorded_after_the_file_changes(
     # Two completed matches have separate block indices; their tables stay cached.
     assert sum(key.endswith("/block.json") for key in storage.got) == 2
     assert not any(key.endswith(".parquet") for key in storage.got)
-    assert (storage.listings, storage.requests) == (2, 10)
+    assert (storage.listings, storage.requests) == (1, 10)
     # Scheduling new games still needs the definition to agree.
     with pytest.raises(EtudeError, match="tournament_conflict"):
         advance(read_experiment(file), source=DirectoryStorage(runs), directory=runs)

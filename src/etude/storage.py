@@ -18,7 +18,9 @@ import logging
 import os
 import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from stat import S_ISREG
 from typing import Any, Literal, Protocol
@@ -185,8 +187,27 @@ class S3Storage:
         if host == "s3.amazonaws.com":
             host = f"s3.{self.client.meta.region_name or 'us-east-1'}.amazonaws.com"
         self._where = f"{endpoint.scheme}://{bucket}.{host}/"
+        # Scoped ETags from a fresh `versions` listing; trusted only inside `_revalidating`.
+        self._listed_etags: dict[str, str] | None = None
+
+    @contextmanager
+    def _revalidating(self, listed: Mapping[str, str]) -> Iterator[None]:
+        """Trust ETags already returned by a fresh `versions` listing during one read pass."""
+        previous = self._listed_etags
+        etags: dict[str, str] = {}
+        for key, tag in listed.items():
+            etag = tag.partition(":")[0]
+            if etag and etag != "None":
+                etags[key] = etag
+        self._listed_etags = etags
+        try:
+            yield
+        finally:
+            self._listed_etags = previous
 
     def put(self, key: str, data: bytes) -> None:
+        if self._listed_etags is not None:
+            self._listed_etags.pop(key, None)
         _storage_request(
             lambda: self.client.put_object(
                 Bucket=self.bucket, Key=self.prefix + key, Body=data, ChecksumAlgorithm="SHA256"
@@ -194,6 +215,8 @@ class S3Storage:
         )
 
     def put_file(self, key: str, path: Path) -> None:
+        if self._listed_etags is not None:
+            self._listed_etags.pop(key, None)
         # boto3 splits a large file into parts, checksums and retries each itself.
         _storage_request(
             lambda: self.client.upload_file(
@@ -215,6 +238,8 @@ class S3Storage:
         return Artifact(location=location, immutable=immutable(key))
 
     def delete(self, key: str) -> bool:
+        if self._listed_etags is not None:
+            self._listed_etags.pop(key, None)
         try:
             _storage_request(
                 lambda: self.client.delete_object(Bucket=self.bucket, Key=self.prefix + key)
@@ -230,20 +255,133 @@ class S3Storage:
         return sorted(self.versions(prefix))
 
     def versions(self, prefix: str) -> dict[str, str]:
-        """Each object's ETag, size and time, from the listing alone."""
+        """Each object's ETag, size and time, from the listing alone.
+
+        A small listing finishes in one `list_objects_v2` page; a truncated one
+        fans out across subdirectories and `StartAfter` ranges concurrently.
+        """
+        base = self.prefix + prefix
+        strip = len(self.prefix)
+
+        def tag(item: dict[str, Any]) -> str:
+            return f"{item.get('ETag')}:{item.get('Size')}:{item.get('LastModified')}"
+
+        def list_range(
+            target: str,
+            start_after: str | None = None,
+            stop_at: str | None = None,
+            token: str | None = None,
+        ) -> dict[str, str]:
+            part: dict[str, str] = {}
+            kwargs: dict[str, Any] = {"Bucket": self.bucket, "Prefix": target}
+            if start_after is not None:
+                kwargs["StartAfter"] = start_after
+            if token is not None:
+                kwargs["ContinuationToken"] = token
+            while True:
+                remaining()
+                page = self.client.list_objects_v2(**kwargs)
+                done = False
+                for item in page.get("Contents", []):
+                    key = item["Key"]
+                    if stop_at is not None and key >= stop_at:
+                        done = True
+                        break
+                    part[key[strip:]] = tag(item)
+                if done or not page.get("IsTruncated"):
+                    break
+                kwargs["ContinuationToken"] = page["NextContinuationToken"]
+            return part
+
+        def list_delimiter(target: str) -> tuple[dict[str, str], list[str]]:
+            part: dict[str, str] = {}
+            prefixes: list[str] = []
+            kwargs: dict[str, Any] = {"Bucket": self.bucket, "Prefix": target, "Delimiter": "/"}
+            while True:
+                remaining()
+                page = self.client.list_objects_v2(**kwargs)
+                for item in page.get("Contents", []):
+                    part[item["Key"][strip:]] = tag(item)
+                for common in page.get("CommonPrefixes", []):
+                    prefixes.append(common["Prefix"])
+                if not page.get("IsTruncated"):
+                    break
+                kwargs["ContinuationToken"] = page["NextContinuationToken"]
+            prefixes.sort()
+            return part, prefixes
+
+        def first_page(target: str) -> tuple[dict[str, str], str | None]:
+            remaining()
+            page = self.client.list_objects_v2(Bucket=self.bucket, Prefix=target)
+            items = {item["Key"][strip:]: tag(item) for item in page.get("Contents", [])}
+            return items, page.get("NextContinuationToken") if page.get("IsTruncated") else None
+
+        def submit_sharded(
+            pool: ThreadPoolExecutor, target: str, prefixes: list[str]
+        ) -> list[tuple[str, Any]]:
+            shards = 16
+            tasks: list[tuple[str, Any]] = []
+            for idx in range(shards):
+                lo_i = idx * len(prefixes) // shards
+                hi_i = (idx + 1) * len(prefixes) // shards
+                if lo_i >= hi_i:
+                    continue
+                lo = prefixes[lo_i]
+                hi = prefixes[hi_i] if hi_i < len(prefixes) else None
+                start_after = lo[:-1] if idx > 0 else None
+                tasks.append((lo, pool.submit(list_range, target, start_after, hi)))
+            return tasks
 
         def collect() -> dict[str, str]:
-            found: dict[str, str] = {}
-            pages = self.client.get_paginator("list_objects_v2").paginate(
-                Bucket=self.bucket, Prefix=self.prefix + prefix
-            )
-            for page in pages:
-                for item in page.get("Contents", []):
-                    tag = f"{item.get('ETag')}:{item.get('Size')}:{item.get('LastModified')}"
-                    found[item["Key"][len(self.prefix) :]] = tag
-            return found
+            first = self.client.list_objects_v2(Bucket=self.bucket, Prefix=base)
+            if not first.get("IsTruncated"):
+                return {item["Key"][strip:]: tag(item) for item in first.get("Contents", [])}
+            # Fan out breadth-first from the caller thread so pool workers never wait on the pool.
+            part, prefixes = list_delimiter(base)
+            if not prefixes:
+                return part
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                if len(prefixes) >= 32:
+                    for lo, fut in submit_sharded(pool, base, prefixes):
+                        for key, value in fut.result().items():
+                            if (self.prefix + key) >= lo:
+                                part[key] = value
+                    return part
+                first_futures = [(sub, pool.submit(first_page, sub)) for sub in prefixes]
+                truncated: list[str] = []
+                for sub, page_fut in first_futures:
+                    items, next_token = page_fut.result()
+                    if next_token is None:
+                        part.update(items)
+                    else:
+                        truncated.append(sub)
+                if not truncated:
+                    return part
+                delim_futures = [(sub, pool.submit(list_delimiter, sub)) for sub in truncated]
+                range_tasks: list[tuple[str | None, Any]] = []
+                for sub, delim_fut in delim_futures:
+                    direct, sub_prefixes = delim_fut.result()
+                    part.update(direct)
+                    if len(sub_prefixes) >= 32:
+                        range_tasks.extend(submit_sharded(pool, sub, sub_prefixes))
+                    else:
+                        for child in sub_prefixes:
+                            range_tasks.append((None, pool.submit(list_range, child)))
+                for bound, fut in range_tasks:
+                    for key, value in fut.result().items():
+                        if bound is None or (self.prefix + key) >= bound:
+                            part[key] = value
+                return part
 
-        return _storage_request(collect)
+        found = _storage_request(collect)
+        if self._listed_etags is not None:
+            for key in [k for k in self._listed_etags if k.startswith(prefix)]:
+                del self._listed_etags[key]
+            for key, value in found.items():
+                etag = value.partition(":")[0]
+                if etag and etag != "None":
+                    self._listed_etags[key] = etag
+        return found
 
 
 class _Object:
@@ -263,6 +401,11 @@ class _Object:
         return found
 
     def changed(self, etag: str) -> Fetched | None:
+        if (
+            self.storage._listed_etags is not None
+            and self.storage._listed_etags.get(self.key) == etag
+        ):
+            return None
         return self._get({"IfNoneMatch": etag})
 
     def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
@@ -319,7 +462,7 @@ def _client(provider: Literal["s3", "r2"]) -> Any:
     except ImportError:
         raise EtudeError(f"{provider}_requires_boto3", 422) from None
     timeout = socket_timeout()
-    config = Config(connect_timeout=timeout, read_timeout=timeout)
+    config = Config(connect_timeout=timeout, read_timeout=timeout, max_pool_connections=32)
     if provider == "s3":
         return boto3.client("s3", config=config)
     try:
