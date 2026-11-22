@@ -381,10 +381,7 @@ class ChartIndex:
                     reports[experiment] = self._report(db, experiment, paths.get(experiment))
                 report = reports[experiment]
             sealed = sorted(
-                key
-                for folder in run.folders
-                for key in listing.members[folder]
-                if not key.endswith(".open")
+                key for key in listing.keys_in(run.folders) if not key.endswith(".open")
             )
             _stage_run(db, storage, run, sealed, report, previous)
 

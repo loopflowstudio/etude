@@ -92,7 +92,7 @@ from etude.experiment_file import experiment_named, refuse_renamed
 from etude.home import home
 from etude.records import BUILT_IN_NAMES, Record, RunRecord
 from etude.report import Counters, Curve, Flame, Matches, Report, Score, Series
-from etude.run import RunListing, as_storage, declared, under
+from etude.run import RunListing, as_storage, declared
 from etude.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import RunData, read_all
 from etude.train.report import Training, training
@@ -378,8 +378,7 @@ class _ReportListing:
             (key, self.objects[key])
             for run in self.runs.declarations
             if run.file.experiment == experiment
-            for folder in run.folders
-            for key in under(self.runs.keys, folder)
+            for key in self.runs.keys_in(run.folders)
         )
 
 
@@ -387,7 +386,7 @@ class Pages:
     """Experiments' pages from one source, each built again only when its inputs change.
 
     A page's inputs are its file, by modification time and size, and the
-    experiment's runs, by the version of every object in their folders
+    experiment's runs, by the version of each visible object they own
     (`Storage.versions`): under the source, and under this computer's runs
     directory, whose eval runs count too (`etude.eval.tournament.played`).
     Checking them is one listing of each, plus a run's declaration the first
@@ -449,7 +448,7 @@ class _BuiltPage:
 
     page: Page
     sources: SourceVersions
-    # Per place: (key, version) of each object in the experiment's runs' folders.
+    # Per place, the (key, version) pairs owned by this experiment's runs.
     runs: tuple[tuple[tuple[str, str], ...], ...]
 
 

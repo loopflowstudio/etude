@@ -600,7 +600,7 @@ class RunListing:
         )
 
     @cached_property
-    def members(self) -> dict[str, list[str]]:
+    def _members(self) -> dict[str, list[str]]:
         members: dict[str, list[str]] = {
             folder: [] for folders in self.folders.values() for folder in folders
         }
@@ -609,8 +609,13 @@ class RunListing:
                 members[folder].append(key)
         return members
 
+    def keys_in(self, folders: Sequence[str]) -> Iterator[str]:
+        """Visible keys owned by these copies, excluding nested runs and delivery bookkeeping."""
+        for folder in folders:
+            yield from self._members[folder]
+
     def _last_write(self, folders: Sequence[str], objects: Mapping[str, str]) -> datetime | None:
-        versions = (objects[key] for folder in folders for key in self.members[folder])
+        versions = (objects[key] for key in self.keys_in(folders))
         return max(
             (
                 v.modified

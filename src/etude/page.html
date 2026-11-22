@@ -12,16 +12,16 @@ __PAGE_CSS__
 <body>
 <div class="wrap">
   <!--view-heading-->
-  <div class="head"><h1 id="title"></h1><span class="pill" id="pill"></span></div>
-  <div class="context" id="context"></div>
-  <div class="controls"><div class="legend-jobs" id="jobs" role="group" aria-label="Jobs"></div><span id="chips" style="display:contents"></span></div>
-  <nav class="tabs" id="tabs"><a href="#evals" data-s="evals">Evals</a><a href="#perf" data-s="perf">Perf</a><a href="#ml" data-s="ml">ML details</a><!--view-tabs--></nav>
-  <section class="sec" id="evals"><h2>Evals <span id="evals-sub"></span><div class="sec-controls" id="evals-controls"></div></h2><div class="grid" id="evals-body"></div></section>
+  <div class="head" data-report-only><h1 id="title"></h1><span class="pill" id="pill"></span></div>
+  <div class="context" id="context" data-report-only></div>
+  <div class="controls" data-report-only><div class="legend-jobs" id="jobs" role="group" aria-label="Jobs"></div><span id="chips" style="display:contents"></span></div>
+  <nav class="tabs" id="tabs"><a href="#evals" data-s="evals" data-report-only>Evals</a><a href="#perf" data-s="perf">Perf</a><a href="#ml" data-s="ml">ML details</a><!--view-tabs--></nav>
+  <section class="sec" id="evals" data-report-only><h2>Evals <span id="evals-sub"></span><div class="sec-controls" id="evals-controls"></div></h2><div class="grid" id="evals-body"></div></section>
   <section class="sec" id="perf"><h2>Perf <span id="perf-sub"></span><div class="sec-controls" id="perf-controls"></div></h2><div class="grid" id="perf-body"></div></section>
   <section class="sec" id="ml"><h2>ML details <span id="ml-sub"></span><div class="sec-controls" id="ml-controls"></div></h2><div class="grid" id="ml-body"></div></section>
-  <details id="runs-box"><summary>Runs</summary><div class="scroll"><table id="runs"></table></div></details>
-  <details id="coverage-box"><summary>Evaluated checkpoints</summary><div class="scroll"><table id="coverage"></table></div></details>
-  <details id="failures-box" open><summary>Failed matches</summary><div class="scroll"><table id="failures"></table></div></details>
+  <details id="runs-box" data-report-only><summary>Runs</summary><div class="scroll"><table id="runs"></table></div></details>
+  <details id="coverage-box" data-report-only><summary>Evaluated checkpoints</summary><div class="scroll"><table id="coverage"></table></div></details>
+  <details id="failures-box" open data-report-only><summary>Failed matches</summary><div class="scroll"><table id="failures"></table></div></details>
   <!--view-details-->
 </div>
 <script type="application/json" id="data">__DATA__</script>
@@ -109,16 +109,31 @@ function control(host, label, options, key, apply = render) {
   host.append(node("span", "lbl", label), group);
 }
 const CLOCKS = clockNames.map(c => [c, c]);
+// Clock and smoothing choices redraw the same ordered set of metrics.
+const panels = [...R.perf, ...R.ml];
+const namedMetrics = new Set(panels.flatMap(panel => panel.keys || []));
+const flamePrefixes = panels.filter(panel => panel.kind === "flame").map(panel => panel.prefix);
+const otherMetrics = T.metrics.filter(key => !namedMetrics.has(key) && !flamePrefixes.some(prefix => key.startsWith(prefix)));
 const draws = []; const later = f => draws.push(f);
+
+const color = j => css(j.color);
+const swatch = j => { const s = node("i", "sw" + (j.baseline ? " dot" : "")); s.style.background = j.baseline ? "" : color(j); s.style.color = color(j); return s; };
+
+function series(jobs, points) {
+  return jobs.map(j => ({label: j.label, color: color(j), dotted: j.baseline, points: points(j)}));
+}
 
 function render() {
   writeHash(); draws.length = 0; destroyCharts(); hideTip();
   const hidden = new Set(S.hide ? S.hide.split("|") : []);
   const vis = JOBS.filter(j => !hidden.has(j.key));
-  const color = j => css(j.color);
-  const swatch = j => { const s = node("i", "sw" + (j.baseline ? " dot" : "")); s.style.background = j.baseline ? "" : color(j); s.style.color = color(j); return s; };
-  const series = (fn, jobs = vis) => jobs.map(j => ({label: j.label, color: color(j), dotted: j.baseline, points: fn(j)}));
 
+  if (!D.run_charts) renderReport(hidden, vis);
+  renderMetrics(vis);
+  for (const draw of draws) draw();
+}
+
+function renderReport(hidden, vis) {
   // ---- header and context
   document.getElementById("title").textContent = D.experiment;
   document.getElementById("pill").textContent = D.origin ? `${D.origin}()` : "default report";
@@ -189,14 +204,14 @@ function render() {
       const c = card(body, panel.title, caption(where, score, BAND, GAPS), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const host = node("div"); c.appendChild(host);
-      later(() => line(host, series(j => curveOf(j, sel, {}, opp), vis), {...eOpts, refs: anchorLines(E, sel, opp), height: 260}));
+      later(() => line(host, series(vis, j => curveOf(j, sel, {}, opp)), {...eOpts, refs: anchorLines(E, sel, opp), height: 260}));
     } else if (panel.kind === "curve") {
       const c = card(body, panel.title, caption(where, `one chart per ${panel.split}`, score), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const vals = values(E, sel, panel.split);
       if (!vals.length) { c.appendChild(node("div", "na", absentNote(E, panel.split))); continue; }
       const grid = node("div", "grid multiples"); c.appendChild(grid);
-      for (const v of vals) { const m = node("div"), host = node("div"); m.append(node("div", "mini-title", `${panel.split} = ${show(v)}`), host); grid.appendChild(m); later(() => line(host, series(j => curveOf(j, sel, {[panel.split]: v}, opp), vis), {...eOpts, refs: anchorLines(E, sel, opp, {[panel.split]: v}), compact: true, height: 140})); }
+      for (const v of vals) { const m = node("div"), host = node("div"); m.append(node("div", "mini-title", `${panel.split} = ${show(v)}`), host); grid.appendChild(m); later(() => line(host, series(vis, j => curveOf(j, sel, {[panel.split]: v}, opp)), {...eOpts, refs: anchorLines(E, sel, opp, {[panel.split]: v}), compact: true, height: 140})); }
     } else if (panel.kind === "matrix") {
       const c = card(body, panel.title || `${panel.columns} × ${panel.rows}`, caption(where, `${panel.columns} across`, `${panel.rows} down`, score), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
@@ -329,7 +344,11 @@ function render() {
     return gone.length ? `${gone.join(", ")} ${gone.length > 1 ? "are not columns" : "is not a column"} of ${E.info.table}` : "Nothing recorded for this selection";
   }
 
-  // ---- Perf and ML details: what the training runs logged, and what Etude recorded.
+  tables();
+}
+
+// Both an experiment report and a live run draw the same training panels.
+function renderMetrics(vis) {
   // Smoothed: the mean of up to seven neighbouring buckets, centred so it does not lag; gaps stay gaps.
   const smoothed = pts => pts.map((p, i) => {
     if (p.missing || p.y == null) return p;
@@ -343,17 +362,15 @@ function render() {
     if (!l) return null;
     return l.x.map((x, i) => ({x, y: l.mean[i], lo: band ? l.low[i] : null, hi: band ? l.high[i] : null, intervalLabel: "seed range", missing: l.mean[i] == null, meta: band ? `${l.seeds[i]} seeds` : ""}));
   }
-  const named = new Set([...(R.perf || []), ...(R.ml || [])].flatMap(p => p.keys || []));
-  const prefixes = [...(R.perf || []), ...(R.ml || [])].filter(p => p.kind === "flame").map(p => p.prefix);
-  function metricSection(section, panels, clockKey) {
+  function metricSection(section, panels, clockKey, others = []) {
     const host = document.getElementById(section + "-body"); host.replaceChildren();
     const ctl = document.getElementById(section + "-controls"); ctl.replaceChildren();
     // A section the report gives no panel is not drawn: no header, controls or tab.
-    const others = section === "ml" ? T.metrics.filter(k => !named.has(k) && !prefixes.some(p => k.startsWith(p))) : [];
-    const shown = panels.length || others.length ? "" : "none";
-    document.getElementById(section).style.display = shown;
-    for (const tab of document.querySelectorAll(`#tabs a[data-s="${section}"]`)) tab.style.display = shown;
-    if (shown) return;
+    const empty = panels.length === 0 && others.length === 0;
+    const display = empty ? "none" : "";
+    document.getElementById(section).style.display = display;
+    for (const tab of document.querySelectorAll(`#tabs a[data-s="${section}"]`)) tab.style.display = display;
+    if (empty) return;
     if (!TRAINED) { host.appendChild(node("div", "na", "No training runs")); document.getElementById(section + "-sub").textContent = ""; return; }
     control(ctl, "X axis", CLOCKS, clockKey); control(ctl, "Lines", [["on", "Smoothed"], ["off", "Raw"]], "smooth");
     const clock = S[clockKey], opts = {xLabel: clock, band: true, sync: section};
@@ -404,13 +421,13 @@ function render() {
         const grid = node("div", "grid multiples"); c.appendChild(grid);
         for (const k of stepClocks) {
           const m = node("div"), h = node("div"); m.append(node("div", "mini-title", `${k} per second`), h); grid.appendChild(m);
-          later(() => line(h, series(j => jobPoints(j, clock, mk => mk.pace[k] == null ? {missing: true, meta: "an attempt began since the last checkpoint"} : {y: mk.pace[k]})), {...opts, compact: true, height: 140}));
+          later(() => line(h, series(vis, j => jobPoints(j, clock, mk => mk.pace[k] == null ? {missing: true, meta: "an attempt began since the last checkpoint"} : {y: mk.pace[k]})), {...opts, compact: true, height: 140}));
         }
       } else if (panel.kind === "elapsed") {
         const c = card(host, panel.title, "wall hours since the run first started");
         if (!T.checkpoints.length) { c.appendChild(node("div", "na", "No checkpoint recorded")); continue; }
         const h = node("div"); c.appendChild(h);
-        later(() => line(h, series(j => jobPoints(j, clock, mk => ({y: mk.elapsed / 3600}))), {...opts, height: 170, yFormat: v => v.toFixed(v < 10 ? 2 : 1) + " h"}));
+        later(() => line(h, series(vis, j => jobPoints(j, clock, mk => ({y: mk.elapsed / 3600}))), {...opts, height: 170, yFormat: v => v.toFixed(v < 10 ? 2 : 1) + " h"}));
       } else if (panel.kind === "attempts") {
         const c = card(host, panel.title, "each attempt from its start to its last row · hours since the run first started");
         const runs = T.runs.filter(r => vis.some(j => j.runs.includes(r.name)));
@@ -427,7 +444,7 @@ function render() {
         }
         c.appendChild(node("div", "legend", `${dur(span)} across`));
       } else if (panel.kind === "flame") {
-        flame(card(host, panel.title, `seconds logged under ${panel.prefix}`, "full"), panel, vis, color, swatch);
+        flame(card(host, panel.title, `seconds logged under ${panel.prefix}`, "full"), panel, vis);
       } else card(host, `Unknown panel kind ${JSON.stringify(panel.kind)}`, "not drawn");
     }
     if (others.length) {
@@ -438,13 +455,11 @@ function render() {
     document.getElementById(section + "-sub").textContent = clockMeaning(clock);
   }
   metricSection("perf", R.perf, "pclock");
-  metricSection("ml", R.ml, "mlclock");
-  tables();
-  for (const d of draws) d();
+  metricSection("ml", R.ml, "mlclock", otherMetrics);
 }
 
 // ---- Flame: width is seconds, rows are timer depth. The zoom path applies to every job.
-function flame(c, panel, vis, color, swatch) {
+function flame(c, panel, vis) {
   const path = S.fpath ? S.fpath.split("/") : [];
   const per = stepClocks[0];
   const scales = [["share", "Share"], ["total", "Total"], ...(per ? [["per", `Per 1M ${per}`]] : [])];
@@ -515,6 +530,10 @@ function tables() {
   for (const x of D.failures) { const row = node("tr"); for (const v of [x.tournament ?? "outside a tournament", x.players.map(playerName).join(" vs "), x.error ?? "–"]) row.appendChild(node("td", null, v)); f.appendChild(row); }
 }
 
+if (D.run_charts) {
+  for (const section of document.querySelectorAll("[data-report-only]")) section.remove();
+}
+
 // Section nav highlights the section in view.
 const tabs = [...document.querySelectorAll("nav.tabs a")];
 const io = new IntersectionObserver(entries => { for (const en of entries) if (en.isIntersecting) tabs.forEach(t => t.classList.toggle("on", t.dataset.s === en.target.id)); }, {rootMargin: "-40% 0px -55% 0px"});
@@ -527,11 +546,6 @@ for (const tab of tabs) {
     event.preventDefault();
     section.scrollIntoView();
   });
-}
-if (D.run_charts) {
-  for (const selector of ["div.head", "#context", ".controls", "#evals", "[data-s=evals]", "#runs-box"]) {
-    document.querySelector(selector).style.display = "none";
-  }
 }
 render();
 let pending; addEventListener("resize", () => { clearTimeout(pending); pending = setTimeout(render, 120); });

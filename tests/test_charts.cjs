@@ -384,9 +384,12 @@ test("pace plots restart boundaries as null gaps between measured intervals", ()
     })),
   });
   data.report = {clock: "updates", perf: [{kind: "pace", title: "Pace"}]};
-  const rendered = renderPage(data);
-  assert.equal(rendered.plots.length, 1);
-  assert.deepEqual([...rendered.plots[0].values[1]], [null, 10, null, 10]);
+  for (const run_charts of [false, true]) {
+    const rendered = renderPage({...data, run_charts});
+    assert.equal(rendered.plots.length, 1);
+    assert.deepEqual([...rendered.plots[0].values[1]], [null, 10, null, 10]);
+    assert.equal(rendered.text === "", run_charts);
+  }
 });
 
 test("a curve finds its score when the score carries a range", () => {

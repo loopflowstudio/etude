@@ -75,8 +75,9 @@ def test_a_served_page_refreshes_on_demand_only_when_its_files_change(tmp_path: 
         server.page("/experiments/lab/report")
         assert (measured.requests, measured.listings) == reads
         assert builds.read_text().count("built") == 1
-        # Another experiment's run is not this page's input; a run of its own is.
-        trained(runs, "other", "d")
+        # A copied experiment and a delivery note beneath lab/a leave lab's report current.
+        trained(runs / "lab/a", "other", "d")
+        measured.put("lab/a/.shipped/note", b"delivered")
         server.page("/experiments/lab/report", refresh=True)
         assert builds.read_text().count("built") == 1
         trained(runs, "lab", "b")
