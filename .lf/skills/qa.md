@@ -121,7 +121,11 @@ Python driver and send SIGINT, which is what Ctrl-C does. A launched run's conso
 its page only when the loop collects it, about every 30 s, so a page shows a stale tail
 between collections; check its "Last collected" age rather than expecting each refresh to move.
 `etude launch` refuses a plain `train(config)` file; declare `training_jobs()` for a
-launched run. To see a broken `report()`, write a syntax error into the file while a run
+launched run. `etude continue --run RUN --until updates=N` writes a child run named by
+a digest (`continues.parent` in its `run.json`); require each row to carry its own
+launcher facts. A launched evaluation groups every tournament with new matches into one
+`EXPERIMENT/evals-DIGEST`: add a second `Benchmark` to `eval_jobs` and raise `games` on
+both to get a two-member group, then count rows per tournament in `statsdb`. To see a broken `report()`, write a syntax error into the file while a run
 writes and restore it after. `etude server set` refuses an unreachable host, so reach a
 failed launcher read with `chmod 0 home/launcher.sqlite` across a view restart (stop
 `etude wait` first) and restore `0644` before finishing.
