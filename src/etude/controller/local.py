@@ -33,7 +33,7 @@ from etude.controller.declarations import (
     select_runs,
 )
 from etude.errors import EtudeError, LauncherError
-from etude.experiment import find_training_run, observe
+from etude.experiment import TrainingRuns, observe
 from etude.experiment_file import defined_functions, refuse_renamed
 from etude.identity import run_address
 from etude.jobs import load_job_function
@@ -74,20 +74,16 @@ def train(
     refuse_renamed(file)
     if "training_jobs" in functions:
         state = observe(default_root(), label)
-        requests = select_runs(
-            read_training_jobs(file, experiment=experiment, local=True, state=state),
-            job=job,
-            seed=seed,
-        )
+        requests = read_training_jobs(file, experiment=experiment, local=True, state=state)
+        known = TrainingRuns(state.runs, requested=(r.id for r in requests))
+        requests = select_runs(requests, job=job, seed=seed)
         with TemporaryDirectory(prefix="etude-inputs-") as folder:
             prepared: list[_Training | _Finished] = []
             refusals: list[str] = []
             for request in requests:
                 assert request.id is not None  # read_training_jobs addresses every run
                 try:
-                    prior = find_training_run(
-                        state.runs, request.id, request.job.name, request.seed
-                    )
+                    prior = known.find(request.id, request.job, request.seed)
                     if prior is not None and job is None and seed is None and not resume:
                         print(
                             format_known_run(request, prior),
@@ -95,7 +91,7 @@ def train(
                         )
                         print_view(prior.address, file=sys.stderr if json_output else sys.stdout)
                         continue
-                    identity = run_address(prior.name, label) if prior is not None else request.id
+                    identity = prior._data.address if prior and prior._data else request.id
                     directory = Path(folder) / "runs" / request.id
                     attempt = _prepare(
                         file,

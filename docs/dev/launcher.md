@@ -216,8 +216,10 @@ run separately. Each experiment keeps its last accepted panels through an
 incomplete edit.
 
 At commit, either publisher joins its new facts with the other source's last
-observation through `state_of`. Stored declarations, outcomes and checkpoints
-preserve compact addresses and terminal states. A failed file pass records its
+observation through `state_of`. Training submissions claim their full addresses
+first. A declared job and seed can also identify one unclaimed historical root.
+Both its stored address and its launcher link open that run. Continuations and
+independent repetitions keep their submitted addresses. A failed file pass records its
 error and keeps the previous file generation and date. A directory traversal error
 invalidates the listing for both the index and report refresh. When a listed
 block disappears during its read, that run keeps its file facts and the start

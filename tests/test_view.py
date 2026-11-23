@@ -25,13 +25,14 @@ from etude.checkpoints import CheckpointRecord
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.home import home
-from etude.jobs import ExperimentState, group_evaluations
+from etude.jobs import ExperimentState, continue_from, group_evaluations
 from etude.launch.database import Database
 from etude.launch.logs import snapshot_stream
 from etude.launch.records import GPU
 from etude.launch.server import LauncherObservation, PythonClient
 from etude.page import Page, Pages, _run_file
 from etude.records import ArtifactRef, Clock, RunCounters, RunOutcome, RunRecord, RunWriter, Tally
+from etude.run import sync
 from etude.spec import RunRequest, Until
 from etude.storage import DirectoryStorage, S3Storage
 from etude.train.block import Builder
@@ -283,10 +284,13 @@ def _seal(
     return name
 
 
-def _loss(html: str) -> list[float | None]:
+def _page_data(html: str) -> Page:
     payload = html.split('<script type="application/json" id="data">')[1].split("</script>")[0]
-    page = Page.model_validate_json(payload, extra="ignore")
-    return page.training.series["steps"]["loss"][0].mean
+    return Page.model_validate_json(payload, extra="ignore")
+
+
+def _loss(html: str, clock: str = "steps") -> list[float | None]:
+    return _page_data(html).training.series[clock]["loss"][0].mean
 
 
 def _version(html: str) -> str:
@@ -943,6 +947,121 @@ def test_replacement_allocation_keeps_the_curve_and_supplies_the_phase(
         check(restarted, "finished" if resume else "stopped", [7, 3])
         assert backend.scheduler.read(run).phase == "setting_up"
     backend.store.close()
+
+
+def test_continuation_link_from_queue_to_delivery_survives_view_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = DirectoryStorage(tmp_path / "source")
+    measured = MeasuredStorage(source)
+    backend = bench(home())
+    spec = job(name="talk", experiment="paced", until="updates=150")
+    (parent,) = backend.scheduler.queue(RunRequest(id="paced/talk@0", seed=0, job=spec), rent="l4")
+    backend.scheduler.tick()
+    backend.run(601)
+    with open_run(
+        experiment="paced",
+        run=parent,
+        job="talk",
+        seed=0,
+        clocks=["updates"],
+        directory=source.root,
+    ) as writer:
+        writer.log({"loss": 7}, updates=150)
+        (writer.out / "saved").write_text("150")
+    previous = (datetime.now(UTC) - timedelta(hours=2)).timestamp()
+    for key in source.keys(parent + "/"):
+        os.utime(source.root / key, (previous, previous))
+    request = continue_from(backend.scheduler.record(parent), "updates=200", source=source)
+    (child,) = backend.scheduler.queue(request, rent="l4")
+    parent_page, child_page = "/runs/" + parent, "/runs/" + child
+
+    def check(view: Server, phase: str) -> str:
+        before = measured.listings, measured.requests
+        table = _get(view, "/experiments/paced/status")
+        assert table.count('href="/runs/') == 2
+        for path, label in ((parent_page, "finished"), (child_page, phase)):
+            row = table.split(f'href="{path}"')[1].split("</tr>")[0]
+            assert f">{label}<" in row
+        parent_graph = _get(view, parent_page)
+        child_graph = _get(view, child_page)
+        assert _loss(parent_graph, "updates") == [7]
+        assert "updates 150 / 150" in parent_graph and "last file write 2 h ago" in parent_graph
+        assert f">{phase}<" in child_graph
+        if phase in ("queued", "setting up"):
+            assert "Target updates 200" in child_graph and 'id="data"' not in child_graph
+            assert "last file write unknown" in child_graph
+            assert child_page in _get(view, "/status").split("<h2>Completed")[0]
+        if phase == "setting up":
+            slots = _get(view, "/machines/status")
+            assert child_page in slots and parent_page not in slots
+            assert f"machine {attempt.machine}" in child_graph
+        assert (measured.listings, measured.requests) == before
+        return child_graph
+
+    with Server(measured, None, ("127.0.0.1", 0)) as view:
+        _ingest(view)
+        assert main(["status", child]) == 0
+        assert f"view: {view.origin}{child_page}" in capsys.readouterr().out.splitlines()
+        check(view, "queued")
+        backend.scheduler.tick()
+        (attempt,) = backend.scheduler.attempts(child)
+        view.refresh_launcher()
+        check(view, "setting up")
+        with monkeypatch.context() as patch:
+            patch.setenv("ETUDE_ATTEMPT", attempt.id)
+            for variable in request.job.environment:
+                patch.setenv(variable.name, variable.value)
+            with open_run(
+                experiment="paced",
+                run=child,
+                job="talk",
+                seed=0,
+                clocks=["updates"],
+                directory=source.root,
+            ) as writer:
+                writer.log({"loss": 3}, updates=151)
+                writer.log({"loss": 2}, updates=200)
+        get = source.get
+
+        def interrupted(key: str) -> bytes:
+            if key == child + "/outcome.json":
+                raise FileNotFoundError(key)
+            return get(key)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(source, "get", interrupted)
+            view.refresh_files()
+            check(view, "setting up")
+
+    with Server(measured, None, ("127.0.0.1", 0)) as reopened:
+        check(reopened, "setting up")
+        # Metrics and their writer can arrive before the committing outcome.
+        outcome = source.root / child / "outcome.json"
+        pending = outcome.rename(tmp_path / "child-outcome.json")
+        reopened.refresh_files()
+        active = check(reopened, "running")
+        (trace,) = _page_data(active).training.series["updates"]["loss"]
+        assert trace.x == [151, 200] and trace.mean == [3, 2]
+        pending.rename(outcome)
+        reopened.refresh_files()
+        assert "updates 200 / 200" in check(reopened, "finished")
+        backend.run(601)
+        reopened.refresh_launcher()
+        assert "2 finished" in _get(reopened, "/status").split("<h2>Completed")[1]
+    backend.store.close()
+
+    archive = DirectoryStorage(tmp_path / "archive")
+    assert sync(source.root, storages=[archive], stopped=True) == {}
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "reader"))
+    with Server(archive, None, ("127.0.0.1", 0)) as reader:
+        _ingest(reader)
+        assert "2 finished" in _get(reader, "/status")
+        assert _loss(_get(reader, parent_page), "updates") == [7]
+        assert _loss(_get(reader, child_page), "updates") == [3, 2]
+        report = _get(reader, "/experiments/paced/report")
+        (group,) = _page_data(report).training.jobs
+        assert set(group.runs) == {"talk@0", child.split("/")[1]} and group.label == "talk · 1 seed"
 
 
 def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: Path) -> None:

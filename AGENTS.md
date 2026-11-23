@@ -172,7 +172,9 @@ where upload-only grants cannot.
 
 A declared run's address is always `EXPERIMENT/JOB@SEED`; a plain
 `train(config)` file trained with `etude train` is `EXPERIMENT`, and stored
-compact spellings stay readable, matched by their recorded job name and seed. Job code sees the local `ETUDE_RUN` name;
+compact spellings stay readable. Match full addresses first. A declared job
+and seed can identify one unclaimed stored root. Continuations and independent
+repetitions keep their own addresses. Job code sees the local `ETUDE_RUN` name;
 `ETUDE_RUN_ADDRESS` preserves its full storage address, including when a job
 is named for its experiment. Discovery permits sibling runs below a compact
 run address while excluding its `out`, `artifacts` and metric data. `Input.run` names the producer for relay; its unsigned `uri` locates the

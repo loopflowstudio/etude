@@ -184,6 +184,13 @@ checkpoints. Its writer can confirm **running** before the next launcher
 poll. An explicit resume shows **queued** as soon as the launcher reopens
 the run. A recorded result for the current allocation can appear while its
 machine slot is still occupied.
+
+After `etude continue`, open the link from `etude status CHILD` to follow the
+new run from the queue. The experiment table lists the parent and child
+separately. The child shows its own target and placement while its first files
+arrive. Its curve uses the absolute clock inherited from the parent. The
+experiment report groups both runs on the same learner line.
+
 `last file write` dates the run files. On a run page, `files observed` dates
 the listing that supplied that run’s file facts. On the overview, experiment
 and machine pages, `Run files listed` dates the most recent successful listing.

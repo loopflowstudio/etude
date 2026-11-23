@@ -254,6 +254,9 @@ class ExperimentState:
     def run(self, name: str) -> TrainingRunSummary:
         """The training run named `name`; raises `EtudeError("run_not_found")` without one."""
         for each in self.runs:
+            if each.address == name or (each._data and each._data.address == name):
+                return each
+        for each in self.runs:
             if each.name == name.removeprefix(self.experiment + "/"):
                 return each
         raise EtudeError("run_not_found", 404) from ValueError(name)

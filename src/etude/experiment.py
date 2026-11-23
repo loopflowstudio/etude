@@ -23,6 +23,7 @@ from etude.launch import client
 from etude.launch.records import Standing
 from etude.records import RunRecord
 from etude.run import LocatedRun, RunListing
+from etude.spec import Job, declared_address
 from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
 from etude.train.report import job_names
@@ -80,20 +81,44 @@ def read_tournament_lines(
     return tuple(found)
 
 
-def find_training_run(
-    runs: Iterable[jobs.TrainingRunSummary], address: str | None, job: str, seed: int | None
-) -> jobs.TrainingRunSummary | None:
-    """Match the run name, or else its recorded job and seed for compact spellings.
+class TrainingRuns:
+    """Resolve submitted addresses and unambiguous older spellings within one experiment."""
 
-    A continuation shares its parent's job and seed, so an exact name wins
-    over every job-and-seed match.
-    """
-    runs = tuple(runs)
-    if address is not None:
+    def __init__(
+        self, runs: Iterable[jobs.TrainingRunSummary], *, requested: Iterable[str | None]
+    ) -> None:
+        claimed = set(requested)
+        self._addresses: dict[str, jobs.TrainingRunSummary] = {}
+        self._aliases: dict[str, jobs.TrainingRunSummary | None] = {}
         for run in runs:
-            if run.name == address.removeprefix(run.experiment + "/"):
-                return run
-    return next((run for run in runs if run.launch == job and run.seed == seed), None)
+            self._addresses[run.address] = run
+            data = run._data
+            if data is None or data.file is None:
+                continue
+            self._addresses[data.address] = run
+            if (
+                run.status is None
+                and data.address not in claimed
+                and data.file.continues is None
+                and run.seed is not None
+                and (data.file.job_name or data.file.job)
+            ):
+                alias = declared_address(run.experiment, run.launch, run.seed)
+                # Two unclaimed roots leave the declared spelling unresolved.
+                self._aliases[alias] = None if alias in self._aliases else run
+
+    def find(
+        self, address: str | None, job: Job, seed: int | None
+    ) -> jobs.TrainingRunSummary | None:
+        if address is None:
+            return None
+        if exact := self._addresses.get(address):
+            return exact
+        root = self._aliases.get(address)
+        if root and root.launch == job.name and root.seed == seed:
+            if not any(v.name == "ETUDE_CONTINUES" for v in job.environment):
+                return root
+        return None
 
 
 def state_of(
@@ -145,7 +170,7 @@ def state_of(
             for record in data.checkpoints
             if record.artifact.sha256 is not None and record.artifact.size_bytes is not None
         )
-        runs[name] = jobs.TrainingRunSummary(
+        runs[data.address] = jobs.TrainingRunSummary(
             name=data.name,
             experiment=data.experiment,
             job=job[data.name].name,
@@ -159,6 +184,7 @@ def state_of(
         )
     launches = find_eval_groups(retained)
     evals = _evaluations(every, experiment, launches)
+    training_runs = TrainingRuns(runs.values(), requested=(item.record.id for item in retained))
     committed = Decimal(0)
     for item in retained:
         record = item.record
@@ -173,20 +199,21 @@ def state_of(
             summary = evals.get(record.id) or jobs.EvalRunSummary(name=name, state="queued")
             evals[record.id] = _join_allocation(replace(summary, matches=matches), item)
             continue
-        launch = record.launch.spec.name
-        training = find_training_run(runs.values(), record.id, launch, record.seed)
+        spec = record.launch.spec
+        training = training_runs.find(record.id, spec, record.seed)
+        address = training.address if training else record.id
         if training is None:
             training = jobs.TrainingRunSummary(
                 name=name,
                 experiment=experiment,
-                job=launch,
-                launch=launch,
+                job=spec.name,
+                launch=spec.name,
                 line=name,
                 seed=record.seed,
                 state="queued",
                 checkpoints=jobs.Checkpoints(),
             )
-        runs[training.name] = _join_allocation(training, item)
+        runs[address] = _join_allocation(training, item)
     return jobs.ExperimentState(
         experiment=experiment,
         runs=tuple(runs.values()),

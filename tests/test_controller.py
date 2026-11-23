@@ -192,6 +192,41 @@ def test_a_pass_leaves_known_runs_alone_and_queues_only_a_new_stage(
     assert not (tmp_path / "experiments").exists()
 
 
+def test_declared_queue_and_resume_leave_an_independent_same_seed_request_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = bench(tmp_path)
+    backend.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setattr(client, "_client", lambda: backend.scheduler)
+    monkeypatch.setattr(client, "standing", backend.scheduler.standing)
+    source = DirectoryStorage(tmp_path / "source")
+    file = tmp_path / "two.py"
+    file.write_text(FILE)
+    experiment = read_experiment(file)
+    (repeat,) = backend.scheduler.queue(
+        RunRequest(
+            id="two/another",
+            job=Job(name="base", experiment="two", command="true", max_hours=1),
+            seed=0,
+        ),
+        pool="waiting",
+    )
+    prior = backend.scheduler.record(repeat)
+    for resume in (False, True):
+        advance(
+            experiment,
+            source=source,
+            mode="queue",
+            pool="waiting",
+            job="base",
+            seed=0,
+            resume=resume,
+        )
+        assert backend.scheduler.record(repeat) == prior
+        assert backend.scheduler.record("two/base@0").launch.version == (2 if resume else 1)
+    backend.store.close()
+
+
 def test_an_experiment_limit_refuses_hand_down_before_any_rental(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

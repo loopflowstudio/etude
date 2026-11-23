@@ -9,7 +9,7 @@ from etude.cli import main
 from etude.controller.declarations import read_training_jobs, select_runs
 from etude.jobs import checkpoint_inputs_for
 from etude.launch.database import upgrade
-from etude.records import Clock, RunRecord
+from etude.records import Clock, Continuation, RunRecord, SourceKey
 from etude.run import RunFiles, declare, run_directories, runs, sync
 from etude.spec import Job, expand_runs
 from etude.storage import DirectoryStorage
@@ -199,6 +199,33 @@ def training_jobs():
     return [TrainingJob(train=train, config=Config(), name=name, seeds=(0, 1, 2))
             for name in ("small", "wide")]
 """
+
+
+def test_local_train_keeps_a_file_only_continuation_out_of_declared_run_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local = tmp_path / "home"
+    monkeypatch.setenv("ETUDE_HOME", str(local))
+    file = tmp_path / "sweep.py"
+    file.write_text(SELECTION)
+    source = local / "track"
+    with open_run(
+        experiment="sweep",
+        run="child",
+        job="small",
+        seed=0,
+        clocks=["updates"],
+        continues=Continuation(
+            parent=SourceKey(namespace="local", kind="run", source_id="small@0"),
+            clock="updates",
+            value=4,
+        ),
+        directory=source,
+    ) as writer:
+        writer.log({"score": 7}, updates=5)
+    assert main(["train", str(file), "--job", "small", "--seed", "0"]) == 0
+    assert read(source, "sweep", "small@0").points("score", "updates").x.tolist() == [1, 2, 3, 4]
+    assert read(source, "sweep", "child").points("score", "updates").x.tolist() == [5]
 
 
 def test_selection_preflight_refuses_every_conflict_without_training_any_member(

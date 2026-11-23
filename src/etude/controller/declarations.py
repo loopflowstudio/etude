@@ -23,7 +23,7 @@ from etude.experiment import observe
 from etude.experiment_file import refuse_renamed
 from etude.identity import run_address
 from etude.jobs import EvalJob, ExperimentState, TrainingJob, TrainingRunSummary, evaluation_group
-from etude.spec import Job, RunRequest, expand_runs
+from etude.spec import Job, RunRequest, declared_address, expand_runs
 from etude.storage import default_root
 
 
@@ -174,18 +174,16 @@ def read_training_jobs(
                 "experiment": label,
             }
         )
+        if isinstance(each, Job):
+            normalized.append(named)
+            continue
+        seed = each.seed if each.seed is not None else named.seeds[0]
+        address = (
+            run_address(each.id, label) if each.id else declared_address(label, named.name, seed)
+        )
         normalized.append(
-            named
-            if isinstance(each, Job)
-            else each.model_copy(
-                update={
-                    "job": named,
-                    "params": each.params or params,
-                    "id": run_address(each.id, label)
-                    if each.id
-                    else f"{label}/{named.name}@{each.seed if each.seed is not None else named.seeds[0]}",
-                    "seed": each.seed if each.seed is not None else named.seeds[0],
-                }
+            each.model_copy(
+                update={"job": named, "params": each.params or params, "id": address, "seed": seed}
             )
         )
     return expand_runs(normalized, params=params)

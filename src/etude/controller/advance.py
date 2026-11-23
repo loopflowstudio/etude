@@ -23,7 +23,7 @@ from etude.errors import EtudeError, LauncherError
 from etude.eval.records import digest
 from etude.eval.result import EvalResult
 from etude.eval.tournament import StoredRuns, played
-from etude.experiment import find_training_run, observe, read_tournament_lines
+from etude.experiment import TrainingRuns, observe, read_tournament_lines
 from etude.jobs import (
     Checkpoints,
     EvalGroup,
@@ -104,7 +104,7 @@ def _fits(job: Job, committed: Decimal, max_usd: Decimal | None) -> bool:
 def _resumed(
     request: RunRequest, experiment: str, until: Until | None
 ) -> tuple[RunRequest, Decimal]:
-    """The request as a resume under its standing record's id, and the dollars that record releases."""
+    """Resume this address and release its previous budget commitment."""
     request = request.model_copy(
         update={
             "resume": True,
@@ -112,8 +112,8 @@ def _resumed(
         }
     )
     for item in client.standing(experiment):
-        if item.record.launch.spec.name == request.job.name and item.record.seed == request.seed:
-            return request.model_copy(update={"id": item.record.id}), item.committed_usd
+        if item.record.id == request.id:
+            return request, item.committed_usd
     return request, Decimal(0)
 
 
@@ -176,17 +176,19 @@ def advance(
             state=state,
             function=experiment.training,
         )
+        known = TrainingRuns(state.runs, requested=(r.id for r in requests))
         if job is not None or seed is not None:
             requests = select_runs(requests, job=job, seed=seed)
         if resume and len(requests) != 1:
             raise LauncherError("--resume needs one run; select --job and --seed")
         for request in requests:
+            prior = known.find(request.id, request.job, request.seed)
             if resume:
+                if prior and prior.status:
+                    request = request.model_copy(update={"id": prior.status.run})
                 request, released = _resumed(request, experiment.name, until)
                 committed -= released
-            elif (
-                prior := find_training_run(state.runs, request.id, request.job.name, request.seed)
-            ) is not None:
+            elif prior is not None:
                 lines[request.id] = format_known_run(request, prior), prior.address
                 continue
             if not _fits(request.job, committed, max_usd):

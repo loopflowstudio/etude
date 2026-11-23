@@ -287,6 +287,12 @@ class Job(Record):
         return expand_runs([self], params=params)
 
 
+def declared_address(experiment: str | None, job: str, seed: int) -> str:
+    """The stable address assigned to a declared job and seed."""
+    name = f"{job}@{seed}"
+    return f"{experiment}/{name}" if experiment else name
+
+
 def expand_runs(
     given: Sequence[Job | RunRequest], *, params: dict[str, Param] | None = None
 ) -> list[RunRequest]:
@@ -304,8 +310,7 @@ def expand_runs(
         for seed in job.seeds:
             address = None
             if job.name:
-                local = f"{job.name}@{seed}"
-                address = f"{job.experiment}/{local}" if job.experiment else local
+                address = declared_address(job.experiment, job.name, seed)
             requests.append(RunRequest(job=job, seed=seed, params=dict(params or {}), id=address))
     return requests
 

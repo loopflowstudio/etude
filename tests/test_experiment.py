@@ -26,7 +26,7 @@ from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, CheckpointSlot, Code, Seating, checkpoint_player
 from etude.eval.tournament import evaluating, scores
-from etude.experiment import observe
+from etude.experiment import observe, state_of
 from etude.jobs import EvalJob, ExperimentState, OutMembers, _hold, evaluation_group
 from etude.launch.records import Outcome, Standing, Status
 from etude.out import MEMBERSHIP, OutFile, OutFiles
@@ -42,7 +42,7 @@ from etude.records import (
 from etude.spec import Job, RunRequest
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage
-from etude.train.read import read
+from etude.train.read import read, read_all
 from etude.train.tracking import TrainingRun as Run_
 from tests.eval.games import (
     play,
@@ -996,45 +996,129 @@ def test_launcher_phase_preserves_compact_training_addresses_and_terminal_outcom
         "failed" if phase == "failed" else "succeeded" if phase == "succeeded" else None
     )
     monkeypatch.setattr(client, "standing", launcher.standing)
-    (run,) = observe(bucket, "ppo").runs
+    state = observe(bucket, "ppo")
+    (run,) = state.runs
+    assert state.run("ppo/base@0") is state.run("ppo@0") is run
     assert run.name == "ppo@0"
     assert run.status == launcher.status("ppo/base@0")
     assert run.state == (phase if outcome == "stopped" and phase != "succeeded" else outcome)
 
 
-def test_a_continuation_keeps_its_own_launcher_status_beside_its_parents(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("stored", [("base@0",), ("c1",), ("base@0", "c1"), ()])
+def test_continuation_and_parent_keep_their_addresses_through_delivery(
+    tmp_path: Path, stored: tuple[str, ...]
 ) -> None:
-    bucket = DirectoryStorage(tmp_path / "bucket")
-    for name, parent in (("base@0", None), ("c1", "base@0")):
-        open_run(
+    source = DirectoryStorage(tmp_path)
+    job = Job(name="base", experiment="ppo", command="true")
+    parent, child = "ppo/base@0", "ppo/c1"
+    for name in stored:
+        continuation = (
+            Continuation(
+                parent=SourceKey(namespace="local", kind="run", source_id="base@0"),
+                clock="updates",
+                value=150,
+            )
+            if name == "c1"
+            else None
+        )
+        with open_run(
             experiment="ppo",
             run=name,
             job="base",
             seed=0,
-            directory=tmp_path / name,
-            storages=[bucket],
             clocks=["updates"],
-            continues=None
-            if parent is None
-            else Continuation(
-                parent=SourceKey(namespace="local", kind="run", source_id=parent),
-                clock="updates",
-                value=1,
-            ),
-        ).finish("finished", timeout=30)
+            continues=continuation,
+            directory=tmp_path,
+        ) as writer:
+            writer.log({"loss": 1}, updates=200 if continuation else 150)
     launcher = _Launcher()
+    launcher.launched.append(RunRequest(id=parent, seed=0, job=job))
     launcher.outcome = "succeeded"
-    launcher.launched.extend(
+    (finished,) = launcher.standing("ppo")
+    launcher.launched = [RunRequest(id=child, seed=0, job=job)]
+    launcher.queued, launcher.outcome = True, None
+    (queued,) = launcher.standing("ppo")
+    files = read_all(source)
+    for standing in ((queued, finished), (finished, queued)):
+        state = state_of(files, "ppo", retained=standing)
+        assert {run.name: run.status for run in state.runs} == {
+            "base@0": finished.status,
+            "c1": queued.status,
+        }
+        assert state.run(parent).state == "finished"
+        assert state.run(child).state == ("finished" if "c1" in stored else "queued")
+        for name in ("base@0", "c1"):
+            assert (state.run(name).last_write is not None) == (name in stored)
+        if "c1" in stored:
+            assert state.run(child).line == "base@0"
+
+
+@pytest.mark.parametrize(
+    ("stored", "requests", "expected"),
+    [
+        (("old",), ("base@0",), {"old": "base@0"}),
+        (("old",), ("repeat",), {"old": None, "repeat": "repeat"}),
+        (("old",), ("old", "base@0"), {"old": "old", "base@0": "base@0"}),
+        (("old", "older"), ("base@0",), {"old": None, "older": None, "base@0": "base@0"}),
+        (("c1",), ("base@0",), {"c1": None, "base@0": "base@0"}),
+    ],
+)
+def test_only_one_unclaimed_training_root_can_supply_a_declared_alias(
+    tmp_path: Path,
+    stored: tuple[str, ...],
+    requests: tuple[str, ...],
+    expected: dict[str, str | None],
+) -> None:
+    source = DirectoryStorage(tmp_path)
+    for name in stored:
+        record = RunRecord(
+            id=f"ppo/{name}",
+            experiment="ppo",
+            job_name="base",
+            seed=0,
+            continues=Continuation(
+                parent=SourceKey(namespace="local", kind="run", source_id="base@0"),
+                clock="steps",
+                value=1,
+            )
+            if name == "c1"
+            else None,
+            clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
+        )
+        source.put(f"ppo/{name}/run.json", record.model_dump_json().encode())
+    launcher = _Launcher()
+    launcher.launched = [
         RunRequest(id=f"ppo/{name}", seed=0, job=Job(name="base", experiment="ppo", command="true"))
-        for name in ("base@0", "c1")
+        for name in requests
+    ]
+    files, retained = read_all(source), launcher.standing("ppo")
+    for standing in (retained, retained[::-1]):
+        state = state_of(files, "ppo", retained=standing)
+        assert {
+            run.name: run.status.run.removeprefix("ppo/") if run.status else None
+            for run in state.runs
+        } == expected
+
+
+def test_compact_and_qualified_address_claims_survive_the_same_local_name(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path)
+    compact, qualified = "ppo@0", "ppo/ppo@0"
+    source.put(
+        compact + "/run.json",
+        RunRecord(id=compact, experiment="ppo", job_name="ppo", seed=0).model_dump_json().encode(),
     )
-    monkeypatch.setattr(client, "standing", launcher.standing)
-    state = observe(bucket, "ppo")
-    assert {run.name: run.status for run in state.runs} == {
-        "base@0": launcher.status("ppo/base@0"),
-        "c1": launcher.status("ppo/c1"),
-    }
+    launcher = _Launcher()
+    launcher.queued = True
+    launcher.launched = [
+        RunRequest(id=address, seed=0, job=Job(name="ppo", experiment="ppo", command="true"))
+        for address in (compact, qualified)
+    ]
+    files, retained = read_all(source), launcher.standing("ppo")
+    for standing in (retained, retained[::-1]):
+        state = state_of(files, "ppo", retained=standing)
+        assert {run.address for run in state.runs} == {compact, qualified}
+        assert state.run(compact).last_write is not None
+        assert state.run(qualified).last_write is None
 
 
 @pytest.mark.parametrize("phase", ["queued", "running"])
