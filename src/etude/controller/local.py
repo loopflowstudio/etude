@@ -91,7 +91,7 @@ def train(
                         )
                         print_view(prior.address, file=sys.stderr if json_output else sys.stdout)
                         continue
-                    identity = prior._data.address if prior and prior._data else request.id
+                    identity = (prior.stored_address if prior else None) or request.id
                     directory = Path(folder) / "runs" / request.id
                     attempt = _prepare(
                         file,

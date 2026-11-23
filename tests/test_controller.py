@@ -212,18 +212,23 @@ def test_declared_queue_and_resume_leave_an_independent_same_seed_request_alone(
         pool="waiting",
     )
     prior = backend.scheduler.record(repeat)
+    counts = Counting(backend.store, backend.service)
     for resume in (False, True):
-        advance(
-            experiment,
-            source=source,
-            mode="queue",
-            pool="waiting",
-            job="base",
-            seed=0,
-            resume=resume,
-        )
+        with counts.record():
+            advance(
+                experiment,
+                source=source,
+                mode="queue",
+                pool="waiting",
+                job="base",
+                seed=0,
+                resume=resume,
+                max_usd=Decimal(1),
+            )
         assert backend.scheduler.record(repeat) == prior
         assert backend.scheduler.record("two/base@0").launch.version == (2 if resume else 1)
+    # The resume uses the standing that established the original commitment.
+    assert counts.snapshot() == Counts(database=50)
     backend.store.close()
 
 

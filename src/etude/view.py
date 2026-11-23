@@ -484,9 +484,9 @@ class ChartIndex:
     def _publish_runs(
         self, db: sqlite3.Connection, launcher: LauncherObservation, experiments: set[str]
     ) -> None:
-        standing: dict[str, dict[str, Standing]] = defaultdict(dict)
+        standing: dict[str, list[Standing]] = defaultdict(list)
         for held in launcher.runs:
-            standing[held.record.experiment][held.record.id] = held
+            standing[held.record.experiment].append(held)
         for experiment in experiments:
             rows = db.execute(
                 """SELECT address, metadata, reached, preferred, last_write
@@ -508,24 +508,17 @@ class ChartIndex:
                 row[0]
                 for row in db.execute("SELECT address FROM runs WHERE experiment=?", (experiment,))
             }
-            retained = standing[experiment]
-            state = state_of(metadata, experiment, retained=tuple(retained.values()))
+            state = state_of(metadata, experiment, retained=tuple(standing[experiment]))
             runs: tuple[TrainingRunSummary | EvalRunSummary, ...] = (*state.runs, *state.eval_runs)
             for run in runs:
-                record = retained[run.status.run].record if run.status else None
-                # Stored training charts keep their compact address through a launcher alias.
-                address = (
-                    run._data.address
-                    if isinstance(run, TrainingRunSummary) and run._data
-                    else run.address
-                )
+                # Stored charts keep their compact address through a launcher alias.
+                address = run.stored_address or run.address
                 chart = files.get(address)
                 _store_run(
                     db,
                     address,
                     experiment,
                     run,
-                    record,
                     _CLOCKS.validate_json(chart["reached"]) if chart and chart["reached"] else {},
                     chart["preferred"] if chart else None,
                 )
@@ -889,12 +882,12 @@ def _store_run(
     address: str,
     experiment: str,
     run: TrainingRunSummary | EvalRunSummary,
-    record: RunRecord | None,
     reached: dict[str, float],
     preferred: str | None,
 ) -> None:
-    stored = run._data
+    stored = run.stored
     file = stored.file if stored else None
+    record = run.standing.record if run.standing else None
     job = record.launch.spec if record else None
     status = run.status
     training = isinstance(run, TrainingRunSummary)

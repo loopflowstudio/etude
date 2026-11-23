@@ -33,6 +33,9 @@ class Record(BaseModel):
     model_config = ConfigDict(defer_build=True, frozen=True)
 
 
+CONTINUATION_ENV = "ETUDE_CONTINUES"
+
+
 type Param = str | int | float | bool
 
 
@@ -246,6 +249,11 @@ class Job(Record):
     def plain(self) -> Job:
         """The frozen executable form stored and sent by the scheduler."""
         return self
+
+    @property
+    def continuation_json(self) -> str | None:
+        """The serialized parent handed to this job, if it continues a run."""
+        return next((v.value for v in self.environment if v.name == CONTINUATION_ENV), None)
 
     def require_hours(self) -> float:
         """The machine allowance; launch, queue and smoke require it."""

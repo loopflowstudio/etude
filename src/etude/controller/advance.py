@@ -25,7 +25,6 @@ from etude.eval.result import EvalResult
 from etude.eval.tournament import StoredRuns, played
 from etude.experiment import TrainingRuns, observe, read_tournament_lines
 from etude.jobs import (
-    Checkpoints,
     EvalGroup,
     EvalJob,
     Evaluation,
@@ -101,37 +100,6 @@ def _fits(job: Job, committed: Decimal, max_usd: Decimal | None) -> bool:
     return max_usd is None or committed + (job.max_usd or Decimal(0)) <= max_usd
 
 
-def _resumed(
-    request: RunRequest, experiment: str, until: Until | None
-) -> tuple[RunRequest, Decimal]:
-    """Resume this address and release its previous budget commitment."""
-    request = request.model_copy(
-        update={
-            "resume": True,
-            "job": request.job.model_copy(update={"until": until or request.job.until}),
-        }
-    )
-    for item in client.standing(experiment):
-        if item.record.id == request.id:
-            return request, item.committed_usd
-    return request, Decimal(0)
-
-
-def _queued(request: RunRequest, experiment: str) -> TrainingRunSummary:
-    assert request.id is not None
-    name = request.id.removeprefix(experiment + "/")
-    return TrainingRunSummary(
-        name=name,
-        experiment=experiment,
-        job=request.job.name,
-        launch=request.job.name,
-        line=name,
-        state="queued",
-        checkpoints=Checkpoints(),
-        seed=request.seed,
-    )
-
-
 def advance(
     experiment: Experiment,
     *,
@@ -184,10 +152,16 @@ def advance(
         for request in requests:
             prior = known.find(request.id, request.job, request.seed)
             if resume:
-                if prior and prior.status:
-                    request = request.model_copy(update={"id": prior.status.run})
-                request, released = _resumed(request, experiment.name, until)
-                committed -= released
+                standing = prior.standing if prior else None
+                if standing:
+                    committed -= standing.committed_usd
+                request = request.model_copy(
+                    update={
+                        "id": standing.record.id if standing else request.id,
+                        "resume": True,
+                        "job": request.job.model_copy(update={"until": until or request.job.until}),
+                    }
+                )
             elif prior is not None:
                 lines[request.id] = format_known_run(request, prior), prior.address
                 continue
@@ -204,7 +178,14 @@ def advance(
     if experiment.eval is not None and evaluate:
         # This pass's new runs have no checkpoints yet, but their policies already exist
         # for eval_jobs. Selection/resume passes skip evaluation, so every run here is new.
-        asking = replace(state, runs=(*state.runs, *(_queued(r, experiment.name) for r in new)))
+        queued = []
+        for request in new:
+            assert request.id is not None  # Declarations have assigned addresses.
+            name = request.id.removeprefix(experiment.name + "/")
+            queued.append(
+                TrainingRunSummary.queued(name, experiment.name, request.job.name, request.seed)
+            )
+        asking = replace(state, runs=(*state.runs, *queued))
         try:
             jobs = asked(experiment.eval, asking)
         except EtudeError:
@@ -233,10 +214,7 @@ def advance(
         key for run in state.eval_runs if run.state in {"queued", "running"} for key in run.matches
     }
     failed = {
-        key: f"{experiment.name}/{run.name}"
-        for run in state.eval_runs
-        if run.state == "failed"
-        for key in run.matches
+        key: run.address for run in state.eval_runs if run.state == "failed" for key in run.matches
     }
     taken = {run.address for run in state.eval_runs}
     decisions: list[TournamentDecision] = []

@@ -979,13 +979,7 @@ def _read_out(
         membership = OutFiles.model_validate_json(storage.get(folder + MEMBERSHIP))
         owner = stored_owner(run, experiment, folder.rstrip("/"))
         return tuple(
-            OutMember(
-                run=owner,
-                key=member.key,
-                sha256=member.sha256,
-                size_bytes=member.size_bytes,
-                uri=storage.uri(folder + member.key),
-            )
+            member.locate(owner, storage.uri(folder + member.key))
             for member in membership.files
             if (folder, member.key) in present
         )

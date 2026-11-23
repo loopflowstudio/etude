@@ -753,7 +753,8 @@ starts empty. A checkpoint delivered as an input names its parent run
 (`Input(run=PARENT, key=RECORDED_FILE)`); its bytes are verified by digest.
 That key may be under `out/` when the checkpoint was recorded there by reference.
 
-`etude.jobs` reads the parent's records and `out.json` from `--source`.
+The continuation reads the parent's declaration, checkpoints and out membership
+from one listing of `--source`. Each out file keeps the URI of the copy that supplied it.
 Continuation uses those fingerprints without downloading out files; inputs
 are verified when delivered. Sources without membership, such as a local
 run, are hashed while creating the continuation. The source is where the

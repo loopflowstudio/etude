@@ -92,7 +92,7 @@ class TrainingRuns:
         self._aliases: dict[str, jobs.TrainingRunSummary | None] = {}
         for run in runs:
             self._addresses[run.address] = run
-            data = run._data
+            data = run.stored
             if data is None or data.file is None:
                 continue
             self._addresses[data.address] = run
@@ -115,9 +115,8 @@ class TrainingRuns:
         if exact := self._addresses.get(address):
             return exact
         root = self._aliases.get(address)
-        if root and root.launch == job.name and root.seed == seed:
-            if not any(v.name == "ETUDE_CONTINUES" for v in job.environment):
-                return root
+        if root and root.launch == job.name and root.seed == seed and job.continuation_json is None:
+            return root
         return None
 
 
@@ -179,7 +178,7 @@ def state_of(
             state=data.stored_state,
             checkpoints=saved,
             seed=data.file.seed if data.file else None,
-            _data=data,
+            stored=data,
             last_write=data.last_write,
         )
     launches = find_eval_groups(retained)
@@ -203,16 +202,7 @@ def state_of(
         training = training_runs.find(record.id, spec, record.seed)
         address = training.address if training else record.id
         if training is None:
-            training = jobs.TrainingRunSummary(
-                name=name,
-                experiment=experiment,
-                job=spec.name,
-                launch=spec.name,
-                line=name,
-                seed=record.seed,
-                state="queued",
-                checkpoints=jobs.Checkpoints(),
-            )
+            training = jobs.TrainingRunSummary.queued(name, experiment, spec.name, record.seed)
         runs[address] = _join_allocation(training, item)
     return jobs.ExperimentState(
         experiment=experiment,
@@ -299,7 +289,7 @@ def _evaluations(
             name=address.removeprefix(experiment + "/"),
             state=state,
             last_write=max((d.last_write for d in files if d.last_write), default=None),
-            _data=root,
+            stored=root,
             file_state=state,
         )
     return summaries
@@ -310,7 +300,7 @@ def _join_allocation[Run: (jobs.TrainingRunSummary, jobs.EvalRunSummary)](
 ) -> Run:
     """Join the accepted file outcome to the allocation that could have written it."""
     status = item.status
-    data = run._data
+    data = run.stored
     writers = data.writers if data else ()
     latest = writers[-1] if writers else None
     outcome = data.outcome if data else None
@@ -347,4 +337,4 @@ def _join_allocation[Run: (jobs.TrainingRunSummary, jobs.EvalRunSummary)](
     else:
         state = item.placement
         allocation_phase = phase if phase in ("renting", "setting_up", "stopping") else None
-    return replace(run, state=state, status=status, allocation_phase=allocation_phase)
+    return replace(run, state=state, standing=item, allocation_phase=allocation_phase)

@@ -86,6 +86,7 @@ from etude.run import (
     report_progress,
     run_directories,
 )
+from etude.spec import CONTINUATION_ENV
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage, Storage, run_prefix
 from etude.train.block import Builder, Columns, Json, LoggedRow, concat
@@ -1277,7 +1278,7 @@ def _origin(latest: CheckpointRecord | None, root: Path, started_ms: int) -> int
 
 def _inherited() -> ParentRun | None:
     """The handed lineage, relocating its checkpoint input onto this machine."""
-    given = os.environ.get("ETUDE_CONTINUES")
+    given = os.environ.get(CONTINUATION_ENV)
     if not given:
         return None
     parent = ParentRun.model_validate_json(given)

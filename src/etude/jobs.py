@@ -78,11 +78,12 @@ from etude.eval.run import (
 )
 from etude.eval.tournament import _open_evaluation
 from etude.identity import run_address, stored_owner
-from etude.launch.records import Status
+from etude.launch.records import Standing, Status
 from etude.out import MEMBERSHIP, OutFile, OutFiles, OutMember
 from etude.records import ArtifactRef, Record, RunRecord, SourceKey
-from etude.run import as_storage, declare, destinations, located_runs
+from etude.run import RunListing, as_storage, declare, destinations, under
 from etude.spec import (
+    CONTINUATION_ENV,
     Input,
     Job,
     Preparation,
@@ -94,7 +95,7 @@ from etude.spec import (
     number,
 )
 from etude.storage import Storage, default_root, place_artifact
-from etude.train.read import RunData, read
+from etude.train.read import RunData, read_located
 from etude.train.records import ParentRun
 
 __all__ = (
@@ -171,8 +172,27 @@ type RunState = Literal["queued", "running", "stopped", "finished", "failed"]
 type AllocationPhase = Literal["renting", "setting_up", "stopping", "stopped"]
 
 
+@dataclass(frozen=True, kw_only=True)
+class _RunObservation:
+    # Keep the same launcher observation for status, placement and budget decisions.
+    standing: Standing | None = field(default=None, repr=False, hash=False)
+    last_write: datetime | None = None
+    allocation_phase: AllocationPhase | None = None
+    # The file observation carries the reader's selected data and may be absent before delivery.
+    stored: RunData | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def status(self) -> Status | None:
+        return self.standing.status if self.standing else None
+
+    @property
+    def stored_address(self) -> str | None:
+        """The address in the file declaration, including historical compact spellings."""
+        return self.stored.address if self.stored else None
+
+
 @dataclass(frozen=True)
-class TrainingRunSummary:
+class TrainingRunSummary(_RunObservation):
     name: str
     experiment: str
     # Its job as the report names it (`etude.train.report.job_names`): the launch name, with
@@ -186,24 +206,30 @@ class TrainingRunSummary:
     checkpoints: Checkpoints
     # The seed it declared, if any.
     seed: int | None = None
-    # Launcher-only runs have no stored data. Copies keep the same lazy storage read.
-    _data: RunData | None = field(default=None, repr=False, compare=False)
-    status: Status | None = field(default=None, hash=False)
-    last_write: datetime | None = None
-    allocation_phase: AllocationPhase | None = None
+
+    @classmethod
+    def queued(cls, name: str, experiment: str, job: str, seed: int | None) -> TrainingRunSummary:
+        return cls(
+            name=name,
+            experiment=experiment,
+            job=job,
+            launch=job,
+            line=name,
+            state="queued",
+            checkpoints=Checkpoints(),
+            seed=seed,
+        )
 
     @property
     def address(self) -> str:
         """The full spelling held by the launcher or written in the run declaration."""
         if self.status:
             return self.status.run
-        if self._data:
-            return self._data.address
-        return run_address(self.name, self.experiment)
+        return self.stored_address or run_address(self.name, self.experiment)
 
     @cached_property
     def out(self) -> OutMembers:
-        return OutMembers(self._data.out if self._data is not None else ())
+        return OutMembers(self.stored.out if self.stored is not None else ())
 
     @property
     def ended(self) -> bool:
@@ -216,22 +242,18 @@ class TrainingRunSummary:
 
 
 @dataclass(frozen=True)
-class EvalRunSummary:
+class EvalRunSummary(_RunObservation):
     name: str
     state: RunState
     matches: tuple[str, ...] = ()
-    status: Status | None = field(default=None, hash=False)
-    last_write: datetime | None = None
-    allocation_phase: AllocationPhase | None = None
     file_state: RunState | None = None
-    _data: RunData | None = field(default=None, repr=False, compare=False)
 
     @property
     def address(self) -> str:
         """The submitted address, or the file declaration's address for a standalone run."""
         if self.status:
             return self.status.run
-        return self._data.address if self._data else self.name
+        return self.stored_address or self.name
 
 
 @dataclass(frozen=True)
@@ -254,7 +276,7 @@ class ExperimentState:
     def run(self, name: str) -> TrainingRunSummary:
         """The training run named `name`; raises `EtudeError("run_not_found")` without one."""
         for each in self.runs:
-            if each.address == name or (each._data and each._data.address == name):
+            if name in (each.address, each.stored_address):
                 return each
         for each in self.runs:
             if each.name == name.removeprefix(self.experiment + "/"):
@@ -1041,33 +1063,36 @@ def continue_from(
     Empty out without a latest copied checkpoint is refused before queueing.
     """
     storage = as_storage(source)
-    keys = storage.keys("")
     name = parent.id.rsplit("/", 1)[-1]
+    listing = RunListing.read(storage, run=name)
     candidates = [
         item
-        for item in located_runs(storage, keys, run=name)
+        for item in listing.declarations
         if not parent.experiment or item.file.experiment == parent.experiment
     ]
     if len(candidates) != 1:
         raise LauncherError(f"run {parent.id} has no unambiguous tracked folder in {storage.name}")
-    declaration, folders = candidates[0].file, candidates[0].folders
-    source_run = folders[0].rstrip("/")
-    data = read(storage, declaration.experiment, name)
+    (located,) = candidates
+    declaration = located.file
+    data = read_located(storage, located, listing.keys)
     target = Until.parse(until)
-    previous = next(
-        (v.value for v in parent.launch.spec.environment if v.name == "ETUDE_CONTINUES"), None
-    )
+    spec = parent.launch.spec
+    previous = spec.continuation_json
     inherited_input = None if previous is None else ParentRun.model_validate_json(previous).input
     inputs = {
         i.name: i
-        for i in parent.launch.spec.inputs
+        for i in spec.inputs
         if i.name != inherited_input
         and (inherited_input is None or not i.name.startswith(inherited_input + "/"))
         and i.out is None
     }
     parent_key = SourceKey(namespace=declaration.namespace, kind="run", source_id=name)
     # An explicit checkpoint needs no out reads, even when the parent has out.
-    out = None if ordinal is not None else _parent_out(storage, folders, keys)
+    out = (
+        None
+        if ordinal is not None
+        else _parent_out(storage, parent.id, located.folders, listing.keys)
+    )
     checkpoint = next((r for r in reversed(data.checkpoints) if ordinal in (None, r.ordinal)), None)
     key = None
     if checkpoint is not None:
@@ -1078,10 +1103,9 @@ def continue_from(
             # read from does not make the same continuation a different job.
             key = checkpoint_key(checkpoint.artifact.uri)
     copied = key is not None and key.startswith(f"{CHECKPOINTS}/")
-    members = () if out is None else out.files
     # Empty out still resumes a copied checkpoint. A removed out checkpoint
     # must never select an older record or resurrect its retained bytes.
-    if out is not None and not members and not copied:
+    if out == () and not copied:
         if checkpoint is None:
             raise LauncherError(
                 f"run {parent.id} has no saved state: out is empty and no checkpoint was recorded"
@@ -1091,30 +1115,22 @@ def continue_from(
             "use --ordinal N to select a recorded checkpoint explicitly"
         )
     given = None
-    if members:
+    if out:
         # A recipe may save a checkpoint without logging scalar rows.
         at = {**(checkpoint.at if checkpoint is not None else {}), **data.reached}
-        for index, member in enumerate(members):
-            name = _input_name(f"parent-out-{index}", inputs)
-            inputs[name] = Input(
-                name=name,
-                out=member.key.removeprefix("out/"),
-                key=member.key,
-                sha256=member.sha256,
-                size_bytes=member.size_bytes,
-                run=parent.id,
-                uri=storage.uri(source_run + "/" + member.key),
-            )
+        for index, member in enumerate(out):
+            input_name = _input_name(f"parent-out-{index}", inputs)
+            inputs[input_name] = member.input(input_name, out=member.path)
         if not copied and not any(
             member.key == key or key is not None and member.key.startswith(key + "/")
-            for member in members
+            for member in out
         ):
             checkpoint = None
         origin = "parent"
     else:
         origin = "checkpoint"
         at = checkpoint.at if checkpoint is not None else {}
-    if not members or copied:
+    if not out or copied:
         if (
             checkpoint is None
             or checkpoint.artifact.sha256 is None
@@ -1123,8 +1139,8 @@ def continue_from(
             raise LauncherError(f"run {parent.id} recorded no stored checkpoint {ordinal or ''}")
         if key is not None:
             given = _input_name(_PARENT_CHECKPOINT + PurePosixPath(key).suffix, inputs)
-            located = checkpoint.model_copy(update={"run": name, "file": key, "folder": source_run})
-            for file_input in checkpoint_inputs_for(located, given):
+            saved = checkpoint.model_copy(update={"file": key})
+            for file_input in checkpoint_inputs_for(saved, given):
                 inputs[file_input.name] = file_input.model_copy(update={"run": parent.id})
     if target.clock not in at:
         raise LauncherError(
@@ -1145,15 +1161,11 @@ def continue_from(
         parent=parent_key, at=at, clocks=declaration.clocks, checkpoint=checkpoint, input=given
     )
     environment = (
-        *(v for v in parent.launch.spec.environment if v.name != "ETUDE_CONTINUES"),
-        Variable(name="ETUDE_CONTINUES", value=handed.model_dump_json()),
+        *(v for v in spec.environment if v.name != CONTINUATION_ENV),
+        Variable(name=CONTINUATION_ENV, value=handed.model_dump_json()),
     )
-    text = (
-        parent.launch.spec.config
-        if config is None
-        else _config_text(load_job_function(parent.launch.spec), config)
-    )
-    job = parent.launch.spec.model_copy(
+    text = spec.config if config is None else _config_text(load_job_function(spec), config)
+    job = spec.model_copy(
         update={
             "until": target,
             "inputs": tuple(inputs.values()),
@@ -1166,7 +1178,9 @@ def continue_from(
     )
 
 
-def _parent_out(storage: Storage, folders: Sequence[str], keys: Sequence[str]) -> OutFiles | None:
+def _parent_out(
+    storage: Storage, run: str, folders: Sequence[str], keys: Sequence[str]
+) -> OutMembers | None:
     """Choose one physical out; absent membership requires reading and hashing its files.
 
     None means no out exists. Empty membership excludes retained out bytes;
@@ -1174,20 +1188,27 @@ def _parent_out(storage: Storage, folders: Sequence[str], keys: Sequence[str]) -
     """
     for folder in folders:
         if folder + MEMBERSHIP in keys:
-            return OutFiles.model_validate_json(storage.get(folder + MEMBERSHIP))
-        out_keys = sorted(key for key in keys if key.startswith(folder + "out/"))
-        if not out_keys and folder + OUT_PRESENT not in keys:
-            continue
-        files: list[OutFile] = []
-        for full_key in out_keys:
-            key = full_key[len(folder) :]
-            if any(part.startswith(".") for part in key.split("/")) or key.endswith(
-                (".partial", ".open")
-            ):
+            members = OutFiles.model_validate_json(storage.get(folder + MEMBERSHIP)).files
+        else:
+            out_keys = list(under(keys, folder + "out/"))
+            if not out_keys and folder + OUT_PRESENT not in keys:
                 continue
-            body = storage.get(full_key)
-            files.append(OutFile(key=key, sha256=sha256(body).hexdigest(), size_bytes=len(body)))
-        return OutFiles(files=tuple(files))
+            files = []
+            for full_key in out_keys:
+                key = full_key[len(folder) :]
+                if any(part.startswith(".") for part in key.split("/")) or key.endswith(
+                    (".partial", ".open")
+                ):
+                    continue
+                body = storage.get(full_key)
+                files.append(
+                    OutFile(key=key, sha256=sha256(body).hexdigest(), size_bytes=len(body))
+                )
+            members = tuple(files)
+        # A declaration-only copy may precede the folder that supplied these bytes.
+        return OutMembers(
+            member.locate(run, storage.uri(folder + member.key)) for member in members
+        )
     return None
 
 
