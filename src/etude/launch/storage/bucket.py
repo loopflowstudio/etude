@@ -48,6 +48,7 @@ from etude.launch.storage.files import select_output
 from etude.launch.storage.s3 import Bucket, Grant, Version
 from etude.launch.storage.transport import attribute
 from etude.launch.usage import Transfer
+from etude.observations import ViewGrantTarget
 from etude.out import MEMBERSHIP, OutFiles, recovery
 from etude.storage_timeout import StorageUnavailable
 
@@ -121,7 +122,13 @@ class BucketJournal:
         """What a machine may write for one run: everything under its folder."""
         return self._bucket.grant(self._run_prefix(run), seconds, run)
 
-    def prepare(self, packet: Packet, *, expires_at: datetime | None = None) -> BootstrapLinks:
+    def prepare(
+        self,
+        packet: Packet,
+        *,
+        expires_at: datetime | None = None,
+        view_grants: dict[str, ViewGrantTarget] | None = None,
+    ) -> BootstrapLinks:
         """Write a session's instructions and grants that last until `expires_at`.
 
         `expires_at` defaults to the packet's deadline; without either, grants
@@ -135,6 +142,7 @@ class BucketJournal:
             runs = {work.run: self._run_grant(work.run, seconds) for work in packet.work}
             self._bucket.put(root + "packet.json", packet.model_dump_json().encode(), once=True)
             bootstrap = Bootstrap(
+                view_grants=view_grants or {},
                 packet=packet,
                 out=out,
                 runs=runs,
@@ -492,7 +500,7 @@ class BucketJournal:
             )
 
     @_attribute_session
-    def add(self, session_id: str, work: Work) -> None:
+    def add(self, session_id: str, work: Work, view_grant: ViewGrantTarget | None = None) -> None:
         inbox = self._inbox(session_id)
         if all(entry.work.attempt != work.attempt for entry in inbox.work):
             raw = self._once(self._session_prefix(session_id) + "packet.json")
@@ -502,6 +510,7 @@ class BucketJournal:
                 # The machine delivers for this long after the deadline it was given.
                 deadline = packet.deadline + timedelta(seconds=packet.delivery_seconds or 0)
             entry = Delivery(
+                view_grant=view_grant,
                 work=work,
                 access=self._run_grant(work.run, _seconds_until(deadline)),
                 fetch=self._fetch([work]),

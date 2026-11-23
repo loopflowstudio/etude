@@ -45,6 +45,8 @@ def invoke(call: RemoteCall) -> RemoteReply:
             added = root / request.session / "work"
             added.mkdir(exist_ok=True)
             if not (added / f"{request.work.attempt}.json").exists():
+                if request.view_grant:
+                    request.view_grant.place(root / request.session, request.work.attempt)
                 write(added / f"{request.work.attempt}.json", request.work.model_dump_json())
             return RemoteReply()
         case SessionRequest(action="started"):
@@ -129,6 +131,8 @@ def _start(root: Path, request: StartRequest) -> RemoteReply:
             )
         return RemoteReply(pid=process.pid)
     # Sources were staged above; this start uses the same process implementation.
+    for attempt, target in request.view_grants.items():
+        target.place(home, attempt)
     write(home / "packet.json", request.packet.model_dump_json())
     return RemoteReply(pid=ProcessStart(root).spawn(request.packet))
 

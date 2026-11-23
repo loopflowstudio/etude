@@ -10,7 +10,7 @@ import os
 import re
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -38,8 +38,8 @@ class Console:
     a credential. Only sanitized text reaches the retained sink.
     """
 
-    def __init__(self, operation: str) -> None:
-        self._operation = operation
+    def __init__(self, operation: str, *, retain: Callable[[str], None] | None = None) -> None:
+        self._retain = retain or (lambda line: write_log(operation, line))
         self._pending = b""
         self._omitting = False
 
@@ -57,9 +57,9 @@ class Console:
 
     def _flush(self) -> None:
         if self._omitting:
-            write_log(self._operation, "[retention truncated: oversized console line omitted]")
+            self._retain("[retention truncated: oversized console line omitted]")
         elif self._pending:
-            write_log(self._operation, self._pending.decode(errors="replace").rstrip("\n"))
+            self._retain(sanitize(self._pending.decode(errors="replace").rstrip("\n")))
         self._pending = b""
         self._omitting = False
 

@@ -52,6 +52,7 @@ from etude.launch.storage.transport import HTTPReply
 from etude.launch.worker import courier as courier_module
 from etude.launch.worker.courier import Courier
 from etude.launch.worker.main import work
+from etude.observations import ViewGrantTarget
 from etude.spec import RunRequest
 from tests.launch.counting import Counting, Counts, job_text
 from tests.launch.fake import bench, open_database
@@ -122,12 +123,12 @@ def test_partial_cohort_retains_shared_failure_without_admitting_members(
     create = b.service.create
     calls = 0
 
-    def fail_second(packet: Packet) -> str:
+    def fail_second(packet: Packet, view_grants: dict[str, ViewGrantTarget] | None = None) -> str:
         nonlocal calls
         calls += 1
         if calls == 2:
             b.service.refuse = 1
-        return create(packet)
+        return create(packet, view_grants)
 
     monkeypatch.setattr(b.service, "create", fail_second)
     ids = b.scheduler.launch(

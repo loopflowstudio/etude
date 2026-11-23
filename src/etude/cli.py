@@ -607,6 +607,7 @@ def continue_run(
     from etude.identity import run_address
     from etude.jobs import continue_from, continued_config
     from etude.launch.listing import show_runs
+    from etude.observations import launcher_origin
     from etude.run import RunListing
     from etude.storage import DirectoryStorage, default_root, storage_from_uri
     from etude.view_link import print_view
@@ -634,7 +635,7 @@ def continue_run(
         )
     (child,) = scheduler.queue(request, parent.launch.pool, rent=parent.launch.rent)
     show_runs(scheduler, [child])
-    print_view(child)
+    print_view(child, origin=launcher_origin())
 
 
 # Each may reach a bucket, so it is a wait rather than a read.

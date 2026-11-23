@@ -48,8 +48,8 @@ failure recovery requires.
   `blobs.zip`. View outages never block training or bucket delivery, but a lost
   machine can leave a permanent gap on the hosted view while the bucket remains
   the portable scientific record. Because push mode reads neither buckets nor
-  `launcher.sqlite`, `/machines` inventory, dollar totals and copyable local
-  commands are unavailable, and an unfinished run with no push for 10 minutes
+  `launcher.sqlite`, machine inventory and dollar totals are unavailable.
+  An unfinished attempt with no push for 10 minutes
   shows **no end recorded**.
 - Time/dollar caps bound admitted rental allocations, not provider bills.
   Outages can delay deletion. External storage/transfer/API costs are excluded.

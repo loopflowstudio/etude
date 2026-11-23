@@ -70,9 +70,16 @@ def _live_origin(address: Path) -> str | None:
     return None
 
 
-def print_view(run: str, *, file: TextIO | None = None) -> None:
-    # Only the invoking computer's loopback address is useful to its reader.
-    if os.environ.get("ETUDE_SERVER_LOCAL"):
-        return
-    if origin := _live_origin(home() / "view"):
+def local_origin() -> str | None:
+    return _live_origin(home() / "view")
+
+
+def print_view(run: str, *, origin: str | None = None, file: TextIO | None = None) -> None:
+    if not origin:
+        origin = (
+            os.environ.get("ETUDE_CLIENT_VIEW_URL")
+            if os.environ.get("ETUDE_SERVER_LOCAL")
+            else local_origin()
+        )
+    if origin:
         print(f"view: {origin}{run_path(run)}", file=file, flush=True)

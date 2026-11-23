@@ -5,6 +5,7 @@ import stat
 import sys
 import threading
 import time
+from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -15,12 +16,80 @@ from urllib.parse import urlsplit
 
 from etude.block_file import parse, select
 from etude.errors import explain
-from etude.observations import MAX_FILE_BYTES, ViewGrantTarget, training_file
+from etude.launch.logging import LIMIT, TRUNCATED, Console
+from etude.launch.logs import ConsoleTail
+from etude.launch.schemas import read_progress
+from etude.observations import (
+    MAX_FILE_BYTES,
+    AttemptObservation,
+    ConsoleObservation,
+    ViewGrantTarget,
+    training_file,
+)
+
+
+class _JobConsole:
+    """Byte cursor in the local job log. Only whole sanitized lines leave the machine."""
+
+    def __init__(self) -> None:
+        self.position = 0
+        self.lines: deque[str] = deque()
+        self.size = 0
+        self.gaps = False
+        self._skip_partial = False
+        self.console = Console("job", retain=self._retain)
+
+    def _retain(self, line: str) -> None:
+        self.lines.append(line)
+        self.size += len(line.encode()) + 1
+        self.gaps |= TRUNCATED in line
+        while self.size > LIMIT or len(self.lines) > ConsoleTail.max_lines:
+            self.size -= len(self.lines.popleft().encode()) + 1
+            self.gaps = True
+
+    def collect(self, path: Path, finished: bool) -> ConsoleObservation | None:
+        try:
+            stream = path.open("rb")
+        except FileNotFoundError:
+            return None
+        with stream:
+            # Snapshot the end so a noisy producer cannot monopolize publication.
+            end = os.fstat(stream.fileno()).st_size
+            if end - self.position > LIMIT:
+                self.position = end - LIMIT
+                self.lines.clear()
+                self.size = 0
+                self.gaps = self._skip_partial = True
+                self.console = Console("job", retain=self._retain)
+            stream.seek(self.position)
+            while self.position < end:
+                chunk = stream.read(min(end - self.position, 65536))
+                if not chunk:
+                    break
+                self.position += len(chunk)
+                if self._skip_partial:
+                    # Starting inside a line could expose the rest of a credential.
+                    _, newline, chunk = chunk.partition(b"\n")
+                    self._skip_partial = not newline
+                self.console.write(chunk)
+        complete = finished and self.position == end
+        if complete:
+            self.console.write(b"", final=True)
+        return ConsoleObservation(
+            position=self.position, body="\n".join(self.lines), gaps=self.gaps, complete=complete
+        )
 
 
 class AttemptPublisher:
-    def __init__(self, root: Path, target: ViewGrantTarget, halt: threading.Event) -> None:
+    def __init__(
+        self, root: Path, journal: Path, target: ViewGrantTarget, halt: threading.Event
+    ) -> None:
         self.root = root
+        self.journal = journal
+        self.console = _JobConsole()
+        self.last: AttemptObservation | None = None
+        self.heartbeat = 0.0
+        self.sequence = 0
         self.target = target
         self.halt = halt
         self.finish = threading.Event()
@@ -35,6 +104,13 @@ class AttemptPublisher:
             yield from sorted(key for key in keys if key.endswith(".json") and training_file(key))
             for block in select(b for k in keys if training_file(k) and (b := parse(k))):
                 yield block.key
+        checkpoints = self.root / "checkpoints"
+        if checkpoints.is_dir() and not checkpoints.is_symlink():
+            yield from sorted(
+                "checkpoints/" + p.name
+                for p in checkpoints.glob("*.json")
+                if training_file("checkpoints/" + p.name)
+            )
         yield "outcome.json"
 
     def _send(self, key: str) -> None:
@@ -53,33 +129,63 @@ class AttemptPublisher:
             body = stream.read(MAX_FILE_BYTES + 1)
         if len(body) > MAX_FILE_BYTES:
             raise ValueError("training evidence exceeds hosted view limit")
+        self._post(
+            "/api/observations/file",
+            body,
+            {
+                "Content-Type": "application/octet-stream",
+                "X-Etude-Key": key,
+                "X-Etude-Sha256": sha256(body).hexdigest(),
+                "X-Etude-Modified-At": datetime.fromtimestamp(info.st_mtime, UTC).isoformat(),
+            },
+        )
+        self._sent[key] = version
+
+    def _post(self, route: str, body: bytes, headers: dict[str, str]) -> None:
         url = urlsplit(self.target.origin)
-        if not url.hostname:
-            raise ValueError("missing hosted view origin")
+        assert url.hostname is not None
         connection = HTTPSConnection if url.scheme == "https" else HTTPConnection
-        # One exchange, with no redirect handling or forwarding of the grant.
+        # A single exchange never follows a redirect carrying the grant.
         client = connection(url.hostname, url.port, timeout=5)
         try:
             client.request(
-                "POST",
-                "/api/observations/file",
-                body,
-                {
-                    "Authorization": "Bearer " + self.target.token,
-                    "Content-Type": "application/octet-stream",
-                    "X-Etude-Key": key,
-                    "X-Etude-Sha256": sha256(body).hexdigest(),
-                    "X-Etude-Modified-At": datetime.fromtimestamp(info.st_mtime, UTC).isoformat(),
-                },
+                "POST", route, body, {**headers, "Authorization": "Bearer " + self.target.token}
             )
             with client.getresponse() as response:
                 if response.status in (409, 413, 422):
-                    raise ValueError(f"hosted view refused {key} (HTTP {response.status})")
+                    raise ValueError(f"hosted view refused observation (HTTP {response.status})")
                 if response.status != 200:
                     raise HTTPException(f"hosted view returned HTTP {response.status}")
         finally:
             client.close()
-        self._sent[key] = version
+
+    def _observe(self) -> None:
+        progress = read_progress(self.journal)
+        done = progress.finished_at is not None
+        observation = AttemptObservation(
+            producer_seq=self.last.producer_seq if self.last else 1,
+            phase="done" if done else "running" if progress.started_at else "setting_up",
+            started_at=progress.started_at,
+            finished_at=progress.finished_at,
+            outcome=progress.outcome,
+            cause=progress.cause,
+            exit_code=progress.exit_code,
+            clocks=progress.clocks,
+            tally=progress.tally,
+            context=self.target.context,
+            console=self.console.collect(self.journal / "log", done),
+        )
+        if observation == self.last and time.monotonic() < self.heartbeat:
+            return
+        self.sequence += 1
+        observation = observation.model_copy(update={"producer_seq": self.sequence})
+        self._post(
+            "/api/observations",
+            observation.model_dump_json().encode(),
+            {"Content-Type": "application/json"},
+        )
+        self.last = observation
+        self.heartbeat = time.monotonic() + 60
 
     def run(self) -> None:
         failed = False
@@ -88,6 +194,10 @@ class AttemptPublisher:
             final = self.finish.is_set()
             failure: str | None = None
             try:
+                try:
+                    self._observe()
+                except ValueError as error:
+                    failure = explain(error)
                 for key in self._files():
                     if self.halt.is_set() or self.stop.is_set():
                         return
@@ -123,7 +233,9 @@ def publish_attempt(
         print("hosted view: cannot read attempt grant", file=sys.stderr, flush=True)
         yield
         return
-    publisher = AttemptPublisher(session.parent.parent / "track" / run, target, halt)
+    publisher = AttemptPublisher(
+        session.parent.parent / "track" / run, session / "attempts" / attempt, target, halt
+    )
     thread = threading.Thread(target=publisher.run, daemon=True, name="etude-view-publish")
     thread.start()
     try:

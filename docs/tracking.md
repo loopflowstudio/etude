@@ -148,8 +148,7 @@ view. On a cold start, the view lists the entire source and downloads the
 run metadata and sealed training metrics for every experiment into
 `ETUDE_HOME/cache`. File-backed runs appear together after that first pass
 finishes. Passing one experiment file selects its report code and still
-scans the whole source. For large buckets, the planned hosted view will
-receive updates pushed by trainers.
+scans the whole source. For large buckets, the [hosted view](#hosted-view) receives updates from launched workers.
 
 While the view advertises its address in `ETUDE_HOME/view`, `train`, `launch`,
 `queue`, `continue` and `status RUN` print a `view:` link for each run (when the
@@ -348,12 +347,6 @@ selected server and directs you to `etude machines`.
 
 ### Hosted view
 
-The first hosted milestone serves the Overview and Charts tabs from pushed
-training files. Run `uv run --extra hosted pytest -q tests/test_hosted_view.py`
-to exercise a directory worker publishing to a disposable Postgres view. The fixture
-supplies the private attempt grant. Automatic launcher handoff, console tails,
-experiment pages and reports below are planned for the following slices.
-
 Run `etude view --push` backed by Postgres so launched jobs publish sealed
 curves, attempt status and console output to a shared URL as they run. The
 hosted view receives all run data over HTTP and never reads back from a bucket
@@ -377,8 +370,8 @@ view: http://127.0.0.1:8765/runs/prototype/coin@0
 
 Loopback works when the worker runs on the same host; for remote or rented
 workers, set `ETUDE_VIEW_URL` to the view's reachable HTTPS origin. Open the
-printed link to watch the run's curves, console and experiment report update on
-the same 5-second refresh cadence.
+printed link for the latest attempt, config, checkpoint records and console on
+Overview. Charts shows the sealed training curves. Both refresh every 5 seconds.
 
 **Mode and upgrades.** Plain `etude view [PATH] [--source SOURCE]` stays in local
 pull mode even if `ETUDE_VIEW_DATABASE_URL` is set. `--push` explicitly enables
@@ -410,21 +403,23 @@ and prints no links. Plain `etude train` does not push to a hosted view.
 
 **What is pushed and persisted.** Workers push attempt status, machine and
 hardware display details, config, an incremental tail of the last 500 console
-lines and portable evidence files: sealed metric blocks, run/outcome/checkpoint/artifact
-records and evaluation Parquet tables with `block.json` (up to 32 MiB per file).
-Weights, `out/` and `blobs.zip` are never pushed. Runs, charts, console tails
-and built experiment reports persist in Postgres across web restarts. Experiment
-reports build on demand—and update with **Refresh report**—from data pushed to
-Postgres, using the optional local `PATH` declaration on the view host or the
-default report.
+lines, run and outcome records, checkpoint records and sealed training metrics.
+Each file may be up to 32 MiB. Checkpoint weights stay in the run’s canonical
+storage. A replacement attempt owns the current status and console. Opening
+the link after a web restart shows the last committed observation.
+
+Run `uv run --extra hosted pytest -q tests/test_hosted_view.py` to exercise
+the launch, receiver outage, retry and worker handoffs with a disposable Postgres.
+Hosted experiment pages, reports, artifact records and evaluation tables are
+planned for the next milestone.
 
 | Situation | What appears |
 | --- | --- |
 | Link opened before first push | Waiting run page naming the hosted push feed |
 | View unreachable during training | Job, canonical bucket delivery and cleanup continue unaffected; a live or resumed worker catches up (including folded blocks). A lost machine can leave a permanent gap on the site; the bucket remains the portable scientific record. |
-| Worker silent with no outcome or retry | Last push time and **no end recorded** after 10 minutes without a push; stops holding the experiment **Open** |
-| No launcher inventory | `/machines` and the side rail say machine inventory is unavailable here; Dollars show `—`; the local copy-command bar is omitted |
-| Projection or declaration error | Previous complete chart or report stays visible with the sanitized error shown |
+| Worker silent with no outcome or retry | Last push time and **no end recorded** after 10 minutes without a push |
+| Machine details | Overview shows the machine assigned to the attempt and hardware when known. |
+| Projection error | Previous complete chart stays visible with the sanitized error shown |
 
 The hosted view UI has no login; place authentication or a private network in
 front of it when exposing it beyond `127.0.0.1`. HTTP ingest endpoints require

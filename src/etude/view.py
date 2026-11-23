@@ -40,7 +40,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 from pydantic import TypeAdapter
 
 from etude.cache import Cache
-from etude.errors import EtudeError, explain
+from etude.errors import EtudeError, LauncherError, explain
 from etude.experiment import find_eval_groups, locate_evaluation_members, state_of
 from etude.home import home
 from etude.identity import SAFE_NAME, run_address
@@ -50,7 +50,13 @@ from etude.launch.logs import ConsoleTail
 from etude.launch.records import MachineStatus, Standing, Status
 from etude.launch.server import LauncherObservation, PythonClient, selected
 from etude.launch.source import line
-from etude.observations import MAX_FILE_BYTES, ViewGrant, training_file
+from etude.observations import (
+    MAX_FILE_BYTES,
+    MAX_OBSERVATION_BYTES,
+    AttemptObservation,
+    ViewGrant,
+    training_file,
+)
 from etude.page import (
     DEFAULT_REPORT,
     Pages,
@@ -1323,7 +1329,7 @@ def _store_run(
         "file_state": file_state,
         "file_position": _position(clocks, preferred) if stored else None,
         "file_config": file_config,
-        "checkpoints": _checkpoints(stored) if stored and training else None,
+        "checkpoints": checkpoint_table(stored) if stored and training else None,
         "launched_as": status.run if status else None,
         "launcher_job": (job.name or "Evaluation") if job and not (file and training) else None,
         "launcher_state": (run.allocation_phase or run.state).replace("_", " ") if status else None,
@@ -1565,14 +1571,17 @@ def _position(clocks: dict[str, float], preferred: str | None, target: Until | N
     return f"{clock} {number(clocks[clock])}" if clock else ""
 
 
+def _retained_output(body: str, gaps: bool) -> str:
+    html = (
+        '<pre id="retained-output" class="console" tabindex="0" aria-label="Retained console">'
+        f"{escape(body)}</pre>"
+    )
+    return html + ("<p>Some console output is missing from retention.</p>" if gaps else "")
+
+
 def _console(row: sqlite3.Row, collected: str) -> str:
     if row["body"] is not None:
-        console = (
-            '<pre id="retained-output" class="console" tabindex="0" aria-label="Retained console">'
-            f"{escape(row['body'])}</pre>"
-        )
-        if row["gaps"]:
-            console += "<p>Some console output is missing from retention.</p>"
+        console = _retained_output(row["body"], row["gaps"])
         hidden = "" if collected else " hidden"
         console = f'<p id="console-collected"{hidden}>{collected}</p>' + console
     elif row["launched_as"]:
@@ -1599,7 +1608,7 @@ def _source(record: RunRecord) -> str:
     return source
 
 
-def _checkpoints(stored: RunData) -> str | None:
+def checkpoint_table(stored: RunData) -> str | None:
     rows = []
     for checkpoint in stored.checkpoints:
         # Wall clocks are fractional hours; four significant digits read as a position.
@@ -2064,6 +2073,47 @@ class RunChart:
     received: datetime
     error: str | None
     payload: str | None
+    attempt_number: int
+    sequence: int | None
+    finished: bool | None
+    attempt: AttemptObservation | None
+    checkpoints: str | None
+
+
+def _attempt_panel(chart: RunChart) -> str:
+    attempt = chart.attempt
+    if attempt is None:
+        return ""
+    context = attempt.context
+    position = _position(attempt.clocks, None, context.until)
+    details = [
+        f"Attempt {chart.attempt_number} of {context.max_attempts}",
+        attempt.outcome or attempt.phase.replace("_", " "),
+        context.machine,
+        str(context.hardware) if context.hardware else "",
+        position,
+        attempt.cause or "",
+    ]
+    panel = "<p>" + " · ".join(escape(d) for d in details if d) + "</p>"
+    if context.source:
+        panel += f"<p>Source <code>{escape(context.source)}</code></p>"
+    if context.config is not None:
+        panel += (
+            f'<section class="sec"><h2>Config</h2><pre>{escape(context.config)}</pre></section>'
+        )
+    if chart.checkpoints:
+        panel += f'<section class="sec"><h2>Checkpoints</h2>{chart.checkpoints}</section>'
+    console = attempt.console
+    label = "Waiting for retained console."
+    if console:
+        label = "Final output" if console.complete else "Incomplete output"
+        if not console.body:
+            label += " · silent" if console.complete else " · no output yet"
+    output = _retained_output(console.body, console.gaps) if console else ""
+    return (
+        panel
+        + f'<section class="sec" id="console"><h2>Console</h2><p>{label}</p>{output}</section>'
+    )
 
 
 class ViewReader(Protocol):
@@ -2071,6 +2121,8 @@ class ViewReader(Protocol):
 
 
 class ObservationWriter(Protocol):
+    def accept_observation(self, grant: ViewGrant, observation: AttemptObservation) -> None: ...
+
     def accept_file(
         self, grant: ViewGrant, key: str, digest: str, modified: datetime, body: bytes
     ) -> None: ...
@@ -2116,6 +2168,10 @@ class _PushHandler(_ViewHandler):
             age = _age(chart.received.isoformat(), datetime.now(UTC))
             message = "Last push " + age + (f" · {chart.error}" if chart.error else "")
             token = f"{chart.revision}-{sha256((chart.error or '').encode()).hexdigest()[:12]}"
+            stale = chart.finished is False and datetime.now(UTC) - chart.received >= _SILENT
+            token += f"-{chart.attempt_number}-{chart.sequence}-{int(stale)}"
+            if stale:
+                message += " · no end recorded"
             notice = _observation("run", token, message)
         if observe:
             return self._reply(200, notice, "text/html")
@@ -2125,13 +2181,14 @@ class _PushHandler(_ViewHandler):
             address,
             chart.payload if chart else None,
             heading,
-            "",
+            _attempt_panel(chart) if chart and overview else "",
             "<p>Waiting for sealed metrics.</p>",
         )
         self._reply(200 if chart else 404, _shell(html, ""), "text/html")
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/api/observations/file":
+        is_file = self.path == "/api/observations/file"
+        if not is_file and self.path != "/api/observations":
             return self._reply(404)
         try:
             scheme, _, token = self.headers.get("Authorization", "").partition(" ")
@@ -2148,8 +2205,17 @@ class _PushHandler(_ViewHandler):
             ):
                 raise EtudeError("content_length_required", 411)
             size = int(sizes[0])
-            if size > MAX_FILE_BYTES:
+            if size > (MAX_FILE_BYTES if is_file else MAX_OBSERVATION_BYTES):
                 raise EtudeError("view_file_too_large", 413)
+            if not is_file:
+                if self.headers.get_content_type() != "application/json":
+                    raise EtudeError("expected_json", 415)
+                data = self.rfile.read(size)
+                if len(data) != size:
+                    raise EtudeError("incomplete_observation", 422)
+                observation = AttemptObservation.model_validate_json(data)
+                self.server.writer.accept_observation(grant, observation)
+                return self._reply(200)
             if self.headers.get_content_type() != "application/octet-stream":
                 raise EtudeError("expected_binary_file", 415)
             key = self.headers.get("X-Etude-Key", "")
@@ -2163,8 +2229,8 @@ class _PushHandler(_ViewHandler):
             self.server.writer.accept_file(grant, key, digest, modified, body)
         except EtudeError as error:
             return self._reply(error.status, error.code)
-        except ValueError:
-            return self._reply(422, "invalid_view_file")
+        except (ValueError, LauncherError):
+            return self._reply(422, "invalid_view_file" if is_file else "invalid_observation")
         except Exception as error:
             print(explain(error), file=sys.stderr, flush=True)
             return self._reply(503, "Hosted view unavailable.")

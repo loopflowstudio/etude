@@ -51,8 +51,10 @@ from etude.launch.ssh import (
 )
 from etude.launch.storage.files import write
 from etude.launch.usage import Usage
+from etude.observations import ViewOrigin, launcher_origin
 from etude.records import RunRecord
 from etude.spec import Job, Record, RunRequest, expand_runs
+from etude.view_link import local_origin
 
 
 class Source(Record):
@@ -101,6 +103,10 @@ class OutputRequest(Record):
 class RunOperation(Record):
     operation: Literal["record", "status", "read", "cancel"]
     run: str
+
+
+class ViewURLRequest(Record):
+    operation: Literal["view_url"] = "view_url"
 
 
 class StandingRequest(Record):
@@ -182,6 +188,7 @@ type Request = Annotated[
     | OutputRequest
     | RunOperation
     | StandingRequest
+    | ViewURLRequest
     | ObservationRequest
     | WaitRequest
     | EvidenceRequest
@@ -205,6 +212,7 @@ type Response = (
     | tuple[Standing, ...]
     | Launch
     | Quote
+    | None
     | str
 )
 
@@ -251,13 +259,17 @@ def _command(address: str, argv: Sequence[str]) -> list[str]:
     # A remote setting cannot forward again. No local environment/keys are serialized.
     root = '"${ETUDE_HOME:-$HOME/.etude}/programs/' + _program()[0] + '"'
     run = root + "/.venv/bin/python -m etude"
+    # The remote CLI resolves the full run address. Give it the reader's local
+    # fallback when it will print a link, even if the server has its own local view.
+    fallback = local_origin() if argv and argv[0] in ("status", "continue") else None
+    client_view = "ETUDE_CLIENT_VIEW_URL=" + shlex.quote(fallback or "")
     return [
         "ssh",
         "--",
         address,
         login_shell(
             f"test -f {root}/ready || exit {_MISSING}; "
-            f"ETUDE_SERVER_LOCAL=1 exec {run} {shlex.join(argv)}"
+            f"ETUDE_SERVER_LOCAL=1 {client_view} exec {run} {shlex.join(argv)}"
         ),
     ]
 
@@ -355,6 +367,13 @@ def _with_sources(submission: LaunchInput, client: PythonClient) -> LaunchInput:
                     body=base64.b64encode(body).decode(),
                 )
     return submission.model_copy(update={"sources": tuple(sources.values())})
+
+
+def view_url() -> str | None:
+    if address := selected():
+        reply = PythonClient(address)._request(ViewURLRequest())
+        return TypeAdapter(ViewOrigin | None).validate_json(reply)
+    return launcher_origin()
 
 
 def forward(address: str, argv: Sequence[str]) -> int:
@@ -528,11 +547,12 @@ class PythonClient:
 
 def receive(open_scheduler: Callable[[], Scheduler]) -> int:
     request = _REQUEST.validate_json(sys.stdin.buffer.read())
-    response = (
-        LauncherObservation.read(request.consoles)
-        if isinstance(request, ObservationRequest)
-        else _answer(open_scheduler(), request)
-    )
+    if isinstance(request, ObservationRequest):
+        response: Response = LauncherObservation.read(request.consoles)
+    elif isinstance(request, ViewURLRequest):
+        response = launcher_origin()
+    else:
+        response = _answer(open_scheduler(), request)
     print(ServerReply(response).model_dump_json())
     return 0
 

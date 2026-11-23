@@ -108,6 +108,7 @@ from etude.launch.storage.download import StoredContentMismatch
 from etude.launch.storage.s3 import longest_grant
 from etude.launch.storage.transport import attribute, observe
 from etude.launch.usage import Usage
+from etude.observations import ViewContext, ViewGrant, ViewGrantTarget, ViewSigner
 from etude.records import RunRecord, RunSubmission
 from etude.spec import Job, Record, RunRequest, expand_runs, job_id
 from etude.storage_timeout import StorageUnavailable
@@ -664,6 +665,7 @@ class Scheduler:
         self, runs: Sequence[RunRequest], pool: str | None = None, *, rent: str | None = None
     ) -> Launch:
         """Retain valid intent before the submitting client publishes source."""
+        ViewSigner.configured()  # Validate before retaining intent or acquiring a machine.
         target = self._target(pool, rent)
         requested = self._address_requests(runs, target)
         launch = Launch(
@@ -1915,7 +1917,8 @@ class Scheduler:
     ) -> None:
         self._store.check_lock(session.supply)
         try:
-            packet = self._packet(session)
+            grants: dict[str, ViewGrantTarget] = {}
+            packet = self._packet(session, grants)
         except _RELAY_WAITS as error:
             self._await_relay(session, error)
             return
@@ -1945,7 +1948,7 @@ class Scheduler:
                 raise Refused("startup or rental deadline reached before creation")
             with creation_guard(check), limit_time(seconds):
                 provider_id = service.create(
-                    packet.model_copy(update={"kept": True}) if idle else packet
+                    packet.model_copy(update={"kept": True}) if idle else packet, grants
                 )
         except Refused as error:
             self._diagnose(
@@ -2137,7 +2140,9 @@ class Scheduler:
             return None
         return self._service(holder).held(run)
 
-    def _work(self, attempt: RunAttempt) -> Work | None:
+    def _work(
+        self, attempt: RunAttempt, session: Session, grants: dict[str, ViewGrantTarget]
+    ) -> Work | None:
         """What the attempt's machine is sent; None when the attempt ended undelivered."""
         run = self._store.run(attempt.run)
         spec = run.launch.spec
@@ -2169,7 +2174,44 @@ class Scheduler:
             inputs=tuple(i for i in spec.inputs if holder is None or i.out is None),
             environment=spec.environment,
         )
-        return work if self._relay(attempt, work) else None
+        if not self._relay(attempt, work):
+            return None
+        try:
+            signer = ViewSigner.configured()
+        except LauncherError as error:
+            self._diagnose(
+                "hosted view", "attempt will run without publication", error, attempt=attempt.id
+            )
+            return work
+        if signer:
+            delivery = self._store.supply(session.supply).delivery_seconds
+            rental = self._store.rental_for(session)
+            expires = (
+                rental.deadline + timedelta(seconds=delivery or 0)
+                if rental
+                else self._clock()
+                + timedelta(seconds=max(13 * 3600, attempt.limit_seconds + (delivery or 3600)))
+            )
+            grant = ViewGrant(
+                origin=signer.origin,
+                run=run.id,
+                attempt=attempt.id,
+                attempt_number=attempt.number,
+                exp=int(expires.timestamp()),
+            )
+            grants[attempt.id] = ViewGrantTarget(
+                origin=signer.origin,
+                token=grant.sign(signer.secret),
+                context=ViewContext(
+                    machine=session.machine,
+                    hardware=session.hardware,
+                    max_attempts=spec.max_attempts,
+                    until=spec.until,
+                    source=spec.revision,
+                    config=sanitize(spec.config) if spec.config else spec.config,
+                ),
+            )
+        return work
 
     def _hand(self, session: Session, attempt: RunAttempt) -> None:
         """Add placed work to a kept session; while its run's folder cannot be relayed, it waits.
@@ -2178,12 +2220,13 @@ class Scheduler:
         each pass, so the wait ends when the holding machine answers.
         """
         try:
-            work = self._work(attempt)
+            grants: dict[str, ViewGrantTarget] = {}
+            work = self._work(attempt, session, grants)
         except _RELAY_WAITS as error:
             self._await_relay(session, error, attempt=attempt.id)
             return
         if work is not None:
-            self._service(session).add(session.id, work)
+            self._service(session).add(session.id, work, grants.get(attempt.id))
 
     def _await_relay(
         self, session: Session, error: Exception, *, attempt: str | None = None
@@ -2198,12 +2241,12 @@ class Scheduler:
         )
         self._trouble[session.supply] = "waiting for the machine or storage holding a run's folder"
 
-    def _packet(self, session: Session) -> Packet:
+    def _packet(self, session: Session, grants: dict[str, ViewGrantTarget]) -> Packet:
         """What one session is sent: its deadline, its work and where its records go."""
         rental = self._store.rental_for(session)
         attempts = self._store.attempts(session=session.id)
         first = [a for a in attempts if not a.added and a.outcome is None]
-        work = tuple(w for w in map(self._work, first) if w is not None)
+        work = tuple(w for a in first if (w := self._work(a, session, grants)) is not None)
         supply = self._store.supply(session.supply)
         cap_units: Decimal | None = None
         max_units_per_hour: Decimal | None = None
