@@ -184,8 +184,11 @@ To count what the view reads from that bucket, have the forwarder log each reque
 For the real Manabot history, run the branch from `~/src/manabot` with `uv run --no-sync
 --with-editable 'REPO[s3]' etude view experiments/ --source r2://manabot/jobs`. That
 overlay leaves manabot's environment untouched. Use a private `ETUDE_HOME` and the
-Doppler R2 keys from `manabot/prd`. Watch `du -sm` of that home, cap it, and delete it
-afterwards. Its many legacy `run.json` files make a cold first pass large.
+Doppler R2 keys from `manabot/prd`. Cap `du -sm HOME/cache`, not the whole home: the
+view's index (`views/*.sqlite`) reaches ~80 MB and a temporary file briefly doubles the
+home. A cold first pass should publish ~58 experiments in about a minute on ~50 MB of
+cache (legacy `run.json` files get one 4 KiB ranged read), and a restart should publish
+within seconds with no new cache bytes. Delete the home afterwards.
 
 A directory source with an incomplete listing needs no bucket: under the view's
 `home/track`, `mkdir -p locked/inner && chmod 000 locked` beside the runs (never the
