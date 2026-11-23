@@ -115,6 +115,11 @@ When neither browser extension is connected, drive headless system Chrome:
 `p.chromium.launch(channel="chrome")`; no browser download is needed. For older run
 files, `cp -cR ~/.etude/track` into a private folder and pass it as `--source` with a
 private `ETUDE_HOME`.
+The view's index (`home/views/*.sqlite`) is keyed by the `etude-sdk` version, not
+the code: after fixing how charts are projected, stop the view, remove
+`home/views` and restart it, or unchanged runs keep their old projection.
+A view page that differs from the run's Charts tab is a bug worth checking with the
+prototype, whose `report()` names no training panel.
 A `nohup uv run etude view … &` ignores SIGINT; stop the view by sending SIGTERM to its
 `.venv/bin/etude` child (`pgrep -P UV_PID`), or start `.venv/bin/etude view` from a
 Python driver and send SIGINT, which is what Ctrl-C does. A launched run's console reaches
