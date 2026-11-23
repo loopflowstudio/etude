@@ -208,13 +208,22 @@ the latest collection time and any gaps across the retained streams.
 
 The view indexes files and launcher standing independently under
 `ETUDE_HOME/views`. Each file pass compares the listed object versions and
-accepted report panels with the previous pass, including after a restart. One
-reader per index stages updated run metadata and charts in a private SQLite
-table. The listing supplies each training run’s Files tab. Open blocks can
-change its inventory and last write between sealed chart generations. A change to sealed
-inputs replaces the file record, its full charts, its two-panel preview and
-its headline panel together.
-The experiment list reads just that panel from each run, preferring drawable ML series in
+accepted report panels with the previous pass, including after a restart.
+Discovery lists once and publishes run metadata before any metric
+blocks or checkpoint records are read. Bucket declarations and changed
+outcomes are read concurrently. A completed training run with one matching
+writer needs only its declaration and outcome. Resumes and unfinished
+allocations use writer records to attribute the outcome.
+
+The index retains each run’s folders, keys and listed versions. A chart
+reader uses them to fetch one run without listing the bucket again. Each
+file poll charts Open and previously viewed runs first, then the other
+runs in a local directory. It commits each experiment’s changed curves and
+checkpoint records together. Opening a cold bucket run schedules its first
+chart on a separate thread and records the visit in SQLite. A failed read
+leaves its metadata visible and the run page shows the error. Open blocks can
+change the Files tab and last write between sealed chart generations.
+The experiment list reads the indexed headline panel from each run, preferring drawable ML series in
 report order before counters and diagnostics. If a run file is temporarily unavailable during a
 report edit, its dot remains. Its curve rejoins the card when its indexed panel
 matches the current report and clock. Local report declarations run separately. Each experiment keeps its last accepted panels through an
@@ -224,11 +233,11 @@ At commit, either publisher joins its new facts with the other source's last
 observation through `state_of`. Training submissions claim their full addresses
 first. A declared job and seed can also identify one unclaimed historical root.
 Both its stored address and its launcher link open that run. Continuations and
-independent repetitions keep their submitted addresses. A failed file pass records its
-error and keeps the previous file generation and date. A directory traversal error
+independent repetitions keep their submitted addresses. If discovery fails, the index retains the previous listing and records the error. A directory traversal error
 invalidates the listing for both the index and report refresh. When a listed
-block disappears during its read, that run keeps its file facts and the start
-date of its last accepted listing. The reader retries it on the next listing.
+block disappears during charting, an already charted run keeps its curves
+and the start date of its last accepted listing. A cold run keeps its
+discovered metadata. The next file pass retries the chart.
 The index records an individual date only
 while a run is held. A second consecutive miss reports the affected address,
 including across a restart. Other runs take the new listing date. The silence

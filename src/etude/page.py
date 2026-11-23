@@ -368,7 +368,8 @@ class Page(Record):
                         values = [
                             value
                             for trace in measured.get(key, ())
-                            if (value := trace.latest(log=panel.scale == "log")) is not None
+                            if trace.drawable(log=panel.scale == "log")
+                            and (value := trace.latest(log=panel.scale == "log")) is not None
                         ]
                         if values:
                             return f"{key} {_value_range(values)} {panel.unit}".rstrip()
@@ -700,7 +701,7 @@ def build(
 
 
 # Bump whenever derived Page fields change without changing inputs.
-_PAGE_CACHE_VERSION = 4
+_PAGE_CACHE_VERSION = 5
 
 
 def _page_cache_path(experiment: str, storage: Storage) -> Path:
@@ -900,8 +901,7 @@ def _ungrouped_metric(source: RunListing, page: Page) -> str | None:
                 if key not in present:
                     continue
                 trace = Trace.from_buckets(run.name, run.chart(key, clock, BUCKETS))
-                latest = trace.latest(log=False)
-                if latest is not None:
+                if trace.drawable(log=False) and (latest := trace.latest(log=False)) is not None:
                     if i < len(keys) - 1:
                         del keys[i + 1 :]
                         values.clear()
@@ -977,10 +977,10 @@ class Headline(Record):
     curves: dict[str, Trace]
 
     def latest(self) -> list[str]:
-        """Latest drawable bucket of each metric, labelled for the run table."""
+        """Latest value of each drawable metric, labelled for the run table."""
         values = []
         for key, trace in self.curves.items():
-            if (value := trace.latest(log=self.log)) is not None:
+            if trace.drawable(log=self.log) and (value := trace.latest(log=self.log)) is not None:
                 values.append(f"{key} {value:.4g} {self.unit}".rstrip())
         return values
 
@@ -993,7 +993,7 @@ def _preview_panels(report: Report, data: Training, clock: str) -> tuple[MetricP
         for key in data.metrics:
             if key in named or key.startswith(timers):
                 continue
-            if any(trace.latest(log=False) is not None for trace in measured.get(key, ())):
+            if any(trace.drawable(log=False) for trace in measured.get(key, ())):
                 return (*report.ml, Series(title=key, keys=(key,)))
     return report.ml
 
@@ -1016,9 +1016,7 @@ def _headline(report: Report, data: Training, clock: str) -> Headline | None:
                 continue  # The report omits metric panels absent across its runs.
             curves = {k: measured[k][0] for k in panel.keys if k in measured}
             if isinstance(panel, Series):
-                if not any(
-                    trace.latest(log=panel.scale == "log") is not None for trace in curves.values()
-                ):
+                if not any(trace.drawable(log=panel.scale == "log") for trace in curves.values()):
                     continue
                 unit = panel.unit
         elif isinstance(panel, Pace | Elapsed):

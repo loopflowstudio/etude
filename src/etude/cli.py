@@ -323,7 +323,7 @@ def view(
     ] = None,
     source: Annotated[
         str | None,
-        typer.Option(help="read every experiment in this runs directory or small bucket prefix"),
+        typer.Option(help="a runs directory or bucket URI"),
     ] = None,
     push: Annotated[
         bool, typer.Option("--push", help="receive training evidence over HTTP")
