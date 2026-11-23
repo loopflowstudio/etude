@@ -537,9 +537,8 @@ def experiment_files(directory: Path, *, known: Collection[Path] = ()) -> list[P
         if path not in known and experiment_named(path) is None:
             continue
         if path.stem in found:
-            raise EtudeError("experiment_named_twice", 409) from ValueError(
-                f"{found[path.stem]} and {path}"
-            )
+            first, second = (p.relative_to(directory) for p in (found[path.stem], path))
+            raise EtudeError("experiment_named_twice", 409, detail=f"{first} and {second}")
         found[path.stem] = path
     return list(found.values())
 

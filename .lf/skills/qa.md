@@ -110,6 +110,9 @@ before `wait`, to see the first updates. The launcher keeps `setting_up` until a
 To see "no end recorded" without waiting 10 minutes, SIGKILL the train's process
 group and `touch -t` its run folder's files into the past. The QA home sits inside
 the lab, so the view must not count `home/sessions/…/src` copies as experiments.
+A second view home for the same lab (e.g. a file-only `home2` with `--source`) must sit
+outside the lab: the view skips only its own home, so the first home's retained
+sources read as `experiment_named_twice`.
 When neither browser extension is connected, drive headless system Chrome:
 `uv run --python 3.12 --with playwright --no-project python driver.py` with
 `p.chromium.launch(channel="chrome")`; no browser download is needed. For older run

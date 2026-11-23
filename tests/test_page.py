@@ -223,7 +223,7 @@ def test_a_folder_holds_the_files_that_define_eval_or_report_and_none_is_run(
         Path("more/ladder.py"),
     ]
     experiment_file(folder / "copy", "lab", REPORTED)
-    with pytest.raises(EtudeError, match="experiment_named_twice"):
+    with pytest.raises(EtudeError, match="experiment_named_twice: copy/lab.py and lab.py"):
         experiment_files(folder)
 
 

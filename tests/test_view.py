@@ -746,7 +746,7 @@ def test_two_files_with_one_name_leave_runs_refreshing(tmp_path: Path) -> None:
         _seal(root, 1, 3.0)
         _ingest(server)
         assert _loss(server.page("/runs/lab/base@0") or "") == [7.0, 3.0]
-        assert "experiment_named_twice" in (server.page("/status") or "")
+        assert "experiment_named_twice: copy/lab.py and lab.py" in (server.page("/status") or "")
 
 
 def test_indexed_experiment_opens_its_default_report_separately(tmp_path: Path) -> None:
