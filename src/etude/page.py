@@ -86,7 +86,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.util import cache_from_source
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, BinaryIO, Literal, cast
 
 from pydantic import JsonValue, ValidationError
 
@@ -516,11 +516,15 @@ _PAGE_CACHE_VERSION = 1
 
 def _page_cache_path(experiment: str, storage: Storage) -> Path:
     home = Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser()
-    store = hashlib.sha256(storage.name.encode()).hexdigest()[:16]
+    # Bucket display names flatten slashes and omit the endpoint. Hints belong to one prefix.
+    source = (
+        storage._artifact("").location if isinstance(storage, S3Storage) else _source_name(storage)
+    )
+    store = hashlib.sha256(source.encode()).hexdigest()[:16]
     stem = (
         f"{experiment}.{store}"
         if SAFE_NAME.match(experiment)
-        else hashlib.sha256(f"{experiment}\0{storage.name}".encode()).hexdigest()[:24]
+        else hashlib.sha256(f"{experiment}\0{source}".encode()).hexdigest()[:24]
     )
     return home / "pages" / f"{stem}.json"
 
@@ -599,18 +603,38 @@ def _page_cache_key(
     return digest.hexdigest()
 
 
+class _PageCacheHeader(Record):
+    key: str
+    split_points: tuple[str, ...]
+
+    @classmethod
+    def read(cls, stream: BinaryIO) -> _PageCacheHeader:
+        # 47 S3 keys of at most 1,024 bytes, including worst-case JSON escaping.
+        return cls.model_validate_json(stream.readline(512 * 1024))
+
+
+def _list_page_versions(storage: Storage, path: Path) -> dict[str, str]:
+    if isinstance(storage, S3Storage):
+        try:
+            with path.open("rb") as stream:
+                bounds = _PageCacheHeader.read(stream).split_points
+        except (OSError, ValidationError):
+            bounds = ()
+        return storage.versions("", split_points=bounds)
+    return storage.versions("")
+
+
 def _load_cached_page(path: Path, expected_key: str) -> Page | None:
     try:
         with path.open("rb") as stream:
-            first = stream.readline().rstrip(b"\r\n").decode("ascii", errors="strict")
-            if first != expected_key:
+            if _PageCacheHeader.read(stream).key != expected_key:
                 return None
             return Page.model_validate_json(stream.read())
-    except (FileNotFoundError, OSError, UnicodeDecodeError, ValidationError):
+    except (OSError, ValidationError):
         return None
 
 
-def _save_cached_page(path: Path, cache_key: str, page: Page) -> None:
+def _save_cached_page(path: Path, header: _PageCacheHeader, page: Page) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
@@ -618,7 +642,7 @@ def _save_cached_page(path: Path, cache_key: str, page: Page) -> None:
         ) as partial:
             name = Path(partial.name)
             try:
-                partial.write(cache_key.encode("ascii"))
+                partial.write(header.model_dump_json().encode())
                 partial.write(b"\n")
                 partial.write(page.model_dump_json().encode("utf-8"))
             except BaseException:
@@ -640,7 +664,8 @@ def _build_page(
     names = _run_file(file)
     report, origin, notes = _report(names.get("report"), file)
     flames = tuple(panel.prefix for panel in (*report.perf, *report.ml) if isinstance(panel, Flame))
-    versions = storage.versions("") if listed is None else listed
+    cache_path = _page_cache_path(experiment, storage)
+    versions = _list_page_versions(storage, cache_path) if listed is None else listed
     keys = sorted(versions)
     with _revalidating(storage, versions):
         declarations = located_runs(storage, keys)
@@ -679,7 +704,6 @@ def _build_page(
             if here.name != storage.name:
                 local_versions = sorted(here.versions("").items())
         source_name = _source_name(storage)
-        cache_path = _page_cache_path(experiment, storage)
         cache_key = _page_cache_key(
             experiment=experiment,
             file=file,
@@ -753,7 +777,8 @@ def _build_page(
         latest_result_ms=evals.latest_result_ms,
         absent=evals.absent,
     )
-    _save_cached_page(cache_path, cache_key, page)
+    bounds = storage._split_points(keys) if isinstance(storage, S3Storage) else ()
+    _save_cached_page(cache_path, _PageCacheHeader(key=cache_key, split_points=bounds), page)
     return page
 
 

@@ -1024,6 +1024,7 @@ def report():
         read_once = client.bytes
         assert build(S3Storage("runs", client=client, cache=cache), file) == first
         assert client.bytes == read_once
+        assert client.list_pages == 2  # one page per render on a small source
 
 
 @pytest.mark.parametrize("uri", ["s3://runs/producer/out/weights%?#.pt", "file"])
@@ -1054,23 +1055,56 @@ def test_placing_a_checkpoint_verifies_and_reuses_its_bytes(
         assert not (tmp_path / "refused").exists()
 
 
-def test_parallel_s3_versions_lists_truncated_nested_bucket_completely(tmp_path: Path) -> None:
-    boto3 = pytest.importorskip("boto3")
+def test_report_lists_current_versions_across_stale_bucket_splits(tmp_path: Path) -> None:
+    file = experiment_file(tmp_path / "experiments", "exp")
+    local = DirectoryStorage(tmp_path / "runs")
+    with open_run(experiment="exp", run="historical", clocks=[], directory=local.root):
+        pass
+
     with mock_aws():
-        client = boto3.client("s3", region_name="us-east-1")
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
         client.create_bucket(Bucket="big")
-        expected: set[str] = set()
-        # Exceed S3's 1,000-object page limit across top-level runs and >32 nested eval runs.
-        for i in range(4):
-            key = f"jobs/exp/train-{i}/run.json"
-            client.put_object(Bucket="big", Key=key, Body=b"{}")
-            expected.add(key.removeprefix("jobs/exp/"))
+        bucket = S3Storage("big", "jobs/exp", client=client, cache=Cache(tmp_path / "cache"))
+        for key in local.keys(""):
+            bucket.put(key, local.get(key))
+        # Nested and flat run folders share the source. Its 1,040 artifacts exceed a LIST page.
         for i in range(40):
             for j in range(26):
-                key = f"jobs/exp/exp/eval-{i:02d}/b-{j:02d}.json"
-                client.put_object(Bucket="big", Key=key, Body=b"{}")
-                expected.add(key.removeprefix("jobs/exp/"))
-        storage = S3Storage("big", "jobs/exp", client=client, cache=Cache(tmp_path / "cache"))
-        listed = storage.versions("")
-        assert set(listed) == expected
-        assert len(listed) == 4 + 40 * 26
+                bucket.put(f"exp/eval-{i:02d}/artifacts/b-{j:02d}", b"first")
+        first = build(bucket, file)
+        assert [run.name for run in first.training.runs] == ["historical"]
+        inventory = bucket.versions("")
+        assert len(inventory) == 1040 + len(local.keys(""))
+        (boundary,) = bucket._split_points(sorted(inventory))
+
+        before = client.list_pages
+        assert build(bucket, file) == first
+        assert client.list_pages - before == 2
+
+        bucket.delete(boundary)
+        bucket.put(boundary + "-new", b"after the deleted split")
+        bucket.put("00-first", b"below every previous key")
+        bucket.put("zz-last", b"above every previous key")
+        with open_run(experiment="exp", run="later", clocks=[], directory=local.root):
+            pass
+        for key in local.keys(""):
+            if key not in inventory:
+                bucket.put(key, local.get(key))
+        # Compare every fresh version with boto3's serial paginator, including a key
+        # newly inserted at a supplied boundary and one removed from the middle.
+        pages = client.get_paginator("list_objects_v2").paginate(Bucket="big", Prefix=bucket.prefix)
+        expected = {
+            item["Key"].removeprefix(
+                bucket.prefix
+            ): f"{item['ETag']}:{item['Size']}:{item['LastModified']}"
+            for page in pages
+            for item in page["Contents"]
+        }
+        assert (
+            boundary not in expected
+            and {boundary + "-new", "00-first", "zz-last"} <= expected.keys()
+        )
+        assert bucket.versions("", split_points=(boundary, boundary + "-new")) == expected
+        before = client.list_pages
+        assert {run.name for run in build(bucket, file).training.runs} == {"historical", "later"}
+        assert client.list_pages - before == 2

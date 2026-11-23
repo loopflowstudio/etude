@@ -96,6 +96,11 @@ uv run etude report examples/prototype.py --source s3://bucket/runs
 uv run etude report . --serve
 ```
 
+Each one-shot report lists the source again. For a large S3 or R2 source,
+Etude uses keys from the previous build to divide the fresh listing into
+parallel requests. Added, replaced and deleted records show up on the next
+build.
+
 The report joins training progress with eval results. `Score` names the table
 and value; add `per="opportunities"` for a sum(value)/sum(per) rate.
 Each curve can pin its own score. Curves without one use the report score.
