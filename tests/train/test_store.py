@@ -10,7 +10,9 @@ from pathlib import Path
 import boto3  # type: ignore[import-untyped]
 import numpy as np
 import pytest
+from botocore.awsrequest import AWSResponse  # type: ignore[import-untyped]
 from moto import mock_aws
+from moto.core.botocore_stubber import MockRawResponse
 
 from etude.block_file import block_key, tail_key
 from etude.cache import Artifact, Cache, Content, ContentMismatch
@@ -888,6 +890,37 @@ def test_an_r2_uri_reaches_the_accounts_endpoint_with_r2_keys(
         assert storage.uri("r/run.json") == "r2://manabot/runs/r/run.json"
         assert storage.name == "r2-manabot-runs"
         assert read(storage_from_uri("r2://manabot/runs"), "e", "r").rows == 1
+
+
+def test_r2_listing_preserves_botocore_object_versions(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("R2_ACCOUNT_ID", "fixture")
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "fixture-access")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "fixture-secret")
+    timestamps = {
+        "fractional": "2026-11-22T01:02:03.123Z",
+        "seconds": "2026-11-22T01:02:03Z",
+        "http-date": "Sun, 22 Nov 2026 01:02:03 GMT",
+    }
+    contents = "".join(
+        f'<Contents><Key>{key}</Key><ETag>"abc"</ETag><Size>7</Size>'
+        f"<LastModified>{stamp}</LastModified></Contents>"
+        for key, stamp in timestamps.items()
+    )
+
+    def _list_response(**_: object) -> AWSResponse:
+        body = MockRawResponse(f"<ListBucketResult>{contents}</ListBucketResult>")
+        return AWSResponse("https://fixture", 200, {}, body)
+
+    with mock_aws():
+        s3 = S3Storage("bucket")
+        r2 = S3Storage("bucket", provider="r2")
+        for storage in (s3, r2):
+            storage.client.meta.events.register_first(
+                "before-send.s3.ListObjectsV2", _list_response
+            )
+        expected = s3.versions("")
+        assert expected.keys() == timestamps.keys()
+        assert r2.versions("") == expected
 
 
 def test_live_writer_describes_each_permanent_block_only_once(

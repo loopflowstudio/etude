@@ -22,10 +22,11 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import copy_context
+from datetime import datetime
 from itertools import pairwise
 from pathlib import Path
 from stat import S_ISREG
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import quote, unquote, urlsplit
 
 from etude.cache import Artifact, Cache, Fetched
@@ -508,6 +509,8 @@ def _client(provider: Literal["s3", "r2"]) -> Any:
         # This cloud entry point loads its SDK; local tracking does not need it.
         import boto3  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
         from botocore.config import Config  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
+        from botocore.session import get_session  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
+        from botocore.utils import parse_timestamp  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
     except ImportError:
         raise EtudeError(f"{provider}_requires_boto3", 422) from None
     timeout = socket_timeout()
@@ -530,7 +533,21 @@ def _client(provider: Literal["s3", "r2"]) -> Any:
             response_checksum_validation="when_required",
         )
     )
-    return boto3.client(
+
+    def _parse_r2_timestamp(value: str | int | float) -> datetime:
+        # R2 lists one UTC timestamp per key. Other response fields can use HTTP dates or epochs.
+        if isinstance(value, str) and value.endswith("Z") and "T" in value:
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                pass
+        return cast(datetime, parse_timestamp(value))  # Botocore's untyped datetime parser.
+
+    session = get_session()
+    session.get_component("response_parser_factory").set_parser_defaults(
+        timestamp_parser=_parse_r2_timestamp
+    )
+    return boto3.Session(botocore_session=session).client(
         "s3",
         endpoint_url=f"https://{account}.r2.cloudflarestorage.com",
         aws_access_key_id=access,
