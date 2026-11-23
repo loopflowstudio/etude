@@ -105,8 +105,10 @@ lines, so sleep a few seconds, then send SIGINT to that process (a driver that
 blocks on `readline` never sends it). Require exit 75. The next plain
 `etude train experiment.py` prints `stopped; --job coin --seed 0 --resume`;
 follow it, then read `etude.train.read.read(default_root(), "experiment",
-"coin@0").points("heads", "updates")` and require each update once, in order,
-across two metric writers. Use `uv run python` for the driver. A background
+"coin@0").points("heads", "updates")` (`default_root` is in `etude.storage`;
+the result has `.x` and `.y` arrays) and require each update once, in order,
+across two metric writers. Stop between saves by making one update take
+longer than startup plus the driver's wait (4 s per update, SIGINT at 4 s). Use `uv run python` for the driver. A background
 shell job may ignore SIGINT; do not signal processes by a broad name pattern.
 
 Training code calls `track(config=config)` only inside Etude's assigned run.
@@ -158,7 +160,7 @@ In a fresh lab home, run `uv run etude database upgrade --development` before
 launcher commands for unmerged SQL. Reads never initialize the database.
 `uv run etude launch experiment.py --pool local` submits pending work;
 `uv run etude wait --experiment experiment` drives it. Launch again to discover
-evals after training, then wait again. Read printed outcomes, logs and cleanup
+evals after training, then wait again. Read printed outcomes, logs (`etude logs --run RUN --job-only`) and cleanup
 receipts: exit 0 from wait alone does not establish success. `wait` takes no
 time limit and macOS has no `timeout`; bound it with the shell tool's own timeout. Each job uses an
 environment separate from the client. Keep `max_hours` and `max_usd` bounded.
