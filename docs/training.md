@@ -69,10 +69,9 @@ registered state when due: by default every five minutes, or at `save_every`
 steps / `save_every_seconds` seconds. Call save each iteration; completion and
 planned stop save too. Register everything required to continue learning.
 
-For custom framework files, pass `export` and `restore` together to
-`run.resume` (passing only one raises at registration). You can combine them
-with JSON counters or PyTorch objects in the same save. This example runs
-without PyTorch.
+Register `export` and `restore` together to save custom files with JSON
+counters. Passing just one to `run.resume` raises `ValueError`. The same
+save can include PyTorch objects when needed.
 
 ```python
 from pathlib import Path
@@ -102,27 +101,25 @@ def train(config: Config) -> None:
             run.save(name="learner")
 ```
 
-Omit `name` for the default save; each `name` keeps its own. On a fresh run,
-Etude skips `restore`. On resume, it checks the seed and listed files, loads
-registered objects, fills in the supplied `extra` instance, then calls
-`restore(folder)`. With `extra`, `resume` returns that instance; without
-`extra`, it returns the committed folder `Path`, or `None` on a fresh run.
-Combining counters with custom files requires both callbacks. If restoration
-fails, live objects may already have changed and any previous registration
-stays active.
+Each `name` has its own save. Omit it from both calls for the default save.
+On a fresh run, Etude skips `restore`. On resume, it checks the seed and
+listed files, loads registered objects, fills in `extra`, then calls
+`restore(folder)`. Either way, callers supplying `extra` get the same
+instance back. A failed restore can change live objects while leaving the
+previous registration active.
 
-`export(folder)` receives an empty directory. Write regular files at visible
-paths (subdirectories are fine). Reserve the root `state.json`, each object
-name and its `<name>.pt` file for Etude. Symlinks and names ending in `.open`
-or `.partial` are rejected. The keywords `export`, `restore`, `extra` and
-`name` are reserved.
+`export(folder)` receives an empty directory. Write regular files there or
+in subdirectories. Etude rejects hidden paths, symlinks and names ending in
+`.open` or `.partial`. Reserve the root `state.json`, each object name and
+its `<name>.pt` file for Etude. The keywords `export`, `restore`, `extra`
+and `name` are reserved.
 
-For manual loading without callbacks, omit `extra`: `path = run.resume()`
-returns the committed folder, or `None` on a fresh run, and
-`run.save(export=fn)` writes custom files in the loop. Between saves Etude
-remembers `fn` for the next save or planned stop; during a save, `fn` replaces
-the previous exporter only once the save commits. See the
-[persistence reference](dev/training.md).
+Without `extra`, `run.resume` returns the committed folder as a `Path`, or
+`None` on a fresh run. For manual loading, read your files from that folder
+and call `run.save(export=fn)` in the loop. Between saves Etude remembers
+`fn` for the next save or planned stop. If the call writes a save, `fn`
+replaces the previous exporter only after the save commits.
+See the [persistence reference](dev/training.md).
 
 A save is a whole snapshot, selected by a pointer written last. A crash while
 saving leaves the previous complete save. A second attempt reloads that save;
