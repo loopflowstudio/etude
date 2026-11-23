@@ -402,6 +402,25 @@ Tracking's queue/block sizing and metric-name limit are implementation policy;
 `track` no longer exposes those tuning parameters. Rental attribution always
 uses retained billed coverage; its unused alternate arithmetic switch is gone.
 
+## Live view
+
+```sh
+uv run etude view examples/prototype.py
+```
+
+Run `uv run etude train examples/prototype.py` in another terminal and open
+its `view:` link. `launch`, `queue` and `status RUN` also print run links
+while the view is running. The experiment table shows each run’s state, clock,
+latest training metric, machine and spend. Select a row to inspect its console, curves,
+config or checkpoints, or share a link to the selected tab. Open the Report
+tab to load the experiment report. The Machines page shows held machines,
+their windows and costs, and which runs occupy their slots.
+
+`etude report` writes printable HTML and folder indexes. For live pages, use
+`etude view --source SOURCE` to select a run directory or bucket. Existing launchers
+need `etude database upgrade` for the new machine inventory indexes.
+See the [live view guide](../docs/tracking.md#live-view).
+
 ## Removed commands, options and helpers
 
 These had no caller in Etude and are outside what the guides teach. Each line
@@ -424,3 +443,4 @@ names what to use now.
 | `run.checkpoint_due(every)` | compare `run.at("running_hours")` with your own next mark |
 | `rent`, `terminate`, `availability`, `diagnostics` in `etude.launch.client` | the `etude rent`, `terminate` and `availability` commands; `logs(...).diagnostics` |
 | `Planned`, `PlannedPoint` report panels | removed; plot a schedule as a logged metric with `Series` |
+| `etude report PATH --serve [--host] [--port]` | `etude view [PATH] [--source SOURCE] [--host HOST] [--port PORT]` |

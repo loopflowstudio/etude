@@ -14,8 +14,7 @@ from etude.eval.records import (
     RoundRobin,
 )
 from etude.eval.result import EvalResult, Result, Tables
-from etude.eval.run import _evaluating_matches
-from etude.eval.tournament import evaluating
+from etude.eval.tournament import _open_evaluation, evaluating
 from etude.jobs import Agents
 from etude.storage import Storage
 
@@ -33,9 +32,9 @@ def play_matches(
     rollups: Sequence[Rollup] = (),
 ) -> EvalResult:
     # Rollups belong to the low-level run when the fixture has no generator.
-    with _evaluating_matches(
+    with _open_evaluation(
+        environment,
         experiment=experiment,
-        environment=environment,
         matches=matches,
         run=run,
         directory=directory,

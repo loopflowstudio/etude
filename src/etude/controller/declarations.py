@@ -23,7 +23,7 @@ from etude.experiment import observe
 from etude.experiment_file import refuse_renamed
 from etude.identity import run_address
 from etude.jobs import EvalJob, ExperimentState, TrainingJob, TrainingRunSummary, evaluation_group
-from etude.spec import Job, RunRequest, expand_runs
+from etude.spec import Job, RunRequest, declared_address, expand_runs
 from etude.storage import default_root
 
 
@@ -174,43 +174,23 @@ def read_training_jobs(
                 "experiment": label,
             }
         )
+        if isinstance(each, Job):
+            normalized.append(named)
+            continue
+        seed = each.seed if each.seed is not None else named.seeds[0]
+        address = (
+            run_address(each.id, label) if each.id else declared_address(label, named.name, seed)
+        )
         normalized.append(
-            named
-            if isinstance(each, Job)
-            else each.model_copy(
-                update={
-                    "job": named,
-                    "params": each.params or params,
-                    "id": run_address(each.id, label)
-                    if each.id
-                    else f"{label}/{named.name}@{each.seed if each.seed is not None else named.seeds[0]}",
-                    "seed": each.seed if each.seed is not None else named.seeds[0],
-                }
+            each.model_copy(
+                update={"job": named, "params": each.params or params, "id": address, "seed": seed}
             )
         )
     return expand_runs(normalized, params=params)
 
 
-def find_training_run(request: RunRequest, state: ExperimentState) -> TrainingRunSummary | None:
-    """Find a declared address, including stored compact job/seed spellings."""
-    return next(
-        (
-            run
-            for run in state.runs
-            if (
-                request.id is not None
-                and run.name == request.id.removeprefix(state.experiment + "/")
-            )
-            or (run.launch == request.job.name and run.seed == request.seed)
-        ),
-        None,
-    )
-
-
-def format_known_run(request: RunRequest, prior: TrainingRunSummary | None) -> str | None:
-    """The pass's line for a known run; None when the address is new."""
-    if prior is None:
-        return None
+def format_known_run(request: RunRequest, prior: TrainingRunSummary) -> str:
+    """The pass's line for a known run."""
     line = f"{request.id}  {prior.state}"
     if prior.state in {"failed", "stopped"}:
         line += f"; --job {request.job.name} --seed {request.seed} --resume"

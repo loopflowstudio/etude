@@ -40,10 +40,7 @@ def open_run(
     experiment = experiment or os.environ.get("ETUDE_EXPERIMENT") or "fixture"
     handed = _inherited()
     if handed is not None and continues is None:
-        at = handed.at
-        until = os.environ.get("ETUDE_UNTIL_CLOCK")
-        clock = until if until in at else next(iter(at))
-        continues = Continuation(parent=handed.parent, clock=clock, value=at[clock])
+        continues = handed.continuation(os.environ.get("ETUDE_UNTIL_CLOCK"))
     assigned = {
         name: str(value)
         for name, value in (("ETUDE_JOB", job), ("ETUDE_SEED", seed))

@@ -28,13 +28,12 @@ from pydantic import BaseModel
 from etude.cache import Artifact, Content, ContentMismatch, Corrupt
 from etude.call import changed_config, config_type
 from etude.controller.declarations import (
-    find_training_run,
     format_known_run,
     read_training_jobs,
     select_runs,
 )
 from etude.errors import EtudeError, LauncherError
-from etude.experiment import observe
+from etude.experiment import TrainingRuns, observe
 from etude.experiment_file import defined_functions, refuse_renamed
 from etude.identity import run_address
 from etude.jobs import load_job_function
@@ -45,6 +44,7 @@ from etude.stopping import Stopped
 from etude.storage import DirectoryStorage, default_root, place_artifact, run_directory
 from etude.train.read import read
 from etude.train.state import saved_states
+from etude.view_link import print_view
 
 
 def train(
@@ -74,23 +74,24 @@ def train(
     refuse_renamed(file)
     if "training_jobs" in functions:
         state = observe(default_root(), label)
-        requests = select_runs(
-            read_training_jobs(file, experiment=experiment, local=True, state=state),
-            job=job,
-            seed=seed,
-        )
+        requests = read_training_jobs(file, experiment=experiment, local=True, state=state)
+        known = TrainingRuns(state.runs, requested=(r.id for r in requests))
+        requests = select_runs(requests, job=job, seed=seed)
         with TemporaryDirectory(prefix="etude-inputs-") as folder:
             prepared: list[_Training | _Finished] = []
             refusals: list[str] = []
             for request in requests:
                 assert request.id is not None  # read_training_jobs addresses every run
                 try:
-                    prior = find_training_run(request, state)
-                    known = format_known_run(request, prior)
-                    if known is not None and job is None and seed is None and not resume:
-                        print(known, file=sys.stderr if json_output else sys.stdout)
+                    prior = known.find(request.id, request.job, request.seed)
+                    if prior is not None and job is None and seed is None and not resume:
+                        print(
+                            format_known_run(request, prior),
+                            file=sys.stderr if json_output else sys.stdout,
+                        )
+                        print_view(prior.address, file=sys.stderr if json_output else sys.stdout)
                         continue
-                    identity = run_address(prior.name, label) if prior is not None else request.id
+                    identity = (prior.stored_address if prior else None) or request.id
                     directory = Path(folder) / "runs" / request.id
                     attempt = _prepare(
                         file,
@@ -261,6 +262,7 @@ def _train_each(attempts: list[_Training | _Finished], *, json_output: bool) -> 
                 "run_already_finished", detail=f"{finished}; give --until with a later target"
             )
         print(f"{attempt.address} {finished}", file=sys.stderr if json_output else sys.stdout)
+        print_view(attempt.address, file=sys.stderr if json_output else sys.stdout)
         if json_output:
             _print_outcome(attempt.address, attempt.experiment, stopped=False)
     return 0
@@ -277,6 +279,7 @@ def _train(attempt: _Training, *, json_output: bool) -> bool:
     with _attempt(values):
         if not json_output:
             print(attempt.address, flush=True)
+        print_view(attempt.address, file=sys.stderr if json_output else sys.stdout)
         try:
             with redirect_stdout(sys.stderr) if json_output else nullcontext():
                 attempt.recipe(attempt.settings)

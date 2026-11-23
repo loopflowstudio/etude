@@ -61,6 +61,7 @@ __all__ = (
     "Quote",
     "Diagnostic",
     "Machine",
+    "MachineStatus",
     "RentalCost",
     "LogStream",
     "Standing",
@@ -359,6 +360,9 @@ class Target(Record):
     rent: str | None = None
 
 
+MachineState = Literal["starting", "available", "unavailable", "deleted"]
+
+
 class Machine(Record):
     """A machine you own, in a pool, or one rented from an on-demand.
 
@@ -399,7 +403,7 @@ class Machine(Record):
         now: datetime,
         *,
         off: bool = False,
-    ) -> Literal["starting", "available", "unavailable", "deleted"]:
+    ) -> MachineState:
         """Acquisition state at `now`; pool withdrawal also makes a machine unavailable."""
         if self.deleted_at is not None:
             return "deleted"
@@ -460,6 +464,21 @@ class RentalCost(Record):
     unbilled_usd: Decimal  # the estimated part: `usd` beyond its retained bills
     over_cap: bool  # its bills exceed its cap
     units: Decimal | None = None  # estimated native units consumed when rental.unit != "usd"
+
+
+class MachineStatus(Record):
+    """A machine at observation time, its paid window and the runs holding its slots."""
+
+    machine: Machine
+    observed_at: datetime
+    pool_off: bool
+    spot: bool
+    cost: RentalCost | None
+    runs: tuple[str, ...]
+
+    @property
+    def state(self) -> MachineState:
+        return self.machine.state(self.observed_at, off=self.pool_off)
 
 
 class Session(Record):
@@ -567,6 +586,7 @@ class Status(Spend):
     attempts: int
     rental_ended: bool | None  # True only on a dated confirmation
 
+    attempt: str | None = None  # latest allocation after the explicit resume boundary
     machine: str | None = None
     hardware: Hardware | None = None
     estimated: bool = False
@@ -581,7 +601,7 @@ class Status(Spend):
     def done(self) -> bool:
         return self.phase == "done"
 
-    def __str__(self) -> str:
+    def phase_and_clock(self) -> str:
         if self.phase == "queued":
             head = f"queued ({self.reason})"
         elif self.phase == "done":
@@ -590,19 +610,31 @@ class Status(Spend):
             head = self.phase
         clock = self.until.clock if self.until else next(iter(self.clocks), None)
         at = f", {clock} {number(self.clocks[clock])}" if clock in self.clocks else ""
+        return head + at
+
+    @property
+    def formatted_spend(self) -> str:
+        return self.format_cost(estimated=self.estimated)
+
+    def facts(self) -> list[str]:
+        """Counted work, shared placement, spend and delivery evidence."""
+        facts = []
         if self.tally is not None:
             # A finished job has no time left to give, whatever its last pace.
             shown = self.tally.model_copy(update={"per_hour": None}) if self.done else self.tally
-            at += f", {shown}"
-        shared = f", shared by {self.shared} runs" if self.shared > 1 else ""
-        delivery = ""
+            facts.append(str(shown))
+        if self.shared > 1:
+            facts.append(f"shared by {self.shared} runs")
+        facts.append(self.formatted_spend)
         if self.delivery_age_seconds is not None:
-            delivery = (
-                f", no delivery confirmed for {self.delivery_age_seconds / 60:.1f} minutes"
+            facts.append(
+                f"no delivery confirmed for {self.delivery_age_seconds / 60:.1f} minutes"
                 " (retained evidence; collection may be stale)"
             )
-        cost = self.format_cost(estimated=self.estimated)
-        return f"{head}{at}{shared}, {cost}{delivery}"
+        return facts
+
+    def __str__(self) -> str:
+        return ", ".join([self.phase_and_clock(), *self.facts()])
 
 
 class QuotedMachine(HourlyRate):

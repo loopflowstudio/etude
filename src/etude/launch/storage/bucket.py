@@ -15,6 +15,7 @@ from etude.carriage import (
     CHECKPOINTS,
     checkpoint_file,
     checkpoint_file_name,
+    evaluation_files,
     note_stored,
     older_saves,
     purpose,
@@ -236,10 +237,25 @@ class BucketJournal:
             folder = self._run_prefix(work.run)
             with attribute(run=work.run, attempt=work.attempt, purpose="control"):
                 kept = self._bucket.objects(folder)
+                listed = [key[len(folder) :] for key in kept]
+                # A group can stop before opening its first tournament. Only
+                # training writes checkpoint records at the allocation root.
+                evaluation: set[str] = set()
+                if not any(key.startswith(CHECKPOINTS + "/") for key in listed):
+                    declaration = (
+                        self._bucket.get(folder + "run.json") if "run.json" in listed else None
+                    )
+                    if "run.json" in listed and declaration is None:
+                        raise StorageUnavailable(
+                            "listed run declaration disappeared during restore"
+                        )
+                    evaluation = evaluation_files(listed, declaration)
             for key, size in kept.items():
                 relative = key[len(folder) :]
-                if relative in ("run.json", MEMBERSHIP) or relative.startswith(
-                    ("checkpoints/", "out/")
+                if (
+                    relative in evaluation
+                    or relative in ("run.json", MEMBERSHIP)
+                    or relative.startswith(("checkpoints/", "out/"))
                 ):
                     links[f"{work.run}/{relative}"] = ReadLink(
                         url=self._bucket.get_url(key, _GRANT_SECONDS), size_bytes=size
@@ -281,9 +297,17 @@ class BucketJournal:
                     (root / "out").mkdir(exist_ok=True)
             else:
                 selected, pointers = [key], {}
+            evaluation = (
+                evaluation_files(
+                    listed,
+                    (root / "run.json").read_bytes() if (root / "run.json").is_file() else None,
+                )
+                if key is None
+                else set()
+            )
             recorded = recorded_files(root)
             for name in selected:
-                if not name.startswith("out/"):
+                if name not in evaluation and not name.startswith("out/"):
                     continue
                 with attribute(purpose=purpose(name, recorded)):
                     raw = pointers[name] if name in pointers else self._bucket.get(folder + name)

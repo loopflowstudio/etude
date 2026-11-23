@@ -15,7 +15,6 @@ from etude.launch.database import launcher_file
 from etude.records import Clock
 from etude.run import sync
 from etude.storage import DirectoryStorage
-from tests.experiments import experiment_file
 from tests.train.tracking import open_run
 
 # What reads, schedules or plays evaluations, beside the records a page carries.
@@ -28,18 +27,19 @@ EVAL_READERS = tuple(
 @pytest.mark.parametrize(
     ("command", "count", "forbidden"),
     [
+        (["view", "--help"], 8, ("numpy", "pydantic")),
         (["report", "--help"], 8, ("numpy", "pydantic")),
         # No eval run and no eval_jobs(state), so nothing that reads or plays evaluations
         # loads: only `etude.eval.records`, whose `Gap` a page's points carry. The report
         # recognises experiment files as `etude launch` does (`etude.experiment_file`).
         (
             ["report", "{directory}/pilot.py", "--source", "{directory}"],
-            31,  # shared run identity, delivery and job specification: the checkpoint records runs and evals share
+            32,  # run identity, delivery, job specification and Etude's home
             ("boto3", "duckdb", *EVAL_READERS, "etude.train.tracking"),
         ),
         (
             ["sync", "--directory", "{directory}"],
-            19,  # shared run and job specification: out membership
+            20,  # run and job specification, out membership and Etude's home
             ("boto3", "numpy", "etude.page", "etude.train.report"),
         ),
         (
@@ -47,7 +47,7 @@ EVAL_READERS = tuple(
             # etude.out, etude.stopping for Stopped, etude.train.state for saves and
             # etude.checkpoints for the records a run publishes, and
             # etude.identity for config and seed validation shared with the launcher.
-            26,
+            27,
             ("boto3", "etude.page", "etude.train.report"),
         ),
     ],
@@ -158,57 +158,3 @@ def test_checkpoints_explains_an_empty_selection(
         pass
     assert main(["checkpoints", "--experiment", "missing"]) == 1
     assert f"no runs for experiment 'missing' in {home / 'track'}" in capsys.readouterr().err
-
-
-SERVE_INDEX = """
-import json, sys, threading
-from pathlib import Path
-from urllib.request import urlopen
-from etude.cli import main  # what `etude` loads before it runs a command
-from etude.page import Server
-server = Server(Path(sys.argv[1]), Path(sys.argv[2]), ("127.0.0.1", 0))
-threading.Thread(target=server.serve_forever, daemon=True).start()
-base = f"http://127.0.0.1:{server.server_port}"
-index, page = (urlopen(base + route).read().decode() for route in ("/", "/pilot"))
-assert '"href": "/sweep"' in index and "pilot.py:report" in page
-print(json.dumps(sorted(sys.modules)))
-"""
-
-
-def test_serving_an_index_loads_no_evaluation_launcher_or_bucket_client(tmp_path: Path) -> None:
-    runs, experiments = tmp_path / "runs", tmp_path / "experiments"
-    for name in ("pilot", "sweep"):
-        with open_run(
-            experiment=name,
-            run=f"{name}-1",
-            clocks=[Clock(name="step", kind="step", meaning="steps")],
-            directory=runs,
-        ) as run:
-            run.log({"loss": 1.0}, step=1)
-        experiment_file(
-            experiments,
-            name,
-            "from etude.report import Report\n\n\ndef report() -> Report:\n    return Report()\n",
-        )
-    done = subprocess.run(
-        [sys.executable, "-c", SERVE_INDEX, str(runs), str(experiments)],
-        env={**os.environ, "ETUDE_HOME": str(tmp_path / "home")},
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert done.returncode == 0, done.stderr
-    modules = json.loads(done.stdout.splitlines()[-1])
-    loaded = [name for name in modules if name.startswith("etude")]
-    # Neither experiment has eval runs or eval(): the index reads training files alone,
-    # and recognises experiment files as `etude launch` does (`etude.experiment_file`).
-    assert len(loaded) == 31, loaded
-    forbidden = (
-        "boto3",
-        "duckdb",
-        *EVAL_READERS,
-        "etude.experiment",
-        "etude.train.tracking",
-        "etude.launch.client",
-    )
-    assert not [n for n in modules if any(n == f or n.startswith(f + ".") for f in forbidden)]

@@ -87,12 +87,28 @@ def status(
     job: Annotated[str | None, typer.Option(help="select a job")] = None,
 ) -> None:
     """Show where runs stand, as of the server loop's last pass."""
+    from etude.identity import run_address
     from etude.launch import server
     from etude.launch.listing import resolve_runs, show_runs
+    from etude.view_link import print_view
 
+    if address := server.selected():
+        args = ["status", *(runs or [])]
+        if experiment is not None:
+            args += ["--experiment", experiment]
+        if job is not None:
+            args += ["--job", job]
+        result = server.forward(address, args)
+        if not result:
+            for name in runs or ():
+                print_view(run_address(name, experiment))
+        raise typer.Exit(result)
     scheduler = default()
     selected = resolve_runs(scheduler, runs or [], experiment=experiment, job=job)
     show_runs(scheduler, selected)
+    if runs:
+        for name in selected:
+            print_view(name)
     server.show_freshness(scheduler)
 
 
@@ -682,8 +698,8 @@ def usage(
 @kind(Kind.read)
 def database_status() -> None:
     """Read this computer's schema; never initialize or migrate it."""
+    from etude.home import home
     from etude.launch.database import inspect
-    from etude.launch.source import home
 
     state = inspect(home())
     print(f"database {state.path}")
@@ -708,8 +724,8 @@ def database_upgrade(
     ] = False,
 ) -> None:
     """Explicitly initialize or upgrade this computer's database without scheduling."""
+    from etude.home import home
     from etude.launch.database import upgrade
-    from etude.launch.source import home
 
     result = upgrade(home(), timeout=timeout, development=development)
     print(f"database {result.path}")

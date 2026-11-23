@@ -18,13 +18,10 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from etude.errors import LauncherError
+from etude.home import home
 from etude.identity import run_address
 from etude.records import RunRecord
 from etude.spec import RunRequest, SourcePosition
-
-
-def home() -> Path:
-    return Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser()
 
 
 def stored(repo: str, commit: str) -> Path:

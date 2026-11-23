@@ -7,6 +7,7 @@ historical copies by declared experiment and run.
 
 from __future__ import annotations
 
+import codecs
 import fcntl
 import json
 import os
@@ -14,19 +15,22 @@ import secrets
 import threading
 import time
 from bisect import bisect_left
-from collections.abc import Container, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Container, Iterator, Mapping, Sequence
+from concurrent.futures import Executor
 from dataclasses import dataclass
 from datetime import datetime
+from functools import cached_property
 from hashlib import file_digest, sha256
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Literal
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from etude.block_file import parse
 from etude.carriage import (
     EVAL_BLOCK_PACK,
+    RUN_FILES,
     RecordedFile,
     checkpoint_file,
     immutable,
@@ -50,11 +54,13 @@ from etude.records import (
     RunOutcome,
     RunProgress,
     RunRecord,
+    RunSubmission,
     RunWriter,
     Tally,
 )
 from etude.storage import (
     DirectoryStorage,
+    ObjectVersion,
     Storage,
     run_directory,
     run_prefix,
@@ -106,7 +112,7 @@ class Run:
     def ship(self) -> bool:
         """Deliver to every destination once; retain each destination's failure reason."""
         for destination in self._destinations:
-            reason = ship(self.files, self.name, destination)
+            reason = ship(self.files, self.address, destination)
             if reason is None:
                 self.problems.pop(destination.name, None)
             else:
@@ -176,8 +182,11 @@ class StorageDestination:
         self.name = storage.name
 
     def ship(self, files: RunFiles, run: str) -> None:
+        prefix = run_prefix(run)
+        receipt = self.name
         record = files.run_file()
-        prefix = run_prefix(record.id if record else run)
+        if record and record.id != run:
+            receipt += "-" + sha256(prefix.encode()).hexdigest()
         # Freeze mutable objects together with the permanent-file listing. No
         # network I/O holds the writer's lock, and large immutable files stream.
         with TemporaryDirectory(prefix=".out-", dir=files.root) as staging:
@@ -188,25 +197,21 @@ class StorageDestination:
                 acknowledged = {
                     key: prior.encode()
                     for key in snapshot.pointers
-                    if (prior := files.shipped(self.name, key)) is not None
+                    if (prior := files.shipped(receipt, key)) is not None
                 }
                 keys = [key for key in snapshot.keys if key != MEMBERSHIP]
                 recorded = recorded_files(files.root)
                 out: list[OutFile] = []
                 for index, key in enumerate(keys):
                     path = files.root / key
-                    if key in snapshot.pointers:
-                        pointer_body = snapshot.pointers[key]
-                        fingerprint = pointer_body.decode()
-                        out.append(
-                            OutFile(
-                                key=key,
-                                sha256=sha256(pointer_body).hexdigest(),
-                                size_bytes=len(pointer_body),
-                            )
-                        )
-                        if files.shipped(self.name, key) != fingerprint:
-                            deliveries.append(Delivery(key, fingerprint, pointer_body))
+                    if (frozen := snapshot.frozen(key)) is not None:
+                        fingerprint = sha256(frozen).hexdigest()
+                        if key in snapshot.pointers:
+                            out.append(OutFile(key=key, sha256=fingerprint, size_bytes=len(frozen)))
+                            # Pruning needs the acknowledged save name.
+                            fingerprint = frozen.decode()
+                        if files.shipped(receipt, key) != fingerprint:
+                            deliveries.append(Delivery(key, fingerprint, frozen))
                         continue
                     if key.startswith("out/"):
                         # Recipes save by atomic replacement. A link keeps the
@@ -223,7 +228,7 @@ class StorageDestination:
                                 size_bytes=path.stat().st_size,
                             )
                         )
-                    if files.shipped(self.name, key) == fingerprint:
+                    if files.shipped(receipt, key) == fingerprint:
                         continue
                     block = parse(key)
                     body = (
@@ -236,11 +241,9 @@ class StorageDestination:
                         else (files.root / key).read_bytes()
                     )
                     deliveries.append(Delivery(key, fingerprint, body))
-                if (files.root / "out").is_dir() or files.shipped(
-                    self.name, MEMBERSHIP
-                ) is not None:
+                if (files.root / "out").is_dir() or files.shipped(receipt, MEMBERSHIP) is not None:
                     membership = OutFiles(files=tuple(out)).model_dump_json()
-                    if files.shipped(self.name, MEMBERSHIP) != membership:
+                    if files.shipped(receipt, MEMBERSHIP) != membership:
                         # The same queue publishes membership only after all its files succeed.
                         deliveries.append(Delivery(MEMBERSHIP, membership, membership.encode()))
             for delivery in deliveries:
@@ -250,11 +253,11 @@ class StorageDestination:
                     self.storage.put_file(prefix + delivery.key, delivery.body)
                 else:
                     self.storage.put(prefix + delivery.key, delivery.body)
-                files.mark(self.name, delivery.key, delivery.fingerprint)
+                files.mark(receipt, delivery.key, delivery.fingerprint)
         # Acknowledgement of the pointer makes only older saves disposable.
         for key in (*_older_saves(files, acknowledged), *removed):
-            if files.shipped(self.name, key) is not None and self.storage.delete(prefix + key):
-                files._marker(self.name, key).unlink(missing_ok=True)
+            if files.shipped(receipt, key) is not None and self.storage.delete(prefix + key):
+                files._marker(receipt, key).unlink(missing_ok=True)
 
 
 def _older_saves(files: RunFiles, acknowledged: Mapping[str, bytes]) -> list[str]:
@@ -331,11 +334,22 @@ def sync(
     """
     base = Path(directory)
     undelivered: dict[str, dict[str, str]] = {}
+    member_roots: set[Path] = set()
+    targets = destinations(base, storages)
     for root in sorted(run_directories(base)):
+        if root in member_roots:
+            continue  # The parent ships these under its own address.
         files = RunFiles(root, tail_age=0.0 if stopped else 60.0)
         record = files.run_file()
+        if record and record.members:
+            member_roots.update(root / member for member in record.members)
         run = record.id if record else root.name
-        targets = destinations(base, storages)
+        if record and record.kind == "evaluation" and record.members is None:
+            # A legacy copy's physical prefix may be its only link to a retained
+            # launch. Preserve it until a reader can resolve its ownership.
+            relative = root.relative_to(base).as_posix()
+            if relative.endswith("/" + run):
+                run = relative
         prune(files, targets)
         for destination in targets:
             reason = ship(files, run, destination)
@@ -363,6 +377,7 @@ def declare(
     clocks: Sequence[Clock] | None,
     run: str | None = None,
     kind: str | None = None,
+    members: tuple[str, ...] | None = None,
     config: Mapping[str, object] | str | None = None,
     continues: Continuation | None = None,
     inherited_clocks: Sequence[Clock] = (),
@@ -395,6 +410,7 @@ def declare(
         job_name=handed.get("ETUDE_JOB_NAME"),
         seed=seed,
         kind=kind,
+        members=members,
         config=text,
         continues=continues,
         start=handed.get("ETUDE_START"),
@@ -410,6 +426,8 @@ def declare(
             raise EtudeError("run_clock_conflict", 409)
         if not resume:
             raise run_name_taken(address)
+        if prior.members != members:
+            raise EtudeError("eval_group_members_conflict", 409)
         validate_resume(prior, config=text, seed=seed)
         return Declared(base, root, prior)
     root.mkdir(parents=True, exist_ok=True)
@@ -481,7 +499,6 @@ def as_storage(source: Storage | Path | str) -> Storage:
 # `environment.json`, `tournament.json` and `blocks` are an eval run's (`etude.eval`);
 # `tables` and `matches` an eval run's of the per-file layout, kept until converted.
 RUN_FOLDERS = ("metrics", "checkpoints", "blocks", "tables", "matches")
-RUN_FILES = ("run.json", "environment.json", "tournament.json", "state.json", "outcome.json")
 RUN_DATA = frozenset((*RUN_FOLDERS, "out", "artifacts"))
 
 
@@ -493,51 +510,35 @@ def run_folders(keys: Sequence[str]) -> dict[str, list[str]]:
     and a bucket can hold a launcher's other files beside them. Taking a
     listing already made lets a reader list a source once.
     """
-    found: dict[str, dict[str, None]] = {}
+    candidates: dict[str, str] = {}
     for key in keys:
         parts = key.split("/")
         for index in range(1, len(parts)):
-            last = index == len(parts) - 1
-            if (parts[index] in RUN_FOLDERS and not last) or (last and parts[index] in RUN_FILES):
-                found.setdefault(parts[index - 1], {})["/".join(parts[:index]) + "/"] = None
+            markers = RUN_FILES if index == len(parts) - 1 else RUN_FOLDERS
+            if parts[index] in markers:
+                candidates["/".join(parts[:index]) + "/"] = parts[index - 1]
                 break
-    roots = {folder for folders in found.values() for folder in folders}
+
     result: dict[str, list[str]] = {}
-    for run, folders in found.items():
-        kept = [
-            folder
-            for folder in folders
-            if not any(
-                parent.as_posix() + "/" in roots
-                and PurePosixPath(folder).relative_to(parent).parts[0] in RUN_DATA
-                for parent in PurePosixPath(folder).parents
-                if parent != PurePosixPath(".")
-            )
-        ]
-        if kept:
-            result[run] = kept
+    for folder, name in candidates.items():
+        # A run.json below another run's out or artifacts is payload.
+        parts = folder.rstrip("/").split("/")
+        if any(
+            part in RUN_DATA and "/".join(parts[:index]) + "/" in candidates
+            for index, part in enumerate(parts[1:], start=1)
+        ):
+            continue
+        result.setdefault(name, []).append(folder)
     return result
 
 
 def under(keys: Sequence[str], prefix: str) -> Iterator[str]:
     """The keys under `prefix` of a sorted listing."""
-    for key in keys[bisect_left(keys, prefix) :]:
+    for position in range(bisect_left(keys, prefix), len(keys)):
+        key = keys[position]
         if not key.startswith(prefix):
             return
         yield key
-
-
-def declared(storage: Storage, folder: str, listed: Container[str]) -> RunRecord | None:
-    """The valid declaration a run folder holds, else None.
-
-    The folder is asked only when its `run.json` is in `listed`, the source's listing.
-    """
-    if folder + "run.json" not in listed:
-        return None
-    try:
-        return RunRecord.model_validate_json(storage.get(folder + "run.json"))
-    except (FileNotFoundError, ValidationError):
-        return None
 
 
 def runs(source: Storage | Path | str) -> list[tuple[str, str]]:
@@ -546,8 +547,8 @@ def runs(source: Storage | Path | str) -> list[tuple[str, str]]:
     A run is listed once its declaration, `run.json`, has arrived.
     """
     storage = as_storage(source)
-    keys = storage.keys("")
-    return [(run.file.experiment, run.name) for run in located_runs(storage, keys)]
+    listing = RunListing.read(storage)
+    return sorted({(run.file.experiment, run.name) for run in listing.declarations})
 
 
 class LocatedRun(Record):
@@ -556,59 +557,217 @@ class LocatedRun(Record):
     name: str
     file: RunRecord
     folders: tuple[str, ...]
+    last_write: datetime | None = None
 
 
-@dataclass(frozen=True)
-class Listing:
-    """One consistent listing of a storage source: pinned reader, sorted keys and declarations."""
+type DeclarationCache = dict[str, tuple[str | None, RunRecord | None]]
 
-    storage: Storage
-    versions: Mapping[str, str]
-    keys: tuple[str, ...]
-    declarations: tuple[LocatedRun, ...]
+
+# RunRecord also consumes flat submission fields and historical declaration fields.
+_RUN_RECORD_KEYS = frozenset(
+    (
+        *RunRecord.model_fields,
+        *RunSubmission.model_fields,
+        "declaration",
+        "source_key",
+        "config_json",
+        "config_sha256",
+    )
+)
+_DECLARATION_PROBE_THRESHOLD = 8 * 1024
+_DECLARATION_PROBE_BYTES = 4 * 1024
+_JSON_PREFIX = TypeAdapter(object)
+
+
+def _may_be_run_record(prefix: bytes) -> bool:
+    """Reject only what the bytes already rule out. A value or UTF-8 character can span the cut."""
+    whitespace = " \t\r\n"
+    try:
+        text = codecs.getincrementaldecoder("utf-8-sig")().decode(prefix).lstrip(whitespace)
+    except UnicodeDecodeError:
+        return False
+    if not text:
+        return True
+    if not text.startswith("{"):
+        return False
+    rest = text[1:].lstrip(whitespace)
+    if rest.startswith("}"):
+        return not rest[1:].strip(whitespace)
+    decoder = json.JSONDecoder()
+    while rest:
+        if not rest.startswith('"'):
+            return False
+        try:
+            key, end = decoder.raw_decode(rest)
+            if key not in _RUN_RECORD_KEYS:
+                return False
+            rest = rest[end:].lstrip(whitespace)
+            if not rest.startswith(":"):
+                return not rest
+            rest = rest[1:].lstrip(whitespace)
+            _, end = decoder.raw_decode(rest)
+        except (ValueError, RecursionError):
+            break
+        rest = rest[end:].lstrip(whitespace)
+        if rest.startswith("}"):
+            return not rest[1:].strip(whitespace)
+        if not rest.startswith(","):
+            # raw_decode may have stopped inside a number (for example 1e-).
+            break
+        rest = rest[1:].lstrip(whitespace)
+    # The JSON reader can distinguish an unfinished value from broken syntax.
+    try:
+        _JSON_PREFIX.validate_json(text, experimental_allow_partial=True)
+    except ValidationError:
+        return False
+    return True
+
+
+def _read_declaration(storage: Storage, key: str, version: str | None) -> RunRecord | None:
+    size = version.size if isinstance(version, ObjectVersion) else None
+    if size is not None and size > _DECLARATION_PROBE_THRESHOLD:
+        if not _may_be_run_record(storage.get_range(key, 0, _DECLARATION_PROBE_BYTES)):
+            return None
+    body = storage.get(key)
+    try:
+        record = RunRecord.model_validate_json(body)
+        # Readers address every run; one that has no address is not a run
+        # here, rather than an error for the whole source.
+        run_address(record.id, record.experiment)
+    except ValueError:
+        return None
+    return record
+
+
+class RunListing:
+    """One source discovery. Training copies share a declaration. Tournament copies
+    keep their physical folder until the observer can identify their launch."""
+
+    def __init__(
+        self,
+        storage: Storage,
+        objects: Mapping[str, str | None],
+        *,
+        run: str | None = None,
+        missing: Callable[[str, FileNotFoundError], RunRecord | None] | None = None,
+        known: DeclarationCache | None = None,
+        executor: Executor | None = None,
+    ) -> None:
+        self.storage = storage
+        self.objects = objects
+        self.keys = sorted(objects)
+        self._all_folders = run_folders(self.keys)
+        self.folders = self._all_folders
+        if run is not None:
+            self.folders = {run: self.folders[run]} if run in self.folders else {}
+        self._executor = executor
+        self._missing = missing
+        self._known = {} if known is None else known
+        if known is not None:
+            for key in known.keys() - objects.keys():
+                del known[key]
+
+    def declaration(self, folder: str) -> RunRecord | None:
+        """Read a folder's declaration once per version, including an invalid declaration."""
+        key = folder + "run.json"
+        if key not in self.objects:
+            return None
+        version = self.objects[key]
+        kept = self._known.get(key)
+        if kept is not None and kept[0] == version:
+            return kept[1]
+        try:
+            record = _read_declaration(self.storage, key, version)
+        except FileNotFoundError as error:
+            # A later listing may recover the same version. Cache only completed reads.
+            return self._missing(folder, error) if self._missing else None
+        self._known[key] = version, record
+        return record
+
+    @cached_property
+    def declarations(self) -> list[LocatedRun]:
+        found: dict[tuple[str, str, str], tuple[RunRecord, list[str]]] = {}
+        folders = [folder for copies in self.folders.values() for folder in copies]
+        records = (
+            self._executor.map(self.declaration, folders)
+            if self._executor
+            else map(self.declaration, folders)
+        )
+        for folder, file in zip(folders, records, strict=True):
+            if file is not None:
+                # A tournament name can occur in several independent launches.
+                copy = folder if file.kind == "evaluation" else ""
+                name = folder.rstrip("/").rsplit("/", 1)[-1]
+                found.setdefault((file.experiment, name, copy), (file, []))[1].append(folder)
+        return [
+            LocatedRun(
+                name=name,
+                file=file,
+                folders=tuple(folders),
+                last_write=self._last_write(folders),
+            )
+            for (_, name, _), (file, folders) in sorted(found.items())
+        ]
 
     @classmethod
-    def read(cls, storage: Storage, listed: Mapping[str, str] | None = None) -> Listing:
-        versions = storage.versions("") if listed is None else listed
-        pinned = with_versions(storage, versions)
-        keys = tuple(sorted(versions))
-        return cls(pinned, versions, keys, tuple(located_runs(pinned, keys)))
+    def read(
+        cls, storage: Storage, *, run: str | None = None, known: DeclarationCache | None = None
+    ) -> RunListing:
+        versions = storage.versions("")
+        return cls(with_versions(storage, versions), versions, run=run, known=known)
 
-    def experiment_versions(self, experiments: Container[str]) -> dict[str, str]:
-        """Object versions inside run folders declared for any experiment in `experiments`."""
-        found: dict[str, str] = {}
-        for run in self.declarations:
-            if run.file.experiment in experiments:
-                for folder in run.folders:
-                    for key in under(self.keys, folder):
-                        found[key] = self.versions[key]
-        return found
+    def versions_for(self, experiments: Collection[str]) -> dict[str, str]:
+        """Versions of the files owned by these experiments in this listing."""
+        return {
+            key: version
+            for run in self.declarations
+            if run.file.experiment in experiments
+            for key in self.keys_in(run.folders)
+            if (version := self.objects[key]) is not None
+        }
 
+    @cached_property
+    def _members(self) -> dict[str, list[str]]:
+        members: dict[str, list[str]] = {
+            folder: [] for folders in self._all_folders.values() for folder in folders
+        }
+        for key in self.keys:
+            if (folder := _owning_folder(key, members)) is not None:
+                members[folder].append(key[len(folder) :])
+        return members
 
-def located_runs(
-    storage: Storage, keys: Sequence[str], *, run: str | None = None
-) -> list[LocatedRun]:
-    """Group copies by declared experiment and run, never by the folder name alone.
-
-    Historical flat and machine-nested folders join the same identity, which
-    keeps the first copy's declaration. Each listed declaration is read once;
-    undeclared folders cannot claim an identity. Sorted by experiment and run;
-    `run` keeps only folders of that name.
-    """
-    listed = set(keys)
-    by_name = run_folders(keys)
-    if run is not None:
-        by_name = {run: by_name.get(run, [])}
-    found: dict[tuple[str, str], tuple[RunRecord, list[str]]] = {}
-    for name, folders in by_name.items():
+    def keys_in(self, folders: Sequence[str]) -> Iterator[str]:
+        """Visible keys owned by these copies, excluding nested runs and delivery bookkeeping."""
         for folder in folders:
-            file = declared(storage, folder, listed)
-            if file is not None:
-                found.setdefault((file.experiment, name), (file, []))[1].append(folder)
-    return [
-        LocatedRun(name=name, file=file, folders=tuple(folders))
-        for (_, name), (file, folders) in sorted(found.items(), key=lambda item: item[0])
-    ]
+            for name in self.names_in(folder):
+                if not name.startswith(".") and "/." not in name:
+                    yield folder + name
+
+    def names_in(self, folder: str) -> Sequence[str]:
+        """Every owned name, including hidden artifacts in historical per-file evals."""
+        return self._members[folder]
+
+    def _last_write(self, folders: Sequence[str]) -> datetime | None:
+        versions = (self.objects[key] for key in self.keys_in(folders))
+        return max(
+            (
+                v.modified
+                for v in versions
+                if isinstance(v, ObjectVersion) and v.modified is not None
+            ),
+            default=None,
+        )
+
+
+def _owning_folder(key: str, roots: Container[str]) -> str | None:
+    """The nearest run folder containing this object."""
+    parent = key.rpartition("/")[0]
+    while parent:
+        folder = parent + "/"
+        if folder in roots:
+            return folder
+        parent = parent.rpartition("/")[0]
+    return None
 
 
 def report_progress(

@@ -7,12 +7,9 @@ import math
 import os
 import subprocess
 import sys
-import threading
 import time
 from hashlib import sha256
 from pathlib import Path
-from urllib.error import HTTPError
-from urllib.request import urlopen
 
 import boto3  # type: ignore[import-untyped]
 import numpy as np
@@ -23,10 +20,10 @@ from etude.carriage import publication
 from etude.cli import main
 from etude.errors import EtudeError
 from etude.launch.database import launcher_file
-from etude.page import Server, build
+from etude.page import build
 from etude.records import Clock
 from etude.run import runs, sync
-from etude.storage import DirectoryStorage, S3Storage, default_root
+from etude.storage import DirectoryStorage, S3Storage
 from etude.train.read import buckets, read
 from etude.train.records import Time
 from etude.train.report import training
@@ -407,41 +404,6 @@ def test_logging_from_training_code_imports_no_command_line_library() -> None:
     assert loaded.stdout.strip() == "[]"
 
 
-def test_the_server_serves_the_experiments_page_from_the_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
-    run = open_run(experiment="pilot", run="a", clocks=CLOCKS)  # no directory named
-    run.log(manabot_row(1))
-    run.finish()
-    experiments = tmp_path / "experiments"
-    server = Server(
-        default_root(), experiment_file(experiments, "pilot"), ("127.0.0.1", 0), refresh=5.0
-    )
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    try:
-        base = f"http://127.0.0.1:{server.server_port}"
-        with urlopen(base + "/") as response:
-            page = response.read().decode()
-        assert "rl/entropy" in page and '"refresh": 5.0' in page
-        with pytest.raises(HTTPError) as missing:
-            urlopen(base + "/absent")
-        assert missing.value.code == 404
-    finally:
-        server.shutdown()
-        server.server_close()
-    absent = Server(default_root(), experiment_file(experiments, "absent"), ("127.0.0.1", 0))
-    threading.Thread(target=absent.serve_forever, daemon=True).start()
-    try:
-        # An experiment with no runs yet is not found, and says what the source holds.
-        with pytest.raises(HTTPError) as none:
-            urlopen(f"http://127.0.0.1:{absent.server_port}/")
-        assert none.value.code == 404 and "it holds pilot" in none.value.read().decode()
-    finally:
-        absent.shutdown()
-        absent.server_close()
-
-
 def test_tracking_commands_use_local_files_with_a_selected_server(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -468,15 +430,6 @@ def test_tracking_commands_use_local_files_with_a_selected_server(
     assert main(["report", pilot, "--source", str(destination), "--out", str(target)]) == 0
     assert (target / "pilot.html").is_file()
 
-    def serve_once(server: Server) -> None:
-        # Replace the blocking server loop; inspect the page it would serve.
-        assert "rl/loss" in (server.page() or "")
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(Server, "serve_forever", serve_once)
-    served = ["report", pilot, "--serve", "--source", str(destination), "--port", "0"]
-    assert main(served) == 0
-    assert "http://127.0.0.1:" in capsys.readouterr().out
     assert not launcher_file(home).exists()
 
 

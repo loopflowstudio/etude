@@ -61,9 +61,8 @@ from etude.eval.result import EvalResult as EvalResult
 from etude.eval.result import Result as Result
 from etude.eval.result import Row
 from etude.eval.result import Tables as Tables
-from etude.eval.schedule import ordered
 from etude.records import RunCounters, RunWriter, Tally
-from etude.run import Run, StorageDestination, declare, destinations, report_progress
+from etude.run import Declared, Run, StorageDestination, report_progress
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage, Storage, run_prefix
 
@@ -102,23 +101,18 @@ class EvalRun(Run):
         experiment: str,
         environment: Environment,
         matches: Sequence[Match],
+        progress: _Report | None = None,
     ) -> None:
         # Imported here: DuckDB is the optional `eval` extra.
         import duckdb  # noqa: PLC0415
 
         super().__init__(experiment=experiment, name=name, root=root, targets=targets)
+        self._delivery = progress.run if progress else self
         self.environment = environment
         self.matches = tuple(matches)
         self.rollups = rollups
         self.id = secrets.token_hex(6)
-        self.writer = RunWriter(
-            writer=self.id,
-            run=self.address,
-            started_ms=_now_ms(),
-            host=socket.gethostname(),
-            attempt=os.environ.get("ETUDE_ATTEMPT"),
-            commit=os.environ.get("ETUDE_COMMIT"),
-        )
+        self.writer = _writer(self.address, self.id)
         self._failed: set[str] = set()
         self.db: duckdb.DuckDBPyConnection = duckdb.connect()
         try:
@@ -134,10 +128,11 @@ class EvalRun(Run):
             for table, columns in record.columns.items():
                 self.columns.setdefault(table, {}).update(columns)
 
-        self._report = _Report(
+        self._report = progress or _Report(
             total=len(self.matches),
             done=sum(match.key in self.done for match in self.matches),
             writer=self.writer,
+            run=self,
         )
         self._report.write()
 
@@ -211,7 +206,10 @@ class EvalRun(Run):
         One listing per place and one read of each block not already read here.
         """
         places: list[tuple[Storage, str]] = [(DirectoryStorage(self.files.root), "")]
-        places += [(target.storage, run_prefix(self.address)) for target in self._destinations]
+        path = (
+            self.address if self._delivery is self else f"{self._delivery.address}/{self.address}"
+        )
+        places += [(target.storage, run_prefix(path)) for target in self._delivery._destinations]
         found: list[MatchRecord] = []
         known: dict[str, Block] = {}
         for storage, prefix in places:
@@ -325,7 +323,7 @@ class EvalRun(Run):
         """Seal what is staged into a block and offer it to every destination."""
         with self.files.lock:
             self.staging.seal(self.db)
-        if not self.ship():
+        if not self._delivery.ship():
             raise RetryRequested("evaluation delivery failed; results remain in the local run")
 
     def finish(self, state: Literal["finished", "failed", "stopped"]) -> None:
@@ -334,10 +332,10 @@ class EvalRun(Run):
         self.staging.close()
         self._write_outcome(state, counters=RunCounters(), writer=self.id)
         self.db.close()
-        if not self.ship():
+        if not self._delivery.ship():
             self._write_outcome("failed", counters=RunCounters(), writer=self.id)
             print(
-                f"etude: not delivered: {self.problems}. Files are in {self.files.root}; "
+                f"etude: not delivered: {self._delivery.problems}. Files are in {self._delivery.files.root}; "
                 "deliver them with `etude sync`.",
                 file=sys.stderr,
             )
@@ -416,6 +414,47 @@ _REPORT_SECONDS = 15.0
 _PACE_MATCHES = 50
 
 
+def _writer(address: str, writer: str) -> RunWriter:
+    return RunWriter(
+        writer=writer,
+        run=address,
+        started_ms=_now_ms(),
+        host=socket.gethostname(),
+        attempt=os.environ.get("ETUDE_ATTEMPT"),
+        commit=os.environ.get("ETUDE_COMMIT"),
+    )
+
+
+@contextmanager
+def _group_progress(
+    declaration: Declared, targets: Sequence[StorageDestination], *, total: int
+) -> Iterator[_Report]:
+    run = Run(
+        experiment=declaration.record.experiment,
+        name=declaration.name,
+        root=declaration.root,
+        targets=targets,
+    )
+    writer = _writer(run.address, secrets.token_hex(6))
+    DirectoryStorage(declaration.root).put(
+        f"metrics/{writer.writer}.json", writer.model_dump_json().encode()
+    )
+    progress = _Report(total=total, done=0, writer=writer, run=run)
+    state: Literal["finished", "failed", "stopped"] = "failed"
+    try:
+        progress.write()
+        yield progress
+        state = "finished"
+    except (Stopped, Terminated):
+        state = "stopped"
+        raise
+    finally:
+        run._write_outcome(state, counters=RunCounters(), writer=writer.writer)
+        if not run.ship():
+            run._write_outcome("failed", counters=RunCounters(), writer=writer.writer)
+            raise RetryRequested("evaluation delivery failed; results remain in the local run")
+
+
 class _Report:
     """Under `etude launch`, how far the eval run has got, for the launcher's status.
 
@@ -424,7 +463,8 @@ class _Report:
     It is progress only: results are the run's blocks.
     """
 
-    def __init__(self, *, total: int, done: int, writer: RunWriter) -> None:
+    def __init__(self, *, total: int, done: int, writer: RunWriter, run: Run) -> None:
+        self.run = run
         self.writer = writer
         self.total, self.done = total, done
         self.failed = 0
@@ -716,7 +756,7 @@ def play_together(
                             process.terminate()
                     pool.shutdown(wait=True, cancel_futures=True)
             if stopping:
-                raise RetryRequested("evaluation stopped before its execution deadline")
+                raise Terminated("evaluation stopped before its execution deadline")
     except RetryRequested as error:
         for each in plays:
             each.run.fail_pending(error)
@@ -738,58 +778,3 @@ def play_together(
         )
         for each in plays
     )
-
-
-@contextmanager
-def _evaluating_matches(
-    *,
-    experiment: str,
-    environment: Environment,
-    matches: Sequence[Match],
-    run: str | None = None,
-    directory: Path | str | None = None,
-    storages: Sequence[Storage] = (),
-    rollups: Sequence[Rollup] = (),
-    resume: bool = False,
-) -> Iterator[EvalRun]:
-    if len({scheduled.key for scheduled in matches}) != len(matches):
-        raise EtudeError("duplicate_match", 422)
-    names = [rollup.name for rollup in rollups]
-    if len(set(names)) != len(names) or set(names) & set(ETUDE_TABLES):
-        raise EtudeError("rollup_name_refused", 422) from ValueError(names)
-    declared = declare(
-        experiment=experiment,
-        clocks=(),
-        run=run,
-        kind="evaluation",
-        directory=directory,
-        resume=resume,
-    )
-    if declared.record.kind != "evaluation":
-        raise EtudeError("run_is_not_an_eval_run", 409)
-    path = declared.root / "environment.json"
-    if not path.is_file():
-        DirectoryStorage(declared.root).put(
-            "environment.json", environment.model_dump_json().encode()
-        )
-    elif Environment.model_validate_json(path.read_bytes()) != environment:
-        raise EtudeError("eval_run_environment_conflict", 409)
-    writer = EvalRun(
-        declared.root,
-        declared.name,
-        destinations(declared.base, storages),
-        tuple(rollups),
-        experiment=experiment,
-        environment=environment,
-        matches=list(ordered(matches)),
-    )
-    try:
-        yield writer
-    except Stopped:
-        writer.finish("stopped")
-        raise
-    except BaseException:
-        writer.finish("failed")
-        raise
-    else:
-        writer.finish("finished")

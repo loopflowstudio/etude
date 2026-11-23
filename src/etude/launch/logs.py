@@ -1,10 +1,31 @@
 """Log snapshots and plain-text views, independent of execution decisions."""
 
 from datetime import UTC, datetime
-from typing import cast
+from typing import ClassVar, Self, cast
 
 from etude.launch.logging import CLOSED, TRUNCATED, bound, parse_log_line
-from etude.launch.records import Diagnostic, LogChunk, LogProducer, LogSnapshot, LogStream
+from etude.launch.records import Diagnostic, LogChunk, LogProducer, LogSnapshot, LogStream, Status
+from etude.spec import Record
+
+
+class ConsoleTail(Record):
+    """The end of the CLI transcript sent with a live run observation."""
+
+    max_lines: ClassVar[int] = 500
+    body: str
+    collected: datetime | None
+    gaps: bool
+    final_attempt: int | None
+
+    @classmethod
+    def from_snapshot(cls, snapshot: LogSnapshot, status: Status) -> Self:
+        return cls(
+            body="\n".join(render(snapshot).splitlines()[-cls.max_lines :]),
+            collected=max((s.observed_at for s in snapshot.streams if s.observed_at), default=None),
+            # An older stream can have a gap before the visible tail.
+            gaps=any(s.truncated or not s.received or s.retrieval_error for s in snapshot.streams),
+            final_attempt=status.attempts if status.done and snapshot.settled else None,
+        )
 
 
 def snapshot_stream(

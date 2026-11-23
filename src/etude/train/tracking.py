@@ -70,7 +70,6 @@ from etude.records import (
     RUNNING_HOURS,
     ArtifactRef,
     Clock,
-    Continuation,
     Record,
     RunCounters,
     RunWriter,
@@ -86,6 +85,7 @@ from etude.run import (
     report_progress,
     run_directories,
 )
+from etude.spec import CONTINUATION_ENV
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage, Storage, run_prefix
 from etude.train.block import Builder, Columns, Json, LoggedRow, concat
@@ -1254,10 +1254,7 @@ def track(
     handed = _inherited()
     continues = None
     if handed is not None:
-        at = handed.at
-        until = os.environ.get("ETUDE_UNTIL_CLOCK")
-        clock = until if until in at else next(iter(at))
-        continues = Continuation(parent=handed.parent, clock=clock, value=at[clock])
+        continues = handed.continuation(os.environ.get("ETUDE_UNTIL_CLOCK"))
     declared = declare(
         experiment=experiment,
         clocks=None
@@ -1304,7 +1301,7 @@ def _origin(latest: CheckpointRecord | None, root: Path, started_ms: int) -> int
 
 def _inherited() -> ParentRun | None:
     """The handed lineage, relocating its checkpoint input onto this machine."""
-    given = os.environ.get("ETUDE_CONTINUES")
+    given = os.environ.get(CONTINUATION_ENV)
     if not given:
         return None
     parent = ParentRun.model_validate_json(given)

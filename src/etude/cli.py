@@ -316,6 +316,27 @@ def smoke_experiment(
 
 @app.command()
 @kind(Kind.wait)
+def view(
+    path: Annotated[
+        Path | None, typer.Argument(exists=True, readable=True, help="an experiment file or folder")
+    ] = None,
+    source: Annotated[
+        str | None,
+        typer.Option(help="a runs directory or bucket URI"),
+    ] = None,
+    host: Annotated[str, typer.Option(help="the address to bind")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(min=0, max=65535)] = 8765,
+) -> None:
+    """Serve live run charts and experiment reports from the selected source."""
+    # This command alone loads the live index and HTTP server.
+    from etude.storage import default_root, storage_from_uri
+    from etude.view import serve
+
+    serve(storage_from_uri(source or default_root()), path, (host, port))
+
+
+@app.command()
+@kind(Kind.wait)
 def report(
     path: Annotated[
         Path,
@@ -345,16 +366,9 @@ def report(
         float | None,
         typer.Option(
             min=0.1,
-            help="rewrite it every SECONDS, and the open page reloads; with --serve, how often "
-            "the page refreshes (no timer by default)",
+            help="rewrite it every SECONDS, and reload the open page",
         ),
     ] = None,
-    serve: Annotated[
-        bool,
-        typer.Option(help="serve it with refresh on demand, and write nothing"),
-    ] = False,
-    host: Annotated[str, typer.Option(help="with --serve; it has no login")] = "127.0.0.1",
-    port: Annotated[int, typer.Option(help="with --serve")] = 8765,
 ) -> None:
     """Draw an experiment's evals, perf and ML details as one HTML page, from its runs' files.
 
@@ -366,38 +380,22 @@ def report(
     import time
     import webbrowser
 
-    from etude.page import Page, Pages, Server, build, index, render, render_index, target, write
+    from etude.page import Page, Pages, index, render, render_index, target, write
     from etude.storage import default_root, storage_from_uri
 
     if experiment is not None and path.is_dir():
         raise ValueError("--experiment needs one Python file")
     storage = storage_from_uri(source or default_root())
-    if serve:
-        server = Server(storage, path, (host, port), refresh=watch, experiment=experiment)
-        address = f"http://{host}:{server.server_port}/"
-        print(address, flush=True)
-        if open_:
-            webbrowser.open(address)
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            server.server_close()
-        return
     shown: object = None
-    # A watched page is built again only once its files change; a one-shot file build needs no watch index.
-    pages = None if watch is None and not path.is_dir() else Pages(storage, experiment=experiment)
+    pages = Pages(storage)
     try:
         while True:
             current: Page | dict[Path, Page | str] | None
-            if pages is None:
-                current = build(storage, path, experiment=experiment)
-            elif path.is_dir():
+            if path.is_dir():
                 current = pages.build_each(path)
             else:
                 try:
-                    current = pages.build(path)
+                    current = pages.build(path, experiment=experiment)
                 except ValueError:
                     if watch is None:
                         raise
@@ -413,7 +411,7 @@ def report(
                     for file, built in current.items():
                         if isinstance(built, Page):
                             write(render(built, refresh=watch), target(storage, file.stem, out))
-                    found = index(storage, current, href=lambda stem: f"{stem}.html")
+                    found = index(storage, current)
                     written = write(
                         render_index(found, refresh=watch), target(storage, "index", out)
                     )
@@ -546,43 +544,40 @@ def continue_run(
     """Go past a run's target from its out. This makes a new run with a parent."""
     # Continuation joins the launcher's runs with tracking's checkpoints.
     import tempfile
+    from contextlib import ExitStack
 
     from etude.carriage import put_back
+    from etude.identity import run_address
     from etude.jobs import continue_from, continued_config
-    from etude.launch.listing import resolve_runs, show_runs
-    from etude.run import located_runs
-    from etude.storage import default_root, storage_from_uri
+    from etude.launch.listing import show_runs
+    from etude.run import RunListing
+    from etude.storage import DirectoryStorage, default_root, storage_from_uri
+    from etude.view_link import print_view
 
     scheduler = launch_cli.default()
-    storage = storage_from_uri(source or default_root())
     try:
-        parents = [
-            scheduler.record(parent)
-            for parent in resolve_runs(scheduler, [run], experiment=experiment)
-        ]
+        parent = scheduler.record(run_address(run, experiment))
     except LauncherError as error:
         raise LauncherError(f"{error}; a changed config needs a new --experiment") from error
-    first = parents[0]
-    with tempfile.TemporaryDirectory() as relayed:
-        if source is None:
-            # A parent that ran on another owned host: its records, from there.
-            here = {item.file.id for item in located_runs(storage, storage.keys(""))}
-            for parent in parents:
-                files = None if parent.id in here else scheduler.held(parent.id)
-                if files is not None:
-                    put_back(Path(relayed) / parent.id, files)
-        again = [
-            continue_from(
-                parent,
-                until,
-                source=relayed if (Path(relayed) / parent.id).is_dir() else storage,
-                ordinal=ordinal,
-                config=None if config is None else continued_config(parent, config),
-            )
-            for parent in parents
-        ]
-    ids = scheduler.queue(again[0], first.launch.pool, rent=first.launch.rent)
-    show_runs(scheduler, ids)
+    name = parent.id.rsplit("/", 1)[-1]
+    listing = RunListing.read(storage_from_uri(source or default_root()), run=name)
+    with ExitStack() as relay:
+        if source is None and not any(item.file.id == parent.id for item in listing.declarations):
+            # A parent on another owned host can supply its own records.
+            if files := scheduler.held(parent.id):
+                relayed = relay.enter_context(tempfile.TemporaryDirectory())
+                put_back(Path(relayed) / parent.id, files)
+                listing = RunListing.read(DirectoryStorage(relayed), run=name)
+        request = continue_from(
+            parent,
+            until,
+            source=listing,
+            ordinal=ordinal,
+            config=None if config is None else continued_config(parent, config),
+        )
+    (child,) = scheduler.queue(request, parent.launch.pool, rent=parent.launch.rent)
+    show_runs(scheduler, [child])
+    print_view(child)
 
 
 # Each may reach a bucket, so it is a wait rather than a read.
@@ -605,6 +600,8 @@ _HERE = (
     "worker",
     "logs",
     "report",
+    "status",
+    "view",
     "checkpoints",
     "sync",
     "convert-eval",
@@ -620,7 +617,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             from etude.launch import server
 
             if argv == ["--server-request"]:
-                return server.receive(launch_cli.default())
+                return server.receive(launch_cli.default)
             # The server command chooses the server, so `set` and `unset` run here.
             local = argv[:2] in (["server", "set"], ["server", "unset"])
             if not local and (address := server.selected()):

@@ -94,10 +94,37 @@ class Trace(Record):
     owner: str  # a run's or a job's name
     x: list[float | None]
     mean: list[float | None]
+    last: float | None = None
     low: list[float | None] | None = None
     high: list[float | None] | None = None
     nonfinite: int = 0
     seeds: list[int] | None = None
+
+    @classmethod
+    def from_buckets(cls, owner: str, reduced: Buckets) -> Trace:
+        last = None
+        for endpoint, mean in zip(reversed(reduced.last), reversed(reduced.mean), strict=True):
+            # A folded bucket retains its finite mean even when it ends in a gap.
+            value = endpoint if math.isfinite(endpoint) else mean
+            if math.isfinite(value):
+                last = float(value)
+                break
+        return cls(
+            owner=owner,
+            last=last,
+            x=_rounded((reduced.x_first + reduced.x_last) / 2, 7),
+            mean=_rounded(reduced.mean),
+            nonfinite=int(reduced.nonfinite.sum()),
+        )
+
+    def latest(self, *, log: bool) -> float | None:
+        """The logged endpoint of a drawable trace, falling back to its last drawable mean."""
+        for x, y in zip(reversed(self.x), reversed(self.mean), strict=True):
+            if x is not None and y is not None and (not log or y > 0):
+                if self.last is not None and (not log or self.last > 0):
+                    return self.last
+                return y
+        return None
 
 
 class Timer(Record):
@@ -143,15 +170,6 @@ def _started(run: RunData) -> float:
     """Seconds since the epoch when the run first started."""
     starts = run.writer_starts
     return min(starts.values()) / 1000 if starts else 0.0
-
-
-def _trace(run: RunData, reduced: Buckets) -> Trace:
-    return Trace(
-        owner=run.name,
-        x=_rounded((reduced.x_first + reduced.x_last) / 2, 7),
-        mean=_rounded(reduced.mean),
-        nonfinite=int(reduced.nonfinite.sum()),
-    )
 
 
 def _band(
@@ -391,8 +409,8 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
                         if len(reduced):
                             present.append((run, reduced))
                             if clock in BUILT_IN_NAMES or clock in run_clocks[run.name]:
-                                traces_by_key.setdefault((clock, metric), {})[run.name] = _trace(
-                                    run, reduced
+                                traces_by_key.setdefault((clock, metric), {})[run.name] = (
+                                    Trace.from_buckets(run.name, reduced)
                                 )
                     if (band := _band(job.name, present, metric, clock)) is not None:
                         bands_by_key.setdefault((clock, metric), []).append(band)

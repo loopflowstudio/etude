@@ -25,6 +25,7 @@ from etude.launch.records import Pool
 from etude.out import MEMBERSHIP, OutFile, OutFiles
 from etude.page import build
 from etude.records import ArtifactRef, RunRecord
+from etude.run import RunListing
 from etude.spec import Job, RunRequest, job_id
 from etude.storage import DirectoryStorage, default_root
 from tests.eval.games import play
@@ -190,6 +191,46 @@ def test_a_pass_leaves_known_runs_alone_and_queues_only_a_new_stage(
     assert [r.id for r in b.scheduler.runs()] == ["two/base@0", "two/base@1", "two/fine@0"]
     assert "two/base@0  finished" in capsys.readouterr().out
     assert not (tmp_path / "experiments").exists()
+
+
+def test_declared_queue_and_resume_leave_an_independent_same_seed_request_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = bench(tmp_path)
+    backend.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setattr(client, "_client", lambda: backend.scheduler)
+    monkeypatch.setattr(client, "standing", backend.scheduler.standing)
+    source = DirectoryStorage(tmp_path / "source")
+    file = tmp_path / "two.py"
+    file.write_text(FILE)
+    experiment = read_experiment(file)
+    (repeat,) = backend.scheduler.queue(
+        RunRequest(
+            id="two/another",
+            job=Job(name="base", experiment="two", command="true", max_hours=1),
+            seed=0,
+        ),
+        pool="waiting",
+    )
+    prior = backend.scheduler.record(repeat)
+    counts = Counting(backend.store, backend.service)
+    for resume in (False, True):
+        with counts.record():
+            advance(
+                experiment,
+                source=source,
+                mode="queue",
+                pool="waiting",
+                job="base",
+                seed=0,
+                resume=resume,
+                max_usd=Decimal(1),
+            )
+        assert backend.scheduler.record(repeat) == prior
+        assert backend.scheduler.record("two/base@0").launch.version == (2 if resume else 1)
+    # The resume uses the standing that established the original commitment.
+    assert counts.snapshot() == Counts(database=50)
+    backend.store.close()
 
 
 def test_an_experiment_limit_refuses_hand_down_before_any_rental(
@@ -852,8 +893,8 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         run.checkpoint(path, updates=1)
     decisions = advance(definition, source=source, directory=tmp_path / "evals")
     assert [(decision.new, decision.played) for decision in decisions] == [(1, 1)]
-    stored = StoredRuns.read("fresh_policy", source)
-    assert sum(len(stored.records(folder)) for folder in stored.folders()) == 1
+    stored = StoredRuns.read("fresh_policy", RunListing.read(source))
+    assert sum(len(stored.records(folder)) for folder in stored.folders) == 1
 
 
 def test_policy_key_of_a_job_added_to_a_started_experiment_is_queued(
@@ -982,8 +1023,8 @@ def eval_jobs(state):
     assert measured.requests == 12  # three declarations, writers, checkpoints and outcomes
     assert all(measured.got.count(key) == 1 for key in measured.got)
     assert not any(key.endswith("weights.pt") for key in measured.got)
-    stored = StoredRuns.read("rival", source)
-    matches = [record.match for folder in stored.folders() for record in stored.records(folder)]
+    stored = StoredRuns.read("rival", RunListing.read(source))
+    matches = [record.match for folder in stored.folders for record in stored.records(folder)]
     assert {
         tuple(
             player.checkpoint.key

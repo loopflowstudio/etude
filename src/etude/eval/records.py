@@ -1710,6 +1710,21 @@ class Tournament(Record):
         return self.model_copy(update={"seated": _most_lines(seated)}), tuple(gaps)
 
 
+def find_line_experiments(tournaments: Iterable[Tournament | TournamentRun]) -> set[str]:
+    """Experiments whose learner lines can resolve these tournaments' relative seats."""
+    names: set[str] = set()
+    for held in tournaments:
+        definition = held.definition if isinstance(held, Tournament) else held.tournament
+        if isinstance(definition, Benchmark) and any(seat.relative for seat in definition.seatings):
+            names.update(definition.experiments)
+            names.update(
+                ref.policy.experiment
+                for ref in held.checkpoints
+                if ref.policy is not None and ref.policy.experiment is not None
+            )
+    return names
+
+
 def _most_lines(seated: Iterable[Seated]) -> tuple[Seated, ...]:
     """One `Seated` per seating and held checkpoint: of two, the one that counted more lines,
     and of those resolved alike, the later."""

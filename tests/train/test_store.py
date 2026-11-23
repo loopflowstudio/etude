@@ -20,7 +20,7 @@ from etude.carriage import publication
 from etude.errors import EtudeError
 from etude.page import Pages, build
 from etude.records import Clock, RunWriter
-from etude.run import RunFiles, StorageDestination, runs, sync
+from etude.run import RunFiles, RunListing, StorageDestination, runs, sync
 from etude.storage import (
     DirectoryStorage,
     S3Storage,
@@ -92,11 +92,20 @@ def test_a_folder_listed_without_a_declaration_is_not_asked_for_one(tmp_path: Pa
         for key in local.keys(""):
             if not key.startswith("cache/"):
                 bucket.put(key, local.get(key))
-        assert [run.name for run in read_all(bucket)] == ["r"]
+        measured = MeasuredStorage(bucket)
+        (observed,) = read_all(measured)
+        assert observed.name == "r"
+        objects = client.list_objects_v2(Bucket="runs", Prefix="e/r/")["Contents"]
+        assert observed.last_write == max(item["LastModified"] for item in objects)
+        assert measured.listings == 1
         assert client.requests == len(client.read) == 3  # declaration, attempt, state
         client.requests = 0
         assert runs(bucket) == [("e", "r")]
-        assert client.requests == 1
+        assert client.requests == 0  # The listing confirms the cached declaration’s ETag.
+        pages = client.list_pages
+        warm = read(bucket, "e", "r")
+        assert warm.outcome == observed.outcome and warm.writers == observed.writers
+        assert (client.list_pages - pages, client.requests) == (1, 0)
 
 
 def test_a_run_whose_declaration_is_invalid_reads_without_one(tmp_path: Path) -> None:
@@ -106,6 +115,34 @@ def test_a_run_whose_declaration_is_invalid_reads_without_one(tmp_path: Path) ->
     data = read(tmp_path, "e", "r")
     assert data.file is None
     assert len(data.writers) == 1
+
+
+@pytest.mark.parametrize(
+    ("head", "tail", "accepted"),
+    [
+        (b"", b'{"id":"r","experiment":"e"}', True),
+        (b'{"i', b'd":"r","experiment":"e"}', True),
+        (b'{"id":"r","config":"\xc3', b'\xa9","experiment":"e"}', True),
+        (b'{"resume_after":1e-', b'2,"id":"r","experiment":"e"}', True),
+        (
+            b'{"source_key":{"namespace":"local","kind":"run","source_id":"r"},',
+            b'"experiment":"e","declaration":{}}',
+            True,
+        ),
+        (b'{"params":{"foreign":[1,2]},"id":"r","experiment":"e"', b"}", True),
+        (b'{"id":"r","calendar_seconds"', b":42}", False),
+        (b'{"params":{"broken":truX', b"}}", False),
+        (b'{"id":"\xff', b'"}', False),
+    ],
+)
+def test_large_declaration_reads_only_beyond_an_inconclusive_prefix(
+    tmp_path: Path, head: bytes, tail: bytes, accepted: bool
+) -> None:
+    source = MeasuredStorage(DirectoryStorage(tmp_path))
+    body = head.rjust(4096) + tail + b" " * 8192
+    source.put("r/run.json", body)
+    assert runs(source) == ([("e", "r")] if accepted else [])
+    assert source.ranges == 1 and source.bytes == 4096 + (len(body) if accepted else 0)
 
 
 @pytest.mark.parametrize("attributed", [False, True])
@@ -290,8 +327,10 @@ def test_permanent_and_recent_duplicate_is_read_once(tmp_path: Path) -> None:
     builder.add(1000, {"step": 1}, {"value": 7})
     table = builder.columns(writer, 0)
     write_block(tmp_path / prefix, block_key(1, 0, 0, writer), table)
-    write_block(tmp_path / prefix, block_key(2, 0, 0, writer), table)
+    permanent = block_key(2, 0, 0, writer)
+    write_block(tmp_path / prefix, permanent, table)
     data = read(tmp_path, "e", "r")
+    assert [block.key for block in data.blocks] == [prefix + permanent]
     assert data.rows == 1
     np.testing.assert_array_equal(data.points("value", "step").y, [7])
 
@@ -438,24 +477,22 @@ def test_reader_refreshes_vanished_tails_and_sequence_gaps(
     write_block(root, block_key(1, 0, 0, writer), builder.columns(writer, 0))
     (root / tail_key(0, writer)).unlink()
     assert snapshot.chart("value", "step").last.tolist() == [1]
-    write_block(root, block_key(1, 0, 0, writer), builder.columns(writer, 0))
     builder = Builder(["step"])
     builder.add(2000, {"step": 2}, {"value": 2})
     write_block(root, block_key(1, 1, 1, writer), builder.columns(writer, 1))
     storage = DirectoryStorage(tmp_path)
-    keys = storage.keys
-    stale = True
+    versions = storage.versions
 
-    def counted_keys(prefix: str) -> list[str]:
-        nonlocal stale
-        result = keys(prefix)
-        if stale:
-            stale = False
-            return [key for key in result if "/metrics/1-00000000-" not in key]
+    def omit_first_block(prefix: str) -> dict[str, str]:
+        result = versions(prefix)
+        if not prefix:  # The initial discovery saw only sequence 1.
+            del result[run_prefix("r") + block_key(1, 0, 0, writer)]
         return result
 
-    monkeypatch.setattr(storage, "keys", counted_keys)
-    assert read(storage, "e", "r").chart("value", "step").last.tolist() == [1, 2]
+    monkeypatch.setattr(storage, "versions", omit_first_block)
+    measured = MeasuredStorage(storage)
+    assert read(measured, "e", "r").chart("value", "step").last.tolist() == [1, 2]
+    assert measured.listings == 2
 
 
 def test_range_read_refuses_a_damaged_permanent_array(tmp_path: Path) -> None:
@@ -815,7 +852,7 @@ def test_watched_reports_read_each_bucket_file_once_per_computer(tmp_path: Path)
         client.create_bucket(Bucket="etude-watched")
         assert sync(local, storages=[S3Storage("etude-watched", client=client)]) == {}
         written = client.stored("etude-watched")
-        # `etude report --watch` and `etude report --serve` build the page every few seconds.
+        # `etude report --watch` builds the page every few seconds.
         file = experiment_file(tmp_path / "experiments", "e")
         first = build(S3Storage("etude-watched", client=client), file)
         assert 0 < client.bytes <= written
@@ -855,6 +892,26 @@ def test_a_long_run_uploads_a_small_multiple_of_what_it_finally_stores(tmp_path:
     assert len(bucket.get(note).splitlines()) >= 5  # replaced blocks were delivered first
     # A row travels as a tail, in a recent block and in its permanent block.
     assert stored < measured.written <= 3 * stored
+
+
+def test_directory_listing_skips_missing_prefixes_and_disappeared_targets(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path)
+    source.put("lab/kept", b"complete")
+    source.put("lab/covered", b"replaced")
+    (tmp_path / "lab" / "link").symlink_to("covered")
+    assert source.keys("lab") == ["lab/covered", "lab/kept", "lab/link"]
+    source.delete("lab/covered")
+    assert source.keys("lab") == ["lab/kept"]
+    assert source.keys("missing") == []
+
+
+def test_a_printed_directory_uri_reads_the_same_runs_as_its_path(tmp_path: Path) -> None:
+    folder = tmp_path / "runs with space"
+    DirectoryStorage(folder).put("lab/a/run.json", b"{}")
+    printed = DirectoryStorage(folder).uri("run.json").removesuffix("/run.json")
+    assert storage_from_uri(printed).keys("") == ["lab/a/run.json"]
+    with pytest.raises(ValueError, match="no other host"):
+        storage_from_uri("file://elsewhere/runs")
 
 
 def test_an_r2_uri_reaches_the_accounts_endpoint_with_r2_keys(
@@ -1181,10 +1238,12 @@ def test_a_report_listing_validates_only_its_own_reads(tmp_path: Path) -> None:
         client.create_bucket(Bucket="scoped")
         storage = S3Storage("scoped", client=client, cache=Cache(tmp_path / "cache"))
         storage.put("run.json", b"first")
-        report = storage._with_versions(storage.versions(""))
+        report = RunListing.read(storage).storage
         assert report.get("run.json") == report.get("run.json") == b"first"
+        assert report.get_range("run.json", 1, 3) == b"irs"
         assert client.requests == 1
 
         storage.put("run.json", b"second")
+        assert storage.get_range("run.json", 1, 3) == b"eco"
         assert storage.get("run.json") == b"second"
-        assert client.requests == 2
+        assert client.requests == 3

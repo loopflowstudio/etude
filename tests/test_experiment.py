@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import time
 from contextlib import nullcontext
+from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -24,15 +26,24 @@ from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, CheckpointSlot, Code, Seating, checkpoint_player
 from etude.eval.tournament import evaluating, scores
-from etude.experiment import observe
+from etude.experiment import observe, state_of
 from etude.jobs import EvalJob, ExperimentState, OutMembers, _hold, evaluation_group
 from etude.launch.records import Outcome, Standing, Status
 from etude.out import MEMBERSHIP, OutFile, OutFiles
-from etude.records import Clock, RunCounters, RunOutcome, RunRecord, RunSubmission
-from etude.spec import Job, RunRequest
+from etude.records import (
+    Clock,
+    Continuation,
+    RunCounters,
+    RunOutcome,
+    RunRecord,
+    RunSubmission,
+    SourceKey,
+)
+from etude.spec import CONTINUATION_ENV, Job, RunRequest, Until, Variable
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage
-from etude.train.read import read
+from etude.train.read import read, read_all
+from etude.train.records import ParentRun
 from etude.train.tracking import TrainingRun as Run_
 from tests.eval.games import (
     play,
@@ -482,6 +493,7 @@ def test_saved_stop_keeps_the_launchers_continuation_state(
     training.finish("stopped", timeout=30)
     (stopped,) = observe(bucket, "ppo").runs
     assert stopped.state == "stopped"
+    assert stopped.status is None
     launcher = _Launcher()
     launcher.launched.append(
         RunRequest(
@@ -494,6 +506,8 @@ def test_saved_stop_keeps_the_launchers_continuation_state(
     monkeypatch.setattr(client, "standing", launcher.standing)
     (continued,) = observe(bucket, "ppo").runs
     assert continued.state == phase
+    assert continued.status == launcher.status(f"ppo/{stopped.name}")
+    assert continued.last_write == stopped.last_write
 
 
 def test_a_launched_pass_ships_its_checkpoints_and_is_not_launched_twice(
@@ -903,6 +917,8 @@ def test_saved_eval_outcomes_keep_the_launchers_continuation_state(
     monkeypatch.setattr(client, "standing", launcher.standing)
     (run,) = observe(bucket, "ppo").eval_runs
     assert run.name == "ladder"
+    assert run.last_write is not None
+    assert run.status == (None if phase == "absent" else launcher.status("ppo/ladder"))
     assert run.state == (
         phase if outcome == "stopped" and phase not in {"absent", "succeeded"} else outcome
     )
@@ -981,9 +997,183 @@ def test_launcher_phase_preserves_compact_training_addresses_and_terminal_outcom
         "failed" if phase == "failed" else "succeeded" if phase == "succeeded" else None
     )
     monkeypatch.setattr(client, "standing", launcher.standing)
-    (run,) = observe(bucket, "ppo").runs
+    state = observe(bucket, "ppo")
+    (run,) = state.runs
+    assert state.run("ppo/base@0") is state.run("ppo@0") is run
     assert run.name == "ppo@0"
+    assert run.status == launcher.status("ppo/base@0")
     assert run.state == (phase if outcome == "stopped" and phase != "succeeded" else outcome)
+
+
+def _continue_job(job: Job, parent: str, updates: int) -> Job:
+    handoff = ParentRun(
+        parent=SourceKey(namespace="local", kind="run", source_id=parent),
+        at={"steps": 20, "updates": updates},
+    )
+    return job.model_copy(
+        update={
+            "environment": (Variable(name=CONTINUATION_ENV, value=handoff.model_dump_json()),),
+            "until": Until(clock="updates", value=updates + 50),
+        }
+    )
+
+
+@pytest.mark.parametrize("stored", [("base@0",), ("c1",), ("base@0", "c1"), ()])
+def test_continuation_and_parent_keep_their_addresses_through_delivery(
+    tmp_path: Path, stored: tuple[str, ...]
+) -> None:
+    source = DirectoryStorage(tmp_path)
+    job = Job(name="base", experiment="ppo", command="true")
+    parent, child = "ppo/base@0", "ppo/c1"
+    for name in stored:
+        continuation = (
+            Continuation(
+                parent=SourceKey(namespace="local", kind="run", source_id="base@0"),
+                clock="updates",
+                value=150,
+            )
+            if name == "c1"
+            else None
+        )
+        with open_run(
+            experiment="ppo",
+            run=name,
+            job="base",
+            seed=0,
+            clocks=["updates"],
+            continues=continuation,
+            directory=tmp_path,
+        ) as writer:
+            updates = 200 if continuation else 150
+            writer.log({"loss": 1}, updates=updates)
+            weights = writer.out / "weights.pt"
+            weights.write_text(name)
+            writer.checkpoint(weights, updates=updates)
+    launcher = _Launcher()
+    launcher.launched.append(RunRequest(id=parent, seed=0, job=job))
+    launcher.outcome = "succeeded"
+    (finished,) = launcher.standing("ppo")
+    launcher.launched = [RunRequest(id=child, seed=0, job=_continue_job(job, "base@0", 150))]
+    launcher.queued, launcher.outcome = True, None
+    (queued,) = launcher.standing("ppo")
+    files = read_all(source)
+    for standing in ((queued, finished), (finished, queued)):
+        state = state_of(files, "ppo", retained=standing)
+        assert {run.name: run.status for run in state.runs} == {
+            "base@0": finished.status,
+            "c1": queued.status,
+        }
+        assert state.run(parent).state == "finished"
+        assert state.run(child).state == ("finished" if "c1" in stored else "queued")
+        for name in ("base@0", "c1"):
+            assert (state.run(name).last_write is not None) == (name in stored)
+        (line,) = state.lines
+        assert line.name == "base@0" and line.ended == ("c1" in stored)
+        assert [point.at["updates"] for point in line.checkpoints] == [
+            updates for name, updates in (("base@0", 150), ("c1", 200)) if name in stored
+        ]
+        run = state.run(child)
+        assert run.parent_address == parent and run.continues
+        assert (run.continues.clock, run.continues.value) == ("updates", 150)
+        assert all(point.run == "base@0" for point in state.run(parent).checkpoints)
+
+
+def test_queued_chain_follows_a_compact_parent_and_keeps_a_same_seed_repeat_separate(
+    tmp_path: Path,
+) -> None:
+    source = DirectoryStorage(tmp_path)
+    declaration = RunRecord(id="ppo@0", experiment="ppo", job_name="base", seed=0)
+    source.put("ppo@0/run.json", declaration.model_dump_json().encode())
+    launcher = _Launcher()
+    launcher.queued = True
+    job = Job(name="base", experiment="ppo", command="true")
+    launcher.launched = [
+        RunRequest(id="ppo/last", seed=0, job=_continue_job(job, "middle", 200)),
+        RunRequest(id="ppo/middle", seed=0, job=_continue_job(job, "base@0", 150)),
+        RunRequest(id="ppo/repeat", seed=0, job=job),
+        RunRequest(id="ppo/base@0", seed=0, job=job),
+    ]
+    state = state_of(read_all(source), "ppo", retained=launcher.standing("ppo"))
+    assert state.run("middle").parent_address == "ppo@0"
+    assert state.run("last").parent_address == "ppo/middle"
+    assert state.run("middle").line == state.run("last").line == "ppo@0"
+    assert {line.name for line in state.lines} == {"ppo@0", "repeat"}
+    assert state.run("repeat").continues is None
+
+
+@pytest.mark.parametrize(
+    ("stored", "requests", "expected"),
+    [
+        (("old",), ("base@0",), {"old": "base@0"}),
+        (("old",), ("repeat",), {"old": None, "repeat": "repeat"}),
+        (("old",), ("old", "base@0"), {"old": "old", "base@0": "base@0"}),
+        (("old", "older"), ("base@0",), {"old": None, "older": None, "base@0": "base@0"}),
+        (("c1",), ("base@0",), {"c1": None, "base@0": "base@0"}),
+    ],
+)
+def test_only_one_unclaimed_training_root_can_supply_a_declared_alias(
+    tmp_path: Path,
+    stored: tuple[str, ...],
+    requests: tuple[str, ...],
+    expected: dict[str, str | None],
+) -> None:
+    source = DirectoryStorage(tmp_path)
+    for name in stored:
+        record = RunRecord(
+            id=f"ppo/{name}",
+            experiment="ppo",
+            job_name="base",
+            seed=0,
+            continues=Continuation(
+                parent=SourceKey(namespace="local", kind="run", source_id="base@0"),
+                clock="steps",
+                value=1,
+            )
+            if name == "c1"
+            else None,
+            clocks=(Clock(name="steps", kind="step", meaning="training steps"),),
+        )
+        source.put(f"ppo/{name}/run.json", record.model_dump_json().encode())
+    launcher = _Launcher()
+    launcher.launched = [
+        RunRequest(id=f"ppo/{name}", seed=0, job=Job(name="base", experiment="ppo", command="true"))
+        for name in requests
+    ]
+    files, retained = read_all(source), launcher.standing("ppo")
+    for standing in (retained, retained[::-1]):
+        state = state_of(files, "ppo", retained=standing)
+        assert {
+            run.name: run.status.run.removeprefix("ppo/") if run.status else None
+            for run in state.runs
+        } == expected
+
+
+def test_compact_and_qualified_address_claims_survive_the_same_local_name(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path)
+    compact, qualified = "ppo@0", "ppo/ppo@0"
+    source.put(
+        compact + "/run.json",
+        RunRecord(id=compact, experiment="ppo", job_name="ppo", seed=0).model_dump_json().encode(),
+    )
+    launcher = _Launcher()
+    launcher.queued = True
+    launcher.launched = [
+        RunRequest(id=address, seed=0, job=Job(name="ppo", experiment="ppo", command="true"))
+        for address in (compact, qualified)
+    ]
+    launcher.launched.append(
+        RunRequest(
+            id="ppo/child", seed=0, job=_continue_job(launcher.launched[0].job, "ppo@0", 150)
+        )
+    )
+    files, retained = read_all(source), launcher.standing("ppo")
+    for standing in (retained, retained[::-1]):
+        state = state_of(files, "ppo", retained=standing)
+        assert {run.address for run in state.runs} == {compact, qualified, "ppo/child"}
+        assert state.run("ppo/child").parent_address is None
+        assert {line.name for line in state.lines} == {compact, qualified, "child"}
+        assert state.run(compact).last_write is not None
+        assert state.run(qualified).last_write is None
 
 
 @pytest.mark.parametrize("phase", ["queued", "running"])
@@ -1017,3 +1207,57 @@ def test_unstored_summaries_use_local_names_and_accept_both_lookup_spellings(
     assert (run.name, run.line, run.state) == ("base@0", "base@0", phase)
     (evaluation,) = state.eval_runs
     assert (evaluation.name, evaluation.state) == ("ladder-123", phase)
+    for summary, address in ((run, "ppo/base@0"), (evaluation, "ppo/ladder-123")):
+        assert summary.status == launcher.status(address)
+        assert summary.last_write is None
+
+
+def test_observe_dates_each_runs_files_across_copies_from_one_listing(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path)
+    started = 1_700_000_000
+    for folder, address, kind, seconds in (
+        ("lab", "lab", "training", 0),
+        ("copied/lab", "lab", "training", 10),
+        ("lab/eval@0", "lab/eval@0", "evaluation", 20),
+    ):
+        key = f"{folder}/run.json"
+        source.put(
+            key, RunRecord(id=address, experiment="lab", kind=kind).model_dump_json().encode()
+        )
+        os.utime(tmp_path / key, (started + seconds, started + seconds))
+    for key, seconds in (
+        ("copied/lab/out/current", 15),
+        ("lab/eval@0/artifacts/plays", 30),
+        ("lab/.shipped/bucket/run.json.sent", 50),
+    ):
+        source.put(key, b"")
+        os.utime(tmp_path / key, (started + seconds, started + seconds))
+
+    measured = MeasuredStorage(source)
+    state = observe(measured, "lab")
+    assert state.run("lab").last_write == datetime.fromtimestamp(started + 15, UTC)
+    assert state.eval_runs[0].last_write == datetime.fromtimestamp(started + 30, UTC)
+    assert (measured.listings, measured.requests) == (1, 3)
+
+
+def test_storage_with_opaque_versions_reports_an_unknown_write_time(tmp_path: Path) -> None:
+    class Undated(DirectoryStorage):
+        def versions(self, prefix: str) -> dict[str, str]:
+            return {key: str(tag) for key, tag in super().versions(prefix).items()}
+
+    source = Undated(tmp_path)
+    source.put("lab/run.json", RunRecord(id="lab", experiment="lab").model_dump_json().encode())
+    run = observe(source, "lab").run("lab")
+    assert run.state == "running" and run.last_write is None
+
+
+def test_successful_training_launch_without_run_files_is_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launcher = _Launcher()
+    launcher.launched.append(
+        RunRequest(id="lab/command", job=Job(name="command", experiment="lab", command="true"))
+    )
+    launcher.outcome = "succeeded"
+    monkeypatch.setattr(client, "standing", launcher.standing)
+    assert observe(DirectoryStorage(tmp_path), "lab").run("command").state == "finished"

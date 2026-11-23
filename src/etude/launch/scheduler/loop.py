@@ -67,6 +67,7 @@ from etude.launch.records import (
     LogSnapshot,
     LogStream,
     Machine,
+    MachineStatus,
     MachineTemplate,
     Offer,
     OnDemand,
@@ -91,9 +92,9 @@ from etude.launch.records import (
 from etude.launch.scheduler.costs import (
     Budget,
     Place,
+    has_unbilled_time,
+    price_rental,
     rental_cost,
-    rental_units,
-    rental_usd,
     run_share,
 )
 from etude.launch.scheduler.placement import Placement, PlannedRun, funded_group
@@ -448,21 +449,42 @@ class Scheduler:
     def rentals(self) -> tuple[RentalCost, ...]:
         """Paid windows and their cost from retained bills, including terminated machines."""
         now = self._clock()
-        costs = []
-        for rental in self._store.rentals():
-            machine = self._store.machine(rental.machine)
-            usd = rental_usd(rental, machine, now)
-            costs.append(
-                RentalCost(
-                    rental=rental,
-                    usd=usd,
-                    estimated=self._estimated(rental, now),
-                    unbilled_usd=usd - rental.billed_usd,
-                    over_cap=rental.billed_usd > rental.cap_usd,
-                    units=rental_units(rental, machine, now),
+        return tuple(
+            price_rental(rental, self._store.machine(rental.machine), now)
+            for rental in self._store.rentals()
+        )
+
+    def machine_statuses(self, *, ended: bool = False) -> tuple[MachineStatus, ...]:
+        """Machines in CLI order, with their current allocations. All reads are local."""
+        with self._store.reading():
+            now = self._clock()
+            supplies: tuple[Supply, ...] = (*self.pools(), *self.ondemands())
+            machines = self._store.machines(held_only=not ended)
+            windows = {r.machine: r for r in self._store.rentals(held_only=not ended)}
+            allocated = self._store.allocated_runs()
+        by_supply: dict[str, list[Machine]] = {}
+        for machine in machines:
+            by_supply.setdefault(machine.supply, []).append(machine)
+        statuses = []
+        for supply in supplies:
+            for machine in by_supply.get(supply.name, []):
+                cost = None
+                if machine.kind == "rented" and machine.refused_at is None:
+                    rental = windows.get(machine.name)
+                    if rental is None:
+                        continue
+                    cost = price_rental(rental, machine, now)
+                statuses.append(
+                    MachineStatus(
+                        machine=machine,
+                        observed_at=now,
+                        pool_off=isinstance(supply, Pool) and supply.off,
+                        spot=isinstance(supply, OnDemand) and supply.template.spot,
+                        cost=cost,
+                        runs=tuple(allocated.get(machine.name, ())),
+                    )
                 )
-            )
-        return tuple(costs)
+        return tuple(statuses)
 
     def now(self) -> datetime:
         """The time by the clock this scheduler reads every record against."""
@@ -1371,8 +1393,10 @@ class Scheduler:
                 delivered = self._store.last_delivery(last.id)
                 since = delivered or last.planned_at or session.planned_at
                 delivery_age = max(0.0, (now - since).total_seconds())
+        superseded = last is not None and last.number <= record.launch.resume_after
         spend = self._run_spend(run, paid, now)
         seen = Status(
+            attempt=last.id if last is not None and not superseded else None,
             run=run,
             delivery_age_seconds=delivery_age,
             phase="queued",
@@ -1406,7 +1430,6 @@ class Scheduler:
             return seen.model_copy(
                 update={"phase": "setting_up" if last.started_at is None else "running"}
             )
-        superseded = last is not None and last.number <= record.launch.resume_after
         retry = (
             last is None
             or superseded
@@ -1535,31 +1558,17 @@ class Scheduler:
             except (OSError, LauncherError, StorageUnavailable):
                 continue  # the existing cleanup path retains uncertainty for a later pass
 
-    def _estimated(self, record: Session | Rental, now: datetime) -> bool:
-        rental = self._store.rental_for(record) if isinstance(record, Session) else record
+    def _estimated(self, session: Session, now: datetime) -> bool:
+        rental = self._store.rental_for(session)
         if rental is None:
             return False
         machine = self._store.machine(rental.machine)
-        return (
-            (
-                rental.usd_per_hour > 0
-                or (
-                    rental.unit != "usd"
-                    and (rental.units_per_hour is not None or rental.usd_per_unit > 0)
-                )
-            )
-            and machine.claimed_at is not None
-            and machine.refused_at is None
-            and (
-                rental.billed_through is None
-                or rental.billed_through < (machine.deleted_at or min(now, rental.deadline))
-            )
-        )
+        return has_unbilled_time(rental, machine, now)
 
     def _bills(self, now: datetime) -> None:
         for rental in self._store.rentals():
             machine = self._store.machine(rental.machine)
-            if machine.provider_id is None or not self._estimated(rental, now):
+            if machine.provider_id is None or not has_unbilled_time(rental, machine, now):
                 continue
             if rental.billed_through is not None and rental.billed_through >= now.replace(
                 minute=0, second=0, microsecond=0

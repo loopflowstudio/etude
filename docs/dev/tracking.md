@@ -67,6 +67,9 @@ Rules a caller can rely on:
   that wrote a run.
   A run's id is unique within its experiment. Runs stored before this
   layout, in a flat `RUN/` folder with a `state.json` outcome, read the same.
+  A custom storage can return `etude.storage.ObjectVersion(tag, modified)` values
+  from `versions()` to supply file dates. Each tag compares as a string.
+  Plain string tags leave the write time unknown.
   Config, outcome, state and checkpoint records are JSON. Rows are columnar block files (the
   layout is described at the top of `src/etude/train/block.py`),
   sealed every few seconds and merged as they accumulate, so a chart reads two

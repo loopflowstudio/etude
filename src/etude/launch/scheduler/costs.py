@@ -7,7 +7,7 @@ from decimal import ROUND_CEILING, Decimal
 
 from pydantic import Field
 
-from etude.launch.records import Machine, Rental, RunAttempt, Session, Spend
+from etude.launch.records import Machine, Rental, RentalCost, RunAttempt, Session, Spend
 from etude.spec import Record
 
 
@@ -146,25 +146,41 @@ def rental_cost(price: Decimal, seconds: float | Decimal, reservation_hours: int
     return price * hours
 
 
-def rental_usd(rental: Rental, machine: Machine, now: datetime) -> Decimal:
-    """Estimate an unconfirmed machine through its paid deadline."""
-    if machine.claimed_at is None or machine.refused_at is not None:
-        return Decimal(0)
-    end = machine.deleted_at or min(now, rental.deadline)
-    return cost_between(rental, machine, machine.claimed_at, end)
+def has_unbilled_time(rental: Rental, machine: Machine, now: datetime) -> bool:
+    return (
+        (
+            rental.usd_per_hour > 0
+            or (
+                rental.unit != "usd"
+                and (rental.units_per_hour is not None or rental.usd_per_unit > 0)
+            )
+        )
+        and machine.claimed_at is not None
+        and machine.refused_at is None
+        and (
+            rental.billed_through is None
+            or rental.billed_through < (machine.deleted_at or min(now, rental.deadline))
+        )
+    )
 
 
-def rental_units(rental: Rental, machine: Machine, now: datetime) -> Decimal | None:
-    """Estimate native units consumed for a non-USD rental with a known hourly burn rate."""
-    if (
-        rental.unit == "usd"
-        or rental.units_per_hour is None
-        or machine.claimed_at is None
-        or machine.refused_at is not None
-    ):
-        return None
-    end = machine.deleted_at or min(now, rental.deadline)
-    return _metered(rental.units_per_hour, machine.claimed_at, end)
+def price_rental(rental: Rental, machine: Machine, now: datetime) -> RentalCost:
+    """Combine retained bills and uncovered time through deletion or the paid deadline."""
+    usd = Decimal(0)
+    units = None
+    if machine.claimed_at is not None and machine.refused_at is None:
+        end = machine.deleted_at or min(now, rental.deadline)
+        usd = cost_between(rental, machine, machine.claimed_at, end)
+        if rental.unit != "usd" and rental.units_per_hour is not None:
+            units = _metered(rental.units_per_hour, machine.claimed_at, end)
+    return RentalCost(
+        rental=rental,
+        units=units,
+        usd=usd,
+        estimated=has_unbilled_time(rental, machine, now),
+        unbilled_usd=usd - rental.billed_usd,
+        over_cap=rental.billed_usd > rental.cap_usd,
+    )
 
 
 def cost_between(r: Rental, machine: Machine, start: datetime, end: datetime) -> Decimal:

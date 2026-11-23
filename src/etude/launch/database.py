@@ -340,6 +340,9 @@ _MACHINES = """SELECT m.name, m.pool, m.ondemand, m.kind, m.cost_usd, m.expires_
 _SESSIONS = """SELECT w.*, COALESCE(m.pool, m.ondemand) AS supply
     FROM sessions w JOIN machines m ON m.name = w.machine"""
 _RENTALS = "SELECT r.* FROM rentals r"
+_OPEN_SESSION_MACHINES = (
+    "SELECT machine FROM sessions WHERE ended_at IS NULL AND refused_at IS NULL"
+)
 
 
 def _machine_from_row(row: sqlite3.Row) -> Machine:
@@ -554,6 +557,18 @@ class Database:
 
     def close(self) -> None:
         self._db.close()
+
+    @contextmanager
+    def reading(self) -> Iterator[None]:
+        """Keep related reads on one committed snapshot while the loop changes allocations."""
+        if self._db.in_transaction:
+            yield
+        else:
+            self._db.execute("BEGIN")
+            try:
+                yield
+            finally:
+                self._db.rollback()
 
     @contextmanager
     def _together(self) -> Iterator[None]:
@@ -828,11 +843,22 @@ class Database:
             raise LauncherError(f"no machine named {name!r}")
         return _machine_from_row(row)
 
-    def machines(self, supply: str) -> tuple[Machine, ...]:
-        """A pool's machines, or every machine ever rented from an on-demand."""
-        rows = self._db.execute(
-            f"{_MACHINES} WHERE m.pool = ? OR m.ondemand = ? ORDER BY m.rowid", (supply, supply)
-        )
+    def machines(
+        self, supply: str | None = None, *, held_only: bool = False
+    ) -> tuple[Machine, ...]:
+        """Machines in registration order. Held rentals have a live, unrefused session."""
+        filters = []
+        params: tuple[str, ...] = ()
+        if supply is not None:
+            filters.append("(m.pool = ? OR m.ondemand = ?)")
+            params = (supply, supply)
+        if held_only:
+            filters.append(f"""m.deleted_at IS NULL AND m.name IN (
+                SELECT name FROM machines WHERE pool IS NOT NULL UNION ALL
+                {_OPEN_SESSION_MACHINES}
+            )""")
+        where = " WHERE " + " AND ".join(filters) if filters else ""
+        rows = self._db.execute(f"{_MACHINES}{where} ORDER BY m.rowid", params)
         return tuple(_machine_from_row(row) for row in rows)
 
     # Jobs and runs
@@ -1123,8 +1149,18 @@ class Database:
             raise LauncherError(f"machine {machine!r} has no rental")
         return _session_from_row(row)
 
-    def rentals(self) -> tuple[Rental, ...]:
-        return tuple(Rental.model_validate(dict(row)) for row in self._db.execute(_RENTALS))
+    def rentals(self, *, held_only: bool = False) -> tuple[Rental, ...]:
+        where = f" WHERE r.machine IN ({_OPEN_SESSION_MACHINES})" if held_only else ""
+        return tuple(Rental.model_validate(dict(row)) for row in self._db.execute(_RENTALS + where))
+
+    def allocated_runs(self) -> dict[str, list[str]]:
+        """Only unfinished attempts occupy a slot, even when a run awaits another try."""
+        allocated: dict[str, list[str]] = {}
+        for machine, run in self._db.execute(
+            "SELECT machine,run FROM attempts WHERE outcome IS NULL ORDER BY machine,run"
+        ):
+            allocated.setdefault(machine, []).append(run)
+        return allocated
 
     def machine_busy(self, machine: str) -> bool:
         """Allocation authority: any unfinished attempt holds its machine."""

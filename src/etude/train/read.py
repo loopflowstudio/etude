@@ -19,13 +19,16 @@ reader of checkpoints, or of an eval run, reads no metric data.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections import Counter
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from functools import cached_property
+from graphlib import TopologicalSorter
 from hashlib import sha256
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 import numpy as np
 import numpy.typing as npt
@@ -35,19 +38,21 @@ from etude.block_file import BlockFile, parse, select
 from etude.carriage import checkpoint_key
 from etude.checkpoints import CheckpointRecord
 from etude.errors import EtudeError
-from etude.identity import stored_owner
+from etude.identity import run_address, stored_owner
 from etude.out import MEMBERSHIP, OutFiles, OutMember
 from etude.records import (
     HOURS_SINCE_START,
     RUNNING_HOURS,
     Clock,
+    Continuation,
     Record,
     RunOutcome,
     RunRecord,
     RunWriter,
+    SourceKey,
 )
-from etude.run import LocatedRun, as_storage, located_runs, run_folders, under
-from etude.storage import Storage, run_prefix
+from etude.run import LocatedRun, RunListing, as_storage, under
+from etude.storage import ListedStorage, Storage, run_prefix
 from etude.train.block import (
     COUNT,
     DTYPES,
@@ -111,10 +116,14 @@ class RunData(Arrays):
     name: str
     file: RunRecord | None
     outcome: RunOutcome | None
+    # A tournament folder identifies the launch that delivered this copy.
+    eval_folder: str | None = None
     # In ordinal order, one per ordinal: a later attempt continues its run's ordinals.
     checkpoints: tuple[CheckpointRecord, ...]
     # Every process that wrote to this run, in start order.
     writers: tuple[RunWriter, ...]
+    # Latest modification in this run's listed folders, when the source supplied dates.
+    last_write: datetime | None = None
     _read_blocks: Callable[[], tuple[StoredBlock, ...]] = PrivateAttr()
     _read_out: Callable[[], tuple[OutMember, ...]] = PrivateAttr(default=tuple)
     _stretches_cache: dict[str, list[list[_Extent]]] = PrivateAttr(default_factory=dict)
@@ -172,6 +181,15 @@ class RunData(Arrays):
                 if len(x):
                     given = _Given(float(x.min()), float(x.max()), float(x[0]))
         return _Placed(block.key, h.writer, h.first, h.wall_first, given)
+
+    @property
+    def address(self) -> str:
+        """Preserve a declared address's spelling, including older compact runs."""
+        return run_address(self.file.id if self.file else self.name, self.experiment)
+
+    @property
+    def stored_state(self) -> Literal["running", "stopped", "finished", "failed"]:
+        return self.outcome.state if self.outcome else "running"
 
     @cached_property
     def out(self) -> tuple[OutMember, ...]:
@@ -757,7 +775,7 @@ def _hours(
 
 
 def _here(
-    record: CheckpointRecord, storage: Storage, folder: str, keys: set[tuple[str, str]]
+    record: CheckpointRecord, storage: Storage, folder: str, keys: Collection[tuple[str, str]]
 ) -> CheckpointRecord:
     """The record with its file's address in this storage, where the file sits beside it.
 
@@ -776,26 +794,68 @@ def _here(
     return record.model_copy(update={"artifact": artifact, "folder": folder.rstrip("/")})
 
 
+@dataclass(frozen=True)
+class Ancestry:
+    parent: str | None  # Visible address of the immediate parent.
+    first: str  # Address of the earliest visible run.
+    line: str  # Includes the recorded name of a missing ancestor.
+
+
+class RunSources:
+    """Resolve recorded parents within an experiment, including joined submission aliases."""
+
+    def __init__(self, records: Iterable[tuple[str, RunRecord]]) -> None:
+        self._records: dict[str, RunRecord] = {}
+        self._addresses: dict[tuple[str, SourceKey], str | None] = {}
+        for address, record in records:
+            self._records.setdefault(address, record)
+            key = (record.experiment, record.source_key)
+            if self._addresses.setdefault(key, address) != address:
+                self._addresses[key] = None
+
+    def parent(self, experiment: str, edge: Continuation) -> str | None:
+        return self._addresses.get((experiment, edge.parent))
+
+    def ancestry(self, edges: dict[str, Continuation]) -> dict[str, Ancestry]:
+        """Visit parents before children so checkpoints keep their order across handoffs."""
+        parents = {
+            address: self.parent(record.experiment, edges[address]) if address in edges else None
+            for address, record in self._records.items()
+        }
+        names = Counter((record.experiment, record.name) for record in self._records.values())
+        found: dict[str, Ancestry] = {}
+        graph = {address: (parent,) if parent else () for address, parent in parents.items()}
+        for address in TopologicalSorter(graph).static_order():
+            parent = parents[address]
+            if parent:
+                first = found[parent]
+                found[address] = Ancestry(parent, first.first, first.line)
+            else:
+                record = self._records[address]
+                edge = edges.get(address)
+                line = record.name if names[record.experiment, record.name] == 1 else address
+                # A missing parent names the line unless a different visible run bears that name.
+                if (
+                    edge
+                    and (record.experiment, edge.parent) not in self._addresses
+                    and not names[record.experiment, edge.parent.source_id]
+                ):
+                    line = edge.parent.source_id
+                found[address] = Ancestry(None, address, line)
+        return found
+
+
 def lines(data: Sequence[RunData]) -> dict[str, str]:
-    """Each run's learner line: the first run of the chain of continuations that led to it,
-    as far as `data` knows. A run and the runs continuing it are one learner, one seed."""
-    parents = {
-        run.name: run.file.continues.parent.source_id
-        for run in data
-        if run.file is not None and run.file.continues is not None
-    }
-    found = {}
-    for run in data:
-        first, seen = run.name, {run.name}
-        while first in parents and parents[first] not in seen:
-            first = parents[first]
-            seen.add(first)
-        found[run.name] = first
-    return found
+    """Each run's learner line, named for the first known ancestor."""
+    sources = RunSources((run.address, run.file) for run in data if run.file)
+    ancestry = sources.ancestry(
+        {run.address: run.file.continues for run in data if run.file and run.file.continues}
+    )
+    return {run.name: ancestry[run.address].line if run.file else run.name for run in data}
 
 
 def read_all(
-    source: Storage | Path | str,
+    source: RunListing | Storage | Path | str,
     experiment: str | None = None,
     *,
     metrics: frozenset[str] | None = None,
@@ -807,63 +867,76 @@ def read_all(
 
     With `metrics`, retain only these keys and `prefixes`, reading each
     immutable block once instead of the cumulative metric indexes.
+    Pass a RunListing to read several experiments from one observation. A caller
+    supplying its own keys and declarations also supplies any write dates.
     """
-    storage = as_storage(source)
-    keys = sorted(storage.keys("") if keys is None else keys)
+    if keys is not None:
+        # A caller supplying only names has no observed versions or write dates.
+        storage = source.storage if isinstance(source, RunListing) else as_storage(source)
+        source = RunListing(storage, dict.fromkeys(keys))
+    listing = source if isinstance(source, RunListing) else RunListing.read(as_storage(source))
+    if declarations is None:
+        declarations = listing.declarations
     data = []
-    for located in located_runs(storage, keys) if declarations is None else declarations:
+    for located in declarations:
         file = located.file
         if experiment in (None, file.experiment):
             data.append(
-                _read(
-                    storage,
-                    file.experiment,
-                    located.name,
-                    located.folders,
-                    keys,
-                    run_file=file,
-                    metrics=metrics,
-                    prefixes=prefixes,
+                read_located(
+                    listing.storage, located, listing.keys, metrics=metrics, prefixes=prefixes
                 )
             )
     return sorted(data, key=lambda one: (one.experiment, one.name))
 
 
+def read_located(
+    storage: Storage,
+    run: LocatedRun,
+    keys: Sequence[str],
+    *,
+    metrics: frozenset[str] | None = None,
+    prefixes: tuple[str, ...] = (),
+    whole_blocks: bool = False,
+) -> RunData:
+    """Read a declaration's copies from a sorted listing. A whole-run chart
+    build traverses every numeric column, so it may acquire each block whole."""
+    return _read(
+        storage,
+        run.file.experiment,
+        run.name,
+        run.folders,
+        keys,
+        declaration=run,
+        metrics=metrics,
+        prefixes=prefixes,
+        whole_blocks=whole_blocks,
+    )
+
+
 def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
     """One run's declaration, state, rows and checkpoints. Rows not yet sealed are not read."""
-    storage = as_storage(source)
-    keys = sorted(storage.keys(""))
     run = run.removeprefix(experiment + "/")
-    file, folders = _located(storage, keys, experiment, run)
-    return _read(storage, experiment, run, folders, keys, run_file=file)
-
-
-def _located(
-    storage: Storage, keys: Sequence[str], experiment: str, run: str
-) -> tuple[RunRecord | None, Sequence[str]]:
-    """The run's declaration and folders within one experiment.
-
-    Folders another experiment declared are not this run's. A name nobody has
-    declared keeps its folders: historical metrics were written without one.
-    """
-    run = run.removeprefix(experiment + "/")
-    identities = located_runs(storage, keys, run=run)
-    for located in identities:
-        if located.file.experiment == experiment:
-            return located.file, located.folders
-    if identities:
-        return None, ()
-    return None, run_folders(keys).get(run, [run_prefix(run)])
-
-
-def _named(keys: Sequence[str], folders: Sequence[str]) -> list[tuple[str, str]]:
-    """Every (folder, name under it) of a sorted listing, first folder first."""
-    return [(folder, key[len(folder) :]) for folder in folders for key in under(keys, folder)]
-
-
-def _listing(storage: Storage, folders: Sequence[str]) -> list[tuple[str, str]]:
-    """Every (folder, name under it), listed afresh, first folder first."""
-    return _named(sorted(k for f in folders for k in storage.keys(f)), folders)
+    listing = RunListing.read(as_storage(source), run=run)
+    copies = [located for located in listing.declarations if located.file.experiment == experiment]
+    if copies:
+        # A group and one of its tournaments may share a name. The printed
+        # address opens the group. Its other copies can supply later writers.
+        groups = [located for located in copies if located.file.members is not None]
+        copies = groups or copies
+        located = copies[0]
+        if len(copies) > 1:
+            located = located.model_copy(
+                update={
+                    "folders": tuple(folder for copy in copies for folder in copy.folders),
+                    "last_write": max(
+                        (copy.last_write for copy in copies if copy.last_write), default=None
+                    ),
+                }
+            )
+        return read_located(listing.storage, located, listing.keys)
+    # Only a name nobody declared can hold historical rows without a declaration.
+    folders = [] if listing.declarations else listing.folders.get(run, [run_prefix(run)])
+    return _read(listing.storage, experiment, run, folders, listing.keys, declaration=None)
 
 
 @dataclass(frozen=True)
@@ -877,9 +950,39 @@ class _Records:
     folder_of: dict[str, str]
 
 
-def _records(storage: Storage, keys: Sequence[tuple[str, str]]) -> _Records:
+def writer_name(name: str) -> str | None:
+    """Writer identified by a run-relative attempt record (excluding block manifests)."""
+    directory, _, leaf = name.partition("/")
+    if (
+        directory == "metrics"
+        and "/" not in leaf
+        and leaf.endswith(".json")
+        and not leaf.endswith((".index.json", ".permanent.json"))
+    ):
+        return leaf.removesuffix(".json")
+    return None
+
+
+def read_run_metadata(
+    storage: Storage, run: LocatedRun, keys: Sequence[str], *, require_writers: bool
+) -> RunData:
+    """Resolve an outcome from sorted declaration, outcome and writer keys for this run."""
+    writers = [
+        (key, writer)
+        for folder in run.folders
+        for key in under(keys, folder)
+        if (writer := writer_name(key[len(folder) :])) is not None
+    ]
+    if len(writers) == 1 and not require_writers and run.file.kind != "evaluation":
+        key, writer = writers[0]
+        data = read_located(storage, run, [k for k in keys if k != key])
+        if data.outcome and data.outcome.writer == writer:
+            return data
+    return read_located(storage, run, keys)
+
+
+def _records(storage: Storage, keys: Collection[tuple[str, str]]) -> _Records:
     """The run's checkpoint records and its writers, with their folders."""
-    present = set(keys)
     checkpoints: list[CheckpointRecord] = []
     writers: dict[str, RunWriter] = {}
     folder_of: dict[str, str] = {}
@@ -889,13 +992,13 @@ def _records(storage: Storage, keys: Sequence[tuple[str, str]]) -> _Records:
         # `checkpoints/NAME.json`. Nothing else, such as an eval run's files, is read.
         if kind not in ("metrics", "checkpoints") or "/" in leaf or not leaf.endswith(".json"):
             continue
-        if kind == "metrics" and leaf.endswith((".index.json", ".permanent.json")):
+        if kind == "metrics" and writer_name(name) is None:
             continue  # an index, read with the blocks
         body = storage.get(folder + name)
         try:
             if kind == "checkpoints":
                 checkpoints.append(
-                    _here(CheckpointRecord.model_validate_json(body), storage, folder, present)
+                    _here(CheckpointRecord.model_validate_json(body), storage, folder, keys)
                 )
             else:
                 attempt = RunWriter.model_validate_json(body)
@@ -916,9 +1019,26 @@ class _Selected:
     # Its description from a writer's index, when one was read.
     description: BlockDescription | None
 
+    def read(
+        self,
+        storage: Storage,
+        metrics: frozenset[str] | None,
+        prefixes: tuple[str, ...],
+        *,
+        whole: bool,
+    ) -> StoredBlock:
+        # The live chart needs all columns. Small recent blocks also cost less
+        # to fetch whole when there is no manifest or metric selection.
+        if whole or (self.description is None and self.file.level < 2 and metrics is None):
+            return fetch(storage, self.folder, self.file.key)
+        description = self.description or describe(
+            storage, self.folder, self.file.key, metrics=metrics, prefixes=prefixes
+        )
+        return StoredBlock(storage, self.folder + self.file.key, description)
+
 
 def _selected(
-    storage: Storage, keys: Sequence[tuple[str, str]], *, indexes: bool
+    storage: Storage, keys: Iterable[tuple[str, str]], *, indexes: bool
 ) -> list[_Selected]:
     """The blocks that hold the run's rows, each with its folder and any index description.
 
@@ -926,8 +1046,9 @@ def _selected(
     listing may close.
     """
     descriptions: dict[str, BlockDescription] = {}
-    # A writer is one process on one machine, so a block's name is in one folder.
-    folder_of: dict[str, str] = {}
+    # Copies and manifests can name the same block. Read it in the first folder
+    # that listed it, using the manifest's description when available.
+    locations: dict[BlockFile, str] = {}
     for folder, name in keys:
         if name.startswith("metrics/") and name.endswith((".index.json", ".permanent.json")):
             if not indexes:
@@ -935,17 +1056,16 @@ def _selected(
             manifest = Manifest.model_validate_json(storage.get(folder + name))
             for described in manifest.blocks:
                 descriptions[described.key] = described
-                folder_of.setdefault(described.key, folder)
-        elif parse(name) is not None:
-            folder_of.setdefault(name, folder)
-    candidates = [file for name in folder_of if (file := parse(name)) is not None]
+                locations.setdefault(described.file(), folder)
+        elif (file := parse(name)) is not None:
+            locations.setdefault(file, folder)
     expected: dict[str, int] = {}
     selected = []
-    for file in select([*candidates, *(d.file() for d in descriptions.values())]):
+    for file in select(locations):
         if file.first != expected.get(file.writer, 0):
             raise FileNotFoundError("block sequence gap")
         expected[file.writer] = file.last + 1
-        selected.append(_Selected(folder_of[file.key], file, descriptions.get(file.key)))
+        selected.append(_Selected(locations[file], file, descriptions.get(file.key)))
     return selected
 
 
@@ -956,13 +1076,17 @@ def _read(
     folders: Sequence[str],
     listing: Sequence[str],
     *,
-    run_file: RunRecord | None,
+    declaration: LocatedRun | None,
     metrics: frozenset[str] | None = None,
     prefixes: tuple[str, ...] = (),
+    whole_blocks: bool = False,
 ) -> RunData:
     """The run's records from `listing`, the source's sorted keys; its blocks once used."""
-    keys = _named(listing, folders)
-    present = set(keys)
+    run_file = declaration.file if declaration else None
+    # Keep folder priority for copied records and membership for checkpoint and out files.
+    keys = dict.fromkeys(
+        (folder, key[len(folder) :]) for folder in folders for key in under(listing, folder)
+    ).keys()
     records = _records(storage, keys)
     writers = records.writers
     # The outcome the latest attempt left, where it left one.
@@ -971,7 +1095,7 @@ def _read(
         folder: name
         for folder in folders
         for name in ("state.json", "outcome.json")
-        if (folder, name) in present
+        if (folder, name) in keys
     }
     left = (records.folder_of[attempt.writer] for attempt in reversed(writers))
     latest = next((folder for folder in left if folder in ended), None)
@@ -979,17 +1103,20 @@ def _read(
     outcome = (
         RunOutcome.model_validate_json(storage.get(folder + ended[folder])) if folder else None
     )
-    if outcome is not None and writers:
+    group = run_file is not None and run_file.members is not None
+    if outcome is not None and (writers or group):
         # A completion belongs to one writer, not every later resume. Older
         # evidence without attribution is conclusive only for a single attempt.
-        current = outcome.writer == writers[-1].writer
-        unattributed = outcome.writer is None and len(writers) == 1
+        current = bool(writers) and outcome.writer == writers[-1].writer
+        unattributed = not group and outcome.writer is None and len(writers) == 1
         if not current and not unattributed:
             outcome = None
     data = RunData(
         experiment=experiment,
         name=run,
         file=run_file,
+        eval_folder=folders[0] if run_file and run_file.kind == "evaluation" else None,
+        last_write=declaration.last_write if declaration else None,
         outcome=outcome,
         # A later attempt continues its run's ordinals; each is kept once.
         checkpoints=_hours(
@@ -999,8 +1126,10 @@ def _read(
         ),
         writers=writers,
     )
-    data._read_blocks = lambda: _blocks(storage, folders, keys, writers, metrics, prefixes)
-    data._read_out = lambda: _read_out(storage, experiment, run, folders, present)
+    data._read_blocks = lambda: _blocks(
+        storage, folders, keys, writers, metrics, prefixes, whole_blocks
+    )
+    data._read_out = lambda: _read_out(storage, experiment, run, folders, keys)
     return data
 
 
@@ -1009,7 +1138,7 @@ def _read_out(
     experiment: str,
     run: str,
     folders: Sequence[str],
-    present: set[tuple[str, str]],
+    present: Collection[tuple[str, str]],
 ) -> tuple[OutMember, ...]:
     for folder in folders:
         if (folder, MEMBERSHIP) not in present:
@@ -1017,13 +1146,7 @@ def _read_out(
         membership = OutFiles.model_validate_json(storage.get(folder + MEMBERSHIP))
         owner = stored_owner(run, experiment, folder.rstrip("/"))
         return tuple(
-            OutMember(
-                run=owner,
-                key=member.key,
-                sha256=member.sha256,
-                size_bytes=member.size_bytes,
-                uri=storage.uri(folder + member.key),
-            )
+            member.locate(owner, storage.uri(folder + member.key))
             for member in membership.files
             if (folder, member.key) in present
         )
@@ -1033,32 +1156,30 @@ def _read_out(
 def _blocks(
     storage: Storage,
     folders: Sequence[str],
-    keys: list[tuple[str, str]],
+    keys: Collection[tuple[str, str]],
     writers: Sequence[RunWriter],
     metrics: frozenset[str] | None,
     prefixes: tuple[str, ...],
+    whole_blocks: bool,
 ) -> tuple[StoredBlock, ...]:
     """The run's metric blocks in write order, listing again when compaction removed one."""
-    blocks: list[StoredBlock] = []
     for retry in range(3):
         try:
-            blocks = []
-            for chosen in _selected(storage, keys, indexes=metrics is None):
-                folder, file, description = chosen.folder, chosen.file, chosen.description
-                if description is None and file.level < 2 and metrics is None:
-                    # A recent block: small, and in no manifest, so take it whole.
-                    blocks.append(fetch(storage, folder, file.key))
-                    continue
-                if description is None:
-                    description = describe(
-                        storage, folder, file.key, metrics=metrics, prefixes=prefixes
-                    )
-                blocks.append(StoredBlock(storage, folder + file.key, description))
+            selected = _selected(storage, keys, indexes=metrics is None and not whole_blocks)
+            blocks = [
+                block.read(storage, metrics, prefixes, whole=whole_blocks) for block in selected
+            ]
             break
         except FileNotFoundError:
-            if retry == 2:
+            # A fixed listing cannot discover the replacement. Its owner retries
+            # the run with the next observation, keeping the last accepted chart.
+            if isinstance(storage, ListedStorage) or retry == 2:
                 raise
-            keys = _listing(storage, folders)
+            keys = [
+                (folder, key[len(folder) :])
+                for folder in folders
+                for key in sorted(storage.keys(folder + "metrics/"))
+            ]
     starts = _writer_starts(writers, ((b.header.writer, b.header.wall_first) for b in blocks))
     blocks.sort(key=lambda block: (starts[block.header.writer], block.header.first))
     return tuple(blocks)

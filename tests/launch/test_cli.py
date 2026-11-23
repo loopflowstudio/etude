@@ -25,6 +25,7 @@ from etude.launch.schemas import Packet
 from etude.spec import Runtime
 from etude.storage import default_root
 from etude.storage_timeout import StorageUnavailable
+from etude.view_link import advertise
 from tests.launch.fake import bench
 
 
@@ -269,11 +270,16 @@ from etude.spec import Job, RunRequest
 def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, config=Command(command="echo hi"), max_hours=0.01, max_usd=1, name="base", repo=None)
 """
     )
-    (line,) = run(capsys, "launch", str(path))
-    assert "new, running" in line
-    run_id = line.split()[0]
-    assert "succeeded" in run(capsys, "wait", run_id)[0]
-    assert "1 of 3 attempts used" in run(capsys, "status", run_id)[0]
+    with advertise("http://localhost:8765"):
+        line, link = run(capsys, "launch", str(path))
+        assert "new, running" in line
+        run_id = line.split()[0]
+        assert link == f"view: http://localhost:8765/runs/{run_id}"
+        assert "succeeded" in run(capsys, "wait", run_id)[0]
+        shown = run(capsys, "status", run_id)
+        assert "1 of 3 attempts used" in shown[0] and link in shown
+        assert link in run(capsys, "queue", str(path))
+    assert link not in run(capsys, "status", run_id)
     assert run(capsys, "machines") == [  # no session
         "local  local  available, owned (this computer), $0.00 committed, never expires"
     ]
