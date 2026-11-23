@@ -399,11 +399,15 @@ configured tracking destinations.
 
 | Surface | Evidence at the shared URL |
 | --- | --- |
-| Overview and Charts | The latest attempt, machine, config, checkpoint records, last 500 console lines and sealed curves. Before the first push the page waits. After 10 minutes of silence an unfinished attempt shows **no end recorded**. |
+| Run | Every tab shows the latest attempt’s state, machine and reported position. Training Overview shows sealed curves, config, checkpoints and the last 500 console lines. Evaluation runs link to their experiment report and show Console and Files. |
 | Experiments | Each card shows its first drawable metric panel. The table shows the latest values and the selected run’s details. Visible pages refresh every 5 seconds. |
 | Report | The first visit builds from Postgres. **Refresh report** picks up new results and edits to the declaration on the view host. The last successful build survives declaration errors and web restarts. |
 | Files | Run and outcome records, metric blocks, checkpoint records and JSON row tables. Eval groups include tournament and environment records. A sealed eval block appears once its index and every referenced Parquet table have arrived. |
 | Machines and Dollars | The launcher holds inventory and spending. The hosted view shows the assigned machine and reported hardware for each attempt. |
+
+The run page waits for the first push. The active attempt’s stored outcome
+can close the run if its final status update is lost. A replacement attempt
+reopens it. After 10 minutes of silence an unfinished attempt shows **no end recorded**.
 
 Each pushed file can be up to 32 MiB. Weights, job outputs and packed match
 blobs stay in canonical storage. During a view outage, training and bucket

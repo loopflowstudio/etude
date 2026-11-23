@@ -267,6 +267,18 @@ class PostgresView:
         position = observation.console.position if observation.console else -1
         finished = observation.phase == "done"
         body = observation.model_dump_json()
+        context = observation.context
+        # Render headers on every tab without reading a retained console or job config.
+        summary = " · ".join(
+            part
+            for part in (
+                f"Attempt {number} of {context.max_attempts}",
+                context.machine,
+                str(context.hardware) if context.hardware else "",
+                observation.cause,
+            )
+            if part
+        )
         with self.pool.connection() as db:
             if number < _lock_run(db, grant):
                 raise EtudeError("superseded_attempt", 409)
@@ -293,10 +305,11 @@ class PostgresView:
                         raise EtudeError("view_attempt_conflict", 409)
                     return
             db.execute(
-                """INSERT INTO attempts(address,number,attempt_id,producer_seq,console_position,finished,observation)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s)
+                """INSERT INTO attempts(address,number,attempt_id,producer_seq,console_position,finished,summary,observation)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT(address,number) DO UPDATE SET producer_seq=excluded.producer_seq,
-                   console_position=excluded.console_position,finished=excluded.finished,observation=excluded.observation""",
+                   console_position=excluded.console_position,finished=excluded.finished,
+                   summary=excluded.summary,observation=excluded.observation""",
                 (
                     grant.run,
                     number,
@@ -304,6 +317,7 @@ class PostgresView:
                     observation.producer_seq,
                     position,
                     finished,
+                    summary,
                     body,
                 ),
             )
@@ -459,10 +473,14 @@ class PostgresView:
         with self.pool.connection() as db:
             db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             row = db.execute(
-                "SELECT accepted_rev FROM runs WHERE address=%s", (address,)
+                """SELECT accepted_rev, f.attempt_number FROM runs
+                   LEFT JOIN run_files f ON f.address=runs.address AND f.key='outcome.json'
+                   WHERE runs.address=%s""",
+                (address,),
             ).fetchone()
             assert row is not None
-            revision = row[0]
+            revision, outcome_attempt = row
+            file_state = None
             storage = PostgresStorage(db, address=address)
             try:
                 record = RunRecord.model_validate_json(storage.get("run.json"))
@@ -475,6 +493,7 @@ class PostgresView:
                     else storage.keys("")
                 )
                 data = read_located(storage, run, keys, whole_blocks=True)
+                file_state = data.stored_state
                 report = self._panels(record.experiment)
                 default_clock = next((c.name for c in record.clocks), BUILT_IN_NAMES[0])
                 clock = report.clock or default_clock
@@ -485,16 +504,21 @@ class PostgresView:
                 error = None
             except (Exception, SystemExit) as exc:
                 charts, error = None, explain(exc)
+                # Outcome delivery can precede the declaration needed to read the run.
+                if file_state is None and outcome_attempt is not None:
+                    file_state = RunOutcome.model_validate_json(storage.get("outcome.json")).state
         with self.pool.connection() as db:
             if error is not None:
                 db.execute(
-                    "UPDATE runs SET projection_error=%s WHERE address=%s AND accepted_rev=%s",
-                    (error, address, revision),
+                    """UPDATE runs SET projection_error=%s,outcome_attempt=%s,file_state=%s
+                       WHERE address=%s AND accepted_rev=%s""",
+                    (error, outcome_attempt, file_state, address, revision),
                 )
                 return
             if (
                 db.execute(
                     """UPDATE runs SET published_rev=%s, projection_error=NULL,experiment=%s,kind=%s,job=%s,
+                       outcome_attempt=%s,
                        file_state=%s,position=%s,headline=%s,latest=%s,panel_order=%s,panel_definition=%s,run_clock=%s
                    WHERE address=%s AND accepted_rev=%s RETURNING address""",
                     (
@@ -502,7 +526,8 @@ class PostgresView:
                         record.experiment or address,
                         record.kind,
                         record.job_name or record.name,
-                        data.stored_state,
+                        outcome_attempt,
+                        file_state,
                         format_position(data.reached, clock),
                         headline.model_dump_json(exclude_defaults=True) if headline else None,
                         " · ".join(headline.latest()) if headline else None,
@@ -592,7 +617,7 @@ class PostgresSnapshot:
         rows = self.db.execute(
             """SELECT DISTINCT experiment FROM runs
                WHERE last_push_at > now()-interval '10 minutes'
-               AND coalesce(attempt_state,file_state,'running') IN ('running','setting_up') ORDER BY experiment"""
+               AND state IN ('running','setting_up') ORDER BY experiment"""
         )
         return tuple(row[0] for row in rows)
 
@@ -601,7 +626,7 @@ class PostgresSnapshot:
         panel = "headline,NULL" if experiment is None else "NULL,latest"
         where = "" if experiment is None else "WHERE experiment=%s"
         rows = self.db.execute(
-            f"""SELECT experiment,address,job,coalesce(attempt_state,file_state,'running'),
+            f"""SELECT experiment,address,job,state,
                    last_push_at,coalesce(nullif(attempt_position,''),position),machine,panel_order,panel_definition,{panel}
                 FROM runs {where} ORDER BY experiment,address""",
             () if experiment is None else (experiment,),
@@ -650,9 +675,13 @@ class PostgresSnapshot:
             # Publication advances this revision for both evidence and changed panel definitions.
             args = (mounted, address)
             payload = f"CASE WHEN published_rev::text<>%s THEN {payload} END"
-        attempt = (
-            "observation" if not observe and tab in ("console", "overview", "config") else "NULL"
-        )
+        attempt = "NULL"
+        if not observe and tab != "files":
+            attempt = (
+                "observation"
+                if tab in ("console", "overview", "config")
+                else "CASE WHEN kind='evaluation' THEN observation END"
+            )
         files = (
             "ARRAY(SELECT key FROM run_files WHERE address=runs.address AND visible ORDER BY key)"
             if tab == "files" and not observe
@@ -662,7 +691,7 @@ class PostgresSnapshot:
             row = cursor.execute(
                 f"""SELECT published_rev AS revision,last_push_at AS received,projection_error AS error,
                            {payload} AS payload,latest_attempt_number AS attempt_number,producer_seq AS sequence,
-                           coalesce(attempt_state,file_state,'running') AS phase,
+                           state AS phase,summary,coalesce(nullif(attempt_position,''),position) AS position,
                            {attempt} AS attempt,{marks} AS checkpoints,experiment,kind,{files} AS files
                     FROM runs {join} LEFT JOIN attempts ON attempts.address=runs.address
                         AND attempts.number=runs.latest_attempt_number WHERE runs.address=%s""",

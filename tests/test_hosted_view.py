@@ -31,10 +31,18 @@ from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch.executor import Executor
 from etude.launch.provisioner.machines import OwnedMachine
+from etude.launch.records import GPU
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
-from etude.observations import MAX_FILE_BYTES, MAX_OBSERVATION_BYTES, ViewGrant, ViewGrantTarget
+from etude.observations import (
+    MAX_FILE_BYTES,
+    MAX_OBSERVATION_BYTES,
+    AttemptObservation,
+    ViewContext,
+    ViewGrant,
+    ViewGrantTarget,
+)
 from etude.page import DEFAULT_REPORT, Page, run_chart_data
 from etude.spec import Job, RunRequest, Until
 from etude.storage import DirectoryStorage
@@ -160,6 +168,94 @@ def _post(
         return error.code
 
 
+def test_run_pages_follow_the_active_attempt_and_its_stored_outcome(
+    postgres: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = secrets.token_hex()
+    monkeypatch.setenv("ETUDE_VIEW_SECRET", secret)
+    monkeypatch.setenv("ETUDE_VIEW_URL", "")
+    with _view(tmp_path) as origin:
+        run = origin + "/runs/lab/coin@0"
+        charts = run + "?tab=charts"
+        table = origin + "/experiments/lab/status"
+        grant = ViewGrant(
+            origin=origin,
+            run="lab/coin@0",
+            attempt="first",
+            attempt_number=1,
+            exp=int(time.time()) + 3600,
+        )
+        token = grant.sign(secret.encode())
+        early = grant.model_copy(update={"run": "other/job@0", "attempt": "early"})
+        ended = b'{"state":"finished","counters":{}}'
+        assert _post(origin, early.sign(secret.encode()), "outcome.json", ended) == 200
+        assert '<span class="pill">finished</span>' in _get(origin + "/runs/other/job@0")
+        record = b'{"id":"lab/coin@0","experiment":"lab","kind":"training"}'
+        assert _post(origin, token, "run.json", record) == 200
+        checkpoint = b'{"ordinal":1,"artifact":{"uri":"file:///first.bin"},"at":{"steps":1}}'
+        assert _post(origin, token, "checkpoints/first.json", checkpoint) == 200
+        overview = _get(run)
+        assert "Waiting for an attempt observation" in overview and "first.bin" in overview
+
+        observation = AttemptObservation(
+            producer_seq=1,
+            phase="setting_up",
+            started_at=None,
+            finished_at=None,
+            outcome=None,
+            cause=None,
+            exit_code=None,
+            clocks={"steps": 3},
+            tally=None,
+            context=ViewContext(
+                machine="bench",
+                hardware=GPU(id="L4"),
+                max_attempts=3,
+                until=None,
+                source=None,
+                config=None,
+            ),
+            console=None,
+        )
+        assert _post(origin, token, None, observation.model_dump_json().encode()) == 200
+        assert "1 setting up" in _get(origin + "/status")
+        assert '<span class="pill">setting up</span>' in _get(table)
+        header = _get(charts).split('<nav class="tabs" aria-label="Run tabs"')[0]
+        assert '<span class="pill">setting up</span>' in header
+        assert "Attempt 1 of 3 · bench · L4 · steps 3" in header
+
+        now = datetime.now(UTC)
+        running = observation.model_copy(
+            update={"phase": "running", "producer_seq": 2, "started_at": now}
+        )
+        assert _post(origin, token, None, running.model_dump_json().encode()) == 200
+        assert _post(origin, token, "outcome.json", b'{"state":"finished","counters":{}}') == 200
+        assert '<span class="pill">finished</span>' in _get(charts)
+        assert '<span class="pill">finished</span>' in _get(table)
+        cards = _get(origin + "/status")
+        assert "1 finished" in cards and "No open experiments" in cards
+
+        replacement = grant.model_copy(update={"attempt": "second", "attempt_number": 2})
+        token = replacement.sign(secret.encode())
+        assert _post(origin, token, "run.json", record) == 200
+        assert '<span class="pill">running</span> · Attempt 2' in _get(charts)
+        cards = _get(origin + "/status")
+        assert "1 running" in cards and "No open experiments" not in cards
+        assert _post(origin, token, "outcome.json", b'{"state":"stopped","counters":{}}') == 200
+        terminal = running.model_copy(
+            update={
+                "producer_seq": 3,
+                "phase": "done",
+                "finished_at": now,
+                "outcome": "lost",
+                "cause": "machine_lost",
+            }
+        )
+        assert _post(origin, token, None, terminal.model_dump_json().encode()) == 200
+        header = _get(charts).split('<nav class="tabs" aria-label="Run tabs"')[0]
+        assert '<span class="pill">lost</span>' in header and "machine_lost" in header
+
+
 def test_worker_publishes_live_curve(
     postgres: str, tmp_path: Path, command_python: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -237,6 +333,15 @@ while not Path({str(finish)!r}).exists():
         assert port
         monkeypatch.setenv("ETUDE_VIEW_URL", origin)
         assert _get(origin + "/healthz") == "ok"
+        with urlopen(origin + "/favicon.ico", timeout=5) as favicon:
+            assert favicon.status == 204 and not favicon.read()
+        with pytest.raises(HTTPError) as absent:
+            _get(origin + route)
+        with absent.value as response:
+            assert response.code == 404
+            waiting = response.read().decode()
+            assert "hosted push feed" in waiting and 'aria-label="Breadcrumb"' in waiting
+            assert 'href="/experiments/lab">lab</a>' in waiting
         assert "waiting" in _get(origin + route + "&observe=1")
         assert scheduler.launch(request) == (address,)
         try:
@@ -547,6 +652,28 @@ if __name__ == "__main__":
         private = host / "sessions" / attempt.session / ".view" / (attempt.id + ".json")
         token = ViewGrantTarget.model_validate_json(private.read_bytes()).token
         assert address in _get(origin + "/experiments/grouped")
+        for suffix in ("", "?tab=charts"):
+            evaluation = _get(origin + "/runs/" + address + suffix)
+            assert f"<h1>Evaluation · {address}</h1>" in evaluation
+            assert 'href="/experiments/grouped#report"' in evaluation
+            assert 'href="?tab=files"' in evaluation and "<h2>Console</h2>" in evaluation
+            assert (
+                '<nav class="tabs" aria-label="Run tabs"' not in evaluation
+                and 'href="?tab=charts"' not in evaluation
+            )
+        file.write_text("raise ValueError('report <unavailable>')\n")
+        for embedded in (False, True):
+            with pytest.raises(HTTPError) as failed_build:
+                _get(origin + report + ("?embed=1" if embedded else ""))
+            with failed_build.value as response:
+                assert response.code == 500 and response.headers.get_content_type() == "text/html"
+                page_error = response.read().decode()
+                assert (
+                    "Retry report</button>" in page_error
+                    and "report &lt;unavailable&gt;" in page_error
+                )
+                assert ('aria-label="Breadcrumb"' in page_error) == (not embedded)
+        file.write_text(declaration)
         page = _training(_get(origin + report))
         assert page.report.baseline == "first" and any(cell.value == 7 for cell in page.cells)
         assert "Eval only" in _get(origin + "/reports")

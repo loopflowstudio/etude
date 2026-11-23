@@ -1994,6 +1994,20 @@ def _shell(html: str, rail: str, breadcrumbs: str = "") -> str:
     return html.replace("<body>", opening, 1).replace("</body>", closing, 1)
 
 
+def _waiting_run_page(address: str, notice: str, rail: str) -> str:
+    experiment, _, _ = address.rpartition("/")
+    return _shell(_document("Run", notice), rail, _breadcrumbs(experiment or None, run=address))
+
+
+def _report_error_page(experiment: str, reason: str, rail: str) -> str:
+    html = _document(
+        "Experiment report",
+        f'<p role="status">Report build failed: {escape(reason)}</p>'
+        '<button onclick="location.reload()">Retry report</button>',
+    )
+    return _shell(html, rail, _breadcrumbs(experiment, report=True)) if rail else html
+
+
 def _run_tabs(tab: str) -> str:
     links = "".join(
         f'<a href="?tab={name}"'
@@ -2320,6 +2334,16 @@ def render_report(page: Page, file: Path | None, commit: str | None) -> ServedRe
 
 
 class _ViewHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        if urlsplit(self.path).path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
+        self._respond(refresh=False)
+
+    def _respond(self, *, refresh: bool) -> None:
+        raise NotImplementedError
+
     def _reply(self, status: int, body: str | bytes = "", media: str = "text/plain") -> None:
         data = body.encode() if isinstance(body, str) else body
         self.send_response(status)
@@ -2335,14 +2359,6 @@ class _ViewHandler(BaseHTTPRequestHandler):
 
 class _Handler(_ViewHandler):
     server: Server
-
-    def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/favicon.ico":
-            # Browsers ask on every page; the view has no icon and says so without an error.
-            self.send_response(204)
-            self.end_headers()
-            return
-        self._respond(refresh=False)
 
     def do_POST(self) -> None:  # noqa: N802
         if not self._report_route():
@@ -2362,26 +2378,16 @@ class _Handler(_ViewHandler):
                 # A train prints its link before the next listing can discover it.
                 with self.server.index.snapshot() as view:
                     address = unquote(urlsplit(self.path).path.removeprefix("/runs/"))
-                    experiment, _, _ = address.rpartition("/")
-                    html = _shell(
-                        _document("Run", view.waiting()),
-                        view.rail("/"),
-                        _breadcrumbs(experiment or None, run=address),
-                    )
+                    html = _waiting_run_page(address, view.waiting(), view.rail("/"))
             body = (html or "Not found.").encode()
         except (Exception, SystemExit) as error:
             reason = explain(error)
             if not refresh and (route := self._report_route()):
-                html = _document(
-                    "Experiment report",
-                    f'<p role="status">Report build failed: {escape(reason)}</p>'
-                    '<button onclick="location.reload()">Retry report</button>',
-                )
+                rail = ""
                 if parse_qs(urlsplit(self.path).query).get("embed") != ["1"]:
                     with self.server.index.snapshot() as view:
-                        html = _shell(
-                            html, view.rail("/reports"), _breadcrumbs(route[1], report=True)
-                        )
+                        rail = view.rail("/reports")
+                html = _report_error_page(route[1], reason, rail)
                 body, status = html.encode(), 500
             else:
                 body, status = reason.encode(), 404 if isinstance(error, ValueError) else 500
@@ -2415,6 +2421,8 @@ class RunDetail(Record):
     attempt_number: int
     sequence: int | None
     phase: str
+    summary: str | None
+    position: str | None
     attempt: AttemptObservation | None
     checkpoints: str | None
     experiment: str
@@ -2437,10 +2445,11 @@ def _attempt_panel(chart: RunDetail, tab: str) -> str:
     checkpoints = f'<section class="sec"><h2>Checkpoints</h2>{marks}</section>'
     if tab == "checkpoints":
         return checkpoints
-    if attempt is None:
-        return "<p>Waiting for an attempt observation.</p>"
     if tab == "console":
-        return _attempt_console(attempt.console)
+        return _attempt_console(attempt.console if attempt else None)
+    if attempt is None:
+        waiting = "<p>Waiting for an attempt observation.</p>"
+        return waiting + checkpoints if tab == "overview" else waiting
     context = attempt.context
     config = ""
     if context.source:
@@ -2451,16 +2460,7 @@ def _attempt_panel(chart: RunDetail, tab: str) -> str:
         )
     if tab == "config":
         return config or "<p>No config received.</p>"
-    details = [
-        f"Attempt {chart.attempt_number} of {context.max_attempts}",
-        attempt.outcome or attempt.phase.replace("_", " "),
-        context.machine,
-        str(context.hardware) if context.hardware else "",
-        attempt_position(attempt),
-        attempt.cause or "",
-    ]
-    panel = "<p>" + " · ".join(escape(d) for d in details if d) + "</p>"
-    return panel + config + checkpoints + _attempt_console(attempt.console)
+    return config + checkpoints + _attempt_console(attempt.console)
 
 
 def _attempt_console(console: ConsoleObservation | None) -> str:
@@ -2473,8 +2473,10 @@ def _attempt_console(console: ConsoleObservation | None) -> str:
     return f'<section class="sec" id="console"><h2>Console</h2><p>{label}</p>{output}</section>'
 
 
-def _silent_attempt(phase: str, received: datetime, now: datetime) -> bool:
-    return phase in ("running", "setting_up") and now - received >= _SILENT
+def _hosted_state(phase: str, received: datetime, now: datetime) -> str:
+    if phase in ("running", "setting_up") and now - received >= _SILENT:
+        return "no end recorded"
+    return phase.replace("_", " ")
 
 
 @dataclass(frozen=True)
@@ -2492,9 +2494,7 @@ class RunRow:
     latest: str | None
 
     def state(self, now: datetime) -> str:
-        if _silent_attempt(self.phase, self.received, now):
-            return "no end recorded"
-        return self.phase
+        return _hosted_state(self.phase, self.received, now)
 
 
 class ViewSnapshot(Protocol):
@@ -2555,20 +2555,28 @@ class _HostedPages:
             "Last push " + _age(chart.received, now) + (f" · {chart.error}" if chart.error else "")
         )
         token = f"{chart.revision}-{sha256((chart.error or '').encode()).hexdigest()[:12]}"
-        stale = _silent_attempt(chart.phase, chart.received, now)
-        token += f"-{chart.attempt_number}-{chart.sequence}-{int(stale)}"
+        state = _hosted_state(chart.phase, chart.received, now)
+        stale = state == "no end recorded"
+        token += f"-{chart.attempt_number}-{chart.sequence}-{chart.phase}-{int(stale)}"
         notice = _observation("run", token, message + (" · no end recorded" if stale else ""))
         if observe:
             return notice
+        evaluation = chart.kind == "evaluation"
+        title = ("Evaluation · " if evaluation else "") + escape(address)
+        facts = [chart.summary or f"Attempt {chart.attempt_number}", chart.position]
+        summary = " · ".join(escape(fact) for fact in facts if fact)
         heading = (
             _breadcrumbs(chart.experiment, run=address)
-            + f'<header class="head"><h1>{escape(address)}</h1></header>'
-            + _run_tabs(tab)
-            + notice
+            + f'<header class="head"><h1>{title}</h1></header>'
+            + f'<p><span class="pill">{escape(state)}</span> · {summary}</p>'
         )
-        if chart.kind == "evaluation":
+        if evaluation:
             heading += f'<p>Evaluation scores are in the <a href="/experiments/{quote(chart.experiment)}#report">experiment report</a>.</p>'
-        if tab in ("overview", "charts") and chart.kind != "evaluation":
+            links = '<p><a href="?tab=console">Console</a> · <a href="?tab=files">Files</a></p>'
+            section = _attempt_panel(chart, "files" if tab == "files" else "console")
+            return _document(address, heading + links + notice + section)
+        heading += _run_tabs(tab) + notice
+        if tab in ("overview", "charts"):
             return _chart_page(
                 address,
                 chart.payload,
@@ -2576,7 +2584,7 @@ class _HostedPages:
                 _attempt_panel(chart, tab) if tab == "overview" else "",
                 "<p>Waiting for sealed metrics.</p>",
             )
-        return _document(address, heading + (_attempt_panel(chart, tab) if tab != "charts" else ""))
+        return _document(address, heading + _attempt_panel(chart, tab))
 
     def experiments(self) -> str:
         rows = self.view.rows(None)
@@ -2697,19 +2705,16 @@ class PushServer(ThreadingHTTPServer):
 class _PushHandler(_ViewHandler):
     server: PushServer
 
-    def do_GET(self) -> None:  # noqa: N802
+    def _respond(self, *, refresh: bool) -> None:
         url = urlsplit(self.path)
         if url.path == "/healthz":
             return self._reply(200, "ok")
-        self._page(refresh=False)
-
-    def _page(self, *, refresh: bool) -> None:
-        url = urlsplit(self.path)
         query = parse_qs(url.query)
         path = unquote(url.path)
         observe = query.get("observe") == ["1"]
         reader = self.server.reader
         html: str | None
+        rail: str | None = None
         try:
             if report := _REPORT_ROUTE.fullmatch(path):
                 experiment = report[1]
@@ -2749,19 +2754,20 @@ class _PushHandler(_ViewHandler):
                     )
                     code = 200 if html else 404
                     if html is None and path.startswith("/runs/"):
-                        html = _shell(
-                            _document(path.removeprefix("/runs/"), _waiting_for_push()),
-                            pages.rail("/"),
+                        html = _waiting_run_page(
+                            path.removeprefix("/runs/"), _waiting_for_push(), pages.rail("/")
                         )
         except (Exception, SystemExit) as error:
             reason = explain(error)
             print(reason, file=sys.stderr, flush=True)
+            if report and rail is not None and not refresh:
+                return self._reply(500, _report_error_page(report[1], reason, rail), "text/html")
             return self._reply(503, reason)
         self._reply(code, html or "Not found.", "text/html")
 
     def do_POST(self) -> None:  # noqa: N802
         if _REPORT_ROUTE.fullmatch(unquote(urlsplit(self.path).path)):
-            return self._page(refresh=True)
+            return self._respond(refresh=True)
         is_file = self.path == "/api/observations/file"
         if not is_file and self.path != "/api/observations":
             return self._reply(404)

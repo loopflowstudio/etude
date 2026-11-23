@@ -353,7 +353,11 @@ def view(
         with (
             closing(PostgresView(url, path)) as store,
             PushServer(
-                (host, port), store, store, secret.encode(), os.environ.get("ETUDE_VIEW_URL")
+                (host, port),
+                store,
+                store,
+                secret.encode(),
+                os.environ.get("ETUDE_VIEW_URL") or None,
             ) as server,
         ):
             run_view(server, f"http://{host}:{server.server_port}")
