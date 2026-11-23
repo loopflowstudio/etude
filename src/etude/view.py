@@ -34,7 +34,7 @@ from itertools import groupby
 from operator import itemgetter
 from pathlib import Path
 from types import FrameType
-from typing import Literal, Protocol
+from typing import Protocol
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from pydantic import TypeAdapter
@@ -179,7 +179,7 @@ class ReportSummary:
     built: datetime
     declaration: str
     headline: str | None
-    runs: int | Literal["Eval only"]
+    runs_label: str
 
 
 @dataclass(frozen=True)
@@ -861,8 +861,6 @@ class _ViewSnapshot:
         return row
 
     def run(self, address: str, *, tab: str, observe: bool = False) -> str | None:
-        if tab not in _RUN_TABS:
-            tab = "overview"
         row = self._read_run(address, tab, observe=observe, standalone=True)
         if row is None:
             return self.waiting() if observe else None
@@ -1029,7 +1027,6 @@ class _ViewSnapshot:
                 )
                 if (run["definition"], run["panel_order"]) == panel and run["headline"]:
                     panels.append(run["headline"])
-            totals = " · ".join(f"{counts[state]} {escape(state)}" for state in sorted(counts))
             stale |= "no end recorded" in counts
             group = opened if active else completed
             spend = ""
@@ -1043,7 +1040,7 @@ class _ViewSnapshot:
             )
             if latest:
                 dated = f"last write <span>{_age(latest, now)}</span>"
-            group.append(_card(name, panels, dots, totals, spend + dated))
+            group.append(_card(name, panels, dots, counts, spend + dated))
         if observation:
             body = (
                 _experiment_cards("Open", opened) + _experiment_cards("Completed", completed)
@@ -1187,8 +1184,6 @@ class _ViewSnapshot:
                 selected = next(
                     (r["address"] for r in rows if r["launched_as"] in candidates), None
                 )
-        if tab not in _DETAIL_TABS:
-            tab = "console"
         panel = _first_panel(rows)
         stale = False
         body = []
@@ -1229,14 +1224,13 @@ class _ViewSnapshot:
             )
             if address == selected:
                 detail = self._detail(address, pick, tab, curves, now, observe=observe)
-        if rows:
-            table = _table(("Run", "State", "Clock", "Latest metric", "Machine", "Dollars"), body)
-            if not detail:
-                detail = "<p>The selected run is unavailable in this experiment.</p>"
-        elif observation and observation["at"]:
-            table = "<p>No runs recorded.</p>"
-        else:
-            table = "<p>Waiting for the first file observation.</p>"
+        if rows and not detail:
+            detail = "<p>The selected run is unavailable in this experiment.</p>"
+        empty = (
+            "No runs recorded."
+            if observation and observation["at"]
+            else "Waiting for the first file observation."
+        )
         ages = ""
         if observation:
             launcher = any(row["status"] for row in rows)
@@ -1246,8 +1240,8 @@ class _ViewSnapshot:
         ).fetchone()
         return _live_status(
             _command_bar(file, self.index.source_uri, unfinished)
-            + f'<div class="experiment-split"><section class="sec"><h2>Runs</h2>{table}</section>{detail}</div>'
-            f'<section><p class="context">{escape(ages)}</p>'
+            + _experiment_table(body, detail, empty)
+            + f'<section><p class="context">{escape(ages)}</p>'
             '<p class="lbl">No machine samples recorded.</p></section>',
             stale=stale,
             error=self._errors(declaration[0] if declaration else None),
@@ -1278,6 +1272,12 @@ class _ViewSnapshot:
         return _run_detail(address, pick, tab, section, _run_line(row, _display_state(row), status))
 
 
+def _experiment_table(rows: list[str], detail: str, empty: str) -> str:
+    columns = ("Run", "State", "Clock", "Latest metric", "Machine", "Dollars")
+    table = _table(columns, rows) if rows else f"<p>{empty}</p>"
+    return f'<div class="experiment-split"><section class="sec"><h2>Runs</h2>{table}</section>{detail}</div>'
+
+
 def _reports(
     visible: set[str],
     opened: Collection[str],
@@ -1302,7 +1302,7 @@ def _reports(
         rows.append(
             f'<tr><td><a href="/experiments/{quote(name)}/report">{escape(name)}</a></td>'
             f"<td>{state}</td><td>{built}</td><td>{escape(declaration)}</td>"
-            f"<td>{headline}</td><td>{report.runs if report else '—'}</td></tr>"
+            f"<td>{headline}</td><td>{escape(report.runs_label) if report else '—'}</td></tr>"
         )
     columns = (
         "Experiment",
@@ -1777,7 +1777,8 @@ def _run_dot(address: str, state: str, position: str | None, machine: str | None
     )
 
 
-def _card(name: str, panels: list[str], dots: list[str], totals: str, footer: str) -> str:
+def _card(name: str, panels: list[str], dots: list[str], counts: Counter[str], footer: str) -> str:
+    totals = " · ".join(f"{count} {escape(state)}" for state, count in sorted(counts.items()))
     chart = ""
     if panels:
         data = ",".join(panels).replace("<", "\\u003c")
@@ -2113,10 +2114,11 @@ def _browse_page(
     *,
     observe: bool,
 ) -> str | None:
+    tab = query.get("tab", [""])[0]
     if path.startswith("/runs/"):
         html = view.run(
             path.removeprefix("/runs/"),
-            tab=query.get("tab", ["overview"])[0],
+            tab=tab if tab in _RUN_TABS else "overview",
             observe=observe,
         )
         if html is None:
@@ -2143,7 +2145,7 @@ def _browse_page(
             title,
             file=files.get(title),
             run=query.get("run", [""])[0] or None,
-            tab=query.get("tab", ["console"])[0],
+            tab=tab if tab in _DETAIL_TABS else "console",
             curves=query.get("curves", [None])[0] if fragment else None,
             observe=observe,
         )
@@ -2329,7 +2331,9 @@ def render_report(page: Page, file: Path | None, commit: str | None) -> ServedRe
         built=datetime.now(UTC),
         declaration=declaration,
         headline=page.headline(),
-        runs="Eval only" if page.selections and not page.training.runs else len(page.training.runs),
+        runs_label="Eval only"
+        if page.selections and not page.training.runs
+        else str(len(page.training.runs)),
     )
 
 
@@ -2546,7 +2550,6 @@ class _HostedPages:
         )
 
     def run(self, address: str, *, tab: str, observe: bool = False) -> str | None:
-        tab = tab if tab in _RUN_TABS else "overview"
         chart = self.view.detail(address, tab=tab, observe=observe)
         if chart is None:
             return _waiting_for_push() if observe else None
@@ -2557,7 +2560,7 @@ class _HostedPages:
         token = f"{chart.revision}-{sha256((chart.error or '').encode()).hexdigest()[:12]}"
         state = _hosted_state(chart.phase, chart.received, now)
         stale = state == "no end recorded"
-        token += f"-{chart.attempt_number}-{chart.sequence}-{chart.phase}-{int(stale)}"
+        token += f"-{chart.attempt_number}-{chart.sequence}-{state}"
         notice = _observation("run", token, message + (" · no end recorded" if stale else ""))
         if observe:
             return notice
@@ -2597,14 +2600,11 @@ class _HostedPages:
             runs = list(members)
             panel = _hosted_panel(runs)
             totals = Counter(r.state(now) for r in runs)
-            summary = " · ".join(
-                f"{count} {escape(state)}" for state, count in sorted(totals.items())
-            )
             dots = [_run_dot(r.address, r.state(now), r.position, r.machine) for r in runs]
             panels = [r.headline for r in runs if r.headline and (r.definition, r.order) == panel]
             age = _age(max(r.received for r in runs), now)
             cards = opened if name in self.open_experiments else completed
-            cards.append(_card(name, panels, dots, summary, "Last push " + age))
+            cards.append(_card(name, panels, dots, totals, "Last push " + age))
         return _live_status(
             _experiment_cards("Open", opened) + _experiment_cards("Completed", completed)
         )
@@ -2637,8 +2637,6 @@ class _HostedPages:
         if not rows and file is None:
             return None
         now = datetime.now(UTC)
-        if tab not in _DETAIL_TABS:
-            tab = "console"
         addresses = {r.address for r in rows}
         selected = rows[0].address if rows else None
         if run:
@@ -2670,14 +2668,7 @@ class _HostedPages:
                 if found.error:
                     section += f'<p role="status">{escape(found.error)}</p>'
                 detail = _run_detail(selected, pick, tab, section, state)
-        table = (
-            _table(("Run", "State", "Clock", "Latest metric", "Machine", "Dollars"), body)
-            if rows
-            else "<p>Waiting for the first push.</p>"
-        )
-        return _live_status(
-            f'<div class="experiment-split"><section class="sec"><h2>Runs</h2>{table}</section>{detail}</div>'
-        )
+        return _live_status(_experiment_table(body, detail, "Waiting for the first push."))
 
 
 class ObservationWriter(Protocol):

@@ -108,10 +108,7 @@ def postgres(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 def _view(probe: Path, port: int = 0, *, file: Path | None = None) -> Iterator[str]:
     with subprocess.Popen(
         [
-            "uv",
-            "run",
-            "--no-sync",
-            "etude",
+            Path(sys.executable).with_name("etude"),
             "view",
             *([str(file)] if file else []),
             "--push",
@@ -217,7 +214,14 @@ def test_run_pages_follow_the_active_attempt_and_its_stored_outcome(
             ),
             console=None,
         )
+        sql_log = tmp_path / "sql.log"
+        mark = sql_log.stat().st_size
         assert _post(origin, token, None, observation.model_dump_json().encode()) == 200
+        # The ordinary push locks the run, writes its observation and updates its summary.
+        statements = sql_log.read_bytes()[mark:].decode()
+        assert statements.count(": INSERT INTO") == 2
+        assert statements.count(": SELECT") == 1
+        assert statements.count(": UPDATE") == 1
         assert "1 setting up" in _get(origin + "/status")
         assert '<span class="pill">setting up</span>' in _get(table)
         header = _get(charts).split('<nav class="tabs" aria-label="Run tabs"')[0]
@@ -251,7 +255,15 @@ def test_run_pages_follow_the_active_attempt_and_its_stored_outcome(
                 "cause": "machine_lost",
             }
         )
-        assert _post(origin, token, None, terminal.model_dump_json().encode()) == 200
+        final_body = terminal.model_dump_json().encode()
+        assert _post(origin, token, None, final_body) == 200
+        with psycopg.connect(postgres) as db:
+            freshness = "SELECT last_push_at FROM runs WHERE address=%s"
+            received = db.execute(freshness, (grant.run,)).fetchone()
+            assert _post(origin, token, None, final_body) == 200
+            reopened = running.model_copy(update={"producer_seq": 4})
+            assert _post(origin, token, None, reopened.model_dump_json().encode()) == 409
+            assert db.execute(freshness, (grant.run,)).fetchone() == received
         header = _get(charts).split('<nav class="tabs" aria-label="Run tabs"')[0]
         assert '<span class="pill">lost</span>' in header and "machine_lost" in header
 

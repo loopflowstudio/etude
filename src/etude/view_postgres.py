@@ -282,34 +282,16 @@ class PostgresView:
         with self.pool.connection() as db:
             if number < _lock_run(db, grant):
                 raise EtudeError("superseded_attempt", 409)
-            prior = db.execute(
-                """SELECT attempt_id,producer_seq,console_position,finished FROM attempts
-                   WHERE address=%s AND number=%s""",
-                (grant.run, number),
-            ).fetchone()
-            if prior:
-                identity, seq, cursor, done = prior
-                if (
-                    identity != grant.attempt
-                    or seq > observation.producer_seq
-                    or cursor > position
-                    or done
-                    and not finished
-                ):
-                    raise EtudeError("view_attempt_conflict", 409)
-                if seq == observation.producer_seq:
-                    if not db.execute(
-                        "SELECT 1 FROM attempts WHERE address=%s AND number=%s AND observation=%s",
-                        (grant.run, number, body),
-                    ).fetchone():
-                        raise EtudeError("view_attempt_conflict", 409)
-                    return
-            db.execute(
+            accepted = db.execute(
                 """INSERT INTO attempts(address,number,attempt_id,producer_seq,console_position,finished,summary,observation)
                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                    ON CONFLICT(address,number) DO UPDATE SET producer_seq=excluded.producer_seq,
                    console_position=excluded.console_position,finished=excluded.finished,
-                   summary=excluded.summary,observation=excluded.observation""",
+                   summary=excluded.summary,observation=excluded.observation
+                   WHERE attempts.attempt_id=excluded.attempt_id
+                     AND attempts.producer_seq < excluded.producer_seq
+                     AND attempts.console_position <= excluded.console_position
+                     AND (NOT attempts.finished OR excluded.finished)""",
                 (
                     grant.run,
                     number,
@@ -321,6 +303,16 @@ class PostgresView:
                     body,
                 ),
             )
+            if not accepted.rowcount:
+                # A lost HTTP reply can replay the same snapshot. It was already counted as a push.
+                replay = db.execute(
+                    """SELECT 1 FROM attempts WHERE address=%s AND number=%s
+                       AND attempt_id=%s AND observation=%s""",
+                    (grant.run, number, grant.attempt, body),
+                ).fetchone()
+                if replay:
+                    return
+                raise EtudeError("view_attempt_conflict", 409)
             db.execute(
                 """UPDATE runs SET last_push_at=now(),attempt_state=%s,machine=%s,attempt_position=%s
                    WHERE address=%s""",
@@ -470,9 +462,10 @@ class PostgresView:
             self._project(address)
 
     def _project(self, address: str) -> None:
-        with self.pool.connection() as db:
-            db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            row = db.execute(
+        with self.snapshot() as view:
+            # The current attempt may have delivered a previous writer's outcome.
+            # Resolve its owner and its writer against the same evidence revision.
+            row = view.db.execute(
                 """SELECT accepted_rev, f.attempt_number FROM runs
                    LEFT JOIN run_files f ON f.address=runs.address AND f.key='outcome.json'
                    WHERE runs.address=%s""",
@@ -481,17 +474,15 @@ class PostgresView:
             assert row is not None
             revision, outcome_attempt = row
             file_state = None
-            storage = PostgresStorage(db, address=address)
+            storage = PostgresStorage(view.db, address=address)
             try:
                 record = RunRecord.model_validate_json(storage.get("run.json"))
                 run = LocatedRun(name=address.rsplit("/", 1)[-1], file=record, folders=("",))
                 # Hosted eval curves come from the experiment report. Only the group root owns its lifecycle.
                 evaluation = record.kind == "evaluation"
-                keys = (
-                    sorted(storage.keys("metrics/") + storage.keys("outcome.json"))
-                    if evaluation
-                    else storage.keys("")
-                )
+                keys = storage.keys("metrics/" if evaluation else "")
+                if evaluation and outcome_attempt is not None:
+                    keys.append("outcome.json")  # Sorts after every metrics/ key.
                 data = read_located(storage, run, keys, whole_blocks=True)
                 file_state = data.stored_state
                 report = self._panels(record.experiment)
@@ -501,10 +492,10 @@ class PostgresView:
                 checkpoints = checkpoint_table(data)
                 definition = panel_definition(report, clock)
                 headline = charts.headline if charts else None
+                position = format_position(data.reached, clock)
                 error = None
             except (Exception, SystemExit) as exc:
                 charts, error = None, explain(exc)
-                # Outcome delivery can precede the declaration needed to read the run.
                 if file_state is None and outcome_attempt is not None:
                     file_state = RunOutcome.model_validate_json(storage.get("outcome.json")).state
         with self.pool.connection() as db:
@@ -515,31 +506,24 @@ class PostgresView:
                     (error, outcome_attempt, file_state, address, revision),
                 )
                 return
-            if (
-                db.execute(
-                    """UPDATE runs SET published_rev=%s, projection_error=NULL,experiment=%s,kind=%s,job=%s,
-                       outcome_attempt=%s,
-                       file_state=%s,position=%s,headline=%s,latest=%s,panel_order=%s,panel_definition=%s,run_clock=%s
-                   WHERE address=%s AND accepted_rev=%s RETURNING address""",
-                    (
-                        revision,
-                        record.experiment or address,
-                        record.kind,
-                        record.job_name or record.name,
-                        outcome_attempt,
-                        file_state,
-                        format_position(data.reached, clock),
-                        headline.model_dump_json(exclude_defaults=True) if headline else None,
-                        " · ".join(headline.latest()) if headline else None,
-                        headline.order if headline else None,
-                        definition,
-                        default_clock,
-                        address,
-                        revision,
-                    ),
-                ).fetchone()
-                and charts is not None
-            ):
+            published = db.execute(
+                """UPDATE runs SET published_rev=accepted_rev,projection_error=NULL,outcome_attempt=%s,file_state=%s,
+                       position=%s,headline=%s,latest=%s,panel_order=%s,panel_definition=%s,run_clock=%s
+                   WHERE address=%s AND accepted_rev=%s""",
+                (
+                    outcome_attempt,
+                    file_state,
+                    position,
+                    headline.model_dump_json(exclude_defaults=True) if headline else None,
+                    " · ".join(headline.latest()) if headline else None,
+                    headline.order if headline else None,
+                    definition,
+                    default_clock,
+                    address,
+                    revision,
+                ),
+            )
+            if published.rowcount and charts is not None:
                 db.execute(
                     """
                     INSERT INTO run_charts(address,overview,payload,checkpoints) VALUES (%s,%s,%s,%s)
@@ -587,7 +571,7 @@ class PostgresView:
                         started[0],
                         report.declaration,
                         report.headline,
-                        str(report.runs),
+                        report.runs_label,
                     ),
                 )
             if refresh:
@@ -641,9 +625,7 @@ class PostgresSnapshot:
 
     def report_index(self) -> dict[str, ReportSummary]:
         return {
-            name: ReportSummary(
-                at, declaration, headline, "Eval only" if label == "Eval only" else int(label)
-            )
+            name: ReportSummary(at, declaration, headline, label)
             for name, at, declaration, headline, label in self.db.execute(
                 "SELECT experiment,built_at,declaration,headline,runs_label FROM reports"
             )
