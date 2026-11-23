@@ -87,23 +87,30 @@ class Storage(Protocol):
 
 
 class ObjectVersion(str):
-    """A storage version tag with its listing's modification time, if supplied.
+    """A storage version tag with the metadata supplied by its listing.
 
     Tags remain strings so existing Storage implementations and consumers can
     compare or persist them. An opaque string supplies no evidence of age.
     """
 
-    __slots__ = ("modified", "etag")
+    __slots__ = ("modified", "etag", "size")
     etag: str | None
     modified: datetime | None
+    size: int | None
 
     def __new__(
-        cls, tag: str, modified: datetime | None = None, *, etag: str | None = None
+        cls,
+        tag: str,
+        modified: datetime | None = None,
+        *,
+        etag: str | None = None,
+        size: int | None = None,
     ) -> Self:
         if modified is not None and modified.utcoffset() is None:
             raise ValueError("an object's modification time must include a time zone")
         version = super().__new__(cls, tag)
         version.etag = etag
+        version.size = size
         version.modified = modified.astimezone(UTC) if modified is not None else None
         return version
 
@@ -177,6 +184,7 @@ class DirectoryStorage:
                         found[key] = ObjectVersion(
                             f"{stat.st_mtime_ns}:{stat.st_size}",
                             datetime.fromtimestamp(stat.st_mtime, UTC),
+                            size=stat.st_size,
                         )
         return found
 
@@ -393,9 +401,10 @@ class S3Storage:
             for item in page.get("Contents", ()):
                 if through is None or item["Key"] <= through:
                     etag, modified = item.get("ETag"), item.get("LastModified")
+                    size = item.get("Size")
                     key = item["Key"][len(self.prefix) :]
                     found[key] = ObjectVersion(
-                        f"{etag}:{item.get('Size')}:{modified}", modified, etag=etag
+                        f"{etag}:{size}:{modified}", modified, etag=etag, size=size
                     )
             return found
 

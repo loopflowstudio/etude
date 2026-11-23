@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -23,6 +24,7 @@ from moto import mock_aws
 from pydantic import TypeAdapter
 
 from etude.block_file import block_key, tail_key
+from etude.cache import Content
 from etude.checkpoints import CheckpointRecord
 from etude.cli import main
 from etude.errors import LauncherError
@@ -766,6 +768,50 @@ def _historical_bucket(directory: Path) -> Iterator[tuple[S3Storage, CountedClie
         yield bucket, client
 
 
+def test_bucket_discovery_remembers_foreign_declarations_until_their_version_changes() -> None:
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="history")
+        bucket = S3Storage("history", client=client)
+        foreign = {
+            "old/ledger/run.json": json.dumps({"game_error_ledgers": "x" * (200 * 1024)}).encode(),
+            "old/time/run.json": json.dumps(
+                {"id": "x", "calendar_seconds": 123, "data": "x" * (20 * 1024)}
+            ).encode(),
+        }
+        for key, body in foreign.items():
+            bucket.put(key, body)
+        for name, size in (("large", 9000), ("new", 0)):
+            record = RunRecord(
+                id=f"lab/{name}", experiment="lab", config=json.dumps({"text": "x" * size})
+            )
+            bucket.put(f"lab/{name}/run.json", record.model_dump_json().encode())
+
+        with Server(bucket, None, ("127.0.0.1", 0)) as view:
+            _ingest(view)
+            table = _get(view, "/experiments/lab")
+            assert 'title="lab/large"' in table and 'title="lab/new"' in table
+            assert table.count("<td>—<small>") == 2 and "Not loaded" not in table
+            assert "old/" not in _get(view, "/status")
+            for key, body in foreign.items():
+                assert client.read[key] == 4096
+                for data in (body, body[:4096]):
+                    assert not (bucket.cache.root / Content.of(data).name).exists()
+
+        with Server(bucket, None, ("127.0.0.1", 0)) as restarted:
+            before = client.requests
+            _ingest(restarted)
+            assert client.requests - before == 1  # Only the large, accepted declaration's prefix.
+            assert all(client.read[key] == 4096 for key in foreign)
+            replacement = RunRecord(
+                id="found/time", experiment="found", config=json.dumps("x" * 9000)
+            )
+            bucket.put("old/time/run.json", replacement.model_dump_json().encode())
+            restarted.refresh_files()
+            assert 'title="found/time"' in _get(restarted, "/experiments/found")
+            assert client.read["old/ledger/run.json"] == 4096
+
+
 def test_bucket_discovery_publishes_before_charting_and_opens_only_the_requested_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -795,6 +841,13 @@ def test_bucket_discovery_publishes_before_charting_and_opens_only_the_requested
                 reads = client.list_pages, client.requests
                 table = _get(view, "/experiments/hist1")
                 assert all(f'title="hist1/job@{seed}"' in table for seed in (0, 1))
+                assert table.count("<td>Not loaded<small>") == 2
+                assert (
+                    table.count(
+                        "Completed bucket runs load clock, metrics and checkpoints when opened."
+                    )
+                    == 1
+                )
                 assert (client.list_pages, client.requests) == reads
             finally:
                 release.set()
@@ -821,6 +874,9 @@ def test_bucket_discovery_publishes_before_charting_and_opens_only_the_requested
             later = _get(view, route)
             assert _version(initial) != _version(later) and _loss(later, "updates") == [7]
             assert ">weights.pt<" in later
+            table = _get(view, "/experiments/hist1")
+            assert table.count("<td>Not loaded<small>") == 1
+            assert "<td>updates 1<small>" in table and "<td>loss 7</td>" in table
             acquired = {k for k in client.read if k.startswith("hist")} - historic_reads
             assert all(k.startswith(pause) for k in acquired)
             assert any(k.endswith(".blk") for k in acquired)
@@ -923,6 +979,10 @@ def test_cold_checkpoint_request_retains_metadata_through_an_outage(
             html = _get(view, route + "?tab=config")
             assert ">finished<" in html and "batch" in html
             assert "bucket offline [redacted URL]" in html and "fixture.invalid" not in html
+            overview = _get(view, route)
+            assert "Charts could not be read; retrying." in overview
+            assert "Checkpoints could not be read; retrying." in overview
+            assert "Loading charts…" not in overview and "Loading checkpoints…" not in overview
             view.index._requests.submit(lambda: None).result(5)
         _get(view, route + "?observe=1")
         view.index._requests.submit(lambda: None).result(5)
@@ -940,7 +1000,7 @@ def test_live_and_served_headlines_use_the_final_logged_value(tmp_path: Path) ->
         overview = _get(view, "/runs/lab/linear")
         assert "<dt>Latest metric</dt><dd>value 300</dd>" in overview
         trace = _page_data(overview).training.series["updates"]["value"][0]
-        assert trace.mean[-1] == 299
+        assert trace.mean[-1] == 299 and trace.last == 300
         assert "<td>value 300</td>" in _get(view, "/experiments/lab")
         _get(view, "/experiments/lab/report")
         assert "<td>value 300</td>" in _get(view, "/reports")

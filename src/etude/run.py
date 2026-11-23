@@ -7,6 +7,7 @@ historical copies by declared experiment and run.
 
 from __future__ import annotations
 
+import codecs
 import fcntl
 import json
 import os
@@ -24,7 +25,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Literal
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from etude.block_file import parse
 from etude.carriage import (
@@ -53,6 +54,7 @@ from etude.records import (
     RunOutcome,
     RunProgress,
     RunRecord,
+    RunSubmission,
     RunWriter,
     Tally,
 )
@@ -561,6 +563,66 @@ class LocatedRun(Record):
 type DeclarationCache = dict[str, tuple[str | None, RunRecord | None]]
 
 
+# RunRecord also consumes flat submission fields and historical declaration fields.
+_RUN_RECORD_KEYS = frozenset(
+    (
+        *RunRecord.model_fields,
+        *RunSubmission.model_fields,
+        "declaration",
+        "source_key",
+        "config_json",
+        "config_sha256",
+    )
+)
+_DECLARATION_PROBE_THRESHOLD = 8 * 1024
+_DECLARATION_PROBE_BYTES = 4 * 1024
+_JSON_PREFIX = TypeAdapter(object)
+
+
+def _may_be_run_record(prefix: bytes) -> bool:
+    """Reject only what the bytes already rule out. A value or UTF-8 character can span the cut."""
+    whitespace = " \t\r\n"
+    try:
+        text = codecs.getincrementaldecoder("utf-8-sig")().decode(prefix).lstrip(whitespace)
+    except UnicodeDecodeError:
+        return False
+    if not text:
+        return True
+    if not text.startswith("{"):
+        return False
+    rest = text[1:].lstrip(whitespace)
+    if rest.startswith("}"):
+        return not rest[1:].strip(whitespace)
+    decoder = json.JSONDecoder()
+    while rest:
+        if not rest.startswith('"'):
+            return False
+        try:
+            key, end = decoder.raw_decode(rest)
+            if key not in _RUN_RECORD_KEYS:
+                return False
+            rest = rest[end:].lstrip(whitespace)
+            if not rest.startswith(":"):
+                return not rest
+            rest = rest[1:].lstrip(whitespace)
+            _, end = decoder.raw_decode(rest)
+        except (ValueError, RecursionError):
+            break
+        rest = rest[end:].lstrip(whitespace)
+        if rest.startswith("}"):
+            return not rest[1:].strip(whitespace)
+        if not rest.startswith(","):
+            # raw_decode may have stopped inside a number (for example 1e-).
+            break
+        rest = rest[1:].lstrip(whitespace)
+    # The JSON reader can distinguish an unfinished value from broken syntax.
+    try:
+        _JSON_PREFIX.validate_json(text, experimental_allow_partial=True)
+    except ValidationError:
+        return False
+    return True
+
+
 class RunListing:
     """One source discovery. Training copies share a declaration. Tournament copies
     keep their physical folder until the observer can identify their launch."""
@@ -599,7 +661,17 @@ class RunListing:
         if kept is None or kept[0] != version:
             record: RunRecord | None
             try:
-                record = RunRecord.model_validate_json(self.storage.get(key))
+                if (
+                    isinstance(version, ObjectVersion)
+                    and version.size is not None
+                    and version.size > _DECLARATION_PROBE_THRESHOLD
+                    and not _may_be_run_record(
+                        self.storage.get_range(key, 0, _DECLARATION_PROBE_BYTES)
+                    )
+                ):
+                    record = None
+                else:
+                    record = RunRecord.model_validate_json(self.storage.get(key))
             except FileNotFoundError as error:
                 # The next listing can recover even if its version tag has not changed.
                 return self._missing(folder, error) if self._missing else None

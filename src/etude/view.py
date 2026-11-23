@@ -209,7 +209,13 @@ class ChartIndex:
         with self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(_SCHEMA)
-        self._known: DeclarationCache = {}
+            # Additive discovery evidence can share previously built chart databases.
+            db.execute("""CREATE TABLE IF NOT EXISTS ignored_declarations (
+                          key TEXT PRIMARY KEY, version TEXT NOT NULL)""")
+            self._known: DeclarationCache = {
+                key: (tag, None)
+                for key, tag in db.execute("SELECT key,version FROM ignored_declarations")
+            }
         self._cache = Cache()
         self._requests = ThreadPoolExecutor(1, thread_name_prefix="view-charts")
         self._chart_lock = threading.Lock()
@@ -487,6 +493,20 @@ class ChartIndex:
         vanished: dict[str, str],
         discovery_error: str | None,
     ) -> None:
+        ignored = {
+            key: tag
+            for key, (tag, record) in self._known.items()
+            if record is None and tag is not None
+        }
+        previous = dict(db.execute("SELECT key,version FROM ignored_declarations"))
+        db.executemany(
+            "DELETE FROM ignored_declarations WHERE key=?",
+            ((key,) for key in previous.keys() - ignored.keys()),
+        )
+        db.executemany(
+            "INSERT OR REPLACE INTO ignored_declarations(key,version) VALUES(?,?)",
+            ignored.items() - previous.items(),
+        )
         # Only missed runs need a date of their own. Freeze the old listing date
         # on the first miss, or NULL if this run has never supplied file facts.
         held = {row[0] for row in db.execute("SELECT address FROM held_files")}
@@ -975,7 +995,7 @@ class _ViewSnapshot:
             projection, selection = "headline", "ORDER BY experiment,address"
         else:
             projection, selection = (
-                "latest,launched_as",
+                "latest,launched_as,kind,target,inputs",
                 "WHERE experiment=:experiment ORDER BY address",
             )
         return self.db.execute(
@@ -1230,6 +1250,7 @@ class _ViewSnapshot:
         stale = False
         body = []
         unfinished = []
+        cold_bucket_runs = False
         detail = ""
         for row in rows:
             address = row["address"]
@@ -1256,11 +1277,17 @@ class _ViewSnapshot:
             reason = _state_reason(state, status)
             machine = escape(status.machine) if status and status.machine else "—"
             current = ' aria-current="true"' if address == selected else ""
+            position = _position(row, status)
+            if _uncharted(row):
+                position = position or "Not loaded"
+                cold_bucket_runs |= isinstance(self.index.source, S3Storage) and not _is_open(
+                    row, state
+                )
             body.append(
                 f'<tr><td><a title="{escape(address)}" href="{pick}{tab}#run-detail"{current}>{escape(short)}</a>'
                 f"<small>{escape(row['job'])}</small>{row['continues'] or ''}</td>"
                 f'<td><span class="pill">{escape(state)}</span><small>{escape(reason)}</small></td>'
-                f"<td>{escape(_position(row, status) or '—')}<small>{last_write}</small></td>"
+                f"<td>{escape(position or '—')}<small>{last_write}</small></td>"
                 f"<td>{escape(metric or '—')}</td><td>{machine}</td>"
                 f"<td>{escape(status.formatted_spend) if status else '—'}</td></tr>"
             )
@@ -1268,6 +1295,10 @@ class _ViewSnapshot:
                 detail = self._detail(address, pick, tab, curves, now)
         if rows:
             table = _table(("Run", "State", "Clock", "Latest metric", "Machine", "Dollars"), body)
+            if cold_bucket_runs:
+                table += (
+                    "<p>Completed bucket runs load clock, metrics and checkpoints when opened.</p>"
+                )
             if not detail:
                 detail = "<p>The selected run is unavailable in this experiment.</p>"
         elif observation and observation["at"]:
@@ -1740,15 +1771,17 @@ def _display_state(row: sqlite3.Row) -> str:
     return state
 
 
+def _uncharted(row: sqlite3.Row) -> bool:
+    return row["kind"] == "training" and row["target"] is not None and row["inputs"] is None
+
+
 def _empty_section(row: sqlite3.Row, subject: str, recorded: str) -> str:
     # Only a successful listing can establish that a section is empty.
-    if (
-        subject in ("Curves", "Checkpoints")
-        and row["target"]
-        and not row["inputs"]
-        and row["kind"] == "training"
-    ):
-        return "<p>Loading charts…</p>" if subject == "Curves" else "<p>Loading checkpoints…</p>"
+    if subject in ("Curves", "Checkpoints") and _uncharted(row):
+        content = "Charts" if subject == "Curves" else "Checkpoints"
+        if row["chart_error"]:
+            return f"<p>{content} could not be read; retrying.</p>"
+        return f"<p>Loading {content.lower()}…</p>"
     message = recorded if row["at"] else f"{subject} appear once the view has read the run files."
     return f"<p>{message}</p>"
 

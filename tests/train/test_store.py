@@ -117,6 +117,34 @@ def test_a_run_whose_declaration_is_invalid_reads_without_one(tmp_path: Path) ->
     assert len(data.writers) == 1
 
 
+@pytest.mark.parametrize(
+    ("head", "tail", "accepted"),
+    [
+        (b"", b'{"id":"r","experiment":"e"}', True),
+        (b'{"i', b'd":"r","experiment":"e"}', True),
+        (b'{"id":"r","config":"\xc3', b'\xa9","experiment":"e"}', True),
+        (b'{"resume_after":1e-', b'2,"id":"r","experiment":"e"}', True),
+        (
+            b'{"source_key":{"namespace":"local","kind":"run","source_id":"r"},',
+            b'"experiment":"e","declaration":{}}',
+            True,
+        ),
+        (b'{"params":{"foreign":[1,2]},"id":"r","experiment":"e"', b"}", True),
+        (b'{"id":"r","calendar_seconds"', b":42}", False),
+        (b'{"params":{"broken":truX', b"}}", False),
+        (b'{"id":"\xff', b'"}', False),
+    ],
+)
+def test_large_declaration_reads_only_beyond_an_inconclusive_prefix(
+    tmp_path: Path, head: bytes, tail: bytes, accepted: bool
+) -> None:
+    source = MeasuredStorage(DirectoryStorage(tmp_path))
+    body = head.rjust(4096) + tail + b" " * 8192
+    source.put("r/run.json", body)
+    assert runs(source) == ([("e", "r")] if accepted else [])
+    assert source.ranges == 1 and source.bytes == 4096 + (len(body) if accepted else 0)
+
+
 @pytest.mark.parametrize("attributed", [False, True])
 def test_resuming_does_not_inherit_a_previous_attempts_finished_state(
     tmp_path: Path, attributed: bool

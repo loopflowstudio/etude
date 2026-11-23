@@ -496,7 +496,14 @@ function runCurvePanels(D) {
   }));
 }
 
-// Card data contains only the first ML panel represented across the experiment's runs.
+// The last logged value can differ from the last plotted bucket's mean.
+function latestMetric(trace, log) {
+  const i = trace.mean.findLastIndex((y, i) => trace.x[i] != null && y != null && (!log || y > 0));
+  if (i < 0) return null;
+  const value = trace.last != null && (!log || trace.last > 0) ? trace.last : trace.mean[i];
+  return {value, bucket: trace.x[i]};
+}
+
 // Keep different metrics and clocks on separate axes, even across a held file observation.
 function drawExperimentCurves(root) {
   destroyCharts();
@@ -512,12 +519,12 @@ function drawExperimentCurves(root) {
       for (const [key, trace] of Object.entries(panel.curves)) {
         const id = JSON.stringify([panel.title, key, panel.clock, panel.unit, panel.log]);
         const points = trace.x.map((x, i) => ({x, y: trace.mean[i]}));
-        const last = points.findLast(p => p.x != null && p.y != null && (!panel.log || p.y > 0));
+        const last = latestMetric(trace, panel.log);
         if (!last) continue;
         if (!plots.has(id)) plots.set(id, {panel, key, lines: [], latest: []});
         const {lines, latest} = plots.get(id);
         lines.push({label: trace.owner, color: css(`--j${detail ? 1 : run % 8 + 1}`), points});
-        latest.push(`${trace.owner}: ${fmt(last.y)} at ${panel.clock} ${num(last.x)}`);
+        latest.push(`${trace.owner}: ${fmt(last.value)}, last plotted bucket at ${panel.clock} ${num(last.bucket)}`);
       }
     });
     if (detail && !plots.size) host.appendChild(node("p", "na", "No metric curves recorded."));
