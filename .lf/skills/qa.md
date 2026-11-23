@@ -105,6 +105,8 @@ block seals and stops once the final block lands; `/`, experiment and Machines t
 update in place, so one load each while new work appears. A finished plain run trains
 again only with `etude train FILE --resume --until updates=N` (plain re-train refuses
 `run_name_taken`). Launching in a fresh lab needs `etude database upgrade --development` first.
+`launch --pool local` starts the job itself; open the tabs before `launch`, not just
+before `wait`, to see the first updates. The launcher keeps `setting_up` until a loop runs.
 To see "no end recorded" without waiting 10 minutes, SIGKILL the train's process
 group and `touch -t` its run folder's files into the past. The QA home sits inside
 the lab, so the view must not count `home/sessions/…/src` copies as experiments.
@@ -176,7 +178,7 @@ experiment.py` with a Python subprocess driver: `etude train` prints no progress
 lines, so sleep a few seconds, then send SIGINT to that process (a driver that
 blocks on `readline` never sends it). Require exit 75. The next plain
 `etude train experiment.py` prints `stopped; --job coin --seed 0 --resume`;
-follow it, then read `etude.train.read.read(default_root(), "experiment",
+follow it, then read `etude.train.read.read(etude.storage.default_root(), "experiment",
 "coin@0").points("heads", "updates")` and require each update once, in order,
 across two metric writers. Use `uv run python` for the driver. A background
 shell job may ignore SIGINT; do not signal processes by a broad name pattern.
