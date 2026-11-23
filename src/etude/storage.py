@@ -14,9 +14,11 @@ folder is named for the run (`run_directory`).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
+import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -29,12 +31,14 @@ from stat import S_ISREG
 from typing import Any, Literal, NamedTuple, Protocol, cast
 from urllib.parse import quote, unquote, urlsplit
 
+from pydantic import ValidationError
+
 from etude.cache import Artifact, Cache, Fetched
 from etude.carriage import immutable
 from etude.deadline import call, remaining
 from etude.errors import EtudeError
 from etude.identity import SAFE_NAME, run_address
-from etude.records import RunRecord
+from etude.records import Record, RunRecord
 from etude.storage_timeout import StorageUnavailable, socket_timeout
 
 __all__ = ("default_root", "storage_from_uri", "Storage", "DirectoryStorage", "S3Storage")
@@ -162,6 +166,25 @@ class _KeyRange(NamedTuple):
     through: str | None = None
 
 
+class _ListingHint(Record):
+    """Remembered key count and quantile boundaries for one bucket prefix."""
+
+    count: int
+    split_points: tuple[str, ...]
+
+
+def store_identity(storage: Storage) -> str:
+    """Canonical location of `storage` for local caches, distinct across endpoints and paths."""
+    if isinstance(storage, S3Storage):
+        return storage._where + storage.prefix
+    return storage.uri("_")
+
+
+def with_versions(storage: Storage, versions: Mapping[str, str]) -> Storage:
+    """Pin an S3/R2 reader to `versions` for ETag checks without affecting other readers."""
+    return storage._with_versions(versions) if isinstance(storage, S3Storage) else storage
+
+
 class S3Storage:
     """An S3 or R2 bucket reached with the author's own credentials.
 
@@ -265,9 +288,50 @@ class S3Storage:
         ranges = min(_LIST_RANGES, (count + 999) // 1000)
         return tuple(sorted_keys[i * count // ranges - 1] for i in range(1, ranges))
 
-    def versions(self, prefix: str, *, split_points: Sequence[str] = ()) -> dict[str, str]:
-        """List current versions. Optional source-relative keys divide the prefix into ranges."""
+    def _listing_hint_path(self, prefix: str) -> Path:
+        digest = hashlib.sha256(f"{self._where}{self.prefix}{prefix}".encode()).hexdigest()[:24]
+        return self.cache.root / "listings" / f"{digest}.json"
+
+    def _read_listing_hint(self, prefix: str) -> _ListingHint | None:
+        try:
+            return _ListingHint.model_validate_json(self._listing_hint_path(prefix).read_bytes())
+        except (OSError, ValidationError):
+            return None
+
+    def _write_listing_hint(
+        self, prefix: str, found: Mapping[str, str], prior: _ListingHint | None
+    ) -> None:
+        path = self._listing_hint_path(prefix)
+        count = len(found)
+        if count <= 1000:
+            if prior is not None:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return
+        # Refresh once the prefix has grown or shrunk enough to unbalance ranges.
+        if prior is not None and abs(count - prior.count) * 5 <= max(prior.count, 1):
+            return
+        hint = _ListingHint(count=count, split_points=self._split_points(sorted(found)))
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=path.parent) as staging:
+                pending = Path(staging) / path.name
+                pending.write_bytes(hint.model_dump_json().encode())
+                pending.replace(path)
+        except OSError:
+            pass
+
+    def versions(self, prefix: str, *, split_points: Sequence[str] | None = None) -> dict[str, str]:
+        """List current versions. Remembered prefix boundaries divide large listings into ranges."""
         base = self.prefix + prefix
+        prior = self._read_listing_hint(prefix) if split_points is None else None
+        active_splits: Sequence[str] = (
+            (prior.split_points if prior is not None else ())
+            if split_points is None
+            else split_points
+        )
 
         def pages(span: _KeyRange, **options: str) -> Iterator[dict[str, Any]]:
             if span.after is not None:
@@ -342,12 +406,12 @@ class S3Storage:
         def collect() -> dict[str, str]:
             root = _KeyRange(base)
             warm = (
-                0 < len(split_points) < _LIST_RANGES
-                and all(key and key.startswith(prefix) for key in split_points)
-                and all(a < b for a, b in pairwise(split_points))
+                0 < len(active_splits) < _LIST_RANGES
+                and all(key and key.startswith(prefix) for key in active_splits)
+                and all(a < b for a, b in pairwise(active_splits))
             )
             if warm:
-                work = ranges(root, [self.prefix + key for key in split_points])
+                work = ranges(root, [self.prefix + key for key in active_splits])
                 found: dict[str, str] = {}
             else:
                 found, work = discover(root, root=True)
@@ -370,6 +434,8 @@ class S3Storage:
             return found
 
         found = _storage_request(collect)
+        if split_points is None:
+            self._write_listing_hint(prefix, found, prior)
         if self._listed_versions is not None:
             for key in [k for k in self._listed_versions if k.startswith(prefix)]:
                 del self._listed_versions[key]

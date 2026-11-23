@@ -120,7 +120,7 @@ from etude.eval.run import ETUDE_TABLES
 from etude.identity import SAFE_NAME
 from etude.records import Digest, Record, RunOutcome
 from etude.run import as_storage, declared, run_folders, under
-from etude.storage import DirectoryStorage, Storage, default_root
+from etude.storage import DirectoryStorage, Storage, default_root, store_identity
 
 __all__ = ("statsdb", "read_blobs", "estimate", "compare", "Estimate", "Comparison")
 
@@ -246,6 +246,7 @@ def _write_catch_up(
                 rebuild = _schema(db) not in (None, SCHEMA)
                 if not rebuild:
                     _catch_up(db, experiment, storage, rollups, keys)
+                    _sweep_stale_generations(path, current)
                     return
             finally:
                 db.close()
@@ -257,12 +258,15 @@ def _write_catch_up(
     old_generation = current if path.is_symlink() else None
     try:
         if current is not None and not rebuild:
-            with closing(duckdb.connect(current, read_only=True)) as reader:
-                if _schema(reader) == SCHEMA:
-                    shutil.copy2(current, generation)
-                    wal = Path(f"{current}.wal")
-                    if wal.exists():
-                        shutil.copy2(wal, Path(f"{generation}.wal"))
+            try:
+                with closing(duckdb.connect(current, read_only=True)) as reader:
+                    if _schema(reader) == SCHEMA:
+                        shutil.copy2(current, generation)
+                        wal = Path(f"{current}.wal")
+                        if wal.exists():
+                            shutil.copy2(wal, Path(f"{generation}.wal"))
+            except (duckdb.IOException, duckdb.ConnectionException) as locked:
+                raise EtudeError("statsdb_in_use", 409) from locked
         with closing(duckdb.connect(generation)) as writer:
             _catch_up(writer, experiment, storage, rollups, keys)
             writer.execute("checkpoint")
@@ -278,6 +282,22 @@ def _write_catch_up(
         old_generation.unlink(missing_ok=True)
         Path(f"{old_generation}.wal").unlink(missing_ok=True)
     Path(f"{path}.wal").unlink(missing_ok=True)
+    _sweep_stale_generations(path, generation.resolve())
+
+
+def _sweep_stale_generations(path: Path, keep: Path | None, *, min_age_s: float = 60.0) -> None:
+    """Remove orphaned generation snapshots left behind by crashed writers."""
+    cutoff = time.time() - min_age_s
+    for candidate in path.parent.glob(f"{path.stem}.g*.duckdb"):
+        if keep is not None and candidate.resolve() == keep:
+            continue
+        try:
+            if candidate.stat().st_mtime > cutoff:
+                continue
+        except FileNotFoundError:
+            continue
+        candidate.unlink(missing_ok=True)
+        Path(f"{candidate}.wal").unlink(missing_ok=True)
 
 
 @dataclass
@@ -347,7 +367,7 @@ def _needs_catch_up(
 
 def _kept_path(experiment: str, storage: Storage) -> Path:
     home = Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser()
-    store = hashlib.sha256(storage.name.encode()).hexdigest()[:16]
+    store = hashlib.sha256(store_identity(storage).encode()).hexdigest()[:16]
     return home / "statsdb" / f"{experiment}.{store}.duckdb"
 
 

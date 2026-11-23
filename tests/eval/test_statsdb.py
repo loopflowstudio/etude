@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -488,3 +490,22 @@ def test_statsdb_allows_concurrent_readers_and_catches_up_while_a_reader_is_open
             assert updated.sql("select count(*) from matches").fetchone() == (3,)
         # Existing readers keep reading their snapshot undisturbed.
         assert reader_one.sql("select count(*) from matches").fetchone() == (2,)
+
+    # Orphaned generation files older than the sweep window are cleaned on the next catch-up.
+    kept = query._kept_path("cards", bucket)
+    stale = kept.with_name(f"{kept.stem}.g1.999999.duckdb")
+    stale.write_bytes(b"orphan")
+    old = time.time() - 120
+    os.utime(stale, (old, old))
+    play_matches(
+        experiment="cards",
+        environment=DUEL,
+        play=play,
+        matches=deals(players, 3),
+        run="c",
+        directory=tmp_path / "c",
+        storages=[bucket],
+    )
+    with statsdb("cards", bucket) as swept:
+        assert swept.sql("select count(*) from matches").fetchone() == (4,)
+    assert not stale.exists()

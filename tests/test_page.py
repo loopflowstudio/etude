@@ -678,5 +678,19 @@ def report() -> Report:
 
     # Editing a non-Python file read by report() invalidates the cache on the very next build.
     label.write_text("Edited")
-    third = build(DirectoryStorage(runs), file)
+    third = build(MeasuredStorage(DirectoryStorage(runs)), file)
     assert third.report.labels == {"a": "Edited"}
+
+    # Another experiment writing to the same source does not invalidate this experiment's page.
+    with open_run(
+        experiment="other",
+        run="z",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=runs,
+    ) as other:
+        other.log({"loss": 2.0}, updates=1)
+    after_other = MeasuredStorage(DirectoryStorage(runs))
+    assert build(after_other, file) == third
+    assert not any(
+        key.endswith((".blk", ".tail", ".index.json", ".permanent.json")) for key in after_other.got
+    )

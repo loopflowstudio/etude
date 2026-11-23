@@ -1142,6 +1142,21 @@ def test_report_lists_current_versions_across_stale_bucket_splits(tmp_path: Path
         assert {run.name for run in build(bucket, file).training.runs} == {"historical", "later"}
         assert client.list_pages - before == 2
 
+        # A fresh S3Storage sharing the cache (as Pages or statsdb opens) reuses the same hints.
+        other = S3Storage("big", "jobs/exp", client=client, cache=Cache(tmp_path / "cache"))
+        before = client.list_pages
+        assert other.versions("") == expected
+        assert client.list_pages - before == 2
+
+        # When the prefix shrinks below one LIST page, stale split points are cleared.
+        for key in list(expected):
+            if key.startswith("exp/eval-"):
+                bucket.delete(key)
+        bucket.versions("")
+        before = client.list_pages
+        bucket.versions("")
+        assert client.list_pages - before == 1
+
 
 def test_cold_bucket_listing_covers_a_partially_read_nested_prefix(tmp_path: Path) -> None:
     # Tiny LIST pages exercise both levels of cold discovery with a few objects.

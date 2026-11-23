@@ -84,18 +84,25 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.util import cache_from_source
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import JsonValue, ValidationError
 
 from etude.errors import EtudeError, explain
-from etude.eval.records import Gap, Scheduled, Tournament
+from etude.eval.records import Benchmark, Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named, refuse_renamed
 from etude.identity import SAFE_NAME
 from etude.records import BUILT_IN_NAMES, Record
 from etude.report import Counters, Curve, Flame, Matches, Report, Score, Series
-from etude.run import LocatedRun, as_storage, declared, located_runs, run_folders, under
-from etude.storage import DirectoryStorage, S3Storage, Storage, default_root
+from etude.run import Listing, as_storage, declared, run_folders, under
+from etude.storage import (
+    DirectoryStorage,
+    S3Storage,
+    Storage,
+    default_root,
+    store_identity,
+    with_versions,
+)
 from etude.train.read import RunData, read_all
 from etude.train.report import Training, training
 
@@ -388,7 +395,7 @@ class Pages:
             return build(self.storage, file, experiment=self.experiment)
         experiment = self.experiment or file.stem
         runs = tuple(
-            self._versions(_with_versions(place, listed), experiment, listed)
+            self._versions(with_versions(place, listed), experiment, listed)
             for place, listed in zip(self._places, listings, strict=True)
         )
         kept = self._built.get(file)
@@ -479,10 +486,6 @@ def _source_name(storage: Storage) -> str:
     return storage.name
 
 
-def _with_versions(storage: Storage, versions: Mapping[str, str]) -> Storage:
-    return storage._with_versions(versions) if isinstance(storage, S3Storage) else storage
-
-
 def build(source: Storage | Path | str, file: Path, *, experiment: str | None = None) -> Page:
     """The page of the experiment `file` names, from the runs under `source`.
 
@@ -495,15 +498,12 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
 
 
 # Bump whenever derived Page fields change without changing inputs.
-_PAGE_CACHE_VERSION = 1
+_PAGE_CACHE_VERSION = 2
 
 
 def _page_cache_path(experiment: str, storage: Storage) -> Path:
     home = Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser()
-    # Bucket display names flatten slashes and omit the endpoint. Hints belong to one prefix.
-    source = (
-        storage._artifact("").location if isinstance(storage, S3Storage) else _source_name(storage)
-    )
+    source = store_identity(storage)
     store = hashlib.sha256(source.encode()).hexdigest()[:16]
     stem = (
         f"{experiment}.{store}"
@@ -564,44 +564,39 @@ def _page_cache_key(
     ).hexdigest()
 
 
-class _PageCacheHeader(Record):
-    key: str
-    split_points: tuple[str, ...]
-
-    @classmethod
-    def read(cls, stream: BinaryIO) -> _PageCacheHeader:
-        # 47 S3 keys of at most 1,024 bytes, including worst-case JSON escaping.
-        return cls.model_validate_json(stream.readline(512 * 1024))
-
-
-def _list_page_versions(storage: Storage, path: Path) -> dict[str, str]:
-    if isinstance(storage, S3Storage):
-        try:
-            with path.open("rb") as stream:
-                bounds = _PageCacheHeader.read(stream).split_points
-        except (OSError, ValidationError):
-            bounds = ()
-        return storage.versions("", split_points=bounds)
-    return storage.versions("")
+def _referenced_experiments(experiment: str, wanted: Sequence[Tournament]) -> set[str]:
+    """Experiments whose stored runs this report or its relative seats depend on."""
+    named = {experiment}
+    for tournament in wanted:
+        benchmark = tournament.definition
+        if not isinstance(benchmark, Benchmark) or not any(s.relative for s in benchmark.seatings):
+            continue
+        named.update(benchmark.experiments)
+        named.update(
+            c.policy.experiment
+            for c in tournament.checkpoints
+            if c.policy is not None and c.policy.experiment is not None
+        )
+    return named
 
 
 def _load_cached_page(path: Path, expected_key: str) -> Page | None:
     try:
         with path.open("rb") as stream:
-            if _PageCacheHeader.read(stream).key != expected_key:
+            if stream.readline(128).decode("ascii", "replace").strip() != expected_key:
                 return None
             return Page.model_validate_json(stream.read())
     except (OSError, ValidationError):
         return None
 
 
-def _save_cached_page(path: Path, header: _PageCacheHeader, page: Page) -> None:
+def _save_cached_page(path: Path, key: str, page: Page) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(dir=path.parent) as staging:
             pending = Path(staging) / path.name
             with pending.open("wb") as stream:
-                stream.write(header.model_dump_json().encode())
+                stream.write(key.encode())
                 stream.write(b"\n")
                 stream.write(page.model_dump_json().encode())
             pending.replace(path)
@@ -620,20 +615,17 @@ def _build_page(
     report, origin, notes = _report(names.get("report"), file)
     flames = tuple(panel.prefix for panel in (*report.perf, *report.ml) if isinstance(panel, Flame))
     cache_path = _page_cache_path(experiment, storage)
-    versions = _list_page_versions(storage, cache_path) if listed is None else listed
-    keys = sorted(versions)
-    storage = _with_versions(storage, versions)
-    declarations = located_runs(storage, keys)
+    listing = Listing.read(storage, listed)
     data = read_all(
-        storage,
+        listing.storage,
         experiment,
         metrics=None if report.other_metrics else frozenset(report.keys()),
         prefixes=flames,
-        keys=keys,
-        declarations=declarations,
+        keys=listing.keys,
+        declarations=listing.declarations,
     )
     if not data:
-        held = sorted({run.file.experiment for run in declarations})
+        held = sorted({run.file.experiment for run in listing.declarations})
         raise ValueError(
             f"no runs of {experiment!r} in {_source_name(storage)}"
             + (f"; it holds {', '.join(held)}" if held else "; it holds no runs")
@@ -653,9 +645,10 @@ def _build_page(
         if want is not None:
             wanted = _wanted(want, state)
         here = DirectoryStorage(default_root())
-        if here.name != storage.name:
-            local_versions = here.versions("")
+        if store_identity(here) != store_identity(storage):
+            local_versions = Listing.read(here).experiment_versions({experiment})
     source_name = _source_name(storage)
+    referenced = _referenced_experiments(experiment, wanted)
     cache_key = _page_cache_key(
         experiment=experiment,
         file=file,
@@ -663,18 +656,14 @@ def _build_page(
         report=report,
         origin=origin,
         notes=notes,
-        versions=versions,
+        versions=listing.experiment_versions(referenced),
         state=state,
         wanted=wanted,
         local_versions=local_versions,
     )
     if (cached := _load_cached_page(cache_path, cache_key)) is not None:
         return cached
-    evals = (
-        _read_evals(storage, state, report, wanted, keys=keys, declarations=declarations)
-        if state is not None
-        else _Evals()
-    )
+    evals = _read_evals(listing, state, report, wanted) if state is not None else _Evals()
     # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
     unended = [
         run.name
@@ -722,8 +711,7 @@ def _build_page(
         latest_result_ms=evals.latest_result_ms,
         absent=evals.absent,
     )
-    bounds = storage._split_points(keys) if isinstance(storage, S3Storage) else ()
-    _save_cached_page(cache_path, _PageCacheHeader(key=cache_key, split_points=bounds), page)
+    _save_cached_page(cache_path, cache_key, page)
     return page
 
 
@@ -860,20 +848,17 @@ class _Evals:
 
 
 def _read_evals(
-    storage: Storage,
+    listing: Listing,
     state: ExperimentState,
     report: Report,
     wanted: Sequence[Tournament],
-    *,
-    keys: Sequence[str],
-    declarations: Sequence[LocatedRun],
 ) -> _Evals:
     # The optional `eval` extra (DuckDB, and the etude.eval modules over it), imported where
     # it is used: only an experiment with evaluations reads it, so a report without loads none.
     from etude.eval.query import _open_statsdb  # noqa: PLC0415
 
-    held, refused = _held_tournaments(wanted, state, storage, keys=keys, declarations=declarations)
-    db = _open_statsdb(state.experiment, storage, keys=keys)
+    held, refused = _held_tournaments(wanted, state, listing)
+    db = _open_statsdb(state.experiment, listing.storage, keys=listing.keys)
     try:
         saved = _saved_checkpoints(db)
         players, placement = _players(db, saved, {run.name: run.line for run in state.runs})
@@ -919,10 +904,7 @@ class _HeldTournament:
 def _held_tournaments(
     asked: Sequence[Tournament],
     state: ExperimentState,
-    storage: Storage,
-    *,
-    keys: Sequence[str],
-    declarations: Sequence[LocatedRun],
+    listing: Listing,
 ) -> tuple[list[_HeldTournament], tuple[str, ...]]:
     """Each tournament as held so far, and a note for each one drawn otherwise than asked.
 
@@ -944,7 +926,12 @@ def _held_tournaments(
     experiment = state.experiment
     refused: list[str] = []
     # Read once for every tournament drawn: a page plays nothing, so nothing changes meanwhile.
-    runs = stored_runs(experiment, storages=[storage], keys=keys, declarations=declarations)
+    runs = stored_runs(
+        experiment,
+        storages=[listing.storage],
+        keys=listing.keys,
+        declarations=listing.declarations,
+    )
     for name, held in runs.tournaments.items():
         try:
             recorded = assemble(held)
@@ -966,14 +953,14 @@ def _held_tournaments(
                 )
         wanted[name] = recorded
     lines = read_tournament_lines(
-        storage,
+        listing.storage,
         state,
         [
             TournamentRun(tournament=t.definition, checkpoints=t.checkpoints)
             for t in wanted.values()
         ],
-        keys=keys,
-        declarations=declarations,
+        keys=listing.keys,
+        declarations=listing.declarations,
     )
     held_tournaments = []
     for name, given in sorted(wanted.items()):
