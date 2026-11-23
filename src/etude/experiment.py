@@ -16,7 +16,7 @@ from pathlib import Path
 import etude.jobs as jobs
 from etude.checkpoints import PolicyKey
 from etude.errors import EtudeError
-from etude.eval.records import Benchmark, Line, Match, TournamentRun
+from etude.eval.records import Line, Match, Tournament, TournamentRun, find_line_experiments
 from etude.identity import run_address
 from etude.launch import client
 from etude.launch.records import Standing
@@ -54,24 +54,13 @@ def observe(
 def read_tournament_lines(
     source: Storage,
     state: jobs.ExperimentState,
-    tournaments: Sequence[TournamentRun],
+    tournaments: Iterable[Tournament | TournamentRun],
     *,
     listing: RunListing,
 ) -> tuple[Line, ...]:
     """Read the lines reachable by these tournaments, sharing one source discovery."""
-    named: set[str] = set()
-    for tournament in tournaments:
-        benchmark = tournament.tournament
-        if not isinstance(benchmark, Benchmark) or not any(s.relative for s in benchmark.seatings):
-            continue
-        named.update(benchmark.experiments)
-        named.update(
-            c.policy.experiment
-            for c in tournament.checkpoints
-            if c.policy is not None and c.policy.experiment is not None
-        )
     found = list(state.lines)
-    for name in sorted(named - {state.experiment}):
+    for name in sorted(find_line_experiments(tournaments) - {state.experiment}):
         found.extend(
             line.seen_from(state.experiment)
             for line in observe(

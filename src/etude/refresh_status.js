@@ -5,9 +5,7 @@
     || document.getElementById("view-rail");
   const railOnly = id === "view-rail";
   const error = document.getElementById("status-error");
-  const path = railOnly || version
-    ? location.pathname + (hasRail ? "?observe=1" : "?observe=1&embed=1")
-    : location.pathname.replace(/\/$/, "") + "/status";
+  const path = railOnly || version ? location.pathname : location.pathname.replace(/\/$/, "") + "/status";
 
   function replace(current, next) {
     const focus = document.activeElement;
@@ -80,18 +78,11 @@
     let navigating = false;
     try {
       if (document.hidden) return;
-      let url = path;
-      if (id === "run-observation" && location.search) {
-        const tab = new URLSearchParams(location.search).get("tab");
-        if (tab) url += "&tab=" + encodeURIComponent(tab);
-      }
+      const params = new URLSearchParams(location.search);
+      if (railOnly || version) params.set("observe", "1");
       const mounted = experimentTabs && document.querySelector(".run-curves");
-      if (experimentTabs) {
-        const params = new URLSearchParams(location.search);
-        if (mounted) params.set("curves", mounted.dataset.generation);
-        url += "?" + params;
-      }
-      const response = await fetch(url);
+      if (mounted) params.set("curves", mounted.dataset.generation);
+      const response = await fetch(params.size ? path + "?" + params : path);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const template = document.createElement("template");
       template.innerHTML = await response.text();

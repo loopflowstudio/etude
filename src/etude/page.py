@@ -89,7 +89,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import JsonValue, ValidationError
 
 from etude.errors import EtudeError, explain
-from etude.eval.records import Benchmark, Gap, Scheduled, Tournament
+from etude.eval.records import Gap, Scheduled, Tournament, find_line_experiments
 from etude.experiment_file import experiment_named, refuse_renamed
 from etude.home import home
 from etude.identity import SAFE_NAME
@@ -634,22 +634,6 @@ def _page_cache_key(
     ).hexdigest()
 
 
-def _referenced_experiments(experiment: str, wanted: Sequence[Tournament]) -> set[str]:
-    """Experiments whose stored runs this report or its relative seats depend on."""
-    named = {experiment}
-    for tournament in wanted:
-        benchmark = tournament.definition
-        if not isinstance(benchmark, Benchmark) or not any(s.relative for s in benchmark.seatings):
-            continue
-        named.update(benchmark.experiments)
-        named.update(
-            c.policy.experiment
-            for c in tournament.checkpoints
-            if c.policy is not None and c.policy.experiment is not None
-        )
-    return named
-
-
 def _load_cached_page(path: Path, expected_key: str) -> Page | None:
     try:
         with path.open("rb") as stream:
@@ -711,7 +695,7 @@ def _build_page(
             if store_identity(here) != store_identity(storage):
                 local = _ReportListing(here, {})
     local_versions = local.versions({experiment}) if local is not None else {}
-    referenced = _referenced_experiments(experiment, wanted)
+    referenced = {experiment} | find_line_experiments(wanted)
     versions = source.versions(referenced)
     cache_key = _page_cache_key(
         experiment=experiment,
@@ -1229,15 +1213,7 @@ def _held_tournaments(
                     f" eval_jobs(state) now defines it otherwise ({error.code})."
                 )
         wanted[name] = recorded
-    lines = read_tournament_lines(
-        source.place,
-        state,
-        [
-            TournamentRun(tournament=t.definition, checkpoints=t.checkpoints)
-            for t in wanted.values()
-        ],
-        listing=source.runs,
-    )
+    lines = read_tournament_lines(source.place, state, wanted.values(), listing=source.runs)
     held_tournaments = []
     for name, given in sorted(wanted.items()):
         try:

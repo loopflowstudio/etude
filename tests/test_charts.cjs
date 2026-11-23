@@ -529,7 +529,12 @@ test("a visible run updates dates in place and reloads only when its content cha
   document.hidden = true;
   await tick();
   assert.equal(navigations, 0);
-  assert.deepEqual(requests, [url + "?observe=1&tab=charts", url + "?observe=1&tab=charts"]);
+  assert.equal(requests.length, 2);
+  for (const request of requests) {
+    const poll = new URL(request, "http://localhost");
+    assert.equal(poll.pathname, url);
+    assert.deepEqual(Object.fromEntries(poll.searchParams), {tab: "charts", observe: "1"});
+  }
   document.hidden = false;
   await tick();
   assert.equal(navigations, 1);

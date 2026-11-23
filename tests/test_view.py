@@ -498,21 +498,18 @@ def test_graph_requests_reuse_the_published_generation_after_interruption(tmp_pa
     outcome.write_text("{")
     with Server(measured, None, ("127.0.0.1", 0)) as restarted:
         _ingest(restarted)
-        assert restarted.index.error
         reads = measured.listings, measured.requests, measured.bytes
         page = restarted.page("/runs/lab/base@0") or ""
-        assert _loss(page) == [1] and ">finished<" in page and 'role="status"' in page
+        assert _loss(page) == [1] and ">finished<" in page and "Run files:" in page
         status = restarted.page("/experiments/lab/status") or ""
-        assert (
-            ">finished<" in status and 'role="status"' in status and 'data-refresh="5000"' in status
-        )
+        assert ">finished<" in status and "Run files:" in status and 'data-refresh="5000"' in status
         overview = restarted.page("/") or ""
         assert "1 finished" in overview and 'data-refresh="5000"' in overview
-        assert restarted.index.error in unescape(overview)
+        assert "Run files:" in overview
         assert (measured.listings, measured.requests, measured.bytes) == reads
         outcome.write_bytes(saved)
         _ingest(restarted)
-        assert restarted.index.error is None
+        assert "Run files:" not in _get(restarted, "/status")
 
 
 def test_an_interrupted_writer_never_exposes_half_a_generation(
@@ -545,7 +542,7 @@ def test_an_interrupted_writer_never_exposes_half_a_generation(
             _ingest(writer)
         assert measured.listings == before + 1
         assert reader_points == [5]
-        assert writer.index.error and "interrupted reading the second chart" in writer.index.error
+        assert "interrupted reading the second chart" in _get(writer, "/status")
         assert _loss(writer.page("/runs/lab/a") or "") == [5]
         _ingest(writer)
         assert _loss(writer.page("/runs/lab/a") or "") == [5, 4]
@@ -606,7 +603,7 @@ def test_a_folded_block_keeps_its_runs_observation_while_other_runs_advance(
         monkeypatch.setattr(source, "get", fold_before_read)
         server.refresh_files()
         assert measured.got.count(tail) == 1
-        assert server.index.error is None
+        assert "Run files:" not in _get(server, "/status")
         check_held(server, "11 min ago")
 
     with Server(measured, None, ("127.0.0.1", 0)) as reopened:
@@ -614,12 +611,12 @@ def test_a_folded_block_keeps_its_runs_observation_while_other_runs_advance(
         now += timedelta(minutes=1)
         reopened.refresh_files()
         assert measured.got.count(recent) == 1
-        assert reopened.index.error and "lab/a" in reopened.index.error
+        assert "Run files: lab/a:" in _get(reopened, "/status")
         check_held(reopened, "12 min ago")
 
         reopened.refresh_files()
-        assert reopened.index.error is None
         graph = _get(reopened, "/runs/lab/a")
+        assert "Run files:" not in graph
         assert ">running<" in graph and ">steps 2<" in graph and _loss(graph) == [7, 3]
         assert "files observed 0 s ago" in graph
         assert "files observed" not in _get(reopened, "/experiments/lab/status")
@@ -1581,7 +1578,7 @@ def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: 
         assert "running" in row and "steps 1 / 40" in row and queued not in html
         assert "Idle" in html and "never expires" in html
         assert backend.scheduler.read(first).clocks == {"steps": 2}
-        header = (server.page("/runs/" + first) or "").split("</header>", 1)[1]
+        header = _get(server, f"/runs/{first}?tab=console").split("</header>", 1)[1]
         line = header.split("<p>", 1)[1].split("</p>", 1)[0]
         assert line.count("running") == line.count("steps") == 1
         assert "steps 1 / 40" in line and machine in line
