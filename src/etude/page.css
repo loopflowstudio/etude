@@ -135,8 +135,8 @@ body:has(> #view-rail) { display: grid; grid-template-columns: 12rem minmax(0, 1
 .rail-group > span, .rail-loop { display: block; padding: 3px 8px; color: var(--ink-2); }
 .rail-rate { margin-top: 16px; border-top: 1px solid var(--line); }
 .state-dot { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border: 1px solid currentColor; border-radius: 50%; }
-.state-dot[aria-label*="running"] { color: var(--j1); background: currentColor; }
-.state-dot[aria-label*="failed"] { color: var(--bad); background: currentColor; }
+.state-dot[aria-label*="running"], .state-dot[data-state="running"] { color: var(--j1); background: currentColor; }
+.state-dot[aria-label*="failed"], .state-dot[data-state="failed"] { color: var(--bad); background: currentColor; }
 #view-rail .idle { color: var(--ink-2); }
 @media (width < 700px) {
   body:has(> #view-rail) { display: block; }
@@ -148,3 +148,16 @@ body:has(> #view-rail) { display: grid; grid-template-columns: 12rem minmax(0, 1
   body:has(> #view-rail) { display: block; }
   #view-rail { display: none; }
 }
+
+.experiment-card { align-self: start; overflow-wrap: anywhere; }
+.experiment-card h3 a { color: var(--ink); font-size: 15px; }
+.experiment-card figure { margin: 12px 0 4px; }
+.experiment-card figcaption { font-weight: 500; }
+.experiment-card figcaption small, .experiment-card footer { display: block; color: var(--ink-2); font-size: 12px; font-weight: 400; }
+.experiment-card p { margin: 2px 0 6px; }
+.run-dots { display: flex; flex-wrap: wrap; margin-top: 8px; }
+.run-dot { display: grid; place-items: center; width: 24px; height: 24px; color: var(--ink-2); }
+.run-dot .state-dot { margin: 0; }
+.state-dot[data-state="finished"] { color: var(--good); background: currentColor; }
+.state-dot[data-state="stopped"], .state-dot[data-state="no end recorded"] { color: var(--muted); background: var(--axis); }
+.state-dot[data-state="setting up"], .state-dot[data-state="renting"], .state-dot[data-state="stopping"] { color: var(--warn); background: currentColor; }

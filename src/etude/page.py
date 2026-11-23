@@ -91,11 +91,11 @@ from etude.eval.records import Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named, refuse_renamed
 from etude.home import home
 from etude.records import BUILT_IN_NAMES, Record, RunRecord
-from etude.report import Counters, Curve, Flame, Matches, Report, Score, Series
+from etude.report import Counters, Curve, Elapsed, Flame, Matches, Pace, Report, Score, Series
 from etude.run import RunListing, as_storage, declared
 from etude.storage import DirectoryStorage, S3Storage, Storage, default_root
 from etude.train.read import RunData, read_all
-from etude.train.report import Training, training
+from etude.train.report import Trace, Training, training
 
 if TYPE_CHECKING:
     import duckdb
@@ -617,10 +617,77 @@ def read_report(file: Path, accepted: ReportDeclaration | None) -> ReportDeclara
     return ReportDeclaration(report=loaded.report, sources=loaded.sources)
 
 
-def run_chart_data(storage: Storage, data: RunData, report: Report) -> str:
-    """Render the report's metric panels for one run with every logged metric available."""
+class Headline(Record):
+    """One run's contribution to the first visible ML panel, on its report clock."""
+
+    order: int
+    title: str
+    clock: str
+    unit: str = ""
+    log: bool = False
+    curves: dict[str, Trace]
+
+
+def _headline(report: Report, data: Training, clock: str) -> Headline | None:
+    measured = data.series.get(clock, {})
+    logged = set(data.metrics)
+    panels = list(report.ml)
+    if report.other_metrics:
+        named, timers = set(report.keys()), _flames(report)
+        other = tuple(k for k in data.metrics if k not in named and not k.startswith(timers))
+        if other:
+            panels.append(Series(title="Other logged metrics", keys=other))
+    for order, panel in enumerate(panels):
+        curves: dict[str, Trace] = {}
+        unit = ""
+        if isinstance(panel, Series | Counters):
+            if logged.isdisjoint(panel.keys):
+                continue  # The report omits metric panels absent across its runs.
+            curves = {k: measured[k][0] for k in panel.keys if k in measured}
+            if isinstance(panel, Series):
+                unit = panel.unit
+        elif isinstance(panel, Pace | Elapsed):
+            unit = "per second" if isinstance(panel, Pace) else ""
+            marks = data.checkpoints
+            keys = (
+                [c.name for c in data.clocks if c.kind == "step"]
+                if isinstance(panel, Pace)
+                else ["hours"]
+            )
+            for key in keys:
+                curves[key] = Trace(
+                    owner=data.runs[0].name,
+                    x=[m.at.get(clock) for m in marks],
+                    mean=[
+                        m.pace.get(key) if isinstance(panel, Pace) else m.elapsed / 3600
+                        for m in marks
+                    ],
+                )
+        # A non-curve panel still occupies its place in the experiment's declaration.
+        return Headline(
+            order=order,
+            title=panel.title,
+            clock=clock,
+            unit=unit,
+            log=isinstance(panel, Series) and panel.scale == "log",
+            curves=curves,
+        )
+    return None
+
+
+@dataclass(frozen=True)
+class RunCharts:
+    payload: str
+    headline: Headline | None
+
+
+def run_chart_data(storage: Storage, data: RunData, report: Report, clock: str) -> RunCharts:
+    """Project the full run and the card from one reading of its bucketed curves."""
     page = _assemble(data.experiment, None, storage, report, None, (), [data], _Evals())
-    return _payload(page.model_dump(mode="json") | {"run_charts": True}, None)
+    return RunCharts(
+        _payload(page.model_dump(mode="json") | {"run_charts": True}, None),
+        _headline(report, page.training, clock),
+    )
 
 
 def render_run(address: str, charts: str, heading: str, details: str, tabs: str) -> str:

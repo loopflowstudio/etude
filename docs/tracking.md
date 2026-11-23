@@ -145,7 +145,7 @@ opened before the run appears names the source the view is watching.
 
 | Path | What you see |
 | --- | --- |
-| `/` | Experiments grouped into Open and Completed, with run counts by state, latest file write and links to open runs |
+| `/` | Experiment cards, Open before Completed, with live curves, run states, spend and latest file write |
 | `/status` | The experiment list used to refresh `/` |
 | `/experiments/NAME` | Jobs and runs with their state, clock, last file write and launcher placement or queue reason, plus the experiment report |
 | `/experiments/NAME/status` | The run status table used to refresh the experiment page |
@@ -164,7 +164,14 @@ scheduler heartbeat. The rail updates with the visible page, including
 beside a report you have already built. Below 700 px it becomes a scrollable
 top row. Printing omits it.
 
-**Experiments.** The experiment page opens with its run status table. The
+**Experiments.** Each card at `/` shows the first ML panel that the
+experiment’s `report()` displays. Metric curves use the report clock and keep
+their last values after training ends. Hover over a curve to read its value.
+A panel without a curve leaves the run summary on its own. Each dot links to
+a run and names its state. Dollars sum the launcher’s recorded run costs,
+with `~` when any share is estimated.
+
+Open an experiment to see its run status table. The
 report loads in a separate frame so you can read status during a report build.
 Before the first run files arrive, the pane shows **Waiting for run files**. Once the
 view indexes its first training or evaluation run, the visible tab builds the

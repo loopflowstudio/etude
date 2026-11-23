@@ -18,6 +18,17 @@
     next.scrollTo(scrollLeft, scrollTop);
   }
 
+  const cards = id === "experiment-status" && typeof drawExperimentCards === "function";
+  const drawCards = () => drawExperimentCards(document.getElementById(id));
+  if (cards) {
+    drawCards();
+    let frame;
+    window.addEventListener("resize", () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(drawCards);
+    });
+  }
+
   async function check() {
     let navigating = false;
     try {
@@ -50,6 +61,7 @@
         }
       } else if (!railOnly) {
         replace(current, next);
+        if (cards) drawCards();
       }
       error.textContent = "";
     } catch (cause) {

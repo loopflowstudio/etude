@@ -23,6 +23,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from hashlib import sha256
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -57,7 +58,7 @@ from etude.page import (
     render_run,
     run_chart_data,
 )
-from etude.records import Continuation, RunRecord
+from etude.records import BUILT_IN_NAMES, Continuation, RunRecord
 from etude.report import Report
 from etude.run import LocatedRun, RunListing, as_storage
 from etude.spec import Until, number
@@ -98,7 +99,9 @@ CREATE TABLE IF NOT EXISTS held_files (
     address TEXT PRIMARY KEY, observed_at TEXT
 );
 CREATE TABLE IF NOT EXISTS charts (
-    address TEXT PRIMARY KEY REFERENCES files(address) ON DELETE CASCADE, payload TEXT NOT NULL
+    address TEXT PRIMARY KEY REFERENCES files(address) ON DELETE CASCADE,
+    panel_order INTEGER GENERATED ALWAYS AS (json_extract(headline,'$.order')) STORED,
+    definition TEXT NOT NULL, headline TEXT, payload TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS consoles (
     run TEXT PRIMARY KEY, body TEXT NOT NULL, collected TEXT, gaps INTEGER NOT NULL, final_attempt INTEGER
@@ -126,7 +129,7 @@ WITH observed AS (
 _VISIBLE = f"""{_OBSERVED}, visible AS (
     SELECT runs.address, runs.experiment, kind, ({_MAY_BE_OPEN}) AS may_be_open,
            CASE WHEN matches THEN phase END AS phase, coalesce(eval_last_write,files.last_write) AS last_write, files.inputs,
-           CASE WHEN held_files.address IS NULL THEN at ELSE held_files.observed_at END AS at,
+           held_files.address IS NULL AS listed, CASE WHEN held_files.address IS NULL THEN at ELSE held_files.observed_at END AS at,
            file_error, launcher_at, last_loop, checkpoints,
            coalesce(CASE WHEN matches THEN launcher_job END, file_job) AS job,
            coalesce(CASE WHEN matches THEN launcher_state END, file_state) AS state,
@@ -373,7 +376,9 @@ class ChartIndex:
         # Every listed run supplies its address and write date. Only changed
         # inputs need metadata and a new chart. Stage one payload at a time on disk.
         db.execute("PRAGMA temp_store=FILE")
-        db.execute("CREATE TEMP TABLE next_files AS SELECT *, NULL AS payload FROM files WHERE 0")
+        db.execute(
+            "CREATE TEMP TABLE next_files AS SELECT *, NULL AS definition, NULL AS headline, NULL AS payload FROM files WHERE 0"
+        )
         db.execute("CREATE UNIQUE INDEX temp.file_address ON next_files(address)")
         db.execute("CREATE TEMP TABLE next_declarations AS SELECT * FROM declarations")
         db.execute("CREATE UNIQUE INDEX temp.declared_experiment ON next_declarations(experiment)")
@@ -397,28 +402,34 @@ class ChartIndex:
 
         listing = RunListing.read(storage, objects=objects, missing=missing_declaration)
         previous = dict(db.execute("SELECT address,inputs FROM files"))
-        reports: dict[str, Report] = {}
-        for run in listing.declarations:
-            experiment = run.file.experiment
-            address = (
-                run.folders[0]
-                if run.file.kind == "evaluation"
-                else run_address(run.file.id, experiment)
-            )
-            report = None
-            if run.file.kind != "evaluation":
-                if experiment not in reports:
-                    reports[experiment] = self._report(db, experiment, paths.get(experiment))
-                report = reports[experiment]
-            sealed = sorted(
-                key for key in listing.keys_in(run.folders) if not key.endswith(".open")
-            )
-            try:
-                _stage_run(db, storage, run, address, sealed, report, previous.get(address))
-            except FileNotFoundError as missing:
-                # A live writer replaced a listed block after this listing began.
-                # The run keeps its published facts; its other runs still advance.
-                vanished[address] = explain(missing)
+        for experiment, members in groupby(listing.declarations, lambda r: r.file.experiment):
+            runs = list(members)
+            training = [r.file for r in runs if r.file.kind != "evaluation"]
+            report = self._report(db, experiment, paths.get(experiment)) if training else None
+            # The card uses one clock across the experiment, even when a run lacks that axis.
+            clocks = dict.fromkeys(c.name for file in training for c in file.clocks)
+            clocks.update(dict.fromkeys(BUILT_IN_NAMES))
+            clock = report.clock if report and report.clock in clocks else next(iter(clocks))
+            for run in runs:
+                evaluation = run.file.kind == "evaluation"
+                address = run.folders[0] if evaluation else run_address(run.file.id, experiment)
+                sealed = sorted(
+                    key for key in listing.keys_in(run.folders) if not key.endswith(".open")
+                )
+                try:
+                    _stage_run(
+                        db,
+                        storage,
+                        run,
+                        address,
+                        sealed,
+                        None if evaluation else report,
+                        clock,
+                        previous.get(address),
+                    )
+                except FileNotFoundError as missing:
+                    # The writer replaced a listed block. Other runs can still advance.
+                    vanished[address] = explain(missing)
 
         return observed_at, _hold_files(db, listing, vanished) if vanished else {}
 
@@ -467,8 +478,8 @@ class ChartIndex:
         if rebuilt:
             # Replacing a file row retires its old chart through the foreign key.
             db.execute(
-                """INSERT INTO charts(address,payload)
-                   SELECT address,payload FROM next_files WHERE payload IS NOT NULL"""
+                """INSERT INTO charts(address,definition,headline,payload)
+                   SELECT address,definition,headline,payload FROM next_files WHERE payload IS NOT NULL"""
             )
         db.execute(
             """DELETE FROM declarations WHERE experiment NOT IN (SELECT experiment FROM next_declarations)"""
@@ -675,10 +686,14 @@ class _ViewSnapshot:
     def _list_runs(
         self, experiment: str | None = None
     ) -> tuple[sqlite3.Row | None, list[sqlite3.Row]]:
-        # Both tables and their ages come from one generation. Leave large chart,
-        # console and machine payloads out of these reads.
+        # The overview reads only the card projection. Both pages skip full run charts.
         query = _VISIBLE + (
-            "SELECT experiment,address,job,state,phase,position,status,max_attempts,last_write,at,continues FROM visible"
+            "SELECT experiment,address,job,state,phase,position,status,max_attempts,last_write,at,continues"
+            + (
+                ",listed,definition,panel_order,headline FROM visible LEFT JOIN charts USING(address)"
+                if experiment is None
+                else " FROM visible"
+            )
         )
         params = {"experiment": experiment, "remote": self.remote}
         observation = self.db.execute(
@@ -704,32 +719,63 @@ class _ViewSnapshot:
         opened: list[str] = []
         completed: list[str] = []
         stale = False
-        for name, runs in groupby(rows, itemgetter("experiment")):
+        for name, members in groupby(rows, itemgetter("experiment")):
+            runs = list(members)
+            # A held run can predate a report edit. Its previous panel is comparable
+            # only if the latest indexed training files use that same report and clock.
+            newest = max(
+                (r for r in runs if r["definition"]), key=itemgetter("listed", "at"), default=None
+            )
             counts: Counter[str] = Counter()
-            active = []
+            active = False
             latest: str | None = None
+            dots = []
+            costs = []
+            panels: dict[int, list[str]] = defaultdict(list)
             for run in runs:
                 state = _display_state(run)
                 counts[state] += 1
-                # The index stores UTC write times in ISO order.
-                written = run["last_write"]
-                if written and (latest is None or written > latest):
+                active |= _is_open(run, state)
+                if (written := run["last_write"]) and (latest is None or written > latest):
                     latest = written
                 status = _status(run)
-                if _is_open(run, state):
-                    address = run["address"]
-                    detail = _run_line(run, state, status)
-                    active.append(f"<div>{_run_link(address)} · {detail}</div>")
+                if status is not None:
+                    costs.append(status)
+                address = run["address"]
+                facts = (address, state, run["position"], status.machine if status else None)
+                label = escape(" · ".join(fact for fact in facts if fact))
+                dots.append(
+                    f'<a class="run-dot" href="{run_path(address)}" aria-label="{label}" title="{label}">'
+                    f'<i class="state-dot" aria-hidden="true" data-state="{escape(state)}"></i></a>'
+                )
+                if newest and run["definition"] == newest["definition"] and run["headline"]:
+                    panels[run["panel_order"]].append(run["headline"])
             totals = " · ".join(f"{counts[state]} {escape(state)}" for state in sorted(counts))
             stale |= "no end recorded" in counts
             group = opened if active else completed
+            spend = ""
+            if costs:
+                usd = sum((s.usd for s in costs), Decimal(0))
+                spend = f"{'~' if any(s.estimated for s in costs) else ''}${usd:.2f} · "
+            dated = (
+                "no files yet"
+                if all(_no_files(run) for run in runs)
+                else "File observation unavailable"
+            )
+            if latest:
+                dated = f"last write <span>{_age(latest, now)}</span>"
+            chart = ""
+            if panels:
+                data = ",".join(panels[min(panels)]).replace("<", "\\u003c")
+                chart = f'<div class="card-charts"><script type="application/json">[{data}]</script></div>'
             group.append(
-                f'<tr><th scope="row"><a href="/experiments/{quote(name)}">{escape(name)}</a></th>'
-                f"<td>{totals}{''.join(active)}</td><td>{_age(latest, now)}</td></tr>"
+                f'<article class="card experiment-card"><h3><a href="/experiments/{quote(name)}">{escape(name)}</a></h3>'
+                f'{chart}<div class="run-dots">{"".join(dots)}</div>'
+                f"<p>{totals}</p><footer>{spend}{dated}</footer></article>"
             )
         if observation:
             body = (
-                _experiments_table("Open", opened) + _experiments_table("Completed", completed)
+                _experiment_cards("Open", opened) + _experiment_cards("Completed", completed)
                 if rows
                 else "<p>Waiting for runs.</p>"
             )
@@ -934,24 +980,31 @@ def _stage_run(
     address: str,
     sealed: list[str],
     report: Report | None,
+    clock: str,
     previous: str | None,
 ) -> None:
     digest = sha256()
+    definition = None
+    if report is not None:
+        digest.update(clock.encode() + b"\0")
+        digest.update(report.model_dump_json(include=report.model_fields_set).encode())
+        definition = digest.hexdigest()
     for key in sealed:
         digest.update(f"{key}\0{storage.objects[key]}\0".encode())
-    if report is not None:
-        digest.update(report.model_dump_json(include=report.model_fields_set).encode())
     inputs = digest.hexdigest()
-    metadata = reached = payload = None
+    metadata = reached = payload = headline = None
     if previous != inputs:
         data = read_located(storage, run, sealed, whole_blocks=True)
         metadata = data.model_dump_json(exclude={"last_write"}, round_trip=True)
         if report is not None:
-            payload = run_chart_data(storage.storage, data, report)
+            charts = run_chart_data(storage.storage, data, report, clock)
+            payload = charts.payload
+            if charts.headline is not None:
+                headline = charts.headline.model_dump_json(exclude_defaults=True)
             reached = _CLOCKS.dump_json(data.reached).decode()
     db.execute(
-        """INSERT INTO next_files(address,experiment,inputs,reached,preferred,last_write,metadata,payload)
-           VALUES(?,?,?,?,?,?,?,?)""",
+        """INSERT INTO next_files(address,experiment,inputs,reached,preferred,last_write,definition,headline,metadata,payload)
+           VALUES(?,?,?,?,?,?,?,?,?,?)""",
         (
             address,
             run.file.experiment,
@@ -959,6 +1012,8 @@ def _stage_run(
             reached,
             report.clock if report else None,
             run.last_write.isoformat() if run.last_write else None,
+            definition,
+            headline,
             metadata,
             payload,
         ),
@@ -1138,13 +1193,13 @@ def _table(columns: tuple[str, ...], rows: list[str]) -> str:
     )
 
 
-def _experiments_table(title: str, rows: list[str]) -> str:
-    table = (
-        _table(("Experiment", "Runs", "Last file write"), rows)
-        if rows
+def _experiment_cards(title: str, cards: list[str]) -> str:
+    body = (
+        f'<div class="grid multiples">{"".join(cards)}</div>'
+        if cards
         else f"<p>No {title.lower()} experiments.</p>"
     )
-    return f'<section class="sec"><h2>{title}</h2>{table}</section>'
+    return f'<section class="sec"><h2>{title}</h2>{body}</section>'
 
 
 def _status_page(title: str, status: str, *, after: str = "") -> str:
@@ -1415,6 +1470,12 @@ class Server(ThreadingHTTPServer):
             section = "/"
             if route == "/":
                 title, status = "Experiments", view.experiments()
+                if path == "/":
+                    after = (
+                        f"<style>{read_asset('vendor/uPlot.min.css')}</style>"
+                        f"<script>{read_asset('vendor/uPlot.iife.min.js')}</script>"
+                        f"<script>{read_asset('charts.js')}</script>"
+                    )
             elif route == "/machines":
                 title, status = "Machines", view.machines()
                 section = route

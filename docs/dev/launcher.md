@@ -211,8 +211,11 @@ The view indexes files and launcher standing independently under
 accepted report panels with the previous pass, including after a restart. One
 reader per index stages updated run metadata and charts in a private SQLite
 table. An open block updates the run's file timestamp. A change to sealed
-inputs replaces the file record and its chart together. Local report declarations
-run separately. Each experiment keeps its last accepted panels through an
+inputs replaces the file record, its full chart and its first ML panel together.
+The overview reads just that panel from each run, choosing the earliest one in
+the experiment’s report order. If a run file is temporarily unavailable during a
+report edit, its dot remains. Its curve rejoins the card when its indexed panel
+matches the current report and clock. Local report declarations run separately. Each experiment keeps its last accepted panels through an
 incomplete edit.
 
 At commit, either publisher joins its new facts with the other source's last

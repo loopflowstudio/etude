@@ -19,6 +19,7 @@ from typing import Self
 import boto3  # type: ignore[import-untyped]
 import pytest
 from moto import mock_aws
+from pydantic import TypeAdapter
 
 from etude.block_file import block_key, tail_key
 from etude.checkpoints import CheckpointRecord
@@ -30,7 +31,7 @@ from etude.launch.database import Database
 from etude.launch.logs import snapshot_stream
 from etude.launch.records import GPU
 from etude.launch.server import LauncherObservation, PythonClient
-from etude.page import Page, Pages, _run_file
+from etude.page import Headline, Page, Pages, _run_file
 from etude.records import ArtifactRef, Clock, RunCounters, RunOutcome, RunRecord, RunWriter, Tally
 from etude.run import sync
 from etude.spec import RunRequest, Until
@@ -892,8 +893,9 @@ def test_replacement_allocation_keeps_the_curve_and_supplies_the_phase(
         pages = [
             graph,
             _get(view, "/experiments/lab/status"),
-            _get(view, "/status").split("<h2>Completed")[0],
         ]
+        overview = _get(view, "/status").split("<h2>Completed")[0]
+        assert f'data-state="{phase}"' in overview and f"steps {len(loss)} /" in overview
         if occupied:
             pages.append(_get(view, "/machines/status"))
         for page in pages:
@@ -1110,6 +1112,131 @@ def test_continuation_link_from_queue_to_delivery_survives_view_restart(
         for page in (child_page, "/experiments/paced/status"):
             html = _get(reader, page)
             assert f"Continued from {parent} at updates 150" in html and parent_page not in html
+
+
+def test_experiment_cards_follow_the_first_indexed_ml_panel_without_source_reads(
+    tmp_path: Path,
+) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    file = experiment_file(
+        tmp_path,
+        "lab",
+        """
+from etude.report import Report, Series
+
+def report() -> Report:
+    return Report(clock="steps", ml=(
+        Series(title="Return </script>", keys=("reward",), unit="points", scale="log"),
+        Series(title="Loss", keys=("loss",)),
+    ))
+""",
+    )
+    for name in ("lab/a", "lab/b", "archive/base"):
+        _start_run(source, name, 7)
+    outcome = RunOutcome(state="finished", counters=RunCounters()).model_dump_json().encode()
+    source.put("archive/base/outcome.json", outcome)
+    backend = bench(home())
+    # The retained read prices each open window through its one-hour deadline.
+    backend.clock.now = datetime.now(UTC) - timedelta(hours=2)
+    queued = backend.scheduler.queue(
+        [job(name="left", experiment="next"), job(name="right", experiment="next")], rent="l4"
+    )
+    measured = MeasuredStorage(source)
+
+    def cards(view: Server, route: str) -> list[str]:
+        reads = measured.listings, measured.requests, measured.bytes
+        html = _get(view, route)
+        assert (measured.listings, measured.requests, measured.bytes) == reads
+        return [
+            part.split("</article>", 1)[0]
+            for part in html.split('<article class="card experiment-card">')[1:]
+        ]
+
+    def curves(card: str) -> list[Headline]:
+        encoded = card.split('<script type="application/json">')[1].split("</script>")[0]
+        return TypeAdapter(list[Headline]).validate_json(encoded)
+
+    with Server(measured, file, ("127.0.0.1", 0)) as view:
+        _ingest(view)
+        _publish_declarations(view)
+        live, waiting, archived = cards(view, "/")
+        assert 'href="/experiments/lab"' in live and 'href="/experiments/archive"' in archived
+        assert live.count('data-state="running"') == 2 and "2 running" in live
+        assert all(f'href="/runs/lab/{name}"' in live for name in ("a", "b"))
+        assert [panel.title for panel in curves(live)] == ["Loss", "Loss"]
+        assert 'data-state="finished"' in archived and "last write" in archived
+        assert (
+            all(f'href="/runs/{address}"' in waiting for address in queued)
+            and "2 queued" in waiting
+        )
+        assert "no files yet" in waiting and "$0.00" in waiting and "card-charts" not in waiting
+        assert "$" not in archived
+
+        builder = Builder(["steps"])
+        builder.add(1002, {"steps": 2}, {"reward": 11, "loss": 4})
+        write_block(
+            source.root / "lab/b", tail_key(1, "123456abcdef"), builder.columns("123456abcdef", 1)
+        )
+        view.refresh_files()
+        backend.scheduler.tick()
+        backend.run(1)
+        backend.run(120)
+        view.refresh_launcher()
+        changed, allocated, still_archived = cards(view, "/status")
+        assert "~$1.18" in allocated and allocated.count('data-state="running"') == 2
+        (panel,) = curves(changed)
+        assert (panel.title, panel.clock, panel.unit, panel.log) == (
+            "Return </script>",
+            "steps",
+            "points",
+            True,
+        )
+        assert list(panel.curves) == ["reward"]
+        reward = panel.curves["reward"]
+        assert (reward.owner, reward.x, reward.mean) == ("b", [2], [11])
+        assert "2 running" in changed and "Loss" not in changed
+        assert curves(still_archived) == curves(archived)
+    backend.store.close()
+
+
+def test_card_keeps_one_report_panel_while_a_run_file_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    for name in ("a", "b"):
+        _start_run(source, f"lab/{name}", 7)
+    file = experiment_file(
+        tmp_path,
+        "lab",
+        """
+from etude.report import Report, Series
+
+def report() -> Report:
+    return Report(ml=(Series(title="Previous panel", keys=("loss",)),))
+""",
+    )
+    with Server(source, file, ("127.0.0.1", 0)) as view:
+        _ingest(view)
+        _publish_declarations(view)
+        assert "Previous panel" in _get(view, "/status")
+        tail = "lab/a/" + _seal(source.root / "lab/a", 1, 4)
+        get = source.get
+
+        def missing(key: str) -> bytes:
+            if key == tail:
+                raise FileNotFoundError(key)
+            return get(key)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(source, "get", missing)
+            file.write_text(file.read_text().replace("Previous panel", "Edited panel"))
+            _publish_declarations(view)
+            _publish_declarations(view)
+            page = _get(view, "/status")
+            assert "Edited panel" in page and "Previous panel" not in page
+            assert '"owner":"b"' in page and '"owner":"a"' not in page and "2 running" in page
+        view.refresh_files()
+        assert '"owner":"a"' in _get(view, "/status")
 
 
 def test_side_rail_follows_open_experiments_and_held_rentals_on_every_page(tmp_path: Path) -> None:

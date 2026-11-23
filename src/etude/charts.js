@@ -458,3 +458,38 @@ function latestActivity(D) {
   for (const m of D.training.checkpoints) times.push(((started.get(m.run) ?? 0) + m.elapsed) * 1000);
   return Math.max(...times) || null;
 }
+
+// Card data contains only the first ML panel represented across the experiment's runs.
+// Keep different metrics and clocks on separate axes, even across a held file observation.
+function drawExperimentCards(root) {
+  destroyCharts();
+  hideTip();
+  for (const host of root.querySelectorAll(".card-charts")) {
+    const data = host.querySelector("script");
+    const panels = JSON.parse(data.textContent);
+    host.replaceChildren(data);
+    const plots = new Map();
+    panels.forEach((panel, run) => {
+      for (const [key, trace] of Object.entries(panel.curves)) {
+        const id = JSON.stringify([panel.title, key, panel.clock, panel.unit, panel.log]);
+        const points = trace.x.map((x, i) => ({x, y: trace.mean[i]}));
+        const last = points.findLast(p => p.x != null && p.y != null && (!panel.log || p.y > 0));
+        if (!last) continue;
+        if (!plots.has(id)) plots.set(id, {panel, key, lines: [], latest: []});
+        const {lines, latest} = plots.get(id);
+        lines.push({label: trace.owner, color: css(`--j${run % 8 + 1}`), points});
+        latest.push(`${trace.owner}: ${fmt(last.y)} at ${panel.clock} ${num(last.x)}`);
+      }
+    });
+    for (const {panel, key, lines, latest} of plots.values()) {
+      const figure = node("figure"), plot = node("div");
+      const caption = node("figcaption", null, panel.title);
+      caption.appendChild(node("small", null, [key, panel.unit, panel.log && "log scale", panel.clock].filter(Boolean).join(" · ")));
+      plot.setAttribute("role", "img");
+      plot.setAttribute("aria-label", latest.join(", "));
+      figure.append(caption, plot);
+      host.appendChild(figure);
+      line(plot, lines, {compact: true, height: 116, xLabel: panel.clock, log: panel.log});
+    }
+  }
+}
