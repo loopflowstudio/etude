@@ -31,7 +31,7 @@ from collections.abc import Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from errno import EEXIST, ENOTEMPTY
 from hashlib import sha256
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
 from stat import S_ISREG
 from typing import Literal
 
@@ -126,6 +126,14 @@ def _rank(key: str) -> int:
     return 3
 
 
+def publishable_name(path: PurePath) -> bool:
+    """Whether a relative path names finished, visible output."""
+    return not any(part.startswith(".") for part in path.parts) and path.suffix not in (
+        ".open",
+        ".partial",
+    )
+
+
 def _listing(root: Path, *, tail_seconds: float) -> list[str]:
     """Ready files as slash-separated keys, ordered by delivery rank then key.
 
@@ -140,8 +148,8 @@ def _listing(root: Path, *, tail_seconds: float) -> list[str]:
         return keys
     now = time.time()
     for path in root.rglob("*"):
-        name = PurePosixPath(path.relative_to(root).as_posix())
-        if any(part.startswith(".") for part in name.parts) or path.suffix in (".open", ".partial"):
+        name = path.relative_to(root)
+        if not publishable_name(name):
             continue
         try:
             stat = path.lstat()  # a link is never followed out of the folder

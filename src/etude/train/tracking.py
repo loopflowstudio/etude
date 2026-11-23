@@ -60,7 +60,7 @@ from pydantic import BaseModel, ValidationError
 
 from etude.block_file import block_key, log_key, sealed_as, tail_key
 from etude.cache import Content
-from etude.carriage import OUT_PRESENT, checkpoint_key, note_retired, taken
+from etude.carriage import OUT_PRESENT, checkpoint_key, note_retired, publishable_name, taken
 from etude.checkpoints import CheckpointRecord
 from etude.deadline import limit_time
 from etude.errors import EtudeError
@@ -178,10 +178,7 @@ def _folder_artifact(folder: Path) -> ArtifactRef:
             raise ValueError("a checkpoint must be self-contained, without symbolic links")
         if path.is_file():
             key = path.relative_to(folder)
-            if any(part.startswith(".") for part in key.parts) or path.suffix in (
-                ".open",
-                ".partial",
-            ):
+            if not publishable_name(key):
                 raise ValueError(
                     "checkpoint files must use portable published names, without private or unfinished files"
                 )
@@ -411,8 +408,8 @@ class TrainingRun(Run):
         for value in range(int(position) + 1, int(target) + 1):
             if self.should_stop:
                 for state in self._states.values():
-                    if state.last_at is None or any(
-                        state.last_at.get(name) != self.at(name) for name in self._clock_names
+                    if any(
+                        state.last_at.get(name, 0.0) != self.at(name) for name in self._clock_names
                     ):
                         self._save_state(state)
                 raise Stopped()
@@ -429,19 +426,41 @@ class TrainingRun(Run):
 
     @overload
     def resume[T: BaseModel](
-        self, *, extra: T, name: str | None = None, **objects: object
+        self,
+        *,
+        extra: T,
+        export: Callable[[Path], None] | None = None,
+        restore: Callable[[Path], None] | None = None,
+        name: str | None = None,
+        **objects: object,
     ) -> T: ...
 
     @overload
     def resume(
-        self, *, extra: None = None, name: str | None = None, **objects: object
+        self,
+        *,
+        extra: None = None,
+        export: Callable[[Path], None] | None = None,
+        restore: Callable[[Path], None] | None = None,
+        name: str | None = None,
+        **objects: object,
     ) -> Path | None: ...
 
     def resume(
-        self, *, extra: BaseModel | None = None, name: str | None = None, **objects: object
+        self,
+        *,
+        extra: BaseModel | None = None,
+        export: Callable[[Path], None] | None = None,
+        restore: Callable[[Path], None] | None = None,
+        name: str | None = None,
+        **objects: object,
     ) -> BaseModel | Path | None:
-        """Register objects and restore only those objects from the last whole save."""
-        state = State(state_folder(self.out, name), objects, extra)
+        """Register a namespace and restore objects, extra, then custom files.
+
+        Return the supplied extra instance, or the selected folder (None on first use).
+        A failing restore leaves registration unchanged but may have mutated live state.
+        """
+        state = State(state_folder(self.out, name), objects, extra, export=export, restore=restore)
         found = state.restore(seed=self.seed)
         self._states[name] = state
         return extra if extra is not None else found
@@ -449,11 +468,13 @@ class TrainingRun(Run):
     def save(
         self, export: Callable[[Path], None] | None = None, *, name: str | None = None
     ) -> None:
-        """Write registered state when due, at the target, or before a planned stop."""
+        """Update the exporter if supplied, then save when due, at the target, or on stop."""
         if name not in self._states:
             raise ValueError("register state with run.resume() before saving")
         state = self._states[name]
         if export is not None:
+            if not callable(export):
+                raise TypeError("export must be callable")
             state.export = export
         clock = self._step_clock
         due = (

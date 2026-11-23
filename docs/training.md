@@ -121,9 +121,10 @@ keyword arguments and cannot name `**objects`. Calling `run.save(export=fn, name
 updates a namespace's exporter before checking whether a save is due;
 registering `restore=` without any `export=` raises `ValueError` on save so
 `current.json` is never overwritten without your files. Exported files are
-recorded in the save manifest and must not be symlinks, `state.json`,
-dot-prefixed paths, `.open`/`.partial` files or names colliding with registered
-`<object>.pt` files. If `restore` raises, registration does not complete,
+recorded in the save manifest. Use visible paths for finished files and
+avoid symlinks and `.open`/`.partial` suffixes. Etude reserves the root
+`state.json`, each registered object's name as a manifest key, and its
+`<object>.pt` path. If `restore` raises, registration does not complete,
 though objects or `extra` restored before it may already be updated. The
 [persistence reference](dev/training.md) describes the stored layout.
 

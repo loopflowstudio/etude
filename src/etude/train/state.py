@@ -18,7 +18,7 @@ from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, JsonValue
 
-from etude.carriage import save_name, save_number, valid_state_name, within
+from etude.carriage import publishable_name, save_name, save_number, valid_state_name, within
 
 
 class SavedState(BaseModel):
@@ -104,15 +104,26 @@ class State:
     """One registered namespace: its live objects, extra counts and last save."""
 
     def __init__(
-        self, folder: Path, objects: Mapping[str, object], extra: BaseModel | None
+        self,
+        folder: Path,
+        objects: Mapping[str, object],
+        extra: BaseModel | None,
+        *,
+        export: Callable[[Path], None] | None = None,
+        restore: Callable[[Path], None] | None = None,
     ) -> None:
+        if export is not None and not callable(export):
+            raise TypeError("export must be callable")
+        if restore is not None and not callable(restore):
+            raise TypeError("restore must be callable")
         self.folder = folder
         self.objects = _objects(objects)
         self.extra = extra
-        self.export: Callable[[Path], None] | None = None
+        self.export = export
+        self._restore = restore
         self.saved_at = time.monotonic()
         self.saved_step = 0.0
-        self.last_at: dict[str, float] | None = None
+        self.last_at: dict[str, float] = {}
         if self.objects:
             _torch()  # refuse an unavailable serializer at registration
 
@@ -121,7 +132,6 @@ class State:
         if found is None:
             return None
         path, saved = found.path, found.record
-        self.last_at = saved.at
         if saved.seed != seed:
             raise ValueError(f"saved seed was {saved.seed}, is {seed}")
         for name, value in self.objects.items():
@@ -136,9 +146,14 @@ class State:
             loaded = type(self.extra).model_validate(saved.extra)
             for name in type(self.extra).model_fields:
                 setattr(self.extra, name, getattr(loaded, name))
+        if self._restore is not None:
+            self._restore(path)
+        self.last_at = saved.at
         return path
 
     def write(self, *, at: dict[str, float], wall_ms: int, seed: int, commit: str | None) -> None:
+        if self._restore is not None and self.export is None:
+            raise ValueError("saving state registered with restore requires an export callback")
         self.folder.mkdir(parents=True, exist_ok=True)
         number = 1 + max(
             (save_number(path.name) or 0 for path in self.folder.glob("save-*")), default=0
@@ -146,9 +161,11 @@ class State:
         target = self.folder / f"save-{number:08d}"
         with TemporaryDirectory(prefix=".save-", dir=self.folder) as temporary:
             staged = Path(temporary)
+            files: dict[str, str] = {}
             if self.export is not None:
                 self.export(staged)
-            files = write_objects(staged, self.objects)
+                files = _exported_files(staged, self.objects)
+            files.update(write_objects(staged, self.objects))
             saved = SavedState(
                 at=at,
                 wall_ms=wall_ms,
@@ -158,12 +175,9 @@ class State:
                 files=files,
             )
             (staged / "state.json").write_text(saved.model_dump_json())
-            for path in staged.rglob("*"):
-                if path.is_symlink():
-                    raise ValueError("a save must be self-contained, without symbolic links")
-                if path.is_file():
-                    with path.open("rb") as stream:
-                        os.fsync(stream.fileno())
+            for name in (*files.values(), "state.json"):
+                with (staged / name).open("rb") as stream:
+                    os.fsync(stream.fileno())
             staged.rename(target)
         pointer = self.folder / "current.json.partial"
         with pointer.open("w") as stream:
@@ -173,6 +187,29 @@ class State:
         pointer.replace(self.folder / "current.json")
         self.saved_at = time.monotonic()
         self.last_at = at
+
+
+def _exported_files(folder: Path, objects: Mapping[str, StateObject]) -> dict[str, str]:
+    """Inventory the callback's files before Etude writes its own."""
+    if folder.is_symlink() or not folder.is_dir():
+        raise ValueError("export must write into its staging directory")
+    for reserved in ("state.json", *(f"{name}.pt" for name in objects)):
+        if (folder / reserved).exists():
+            raise ValueError(f"export collides with reserved state path {reserved!r}")
+    files: dict[str, str] = {}
+    for path in sorted(folder.rglob("*")):
+        relative = path.relative_to(folder)
+        if path.is_symlink() or not publishable_name(relative):
+            raise ValueError(
+                f"export must use visible, finished paths without symlinks: {relative}"
+            )
+        if path.is_dir():
+            continue
+        key = relative.as_posix()
+        if not path.is_file() or key in objects:
+            raise ValueError(f"export must write regular files distinct from object names: {key}")
+        files[key] = key
+    return files
 
 
 def _objects(objects: Mapping[str, object]) -> dict[str, StateObject]:
