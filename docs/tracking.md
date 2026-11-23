@@ -143,6 +143,14 @@ and accepts a directory (as a path or the `file://` address Etude prints),
 Bucket sources need read credentials. Viewing requires no machine-provider key.
 The view listens on `127.0.0.1:8765` by default and prints its address.
 
+Use this computer’s runs directory or a small bucket prefix for the local
+view. On a cold start, the view lists the entire source and downloads the
+run metadata and sealed training metrics for every experiment into
+`ETUDE_HOME/cache`. File-backed runs appear together after that first pass
+finishes. Passing one experiment file selects its report code and still
+scans the whole source. For large buckets, the planned hosted view will
+receive updates pushed by trainers.
+
 While the view advertises its address in `ETUDE_HOME/view`, `train`, `launch`,
 `queue` and `status RUN` print a `view:` link for each run. A declared run
 uses `EXPERIMENT/JOB@SEED`, such as `prototype/coin@0`. For a file defining
