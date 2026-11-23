@@ -51,8 +51,10 @@ function renderPage(data, hash = "", overview = null) {
     training: {metrics: [], series: {}, bands: {}, timers: [], ...data.training, runs: data.training.runs.map(r => ({rows: 0, writers: [], ...r}))},
   };
   document.getElementById("data").textContent = JSON.stringify(full);
+  const location = new URL("http://localhost/runs/test?tab=charts" + hash);
   const browser = vm.createContext({
-    document, devicePixelRatio: 1, URLSearchParams, location: {hash}, history: {replaceState() {}}, addEventListener() {},
+    document, devicePixelRatio: 1, URLSearchParams, location,
+    history: {replaceState(_state, _title, url) { location.href = new URL(url, location).href; }}, addEventListener() {},
     getComputedStyle: () => ({getPropertyValue: () => "#112233"}),
     IntersectionObserver: class { observe() {} },
     uPlot: class {
@@ -62,7 +64,11 @@ function renderPage(data, hash = "", overview = null) {
   });
   const script = fs.readFileSync("src/etude/page.html", "utf8").split("<script>\n")[1].split("</script>")[0];
   vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\n" + script, browser);
-  return {text: document.getElementById("evals-body").textContent, plots, sectionText: id => document.getElementById(id + "-body").textContent, display: id => document.getElementById(id).style.display};
+  function click(section, text) {
+    const find = el => el.onclick && el.textContent === text ? el : el.children.filter(c => typeof c !== "string").map(find).find(Boolean);
+    find(document.getElementById(section + "-controls")).onclick();
+  }
+  return {location, click, text: document.getElementById("evals-body").textContent, plots, sectionText: id => document.getElementById(id + "-body").textContent, display: id => document.getElementById(id).style.display};
 }
 
 test("a section the report gives no panel is hidden, header and controls with it", () => {
@@ -207,6 +213,19 @@ test("union curves keep jobs separate", () => {
   data.report.evals.push({kind: "curve"});
   data.panel_selections.push({selection: null, control: true});
   assert.equal(context.model(data).usesSelection, true);
+});
+
+test("the index headline uses the primary curve and its first named anchor", () => {
+  const anchor = name => ({name, placed: false, config: "{}", at: {}});
+  const data = page([player("u150", "learner", 150), anchor("Z"), anchor("alpha")],
+    [[0, 1, 0.25], [0, 2, 0.75], [0, null, 0.5]]);
+  data.scores = [{table: "scores", value: "won"}];
+  data.report.evals = [{kind: "curve"}];
+  const [head] = context.headline(data, context.model(data));
+  assert.equal(head.against, "alpha");
+  assert.equal(head.latest.y, 0.75);
+  data.report.evals = [{kind: "anchors"}];
+  assert.equal(context.headline(data, context.model(data))[0].latest, null);
 });
 
 test("job labels retain seed counts and baseline identity", () => {
@@ -403,6 +422,28 @@ test("a live run leads with measured groups from either report section", () => {
   assert.doesNotMatch(render().sectionText("performance"), /Pace/);
   data.training.checkpoints.push({run: "a", ordinal: 2, align: 8, at: {updates: 8}, elapsed: 5, pace: {updates: 2}});
   assert.match(render().sectionText("performance"), /Pace.*Elapsed/);
+});
+
+test("run links retain only changed chart controls and preserve section anchors", () => {
+  const data = page([], [], {
+    jobs: [{name: "a", runs: ["a"]}], runs: [{name: "a"}], checkpoints: [],
+    clocks: [{name: "updates"}, {name: "steps"}], metrics: ["loss"],
+    series: {updates: {loss: [{owner: "a", x: [150], mean: [0.42]}]}},
+  });
+  data.run_charts = true;
+  data.report = {clock: "updates", ml: [{kind: "series", title: "Losses", keys: ["loss"]}]};
+  const view = renderPage(data);
+  assert.equal(view.location.hash, "");
+  assert.deepEqual([...view.plots[0].options.scales.x.range], [0, 150]);
+  view.click("charts", "Raw");
+  assert.equal(view.location.hash, "#smooth=off");
+  view.click("charts", "steps");
+  const restored = renderPage(data, view.location.hash + "&sel=3&hide=a");
+  assert.equal(restored.location.hash, "#mlclock=steps&smooth=off");
+  restored.click("charts", "Smoothed");
+  restored.click("charts", "updates");
+  assert.equal(restored.location.href, "http://localhost/runs/test?tab=charts");
+  assert.equal(renderPage({...data, run_charts: false}, "#ml").location.hash, "#ml");
 });
 
 test("Overview draws the first two report panels and marks the last checkpoint on their clock", () => {

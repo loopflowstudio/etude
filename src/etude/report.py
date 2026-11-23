@@ -256,7 +256,8 @@ class Report(Record):
     launched under it, or by its full name ("ppo 1a2b3c"), which covers one.
     `labels` replaces displayed job names, keeping config digests, seed counts
     and identity.
-    A build reads and draws only the metrics its panels name.
+    A build draws the metrics its panels name. If the report has no evaluated
+    curve or drawable ML series, its headline can use one ungrouped metric.
     `other_metrics=True` also draws every other logged metric, last under ML
     details, and so reads each training run's whole metric index; an
     experiment without `report()` gets `Report(other_metrics=True)`.

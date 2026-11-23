@@ -25,6 +25,8 @@ from etude.block_file import block_key, tail_key
 from etude.checkpoints import CheckpointRecord
 from etude.cli import main
 from etude.errors import LauncherError
+from etude.eval.records import Code, Match
+from etude.eval.result import Tables
 from etude.home import home
 from etude.jobs import ExperimentState, group_evaluations
 from etude.launch.database import Database
@@ -40,6 +42,8 @@ from etude.train.block import Builder
 from etude.train.tracking import write_block
 from etude.view import Server, _machines_table
 from etude.view_link import advertise, print_view
+from tests.eval.games import play
+from tests.eval.playing import play_matches
 from tests.experiments import experiment_file
 from tests.launch.counting import Counting, Counts
 from tests.launch.fake import bench
@@ -50,6 +54,7 @@ from tests.run.storage import CountedClient, MeasuredStorage
 from tests.test_eval_groups import group as eval_group
 from tests.test_eval_groups import job as eval_job
 from tests.test_page import REPORTED, trained
+from tests.test_page_evals import DUEL, HEURISTIC, duel, outside
 from tests.train.tracking import open_run
 
 COUNTED = """
@@ -483,6 +488,22 @@ def test_a_reopened_view_dates_open_files_without_rereading_sealed_data(tmp_path
         assert (measured.listings, measured.requests) == (before[0] + 1, before[1] + 1)
 
 
+def test_changed_chart_projection_starts_a_fresh_view_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    _start_run(source, "lab/base", 3)
+    with monkeypatch.context() as old_version:
+        old_version.setattr("etude.view._INDEX_VERSION", -1)
+        with Server(source, None, ("127.0.0.1", 0)) as old:
+            _ingest(old)
+            assert _loss(_get(old, "/runs/lab/base")) == [3]
+    with Server(source, None, ("127.0.0.1", 0)) as new:
+        assert "Waiting for the first observation." in _get(new, "/")
+        _ingest(new)
+        assert _loss(_get(new, "/runs/lab/base")) == [3]
+
+
 def test_graph_requests_reuse_the_published_generation_after_interruption(tmp_path: Path) -> None:
     storage = DirectoryStorage(tmp_path / "runs")
     root = storage.root / "lab/base@0"
@@ -754,9 +775,23 @@ def test_a_metric_no_report_panel_names_leads_its_run_overview_and_card(tmp_path
         _publish_declarations(view)
         overview = _get(view, "/runs/lab/base@0")
         assert _loss(overview) == [7.0, 3.0]
-        assert "<dt>Latest score</dt><dd>loss 3</dd>" in overview
+        assert "<dt>Latest metric</dt><dd>loss 3</dd>" in overview
         assert "loss 3" in _get(view, "/experiments/lab")
         assert '"loss"' in _get(view, "/")
+        _get(view, "/experiments/lab/report")
+        assert "<td>loss 3</td><td>1</td>" in _get(view, "/reports")
+
+
+def test_rl_series_leads_the_card_and_latest_metric_ahead_of_counters(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    with open_run(experiment="rl", run="a", directory=source.root) as run:
+        run.log({"rl/nonfinite_count": 0, "rl/loss": 0.42}, updates=10)
+    with Server(source, None, ("127.0.0.1", 0)) as view:
+        _ingest(view)
+        card = _get(view, "/").split('<div class="card-charts">')[1].split("</script>")[0]
+        assert '"title":"Losses"' in card and "rl/nonfinite_count" not in card
+        assert "<td>rl/loss 0.42</td>" in _get(view, "/experiments/rl")
+        assert "<dt>Latest metric</dt><dd>rl/loss 0.42</dd>" in _get(view, "/runs/rl/a")
 
 
 def test_run_overview_and_tab_polls_use_only_indexed_clock_cost_and_files(tmp_path: Path) -> None:
@@ -788,7 +823,7 @@ def test_run_overview_and_tab_polls_use_only_indexed_clock_cost_and_files(tmp_pa
         assert set(_page_data(overview).training.series["steps"]) == {"loss"}
         for label, value in (
             ("Clock", "steps 160 / 400"),
-            ("Latest score", "loss 3"),
+            ("Latest metric", "loss 3"),
             ("Mean pace", "1 steps/s"),
             ("Ends about", "2026-11-22 03:05 UTC"),
             ("Dollars", "~$0.59"),
@@ -1247,7 +1282,7 @@ def report() -> Report:
             assert table.count('<a title="lab/') == 3
             assert all(
                 f"<th>{col}</th>" in table
-                for col in ("Run", "State", "Clock", "Latest score", "Machine", "Dollars")
+                for col in ("Run", "State", "Clock", "Latest metric", "Machine", "Dollars")
             )
             assert ">loss 4</td>" in table and ">loss 6</td>" in table
             assert 'href="/experiments/lab?run=base@0&amp;tab=config#run-detail"' in table
@@ -1325,6 +1360,9 @@ def report() -> Report:
         assert live.count('data-state="running"') == 2 and "2 running" in live
         assert all(f'href="/runs/lab/{name}"' in live for name in ("a", "b"))
         assert [panel.title for panel in curves(live)] == ["Loss", "Loss"]
+        overview = _get(view, "/runs/" + queued[0])
+        assert '<div class="run-overview"><div><section' in overview
+        assert "</section></div><aside>" in overview and "No server loop" in overview
         assert 'data-state="finished"' in archived and "last write" in archived
         assert (
             all(f'href="/runs/{address}"' in waiting for address in queued)
@@ -1418,19 +1456,24 @@ def test_reports_index_and_poll_show_the_last_served_build_without_source_reads(
         "lab",
         "from etude.report import Report, Series\n"
         "def report() -> Report:\n"
-        "    return Report(ml=(Series(title='Return', keys=('reward',), unit='pts'),))\n",
+        "    return Report(ml=(Series(title='Loss', keys=('loss',), unit='pts'),))\n",
     )
     git(repo, "add", file.name)
     git(repo, "commit", "-m", "Declare the report")
     commit = git(repo, "rev-parse", "--short=12", "HEAD")
     experiment_file(repo, "unused", COUNTED)
     source = DirectoryStorage(tmp_path / "runs")
-    for seed, reward in enumerate((3, 12)):
+    for seed, loss in enumerate((3, 12)):
         with open_run(
-            experiment="lab", run=f"base@{seed}", clocks=["steps"], directory=source.root
+            experiment="lab",
+            run=f"base@{seed}",
+            job="base",
+            seed=seed,
+            clocks=["steps"],
+            directory=source.root,
         ) as run:
-            run.log({"reward": 90}, steps=1)
-            run.log({"reward": reward}, steps=2)
+            run.log({"loss": 90}, steps=1)
+            run.log({"loss": loss}, steps=2)
     _start_run(source, "active/base", 2)
     measured = MeasuredStorage(source)
     with Server(measured, repo, ("127.0.0.1", 0)) as view:
@@ -1455,7 +1498,7 @@ def test_reports_index_and_poll_show_the_last_served_build_without_source_reads(
             return indexed
 
         cold = rows()
-        assert "<td>Never</td>" in cold["unused"]
+        assert "<td>Not started</td><td>Never</td>" in cold["unused"]
         assert "<td>Open</td><td>Never</td><td>Default</td>" in cold["active"]
         assert "<td>Completed</td><td>Never</td>" in cold["lab"]
         route = "/experiments/lab/report"
@@ -1463,7 +1506,7 @@ def test_reports_index_and_poll_show_the_last_served_build_without_source_reads(
         built = rows()["lab"]
         stamp = datetime.fromisoformat(built.split('<time datetime="')[1].split('"')[0])
         assert f"{stamp:%Y-%m-%d %H:%M:%S UTC}</time>" in built
-        assert f"<td>{commit}</td><td>reward 12 pts</td><td>2</td>" in built
+        assert f"<td>{commit}</td><td>loss 3–12 pts</td><td>2</td>" in built
         assert "Refresh report" in _get(view, "/experiments/active/report")
         assert "<td>Default</td><td>loss 2</td><td>1</td>" in rows()["active"]
 
@@ -1481,6 +1524,55 @@ def test_reports_index_and_poll_show_the_last_served_build_without_source_reads(
         view.page(route, refresh=True)
         refreshed = rows()["lab"]
         assert "<td>Working tree</td>" in refreshed and refreshed.endswith("<td>3</td>")
+
+
+def _score_duel(match: Match, agents: list[object]) -> Tables:
+    return {"scores": play(match, agents)["plays"]}
+
+
+def test_reports_headline_follows_the_eval_curve_with_or_without_training(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    file = experiment_file(
+        tmp_path,
+        "coin",
+        """
+from etude.report import Curve, Report, Score
+
+def report():
+    return Report(score=Score(table="scores", value="won"),
+                  evals=(Curve(score=Score(table="scores", value="hits")), Curve()))
+""",
+    )
+    play_matches(
+        experiment="coin",
+        environment=DUEL,
+        matches=[
+            duel(outside("u100", {"updates": 100}, "weak"), HEURISTIC),
+            duel(outside("u400", {"updates": 400}, "strong"), HEURISTIC),
+            duel(
+                outside("u400", {"updates": 400}, "strong"), Code(name="z", config={"strength": 99})
+            ),
+        ],
+        play=_score_duel,
+        run="duels",
+        directory=source.root,
+    )
+    measured = MeasuredStorage(source)
+    with Server(measured, file, ("127.0.0.1", 0)) as view:
+        for count in ("Eval only", "1"):
+            _ingest(view)
+            view.page("/experiments/coin/report", refresh=True)
+            reads = measured.listings, measured.requests, measured.bytes
+            for route in ("/reports", "/reports/status"):
+                html = _get(view, route)
+                assert "<th>Headline</th><th>Runs drawn</th>" in html
+                assert f"<td>scores.won 0.5–1</td><td>{count}</td>" in html
+            assert (measured.listings, measured.requests, measured.bytes) == reads
+            if count == "Eval only":
+                with open_run(
+                    experiment="coin", run="training", clocks=["updates"], directory=source.root
+                ) as run:
+                    run.log({"rl/loss": 7}, updates=1)
 
 
 def test_side_rail_follows_open_experiments_and_held_rentals_on_every_page(tmp_path: Path) -> None:
@@ -2071,7 +2163,8 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
         finally:
             release.set()
         _publish_ssh(server)
-        assert "second is offline" in (server.page("/status") or "")
+        outage = server.page("/status") or ""
+        assert "second is offline" in outage and "Server unavailable" in outage
         assert server.page("/runs/" + queued) is None
         assert _loss(server.page("/runs/local") or "") == [7, 3, 1]
         assert "steps 3" in (server.page("/experiments/local/status") or "")
@@ -2101,15 +2194,30 @@ def test_machines_without_a_launcher_or_with_a_selected_server(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "file-only"))
     source = MeasuredStorage(DirectoryStorage(tmp_path / "runs"))
     with Server(source, None, ("127.0.0.1", 0)) as server:
+        assert "Awaiting launcher" in _get(server, "/")
+        with monkeypatch.context() as patch:
+
+            def unavailable(consoles: tuple[str, ...], *, machines: bool) -> LauncherObservation:
+                raise LauncherError("fixture read error")
+
+            patch.setattr(LauncherObservation, "read", unavailable)
+            server.refresh_launcher()
+            html = _get(server, "/")
+            assert "<span>Launcher unavailable</span>" in html and 'class="rail-loop"' not in html
         _ingest(server)
         reads = source.listings, source.requests, source.bytes
         absent = server.page("/machines/status") or ""
+        assert "<span>No launcher</span>" in absent and '<div class="rail-loop">' not in absent
         assert "No launcher is used here." in absent and 'data-refresh="5000"' in absent
         (home() / "server").write_text("team@fixture")
         monkeypatch.delenv("ETUDE_SERVER_LOCAL", raising=False)
         html = server.page("/machines") or ""
         assert "team@fixture" in html and "<code>etude machines</code>" in html
-        assert "Inventory unavailable" in html and "an hour</span>" not in html
+        assert (
+            'href="/machines">On team@fixture</a>' in html
+            and "Awaiting server" in html
+            and "an hour</span>" not in html
+        )
         assert "No launcher" not in html and 'data-refresh="5000"' in html
         assert (source.listings, source.requests, source.bytes) == reads
 
@@ -2119,6 +2227,7 @@ def test_experiments_group_by_activity_and_date_the_latest_write(tmp_path: Path)
     unused = experiment_file(tmp_path, "unstarted", COUNTED)
     measured = MeasuredStorage(source)
     with Server(measured, unused, ("127.0.0.1", 0)) as server:
+        assert "<td>Waiting</td>" in _get(server, "/reports")
         assert "Waiting for the first observation." in (server.page("/") or "")
         _ingest(server)
         empty = server.page("/status") or ""

@@ -166,24 +166,34 @@ opened before the run appears names the source the view is watching.
 | `/reports` | Experiment states and the reports built in this view |
 | `/reports/status` | The rows used to refresh the reports index |
 
-Open **Reports** to see which experiments are open or completed. Select a
-row to open its report. **Never** means this view has yet to build it.
+Open **Reports** and select an experiment to see its report. An experiment
+with runs is **Open** while any run is active, then **Completed**. A
+declaration with no runs reads **Waiting** until the first successful file
+listing, then **Not started**. **Never** means this view has yet to build it.
 After a successful build, the row shows its UTC build time, the declaration
 file’s Git revision (**Working tree** for a local version, **Default** for
-the built-in report), and the number of training runs included. The headline
-uses the first ML metric with drawable values on the report clock and shows
-the highest of the runs’ latest values. These build details stay with the
+the built-in report), and **Runs drawn** (a training run count or **Eval only**).
+**Headline** shows the primary evaluation curve’s score at each job’s or
+external line’s latest evaluated checkpoint. Before there is a score it uses
+the first drawable ML series, including ungrouped metrics. Different latest
+values appear as a low–high range. These build details stay with the
 served report until a successful refresh. Restarting the view clears them.
 
 Use the side rail to switch pages, open an active experiment or jump to a
 held machine’s row. Idle machines are marked. The hourly total counts each
 held rental once, including idle rentals. The loop age dates the last
-scheduler heartbeat. The rail updates with the visible page, including
+scheduler heartbeat. A local database without a heartbeat shows **No server
+loop**, as when using `etude wait`. A file-only view shows **No launcher**.
+With a selected server, **On user@host** links to Machines. The rail shows
+**Awaiting launcher** or **Awaiting server** before an observation and labels
+a failed first read **Launcher unavailable** or **Server unavailable**.
+The rail updates with the visible page, including
 beside a report you have already built. Below 700 px it becomes a scrollable
 top row. Printing omits it.
 
-**Experiments.** Each card at `/` shows the first ML panel that the
-experiment’s `report()` displays. Metric curves use the report clock and keep
+**Experiments.** Each card at `/` shows the first drawable ML series in report order.
+Ungrouped metrics also qualify. Counters and diagnostics can lead when there
+is no drawable series. Metric curves use the report clock and keep
 their last values after training ends. Hover over a curve to read its value.
 A panel without a curve leaves the run summary on its own. Each dot links to
 a run and names its state. Dollars sum the launcher’s recorded run costs,
@@ -191,7 +201,7 @@ with `~` when any share is estimated.
 
 Open `/experiments/prototype?run=coin@0&tab=curves` to see the coin’s curves
 beside the run table. Each row shows the run and job, state or queue reason,
-clock, last file write, latest headline values, machine and dollars. A dash
+clock, last file write, **Latest metric** from training, machine and dollars. A dash
 means the index has no value for that cell. Select a run to inspect its
 **Console**, **Curves**, **Config** or **Checkpoints**. Picking another run
 keeps the same tab. Copy the URL to share that selection, or open the run’s
@@ -215,11 +225,13 @@ the run’s file facts. During a storage outage, the run keeps its last
 observed file state.
 
 **Runs.** Open `/runs/prototype/coin@0` for **Overview**. It shows the
-clock, latest headline score, mean pace, dollars spent, occupied machine’s
+clock, **Latest metric**, mean pace, dollars spent, occupied machine’s
 rental rate and last file write. The first two report panels with data sit
 beside the console tail and saved checkpoints. A dashed line marks the
 latest checkpoint when the curve’s clock places it. The default group of
 ungrouped metrics previews its first metric here. Charts shows the whole group.
+Opening Overview keeps the run URL clean. Changing a clock or smoothing adds
+just that choice to the link and preserves it across refreshes.
 
 Mean pace divides the change in the displayed clock between the first and
 latest sealed training rows by their elapsed seconds. Both rows must give

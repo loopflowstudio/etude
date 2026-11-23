@@ -213,9 +213,9 @@ reader per index stages updated run metadata and charts in a private SQLite
 table. The listing supplies each training run’s Files tab. Open blocks can
 change its inventory and last write between sealed chart generations. A change to sealed
 inputs replaces the file record, its full charts, its two-panel preview and
-its first ML panel together.
-The experiment list reads just that panel from each run, choosing the earliest one in
-the experiment’s report order. If a run file is temporarily unavailable during a
+its headline panel together.
+The experiment list reads just that panel from each run, preferring drawable ML series in
+report order before counters and diagnostics. If a run file is temporarily unavailable during a
 report edit, its dot remains. Its curve rejoins the card when its indexed panel
 matches the current report and clock. Local report declarations run separately. Each experiment keeps its last accepted panels through an
 incomplete edit.

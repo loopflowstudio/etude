@@ -34,6 +34,7 @@ from itertools import groupby
 from operator import itemgetter
 from pathlib import Path
 from types import FrameType
+from typing import Literal
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from pydantic import TypeAdapter
@@ -57,6 +58,7 @@ from etude.page import (
     read_asset,
     read_report,
     render,
+    render_overview,
     render_run,
     run_chart_data,
 )
@@ -75,9 +77,10 @@ _DETAIL_TABS = ("console", "curves", "config", "checkpoints")
 _REMOTE_STANDING = 30
 _SILENT = timedelta(minutes=10)
 _CLOCKS = TypeAdapter(dict[str, float])
-_SCORES = TypeAdapter(list[str])
+_METRICS = TypeAdapter(list[str])
 
-# A changed schema starts a fresh rebuildable index.
+# Bump when stored projections change independently of their SQL schema.
+_INDEX_VERSION = 1
 _MAY_BE_OPEN = "file_state IN ('running','queued') OR phase != 'done'"
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS runs (
@@ -158,8 +161,8 @@ class _ServedReport:
     html: str
     built: datetime
     declaration: str
-    score: str | None
-    runs: int
+    headline: str | None
+    runs: int | Literal["Eval only"]
 
 
 @dataclass(frozen=True)
@@ -189,6 +192,7 @@ class ChartIndex:
                 str(path.resolve()) if path else "",
                 version("etude-sdk"),
                 _SCHEMA,
+                str(_INDEX_VERSION),
             )
         )
         directory = home() / "views"
@@ -604,7 +608,7 @@ class _ViewSnapshot:
             + """
             SELECT visible.*,
                    CASE :chart WHEN 'overview' THEN charts.overview ELSE charts.payload END AS payload,
-                   json_extract(charts.latest,'$[0]') AS score, declarations.error AS report_error,
+                   json_extract(charts.latest,'$[0]') AS metric, declarations.error AS report_error,
                    consoles.body, consoles.collected, consoles.gaps, consoles.final_attempt AS console_attempt
             FROM visible
             LEFT JOIN charts ON charts.address=CASE
@@ -714,7 +718,9 @@ class _ViewSnapshot:
             return render_run(address, row["payload"], heading, side)
         curves = _empty_section(row, "Curves", "No metric curves recorded.")
         body = f'<section class="sec" id="charts"><h2>Charts</h2>{curves}</section>'
-        return _document(address, heading + body + side)
+        if overview:
+            body = render_overview(body, side)
+        return _document(address, heading + body)
 
     def _observe_console(self, row: sqlite3.Row, status: Status | None, now: datetime) -> str:
         # Session shutdown can still retain final logs after the run itself ended.
@@ -874,36 +880,39 @@ class _ViewSnapshot:
         return _live_status(body, error=error)
 
     def reports(self, declared: dict[str, Path], served: dict[str, _ServedReport]) -> str:
-        names = set(declared)
-        names.update(
+        visible = {
             row[0]
             for row in self.db.execute(
                 _VISIBLE + "SELECT DISTINCT experiment FROM visible", {"remote": self.remote}
             )
-        )
+        }
+        row = self._observation
+        unstarted = "Not started" if row and row["at"] else "Waiting"
         rows = []
-        for name in sorted(names):
+        for name in sorted(visible | declared.keys()):
             report = served.get(name)
-            state = "Open" if name in self._open_experiments else "Completed"
+            state = "Completed" if name in visible else unstarted
+            if name in self._open_experiments:
+                state = "Open"
             built = (
                 f'<time datetime="{report.built.isoformat()}">{report.built:%Y-%m-%d %H:%M:%S UTC}</time>'
                 if report
                 else "Never"
             )
             declaration = report.declaration if report else ("—" if name in declared else "Default")
-            score = escape(report.score) if report and report.score else "—"
+            headline = escape(report.headline) if report and report.headline else "—"
             rows.append(
                 f'<tr><td><a href="/experiments/{quote(name)}/report">{escape(name)}</a></td>'
                 f"<td>{state}</td><td>{built}</td><td>{escape(declaration)}</td>"
-                f"<td>{score}</td><td>{report.runs if report else '—'}</td></tr>"
+                f"<td>{headline}</td><td>{report.runs if report else '—'}</td></tr>"
             )
         columns = (
             "Experiment",
             "State",
             "Built in this view",
             "Declared at",
-            "Headline score",
-            "Training runs drawn",
+            "Headline",
+            "Runs drawn",
         )
         return _live_status(
             f'<div class="reports-index">{_table(columns, rows)}</div>'
@@ -926,6 +935,14 @@ class _ViewSnapshot:
                 opened[name] = states
         return opened
 
+    @cached_property
+    def _observation(self) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self.db.execute(
+            _OBSERVED + "SELECT at,machine_rail,last_loop,launcher_at FROM observed",
+            {"remote": self.remote},
+        ).fetchone()
+        return row
+
     def rail(self, section: str) -> str:
         links = []
         for name, states in self._open_experiments.items():
@@ -934,18 +951,30 @@ class _ViewSnapshot:
                 f'<a href="/experiments/{quote(name)}"><i class="state-dot" '
                 f'role="img" aria-label="{label}" title="{label}"></i>{escape(name)}</a>'
             )
-        row = self.db.execute(
-            _OBSERVED + "SELECT at,machine_rail,last_loop FROM observed",
-            {"remote": self.remote},
-        ).fetchone()
+        row = self._observation
         empty = "None" if row and row["at"] else "Awaiting file observation"
         opened = "".join(links) or f"<span>{empty}</span>"
+        launcher_at = row["launcher_at"] if row else None
         machines = row["machine_rail"] if row else None
-        loop = (
-            "last loop " + _age(row["last_loop"], datetime.now(UTC))
-            if row and row["last_loop"]
-            else "Loop age unavailable"
-        )
+        error = self.index.read_error(self.remote, None)
+        loop = ""
+        if self.remote is not None or machines is not None:
+            if row and row["last_loop"]:
+                loop = "last loop " + _age(row["last_loop"], datetime.now(UTC))
+            elif launcher_at:
+                loop = "No server loop"
+            else:
+                loop = "Server unavailable" if error else "Awaiting server"
+            loop = f'<div class="rail-loop">{loop}</div>'
+        if self.remote is not None:
+            machines = f'<a href="/machines">On {escape(self.remote)}</a>'
+        elif machines is None:
+            label = (
+                "No launcher"
+                if launcher_at
+                else ("Launcher unavailable" if error else "Awaiting launcher")
+            )
+            machines = f"<span>{label}</span>"
         nav = []
         for path, label in (
             ("/", "Experiments"),
@@ -958,8 +987,8 @@ class _ViewSnapshot:
             f'<nav id="view-rail" aria-label="Live view" data-refresh="{_REFRESH * 1000}">'
             f'<div class="rail-pages">{"".join(nav)}</div>'
             f'<div class="rail-group"><h2>Open experiments</h2>{opened}</div>'
-            f'<div class="rail-group"><h2>Held machines</h2>{machines or "<span>Inventory unavailable</span>"}</div>'
-            f'<div class="rail-loop">{loop}</div></nav>'
+            f'<div class="rail-group"><h2>Held machines</h2>{machines}</div>'
+            f"{loop}</nav>"
         )
 
     def report_ready(self, experiment: str, *, declared: bool) -> bool | None:
@@ -1013,8 +1042,8 @@ class _ViewSnapshot:
             status = _status(row)
             if status and not status.done:
                 unfinished.append(status.run)
-            score = (
-                " · ".join(_SCORES.validate_json(row["latest"]))
+            metric = (
+                " · ".join(_METRICS.validate_json(row["latest"]))
                 if row["latest"] and (row["definition"], row["panel_order"]) == panel
                 else None
             )
@@ -1031,13 +1060,13 @@ class _ViewSnapshot:
                 f"<small>{escape(row['job'])}</small>{row['continues'] or ''}</td>"
                 f'<td><span class="pill">{escape(state)}</span><small>{escape(reason)}</small></td>'
                 f"<td>{escape(row['position'] or '—')}<small>{last_write}</small></td>"
-                f"<td>{escape(score or '—')}</td><td>{machine}</td>"
+                f"<td>{escape(metric or '—')}</td><td>{machine}</td>"
                 f"<td>{status.formatted_spend if status else '—'}</td></tr>"
             )
             if address == selected:
                 detail = self._detail(address, pick, tab, curves, now)
         if rows:
-            table = _table(("Run", "State", "Clock", "Latest score", "Machine", "Dollars"), body)
+            table = _table(("Run", "State", "Clock", "Latest metric", "Machine", "Dollars"), body)
             if not detail:
                 detail = "<p>The selected run is unavailable in this experiment.</p>"
         elif observation and observation["at"]:
@@ -1115,7 +1144,7 @@ def _command_bar(file: Path | None, source: str, unfinished: list[str]) -> str:
 
 
 def _first_panel(rows: list[sqlite3.Row]) -> tuple[str, int] | None:
-    # Held files from an older report or clock cannot contribute a comparable score.
+    # Held files from an older report or clock cannot contribute a comparable metric.
     newest = max((r for r in rows if r["definition"]), key=itemgetter("listed", "at"), default=None)
     if newest is None:
         return None
@@ -1439,7 +1468,7 @@ def _run_numbers(row: sqlite3.Row, status: Status | None, state: str, written: s
     rate = rates.get(clock) if clock else None
     values = [
         ("Clock", row["position"]),
-        ("Latest score", row["score"]),
+        ("Latest metric", row["metric"]),
         ("Mean pace", f"{rate:.4g} {clock}/s" if rate is not None else None),
     ]
     if state == "running" and target and rate:
@@ -1909,8 +1938,10 @@ class Server(ThreadingHTTPServer):
             html=html,
             built=datetime.now(UTC),
             declaration=declaration,
-            score=page.headline_score(),
-            runs=len(page.training.runs),
+            headline=page.headline(),
+            runs="Eval only"
+            if page.selections and not page.training.runs
+            else len(page.training.runs),
         )
 
 

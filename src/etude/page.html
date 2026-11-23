@@ -44,10 +44,17 @@ const TRAINED = T.runs.length > 0;
 const ownClock = c => !BUILT_IN.includes(c);
 const clockNames = [...new Set([...T.clocks.map(c => c.name).filter(ownClock), ...M.atClocks.filter(ownClock), ...BUILT_IN.filter(c => TRAINED || !M.atClocks.length || M.atClocks.includes(c))])];
 const firstClock = clockNames.includes(R.clock) ? R.clock : clockNames[0];
-const S = Object.assign({hide: "", filter: "{}", eclock: firstClock, pclock: firstClock, mlclock: firstClock, opp: "first", score: "0", sel: "", lines: "on", mjob: "", mkey: "", xline: "", smooth: "on", fpath: "", fscale: "share", live: "1"},
-  Object.fromEntries(new URLSearchParams(location.hash.slice(1))), {commit: COMMIT});
+const defaults = {hide: "", filter: "{}", eclock: firstClock, pclock: firstClock, mlclock: firstClock, opp: "first", score: "0", sel: choices[0]?.[0] ?? "", lines: "on", mjob: "", mkey: "", xline: "", smooth: "on", fpath: "", fscale: "share", live: "1", commit: ""};
+const keys = D.run_charts ? ["mlclock", "pclock", "smooth", "fpath", "fscale"] : Object.keys(defaults);
+const params = new URLSearchParams(location.hash.slice(1));
+const S = {...defaults, ...Object.fromEntries(keys.filter(k => params.has(k)).map(k => [k, params.get(k)])), commit: COMMIT};
 for (const k of ["eclock", "pclock", "mlclock"]) if (!clockNames.includes(S[k])) S[k] = firstClock;
-const writeHash = () => history.replaceState(null, "", "#" + new URLSearchParams(S));
+function writeHash() {
+  const encoded = new URLSearchParams(keys.filter(k => S[k] !== defaults[k]).map(k => [k, S[k]])).toString();
+  const hash = encoded ? "#" + encoded : "";
+  if (hash === location.hash || (!encoded && !location.hash.includes("="))) return;
+  history.replaceState(null, "", hash || location.pathname + location.search);
+}
 const clockMeaning = c => (T.clocks.find(k => k.name === c) || {}).meaning || c;
 const stepClocks = T.clocks.filter(c => c.kind === "step").map(c => c.name);
 
@@ -133,12 +140,13 @@ function series(jobs, points) {
 }
 
 function render() {
-  writeHash(); draws.length = 0; destroyCharts(); hideTip();
+  draws.length = 0; destroyCharts(); hideTip();
   const hidden = new Set(S.hide ? S.hide.split("|") : []);
   const vis = JOBS.filter(j => !hidden.has(j.key));
 
   if (!D.run_charts) renderReport(hidden, vis);
   renderMetrics(vis);
+  writeHash();
   for (const draw of draws) draw();
 }
 
@@ -187,6 +195,7 @@ function renderReport(hidden, vis) {
   const commits = D.commits.map(k => [k.commit, `${k.commit.slice(0, 10)} · ${k.matches} match${k.matches > 1 ? "es" : ""}`]);
   control(ec, "Played at", [["", "latest of each match"], ...commits], "commit", () => { writeHash(); location.reload(); });
   if (R.score == null) control(ec, "Score", D.scores.map((s, i) => [String(i), `${s.table}.${s.value}`]), "score");
+  defaults.opp = opponents(section, section.sel)[0]?.[0] ?? "";
   S.opp = oppFor(section, section.sel);
   control(ec, "Opponent", opponents(section, section.sel), "opp");
   control(ec, "Anchor lines", fixedPlayers.length > 1 ? [["on", "On"], ["off", "Off"]] : [], "lines");
@@ -227,12 +236,14 @@ function renderReport(hidden, vis) {
       const both = (r, col) => ({[panel.rows]: r, [panel.columns]: col});
       const colsAt = values(E, sel, panel.columns, panel.rows), rowsAt = values(E, sel, panel.rows, panel.columns);
       if (!colsAt.length || !rowsAt.length) { c.appendChild(node("div", "na", absentNote(E, panel.rows, panel.columns))); continue; }
+      defaults.mjob = vis[0]?.key ?? "";
       if (!vis.some(j => j.key === S.mjob)) S.mjob = vis[0].key;
       const job = vis.find(j => j.key === S.mjob), done = evaluated(curveOf(job, sel, {}, opp)).map(p => p.key), last = finalKey(job);
       // A finished job is shown at its final checkpoint, evaluated or not; a running one at its latest evaluated.
       const keys = [...new Set([...done, ...(last != null ? [last] : [])])].sort((a, b) => a - b);
       const fallback = last ?? done[done.length - 1];
       const key = S.mkey !== "" && keys.includes(+S.mkey) ? +S.mkey : fallback;
+      if (key === fallback) S.mkey = "";
       const tabs = node("div", "tabs-in");
       for (const j of vis) { const b = node("button", "jbtn"); b.append(swatch(j), j.label); b.setAttribute("aria-pressed", String(j === job)); b.onclick = () => { S.mjob = j.key; S.mkey = ""; render(); }; tabs.appendChild(b); }
       const pick = node("select"); pick.setAttribute("aria-label", "Checkpoint");
@@ -295,6 +306,7 @@ function renderReport(hidden, vis) {
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const tabsOf = [...new Map(vis.flatMap(j => M.linesOf(j).map(key => [key, {job: j, key, label: j.line == null ? `${j.label} · ${key}` : j.label}]))).values()];
       if (!tabsOf.length) { c.appendChild(node("div", "na", "No checkpoint has a position")); continue; }
+      defaults.xline = tabsOf[0].key;
       if (!tabsOf.some(t => t.key === S.xline)) S.xline = tabsOf[0].key;
       const chosen = tabsOf.find(t => t.key === S.xline);
       const tabs = node("div", "tabs-in");

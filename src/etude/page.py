@@ -76,7 +76,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -84,6 +84,7 @@ from functools import cache, cached_property
 from html import escape
 from importlib.util import cache_from_source
 from pathlib import Path
+from statistics import fmean
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import JsonValue, ValidationError
@@ -115,8 +116,8 @@ from etude.storage import (
     store_identity,
     with_versions,
 )
-from etude.train.read import RunData, read_all
-from etude.train.report import Trace, Training, training
+from etude.train.read import RunData, read_all, read_located
+from etude.train.report import BUCKETS, Trace, Training, training
 
 if TYPE_CHECKING:
     import duckdb
@@ -322,24 +323,181 @@ class Page(Record):
     latest_result_ms: int | None
     absent: tuple[Absent, ...]
 
-    def headline_score(self) -> str | None:
-        """Highest latest run value for the first drawable ML metric, on the report clock."""
+    # A selective report need only retain one summary from outside its named panels.
+    ungrouped_metric: str | None = None
+
+    def _primary_curve(self) -> int | None:
+        curves = [(i, p) for i, p in enumerate(self.report.evals) if isinstance(p, Curve)]
+        return next((i for i, p in curves if p.score is None), curves[0][0] if curves else None)
+
+    def _curve_score(self, curve: int | None) -> int:
+        panel = self.report.evals[curve] if curve is not None else None
+        return self.scores.index(panel.score) if isinstance(panel, Curve) and panel.score else 0
+
+    def _report_clock(self) -> str:
         clocks = [c.name for c in self.training.clocks]
-        if not clocks:
-            return None
-        clock = self.report.clock if self.report.clock in clocks else clocks[0]
-        measured = self.training.series.get(clock, {})
-        for panel in _ml_panels(self.report, self.training):
-            if not isinstance(panel, Series | Counters):
-                continue
-            log = isinstance(panel, Series) and panel.scale == "log"
-            for key in panel.keys:
-                values = (trace.latest(log=log) for trace in measured.get(key, ()))
-                highest = max((v for v in values if v is not None), default=None)
-                if highest is not None:
-                    unit = panel.unit if isinstance(panel, Series) else ""
-                    return f"{key} {highest:.4g} {unit}".rstrip()
-        return None
+        return self.report.clock if self.report.clock in clocks else clocks[0]
+
+    def headline(self) -> str | None:
+        """Latest evaluated value per job or external line, else a training metric per run."""
+        curve = self._primary_curve()
+        if self.scores and curve is not None:
+            score = self._curve_score(curve)
+            resolved = self.panel_selections[curve]
+            selection = resolved.selection
+            if resolved.control:
+                selection = next(
+                    (
+                        i
+                        for i, s in enumerate(self.selections)
+                        if isinstance(s, OutsideTournaments)
+                        or isinstance(s, Matches)
+                        and s.seating is None
+                    ),
+                    None,
+                )
+            if selection is not None and (values := _latest_evaluated(self, score, selection)):
+                measure = self.scores[score]
+                return f"{measure.table}.{measure.value} {_value_range(values)}"
+
+        if self.training.clocks:
+            measured = self.training.series.get(self._report_clock(), {})
+            for panel in _ml_panels(self.report, self.training):
+                if isinstance(panel, Series):
+                    for key in panel.keys:
+                        values = [
+                            value
+                            for trace in measured.get(key, ())
+                            if (value := trace.latest(log=panel.scale == "log")) is not None
+                        ]
+                        if values:
+                            return f"{key} {_value_range(values)} {panel.unit}".rstrip()
+        return self.ungrouped_metric
+
+
+def _value_range(values: Sequence[float]) -> str:
+    low, high = min(values), max(values)
+    return f"{low:.4g}" if low == high else f"{low:.4g}–{high:.4g}"
+
+
+type _MarkKey = tuple[str, int] | tuple[str, tuple[tuple[str, float], ...]]
+
+
+def _mark_key(player: Placement | Point) -> _MarkKey:
+    if player.run is not None and player.ordinal is not None:
+        return player.run, player.ordinal
+    return player.line or "", tuple(sorted(player.at.items()))
+
+
+@dataclass(frozen=True)
+class _Evaluated:
+    value: float
+    whole: bool = False
+    config: str | None = None
+
+
+def _latest_evaluated(page: Page, score: int, selection: int) -> list[float]:
+    """Apply the default curve selection, aligning seed checkpoints before taking the latest."""
+    external = [p for p in page.players if p.placed and p.run is None]
+    clocks = dict.fromkeys(k for p in external for k in p.at)
+    clock = next(
+        (c.name for c in page.training.clocks if c.name not in BUILT_IN_NAMES),
+        page.report.clock if page.report.clock in clocks else next(iter(clocks), None),
+    )
+    values = _scored_marks(page, score, selection, clock)
+    lines: dict[str, dict[float, _MarkKey]] = defaultdict(dict)
+    for player in external:
+        if clock and clock in player.at:
+            lines[player.line or ""][player.at[clock]] = _mark_key(player)
+
+    runs: dict[str, dict[float, _MarkKey]] = defaultdict(dict)
+    for mark in page.training.checkpoints:
+        runs[mark.run][mark.align] = (mark.run, mark.ordinal)
+
+    # One external line has one member. A job needs every seed at a position,
+    # except where its seating explicitly chose one seed for the whole job.
+    groups = [[runs[name] for name in job.runs] for job in page.training.jobs]
+    groups.extend([marks] for marks in lines.values())
+    latest = []
+    for members in groups:
+        by_position: dict[float, list[_Evaluated]] = defaultdict(list)
+        for marks in members:
+            for position, key in marks.items():
+                if key in values:
+                    by_position[position].append(values[key])
+        for position in sorted(by_position, reverse=True):
+            seeds = by_position[position]
+            whole = [v.value for v in seeds if v.whole]
+            if whole:
+                latest.append(fmean(whole))
+                break
+            if len(seeds) == len(members) and len({v.config for v in seeds}) == 1:
+                latest.append(fmean(v.value for v in seeds))
+                break
+    return latest
+
+
+def _scored_marks(
+    page: Page, score: int, selection: int, clock: str | None
+) -> dict[_MarkKey, _Evaluated]:
+    values: dict[_MarkKey, _Evaluated] = {}
+    if page.drawn[selection].seated:
+        for p in page.points:
+            if (
+                p.selection == selection
+                and p.score == score
+                and p.commit is None
+                and not p.split
+                and p.value is not None
+            ):
+                values[_mark_key(p)] = _Evaluated(p.value, whole=p.whole)
+        return values
+
+    cells = [
+        c
+        for c in page.cells
+        if c.selection == selection
+        and c.score == score
+        and c.commit is None
+        and not c.split
+        and not c.fixed
+        and page.players[c.subject].placed
+    ]
+    anchors = {
+        c.opponent for c in cells if c.opponent is not None and not page.players[c.opponent].placed
+    }
+    # JavaScript compares strings as UTF-16 code units. Both indexes pick the
+    # same first anchor regardless of the host's or browser's locale.
+    opponent = min(
+        anchors,
+        key=lambda i: (page.players[i].name.lower().encode("utf-16-be"), i),
+        default=None,
+    )
+    # For all opponents, compare omits an aggregate identical to a single pair.
+    by_subject = {c.subject: c for c in cells} if opponent is None else {}
+    by_subject.update((c.subject, c) for c in cells if c.opponent == opponent)
+    # Ambiguous positions and inference variants are gaps on the report's curve.
+    positions = Counter(
+        (p.line or "", p.config, p.at[clock])
+        for p in page.players
+        if p.placed and clock and clock in p.at
+    )
+    candidates: dict[_MarkKey, list[int]] = defaultdict(list)
+    for i in sorted(by_subject):
+        candidates[_mark_key(page.players[i])].append(i)
+    for key, subjects in candidates.items():
+        first = subjects[0]
+        player = page.players[first]
+        if any(page.players[i].config != player.config for i in subjects):
+            continue
+        same_position = (
+            positions[player.line or "", player.config, player.at[clock]]
+            if clock and clock in player.at
+            else len(subjects)
+        )
+        if same_position == 1:
+            values[key] = _Evaluated(by_subject[first].value, config=player.config)
+    return values
 
 
 class Entry(Record):
@@ -509,10 +667,7 @@ def index(source: Storage | Path | str, pages: dict[Path, Page | str]) -> Index:
         page = None
         if isinstance(built, Page):
             # The index draws each job's curve in the page's first view: one score, unsplit.
-            curves = [p for p in built.report.evals if isinstance(p, Curve)]
-            score = 0
-            if curves and all(p.score is not None for p in curves):
-                score = next(i for i, s in enumerate(built.scores) if s == curves[0].score)
+            score = built._curve_score(built._primary_curve())
             kept = tuple(
                 c
                 for c in built.cells
@@ -569,7 +724,7 @@ def build(
 
 
 # Bump whenever derived Page fields change without changing inputs.
-_PAGE_CACHE_VERSION = 3
+_PAGE_CACHE_VERSION = 4
 
 
 def _page_cache_path(experiment: str, storage: Storage) -> Path:
@@ -731,8 +886,58 @@ def _build_page(
         trained,
         evals,
     )
+    if not report.other_metrics and any(run.rows for run in trained) and page.headline() is None:
+        # Named reports discard ungrouped columns. Inspect the same listing on a
+        # cold build and retain only the first drawable metric's summary.
+        metric = _ungrouped_metric(source, page)
+        page = page.model_copy(update={"ungrouped_metric": metric})
     _save_cached_page(cache_path, cache_key, page)
     return _BuiltPage(page, loaded.sources, referenced, versions, local_versions)
+
+
+def _ungrouped_metric(source: _ReportListing, page: Page) -> str | None:
+    named, timers = set(page.report.keys()), _flames(page.report)
+    clock = page._report_clock()
+    keys: list[str] = []
+    values: list[float] = []
+    records = (
+        r
+        for r in source.runs.declarations
+        if r.file.experiment == page.experiment and r.file.kind != "evaluation"
+    )
+    for located in sorted(records, key=lambda r: r.name):
+        if clock not in BUILT_IN_NAMES and not any(c.name == clock for c in located.file.clocks):
+            continue
+        # Project individual block headers. Once a key has values, later runs
+        # need only that key and earlier candidates that may have been gaps.
+        run = read_located(
+            source.place,
+            located,
+            source.runs.keys,
+            metrics=frozenset(keys),
+            prefixes=() if values else ("",),
+        )
+        logged = run.metrics()
+        if not values:
+            keys = list(
+                dict.fromkeys(
+                    [*keys, *(k for k in logged if k not in named and not k.startswith(timers))]
+                )
+            )
+        present = set(logged)
+        with run._reading_blocks():
+            for i, key in enumerate(keys):
+                if key not in present:
+                    continue
+                trace = Trace.from_buckets(run.name, run.chart(key, clock, BUCKETS))
+                latest = trace.latest(log=False)
+                if latest is not None:
+                    if i < len(keys) - 1:
+                        del keys[i + 1 :]
+                        values.clear()
+                    values.append(latest)
+                    break
+    return f"{keys[-1]} {_value_range(values)}" if values else None
 
 
 def _flames(report: Report) -> tuple[str, ...]:
@@ -792,7 +997,7 @@ def read_report(file: Path, accepted: ReportDeclaration | None) -> ReportDeclara
 
 
 class Headline(Record):
-    """One run's contribution to the first visible ML panel, on its report clock."""
+    """One run's card curves and latest metrics, ranked across runs on the report clock."""
 
     order: int
     title: str
@@ -826,7 +1031,14 @@ def _ml_panels(report: Report, data: Training, *, preview: bool = False) -> tupl
 def _headline(report: Report, data: Training, clock: str) -> Headline | None:
     measured = data.series.get(clock, {})
     logged = set(data.metrics)
-    for order, panel in enumerate(_ml_panels(report, data)):
+    panels = _ml_panels(report, data)
+    # The order is also compared across independently indexed runs. Reserve a
+    # slot for ungrouped metrics even on runs without any.
+    ranked = [
+        (i if isinstance(panel, Series) else len(report.ml) + 1 + i, panel)
+        for i, panel in enumerate(panels)
+    ]
+    for order, panel in sorted(ranked, key=lambda item: item[0]):
         curves: dict[str, Trace] = {}
         unit = ""
         if isinstance(panel, Series | Counters):
@@ -834,6 +1046,10 @@ def _headline(report: Report, data: Training, clock: str) -> Headline | None:
                 continue  # The report omits metric panels absent across its runs.
             curves = {k: measured[k][0] for k in panel.keys if k in measured}
             if isinstance(panel, Series):
+                if not any(
+                    trace.latest(log=panel.scale == "log") is not None for trace in curves.values()
+                ):
+                    continue
                 unit = panel.unit
         elif isinstance(panel, Pace | Elapsed):
             unit = "per second" if isinstance(panel, Pace) else ""
@@ -907,6 +1123,10 @@ def run_chart_data(storage: Storage, data: RunData, report: Report, clock: str) 
         _payload(_overview(page).model_dump(mode="json") | {"run_charts": True}, None),
         _headline(report, page.training, clock),
     )
+
+
+def render_overview(charts: str, beside: str) -> str:
+    return f'<div class="run-overview"><div>{charts}</div><aside>{beside}</aside></div>'
 
 
 def render_run(address: str, charts: str, heading: str, beside: str) -> str:
@@ -2126,11 +2346,7 @@ def _inline(
         "<!--metric-tabs-->": "".join(
             f'<a href="#{key}" data-s="{key}">{label}</a>' for key, label in sections
         ),
-        "<!--metric-sections-->": (
-            f'<div class="run-overview"><div>{metrics}</div><aside>{beside}</aside></div>'
-            if beside
-            else metrics
-        ),
+        "<!--metric-sections-->": (render_overview(metrics, beside) if beside else metrics),
     }
     return re.sub("|".join(map(re.escape, fields)), lambda m: fields[m[0]], read_asset(template))
 

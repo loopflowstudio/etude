@@ -122,9 +122,10 @@ function line(host, series, o = {}) {
   const yf = o.yFormat || fmt, xf = o.xFormat || num;
   const axis = {stroke: muted, grid: {stroke: grid, width: 1}, ticks: {stroke: grid, width: 1, size: 4}, font: "11px ui-sans-serif, -apple-system, sans-serif", labelFont: "11px ui-sans-serif, -apple-system, sans-serif"};
   const toPx = v => v * devicePixelRatio;
+  const xScale = xs.length === 1 && xs[0] > 0 ? {time: false, range: [0, xs[0]]} : {time: false};
   const opts = {
     width, height, legend: {show: false}, bands, series: spec,
-    scales: {x: {time: false}, y: o.log ? {distr: 3, log: 10} : o.range ? {range: () => o.range} : {}},
+    scales: {x: xScale, y: o.log ? {distr: 3, log: 10} : o.range ? {range: () => o.range} : {}},
     axes: o.spark ? [{show: false}, {show: false}] : [
       {...axis, label: o.compact ? null : o.xLabel, labelSize: o.compact ? 0 : 18, values: (u, vs, a, space, incr) => tickLabels(vs, xf, incr), space: o.compact ? 50 : 70},
       // A log axis labels its powers of ten; the ticks between stay unlabelled.
@@ -366,7 +367,10 @@ function model(D) {
   // Opponents are the anchors checkpoints met, by name; checkpoints met are head-to-head games.
   function opponents(score, sel) {
     const seen = new Set(D.cells.filter(c => c.selection === sel && c.score === score && !c.fixed && placed(c.subject)).map(c => c.opponent));
-    const anchors = [...seen].filter(o => o != null && !placed(o)).sort((a, b) => D.players[a].name.localeCompare(D.players[b].name));
+    // Use the same name order as the served headline, independent of browser locale.
+    const names = i => D.players[i].name.toLowerCase();
+    const anchors = [...seen].filter(o => o != null && !placed(o)).sort((a, b) =>
+      names(a) < names(b) ? -1 : names(a) > names(b) ? 1 : a - b);
     return [...anchors.map(o => [String(o), D.players[o].name]), ...(seen.has(null) || !anchors.length ? [["", "all opponents"]] : [])];
   }
   // Why a checkpoint has no value here. Failed and not yet played break a line; a checkpoint
@@ -440,7 +444,7 @@ function headline(D, M) {
   const opp = seated || sel == null ? "" : (M.opponents(score, sel)[0] || [""])[0];
   const clock = M.alignClock || "hours_since_start";
   return M.JOBS.map(j => {
-    const pts = sel == null || !D.scores.length ? [] : M.jobPoints(j, clock, M.evalValue(score, sel, {}, opp));
+    const pts = panel < 0 || sel == null || !D.scores.length ? [] : M.jobPoints(j, clock, M.evalValue(score, sel, {}, opp));
     const done = M.evaluated(pts);
     return {job: j, points: pts, latest: done.length ? done[done.length - 1] : null, against: seated ? "as seated" : opp === "" ? "all opponents" : D.players[+opp].name};
   });

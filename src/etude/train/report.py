@@ -99,6 +99,15 @@ class Trace(Record):
     nonfinite: int = 0
     seeds: list[int] | None = None
 
+    @classmethod
+    def from_buckets(cls, owner: str, reduced: Buckets) -> Trace:
+        return cls(
+            owner=owner,
+            x=_rounded((reduced.x_first + reduced.x_last) / 2, 7),
+            mean=_rounded(reduced.mean),
+            nonfinite=int(reduced.nonfinite.sum()),
+        )
+
     def latest(self, *, log: bool) -> float | None:
         """Last drawable bucket on this trace's axis."""
         for x, y in zip(reversed(self.x), reversed(self.mean), strict=True):
@@ -150,15 +159,6 @@ def _started(run: RunData) -> float:
     """Seconds since the epoch when the run first started."""
     starts = run.writer_starts
     return min(starts.values()) / 1000 if starts else 0.0
-
-
-def _trace(run: RunData, reduced: Buckets) -> Trace:
-    return Trace(
-        owner=run.name,
-        x=_rounded((reduced.x_first + reduced.x_last) / 2, 7),
-        mean=_rounded(reduced.mean),
-        nonfinite=int(reduced.nonfinite.sum()),
-    )
 
 
 def _band(
@@ -398,8 +398,8 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
                         if len(reduced):
                             present.append((run, reduced))
                             if clock in BUILT_IN_NAMES or clock in run_clocks[run.name]:
-                                traces_by_key.setdefault((clock, metric), {})[run.name] = _trace(
-                                    run, reduced
+                                traces_by_key.setdefault((clock, metric), {})[run.name] = (
+                                    Trace.from_buckets(run.name, reduced)
                                 )
                     if (band := _band(job.name, present, metric, clock)) is not None:
                         bands_by_key.setdefault((clock, metric), []).append(band)

@@ -11,7 +11,18 @@ import pytest
 
 from etude.cli import main
 from etude.errors import EtudeError
-from etude.page import Page, Pages, build, experiment_files, index, render, target
+from etude.page import (
+    Drawn,
+    Page,
+    Pages,
+    PanelSelection,
+    Point,
+    build,
+    experiment_files,
+    index,
+    render,
+    target,
+)
 from etude.records import Clock
 from etude.report import (
     Anchors,
@@ -20,6 +31,7 @@ from etude.report import (
     Matrix,
     Ranking,
     Report,
+    Score,
     Series,
 )
 from etude.storage import DirectoryStorage, storage_from_uri
@@ -345,6 +357,71 @@ def test_default_rl_panels_use_logged_keys_but_explicit_panels_keep_missing_keys
         Series(title="Losses", keys=("rl/loss", "rl/value_loss") if explicit else ("rl/loss",)),
     )
     assert page.training.series["updates"]["rl/loss"][0].mean == [0.5]
+    assert page.headline() == "rl/loss 0.5"
+
+
+def test_selective_report_finds_the_first_ungrouped_metric_drawable_across_runs(
+    tmp_path: Path,
+) -> None:
+    source = MeasuredStorage(DirectoryStorage(tmp_path / "runs"))
+    file = experiment_file(tmp_path, "lab", REPORTED)
+    for name, loss in (("a", float("nan")), ("b", 0.42), ("c", 0.25)):
+        with open_run(
+            experiment="lab", run=name, clocks=["updates"], directory=tmp_path / "runs"
+        ) as run:
+            run.log({"loss": loss, "reward": 7.0}, updates=150)
+    pages = Pages(source)
+    page = pages.build(file)
+    assert page.headline() == "loss 0.25–0.42" and not page.training.metrics
+    assert source.listings == 1
+    assert not any(key.endswith((".index.json", ".permanent.json")) for key in source.got)
+    reads, size = source.requests, source.bytes
+    assert pages.build(file).headline() == page.headline()
+    assert (source.listings, source.requests, source.bytes) == (2, reads, size)
+
+
+def test_seated_headline_uses_the_latest_evaluated_checkpoint_of_the_job(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    for seed in (0, 1):
+        with open_run(
+            experiment="coin",
+            run=f"coin@{seed}",
+            job="coin",
+            seed=seed,
+            clocks=["updates"],
+            directory=runs,
+        ) as run:
+            for step in (100, 200):
+                weights = run.out / f"weights-{step}"
+                weights.write_text(str(step))
+                run.checkpoint(weights, updates=step)
+    seating = Matches(seating="prediction")
+    score = Score(table="scores", value="won")
+    points = tuple(
+        Point(
+            selection=0,
+            score=0,
+            run=f"coin@{seed}",
+            ordinal=ordinal,
+            line=None,
+            at={"updates": 100 * ordinal},
+            value=value,
+        )
+        for seed, ordinal, value in ((0, 1, 0), (1, 1, 0.5), (0, 2, 1))
+    )
+    page = build(runs, None, experiment="coin").model_copy(
+        update={
+            "report": Report(score=score, evals=(Curve(matches=seating),)),
+            "selections": (seating,),
+            "scores": (score,),
+            "panel_selections": (PanelSelection(selection=0),),
+            "drawn": (Drawn(seated=True, tournaments=("coin",)),),
+            "points": points,
+        }
+    )
+    assert page.headline() == "scores.won 0.25"
+    whole = (*points[:-1], points[-1].model_copy(update={"whole": True}))
+    assert page.model_copy(update={"points": whole}).headline() == "scores.won 1"
 
 
 def test_policy_key_report_resolves_cross_experiment_seats_once(tmp_path: Path) -> None:

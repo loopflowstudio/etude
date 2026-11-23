@@ -411,7 +411,7 @@ uv run etude view examples/prototype.py
 Run `uv run etude train examples/prototype.py` in another terminal and open
 its `view:` link. `launch`, `queue` and `status RUN` also print run links
 while the view is running. The experiment table shows each run’s state, clock,
-latest score, machine and spend. Select a row to inspect its console, curves,
+latest training metric, machine and spend. Select a row to inspect its console, curves,
 config or checkpoints, or share a link to the selected tab. Open the Report
 tab to load the experiment report. The Machines page shows held machines,
 their windows and costs, and which runs occupy their slots.
