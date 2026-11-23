@@ -80,7 +80,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, cached_property
 from html import escape
 from importlib.util import cache_from_source
 from pathlib import Path
@@ -544,14 +544,32 @@ def experiment_files(directory: Path, *, known: Collection[Path] = ()) -> list[P
     return list(found.values())
 
 
+@dataclass(frozen=True)
+class _ReportRuns:
+    """One build's source listing. Only evaluation can also depend on locally played matches."""
+
+    source: RunListing
+    local_storage: DirectoryStorage | None
+    local_declarations: DeclarationCache
+
+    @cached_property
+    def local(self) -> RunListing | None:
+        if self.local_storage is None:
+            return None
+        return RunListing.read(self.local_storage, known=self.local_declarations)
+
+    def local_versions(self, experiment: str) -> dict[str, str] | None:
+        return self.local.versions_for({experiment}) if self.local else None
+
+
 class Pages:
     """Experiments' pages from one source, each built again only when its inputs change.
 
     A page's inputs are its file, by modification time and size, and the
     experiment's runs, by the version of each visible object they own
     (`Storage.versions`): under the source, and under this computer's runs
-    directory, whose eval runs count too (`etude.eval.tournament.played`).
-    Checking them is one listing of each, plus a run's declaration the first
+    directory when evaluation needs local results (`etude.eval.tournament.played`).
+    Checking them takes one listing per source used, plus a run's declaration the first
     time its version is seen. Changed reports in the same build reuse that
     listing for run discovery.
     """
@@ -559,14 +577,11 @@ class Pages:
     def __init__(self, source: Storage | Path | str) -> None:
         self.storage = as_storage(source)
         here = DirectoryStorage(default_root())
-        self._places = (
-            [self.storage]
-            if store_identity(here) == store_identity(self.storage)
-            else [self.storage, here]
-        )
+        self._local = here if store_identity(here) != store_identity(self.storage) else None
+        self._source_declarations: DeclarationCache = {}
+        self._local_declarations: DeclarationCache = {}
         self._built: dict[tuple[Path | None, str], _BuiltPage] = {}
         self._known: set[Path] = set()
-        self._declared: dict[str, DeclarationCache] = {}
 
     def build(self, file: Path | None, *, experiment: str | None = None) -> Page:
         """`build`'s page, kept from the last call while its inputs are the same."""
@@ -586,28 +601,26 @@ class Pages:
                 built[file] = explain(error)
         return built
 
-    def _listings(self) -> list[RunListing]:
-        return [
-            RunListing.read(place, known=self._declared.setdefault(store_identity(place), {}))
-            for place in self._places
-        ]
+    def _listings(self) -> _ReportRuns:
+        return _ReportRuns(
+            RunListing.read(self.storage, known=self._source_declarations),
+            self._local,
+            self._local_declarations,
+        )
 
-    def _build(
-        self, file: Path | None, listings: Sequence[RunListing], experiment: str | None = None
-    ) -> Page:
+    def _build(self, file: Path | None, runs: _ReportRuns, experiment: str | None = None) -> Page:
         name = _experiment_name(file, experiment)
         key = (file, name)
         kept = self._built.get(key)
         sources = _source_versions(file, kept.sources if kept else ())
-        local = listings[1] if len(listings) > 1 else None
         if (
             kept is not None
             and kept.sources == sources
-            and kept.versions == listings[0].versions_for(kept.experiments)
-            and (local is None or kept.local_versions == local.versions_for({name}))
+            and kept.versions == runs.source.versions_for(kept.experiments)
+            and (kept.local_versions is None or kept.local_versions == runs.local_versions(name))
         ):
             return kept.page
-        built = _build_page(name, _ReportFile(file, sources), listings[0], local)
+        built = _build_page(name, _ReportFile(file, sources), runs)
         self._built[key] = built
         return built.page
 
@@ -620,7 +633,7 @@ class _BuiltPage:
     sources: SourceVersions
     experiments: set[str]
     versions: dict[str, str]
-    local_versions: dict[str, str]
+    local_versions: dict[str, str] | None
 
 
 def index(source: Storage | Path | str, pages: dict[Path, Page | str]) -> Index:
@@ -683,8 +696,7 @@ def build(
     holds no run of this one, and `EtudeError` for a file that is not an
     experiment's.
     """
-    name = _experiment_name(file, experiment)
-    return _build_page(name, _ReportFile(file), RunListing.read(as_storage(source))).page
+    return Pages(source).build(file, experiment=experiment)
 
 
 # Bump whenever derived Page fields change without changing inputs.
@@ -780,9 +792,9 @@ def _save_cached_page(path: Path, key: str, page: Page) -> None:
 def _build_page(
     experiment: str,
     loaded: _ReportFile,
-    source: RunListing,
-    local: RunListing | None = None,
+    runs: _ReportRuns,
 ) -> _BuiltPage:
+    source = runs.source
     storage = source.storage
     report = loaded.report
     cache_path = _page_cache_path(experiment, storage)
@@ -807,11 +819,7 @@ def _build_page(
 
         state = state_of(data, experiment)
         wanted = loaded.tournaments(state)
-        if local is None:
-            here = DirectoryStorage(default_root())
-            if store_identity(here) != store_identity(storage):
-                local = RunListing.read(here)
-    local_versions = local.versions_for({experiment}) if local is not None else {}
+    local_versions = runs.local_versions(experiment) if state is not None else None
     referenced = {experiment} | find_line_experiments(wanted)
     versions = source.versions_for(referenced)
     cache_key = _page_cache_key(
@@ -824,11 +832,11 @@ def _build_page(
         versions=versions,
         state=state,
         wanted=wanted,
-        local_versions=local_versions,
+        local_versions=local_versions or {},
     )
     if (cached := _load_cached_page(cache_path, cache_key)) is not None:
         return _BuiltPage(cached, loaded.sources, referenced, versions, local_versions)
-    evals = _read_evals(source, local, state, report, wanted) if state is not None else _Evals()
+    evals = _read_evals(runs, state, report, wanted) if state is not None else _Evals()
     # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
     unended = [
         run.name
@@ -920,7 +928,7 @@ class ReportDeclaration(Record):
 class _ReportFile:
     """The authored declarations for this build and the sources they used."""
 
-    def __init__(self, path: Path | None, before: SourceVersions | None = None) -> None:
+    def __init__(self, path: Path | None, before: SourceVersions) -> None:
         self.path = path
         self._before = before
         self.sources: SourceVersions = ()
@@ -935,7 +943,7 @@ class _ReportFile:
         # can replace them while this page reads runs or builds its tables.
         with _author_imports:
             yield
-            if self.path and self._before is not None:
+            if self.path:
                 paths = {self.path.resolve(), *_neighbours(self.path).values()}
                 paths.update(Path(p) for p, _, _ in self.sources)
                 self.sources = _versions(paths, observed=(*self._before, *self.sources))
@@ -1300,8 +1308,7 @@ class _Evals:
 
 
 def _read_evals(
-    source: RunListing,
-    local: RunListing | None,
+    runs: _ReportRuns,
     state: ExperimentState,
     report: Report,
     wanted: Sequence[Tournament],
@@ -1310,8 +1317,8 @@ def _read_evals(
     # it is used: only an experiment with evaluations reads it, so a report without loads none.
     from etude.eval.query import _open_statsdb  # noqa: PLC0415
 
-    held, refused = _held_tournaments(wanted, state, source, local)
-    db = _open_statsdb(state.experiment, source)
+    held, refused = _held_tournaments(wanted, state, runs)
+    db = _open_statsdb(state.experiment, runs.source)
     try:
         saved = _saved_checkpoints(db)
         players, placement = _players(db, saved, {run.name: run.line for run in state.runs})
@@ -1357,8 +1364,7 @@ class _HeldTournament:
 def _held_tournaments(
     asked: Sequence[Tournament],
     state: ExperimentState,
-    source: RunListing,
-    local: RunListing | None,
+    listings: _ReportRuns,
 ) -> tuple[list[_HeldTournament], tuple[str, ...]]:
     """Each tournament as held so far, and a note for each one drawn otherwise than asked.
 
@@ -1380,7 +1386,7 @@ def _held_tournaments(
     refused: list[str] = []
     # Read once for every tournament drawn: a page plays nothing, so nothing changes meanwhile.
     experiment = state.experiment
-    places = (local, source) if local is not None else (source,)
+    places = (listings.local, listings.source) if listings.local is not None else (listings.source,)
     runs = StoredRuns.read(experiment, *places)
     for name, held in runs.tournaments.items():
         try:
@@ -1402,7 +1408,7 @@ def _held_tournaments(
                     f" eval_jobs(state) now defines it otherwise ({error.code})."
                 )
         wanted[name] = recorded
-    lines = read_tournament_lines(source, state, wanted.values())
+    lines = read_tournament_lines(listings.source, state, wanted.values())
     held_tournaments = []
     for name, given in sorted(wanted.items()):
         try:

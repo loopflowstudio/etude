@@ -133,7 +133,7 @@ _VISIBLE = f"""{_OBSERVED}, visible AS (
     SELECT runs.address, runs.experiment, kind, ({_MAY_BE_OPEN}) AS may_be_open,
            CASE WHEN matches THEN phase END AS phase, coalesce(eval_last_write,files.last_write) AS last_write, files.inputs,
            held_files.address IS NULL AS listed, CASE WHEN held_files.address IS NULL THEN at ELSE held_files.observed_at END AS at,
-           file_error, launcher_at, last_loop, checkpoints, files.reached, files.preferred, files.pace, files.sample_ms, files.names_version,
+           launcher_at, last_loop, checkpoints, files.reached, files.preferred, files.pace, files.sample_ms, files.names_version,
            CASE WHEN matches THEN machine_rate END AS machine_rate,
            coalesce(CASE WHEN matches THEN launcher_job END, file_job) AS job,
            coalesce(CASE WHEN matches THEN launcher_state END, file_state) AS state,
@@ -259,13 +259,6 @@ class ChartIndex:
             self._next_standing = time.monotonic() + _REMOTE_STANDING
             return None
         return answer
-
-    def read_error(
-        self, remote: str | None, file_error: str | None, *, report: str | None = None
-    ) -> str:
-        launcher = self._launcher_error
-        selected_error = launcher[1] if launcher and launcher[0] == remote else None
-        return "\n".join(filter(None, (file_error, selected_error, report)))
 
     def refresh_launcher(self) -> None:
         remote = selected()
@@ -576,7 +569,11 @@ class ChartIndex:
     def snapshot(self) -> Iterator[_ViewSnapshot]:
         with self._connect() as db:
             db.execute("BEGIN")
-            yield _ViewSnapshot(db, selected(), self)
+            remote = selected()
+            error = self._launcher_error
+            yield _ViewSnapshot(
+                db, remote, self, error[1] if error and error[0] == remote else None
+            )
 
     def request_console(self, remote: str | None, run: str) -> None:
         with self._console_lock:
@@ -591,6 +588,13 @@ class _ViewSnapshot:
     db: sqlite3.Connection
     remote: str | None
     index: ChartIndex
+    launcher_error: str | None
+
+    def _errors(self, report: str | None = None) -> str:
+        row = self._observation
+        return "\n".join(
+            filter(None, (row["file_error"] if row else None, self.launcher_error, report))
+        )
 
     def _read_run(
         self,
@@ -643,7 +647,7 @@ class _ViewSnapshot:
         evaluation = row["kind"] == "evaluation"
         overview = tab == "overview" and not evaluation
         run_line = _run_line(row, state, status, overview=overview)
-        error = self.index.read_error(self.remote, row["file_error"], report=row["report_error"])
+        error = self._errors(row["report_error"])
         console = evaluation or tab in ("overview", "console")
         collected = self._observe_console(row, status, now) if console else ""
 
@@ -748,8 +752,7 @@ class _ViewSnapshot:
 
     def waiting(self) -> str:
         message = f"Waiting for the run to appear in {self.index.source_uri}."
-        row = self._observation
-        if error := self.index.read_error(self.remote, row["file_error"] if row else None):
+        if error := self._errors():
             message += " " + error
         return _observation("run", "waiting", message)
 
@@ -841,13 +844,7 @@ class _ViewSnapshot:
             body += f'<p class="context">{escape(" · ".join(ages))}</p>'
         else:
             body = "<p>Waiting for the first observation.</p>"
-        return _live_status(
-            body,
-            stale=stale,
-            error=self.index.read_error(
-                self.remote, observation["file_error"] if observation else None
-            ),
-        )
+        return _live_status(body, stale=stale, error=self._errors())
 
     def machines(self) -> str:
         if remote := self.remote:
@@ -855,19 +852,20 @@ class _ViewSnapshot:
                 f"<p>The launcher database is on {escape(remote)}. "
                 "Run <code>etude machines</code> to list its machines.</p>",
             )
-        row = self.db.execute(
-            "SELECT at,file_error,launcher_at,last_loop,machines FROM observation WHERE id=1 AND server IS NULL"
-        ).fetchone()
-        error = self.index.read_error(None, row["file_error"] if row else None)
+        row = self._observation
+        error = self._errors()
         if row is None or (row["launcher_at"] is None and not error):
             body = "<p>Waiting for the first local observation.</p>"
-        elif row["machines"] is not None:
-            ages = " · ".join(_observation_ages(row, datetime.now(UTC), launcher=True))
-            body = row["machines"] + f'<p class="context">{escape(ages)}</p>'
         elif row["launcher_at"] is None:
             body = "<p>Machine listing unavailable.</p>"
         else:
-            body = "<p>No launcher is used here.</p>"
+            # Only the Machines page needs the full table.
+            (machines,) = self.db.execute("SELECT machines FROM observation WHERE id=1").fetchone()
+            if machines is None:
+                body = "<p>No launcher is used here.</p>"
+            else:
+                ages = " · ".join(_observation_ages(row, datetime.now(UTC), launcher=True))
+                body = machines + f'<p class="context">{escape(ages)}</p>'
         return _live_status(body, error=error)
 
     def reports(self, declared: dict[str, Path], served: dict[str, _ServedReport]) -> str:
@@ -909,7 +907,7 @@ class _ViewSnapshot:
             f'<div class="reports-index">{_table(columns, rows)}</div>'
             if rows
             else "<p>No experiments yet.</p>",
-            error=self.index.read_error(self.remote, row["file_error"] if row else None),
+            error=self._errors(),
         )
 
     @cached_property
@@ -949,7 +947,7 @@ class _ViewSnapshot:
         launcher_at = row["launcher_at"] if row else None
         machines = row["machine_rail"] if row else None
         outage = ""
-        if self.index.read_error(self.remote, None):
+        if self.launcher_error:
             outage = "Server unavailable" if self.remote is not None else "Launcher unavailable"
         loop = ""
         if self.remote is not None or machines is not None:
@@ -1075,11 +1073,7 @@ class _ViewSnapshot:
             f'<section><p class="context">{escape(ages)}</p>'
             '<p class="lbl">No machine samples recorded.</p></section>',
             stale=stale,
-            error=self.index.read_error(
-                self.remote,
-                observation["file_error"] if observation else None,
-                report=declaration[0] if declaration else None,
-            ),
+            error=self._errors(declaration[0] if declaration else None),
         )
 
     def _detail(self, address: str, pick: str, tab: str, curves: str | None, now: datetime) -> str:

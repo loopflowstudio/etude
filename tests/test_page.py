@@ -487,7 +487,8 @@ def eval_jobs(state):
 
     monkeypatch.setattr(DirectoryStorage, "versions", count_local)
     measured = MeasuredStorage(source)
-    page = build(measured, file)
+    pages = Pages(measured)
+    page = pages.build(file)
     assert [(c.tournament, c.unplayed) for c in page.coverage] == [("first", 2), ("second", 2)]
     assert measured.requests == 13  # 12 discovery reads and the checkpoint statsdb ingests
     assert (measured.listings, local_listings) == (1, 1)
@@ -497,6 +498,14 @@ def eval_jobs(state):
         assert measured.got.count(f"frontier/small@{seed}/checkpoints/updates-100.json") == 1
         assert measured.got.count(f"frontier/small@{seed}/outcome.json") == 1
     assert not any(key.endswith("weights.pt") for key in measured.got)
+
+    # Only reports with evaluation depend on locally played matches.
+    for _ in range(2):
+        assert len(pages.build(None, experiment="frontier").training.runs) == 2
+    assert (measured.listings, local_listings) == (3, 1)
+    reads = measured.requests
+    assert pages.build(file) == page
+    assert (measured.listings, local_listings, measured.requests) == (4, 2, reads)
 
 
 def test_page_cache_reuses_unchanged_build_and_invalidates_on_external_data_edit(

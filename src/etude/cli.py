@@ -377,20 +377,18 @@ def report(
     import time
     import webbrowser
 
-    from etude.page import Page, Pages, build, index, render, render_index, target, write
+    from etude.page import Page, Pages, index, render, render_index, target, write
     from etude.storage import default_root, storage_from_uri
 
     if experiment is not None and path.is_dir():
         raise ValueError("--experiment needs one Python file")
     storage = storage_from_uri(source or default_root())
     shown: object = None
-    pages = None if watch is None and not path.is_dir() else Pages(storage)
+    pages = Pages(storage)
     try:
         while True:
             current: Page | dict[Path, Page | str] | None
-            if pages is None:
-                current = build(storage, path, experiment=experiment)
-            elif path.is_dir():
+            if path.is_dir():
                 current = pages.build_each(path)
             else:
                 try:
@@ -554,27 +552,23 @@ def continue_run(
     from etude.view_link import print_view
 
     scheduler = launch_cli.default()
-    storage = storage_from_uri(source or default_root())
     try:
         parent = scheduler.record(run_address(run, experiment))
     except LauncherError as error:
         raise LauncherError(f"{error}; a changed config needs a new --experiment") from error
-    listing = None
+    name = parent.id.rsplit("/", 1)[-1]
+    listing = RunListing.read(storage_from_uri(source or default_root()), run=name)
     with ExitStack() as relay:
-        if source is None:
-            listing = RunListing.read(storage, run=parent.id.rsplit("/", 1)[-1])
-            if not any(item.file.id == parent.id for item in listing.declarations):
-                # A parent on another owned host can supply its own records.
-                if files := scheduler.held(parent.id):
-                    relayed = relay.enter_context(tempfile.TemporaryDirectory())
-                    put_back(Path(relayed) / parent.id, files)
-                    storage = DirectoryStorage(relayed)
-                    listing = None
+        if source is None and not any(item.file.id == parent.id for item in listing.declarations):
+            # A parent on another owned host can supply its own records.
+            if files := scheduler.held(parent.id):
+                relayed = relay.enter_context(tempfile.TemporaryDirectory())
+                put_back(Path(relayed) / parent.id, files)
+                listing = RunListing.read(DirectoryStorage(relayed), run=name)
         request = continue_from(
             parent,
             until,
-            source=storage,
-            listing=listing,
+            source=listing,
             ordinal=ordinal,
             config=None if config is None else continued_config(parent, config),
         )

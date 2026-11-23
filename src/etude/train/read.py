@@ -915,9 +915,8 @@ def read_located(
 
 def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
     """One run's declaration, state, rows and checkpoints. Rows not yet sealed are not read."""
-    storage = as_storage(source)
     run = run.removeprefix(experiment + "/")
-    listing = RunListing.read(storage, run=run)
+    listing = RunListing.read(as_storage(source), run=run)
     copies = [located for located in listing.declarations if located.file.experiment == experiment]
     if copies:
         # A group and one of its tournaments may share a name. The printed
@@ -934,10 +933,10 @@ def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
                     ),
                 }
             )
-        return read_located(storage, located, listing.keys)
+        return read_located(listing.storage, located, listing.keys)
     # Only a name nobody declared can hold historical rows without a declaration.
     folders = [] if listing.declarations else listing.folders.get(run, [run_prefix(run)])
-    return _read(storage, experiment, run, folders, listing.keys, declaration=None)
+    return _read(listing.storage, experiment, run, folders, listing.keys, declaration=None)
 
 
 def _named(keys: Sequence[str], folders: Sequence[str]) -> list[tuple[str, str]]:

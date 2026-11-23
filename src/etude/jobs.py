@@ -1055,8 +1055,7 @@ def continue_from(
     parent: RunRecord,
     until: str,
     *,
-    source: Storage | Path | str,
-    listing: RunListing | None = None,
+    source: RunListing | Storage | Path | str,
     ordinal: int | None = None,
     config: BaseModel | None = None,
 ) -> RunRequest:
@@ -1065,13 +1064,14 @@ def continue_from(
     File inputs freeze the bytes chosen here by digest; a parent changing them
     before delivery is refused. Config is validated against the typed job's
     function before queueing. The target is absolute and must advance its clock.
-    A supplied listing is the parent's discovery in this source. Empty out
+    A RunListing reuses a discovery of this source. Empty out
     without a latest copied checkpoint is refused before queueing.
     """
-    storage = as_storage(source)
     name = parent.id.rsplit("/", 1)[-1]
-    if listing is None:
-        listing = RunListing.read(storage, run=name)
+    listing = (
+        source if isinstance(source, RunListing) else RunListing.read(as_storage(source), run=name)
+    )
+    storage = listing.storage
     candidates = [
         item
         for item in listing.declarations
@@ -1095,11 +1095,7 @@ def continue_from(
         and i.out is None
     }
     # An explicit checkpoint needs no out reads, even when the parent has out.
-    out = (
-        None
-        if ordinal is not None
-        else _parent_out(storage, parent.id, located.folders, listing.keys)
-    )
+    out = _parent_out(listing, parent.id, located.folders) if ordinal is None else None
     checkpoint = next((r for r in reversed(data.checkpoints) if ordinal in (None, r.ordinal)), None)
     key = None
     if checkpoint is not None:
@@ -1189,29 +1185,27 @@ def continue_from(
     )
 
 
-def _parent_out(
-    storage: Storage, run: str, folders: Sequence[str], keys: Sequence[str]
-) -> OutMembers | None:
+def _parent_out(listing: RunListing, run: str, folders: Sequence[str]) -> OutMembers | None:
     """Choose one physical out; absent membership requires reading and hashing its files.
 
     None means no out exists. Empty membership excludes retained out bytes;
     copied checkpoints live separately under checkpoints/.
     """
+    storage = listing.storage
     for folder in folders:
-        if folder + MEMBERSHIP in keys:
+        if folder + MEMBERSHIP in listing.objects:
             members = OutFiles.model_validate_json(storage.get(folder + MEMBERSHIP)).files
         else:
-            out_keys = list(under(keys, folder + "out/"))
-            if not out_keys and folder + OUT_PRESENT not in keys:
+            out_keys = list(under(listing.names_in(folder), "out/"))
+            if not out_keys and folder + OUT_PRESENT not in listing.objects:
                 continue
             files = []
-            for full_key in out_keys:
-                key = full_key[len(folder) :]
+            for key in out_keys:
                 if any(part.startswith(".") for part in key.split("/")) or key.endswith(
                     (".partial", ".open")
                 ):
                     continue
-                body = storage.get(full_key)
+                body = storage.get(folder + key)
                 files.append(
                     OutFile(key=key, sha256=sha256(body).hexdigest(), size_bytes=len(body))
                 )
