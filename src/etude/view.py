@@ -884,8 +884,9 @@ def _machines_table(db: sqlite3.Connection, machines: tuple[MachineStatus, ...])
         runs = []
         for run in status.runs:
             row = db.execute(
-                """SELECT address,launcher_state AS state,launcher_position AS position,status,max_attempts
-                   FROM runs WHERE launched_as=?""",
+                """SELECT address,launcher_state AS state,launcher_position AS position,status,
+                          max_attempts,last_write
+                   FROM runs LEFT JOIN files USING(address) WHERE launched_as=?""",
                 (run,),
             ).fetchone()
             address = row["address"] if row else run
@@ -915,7 +916,10 @@ def _run_line(row: sqlite3.Row, state: str, status: Status | None) -> str:
             if status.outcome != state and (state, status.outcome) != ("finished", "succeeded"):
                 facts.append(status.outcome)
             facts.append(status.cause)
-        elif status.phase in ("renting", "setting_up", "stopping"):
+        elif status.phase == "stopping" or (
+            # Written files prove the job started, whatever the last loop saw.
+            status.phase in ("renting", "setting_up") and row["last_write"] is None
+        ):
             facts.append(status.phase.replace("_", " "))
         facts.extend(launcher_facts(status, row["max_attempts"]))
     parts.extend(f"<span>{escape(fact)}</span>" for fact in facts if fact)

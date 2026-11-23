@@ -834,6 +834,28 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
     backend.store.close()
 
 
+def test_written_files_supersede_a_setup_phase_the_loop_has_not_revisited(
+    tmp_path: Path,
+) -> None:
+    backend = bench(home())
+    spec = job(name="learn", experiment="lab", until="steps=40")
+    (run,) = backend.scheduler.queue(RunRequest(id="learn@0", seed=0, job=spec), rent="l4")
+    backend.scheduler.tick()
+    assert backend.scheduler.read(run).phase in ("renting", "setting_up")
+    source = DirectoryStorage(tmp_path / "runs")
+    with Server(source, None, ("127.0.0.1", 0)) as server:
+        _ingest(server)
+        phase = backend.scheduler.read(run).phase.replace("_", " ")
+        assert phase in _get(server, "/runs/" + run)
+        # The job wrote rows before any loop recorded its start.
+        _start_run(source, run, 7, job="learn", seed=0)
+        _ingest(server)
+        for path in ("/runs/" + run, "/experiments/lab", "/", "/machines"):
+            assert phase not in _get(server, path)
+        assert "steps 1 / 40" in _get(server, "/runs/" + run)
+    backend.store.close()
+
+
 def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: Path) -> None:
     backend = bench(home(), slots=2)
     backend.scheduler.add_machine("bench", "bench")
