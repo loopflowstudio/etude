@@ -25,7 +25,7 @@ from etude.checkpoints import CheckpointRecord
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.home import home
-from etude.jobs import ExperimentState, continue_from, group_evaluations
+from etude.jobs import ExperimentState, group_evaluations
 from etude.launch.database import Database
 from etude.launch.logs import snapshot_stream
 from etude.launch.records import GPU
@@ -972,19 +972,24 @@ def test_continuation_link_from_queue_to_delivery_survives_view_restart(
     previous = (datetime.now(UTC) - timedelta(hours=2)).timestamp()
     for key in source.keys(parent + "/"):
         os.utime(source.root / key, (previous, previous))
-    request = continue_from(backend.scheduler.record(parent), "updates=200", source=source)
-    (child,) = backend.scheduler.queue(request, rent="l4")
-    parent_page, child_page = "/runs/" + parent, "/runs/" + child
+    parent_page = "/runs/" + parent
+    handoff = f'Continued from <a href="{parent_page}">{parent}</a> at updates 150'
 
     def check(view: Server, phase: str) -> str:
         before = measured.listings, measured.requests
         table = _get(view, "/experiments/paced/status")
-        assert table.count('href="/runs/') == 2
+        rows = [row for row in table.split("<tr>") if "<td>" in row]
+        assert len(rows) == 2
         for path, label in ((parent_page, "finished"), (child_page, phase)):
-            row = table.split(f'href="{path}"')[1].split("</tr>")[0]
-            assert f">{label}<" in row
+            row = next(row for row in rows if row.split('href="', 1)[1].startswith(path + '"'))
+            assert f">{label}<" in row and (handoff in row) == (path == child_page)
         parent_graph = _get(view, parent_page)
         child_graph = _get(view, child_page)
+        assert handoff in child_graph and "Continued from" not in parent_graph
+        assert (
+            f"etude logs --run {child}" in child_graph
+            and f"etude logs --run {parent}" in parent_graph
+        )
         assert _loss(parent_graph, "updates") == [7]
         assert "updates 150 / 150" in parent_graph and "last file write 2 h ago" in parent_graph
         assert f">{phase}<" in child_graph
@@ -999,17 +1004,32 @@ def test_continuation_link_from_queue_to_delivery_survives_view_restart(
         return child_graph
 
     with Server(measured, None, ("127.0.0.1", 0)) as view:
+        argv = ["continue", "--run", parent, "--until", "updates=200", "--source", str(source.root)]
+        assert main(argv) == 0
+        output = capsys.readouterr().out.splitlines()
+        child = output[0].split()[0]
+        child_page = "/runs/" + child
+        assert child != parent and output[-1] == f"view: {view.origin}{child_page}"
         _ingest(view)
         assert main(["status", child]) == 0
         assert f"view: {view.origin}{child_page}" in capsys.readouterr().out.splitlines()
         assert "no files yet" in check(view, "queued")
         backend.scheduler.tick()
         (attempt,) = backend.scheduler.attempts(child)
+        (parent_attempt,) = backend.scheduler.attempts(parent)
+        for allocation, message in ((parent_attempt, b"parent output"), (attempt, b"child output")):
+            backend.store.retain_log(
+                snapshot_stream(allocation.session, allocation.id, "job", message, True)
+            )
         view.refresh_launcher()
         assert "no files yet" in check(view, "setting up")
+        child_console = _get(view, child_page)
+        parent_console = _get(view, parent_page)
+        assert "child output" in child_console and "parent output" not in child_console
+        assert "parent output" in parent_console and "child output" not in parent_console
         with monkeypatch.context() as patch:
             patch.setenv("ETUDE_ATTEMPT", attempt.id)
-            for variable in request.job.environment:
+            for variable in backend.scheduler.record(child).launch.spec.environment:
                 patch.setenv(variable.name, variable.value)
             with open_run(
                 experiment="paced",
@@ -1039,6 +1059,19 @@ def test_continuation_link_from_queue_to_delivery_survives_view_restart(
         outcome = source.root / child / "outcome.json"
         pending = outcome.rename(tmp_path / "child-outcome.json")
         reopened.refresh_files()
+        # An older declaration can lack lineage. The selected launcher supplies it.
+        declaration = source.root / child / "run.json"
+        portable = RunRecord.model_validate_json(declaration.read_bytes())
+        declaration.write_text(portable.model_copy(update={"continues": None}).model_dump_json())
+        reopened.refresh_files()
+        check(reopened, "running")
+        endpoint = home() / "server"
+        endpoint.write_text("other")
+        assert "Continued from" not in _get(reopened, child_page)
+        assert "Continued from" not in _get(reopened, "/experiments/paced/status")
+        endpoint.unlink()
+        declaration.write_text(portable.model_dump_json())
+        reopened.refresh_files()
         active = check(reopened, "running")
         (trace,) = _page_data(active).training.series["updates"]["loss"]
         assert trace.x == [151, 200] and trace.mean == [3, 2]
@@ -1057,10 +1090,17 @@ def test_continuation_link_from_queue_to_delivery_survives_view_restart(
         _ingest(reader)
         assert "2 finished" in _get(reader, "/status")
         assert _loss(_get(reader, parent_page), "updates") == [7]
-        assert _loss(_get(reader, child_page), "updates") == [3, 2]
+        child_graph = _get(reader, child_page)
+        assert _loss(child_graph, "updates") == [3, 2] and handoff in child_graph
+        assert handoff in _get(reader, "/experiments/paced/status")
         report = _get(reader, "/experiments/paced/report")
         (group,) = _page_data(report).training.jobs
         assert set(group.runs) == {"talk@0", child.split("/")[1]} and group.label == "talk · 1 seed"
+        (archive.root / parent).rename(tmp_path / "absent-parent")
+        reader.refresh_files()
+        for page in (child_page, "/experiments/paced/status"):
+            html = _get(reader, page)
+            assert f"Continued from {parent} at updates 150" in html and parent_page not in html
 
 
 def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: Path) -> None:

@@ -39,10 +39,11 @@ from etude.records import (
     RunSubmission,
     SourceKey,
 )
-from etude.spec import Job, RunRequest
+from etude.spec import CONTINUATION_ENV, Job, RunRequest, Until, Variable
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage
 from etude.train.read import read, read_all
+from etude.train.records import ParentRun
 from etude.train.tracking import TrainingRun as Run_
 from tests.eval.games import (
     play,
@@ -1004,6 +1005,19 @@ def test_launcher_phase_preserves_compact_training_addresses_and_terminal_outcom
     assert run.state == (phase if outcome == "stopped" and phase != "succeeded" else outcome)
 
 
+def _continue_job(job: Job, parent: str, updates: int) -> Job:
+    handoff = ParentRun(
+        parent=SourceKey(namespace="local", kind="run", source_id=parent),
+        at={"steps": 20, "updates": updates},
+    )
+    return job.model_copy(
+        update={
+            "environment": (Variable(name=CONTINUATION_ENV, value=handoff.model_dump_json()),),
+            "until": Until(clock="updates", value=updates + 50),
+        }
+    )
+
+
 @pytest.mark.parametrize("stored", [("base@0",), ("c1",), ("base@0", "c1"), ()])
 def test_continuation_and_parent_keep_their_addresses_through_delivery(
     tmp_path: Path, stored: tuple[str, ...]
@@ -1030,12 +1044,16 @@ def test_continuation_and_parent_keep_their_addresses_through_delivery(
             continues=continuation,
             directory=tmp_path,
         ) as writer:
-            writer.log({"loss": 1}, updates=200 if continuation else 150)
+            updates = 200 if continuation else 150
+            writer.log({"loss": 1}, updates=updates)
+            weights = writer.out / "weights.pt"
+            weights.write_text(name)
+            writer.checkpoint(weights, updates=updates)
     launcher = _Launcher()
     launcher.launched.append(RunRequest(id=parent, seed=0, job=job))
     launcher.outcome = "succeeded"
     (finished,) = launcher.standing("ppo")
-    launcher.launched = [RunRequest(id=child, seed=0, job=job)]
+    launcher.launched = [RunRequest(id=child, seed=0, job=_continue_job(job, "base@0", 150))]
     launcher.queued, launcher.outcome = True, None
     (queued,) = launcher.standing("ppo")
     files = read_all(source)
@@ -1049,8 +1067,38 @@ def test_continuation_and_parent_keep_their_addresses_through_delivery(
         assert state.run(child).state == ("finished" if "c1" in stored else "queued")
         for name in ("base@0", "c1"):
             assert (state.run(name).last_write is not None) == (name in stored)
-        if "c1" in stored:
-            assert state.run(child).line == "base@0"
+        (line,) = state.lines
+        assert line.name == "base@0" and line.ended == ("c1" in stored)
+        assert [point.at["updates"] for point in line.checkpoints] == [
+            updates for name, updates in (("base@0", 150), ("c1", 200)) if name in stored
+        ]
+        run = state.run(child)
+        assert run.parent_address == parent and run.continues
+        assert (run.continues.clock, run.continues.value) == ("updates", 150)
+        assert all(point.run == "base@0" for point in state.run(parent).checkpoints)
+
+
+def test_queued_chain_follows_a_compact_parent_and_keeps_a_same_seed_repeat_separate(
+    tmp_path: Path,
+) -> None:
+    source = DirectoryStorage(tmp_path)
+    declaration = RunRecord(id="ppo@0", experiment="ppo", job_name="base", seed=0)
+    source.put("ppo@0/run.json", declaration.model_dump_json().encode())
+    launcher = _Launcher()
+    launcher.queued = True
+    job = Job(name="base", experiment="ppo", command="true")
+    launcher.launched = [
+        RunRequest(id="ppo/last", seed=0, job=_continue_job(job, "middle", 200)),
+        RunRequest(id="ppo/middle", seed=0, job=_continue_job(job, "base@0", 150)),
+        RunRequest(id="ppo/repeat", seed=0, job=job),
+        RunRequest(id="ppo/base@0", seed=0, job=job),
+    ]
+    state = state_of(read_all(source), "ppo", retained=launcher.standing("ppo"))
+    assert state.run("middle").parent_address == "ppo@0"
+    assert state.run("last").parent_address == "ppo/middle"
+    assert state.run("middle").line == state.run("last").line == "ppo@0"
+    assert {line.name for line in state.lines} == {"ppo@0", "repeat"}
+    assert state.run("repeat").continues is None
 
 
 @pytest.mark.parametrize(
@@ -1113,10 +1161,17 @@ def test_compact_and_qualified_address_claims_survive_the_same_local_name(tmp_pa
         RunRequest(id=address, seed=0, job=Job(name="ppo", experiment="ppo", command="true"))
         for address in (compact, qualified)
     ]
+    launcher.launched.append(
+        RunRequest(
+            id="ppo/child", seed=0, job=_continue_job(launcher.launched[0].job, "ppo@0", 150)
+        )
+    )
     files, retained = read_all(source), launcher.standing("ppo")
     for standing in (retained, retained[::-1]):
         state = state_of(files, "ppo", retained=standing)
-        assert {run.address for run in state.runs} == {compact, qualified}
+        assert {run.address for run in state.runs} == {compact, qualified, "ppo/child"}
+        assert state.run("ppo/child").parent_address is None
+        assert {line.name for line in state.lines} == {compact, qualified, "child"}
         assert state.run(compact).last_write is not None
         assert state.run(qualified).last_write is None
 

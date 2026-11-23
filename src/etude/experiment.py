@@ -11,7 +11,6 @@ from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from decimal import Decimal
-from graphlib import TopologicalSorter
 from pathlib import Path
 
 import etude.jobs as jobs
@@ -25,7 +24,8 @@ from etude.records import RunRecord
 from etude.run import LocatedRun, RunListing
 from etude.spec import Job, declared_address
 from etude.storage import Storage
-from etude.train.read import RunData, lines, read_all
+from etude.train.read import RunData, RunSources, read_all
+from etude.train.records import ParentRun
 from etude.train.report import job_names
 
 __all__ = ("observe",)
@@ -135,52 +135,24 @@ def state_of(
         and data.experiment == experiment
         and data.file.kind != "evaluation"
     ]
-    line = lines(ours)
     job = job_names(ours)
-    by_name = {data.name: data for data in ours}
     retained = client.standing(experiment, local=True) if retained is None else retained
-    runs: dict[str, jobs.TrainingRunSummary] = {}
-    # Parent records precede continuations even when their names sort the other way.
-    parents = {
-        data.name: (data.file.continues.parent.source_id,)
-        if data.file is not None
-        and data.file.continues is not None
-        and data.file.continues.parent.source_id in by_name
-        else ()
-        for data in ours
-    }
-    for name in TopologicalSorter(parents).static_order():
-        data = by_name[name]
-        first = by_name.get(line[data.name], data)
-        saved = jobs.Checkpoints(
-            record.model_copy(
-                update={
-                    "run": data.name,
-                    "experiment": data.experiment,
-                    "line": line[data.name],
-                    "policy": PolicyKey(
-                        experiment=data.experiment,
-                        job=job[first.name].name,
-                        seed=first.file.seed if first.file else None,
-                        role=record.role,
-                    ),
-                }
-            )
-            for record in data.checkpoints
-            if record.artifact.sha256 is not None and record.artifact.size_bytes is not None
-        )
-        runs[data.address] = jobs.TrainingRunSummary(
+    runs = {
+        data.address: jobs.TrainingRunSummary(
             name=data.name,
             experiment=data.experiment,
             job=job[data.name].name,
             launch=job[data.name].launch,
-            line=line[data.name],
+            line=data.name,
+            continues=data.file.continues if data.file else None,
             state=data.stored_state,
-            checkpoints=saved,
+            checkpoints=jobs.Checkpoints(),
             seed=data.file.seed if data.file else None,
             stored=data,
             last_write=data.last_write,
         )
+        for data in ours
+    }
     launches = find_eval_groups(retained)
     evals = _evaluations(every, experiment, launches)
     training_runs = TrainingRuns(runs.values(), requested=(item.record.id for item in retained))
@@ -203,13 +175,60 @@ def state_of(
         address = training.address if training else record.id
         if training is None:
             training = jobs.TrainingRunSummary.queued(name, experiment, spec.name, record.seed)
+        if training.continues is None and (raw := spec.continuation_json) is not None:
+            edge = ParentRun.model_validate_json(raw).continuation(
+                spec.until.clock if spec.until else None
+            )
+            training = replace(training, continues=edge)
         runs[address] = _join_allocation(training, item)
     return jobs.ExperimentState(
         experiment=experiment,
-        runs=tuple(runs.values()),
+        runs=_training_lines(runs),
         eval_runs=tuple(evals.values()),
         committed_usd=committed,
     )
+
+
+def _training_lines(
+    runs: dict[str, jobs.TrainingRunSummary],
+) -> tuple[jobs.TrainingRunSummary, ...]:
+    sources = RunSources(
+        (address, record)
+        for address, run in runs.items()
+        for record in (
+            run.stored.file if run.stored else None,
+            run.standing.record if run.standing else None,
+        )
+        if record is not None
+    )
+    ancestry = sources.ancestry(
+        {address: edge for address, run in runs.items() if (edge := run.continues) is not None}
+    )
+    summaries = []
+    for address, ancestors in ancestry.items():
+        run = runs[address]
+        first = runs[ancestors.first]
+        saved = jobs.Checkpoints(
+            record.model_copy(
+                update={
+                    "run": run.name,
+                    "experiment": run.experiment,
+                    "line": ancestors.line,
+                    "policy": PolicyKey(
+                        experiment=run.experiment,
+                        job=first.job,
+                        seed=first.seed,
+                        role=record.role,
+                    ),
+                }
+            )
+            for record in (run.stored.checkpoints if run.stored else ())
+            if record.artifact.sha256 is not None and record.artifact.size_bytes is not None
+        )
+        summaries.append(
+            replace(run, parent_address=ancestors.parent, line=ancestors.line, checkpoints=saved)
+        )
+    return tuple(summaries)
 
 
 def find_eval_groups(retained: Sequence[Standing]) -> dict[str, jobs.EvalGroup]:

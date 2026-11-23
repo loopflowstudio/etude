@@ -12,7 +12,7 @@ import re
 from pydantic import Field, JsonValue
 
 from etude.checkpoints import CheckpointRecord
-from etude.records import Clock, Name, Record, SourceKey
+from etude.records import Clock, Continuation, Name, Record, SourceKey
 
 __all__ = ("Time",)
 
@@ -35,6 +35,11 @@ class ParentRun(Record):
     clocks: tuple[Clock, ...] = ()
     checkpoint: CheckpointRecord | None = None
     input: str | None = None
+
+    def continuation(self, target_clock: str | None) -> Continuation:
+        """The inherited position on the target clock, or the first recorded clock."""
+        clock = target_clock if target_clock in self.at else next(iter(self.at))
+        return Continuation(parent=self.parent, clock=clock, value=self.at[clock])
 
 
 def checkpoint_name(at: dict[str, float], *, padded: bool = False) -> str:

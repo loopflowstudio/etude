@@ -21,6 +21,7 @@ from etude.launch.schemas import Packet, Work
 from etude.records import Clock
 from etude.spec import Job, RunRequest, Until
 from etude.train.records import ParentRun
+from etude.view_link import advertise
 from tests.experiments import authored
 from tests.launch.fake import L4, bench, open_database
 from tests.train.tracking import open_run
@@ -254,8 +255,12 @@ def test_cli_continue_waits_without_capacity(
     tracked.finish()
     b.scheduler.set_ondemand_max("l4", 0)
     argv = ["continue", "--run", parent, "--until", "steps=7", "--source", str(tmp_path)]
-    assert main(argv) == 0
-    child = capsys.readouterr().out.split()[0]
+    with advertise("http://127.0.0.1:8765"):
+        monkeypatch.setenv("ETUDE_SERVER_LOCAL", "1")  # The receiving end of a forwarded command.
+        assert main(argv) == 0
+    output = capsys.readouterr().out
+    assert "view:" not in output
+    child = output.split()[0]
     record = b.scheduler.record(child)
     (given,) = record.launch.spec.environment
     handed = ParentRun.model_validate_json(given.value)

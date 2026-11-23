@@ -8,6 +8,7 @@ server, and turns expected failures into one line on stderr.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -548,6 +549,7 @@ def continue_run(
     from etude.launch.listing import resolve_runs, show_runs
     from etude.run import located_runs
     from etude.storage import default_root, storage_from_uri
+    from etude.view_link import print_view
 
     scheduler = launch_cli.default()
     storage = storage_from_uri(source or default_root())
@@ -579,6 +581,9 @@ def continue_run(
         ]
     ids = scheduler.queue(again[0], first.launch.pool, rent=first.launch.rent)
     show_runs(scheduler, ids)
+    if not os.environ.get("ETUDE_SERVER_LOCAL"):
+        for child in ids:
+            print_view(child)
 
 
 # Each may reach a bucket, so it is a wait rather than a read.

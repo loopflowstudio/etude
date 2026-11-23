@@ -19,10 +19,12 @@ reader of checkpoints, or of an eval run, reads no metric data.
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from functools import cached_property
+from graphlib import TopologicalSorter
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal, NamedTuple
@@ -41,10 +43,12 @@ from etude.records import (
     HOURS_SINCE_START,
     RUNNING_HOURS,
     Clock,
+    Continuation,
     Record,
     RunOutcome,
     RunRecord,
     RunWriter,
+    SourceKey,
 )
 from etude.run import LocatedRun, RunListing, as_storage, located_runs, under
 from etude.storage import ListedStorage, Storage, run_prefix
@@ -711,22 +715,64 @@ def _here(
     return record.model_copy(update={"artifact": artifact, "folder": folder.rstrip("/")})
 
 
+@dataclass(frozen=True)
+class Ancestry:
+    parent: str | None  # Visible address of the immediate parent.
+    first: str  # Address of the earliest visible run.
+    line: str  # Includes the recorded name of a missing ancestor.
+
+
+class RunSources:
+    """Resolve recorded parents within an experiment, including joined submission aliases."""
+
+    def __init__(self, records: Iterable[tuple[str, RunRecord]]) -> None:
+        self._records: dict[str, RunRecord] = {}
+        self._addresses: dict[tuple[str, SourceKey], str | None] = {}
+        for address, record in records:
+            self._records.setdefault(address, record)
+            key = (record.experiment, record.source_key)
+            if self._addresses.setdefault(key, address) != address:
+                self._addresses[key] = None
+
+    def parent(self, experiment: str, edge: Continuation) -> str | None:
+        return self._addresses.get((experiment, edge.parent))
+
+    def ancestry(self, edges: dict[str, Continuation]) -> dict[str, Ancestry]:
+        """Visit parents before children so checkpoints keep their order across handoffs."""
+        parents = {
+            address: self.parent(record.experiment, edges[address]) if address in edges else None
+            for address, record in self._records.items()
+        }
+        names = Counter((record.experiment, record.name) for record in self._records.values())
+        found: dict[str, Ancestry] = {}
+        graph = {address: (parent,) if parent else () for address, parent in parents.items()}
+        for address in TopologicalSorter(graph).static_order():
+            parent = parents[address]
+            if parent:
+                first = found[parent]
+                found[address] = Ancestry(parent, first.first, first.line)
+            else:
+                record = self._records[address]
+                edge = edges.get(address)
+                line = record.name if names[record.experiment, record.name] == 1 else address
+                # A missing parent names the line unless a different visible run bears that name.
+                if (
+                    edge
+                    and (record.experiment, edge.parent) not in self._addresses
+                    and not names[record.experiment, edge.parent.source_id]
+                ):
+                    line = edge.parent.source_id
+                found[address] = Ancestry(None, address, line)
+        return found
+
+
 def lines(data: Sequence[RunData]) -> dict[str, str]:
-    """Each run's learner line: the first run of the chain of continuations that led to it,
-    as far as `data` knows. A run and the runs continuing it are one learner, one seed."""
-    parents = {
-        run.name: run.file.continues.parent.source_id
-        for run in data
-        if run.file is not None and run.file.continues is not None
-    }
-    found = {}
-    for run in data:
-        first, seen = run.name, {run.name}
-        while first in parents and parents[first] not in seen:
-            first = parents[first]
-            seen.add(first)
-        found[run.name] = first
-    return found
+    """Each run's learner line, named for the first known ancestor."""
+    sources = RunSources((run.address, run.file) for run in data if run.file)
+    ancestry = sources.ancestry(
+        {run.address: run.file.continues for run in data if run.file and run.file.continues}
+    )
+    return {run.name: ancestry[run.address].line if run.file else run.name for run in data}
 
 
 def read_all(

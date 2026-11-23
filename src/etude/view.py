@@ -39,7 +39,7 @@ from etude.cache import Cache
 from etude.errors import explain
 from etude.experiment import find_eval_groups, locate_evaluation_members, state_of
 from etude.home import home
-from etude.identity import run_address
+from etude.identity import SAFE_NAME, run_address
 from etude.jobs import EvalRunSummary, TrainingRunSummary
 from etude.launch.listing import describe_machine, launcher_facts, machine_warning
 from etude.launch.logs import ConsoleTail
@@ -57,12 +57,12 @@ from etude.page import (
     render_run,
     run_chart_data,
 )
-from etude.records import RunRecord
+from etude.records import Continuation, RunRecord
 from etude.report import Report
 from etude.run import LocatedRun, RunListing, as_storage
 from etude.spec import Until, number
 from etude.storage import ListedStorage, Storage
-from etude.train.read import RunData, read_located
+from etude.train.read import RunData, RunSources, read_located
 from etude.view_link import advertise, run_path
 
 _REFRESH = 5
@@ -80,9 +80,9 @@ _CLOCKS = TypeAdapter(dict[str, float])
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     address TEXT PRIMARY KEY, experiment TEXT NOT NULL, kind TEXT NOT NULL,
-    eval_last_write TEXT, file_job TEXT, file_state TEXT, file_position TEXT, file_config TEXT, checkpoints TEXT,
+    eval_last_write TEXT, file_job TEXT, file_state TEXT, file_position TEXT, file_config TEXT, file_continues TEXT, checkpoints TEXT,
     launched_as TEXT, launcher_job TEXT, launcher_state TEXT, launcher_position TEXT,
-    launcher_config TEXT, source TEXT, status TEXT, max_attempts INTEGER
+    launcher_config TEXT, launcher_continues TEXT, source TEXT, status TEXT, max_attempts INTEGER
 );
 CREATE INDEX IF NOT EXISTS launcher_address ON runs(launched_as,experiment) WHERE launched_as IS NOT NULL;
 CREATE INDEX IF NOT EXISTS experiment_runs ON runs(experiment, address);
@@ -127,6 +127,7 @@ _VISIBLE = f"""{_OBSERVED}, visible AS (
            coalesce(CASE WHEN matches THEN launcher_state END, file_state) AS state,
            coalesce(CASE WHEN matches THEN launcher_position END, file_position) AS position,
            coalesce(file_config, CASE WHEN matches THEN launcher_config END) AS config,
+           coalesce(CASE WHEN matches THEN launcher_continues END, file_continues) AS continues,
            CASE WHEN matches THEN source END AS source,
            CASE WHEN matches THEN launched_as END AS launched_as,
            CASE WHEN matches THEN status END AS status,
@@ -508,6 +509,11 @@ class ChartIndex:
                 row[0]
                 for row in db.execute("SELECT address FROM runs WHERE experiment=?", (experiment,))
             }
+            file_sources = RunSources(
+                (data.address, data.file)
+                for data in metadata
+                if data.file and data.file.kind != "evaluation"
+            )
             state = state_of(metadata, experiment, retained=tuple(standing[experiment]))
             runs: tuple[TrainingRunSummary | EvalRunSummary, ...] = (*state.runs, *state.eval_runs)
             for run in runs:
@@ -521,6 +527,7 @@ class ChartIndex:
                     run,
                     _CLOCKS.validate_json(chart["reached"]) if chart and chart["reached"] else {},
                     chart["preferred"] if chart else None,
+                    file_sources,
                 )
                 removed.discard(address)
             db.executemany("DELETE FROM runs WHERE address=?", ((a,) for a in removed))
@@ -576,6 +583,7 @@ class ChartIndex:
             row["kind"],
             row["inputs"],
             run_line,
+            row["continues"],
             row["config"],
             row["source"],
             row["launched_as"],
@@ -604,7 +612,7 @@ class ChartIndex:
         heading = (
             f'<a href="{page}">{breadcrumb}</a>'
             f'<header class="head"><h1>{title}</h1></header>'
-            f"<p>{run_line}</p>{observation}{_refresh_script()}"
+            f"<p>{run_line}</p>{row['continues'] or ''}{observation}{_refresh_script()}"
         )
         if evaluation:
             heading += f'<p>Scores are in the <a href="{page}#report">{experiment} report</a>.</p>'
@@ -646,7 +654,7 @@ class ChartIndex:
         # Both tables and their ages come from one generation. Leave large chart,
         # console and machine payloads out of these reads.
         query = _VISIBLE + (
-            "SELECT experiment,address,job,state,position,status,max_attempts,last_write,at FROM visible"
+            "SELECT experiment,address,job,state,position,status,max_attempts,last_write,at,continues FROM visible"
         )
         params = {"experiment": experiment, "remote": remote}
         with self._connect() as db:
@@ -766,7 +774,7 @@ class ChartIndex:
                 last_write += f"<div>{_file_age(row['at'], now, 'files observed')}</div>"
             body.append(
                 f"<tr><td>{escape(row['job'])}</td>"
-                f"<td>{_run_link(address)}</td>"
+                f"<td>{_run_link(address)}{row['continues'] or ''}</td>"
                 f"<td>{_run_line(row, state, status)}</td><td>{last_write}</td></tr>"
             )
         if body:
@@ -886,6 +894,7 @@ def _store_run(
     run: TrainingRunSummary | EvalRunSummary,
     reached: dict[str, float],
     preferred: str | None,
+    file_sources: RunSources,
 ) -> None:
     stored = run.stored
     file = stored.file if stored else None
@@ -914,8 +923,20 @@ def _store_run(
         if stored
         else None
     )
+    file_continues = (
+        _handoff(experiment, file.continues, file_sources.parent(experiment, file.continues))
+        if training and file and file.continues
+        else None
+    )
+    joined_continues = (
+        _handoff(experiment, run.continues, run.parent_address)
+        if isinstance(run, TrainingRunSummary) and run.continues
+        else None
+    )
     fields = {
         "address": address,
+        "file_continues": file_continues,
+        "launcher_continues": joined_continues if joined_continues != file_continues else None,
         "experiment": experiment,
         "kind": "training" if training else "evaluation",
         "eval_last_write": run.last_write.isoformat()
@@ -947,6 +968,13 @@ def _store_run(
 
 def _run_link(address: str) -> str:
     return f'<a href="{run_path(address)}">{escape(address)}</a>'
+
+
+def _handoff(experiment: str, edge: Continuation, parent: str | None) -> str:
+    name = edge.parent.source_id
+    recorded = run_address(name, experiment) if SAFE_NAME.fullmatch(name) else name
+    link = _run_link(parent) if parent else escape(recorded)
+    return f'<div class="context">Continued from {link} at {escape(edge.clock)} {number(edge.value)}</div>'
 
 
 def _machines_table(db: sqlite3.Connection, machines: tuple[MachineStatus, ...]) -> str:

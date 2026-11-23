@@ -70,7 +70,6 @@ from etude.records import (
     RUNNING_HOURS,
     ArtifactRef,
     Clock,
-    Continuation,
     Record,
     RunCounters,
     RunWriter,
@@ -1228,10 +1227,7 @@ def track(
     handed = _inherited()
     continues = None
     if handed is not None:
-        at = handed.at
-        until = os.environ.get("ETUDE_UNTIL_CLOCK")
-        clock = until if until in at else next(iter(at))
-        continues = Continuation(parent=handed.parent, clock=clock, value=at[clock])
+        continues = handed.continuation(os.environ.get("ETUDE_UNTIL_CLOCK"))
     declared = declare(
         experiment=experiment,
         clocks=None

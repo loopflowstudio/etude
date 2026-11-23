@@ -80,7 +80,7 @@ from etude.eval.tournament import _open_evaluation
 from etude.identity import run_address, stored_owner
 from etude.launch.records import Standing, Status
 from etude.out import MEMBERSHIP, OutFile, OutFiles, OutMember
-from etude.records import ArtifactRef, Record, RunRecord, SourceKey
+from etude.records import ArtifactRef, Continuation, Record, RunRecord, SourceKey
 from etude.run import RunListing, as_storage, declare, destinations, under
 from etude.spec import (
     CONTINUATION_ENV,
@@ -206,6 +206,10 @@ class TrainingRunSummary(_RunObservation):
     checkpoints: Checkpoints
     # The seed it declared, if any.
     seed: int | None = None
+
+    continues: Continuation | None = None
+    # Visible parent of the recorded handoff, under its stored spelling when available.
+    parent_address: str | None = None
 
     @classmethod
     def queued(cls, name: str, experiment: str, job: str, seed: int | None) -> TrainingRunSummary:
