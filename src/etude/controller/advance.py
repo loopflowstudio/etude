@@ -14,7 +14,6 @@ from typing import Literal
 from etude.controller.declarations import (
     Experiment,
     asked,
-    find_training_run,
     format_known_run,
     read_training_jobs,
     select_runs,
@@ -24,7 +23,7 @@ from etude.errors import EtudeError, LauncherError
 from etude.eval.records import digest
 from etude.eval.result import EvalResult
 from etude.eval.tournament import StoredRuns, played
-from etude.experiment import observe, read_tournament_lines
+from etude.experiment import find_training_run, observe, read_tournament_lines
 from etude.jobs import (
     Checkpoints,
     EvalGroup,
@@ -185,7 +184,9 @@ def advance(
             if resume:
                 request, released = _resumed(request, experiment.name, until)
                 committed -= released
-            elif (prior := find_training_run(request, state)) is not None:
+            elif (
+                prior := find_training_run(state.runs, request.id, request.job.name, request.seed)
+            ) is not None:
                 lines[request.id] = format_known_run(request, prior), prior.address
                 continue
             if not _fits(request.job, committed, max_usd):

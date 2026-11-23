@@ -28,13 +28,12 @@ from pydantic import BaseModel
 from etude.cache import Artifact, Content, ContentMismatch, Corrupt
 from etude.call import changed_config, config_type
 from etude.controller.declarations import (
-    find_training_run,
     format_known_run,
     read_training_jobs,
     select_runs,
 )
 from etude.errors import EtudeError, LauncherError
-from etude.experiment import observe
+from etude.experiment import find_training_run, observe
 from etude.experiment_file import defined_functions, refuse_renamed
 from etude.identity import run_address
 from etude.jobs import load_job_function
@@ -86,7 +85,9 @@ def train(
             for request in requests:
                 assert request.id is not None  # read_training_jobs addresses every run
                 try:
-                    prior = find_training_run(request, state)
+                    prior = find_training_run(
+                        state.runs, request.id, request.job.name, request.seed
+                    )
                     if prior is not None and job is None and seed is None and not resume:
                         print(
                             format_known_run(request, prior),

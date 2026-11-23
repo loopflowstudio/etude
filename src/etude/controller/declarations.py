@@ -191,22 +191,6 @@ def read_training_jobs(
     return expand_runs(normalized, params=params)
 
 
-def find_training_run(request: RunRequest, state: ExperimentState) -> TrainingRunSummary | None:
-    """Find a declared address, including stored compact job/seed spellings."""
-    return next(
-        (
-            run
-            for run in state.runs
-            if (
-                request.id is not None
-                and run.name == request.id.removeprefix(state.experiment + "/")
-            )
-            or (run.launch == request.job.name and run.seed == request.seed)
-        ),
-        None,
-    )
-
-
 def format_known_run(request: RunRequest, prior: TrainingRunSummary) -> str:
     """The pass's line for a known run."""
     line = f"{request.id}  {prior.state}"

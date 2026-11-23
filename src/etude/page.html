@@ -110,6 +110,7 @@ function control(host, label, options, key, apply = render) {
 const CLOCKS = clockNames.map(c => [c, c]);
 // Clock and smoothing choices redraw the same ordered set of metrics.
 const panels = [...R.perf, ...R.ml];
+const logged = new Set(T.metrics);
 const namedMetrics = new Set(panels.flatMap(panel => panel.keys || []));
 const flamePrefixes = panels.filter(panel => panel.kind === "flame").map(panel => panel.prefix);
 const otherMetrics = T.metrics.filter(key => !namedMetrics.has(key) && !flamePrefixes.some(prefix => key.startsWith(prefix) && (!D.run_charts || key.length > prefix.length)));
@@ -125,7 +126,7 @@ function hasDiagnostic(panel) {
     default: return false;
   }
 }
-const runMetrics = D.run_charts ? [...R.ml, ...R.perf].filter(p => metricPanel(p) && p.keys.some(k => T.metrics.includes(k))) : [];
+const runMetrics = D.run_charts ? [...R.ml, ...R.perf].filter(p => metricPanel(p) && p.keys.some(k => logged.has(k))) : [];
 const diagnostics = D.run_charts ? panels.filter(hasDiagnostic) : [];
 const draws = []; const later = f => draws.push(f);
 
@@ -401,22 +402,31 @@ function renderMetrics(vis) {
       return lines;
     };
     for (const panel of panels) {
-      if (panel.kind === "series") {
-        const present = panel.keys.filter(k => T.metrics.includes(k));
-        missing.push(...panel.keys.filter(k => !present.includes(k)));
+      const present = [];
+      if (metricPanel(panel)) {
+        for (const key of panel.keys) {
+          if (logged.has(key)) present.push(key);
+          else missing.push(key);
+        }
         if (!present.length) continue;
+      }
+      if (panel.kind === "series") {
         const c = card(host, panel.title, panel.unit + (panel.scale === "log" ? " · log scale" : ""), present.length > 1 ? "full" : "");
         if (present.length === 1) {
-          for (const j of vis) { const p = metricPoints(j, present[0], clock); const last = p && [...p].reverse().find(q => !q.missing); if (last) { const r = node("div", "srow"); r.append(swatch(j), node("span", null, j.label), node("b", null, fmt(last.y))); c.appendChild(r); } }
-          const h = node("div"); c.appendChild(h); chartKey(h, present[0], panel.scale, 170, false);
+          const h = node("div");
+          for (const [job, points] of chartKey(h, present[0], panel.scale, 170, false)) {
+            const last = points.findLast(p => !p.missing);
+            if (!last) continue;
+            const row = node("div", "srow");
+            row.append(swatch(job), node("span", null, job.label), node("b", null, fmt(last.y)));
+            c.appendChild(row);
+          }
+          c.appendChild(h);
         } else {
           const grid = node("div", "grid multiples"); c.appendChild(grid);
           for (const k of present) { const m = node("div"), h = node("div"); m.append(node("div", "mini-title mono", k), h); grid.appendChild(m); chartKey(h, k, panel.scale, 140, true); }
         }
       } else if (panel.kind === "counters") {
-        const present = panel.keys.filter(k => T.metrics.includes(k));
-        missing.push(...panel.keys.filter(k => !present.includes(k)));
-        if (!present.length) continue;
         const c = card(host, panel.title, "expected to stay at zero");
         for (const k of present) {
           c.appendChild(node("div", "mini-title mono", k));

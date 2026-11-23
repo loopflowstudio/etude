@@ -162,9 +162,12 @@ class OutMembers(tuple[OutMember, ...]):
         return tuple(member.input(under + "/" + member.path) for member in self)
 
 
+type RunState = Literal["queued", "running", "stopped", "finished", "failed"]
+
+
 # A refinement while the launcher still holds work, including a writer's
 # confirmed stop before the launcher schedules its continuation.
-type _AllocationPhase = Literal["renting", "setting_up", "stopping", "stopped"]
+type AllocationPhase = Literal["renting", "setting_up", "stopping", "stopped"]
 
 
 @dataclass(frozen=True)
@@ -178,7 +181,7 @@ class TrainingRunSummary:
     launch: str
     # Its learner: the first run of the chain of continuations that led to it.
     line: str
-    state: Literal["queued", "running", "stopped", "finished", "failed"]
+    state: RunState
     checkpoints: Checkpoints
     # The seed it declared, if any.
     seed: int | None = None
@@ -186,7 +189,7 @@ class TrainingRunSummary:
     _data: RunData | None = field(default=None, repr=False, compare=False)
     status: Status | None = field(default=None, hash=False)
     last_write: datetime | None = None
-    allocation_phase: _AllocationPhase | None = None
+    allocation_phase: AllocationPhase | None = None
 
     @property
     def address(self) -> str:
@@ -214,11 +217,11 @@ class TrainingRunSummary:
 @dataclass(frozen=True)
 class EvalRunSummary:
     name: str
-    state: Literal["queued", "running", "stopped", "finished", "failed"]
+    state: RunState
     matches: tuple[str, ...] = ()
     status: Status | None = field(default=None, hash=False)
     last_write: datetime | None = None
-    allocation_phase: _AllocationPhase | None = None
+    allocation_phase: AllocationPhase | None = None
 
 
 @dataclass(frozen=True)

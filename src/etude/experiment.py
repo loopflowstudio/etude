@@ -7,7 +7,7 @@ Author-facing types are defined in `etude.jobs`.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from decimal import Decimal
 from graphlib import TopologicalSorter
@@ -77,6 +77,18 @@ def read_tournament_lines(
     return tuple(found)
 
 
+def find_training_run(
+    runs: Iterable[jobs.TrainingRunSummary], address: str | None, job: str, seed: int | None
+) -> jobs.TrainingRunSummary | None:
+    """Match the run name, or its recorded job and seed for compact spellings."""
+    for run in runs:
+        if address is not None and run.name == address.removeprefix(run.experiment + "/"):
+            return run
+        if run.launch == job and run.seed == seed:
+            return run
+    return None
+
+
 def state_of(
     every: Sequence[RunData], experiment: str, *, retained: tuple[Standing, ...] | None = None
 ) -> jobs.ExperimentState:
@@ -96,7 +108,7 @@ def state_of(
     job = job_names(ours)
     by_name = {data.name: data for data in ours}
     retained = client.standing(experiment, local=True) if retained is None else retained
-    runs = []
+    runs: dict[str, jobs.TrainingRunSummary] = {}
     # Parent records precede continuations even when their names sort the other way.
     parents = {
         data.name: (data.file.continues.parent.source_id,)
@@ -126,33 +138,24 @@ def state_of(
             for record in data.checkpoints
             if record.artifact.sha256 is not None and record.artifact.size_bytes is not None
         )
-        runs.append(
-            jobs.TrainingRunSummary(
-                name=data.name,
-                experiment=data.experiment,
-                job=job[data.name].name,
-                launch=job[data.name].launch,
-                line=line[data.name],
-                state=data.stored_state,
-                checkpoints=saved,
-                seed=data.file.seed if data.file else None,
-                _data=data,
-                last_write=data.last_write,
-            )
+        runs[name] = jobs.TrainingRunSummary(
+            name=data.name,
+            experiment=data.experiment,
+            job=job[data.name].name,
+            launch=job[data.name].launch,
+            line=line[data.name],
+            state=data.stored_state,
+            checkpoints=saved,
+            seed=data.file.seed if data.file else None,
+            _data=data,
+            last_write=data.last_write,
         )
     evaluations = {
         d.name: d
         for d in every
         if d.file and d.experiment == experiment and d.file.kind == "evaluation"
     }
-    eval_runs = [
-        jobs.EvalRunSummary(
-            name=d.name,
-            state=d.stored_state,
-            last_write=d.last_write,
-        )
-        for d in evaluations.values()
-    ]
+    launched_evals: list[jobs.EvalRunSummary] = []
     committed = Decimal(0)
     for item in retained:
         record = item.record
@@ -171,43 +174,38 @@ def state_of(
                 for spec in group.evaluations
                 for m in spec.matches
             )
-            prior = next((r for r in eval_runs if r.name == name), None)
-            if prior is not None:
-                eval_runs.remove(prior)
-            summary = (
-                replace(prior, matches=matches)
-                if prior
-                else jobs.EvalRunSummary(name=name, state="queued", matches=matches)
+            stored_eval = evaluations.pop(name, None)
+            summary = jobs.EvalRunSummary(
+                name=name,
+                state="queued",
+                matches=matches,
+                last_write=stored_eval.last_write if stored_eval else None,
             )
-            eval_runs.append(_join_allocation(summary, evaluations.get(name), item))
+            launched_evals.append(_join_allocation(summary, stored_eval, item))
         else:
-            prior_training = next(
-                (
-                    r
-                    for r in runs
-                    if r.name == name
-                    or (r.launch == record.launch.spec.name and r.seed == record.seed)
-                ),
-                None,
-            )
-            if prior_training is None:
-                prior_training = jobs.TrainingRunSummary(
+            launch = record.launch.spec.name
+            training = find_training_run(runs.values(), record.id, launch, record.seed)
+            if training is None:
+                training = jobs.TrainingRunSummary(
                     name=name,
                     experiment=experiment,
-                    job=record.launch.spec.name,
-                    launch=record.launch.spec.name,
+                    job=launch,
+                    launch=launch,
                     line=name,
                     seed=record.seed,
                     state="queued",
                     checkpoints=jobs.Checkpoints(),
                 )
-                runs.append(_join_allocation(prior_training, None, item))
-            else:
-                runs[runs.index(prior_training)] = _join_allocation(
-                    prior_training, prior_training._data, item
-                )
+            runs[training.name] = _join_allocation(training, training._data, item)
+    file_evals = (
+        jobs.EvalRunSummary(name=d.name, state=d.stored_state, last_write=d.last_write)
+        for d in evaluations.values()
+    )
     return jobs.ExperimentState(
-        experiment=experiment, runs=tuple(runs), eval_runs=tuple(eval_runs), committed_usd=committed
+        experiment=experiment,
+        runs=tuple(runs.values()),
+        eval_runs=(*file_evals, *launched_evals),
+        committed_usd=committed,
     )
 
 
@@ -217,43 +215,36 @@ def _join_allocation[Run: (jobs.TrainingRunSummary, jobs.EvalRunSummary)](
     """Join the accepted file outcome to the allocation that could have written it."""
     status = item.status
     writers = data.writers if data else ()
-    executing = status.attempt is not None and any(w.attempt == status.attempt for w in writers)
+    latest = writers[-1] if writers else None
     outcome = data.outcome if data else None
-    if outcome:
-        # read_located accepts only the latest writer's named end, or a
-        # legacy end with at most one writer. A resume needs positive attribution.
-        writer = writers[-1] if writers else None
-        ended_on = writer.attempt if writer else None
-        ended_here = (
-            status.attempt is not None
-            and ended_on == status.attempt
-            and writer is not None
-            and outcome.writer == writer.writer
-        )
-        if ended_on and status.attempt and ended_on != status.attempt:
+    # read_located accepts the latest writer's end, or an anonymous legacy end.
+    # After an explicit resume, only an end attributed to the new allocation counts.
+    ended_here = False
+    if outcome and latest and status.attempt is not None:
+        if latest.attempt == status.attempt:
+            ended_here = outcome.writer == latest.writer
+        elif latest.attempt and status.attempt:
             outcome = None
-        elif item.record.launch.resume_after and not ended_here:
-            outcome = None
-        elif outcome.state != "stopped":
-            return replace(run, state=outcome.state, status=status)
-        elif ended_here and status.phase not in ("queued", "done"):
-            # The tracking context stopped, but the launcher still owns continuation.
-            return replace(run, state=item.placement, allocation_phase="stopped", status=status)
+    if item.record.launch.resume_after and not ended_here:
+        outcome = None
 
-    if status.done:
-        if status.outcome == "succeeded":
-            return replace(
-                run,
-                state="stopped" if outcome and outcome.state == "stopped" else "finished",
-                status=status,
-            )
-        return replace(run, state="failed", status=status)
     phase = status.phase
-    if phase in ("renting", "setting_up") and executing:
-        return replace(run, state="running", status=status)
-    return replace(
-        run,
-        state=item.placement,
-        status=status,
-        allocation_phase=phase if phase in ("renting", "setting_up", "stopping") else None,
-    )
+    state: jobs.RunState
+    allocation_phase: jobs.AllocationPhase | None = None
+    if outcome and (outcome.state != "stopped" or (status.done and status.outcome == "succeeded")):
+        state = outcome.state
+    elif status.done:
+        state = "finished" if status.outcome == "succeeded" else "failed"
+    elif ended_here and phase != "queued":
+        # The writer stopped, but the launcher still owns continuation.
+        state, allocation_phase = item.placement, "stopped"
+    elif (
+        phase in ("renting", "setting_up")
+        and status.attempt is not None
+        and any(w.attempt == status.attempt for w in writers)
+    ):
+        state = "running"
+    else:
+        state = item.placement
+        allocation_phase = phase if phase in ("renting", "setting_up", "stopping") else None
+    return replace(run, state=state, status=status, allocation_phase=allocation_phase)
