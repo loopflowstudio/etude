@@ -524,7 +524,7 @@ function drawExperimentCurves(root) {
     for (const {panel, key, lines, latest} of plots.values()) {
       const figure = node("figure"), plot = node("div");
       const caption = node("figcaption", null, panel.title);
-      caption.appendChild(node("small", null, [key, panel.unit, panel.log && "log scale", panel.clock].filter(Boolean).join(" · ")));
+      caption.appendChild(node("small", null, [key !== panel.title && key, panel.unit, panel.log && "log scale", panel.clock].filter(Boolean).join(" · ")));
       plot.setAttribute("role", "img");
       plot.setAttribute("aria-label", latest.join(", "));
       figure.append(caption, plot);

@@ -25,7 +25,7 @@ const points = (m, job, opponent = "") => m.jobPoints(job, "updates", m.evalValu
 
 // Run the shipped page and chart renderer; only the browser DOM and plotting
 // library are replaced. Assertions see displayed text and the plotted values.
-function renderPage(data, hash = "", overview = null) {
+function chartBrowser(hash = "", overview = null) {
   class Element {
     constructor() { this.children = []; this.style = {}; this.text = ""; }
     set textContent(text) { this.text = String(text); this.children = []; }
@@ -44,13 +44,6 @@ function renderPage(data, hash = "", overview = null) {
       ? {querySelector: () => ({dataset: {lastCheckpoint: JSON.stringify(overview)}})} : null,
     getElementById: id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); },
   };
-  const full = {
-    experiment: "test", notes: [], environments: [], commits: [], failures: [], generated_ms: 0,
-    scores: [{table: "games", value: "win", unit: "games"}], ...data,
-    report: {evals: [{kind: "curve", title: "Score"}], perf: [], ml: [], ...data.report},
-    training: {metrics: [], series: {}, bands: {}, timers: [], ...data.training, runs: data.training.runs.map(r => ({rows: 0, writers: [], ...r}))},
-  };
-  document.getElementById("data").textContent = JSON.stringify(full);
   const location = new URL("http://localhost/runs/test?tab=charts" + hash);
   const browser = vm.createContext({
     document, devicePixelRatio: 1, URLSearchParams, location,
@@ -62,14 +55,44 @@ function renderPage(data, hash = "", overview = null) {
       destroy() {}
     },
   });
+  vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8"), browser);
+  return {browser, document, location, plots};
+}
+
+function renderPage(data, hash = "", overview = null) {
+  const {browser, document, location, plots} = chartBrowser(hash, overview);
+  const full = {
+    experiment: "test", notes: [], environments: [], commits: [], failures: [], generated_ms: 0,
+    scores: [{table: "games", value: "win", unit: "games"}], ...data,
+    report: {evals: [{kind: "curve", title: "Score"}], perf: [], ml: [], ...data.report},
+    training: {metrics: [], series: {}, bands: {}, timers: [], ...data.training, runs: data.training.runs.map(r => ({rows: 0, writers: [], ...r}))},
+  };
+  document.getElementById("data").textContent = JSON.stringify(full);
   const script = fs.readFileSync("src/etude/page.html", "utf8").split("<script>\n")[1].split("</script>")[0];
-  vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\n" + script, browser);
+  vm.runInContext(script, browser);
   function click(section, text) {
     const find = el => el.onclick && el.textContent === text ? el : el.children.filter(c => typeof c !== "string").map(find).find(Boolean);
     find(document.getElementById(section + "-controls")).onclick();
   }
   return {location, click, text: document.getElementById("evals-body").textContent, plots, sectionText: id => document.getElementById(id + "-body").textContent, display: id => document.getElementById(id).style.display};
 }
+
+test("experiment card captions name the metric once and keep its clock, units and scale", () => {
+  const {browser, document} = chartBrowser();
+  const host = document.createElement("div"), data = document.createElement("script");
+  const curves = {loss: {owner: "a", x: [1], mean: [3]}};
+  data.textContent = JSON.stringify([
+    {title: "loss", clock: "updates", curves},
+    {title: "Training", clock: "updates", unit: "nats", log: true, curves},
+  ]);
+  host.classList = {contains: () => false};
+  host.querySelector = () => data;
+  browser.drawExperimentCurves({querySelectorAll: () => [host]});
+  const captions = host.children.slice(1).map(figure => figure.children[0]);
+  assert.deepEqual(captions.map(c => [c.text, c.children[0].textContent]), [
+    ["loss", "updates"], ["Training", "loss · nats · log scale · updates"],
+  ]);
+});
 
 test("a section the report gives no panel is hidden, header and controls with it", () => {
   const data = page([player("u100", "learner", 100)], [[0, null, 0.5]]);

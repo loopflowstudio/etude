@@ -360,8 +360,9 @@ class Page(Record):
                 return f"{measure.table}.{measure.value} {_value_range(values)}"
 
         if self.training.clocks:
-            measured = self.training.series.get(self._report_clock(), {})
-            for panel in _ml_panels(self.report, self.training):
+            clock = self._report_clock()
+            measured = self.training.series.get(clock, {})
+            for panel in _preview_panels(self.report, self.training, clock):
                 if isinstance(panel, Series):
                     for key in panel.keys:
                         values = [
@@ -976,23 +977,23 @@ class Headline(Record):
         return values
 
 
-def _ml_panels(report: Report, data: Training, *, preview: bool = False) -> tuple[MetricPanel, ...]:
+def _preview_panels(report: Report, data: Training, clock: str) -> tuple[MetricPanel, ...]:
+    """Authored ML panels followed by the first drawable ungrouped metric on this clock."""
     if report.other_metrics:
         named, timers = set(report.keys()), _flames(report)
-        other = tuple(k for k in data.metrics if k not in named and not k.startswith(timers))
-        if other:
-            panel = Series(
-                title=other[0] if preview else "Other logged metrics",
-                keys=other[:1] if preview else other,
-            )
-            return (*report.ml, panel)
+        measured = data.series.get(clock, {})
+        for key in data.metrics:
+            if key in named or key.startswith(timers):
+                continue
+            if any(trace.latest(log=False) is not None for trace in measured.get(key, ())):
+                return (*report.ml, Series(title=key, keys=(key,)))
     return report.ml
 
 
 def _headline(report: Report, data: Training, clock: str) -> Headline | None:
     measured = data.series.get(clock, {})
     logged = set(data.metrics)
-    panels = _ml_panels(report, data)
+    panels = _preview_panels(report, data, clock)
     # The order is also compared across independently indexed runs. Reserve a
     # slot for ungrouped metrics even on runs without any.
     ranked = [
@@ -1052,7 +1053,8 @@ def _overview(page: Page) -> Page:
     # Diagnostics can occupy either slot. At most the first two measured metric
     # groups can appear, regardless of which diagnostics the report renderer draws.
     training = page.training
-    report = page.report.model_copy(update={"ml": _ml_panels(page.report, training, preview=True)})
+    panels = _preview_panels(page.report, training, page._report_clock())
+    report = page.report.model_copy(update={"ml": panels})
     logged = set(training.metrics)
     groups = [
         p.keys

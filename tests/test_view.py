@@ -300,6 +300,11 @@ def _loss(html: str, clock: str = "steps") -> list[float | None]:
     return _page_data(html).training.series[clock]["loss"][0].mean
 
 
+def _card_panels(html: str) -> list[Headline]:
+    data = html.split('<div class="card-charts"><script type="application/json">', 1)[1]
+    return TypeAdapter(list[Headline]).validate_json(data.split("</script>", 1)[0])
+
+
 def _version(html: str) -> str:
     return html.split('data-version="', 1)[1].split('"', 1)[0]
 
@@ -766,19 +771,26 @@ def test_indexed_experiment_opens_its_default_report_separately(tmp_path: Path) 
 
 
 def test_a_metric_no_report_panel_names_leads_its_run_overview_and_card(tmp_path: Path) -> None:
-    # The prototype's report declares scores only; its run logs one metric.
-    source = DirectoryStorage(tmp_path / "runs")
-    _start_run(source, "lab/base@0", 7)
-    _seal(source.root / "lab/base@0", 1, 3.0)
+    runs = tmp_path / "runs"
+    with open_run(experiment="lab", run="base@0", clocks=["steps"], directory=runs) as run:
+        run.log({"loss": 7}, steps=1)
+        run.log({"loss": 3, "reward": 8, "lr": 0.01}, steps=2)
+    source = MeasuredStorage(DirectoryStorage(runs))
     file = experiment_file(tmp_path, "lab", REPORTED)
     with Server(source, file, ("127.0.0.1", 0)) as view:
         _ingest(view)
         _publish_declarations(view)
+        reads = source.listings, source.requests, source.bytes
         overview = _get(view, "/runs/lab/base@0")
         assert _loss(overview) == [7.0, 3.0]
+        assert _page_data(overview).training.metrics == ("loss",)
         assert "<dt>Latest metric</dt><dd>loss 3</dd>" in overview
-        assert "loss 3" in _get(view, "/experiments/lab")
-        assert '"loss"' in _get(view, "/")
+        assert "<td>loss 3</td>" in _get(view, "/experiments/lab")
+        (card,) = _card_panels(_get(view, "/"))
+        assert card.title == "loss" and list(card.curves) == ["loss"]
+        full = _page_data(_get(view, "/runs/lab/base@0?tab=charts"))
+        assert set(full.training.metrics) == {"loss", "reward", "lr"}
+        assert (source.listings, source.requests, source.bytes) == reads
         _get(view, "/experiments/lab/report")
         assert "<td>loss 3</td><td>1</td>" in _get(view, "/reports")
 
@@ -789,8 +801,8 @@ def test_rl_series_leads_the_card_and_latest_metric_ahead_of_counters(tmp_path: 
         run.log({"rl/nonfinite_count": 0, "rl/loss": 0.42}, updates=10)
     with Server(source, None, ("127.0.0.1", 0)) as view:
         _ingest(view)
-        card = _get(view, "/").split('<div class="card-charts">')[1].split("</script>")[0]
-        assert '"title":"Losses"' in card and "rl/nonfinite_count" not in card
+        (panel,) = _card_panels(_get(view, "/"))
+        assert panel.title == "Losses" and list(panel.curves) == ["rl/loss"]
         assert "<td>rl/loss 0.42</td>" in _get(view, "/experiments/rl")
         assert "<dt>Latest metric</dt><dd>rl/loss 0.42</dd>" in _get(view, "/runs/rl/a")
 
@@ -1363,10 +1375,6 @@ def report() -> Report:
             for part in html.split('<article class="card experiment-card">')[1:]
         ]
 
-    def curves(card: str) -> list[Headline]:
-        encoded = card.split('<script type="application/json">')[1].split("</script>")[0]
-        return TypeAdapter(list[Headline]).validate_json(encoded)
-
     with Server(measured, file, ("127.0.0.1", 0)) as view:
         _ingest(view)
         _publish_declarations(view)
@@ -1374,7 +1382,7 @@ def report() -> Report:
         assert 'href="/experiments/lab"' in live and 'href="/experiments/archive"' in archived
         assert live.count('data-state="running"') == 2 and "2 running" in live
         assert all(f'href="/runs/lab/{name}"' in live for name in ("a", "b"))
-        assert [panel.title for panel in curves(live)] == ["Loss", "Loss"]
+        assert [panel.title for panel in _card_panels(live)] == ["Loss", "Loss"]
         overview = _get(view, "/runs/" + queued[0])
         assert '<div class="run-overview"><div><section' in overview
         assert "</section></div><aside>" in overview and "No server loop" in overview
@@ -1402,7 +1410,7 @@ def report() -> Report:
         view.refresh_launcher()
         changed, allocated, still_archived = cards(view, "/status")
         assert "~$1.18" in allocated and allocated.count('data-state="running"') == 2
-        (panel,) = curves(changed)
+        (panel,) = _card_panels(changed)
         assert (panel.title, panel.clock, panel.unit, panel.log) == (
             "Return </script>",
             "steps",
@@ -1413,7 +1421,7 @@ def report() -> Report:
         reward = panel.curves["reward"]
         assert (reward.owner, reward.x, reward.mean) == ("b", [2], [11])
         assert "2 running" in changed and "Loss" not in changed
-        assert curves(still_archived) == curves(archived)
+        assert _card_panels(still_archived) == _card_panels(archived)
         before = measured.listings, measured.requests, measured.bytes
         updated = _get(view, route + "&curves=" + token)
         assert ">reward 11 points</td>" in updated and ">loss 7</td>" not in updated

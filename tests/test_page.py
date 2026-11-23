@@ -21,6 +21,7 @@ from etude.page import (
     experiment_files,
     index,
     render,
+    run_chart_data,
     target,
 )
 from etude.records import Clock
@@ -35,6 +36,7 @@ from etude.report import (
     Series,
 )
 from etude.storage import DirectoryStorage, storage_from_uri
+from etude.train.read import read_all
 from tests.experiments import experiment_file
 from tests.run.storage import MeasuredStorage
 from tests.train.tracking import open_run
@@ -378,6 +380,20 @@ def test_selective_report_finds_the_first_ungrouped_metric_drawable_across_runs(
     reads, size = source.requests, source.bytes
     assert pages.build(file).headline() == page.headline()
     assert (source.listings, source.requests, source.bytes) == (2, reads, size)
+
+
+def test_card_skips_empty_ungrouped_metrics_and_keeps_authored_series_together(
+    tmp_path: Path,
+) -> None:
+    storage = DirectoryStorage(tmp_path)
+    with open_run(experiment="lab", run="a", clocks=["updates"], directory=tmp_path) as run:
+        run.log({"empty": float("nan"), "loss": 3, "reward": 7}, updates=1)
+    (data,) = read_all(storage)
+    card = run_chart_data(storage, data, Report(), "updates").headline
+    assert card and (card.title, card.latest()) == ("loss", ["loss 3"])
+    report = Report(ml=(Series(title="Training", keys=("reward", "loss")),))
+    card = run_chart_data(storage, data, report, "updates").headline
+    assert card and (card.title, card.latest()) == ("Training", ["reward 7", "loss 3"])
 
 
 def test_seated_headline_uses_the_latest_evaluated_checkpoint_of_the_job(tmp_path: Path) -> None:

@@ -194,7 +194,10 @@ beside a report you have already built. Below 700 px it becomes a scrollable
 top row. Printing omits it.
 
 **Experiments.** Each card at `/` shows the first drawable ML series in report order.
-Ungrouped metrics also qualify. Counters and diagnostics can lead when there
+An authored series keeps its title and metric keys. When no authored series
+has a drawable value, each run contributes its first drawable ungrouped metric
+in logging order. Its key titles the curve and labels the value in the run
+table’s **Latest metric** column. Counters and diagnostics can lead when there
 is no drawable series. Metric curves use the report clock and keep
 their last values after training ends. Hover over a curve to read its value.
 A panel without a curve leaves the run summary on its own. Each dot links to
@@ -231,7 +234,7 @@ clock, **Latest metric**, mean pace, dollars spent, occupied machine’s
 rental rate and last file write. The first two report panels with data sit
 beside the console tail and saved checkpoints. A dashed line marks the
 latest checkpoint when the curve’s clock places it. The default group of
-ungrouped metrics previews its first metric here. Charts shows the whole group.
+ungrouped metrics previews its first drawable metric here. Charts shows the whole group.
 Opening Overview keeps the run URL clean. Changing a clock or smoothing adds
 just that choice to the link and preserves it across refreshes.
 

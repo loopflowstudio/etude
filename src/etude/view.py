@@ -80,7 +80,7 @@ _CLOCKS = TypeAdapter(dict[str, float])
 _METRICS = TypeAdapter(list[str])
 
 # Bump when stored projections change independently of their SQL schema.
-_INDEX_VERSION = 1
+_INDEX_VERSION = 2
 _MAY_BE_OPEN = "file_state IN ('running','queued') OR phase != 'done'"
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS runs (
