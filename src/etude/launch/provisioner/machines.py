@@ -45,14 +45,6 @@ class Safeguards(Record):
     machine_timer: bool = False
 
 
-class ProviderProfile(Record):
-    """Static capabilities declared by one provider implementation."""
-
-    unit: str = "usd"
-    safeguards: Safeguards = Safeguards()
-    stock_image: bool = True
-
-
 class Allocation(Record):
     id: str
     address: str | None

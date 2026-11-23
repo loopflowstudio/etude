@@ -5,11 +5,10 @@ from datetime import datetime
 from decimal import Decimal
 from itertools import islice
 
-from etude.launch.records import Hardware, Limit, Machine, Session
+from etude.launch.records import Hardware, HourlyRate, Limit, Machine, Session, affordable_seconds
 from etude.launch.scheduler.costs import (
     Budget,
     Place,
-    affordable_seconds,
     group_shares,
     rental_cost,
 )
@@ -37,10 +36,7 @@ class Placement(Record):
     supply: str  # the pool or on-demand the machine belongs to, or would be rented from
     session: Session | None
     machine: Machine | None
-    price: Decimal | None
-    unit: str = "usd"
-    units_per_hour: Decimal | None = None
-    usd_per_unit: Decimal = Decimal(1)
+    rate: HourlyRate
     waiting_usd: Decimal = Decimal(0)  # extension funded by waiting runs
     hardware: Hardware | None = None  # what a new rental would ask for
 
@@ -49,12 +45,13 @@ class Placement(Record):
     ) -> "Placement":
         """Reserve extra rental time only as far as the waiting runs pay for it."""
         assert self.seconds is not None
-        if self.price is None:
+        price = self.rate.usd_per_hour
+        if price is None:
             return self.model_copy(update={"seconds": max(self.seconds, target_seconds)})
-        base = rental_cost(self.price, self.seconds, reservation_hours)
-        affordable = affordable_seconds(self.price, base + waiting_usd, reservation_hours)
+        base = rental_cost(price, self.seconds, reservation_hours)
+        affordable = affordable_seconds(price, base + waiting_usd, reservation_hours)
         seconds = max(self.seconds, min(target_seconds, affordable))
-        extra = rental_cost(self.price, seconds, reservation_hours) - base
+        extra = rental_cost(price, seconds, reservation_hours) - base
         return self.model_copy(update={"seconds": seconds, "waiting_usd": extra})
 
 

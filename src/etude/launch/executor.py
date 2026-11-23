@@ -7,6 +7,7 @@ The launcher depends on its public execution protocol, never on SSH or a provide
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -17,8 +18,8 @@ from etude.launch.provisioner.machines import (
     MachineRequest,
     Machines,
     OwnedMachine,
-    ProviderProfile,
     Refused,
+    Safeguards,
     check_creation,
 )
 from etude.launch.records import (
@@ -247,19 +248,14 @@ def local(root: Path) -> Executor:
     return Executor(OwnedMachine(), ProcessStart(root), DirectoryJournal(root))
 
 
+@dataclass(frozen=True)
 class ProviderService:
-    """Typed provider registration pairing a connection factory with static capabilities."""
+    """Connect to a provider and check its template before opening any connection."""
 
-    def __init__(
-        self,
-        connect: Callable[[Machine | OnDemand], Execution],
-        profile: ProviderProfile = ProviderProfile(),
-        *,
-        validate: Callable[[MachineTemplate], str | None] | None = None,
-    ) -> None:
-        self._connect = connect
-        self.profile = profile
-        self.validate = validate
+    connect: Callable[[Machine | OnDemand], Execution]
+    safeguards: Safeguards = Safeguards()
+    stock_image: bool = True
+    validate: Callable[[MachineTemplate], str | None] | None = None
 
     def __call__(self, held: Machine | OnDemand) -> Execution:
-        return self._connect(held)
+        return self.connect(held)

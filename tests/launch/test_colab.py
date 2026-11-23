@@ -3,19 +3,17 @@
 from __future__ import annotations
 
 import ast
-import base64
-import hashlib
 import json
-import socket
-import struct
 import threading
 from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from websockets.sync.server import ServerConnection, serve
 
 from etude.cli import main
 from etude.errors import LauncherError
@@ -81,17 +79,13 @@ class FakeColab:
     def __init__(self, *, balance: float = 200.0, burn_rate: float = 1.94) -> None:
         self.balance = balance
         self.burn_rate = burn_rate
-        self.rate = 0.0
         self.external_assignments = 0
         self.assigned: dict[str, dict[str, object]] = {}
-        self.by_endpoint: dict[str, dict[str, object]] = {}
         self.counts: Counter[str] = Counter()
         self.lost_create_reply = False
         self.refuse_status: int | None = None
         self.delete_pending = False
-        self.executed: list[tuple[str, str, str, str]] = []
-        self.fail_execute = False
-        self.kernel_counter = 0
+        self.executed: list[str] = []
         self.ccu_lag_polls = 0
         self._lag_remaining = 0
 
@@ -110,43 +104,30 @@ class FakeColab:
             )
         if path == "/api/kernels":
             assert headers.get("X-Colab-Runtime-Proxy-Token") == PROXY_TOKEN
-            self.kernel_counter += 1
             return HTTPReply(
                 status=201,
-                body=json.dumps(
-                    {"id": f"kernel-{self.kernel_counter}", "execution_state": "starting"}
-                ).encode(),
+                body=json.dumps({"id": "fixture-kernel", "execution_state": "starting"}).encode(),
             )
         assert headers.get("Authorization", "").startswith("Bearer ")
         if path == "/tun/m/ccu-info":
-            if self._lag_remaining > 0:
+            count = len(self.assigned) + self.external_assignments
+            if self._lag_remaining:
                 self._lag_remaining -= 1
-                return HTTPReply(
-                    status=200,
-                    body=_xssi(
-                        {
-                            "currentBalance": self.balance,
-                            "consumptionRateHourly": max(0.0, self.rate - self.burn_rate),
-                            "assignmentsCount": max(
-                                0, len(self.by_endpoint) - 1 + self.external_assignments
-                            ),
-                        }
-                    ),
-                )
+                count -= 1
             return HTTPReply(
                 status=200,
                 body=_xssi(
                     {
                         "currentBalance": self.balance,
-                        "consumptionRateHourly": self.rate,
-                        "assignmentsCount": len(self.by_endpoint) + self.external_assignments,
+                        "consumptionRateHourly": self.burn_rate * count,
+                        "assignmentsCount": count,
                     }
                 ),
             )
         if path == "/tun/m/assignments":
             return HTTPReply(
                 status=200,
-                body=_xssi({"assignments": list(self.by_endpoint.values())}),
+                body=_xssi({"assignments": list(self.assigned.values())}),
             )
         if path == "/tun/m/assign":
             nbh = params["nbh"][0]
@@ -183,34 +164,28 @@ class FakeColab:
                     },
                 }
                 self.assigned[nbh] = record
-                self.by_endpoint[ENDPOINT] = record
-                self.rate += self.burn_rate
                 self._lag_remaining = self.ccu_lag_polls
                 if self.lost_create_reply:
                     raise TimeoutError("lost POST reply")
                 return HTTPReply(status=200, body=_xssi(record))
         if path.startswith("/tun/m/unassign/"):
             endpoint = path.removeprefix("/tun/m/unassign/")
-            if endpoint not in self.by_endpoint:
+            if not any(item["endpoint"] == endpoint for item in self.assigned.values()):
                 return HTTPReply(status=404, body=b"gone")
             if method == "GET":
                 return HTTPReply(status=200, body=_xssi({"token": "xsrf-unassign-token"}))
             if method == "POST":
                 assert headers.get("X-Goog-Colab-Token") == "xsrf-unassign-token"
                 if not self.delete_pending:
-                    self.by_endpoint.pop(endpoint, None)
                     for key, value in list(self.assigned.items()):
                         if value["endpoint"] == endpoint:
                             del self.assigned[key]
-                    self.rate = max(0.0, self.rate - self.burn_rate)
                 return HTTPReply(status=200, body=b"")
         raise AssertionError(f"unexpected request {method} {url}")
 
     def execute(self, url: str, token: str, kernel_id: str, code: str) -> None:
         self.counts["WS /api/kernels/channels"] += 1
-        if self.fail_execute:
-            raise ProviderUnavailable("kernel websocket failed")
-        self.executed.append((url, token, kernel_id, code))
+        self.executed.append(code)
 
 
 def _credentials(*, expired: bool = False) -> ColabCredentials:
@@ -245,8 +220,10 @@ def _scheduler(
     storage: Storage,
     *,
     usd_per_unit: Decimal | None = None,
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     template: MachineTemplate = TEMPLATE,
     max_usd_per_hour: Decimal | None = None,
+    delivery_seconds: float | None = None,
 ) -> Scheduler:
     store = open_database(launcher_file(tmp_path))
     place = Place(
@@ -264,8 +241,8 @@ def _scheduler(
             BucketJournal(place, bucket),
         )
 
-    service = ProviderService(compose, ColabMachines.profile, validate=validate_template)
-    scheduler = Scheduler(store, {"colab": service})
+    service = ProviderService(compose, stock_image=False, validate=validate_template)
+    scheduler = Scheduler(store, {"colab": service}, clock=clock)
     scheduler.set_provider(
         Provider(
             name="colab",
@@ -281,17 +258,15 @@ def _scheduler(
             template=template,
             max_machines=1,
             max_usd_per_hour=max_usd_per_hour,
+            delivery_seconds=delivery_seconds,
         )
     )
     return scheduler
 
 
 def _bootstrap_env(code: str) -> dict[str, str]:
-    payload_line = [line for line in code.splitlines() if line.startswith("payload = json.loads(")][
-        0
-    ]
-    payload = json.loads(ast.literal_eval(payload_line.removeprefix("payload = json.loads(")[:-1]))
-    env = payload["env"]
+    line = next(line for line in code.splitlines() if line.startswith("env = "))
+    env = ast.literal_eval(line.removeprefix("env = "))
     assert isinstance(env, dict)
     return {str(k): str(v) for k, v in env.items()}
 
@@ -299,14 +274,14 @@ def _bootstrap_env(code: str) -> dict[str, str]:
 def test_template_resolution_has_no_fabricated_hardware_specs() -> None:
     l4 = resolve_template(MachineTemplate(provider="colab", gpu="l4"))
     assert not isinstance(l4, str)
-    assert l4.variant == "GPU" and l4.accelerator == "L4" and l4.shape_param is None
+    assert l4.variant == "GPU" and l4.accelerator == "L4" and not l4.high_mem
     assert isinstance(l4.hardware, GPU)
     assert l4.hardware.min_vcpus is None and l4.hardware.min_memory_gb is None
     assert str(l4.hardware) == "L4"
 
     t4_high = resolve_template(MachineTemplate(provider="colab", gpu="T4", memory_gb=32))
     assert not isinstance(t4_high, str)
-    assert t4_high.high_mem and t4_high.shape_param == "hm"
+    assert t4_high.high_mem
     assert str(t4_high.hardware) == "High-RAM: T4"
 
     cpu = resolve_template(MachineTemplate(provider="colab"))
@@ -314,45 +289,19 @@ def test_template_resolution_has_no_fabricated_hardware_specs() -> None:
     assert cpu.variant == "DEFAULT" and isinstance(cpu.hardware, CPU) and cpu.hardware.vcpus is None
     assert str(cpu.hardware) == "colab-standard" and not cpu.needs_compute_units
 
-    assert "spot" in str(resolve_template(MachineTemplate(provider="colab", gpu="L4", spot=True)))
-    assert "one GPU" in str(
-        resolve_template(MachineTemplate(provider="colab", gpu="L4", gpu_count=2))
-    )
-    assert "--vcpus" in str(resolve_template(MachineTemplate(provider="colab", gpu="L4", vcpus=8)))
-    assert "--disk-gb" in str(
-        resolve_template(MachineTemplate(provider="colab", gpu="L4", disk_gb=100))
-    )
-    assert "--image" in str(
-        resolve_template(
-            MachineTemplate(
-                provider="colab",
-                gpu="L4",
-                image=Image(
-                    requested="x@sha256:" + "0" * 64,
-                    resolved="x@sha256:" + "0" * 64,
-                ),
-            )
-        )
-    )
-    assert "--data-center" in str(
-        resolve_template(MachineTemplate(provider="colab", gpu="L4", data_center="us-central1"))
-    )
-    unknown = resolve_template(MachineTemplate(provider="colab", gpu="H200"))
-    assert isinstance(unknown, str) and "L4" in unknown and "A100" in unknown
-
 
 def test_ondemand_add_and_image_validate_colab_template_immediately(tmp_path: Path) -> None:
-    colab, storage = FakeColab(), Storage()
-    scheduler = _scheduler(tmp_path, colab, storage)
-    for bad in (
-        MachineTemplate(provider="colab", gpu="L4", spot=True),
-        MachineTemplate(provider="colab", gpu="H200"),
-        MachineTemplate(provider="colab", gpu="L4", gpu_count=2),
-        MachineTemplate(provider="colab", gpu="L4", vcpus=8),
-        MachineTemplate(provider="colab", gpu="L4", data_center="us-west-1"),
+    scheduler = _scheduler(tmp_path, FakeColab(), Storage())
+    for template, reason in (
+        (MachineTemplate(provider="colab", gpu="L4", spot=True), "spot"),
+        (MachineTemplate(provider="colab", gpu="H200"), "supported: .*L4.*A100"),
+        (MachineTemplate(provider="colab", gpu="L4", gpu_count=2), "one GPU"),
+        (MachineTemplate(provider="colab", vcpus=8), "--vcpus"),
+        (MachineTemplate(provider="colab", disk_gb=100), "--disk-gb"),
+        (MachineTemplate(provider="colab", data_center="us-west-1"), "--data-center"),
     ):
-        with pytest.raises(LauncherError):
-            scheduler.add_ondemand(OnDemand(name="bad", template=bad))
+        with pytest.raises(LauncherError, match=reason):
+            scheduler.add_ondemand(OnDemand(name="bad", template=template))
     with pytest.raises(LauncherError, match="--image"):
         scheduler.set_ondemand_image(
             "colab-l4",
@@ -510,7 +459,6 @@ def test_live_burn_rate_observed_with_lag_and_concurrent_sessions_guarded() -> N
         ) -> HTTPReply:
             if urlsplit(url).path == "/tun/m/assign" and method == "POST":
                 self.external_assignments += 1
-                self.rate += 10.0  # another notebook started an A100 concurrently
             return super().__call__(method, url, body, headers)
 
     racy = RacyColab(burn_rate=1.94)
@@ -549,12 +497,35 @@ def test_create_lost_reply_recovers_via_deterministic_nbh_rate_and_bootstraps_on
     assert colab.counts["POST /api/kernels"] == 1
     assert colab.counts["WS /api/kernels/channels"] == 1
     assert len(colab.executed) == 1
-    assert "boot-claim" in colab.executed[0][3]
-    assert "etude.launch.provisioner.providers.watchdog" in colab.executed[0][3]
+    assert "boot-claim" in colab.executed[0]
+    assert "etude.launch.provisioner.providers.watchdog" in colab.executed[0]
 
     machines.allocation("s1")
     assert colab.counts["POST /api/kernels"] == 1
     assert colab.counts["WS /api/kernels/channels"] == 1
+
+
+def test_lost_assignment_reply_checks_recovered_rate_before_bootstrap() -> None:
+    colab = FakeColab(burn_rate=2.0)
+    colab.lost_create_reply = True
+    machines = ColabMachines(
+        TEMPLATE,
+        ColabAPI(_credentials(), colab, execute=colab.execute),
+        _bucket(Storage()),
+        "etude",
+    )
+    request = _request().model_copy(update={"max_units_per_hour": Decimal("1")})
+    with pytest.raises(ProviderUnavailable):
+        machines.create(request)
+    assert machines.find(request.session) == ENDPOINT
+    colab.delete_pending = True
+    with pytest.raises(ProviderUnavailable, match="unassign unconfirmed"):
+        machines.allocation(request.session)
+    colab.delete_pending = False
+    assert machines.allocation(request.session) is None
+    assert not machines.alive(request.session)
+    assert colab.counts["POST /tun/m/assign"] == 1
+    assert colab.counts["POST /api/kernels"] == 0
 
 
 def test_create_refusal_412_and_400_record_no_machine() -> None:
@@ -592,79 +563,37 @@ def test_end_confirms_absence_and_alive_tracks_assignments() -> None:
 
 
 def test_websocket_execute_in_kernel_loopback() -> None:
-    received: dict[str, object] = {}
-    ready = threading.Event()
+    received: list[str] = []
 
-    def serve(server: socket.socket) -> None:
-        ready.set()
-        conn, _ = server.accept()
-        with conn:
-            data = b""
-            while b"\r\n\r\n" not in data:
-                data += conn.recv(4096)
-            headers: dict[str, str] = {}
-            lines = data.decode().split("\r\n")
-            received["request_line"] = lines[0]
-            for line in lines[1:]:
-                if ":" in line:
-                    k, v = line.split(":", 1)
-                    headers[k.strip().lower()] = v.strip()
-            accept = base64.b64encode(
-                hashlib.sha1(
-                    (headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
-                ).digest()
-            ).decode()
-            conn.sendall(
-                f"HTTP/1.1 101 Switching Protocols\r\n"
-                f"Upgrade: websocket\r\n"
-                f"Connection: Upgrade\r\n"
-                f"Sec-WebSocket-Accept: {accept}\r\n\r\n".encode()
+    def kernel(channel: ServerConnection) -> None:
+        assert channel.request is not None
+        assert channel.request.headers["X-Colab-Runtime-Proxy-Token"] == PROXY_TOKEN
+        assert channel.request.path.startswith("/api/kernels/kid-1/channels?")
+        message = json.loads(channel.recv(timeout=5))
+        assert message["header"]["msg_type"] == "execute_request"
+        received.append(message["content"]["code"])
+        channel.ping(b"hi")
+        for parent in ("another-request", message["header"]["msg_id"]):
+            channel.send(
+                json.dumps(
+                    {
+                        "msg_type": "status",
+                        "parent_header": {"msg_id": parent},
+                        "content": {"execution_state": "busy"},
+                    }
+                )
             )
-            head = conn.recv(2)
-            length = head[1] & 0x7F
-            if length == 126:
-                length = struct.unpack("!H", conn.recv(2))[0]
-            elif length == 127:
-                length = struct.unpack("!Q", conn.recv(8))[0]
-            mask = conn.recv(4)
-            payload = bytearray()
-            while len(payload) < length:
-                payload.extend(conn.recv(length - len(payload)))
-            decoded = bytes(b ^ mask[i & 3] for i, b in enumerate(payload))
-            msg = json.loads(decoded)
-            received["msg"] = msg
-            conn.sendall(bytes([0x89, 2]) + b"hi")
-            pong_head = conn.recv(6)
-            pong_len = pong_head[1] & 0x7F
-            conn.recv(pong_len)
-            reply = json.dumps(
-                {
-                    "msg_type": "status",
-                    "parent_header": {"msg_id": msg["header"]["msg_id"]},
-                    "content": {"execution_state": "busy"},
-                }
-            ).encode()
-            if len(reply) < 126:
-                frame = bytes([0x81, len(reply)]) + reply
-            else:
-                frame = bytes([0x81, 126]) + struct.pack("!H", len(reply)) + reply
-            conn.sendall(frame)
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-        server.bind(("127.0.0.1", 0))
-        port = server.getsockname()[1]
-        server.listen(1)
-        thread = threading.Thread(target=serve, args=(server,), daemon=True)
+    with serve(kernel, "127.0.0.1", 0) as server:
+        thread = threading.Thread(target=server.serve_forever)
         thread.start()
-        ready.wait(timeout=5)
-        execute_in_kernel(f"http://127.0.0.1:{port}", PROXY_TOKEN, "kid-1", "print(1)")
-        thread.join(timeout=5)
-
-    assert "/api/kernels/kid-1/channels" in str(received["request_line"])
-    msg = received["msg"]
-    assert isinstance(msg, dict)
-    assert msg["header"]["msg_type"] == "execute_request"
-    assert msg["content"]["code"] == "print(1)"
+        try:
+            port = server.socket.getsockname()[1]
+            execute_in_kernel(f"http://127.0.0.1:{port}", PROXY_TOKEN, "kid-1", "print(1)")
+        finally:
+            server.shutdown()
+            thread.join()
+    assert received == ["print(1)"]
 
 
 def test_colab_scheduler_lifecycle_updates_cap_and_displays_cu_and_usd(
@@ -712,7 +641,7 @@ def test_colab_scheduler_lifecycle_updates_cap_and_displays_cu_and_usd(
     assert machines[0].name in listed and "CU (" in listed and "L4" in listed
 
     assert len(colab.executed) == 1
-    env = _bootstrap_env(colab.executed[0][3])
+    env = _bootstrap_env(colab.executed[0])
     vm_deadline = datetime.fromisoformat(env["ETUDE_DEADLINE"])
     assert abs((vm_deadline - rental.deadline).total_seconds()) < 1.0
     bootstrap_url = env["ETUDE_BOOTSTRAP_URL"]
@@ -743,7 +672,7 @@ def test_colab_scheduler_lifecycle_updates_cap_and_displays_cu_and_usd(
         assert statuses[0].unit == "cu" and statuses[0].units is not None
         assert "CU (" in str(statuses[0])
         assert released(scheduler, run_id).rental_ended
-        assert not colab.by_endpoint
+        assert not colab.assigned
         assert scheduler.machines("colab-l4")[0].deleted_at is not None
         assert colab.counts["POST /tun/m/assign"] == 1
         assert colab.counts[f"POST /tun/m/unassign/{ENDPOINT}"] == 1
@@ -766,7 +695,7 @@ def test_colab_manual_rent_respects_max_usd_and_terminate(
     assert cost.rental.cap_usd == Decimal("0.20")
     assert cost.rental.usd_per_hour == Decimal("0.200")
     assert 3500 <= (cost.rental.deadline - before).total_seconds() <= 3700
-    env = _bootstrap_env(colab.executed[0][3])
+    env = _bootstrap_env(colab.executed[0])
     vm_deadline = datetime.fromisoformat(env["ETUDE_DEADLINE"])
     assert abs((vm_deadline - cost.rental.deadline).total_seconds()) < 1.0
 
@@ -777,7 +706,7 @@ def test_colab_manual_rent_respects_max_usd_and_terminate(
 
     ended = scheduler.terminate(machine_name)
     assert ended.deleted_at is not None
-    assert not colab.by_endpoint
+    assert not colab.assigned
     assert colab.counts[f"POST /tun/m/unassign/{ENDPOINT}"] == 1
 
 
@@ -797,7 +726,7 @@ def test_colab_ceiling_exceeded_unassigns_before_booting_kernel(tmp_path: Path) 
             rent="colab-l4",
         )
     # Runtime unassigned immediately; no kernel started; zero endpoints held.
-    assert not colab.by_endpoint
+    assert not colab.assigned
     assert colab.counts["POST /tun/m/assign"] == 1
     assert colab.counts[f"POST /tun/m/unassign/{ENDPOINT}"] == 1
     assert colab.counts["POST /api/kernels"] == 0
@@ -807,31 +736,10 @@ def test_colab_ceiling_exceeded_unassigns_before_booting_kernel(tmp_path: Path) 
 def test_colab_multi_attempt_sums_cu_and_marks_estimated_at_zero_usd(tmp_path: Path) -> None:
     # Start 30m before wall clock so ColabMachines.end() (wall UTC) lands 30m after attempt 1's claim.
     now = [datetime.now(UTC) - timedelta(minutes=30)]
-    store = open_database(launcher_file(tmp_path))
-    place = Place(
-        name="evidence", bucket="journal", prefix="etude/launch", provider="s3", region="us-west-2"
+    colab = FakeColab(burn_rate=2.0)
+    scheduler = _scheduler(
+        tmp_path, colab, Storage(), usd_per_unit=Decimal(0), clock=lambda: now[0]
     )
-    store.add_storage(place)
-    colab, storage = FakeColab(burn_rate=2.0), Storage()
-    bucket = _bucket(storage)
-    api = ColabAPI(_credentials(), send=colab, execute=colab.execute)
-
-    def compose(held: Machine | OnDemand) -> Execution:
-        assert isinstance(held, OnDemand)
-        return Executor(
-            ColabMachines(held.template, api, bucket, place.prefix),
-            None,
-            BucketJournal(place, bucket),
-        )
-
-    service = ProviderService(compose, ColabMachines.profile, validate=validate_template)
-    scheduler = Scheduler(store, {"colab": service}, clock=lambda: now[0])
-    scheduler.set_provider(
-        Provider(
-            name="colab", kind="colab", registry="", storage="evidence", usd_per_unit=Decimal("0")
-        )
-    )
-    scheduler.add_ondemand(OnDemand(name="colab-l4", template=TEMPLATE, max_machines=1))
 
     repo = repository(tmp_path)
     (run_id,) = scheduler.launch(
@@ -840,9 +748,7 @@ def test_colab_multi_attempt_sums_cu_and_marks_estimated_at_zero_usd(tmp_path: P
     )
     # Attempt 1 runs for 30 minutes (1.00 CU), then Colab reclaims the runtime.
     now[0] += timedelta(minutes=30)
-    colab.by_endpoint.clear()
     colab.assigned.clear()
-    colab.rate = 0.0
     scheduler.tick()
     # Attempt 2 is assigned on a fresh runtime and runs for 15 minutes (0.50 CU).
     now[0] += timedelta(minutes=15)
@@ -866,74 +772,18 @@ def test_colab_cli_configuration_is_offline(
         upgrade(home, development=True)
         assert (
             main(
-                [
-                    "storage",
-                    "add",
-                    "evidence",
-                    "--bucket",
-                    "b",
-                    "--prefix",
-                    "p",
-                    "--provider",
-                    "s3",
-                    "--region",
-                    "us-west-2",
-                ]
+                "storage add evidence --bucket b --prefix p --provider s3 --region us-west-2".split()
             )
             == 0
         )
-        assert (
-            main(
-                [
-                    "provider",
-                    "set",
-                    "colab",
-                    "--kind",
-                    "colab",
-                    "--storage",
-                    "evidence",
-                    "--usd-per-unit",
-                    "0.10",
-                ]
-            )
-            == 0
-        )
-        providers_out = capsys.readouterr().out
-        assert "$0.10/CU" in providers_out
-
-        # Invalid Colab template rejected at ondemand add.
-        assert (
-            main(
-                [
-                    "ondemand",
-                    "add",
-                    "bad",
-                    "--provider",
-                    "colab",
-                    "--gpu",
-                    "H200",
-                ]
-            )
-            != 0
-        )
-        capsys.readouterr()
-
-        assert (
-            main(
-                [
-                    "ondemand",
-                    "add",
-                    "colab-l4",
-                    "--provider",
-                    "colab",
-                    "--gpu",
-                    "L4",
-                    "--max",
-                    "1",
-                ]
-            )
-            == 0
-        )
+        assert main("provider set colab --kind colab --storage evidence".split()) == 0
+        assert "$0/CU" in capsys.readouterr().out
+        account = "provider set colab --kind colab --storage evidence --usd-per-unit".split()
+        assert main([*account, "0.10"]) == 0
+        assert "$0.10/CU" in capsys.readouterr().out
+        assert main([*account, "invalid"]) != 0
+        assert main("ondemand add bad --provider colab --gpu H200".split()) != 0
+        assert main("ondemand add colab-l4 --provider colab --gpu L4 --max 1".split()) == 0
         capsys.readouterr()
         assert main(["ondemands"]) == 0
         out = capsys.readouterr().out
@@ -973,3 +823,111 @@ def test_kernel_bootstrap_code_is_valid_python() -> None:
     code = _kernel_bootstrap_code({"ETUDE_SESSION": "s1"}, "print('hi')")
     compile(code, "<colab-bootstrap>", "exec")
     assert "boot-claim" in code and "start_new_session=True" in code
+
+
+def test_unobserved_burn_rate_reports_unobserved_instead_of_zero_usd(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class RacyColab(FakeColab):
+        def __call__(
+            self, method: str, url: str, body: bytes | None, headers: dict[str, str]
+        ) -> HTTPReply:
+            if urlsplit(url).path == "/tun/m/assign" and method == "POST":
+                self.external_assignments += 1
+            return super().__call__(method, url, body, headers)
+
+    colab = RacyColab(burn_rate=2.0)
+    scheduler = _scheduler(tmp_path, colab, Storage(), usd_per_unit=Decimal("0.10"))
+    repo = repository(tmp_path)
+    (run_id,) = scheduler.launch(
+        Job(command="true", repo=str(repo), max_hours=1.0, max_usd=Decimal("1.00")),
+        rent="colab-l4",
+    )
+    status = scheduler.read(run_id)
+    assert status.unit == "cu" and status.units is None and status.estimated is True
+    assert "CU rate unobserved" in str(status)
+    show_machines(scheduler, ended=False)
+    assert "CU rate unobserved" in capsys.readouterr().out
+
+
+def test_queued_ceiling_refusal_backs_off_fifteen_minutes_and_formats_limit(
+    tmp_path: Path,
+) -> None:
+    now = [datetime.now(UTC)]
+    colab = FakeColab(burn_rate=2.0)
+    # 0.15 / 0.09 = 1.6666... -> formats cleanly to 1.6667 CU/hour, not 28 digits.
+    scheduler = _scheduler(
+        tmp_path,
+        colab,
+        Storage(),
+        usd_per_unit=Decimal("0.09"),
+        max_usd_per_hour=Decimal("0.15"),
+        clock=lambda: now[0],
+    )
+    repo = repository(tmp_path)
+    (run_id,) = scheduler.queue(
+        Job(command="true", repo=str(repo), max_hours=1.0, max_usd=Decimal("1.00")),
+        rent="colab-l4",
+    )
+    scheduler.tick()
+    assert colab.counts["POST /tun/m/assign"] == 1
+    assert colab.counts[f"POST /tun/m/unassign/{ENDPOINT}"] == 1
+    reason = scheduler.read(run_id).reason or ""
+    assert "1.6667 CU/hour" in reason and "1.66666666" not in reason
+
+    # Still paused after 2 minutes (no 60-second VM churn).
+    now[0] += timedelta(minutes=2)
+    scheduler.tick()
+    assert colab.counts["POST /tun/m/assign"] == 1
+
+    # Retries after the 15-minute ceiling pause.
+    now[0] += timedelta(minutes=14)
+    scheduler.tick()
+    assert colab.counts["POST /tun/m/assign"] == 2
+
+
+def test_courier_bounds_packet_deadline_by_trimmed_etude_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "client"))
+    colab, storage = FakeColab(burn_rate=2.0), Storage()
+    scheduler = _scheduler(
+        tmp_path,
+        colab,
+        storage,
+        usd_per_unit=Decimal("0.10"),
+        delivery_seconds=120,
+    )
+    repo = repository(tmp_path)
+    run_id = scheduler.launch(
+        Job(command="true", repo=str(repo), max_hours=5.0, max_usd=Decimal("0.50")),
+        rent="colab-l4",
+    )[0]
+    env = _bootstrap_env(colab.executed[0])
+    vm_deadline = datetime.fromisoformat(env["ETUDE_DEADLINE"])
+    monkeypatch.setenv("ETUDE_DEADLINE", env["ETUDE_DEADLINE"])
+    monkeypatch.setenv("ETUDE_SESSION", env["ETUDE_SESSION"])
+    vm_root = tmp_path / "colab-vm"
+
+    def worker() -> None:
+        run_courier(
+            env["ETUDE_BOOTSTRAP_URL"],
+            lambda: None,
+            root=vm_root,
+            send=storage,
+            every=0.05,
+        )
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    try:
+        statuses = scheduler.wait(run_id, every=0.05, timeout=20)
+        assert statuses[0].outcome == "succeeded"
+    finally:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    written = json.loads((vm_root / env["ETUDE_SESSION"] / "packet.json").read_text())
+    packet_deadline = datetime.fromisoformat(written["deadline"])
+    # packet.json deadline must be bounded by trimmed ETUDE_DEADLINE - delivery_seconds (120s).
+    assert abs((vm_deadline - packet_deadline).total_seconds() - 120.0) < 1.0

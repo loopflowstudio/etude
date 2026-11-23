@@ -9,16 +9,16 @@ from __future__ import annotations
 import json
 import urllib.parse
 from collections.abc import Callable
-from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import ConfigDict, Field
+from pydantic import Field
 
 from etude.launch.errors import ProviderUnavailable
 from etude.launch.provisioner.machines import Refused
 from etude.launch.provisioner.providers.colab.http import (
-    COLAB_DOMAIN,
+    XSSI_PREFIX,
     ColabCredentials,
     ColabHTTP,
     execute_in_kernel,
@@ -34,7 +34,6 @@ AcceleratorName = Literal["NONE", "T4", "L4", "G4", "A100", "H100"]
 VariantName = Literal["DEFAULT", "GPU"]
 
 _GPU_NAMES: tuple[AcceleratorName, ...] = ("T4", "L4", "G4", "A100", "H100")
-_PAID_ACCELERATORS = frozenset({"L4", "G4", "A100", "H100"})
 # Accelerators with only one machine shape; Colab ignores `shape=hm` for them.
 _SINGLE_SHAPE_ACCELERATORS = frozenset({"L4", "G4"})
 # Standard CPU/T4 memory threshold above which Colab's High-RAM shape is requested.
@@ -44,20 +43,22 @@ _STANDARD_RAM_GB = 16
 class ColabSpec(Record):
     """Resolved Colab assignment parameters for one MachineTemplate."""
 
-    variant: VariantName
     accelerator: AcceleratorName
     high_mem: bool
-    hardware: Hardware
+
+    @property
+    def variant(self) -> VariantName:
+        return "DEFAULT" if self.accelerator == "NONE" else "GPU"
+
+    @property
+    def hardware(self) -> Hardware:
+        if self.accelerator == "NONE":
+            return CPU(flavor="colab-high-ram" if self.high_mem else "colab-standard")
+        return GPU(id=self.accelerator, flavor="High-RAM" if self.high_mem else None)
 
     @property
     def needs_compute_units(self) -> bool:
-        return self.high_mem or self.accelerator in _PAID_ACCELERATORS
-
-    @property
-    def shape_param(self) -> str | None:
-        if self.high_mem and self.accelerator not in _SINGLE_SHAPE_ACCELERATORS:
-            return "hm"
-        return None
+        return self.high_mem or self.accelerator not in {"NONE", "T4"}
 
 
 def resolve_template(template: MachineTemplate) -> ColabSpec | str:
@@ -73,31 +74,13 @@ def resolve_template(template: MachineTemplate) -> ColabSpec | str:
     if template.vcpus is not None or template.disk_gb is not None:
         return "Colab does not select vCPU or disk sizes; omit --vcpus and --disk-gb"
 
+    high_mem = template.memory_gb is not None and template.memory_gb > _STANDARD_RAM_GB
     if template.gpu is None:
-        high_mem = template.memory_gb is not None and template.memory_gb > _STANDARD_RAM_GB
-        return ColabSpec(
-            variant="DEFAULT",
-            accelerator="NONE",
-            high_mem=high_mem,
-            hardware=CPU(flavor="colab-high-ram" if high_mem else "colab-standard"),
-        )
-
+        return ColabSpec(accelerator="NONE", high_mem=high_mem)
     name = template.gpu.strip().upper()
     if name not in _GPU_NAMES:
-        supported = ", ".join(_GPU_NAMES)
-        return f"Colab has no GPU {template.gpu!r}; supported: {supported}"
-    high_mem = (
-        template.memory_gb is not None
-        and template.memory_gb > _STANDARD_RAM_GB
-        and name not in _SINGLE_SHAPE_ACCELERATORS
-    )
-    accelerator: AcceleratorName = name
-    return ColabSpec(
-        variant="GPU",
-        accelerator=accelerator,
-        high_mem=high_mem,
-        hardware=GPU(id=name, flavor="High-RAM" if high_mem else None, count=1),
-    )
+        return f"Colab has no GPU {template.gpu!r}; supported: {', '.join(_GPU_NAMES)}"
+    return ColabSpec(accelerator=name, high_mem=high_mem and name not in _SINGLE_SHAPE_ACCELERATORS)
 
 
 def validate_template(template: MachineTemplate) -> str | None:
@@ -108,54 +91,35 @@ def validate_template(template: MachineTemplate) -> str | None:
 
 def notebook_hash(value: UUID) -> str:
     """Encode a UUID the way Colab's `/tun/m/assign` `nbh` parameter expects."""
-    transformed = str(value).replace("-", "_")
-    return transformed + "." * (44 - len(transformed))
+    return str(value).replace("-", "_").ljust(44, ".")
 
 
-class _Wire(Record):
-    model_config = ConfigDict(frozen=True, populate_by_name=True, extra="ignore")
-
-
-class CcuInfo(_Wire):
-    current_balance: float = Field(alias="currentBalance")
-    consumption_rate_hourly: float = Field(alias="consumptionRateHourly")
+class CcuInfo(Record):
+    current_balance: Decimal = Field(alias="currentBalance")
+    consumption_rate_hourly: Decimal = Field(alias="consumptionRateHourly")
     assignments_count: int = Field(alias="assignmentsCount")
 
 
-class RuntimeProxyInfo(_Wire):
+class RuntimeProxyInfo(Record):
     token: str
-    token_expires_in_seconds: int = Field(alias="tokenExpiresInSeconds")
     url: str
 
 
-class ListedAssignment(_Wire):
-    accelerator: str
-    endpoint: str
-    variant: int
-    machine_shape: int = Field(default=0, alias="machineShape")
-    runtime_proxy_info: RuntimeProxyInfo = Field(alias="runtimeProxyInfo")
-
-
-class _ListedAssignments(_Wire):
-    assignments: tuple[ListedAssignment, ...] = ()
-
-
-class Assigned(_Wire):
+class Assigned(Record):
     endpoint: str
     runtime_proxy_info: RuntimeProxyInfo = Field(alias="runtimeProxyInfo")
 
 
-class PendingAssign(_Wire):
+class _ListedAssignments(Record):
+    assignments: tuple[Assigned, ...] = ()
+
+
+class ColabToken(Record):
     token: str
 
 
-class _UnassignToken(_Wire):
-    token: str
-
-
-class Kernel(_Wire):
+class Kernel(Record):
     id: str
-    execution_state: str = "starting"
 
 
 def _read[T: Record](model: type[T], raw: bytes | None) -> T:
@@ -173,8 +137,8 @@ def _assign_params(nbh: UUID, spec: ColabSpec) -> dict[str, str]:
         "variant": spec.variant,
         "accelerator": spec.accelerator,
     }
-    if spec.shape_param is not None:
-        params["shape"] = spec.shape_param
+    if spec.high_mem:
+        params["shape"] = "hm"
     return params
 
 
@@ -185,31 +149,27 @@ class ColabAPI(ColabHTTP):
         send: Send = send_to_provider,
         *,
         execute: ExecuteKernel = execute_in_kernel,
-        domain: str = COLAB_DOMAIN,
-        now: Callable[[], datetime] | None = None,
     ) -> None:
-        super().__init__(credentials, send, domain=domain, now=now)
+        super().__init__(credentials, send)
         self._execute = execute
 
     def ccu_info(self) -> CcuInfo:
         return _read(CcuInfo, self.ask("GET", "/tun/m/ccu-info"))
 
-    def assignments(self) -> tuple[ListedAssignment, ...]:
+    def assignments(self) -> tuple[Assigned, ...]:
         return _read(_ListedAssignments, self.ask("GET", "/tun/m/assignments")).assignments
 
-    def lookup(self, nbh: UUID, spec: ColabSpec) -> Assigned | PendingAssign:
+    def lookup(self, nbh: UUID, spec: ColabSpec) -> Assigned | ColabToken:
         raw = self.ask("GET", "/tun/m/assign", params=_assign_params(nbh, spec))
-        if raw is None:
-            raise ProviderUnavailable("Colab assign lookup returned an empty body")
         try:
-            data = json.loads(raw)
+            data = json.loads(raw or b"")
+            if not isinstance(data, dict):
+                raise ValueError
+            if "endpoint" in data:
+                return Assigned.model_validate(data)
+            return ColabToken.model_validate(data)
         except ValueError:
-            raise ProviderUnavailable("Colab assign lookup returned invalid JSON") from None
-        if not isinstance(data, dict):
-            raise ProviderUnavailable("Colab assign lookup returned a non-object reply")
-        if "endpoint" in data and "runtimeProxyInfo" in data:
-            return _read(Assigned, raw)
-        return _read(PendingAssign, raw)
+            raise ProviderUnavailable("Colab assign lookup returned an invalid reply") from None
 
     def assign(self, nbh: UUID, spec: ColabSpec) -> Assigned:
         current = self.lookup(nbh, spec)
@@ -229,28 +189,16 @@ class ColabAPI(ColabHTTP):
             )
         if not 200 <= reply.status < 300:
             raise ProviderUnavailable(f"Colab POST /tun/m/assign: status {reply.status}")
-        body = reply.body
-        if body.startswith(b")]}'\n"):
-            body = body[5:]
-        return _read(Assigned, body)
+        return _read(Assigned, reply.body.removeprefix(XSSI_PREFIX))
 
     def unassign(self, endpoint: str) -> None:
         path = f"/tun/m/unassign/{urllib.parse.quote(endpoint, safe='')}"
         raw = self.ask("GET", path, absent_ok=True)
         if raw is None:
             return
-        token = _read(_UnassignToken, raw).token
+        token = _read(ColabToken, raw).token
         self.ask("POST", path, headers={"X-Goog-Colab-Token": token}, absent_ok=True)
 
-    def start_kernel(self, proxy: RuntimeProxyInfo) -> Kernel:
-        raw = self.runtime_request(
-            "POST",
-            proxy.url,
-            "/api/kernels",
-            proxy.token,
-            body=json.dumps({"name": "python3"}).encode(),
-        )
-        return _read(Kernel, raw)
-
-    def execute(self, proxy: RuntimeProxyInfo, kernel_id: str, code: str) -> None:
-        self._execute(proxy.url, proxy.token, kernel_id, code)
+    def execute(self, proxy: RuntimeProxyInfo, code: str) -> None:
+        raw = self.start_kernel(proxy.url, proxy.token)
+        self._execute(proxy.url, proxy.token, _read(Kernel, raw).id, code)

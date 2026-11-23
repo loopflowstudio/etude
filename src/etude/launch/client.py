@@ -28,10 +28,8 @@ from etude.errors import LauncherError
 from etude.launch.aws import Keys
 from etude.launch.database import launcher_file, open_home
 from etude.launch.executor import Execution, Executor, ProviderService, local
-from etude.launch.provisioner.machines import Machines, OwnedMachine, ProviderProfile, Safeguards
-from etude.launch.provisioner.providers.colab.api import (
-    ColabAPI,
-)
+from etude.launch.provisioner.machines import Machines, OwnedMachine, Safeguards
+from etude.launch.provisioner.providers.colab.api import ColabAPI
 from etude.launch.provisioner.providers.colab.api import (
     validate_template as validate_colab,
 )
@@ -107,7 +105,7 @@ def _open(home: Path) -> Scheduler:
         make: Callable[[K, Provider, MachineTemplate, Bucket, Storage], Machines],
         safeguards: Safeguards,
         *,
-        profile: ProviderProfile | None = None,
+        stock_image: bool = True,
         validate: Callable[[MachineTemplate], str | None] | None = None,
     ) -> ProviderService:
         def rented(held: Machine | OnDemand) -> Execution:
@@ -123,11 +121,7 @@ def _open(home: Path) -> Scheduler:
                 BucketJournal(storage, bucket),
             )
 
-        return ProviderService(
-            rented,
-            profile or ProviderProfile(safeguards=safeguards),
-            validate=validate,
-        )
+        return ProviderService(rented, safeguards, stock_image=stock_image, validate=validate)
 
     def ec2(
         keys: Keys, account: Provider, template: MachineTemplate, bucket: Bucket, storage: Storage
@@ -205,7 +199,7 @@ def _open(home: Path) -> Scheduler:
                     template, ColabAPI(creds), bucket, storage.prefix
                 ),
                 ColabMachines.safeguards,
-                profile=ColabMachines.profile,
+                stock_image=False,
                 validate=validate_colab,
             ),
         },

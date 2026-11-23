@@ -9,10 +9,9 @@ scheduler owns USD conversion and budget accounting.
 
 from __future__ import annotations
 
-import json
 import time
 from datetime import UTC, datetime, timedelta
-from decimal import ROUND_FLOOR, Decimal
+from decimal import Decimal
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from etude.deadline import limit_time, remaining
@@ -21,7 +20,6 @@ from etude.launch.provisioner.machines import (
     Allocation,
     Bill,
     MachineRequest,
-    ProviderProfile,
     Refused,
     Safeguards,
     check_creation,
@@ -35,7 +33,7 @@ from etude.launch.provisioner.providers.colab.api import (
     resolve_template,
 )
 from etude.launch.provisioner.providers.program import Program, boot_source
-from etude.launch.records import MachineTemplate, Offer, provider_unit
+from etude.launch.records import MachineTemplate, Offer, affordable_seconds, provider_unit
 from etude.launch.storage.s3 import AlreadyThere, Bucket
 from etude.spec import Record
 
@@ -52,7 +50,6 @@ class Intent(Record):
 
 class Receipt(Record):
     endpoint: str
-    url: str
     created_at: datetime
     units_per_hour: Decimal | None = None
     deadline: datetime | None = None
@@ -60,14 +57,6 @@ class Receipt(Record):
 
 def _session_nbh(session: str) -> UUID:
     return uuid5(NAMESPACE_URL, f"etude-colab:{session}")
-
-
-def _observed_rate(before: CcuInfo, after: CcuInfo | None) -> Decimal | None:
-    """Isolate this runtime's CU/hr burn rate when no other assignment changed concurrently."""
-    if after is None or after.assignments_count != before.assignments_count + 1:
-        return None
-    delta = round(after.consumption_rate_hourly - before.consumption_rate_hourly, 4)
-    return Decimal(str(delta)) if delta > 0 else None
 
 
 def _cap_deadline(
@@ -79,9 +68,8 @@ def _cap_deadline(
     """Bound a Colab rental's deadline against its CU cap once the hourly burn rate is observed."""
     if units_per_hour is None or units_per_hour <= 0 or cap_units is None or cap_units <= 0:
         return deadline
-    micros = (cap_units * 3_600_000_000 / units_per_hour).to_integral_value(rounding=ROUND_FLOOR)
-    funded = max(1.0, float(micros / 1_000_000))
-    return min(deadline, origin + timedelta(seconds=funded))
+    funded = max(1.0, affordable_seconds(units_per_hour, cap_units))
+    return origin + timedelta(seconds=min(funded, (deadline - origin).total_seconds()))
 
 
 # A retried bootstrap never starts a second worker: the atomic claim lives on
@@ -89,31 +77,28 @@ def _cap_deadline(
 # for the life of the worker, while `start_new_session=True` isolates the
 # watchdog's `killpg` from the Jupyter server.
 def _kernel_bootstrap_code(env: dict[str, str], code: str) -> str:
-    payload = json.dumps({"env": env, "code": code})
-    return (
-        "import json, os, pathlib, shutil, subprocess, sys\n"
-        f"payload = json.loads({payload!r})\n"
-        "root = pathlib.Path('/run/etude')\n"
-        "root.mkdir(parents=True, exist_ok=True, mode=0o700)\n"
-        "try:\n"
-        "    (root / 'boot-claim').open('x').close()\n"
-        "except FileExistsError:\n"
-        "    raise SystemExit(0)\n"
-        "python = shutil.which('python3.12') or sys.executable\n"
-        "subprocess.run(\n"
-        "    [python, '-c', payload['code']],\n"
-        "    env={**os.environ, **payload['env']},\n"
-        "    stdin=subprocess.DEVNULL,\n"
-        "    stdout=subprocess.DEVNULL,\n"
-        "    stderr=subprocess.DEVNULL,\n"
-        "    start_new_session=True,\n"
-        ")\n"
-    )
+    return f"""import os, pathlib, shutil, subprocess, sys
+root = pathlib.Path('/run/etude')
+root.mkdir(parents=True, exist_ok=True, mode=0o700)
+try:
+    (root / 'boot-claim').open('x').close()
+except FileExistsError:
+    raise SystemExit(0)
+env = {env!r}
+python = shutil.which('python3.12') or sys.executable
+subprocess.run(
+    [python, '-c', {code!r}],
+    env={{**os.environ, **env}},
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    start_new_session=True,
+)
+"""
 
 
 class ColabMachines:
     safeguards = Safeguards()
-    profile = ProviderProfile(unit=UNIT, safeguards=safeguards, stock_image=False)
     owned = False
 
     def __init__(
@@ -123,7 +108,8 @@ class ColabMachines:
         bucket: Bucket,
         prefix: str,
     ) -> None:
-        self._template, self._api, self._bucket, self._prefix = template, api, bucket, prefix
+        self._spec = resolve_template(template)
+        self._api, self._bucket, self._prefix = api, bucket, prefix
         self._program = Program(bucket, prefix)
 
     def _key(self, session: str, name: str) -> str:
@@ -133,8 +119,19 @@ class ColabMachines:
         raw = self._bucket.get(self._key(session, name))
         return None if raw is None else model.model_validate_json(raw)
 
-    def _keep_receipt(self, session: str, receipt: Receipt) -> None:
-        self._bucket.put(self._key(session, "receipt"), receipt.model_dump_json().encode())
+    def _record_assignment(
+        self, intent: Intent, assigned: Assigned, created_at: datetime, rate: Decimal | None
+    ) -> Receipt:
+        request = intent.request
+        assert request.deadline is not None
+        receipt = Receipt(
+            endpoint=assigned.endpoint,
+            created_at=created_at,
+            units_per_hour=rate,
+            deadline=_cap_deadline(created_at, request.deadline, rate, request.cap_units),
+        )
+        self._bucket.put(self._key(request.session, "receipt"), receipt.model_dump_json().encode())
+        return receipt
 
     def _poll_rate(self, before: CcuInfo) -> Decimal | None:
         """Read post-assign ccu-info, retrying briefly if Colab lags reflecting the new session."""
@@ -143,8 +140,12 @@ class ColabMachines:
                 after = self._api.ccu_info()
             except ProviderUnavailable:
                 return None
-            if after.assignments_count != before.assignments_count:
-                return _observed_rate(before, after)
+            difference = after.assignments_count - before.assignments_count
+            if difference == 1:
+                rate = round(after.consumption_rate_hourly - before.consumption_rate_hourly, 4)
+                return rate if rate > 0 else None
+            if difference != 0:
+                return None
             if attempt + 1 < _CCU_POLL_ATTEMPTS:
                 left = remaining()
                 if left is not None and left <= _CCU_POLL_INTERVAL:
@@ -152,20 +153,25 @@ class ColabMachines:
                 time.sleep(_CCU_POLL_INTERVAL)
         return None
 
-    def offer(self) -> Offer:
-        spec = resolve_template(self._template)
-        if isinstance(spec, str):
-            return Offer.unavailable(spec)
+    def _availability(self) -> tuple[ColabSpec, CcuInfo]:
+        if isinstance(self._spec, str):
+            raise Refused(self._spec)
         usage = self._api.ccu_info()
-        if spec.needs_compute_units and usage.current_balance <= 0:
-            return Offer.unavailable("Colab account has no paid compute units remaining")
+        if self._spec.needs_compute_units and usage.current_balance <= 0:
+            raise Refused("Colab account has no paid compute units remaining")
+        return self._spec, usage
+
+    def offer(self) -> Offer:
+        try:
+            spec, usage = self._availability()
+        except Refused as reason:
+            return Offer.unavailable(str(reason))
         return Offer(
             hardware=spec.hardware,
             usd_per_hour=None,
             unit=UNIT,
-            units_per_hour=None,
-            usd_per_unit=Decimal(0),
-            balance=Decimal(str(round(usage.current_balance, 2))),
+            usd_per_unit=None,
+            balance=round(usage.current_balance, 2),
             active=usage.assignments_count,
             available=True,
         )
@@ -173,26 +179,15 @@ class ColabMachines:
     def create(self, request: MachineRequest) -> Allocation:
         if request.deadline is None or request.bootstrap is None:
             raise Refused("Colab rentals need a deadline and storage bootstrap")
-        if self._read(request.session, "receipt", Receipt) is not None:
-            found = self.allocation(request.session)
-            if found is None:
-                raise ProviderUnavailable("Colab accepted creation; runtime not yet visible")
-            return found
-        spec = resolve_template(self._template)
-        if isinstance(spec, str):
-            raise Refused(spec)
-        before = self._api.ccu_info()
-        if spec.needs_compute_units and before.current_balance <= 0:
-            raise Refused("Colab account has no paid compute units remaining")
+        receipt = self._read(request.session, "receipt", Receipt)
+        if receipt is not None:
+            return self._restore(request.session, receipt, None)
+        spec, before = self._availability()
         now = datetime.now(UTC)
         cutoff = min(request.deadline, request.startup_deadline or request.deadline)
         if now >= cutoff:
             raise Refused("Colab rental or startup deadline already passed")
-        intent = Intent(
-            request=request,
-            spec=spec,
-            requested_at=now,
-        )
+        intent = Intent(request=request, spec=spec, requested_at=now)
         check_creation()
         try:
             self._bucket.put(
@@ -209,31 +204,8 @@ class ColabMachines:
             assigned = self._api.assign(_session_nbh(request.session), spec)
             created_at = datetime.now(UTC)
             units_per_hour = self._poll_rate(before)
-            if (
-                units_per_hour is not None
-                and request.max_units_per_hour is not None
-                and units_per_hour > request.max_units_per_hour
-            ):
-                self._api.unassign(assigned.endpoint)
-                if any(item.endpoint == assigned.endpoint for item in self._api.assignments()):
-                    raise ProviderUnavailable(
-                        "Colab observed rate exceeded ceiling; unassign unconfirmed"
-                    )
-                raise Refused(
-                    f"Colab observed rate {units_per_hour} CU/hour exceeds ceiling "
-                    f"{request.max_units_per_hour} CU/hour"
-                )
-            effective_deadline = _cap_deadline(
-                created_at, request.deadline, units_per_hour, request.cap_units
-            )
-            receipt = Receipt(
-                endpoint=assigned.endpoint,
-                url=assigned.runtime_proxy_info.url,
-                created_at=created_at,
-                units_per_hour=units_per_hour,
-                deadline=effective_deadline,
-            )
-            self._keep_receipt(request.session, receipt)
+            self._check_rate(request, assigned.endpoint, units_per_hour)
+            receipt = self._record_assignment(intent, assigned, created_at, units_per_hour)
             return self._resume(intent, receipt, assigned.runtime_proxy_info)
 
     def _resume(
@@ -251,13 +223,12 @@ class ColabMachines:
             if proxy is None:
                 proxy = self._proxy_for(receipt.endpoint)
             if proxy is not None:
-                env = self._program.prepare(bounded_request, None)
+                env = self._program.prepare(bounded_request)
                 code = _kernel_bootstrap_code(
                     env, boot_source("etude.launch.provisioner.providers.watchdog")
                 )
                 with limit_time((cutoff - datetime.now(UTC)).total_seconds()):
-                    kernel = self._api.start_kernel(proxy)
-                    self._api.execute(proxy, kernel.id, code)
+                    self._api.execute(proxy, code)
                 self._bucket.put(self._key(request.session, "booted"), b"true")
         return Allocation(
             id=receipt.endpoint,
@@ -290,24 +261,10 @@ class ColabMachines:
         try:
             info = self._api.ccu_info()
             if info.assignments_count == 1 and info.consumption_rate_hourly > 0:
-                units_per_hour = Decimal(str(round(info.consumption_rate_hourly, 4)))
+                units_per_hour = round(info.consumption_rate_hourly, 4)
         except ProviderUnavailable:
             pass
-        assert intent.request.deadline is not None
-        effective_deadline = _cap_deadline(
-            intent.requested_at,
-            intent.request.deadline,
-            units_per_hour,
-            intent.request.cap_units,
-        )
-        receipt = Receipt(
-            endpoint=found.endpoint,
-            url=found.runtime_proxy_info.url,
-            created_at=intent.requested_at,
-            units_per_hour=units_per_hour,
-            deadline=effective_deadline,
-        )
-        self._keep_receipt(session_id, receipt)
+        receipt = self._record_assignment(intent, found, intent.requested_at, units_per_hour)
         return receipt, found.runtime_proxy_info
 
     def find(self, session_id: str) -> str | None:
@@ -318,30 +275,46 @@ class ColabMachines:
         receipt, proxy = self._receipt(session_id)
         if receipt is None:
             return None
+        try:
+            return self._restore(session_id, receipt, proxy)
+        except Refused:
+            return None  # The recovered assignment exceeded its ceiling and is confirmed gone.
+
+    def _restore(
+        self, session_id: str, receipt: Receipt, proxy: RuntimeProxyInfo | None
+    ) -> Allocation:
         intent = self._read(session_id, "intent", Intent)
         if intent is None:
             raise ProviderUnavailable("Colab rental is missing its creation intent")
+        self._check_rate(intent.request, receipt.endpoint, receipt.units_per_hour)
         return self._resume(intent, receipt, proxy)
+
+    def _check_rate(self, request: MachineRequest, endpoint: str, rate: Decimal | None) -> None:
+        ceiling = request.max_units_per_hour
+        if rate is not None and ceiling is not None and rate > ceiling:
+            if not self._unassign(endpoint):
+                raise ProviderUnavailable(
+                    "Colab observed rate exceeded ceiling; unassign unconfirmed"
+                )
+            limit = f"{ceiling.quantize(Decimal('0.0001')).normalize():f}"
+            raise Refused(f"Colab observed rate {rate} CU/hour exceeds ceiling {limit} CU/hour")
 
     def alive(self, session_id: str) -> bool:
         receipt = self._read(session_id, "receipt", Receipt)
         if receipt is None:
             return True
         try:
-            active = self._api.assignments()
+            return self._proxy_for(receipt.endpoint) is not None
         except ProviderUnavailable:
             return True
-        return any(item.endpoint == receipt.endpoint for item in active)
 
     def end(self, session_id: str) -> datetime | None:
-        receipt, _ = self._receipt(session_id)
-        if receipt is None:
-            return None
-        self._api.unassign(receipt.endpoint)
-        active = self._api.assignments()
-        if any(item.endpoint == receipt.endpoint for item in active):
-            return None
-        return datetime.now(UTC)
+        endpoint = self.find(session_id)
+        return datetime.now(UTC) if endpoint is not None and self._unassign(endpoint) else None
+
+    def _unassign(self, endpoint: str) -> bool:
+        self._api.unassign(endpoint)
+        return self._proxy_for(endpoint) is None
 
     def bill(self, session_id: str, now: datetime) -> Bill | None:
         return None

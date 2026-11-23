@@ -10,6 +10,7 @@ import pytest
 
 from etude.errors import LauncherError
 from etude.launch.database import launcher_file
+from etude.launch.executor import ProviderService
 from etude.launch.executor import local as local_service
 from etude.launch.provisioner.machines import Safeguards
 from etude.launch.records import Machine, OnDemand, Pool
@@ -221,25 +222,21 @@ def test_strict_rental_funds_only_the_seeds_placed(tmp_path: Path, seeds: int) -
 
 @pytest.mark.parametrize(("increment", "share"), [(0, "0.2875"), (1, "0.46")])
 def test_group_includes_setup_and_provider_rounding(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, increment: int, share: str
+    tmp_path: Path, increment: int, share: str
 ) -> None:
     b = bench(tmp_path, usd_per_hour="0.69")
-    monkeypatch.setattr(
-        b.scheduler._services["runpod"],
-        "safeguards",
-        Safeguards(reservation_hours=increment),
-        raising=False,
-    )
-    b.scheduler.add_ondemand(
+    provider = ProviderService(lambda _: b.service, Safeguards(reservation_hours=increment))
+    scheduler = Scheduler(b.store, {"runpod": provider}, b.clock)
+    scheduler.add_ondemand(
         OnDemand(name="shared", template=L4, max_machines=1, slots=3, setup_seconds=900)
     )
     job = JOB.model_copy(update={"max_usd": Decimal(share)})
     short = job.model_copy(update={"max_usd": Decimal(share) - Decimal("0.0001")})
     with pytest.raises(LauncherError, match="job dollars do not cover the hours"):
-        b.scheduler.quote(short.runs(1, 2, 3), rent="shared")
-    quote = b.scheduler.quote(job.runs(1, 2, 3), rent="shared")
+        scheduler.quote(short.runs(1, 2, 3), rent="shared")
+    quote = scheduler.quote(job.runs(1, 2, 3), rent="shared")
     assert [q.max_usd for q in quote.machines] == [Decimal(share)] * 3
-    b.scheduler.launch(job.runs(1, 2, 3), rent="shared")
+    scheduler.launch(job.runs(1, 2, 3), rent="shared")
     (rental,) = b.store.rentals()
     assert (rental.deadline - b.clock()).total_seconds() == 4500
     assert rental.cap_usd == quote.max_usd

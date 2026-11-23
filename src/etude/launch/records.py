@@ -18,7 +18,7 @@ Every time is timezone-aware UTC.
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 from typing import Literal, Self
 
 from pydantic import Field, field_validator, model_validator
@@ -205,13 +205,12 @@ class GPU(Record):
         name = self.id if self.count == 1 else f"{self.count} × {self.id}"
         if self.flavor:
             name = f"{self.flavor}: {name}"
-        if self.min_vcpus is not None and self.min_memory_gb is not None:
-            return f"{name} with at least {self.min_vcpus} vCPUs, {self.min_memory_gb} GB"
+        floors = []
         if self.min_vcpus is not None:
-            return f"{name} with at least {self.min_vcpus} vCPUs"
+            floors.append(f"{self.min_vcpus} vCPUs")
         if self.min_memory_gb is not None:
-            return f"{name} with at least {self.min_memory_gb} GB"
-        return name
+            floors.append(f"{self.min_memory_gb} GB")
+        return f"{name} with at least {', '.join(floors)}" if floors else name
 
 
 class CPU(Record):
@@ -228,16 +227,34 @@ class CPU(Record):
 Hardware = GPU | CPU
 
 
-class Offer(Record):
+def affordable_seconds(price: Decimal, cap: Decimal, reservation_hours: int = 0) -> float:
+    """Seconds a cap funds at an hourly rate in the same currency or provider units."""
+    if not price or cap.is_infinite():
+        return float("inf")
+    if reservation_hours:
+        increments = cap // (price * reservation_hours)
+        return float(increments * reservation_hours * 3600)
+    # A rental deadline has microsecond precision. Round down so its last
+    # fraction of a second cannot exceed the dollars that fund the window.
+    micros = (cap * 3_600_000_000 / price).to_integral_value(rounding=ROUND_FLOOR)
+    return float(micros / 1_000_000)
+
+
+class HourlyRate(Record):
+    """A machine's dollar rate and the native units behind it, when metered in credits."""
+
+    usd_per_hour: Decimal | None  # unknown until assignment for a credit-metered offer
+    unit: str = "usd"
+    units_per_hour: Decimal | None = None
+    usd_per_unit: Decimal | None = Decimal(1)  # None on raw non-USD offers before scheduler pricing
+
+
+class Offer(HourlyRate):
     """What a provider would rent for a template now, at what price, and whether it has one."""
 
     hardware: Hardware | None  # None for a machine you own
-    usd_per_hour: Decimal | None  # None: provider reveals rate only after assignment (and rate > 0)
     reason: str | None = None
     available: bool  # False only when the provider positively reports none
-    unit: str = "usd"
-    units_per_hour: Decimal | None = None  # None: provider reveals rate only after assignment
-    usd_per_unit: Decimal = Decimal(1)
     balance: Decimal | None = None  # account balance in `unit`, when the provider reports one
     active: int | None = None  # active assignments on the provider account, when reported
 
@@ -407,7 +424,7 @@ class Output(Record):
     size_bytes: int
 
 
-class Rental(Record):
+class Rental(HourlyRate):
     """The paid window of a rented machine, independent of work and acquisition.
 
     A rented machine has exactly one, so the machine's name identifies it. Machine
@@ -416,14 +433,12 @@ class Rental(Record):
 
     machine: str
     usd_per_hour: Decimal
+    usd_per_unit: Decimal = Decimal(1)
     cap_usd: Decimal
     deadline: datetime
     billed_usd: Decimal = Decimal(0)
     billed_through: datetime | None = None
     kept: bool = False  # stays when idle until its deadline or explicit termination
-    unit: str = "usd"
-    units_per_hour: Decimal | None = None
-    usd_per_unit: Decimal = Decimal(1)
 
     @field_validator("unit", mode="before")
     @classmethod
@@ -523,7 +538,23 @@ class RunAttempt(Record):
     writers: tuple[RunWriter, ...] = ()
 
 
-class Status(Record):
+class Spend(Record):
+    """Attributed dollars, with native consumption when the rentals share a billing unit."""
+
+    usd: Decimal
+    unit: str = "usd"
+    units: Decimal | None = None
+
+    def format_cost(self, *, estimated: bool) -> str:
+        if self.unit != "usd" and self.units is not None:
+            dollars = f"{'~' if estimated and self.usd > 0 else ''}${self.usd:.2f}"
+            return f"~{self.units:.2f} {self.unit.upper()} ({dollars})"
+        if self.unit != "usd" and estimated:
+            return f"{self.unit.upper()} rate unobserved"
+        return f"{'~' if estimated else ''}${self.usd:.2f}"
+
+
+class Status(Spend):
     """Everything `status` says about a run, computed from the stored records."""
 
     run: str
@@ -533,15 +564,12 @@ class Status(Record):
     cause: Cause | None
     until: Until | None  # the job's target
     clocks: dict[str, float]  # where the run last reported each of its clocks
-    usd: Decimal
     attempts: int
     rental_ended: bool | None  # True only on a dated confirmation
 
     machine: str | None = None
     hardware: Hardware | None = None
     estimated: bool = False
-    unit: str = "usd"
-    units: Decimal | None = None
     shared: int = 1  # most runs on the latest attempt's machine at once during it
     tally: Tally | None = None
 
@@ -573,15 +601,11 @@ class Status(Record):
                 f", no delivery confirmed for {self.delivery_age_seconds / 60:.1f} minutes"
                 " (retained evidence; collection may be stale)"
             )
-        if self.unit != "usd" and self.units is not None:
-            dollars = f"{'~' if self.estimated and self.usd > 0 else ''}${self.usd:.2f}"
-            cost = f"~{self.units:.2f} {self.unit.upper()} ({dollars})"
-        else:
-            cost = f"{'~' if self.estimated else ''}${self.usd:.2f}"
+        cost = self.format_cost(estimated=self.estimated)
         return f"{head}{at}{shared}, {cost}{delivery}"
 
 
-class QuotedMachine(Record):
+class QuotedMachine(HourlyRate):
     """One first-wave run's placement and its maximum admitted rental allocation.
 
     Cost assumes the quoted rate and timely deletion, and excludes external storage.
@@ -592,10 +616,6 @@ class QuotedMachine(Record):
     run: str  # the run's name
     machine: str | None  # an existing machine; None means one would be rented
     hardware: Hardware | None  # for a rental, what the provider would be asked for
-    usd_per_hour: Decimal | None
-    unit: str = "usd"
-    units_per_hour: Decimal | None = None
-    usd_per_unit: Decimal = Decimal(1)
     # This run's share over its planned time on the machine; None when rate is observed on assign.
     max_usd: Decimal | None
     slots: int = 1  # runs the machine takes at once
@@ -613,12 +633,12 @@ class Quote(Record):
     @property
     def max_usd(self) -> Decimal | None:
         """Maximum admitted first-wave rental allocation, or None when any rate is observed on assign."""
-        if any(machine.max_usd is None for machine in self.machines):
-            return None
-        return sum(
-            (machine.max_usd for machine in self.machines if machine.max_usd is not None),
-            self.waiting_usd,
-        )
+        total = self.waiting_usd
+        for machine in self.machines:
+            if machine.max_usd is None:
+                return None
+            total += machine.max_usd
+        return total
 
 
 class LaunchRequest(Record):

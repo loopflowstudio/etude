@@ -345,8 +345,9 @@ def providers() -> None:
     """List the accounts that supply machines."""
     for known in default().providers():
         parts = [known.name, known.kind, f"storage {known.storage}"]
-        if known.usd_per_unit is not None:
-            parts.append(f"${known.usd_per_unit}/{known.unit.upper()}")
+        if known.unit != "usd":
+            rate = Decimal(0) if known.usd_per_unit is None else known.usd_per_unit
+            parts.append(f"${rate}/{known.unit.upper()}")
         print(*parts, sep="  ")
 
 
@@ -372,12 +373,14 @@ def provider_set(
     from etude.launch.records import Provider
 
     try:
-        account = Provider(
-            name=name,
-            kind=kind,
-            registry=registry,
-            storage=storage,
-            usd_per_unit=Decimal(usd_per_unit) if usd_per_unit is not None else None,
+        account = Provider.model_validate(
+            {
+                "name": name,
+                "kind": kind,
+                "registry": registry,
+                "storage": storage,
+                "usd_per_unit": usd_per_unit,
+            }
         )
     except ValidationError as error:
         raise typer.BadParameter(error.errors()[0]["msg"].removeprefix("Value error, ")) from None

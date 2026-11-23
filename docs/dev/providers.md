@@ -399,48 +399,44 @@ etude launch job.py --rent colab-l4
 etude wait
 ```
 
-Colab uses Google OAuth2 credentials on the launcher, checked in order:
-`COLAB_ACCESS_TOKEN`, `COLAB_OAUTH_TOKEN`, `COLAB_OAUTH_TOKEN_FILE`,
-`ETUDE_HOME/colab-token.json`, `~/.config/colab-cli/token.json`, and
-`~/.config/gcloud/application_default_credentials.json`. Existing macOS
-`colab-cli` users can export their Keychain token once into
-`~/.etude/colab-token.json` with:
+The launcher looks for Google OAuth2 credentials in this order:
+
+1. A bearer token in `COLAB_ACCESS_TOKEN`.
+2. Authorized-user JSON in `COLAB_OAUTH_TOKEN`, then the file named by `COLAB_OAUTH_TOKEN_FILE`.
+3. `$ETUDE_HOME/colab-token.json` (normally `~/.etude/colab-token.json`), then
+   `~/.config/colab-cli/token.json`, then `~/.config/gcloud/application_default_credentials.json`.
+
+On macOS, you can export an existing `colab-cli` Keychain token once:
 
 ```sh
 umask 077 && security find-generic-password -s google-colab-cli -a oauth_token -w > ~/.etude/colab-token.json
 ```
 
-Etude never prompts an interactive OS keychain dialog and never sends OAuth
-credentials to the runtime; the VM receives only signed storage bootstrap links.
+The launcher keeps the OAuth credentials. The runtime receives signed storage
+links for bootstrap. Configuring the account and its on-demands works offline.
 
-Supported `--gpu` values are `T4`, `L4`, `G4`, `A100` and `H100` (one GPU per
-runtime); omitting `--gpu` requests a CPU runtime. Requesting `--memory-gb`
-above 16 GB selects Colab's High-RAM shape where offered. Colab supplies its own
-runtime environment, chooses its region and machine CPU/disk sizes, and has no
-spot market, so `--image`, `--data-center`, `--vcpus`, `--disk-gb`, `--spot` and
-unsupported GPU names are rejected immediately at `ondemand add` and
-`ondemand image`.
+Omit `--gpu` for a CPU runtime, or choose one `T4`, `L4`, `G4`, `A100` or
+`H100`. A request above 16 GB selects High-RAM where available. Colab chooses
+the image, region, vCPUs and disk. Etude rejects custom values, spot requests
+and unsupported GPUs when you configure the on-demand.
 
-Colab meters in Compute Units (`cu`) rather than USD. Set `--usd-per-unit` on
-`provider set` (default `0`, treating a monthly Google AI subscription allotment
-as sunk cost; `0.10` values units at Pay-As-You-Go replacement cost). Colab does
-not publish a GPU's hourly burn rate before assignment: at `$0/CU`, `availability`
-and `--quote` report `$0.00/hour`; at a positive `--usd-per-unit`, they report
-the CU balance and conversion and note that cost and any `--max-usd-per-hour`
-ceiling are checked on assign. After assignment and before booting the kernel,
-Etude observes the live `consumptionRateHourly` delta from `/tun/m/ccu-info`
-(when no concurrent assignment changed), immediately unassigns and refuses if
-the rate exceeds `--max-usd-per-hour`, trims the rental deadline, VM watchdog,
-and attempt limit against `--max-usd`, and records native `CU` alongside
-converted USD.
+Colab meters Compute Units (CU). With the default conversion of $0/CU, a
+subscription allotment adds $0 to a job's budget. Set `--usd-per-unit` to
+value the units in dollars. Availability shows the balance and active
+assignment count. At a positive conversion, quotes leave the dollar cost
+unknown until assignment.
 
-Creation hashes each session id into a deterministic `nbh` UUID so
-`GET /tun/m/assign` recovers lost create replies without assigning a second
-runtime. Etude starts a Jupyter kernel on the assigned runtime and submits its
-bootstrap over the kernel's WebSocket, running the worker and local deadline
-watchdog in a child process group while the cell waits so Colab sees an active
-busy kernel. On completion, cancellation or deadline expiry, the scheduler
-unassigns the endpoint and confirms its absence from `GET /tun/m/assignments`.
+Etude estimates CU/hour from the change in account consumption when the
+assignment count increases by one. Concurrent assignments can leave the rate
+unknown. With an observed rate, Etude checks the hourly ceiling before
+bootstrap and unassigns a runtime that exceeds it. A dollar budget bounds
+the rental and its watchdog. Status and machine listings show the estimated
+CU alongside the converted dollars.
+
+A stable notebook hash lets Etude recover a lost assignment reply by session
+ID. A Jupyter cell starts the worker and watchdog in a child process group and
+stays busy while they run. To end the rental, the scheduler unassigns the
+endpoint and confirms it has disappeared from the account's assignments.
 
 ### Spot
 

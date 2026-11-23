@@ -639,20 +639,18 @@ class Database:
         self._write(
             "INSERT OR REPLACE INTO providers(name, kind, registry, storage, usd_per_unit)"
             " VALUES (?,?,?,?,?)",
-            (
-                provider.name,
-                provider.kind,
-                provider.registry,
-                provider.storage,
-                None if provider.usd_per_unit is None else str(provider.usd_per_unit),
-            ),
+            tuple(provider.model_dump(mode="json").values()),
         )
 
-    def provider(self, name: str) -> Provider:
+    def find_provider(self, name: str) -> Provider | None:
         row = self._db.execute("SELECT * FROM providers WHERE name = ?", (name,)).fetchone()
-        if row is None:
+        return None if row is None else Provider.model_validate(dict(row))
+
+    def provider(self, name: str) -> Provider:
+        account = self.find_provider(name)
+        if account is None:
             raise LauncherError(f"no provider named {name!r}")
-        return Provider.model_validate(dict(row))
+        return account
 
     def providers(self) -> tuple[Provider, ...]:
         return tuple(
@@ -1089,32 +1087,18 @@ class Database:
     def record_started(self, session: Session, at: datetime) -> None:
         self._change("sessions", session.id, session.version, started_at=at.isoformat())
 
-    def record_price(
-        self,
-        session: Session,
-        price: Decimal,
-        *,
-        units_per_hour: Decimal | None = None,
-        cap_usd: Decimal | None = None,
-        deadline: datetime | None = None,
-    ) -> None:
+    def record_price(self, session: Session, rental: Rental) -> None:
         with self._together():
             self._change("sessions", session.id, session.version)
-            updates = ["usd_per_hour=?"]
-            values: list[Fact] = [str(price)]
-            if units_per_hour is not None:
-                updates.append("units_per_hour=?")
-                values.append(str(units_per_hour))
-            if cap_usd is not None:
-                updates.append("cap_usd=?")
-                values.append(str(cap_usd))
-            if deadline is not None:
-                updates.append("deadline=?")
-                values.append(deadline.isoformat())
-            values.append(session.machine)
             self._write(
-                f"UPDATE rentals SET {', '.join(updates)} WHERE machine=?",
-                tuple(values),
+                "UPDATE rentals SET usd_per_hour=?, units_per_hour=?, cap_usd=?, deadline=? WHERE machine=?",
+                (
+                    str(rental.usd_per_hour),
+                    None if rental.units_per_hour is None else str(rental.units_per_hour),
+                    str(rental.cap_usd),
+                    rental.deadline.isoformat(),
+                    session.machine,
+                ),
             )
 
     def record_bill(self, session: Session, usd: Decimal, through: datetime) -> None:
