@@ -802,7 +802,7 @@ def test_bucket_discovery_remembers_foreign_declarations_until_their_version_cha
         with Server(bucket, None, ("127.0.0.1", 0)) as restarted:
             before = client.requests
             _ingest(restarted)
-            assert client.requests - before == 1  # Only the large, accepted declaration's prefix.
+            assert client.requests == before
             assert all(client.read[key] == 4096 for key in foreign)
             replacement = RunRecord(
                 id="found/time", experiment="found", config=json.dumps("x" * 9000)
@@ -811,6 +811,14 @@ def test_bucket_discovery_remembers_foreign_declarations_until_their_version_cha
             restarted.refresh_files()
             assert 'title="found/time"' in _get(restarted, "/experiments/found")
             assert client.read["old/ledger/run.json"] == 4096
+
+            # A previously accepted version in the byte cache cannot vouch for its replacement.
+            key = "lab/large/run.json"
+            before = client.read[key]
+            bucket.put(key, foreign["old/ledger/run.json"])
+            restarted.refresh_files()
+            assert 'title="lab/large"' not in _get(restarted, "/experiments/lab")
+            assert client.read[key] - before == 4096
 
 
 def test_bucket_discovery_publishes_before_charting_and_opens_only_the_requested_run(

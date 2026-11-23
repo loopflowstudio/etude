@@ -623,6 +623,18 @@ def _may_be_run_record(prefix: bytes) -> bool:
     return True
 
 
+def _read_declaration(storage: Storage, key: str, version: str | None) -> RunRecord | None:
+    size = version.size if isinstance(version, ObjectVersion) else None
+    if size is not None and size > _DECLARATION_PROBE_THRESHOLD:
+        if not _may_be_run_record(storage.get_range(key, 0, _DECLARATION_PROBE_BYTES)):
+            return None
+    body = storage.get(key)
+    try:
+        return RunRecord.model_validate_json(body)
+    except ValidationError:
+        return None
+
+
 class RunListing:
     """One source discovery. Training copies share a declaration. Tournament copies
     keep their physical folder until the observer can identify their launch."""
@@ -658,28 +670,15 @@ class RunListing:
             return None
         version = self.objects[key]
         kept = self._known.get(key)
-        if kept is None or kept[0] != version:
-            record: RunRecord | None
-            try:
-                if (
-                    isinstance(version, ObjectVersion)
-                    and version.size is not None
-                    and version.size > _DECLARATION_PROBE_THRESHOLD
-                    and not _may_be_run_record(
-                        self.storage.get_range(key, 0, _DECLARATION_PROBE_BYTES)
-                    )
-                ):
-                    record = None
-                else:
-                    record = RunRecord.model_validate_json(self.storage.get(key))
-            except FileNotFoundError as error:
-                # The next listing can recover even if its version tag has not changed.
-                return self._missing(folder, error) if self._missing else None
-            except ValidationError:
-                record = None
-            kept = version, record
-            self._known[key] = kept
-        return kept[1]
+        if kept is not None and kept[0] == version:
+            return kept[1]
+        try:
+            record = _read_declaration(self.storage, key, version)
+        except FileNotFoundError as error:
+            # A later listing may recover the same version. Cache only completed reads.
+            return self._missing(folder, error) if self._missing else None
+        self._known[key] = version, record
+        return record
 
     @cached_property
     def declarations(self) -> list[LocatedRun]:

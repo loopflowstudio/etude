@@ -146,9 +146,10 @@ The view listens on `127.0.0.1:8765` by default and prints its address.
 To browse a bucket’s history, open the experiment list. The view lists the
 source and reads run declarations, outcomes and any writer records it needs
 to identify a resume. For `run.json` files larger than 8 KiB, discovery
-checks the first 4 KiB. If those bytes identify a foreign file, the view skips
-the rest and remembers that version across restarts. Experiments and run
-tables appear before charts load.
+checks the first 4 KiB. If the prefix rules out an Etude declaration, discovery
+skips the rest and remembers that version across restarts. When the listing
+confirms a cached Etude declaration’s version, discovery reads its prefix and body locally.
+Experiments and run tables appear before charts load.
 Open runs chart in the background. A directory also charts its completed
 runs, one experiment at a time.
 

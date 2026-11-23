@@ -20,7 +20,7 @@ from etude.carriage import publication
 from etude.errors import EtudeError
 from etude.page import Pages, build
 from etude.records import Clock, RunWriter
-from etude.run import RunFiles, StorageDestination, runs, sync
+from etude.run import RunFiles, RunListing, StorageDestination, runs, sync
 from etude.storage import (
     DirectoryStorage,
     S3Storage,
@@ -1238,10 +1238,12 @@ def test_a_report_listing_validates_only_its_own_reads(tmp_path: Path) -> None:
         client.create_bucket(Bucket="scoped")
         storage = S3Storage("scoped", client=client, cache=Cache(tmp_path / "cache"))
         storage.put("run.json", b"first")
-        report = storage._with_versions(storage.versions(""))
+        report = RunListing.read(storage).storage
         assert report.get("run.json") == report.get("run.json") == b"first"
+        assert report.get_range("run.json", 1, 3) == b"irs"
         assert client.requests == 1
 
         storage.put("run.json", b"second")
+        assert storage.get_range("run.json", 1, 3) == b"eco"
         assert storage.get("run.json") == b"second"
-        assert client.requests == 2
+        assert client.requests == 3

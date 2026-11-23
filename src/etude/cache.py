@@ -116,14 +116,14 @@ class Artifact(_Record):
     (`https://BUCKET.HOST/KEY`), the same whoever reads it: a signed link is
     how bytes are reached, never which. A recorded SHA256 and length name the
     bytes outright; without them the location's held bytes are reused only
-    when `immutable` says they cannot have changed, or storage says by ETag
-    that they have not.
+    when immutable, when a listing confirms their ETag, or after revalidation.
     """
 
     location: str
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     size_bytes: int | None = Field(default=None, ge=0)
     immutable: bool = False
+    listed_etag: str | None = None
 
     @property
     def content(self) -> Content | None:
@@ -181,6 +181,9 @@ class _Partial(_Record):
 class _Located(_Record):
     content: Content
     etag: str | None
+
+    def current(self, artifact: Artifact) -> bool:
+        return artifact.immutable or (self.etag is not None and self.etag == artifact.listed_etag)
 
 
 def _digest(path: Path) -> str:
@@ -290,8 +293,8 @@ class Cache:
     ) -> bytes:
         """The artifact's bytes, or `length` of them from `start`, asking storage only as needed.
 
-        Held bytes of a named or immutable artifact answer without asking; a
-        mutable one is asked for again with the ETag its held bytes came with.
+        A recorded digest, immutability or a matching listed ETag permits reuse.
+        Other mutable artifacts require storage to confirm freshness.
         A recorded digest requires verifying the whole artifact before exposing
         a range. Location-only immutable objects can fetch and keep ranges alone.
         """
@@ -414,7 +417,7 @@ class Cache:
         """Bytes whose digest is not recorded: the location says which bytes are held."""
         located = self._read_locator(artifact.location)
         held = None if located is None else self._load(located.content)
-        if held is not None and artifact.immutable:
+        if held is not None and located is not None and located.current(artifact):
             source.reused(len(held), None, None)
             return held
         if held is not None and located is not None and located.etag is not None:
@@ -435,26 +438,30 @@ class Cache:
         if length == 0:
             return b""
         end = start + length - 1
-        if artifact.content is not None and end >= artifact.content.size_bytes:
+        expected = artifact.content
+        if expected is not None and end >= expected.size_bytes:
             raise ValueError("a range ends past the artifact's recorded length")
-        if artifact.content is None and not artifact.immutable:
-            # A mutable object's range cannot be checked against what is held.
-            return source.read(start, end, None).body
-        located = self._read_locator(artifact.location)
-        content = artifact.content or (None if located is None else located.content)
+        content = expected
+        if content is None and (artifact.immutable or artifact.listed_etag is not None):
+            located = self._read_locator(artifact.location)
+            if located is not None and located.current(artifact):
+                content = located.content
         held = None if content is None else self._slice(content, start, length)
         if held is not None:
             source.reused(length, start, end)
             return held
-        if artifact.content is not None:
+        if expected is not None:
             # A whole-file digest cannot authenticate an isolated range. Use the
             # same verified acquisition as a whole read, including when too large
             # to retain, and expose only the requested bytes after it succeeds.
             with tempfile.TemporaryDirectory(dir=self._made()) as scratch:
-                path = self.place(artifact, Path(scratch) / artifact.content.name, source)
+                path = self.place(artifact, Path(scratch) / expected.name, source)
                 with path.open("rb") as stream:
                     stream.seek(start)
                     return stream.read(length)
+        # A mutable prefix has no identity of its own. Only its verified whole can be reused.
+        if not artifact.immutable:
+            return source.read(start, end, None).body
         part = Artifact(location=f"{artifact.location}\0bytes={start}-{end}", immutable=True)
         return self._read_located(part, _Part(source, start, end))
 

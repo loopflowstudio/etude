@@ -146,7 +146,8 @@ _VISIBLE = f"""{_OBSERVED}, visible AS (
            held_files.address IS NULL AS discovered,
            held_files.address IS NULL AND files.chart_observed_at IS NULL AS listed,
            CASE WHEN held_files.address IS NULL THEN coalesce(files.chart_observed_at,at) ELSE held_files.observed_at END AS at,
-           launcher_at, last_loop, files.names_version, files.target, files.chart_error,
+           launcher_at, last_loop, files.names_version, files.chart_error,
+           CASE WHEN kind='training' THEN files.target END AS target,
            CASE WHEN matches THEN machine_rate END AS machine_rate,
            coalesce(CASE WHEN matches THEN launcher_job END, file_job) AS job,
            coalesce(CASE WHEN matches THEN launcher_state END, file_state) AS state,
@@ -584,7 +585,7 @@ class ChartIndex:
             + """
             SELECT experiment,address,state,phase,last_write,at,inputs,viewed.address IS NOT NULL AS viewed
             FROM visible LEFT JOIN viewed USING(address) LEFT JOIN charts USING(address)
-            WHERE kind='training' AND target IS NOT inputs AND target IS NOT NULL
+            WHERE target IS NOT NULL AND target IS NOT inputs
             AND discovered AND (:local OR may_be_open OR viewed.address IS NOT NULL OR inputs IS NOT NULL)
             ORDER BY experiment,address
             """,
@@ -859,7 +860,6 @@ class _ViewSnapshot:
         if (
             row
             and isinstance(self.index.source, S3Storage)
-            and row["kind"] == "training"
             and row["target"]
             and (standalone or tab in ("curves", "checkpoints"))
             and (not row["viewed"] or not row["inputs"])
@@ -996,7 +996,7 @@ class _ViewSnapshot:
             projection, selection = "headline", "ORDER BY experiment,address"
         else:
             projection, selection = (
-                "latest,launched_as,kind,target,inputs",
+                "latest,launched_as,target,inputs",
                 "WHERE experiment=:experiment ORDER BY address",
             )
         return self.db.execute(
@@ -1773,7 +1773,7 @@ def _display_state(row: sqlite3.Row) -> str:
 
 
 def _uncharted(row: sqlite3.Row) -> bool:
-    return row["kind"] == "training" and row["target"] is not None and row["inputs"] is None
+    return row["target"] is not None and row["inputs"] is None
 
 
 def _empty_section(row: sqlite3.Row, subject: str, recorded: str) -> str:
