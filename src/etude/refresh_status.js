@@ -81,6 +81,10 @@
     try {
       if (document.hidden) return;
       let url = path;
+      if (id === "run-observation" && location.search) {
+        const tab = new URLSearchParams(location.search).get("tab");
+        if (tab) url += "&tab=" + encodeURIComponent(tab);
+      }
       const mounted = experimentTabs && document.querySelector(".run-curves");
       if (experimentTabs) {
         const params = new URLSearchParams(location.search);
@@ -108,6 +112,8 @@
           navigating = true;
           return;
         }
+        const written = document.getElementById("last-write");
+        if (written) written.textContent = next.dataset.written;
         const collected = document.getElementById("console-collected");
         if (collected) {
           collected.textContent = next.dataset.collected;

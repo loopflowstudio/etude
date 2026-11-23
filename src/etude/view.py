@@ -32,6 +32,7 @@ from itertools import groupby
 from operator import itemgetter
 from pathlib import Path
 from types import FrameType
+from typing import Literal
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from pydantic import TypeAdapter
@@ -67,16 +68,14 @@ from etude.train.read import RunData, RunSources, read_located
 from etude.view_link import advertise, run_path
 
 _REFRESH = 5
-_TRAINING_TABS = "".join(
-    f'<a href="#{section.lower()}" data-s="{section.lower()}">{section}</a>'
-    for section in ("Console", "Config", "Checkpoints")
-)
+_RUN_TABS = ("overview", "charts", "console", "config", "checkpoints", "files")
 _DETAIL_TABS = ("console", "curves", "config", "checkpoints")
 _REMOTE_STANDING = 30
 _SILENT = timedelta(minutes=10)
 # Before the first successful file pass, absence in the index is not absence in storage.
 _UNREAD = "{} appear once the view has read the run files."
 _CLOCKS = TypeAdapter(dict[str, float])
+_SCORES = TypeAdapter(list[str])
 
 # A changed schema starts a fresh rebuildable index.
 _MAY_BE_OPEN = "file_state IN ('running','queued') OR phase != 'done'"
@@ -85,7 +84,7 @@ CREATE TABLE IF NOT EXISTS runs (
     address TEXT PRIMARY KEY, experiment TEXT NOT NULL, kind TEXT NOT NULL,
     eval_last_write TEXT, file_job TEXT, file_state TEXT, file_position TEXT, file_config TEXT, file_continues TEXT, checkpoints TEXT,
     launched_as TEXT, launcher_job TEXT, launcher_state TEXT, launcher_position TEXT,
-    launcher_config TEXT, launcher_continues TEXT, source TEXT, status TEXT, max_attempts INTEGER,
+    launcher_config TEXT, launcher_continues TEXT, source TEXT, status TEXT, max_attempts INTEGER, machine_rate TEXT,
     phase TEXT GENERATED ALWAYS AS (json_extract(status,'$.phase')) VIRTUAL
 );
 CREATE INDEX IF NOT EXISTS launcher_address ON runs(launched_as,experiment) WHERE launched_as IS NOT NULL;
@@ -93,7 +92,7 @@ CREATE INDEX IF NOT EXISTS experiment_runs ON runs(experiment, address);
 CREATE INDEX IF NOT EXISTS open_runs ON runs(experiment) WHERE {_MAY_BE_OPEN};
 CREATE TABLE IF NOT EXISTS files (
     address TEXT PRIMARY KEY, experiment TEXT NOT NULL, inputs TEXT NOT NULL, reached TEXT,
-    preferred TEXT, last_write TEXT, metadata TEXT NOT NULL
+    preferred TEXT, last_write TEXT, metadata TEXT NOT NULL, names TEXT, names_version TEXT, pace TEXT, sample_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS experiment_files ON files(experiment,address);
 CREATE TABLE IF NOT EXISTS held_files (
@@ -102,7 +101,7 @@ CREATE TABLE IF NOT EXISTS held_files (
 CREATE TABLE IF NOT EXISTS charts (
     address TEXT PRIMARY KEY REFERENCES files(address) ON DELETE CASCADE,
     panel_order INTEGER GENERATED ALWAYS AS (json_extract(headline,'$.order')) STORED,
-    definition TEXT NOT NULL, latest TEXT, headline TEXT, payload TEXT NOT NULL
+    definition TEXT NOT NULL, latest TEXT, headline TEXT, overview TEXT NOT NULL, payload TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS consoles (
     run TEXT PRIMARY KEY, body TEXT NOT NULL, collected TEXT, gaps INTEGER NOT NULL, final_attempt INTEGER
@@ -131,7 +130,8 @@ _VISIBLE = f"""{_OBSERVED}, visible AS (
     SELECT runs.address, runs.experiment, kind, ({_MAY_BE_OPEN}) AS may_be_open,
            CASE WHEN matches THEN phase END AS phase, coalesce(eval_last_write,files.last_write) AS last_write, files.inputs,
            held_files.address IS NULL AS listed, CASE WHEN held_files.address IS NULL THEN at ELSE held_files.observed_at END AS at,
-           file_error, launcher_at, last_loop, checkpoints,
+           file_error, launcher_at, last_loop, checkpoints, files.reached, files.preferred, files.pace, files.sample_ms, files.names_version,
+           CASE WHEN matches THEN machine_rate END AS machine_rate,
            coalesce(CASE WHEN matches THEN launcher_job END, file_job) AS job,
            coalesce(CASE WHEN matches THEN launcher_state END, file_state) AS state,
            coalesce(CASE WHEN matches THEN launcher_position END, file_position) AS position,
@@ -379,7 +379,7 @@ class ChartIndex:
         # inputs need metadata and a new chart. Stage one payload at a time on disk.
         db.execute("PRAGMA temp_store=FILE")
         db.execute(
-            "CREATE TEMP TABLE next_files AS SELECT *, NULL AS definition, NULL AS headline, NULL AS latest, NULL AS payload FROM files WHERE 0"
+            "CREATE TEMP TABLE next_files AS SELECT *, NULL AS definition, NULL AS headline, NULL AS latest, NULL AS overview, NULL AS payload FROM files WHERE 0"
         )
         db.execute("CREATE UNIQUE INDEX temp.file_address ON next_files(address)")
         db.execute("CREATE TEMP TABLE next_declarations AS SELECT * FROM declarations")
@@ -415,16 +415,13 @@ class ChartIndex:
             for run in runs:
                 evaluation = run.file.kind == "evaluation"
                 address = run.folders[0] if evaluation else run_address(run.file.id, experiment)
-                sealed = sorted(
-                    key for key in listing.keys_in(run.folders) if not key.endswith(".open")
-                )
                 try:
                     _stage_run(
                         db,
                         storage,
                         run,
                         address,
-                        sealed,
+                        sorted(listing.keys_in(run.folders)),
                         None if evaluation else report,
                         clock,
                         previous.get(address),
@@ -467,12 +464,15 @@ class ChartIndex:
         ).fetchall()
         # An open block can advance the last write without changing a sealed curve.
         redated = db.execute(
-            """UPDATE files SET last_write=n.last_write FROM next_files n
-               WHERE n.address=files.address AND n.metadata IS NULL AND files.last_write IS NOT n.last_write RETURNING address,experiment"""
+            """UPDATE files SET last_write=n.last_write, names=n.names,
+                      names_version=n.names_version
+               FROM next_files n WHERE n.address=files.address AND n.metadata IS NULL
+               AND (files.last_write IS NOT n.last_write OR files.names_version IS NOT n.names_version)
+               RETURNING address,experiment"""
         ).fetchall()
         rebuilt = db.execute(
-            """INSERT OR REPLACE INTO files(address,experiment,inputs,reached,preferred,last_write,metadata)
-               SELECT address,experiment,inputs,reached,preferred,last_write,metadata
+            """INSERT OR REPLACE INTO files(address,experiment,inputs,reached,preferred,last_write,metadata,names,names_version,pace,sample_ms)
+               SELECT address,experiment,inputs,reached,preferred,last_write,metadata,names,names_version,pace,sample_ms
                FROM next_files WHERE metadata IS NOT NULL RETURNING experiment"""
         ).fetchall()
         changed = {row[0] for row in (*removed, *rebuilt)}
@@ -480,8 +480,8 @@ class ChartIndex:
         if rebuilt:
             # Replacing a file row retires its old chart through the foreign key.
             db.execute(
-                """INSERT INTO charts(address,definition,headline,latest,payload)
-                   SELECT address,definition,headline,latest,payload FROM next_files WHERE payload IS NOT NULL"""
+                """INSERT INTO charts(address,definition,headline,latest,overview,payload)
+                   SELECT address,definition,headline,latest,overview,payload FROM next_files WHERE payload IS NOT NULL"""
             )
         db.execute(
             """DELETE FROM declarations WHERE experiment NOT IN (SELECT experiment FROM next_declarations)"""
@@ -507,6 +507,12 @@ class ChartIndex:
         standing: dict[str, list[Standing]] = defaultdict(list)
         for held in launcher.runs:
             standing[held.record.experiment].append(held)
+        rates = {
+            run: machine.cost.rental.usd_per_hour
+            for machine in launcher.machines or ()
+            if machine.cost
+            for run in machine.runs
+        }
         for experiment in experiments:
             rows = db.execute(
                 """SELECT address, metadata, reached, preferred, last_write
@@ -547,6 +553,7 @@ class ChartIndex:
                     _CLOCKS.validate_json(chart["reached"]) if chart and chart["reached"] else {},
                     chart["preferred"] if chart else None,
                     file_sources,
+                    rates.get(run.status.run) if run.status else None,
                 )
                 removed.discard(address)
             db.executemany("DELETE FROM runs WHERE address=?", ((a,) for a in removed))
@@ -580,20 +587,24 @@ class _ViewSnapshot:
     index: ChartIndex
 
     def _read_run(
-        self, address: str, *, charts: bool, mounted: str | None = None
+        self,
+        address: str,
+        *,
+        charts: Literal["overview", "payload"] | None,
+        mounted: str | None = None,
     ) -> sqlite3.Row | None:
         # The document reads its chart in the same snapshot as its change token.
-        payload = (
-            "(SELECT payload FROM charts WHERE address=visible.address AND visible.inputs IS NOT :mounted)"
+        chart = (
+            f"CASE WHEN visible.inputs IS NOT :mounted THEN charts.{charts} END AS payload, json_extract(charts.latest,'$[0]') AS score"
             if charts
-            else "NULL"
+            else "NULL AS payload"
         )
         row: sqlite3.Row | None = self.db.execute(
             _VISIBLE
             + f"""
-            SELECT visible.*, {payload} AS payload, declarations.error AS report_error,
+            SELECT visible.*, {chart}, declarations.error AS report_error,
                    consoles.body, consoles.collected, consoles.gaps, consoles.final_attempt AS console_attempt
-            FROM visible
+            FROM visible {"LEFT JOIN charts USING(address)" if charts else ""}
             LEFT JOIN consoles ON consoles.run=visible.launched_as
             LEFT JOIN declarations USING(experiment)
             WHERE address=coalesce(
@@ -605,17 +616,29 @@ class _ViewSnapshot:
         ).fetchone()
         return row
 
-    def run(self, address: str, *, observe: bool = False) -> str | None:
+    def run(self, address: str, *, tab: str, observe: bool = False) -> str | None:
         remote = self.remote
-        row = self._read_run(address, charts=not observe)
+        if tab not in _RUN_TABS:
+            tab = "overview"
+        charts: Literal["overview", "payload"] | None = None
+        if not observe:
+            if tab == "overview":
+                charts = "overview"
+            elif tab == "charts":
+                charts = "payload"
+        row = self._read_run(address, charts=charts)
         if row is None:
             return self.waiting() if observe else None
         now = datetime.now(UTC)
         state = _display_state(row)
         status = _status(row)
-        run_line = _run_line(row, state, status)
+        evaluation = row["kind"] == "evaluation"
+        overview = tab == "overview" and not evaluation
+        run_line = _run_line(row, state, status, overview=overview)
         error = self.index.read_error(remote, row["file_error"], report=row["report_error"])
-        self._request_console(row, status)
+        console = evaluation or tab in ("overview", "console")
+        if console:
+            self._request_console(row, status)
 
         # inputs identifies the sealed files and their report panels. Hash the displayed
         # launcher facts at their rendered precision so a sub-cent change leaves the chart mounted.
@@ -624,29 +647,30 @@ class _ViewSnapshot:
             row["experiment"],
             row["kind"],
             row["inputs"],
+            row["names_version"] if tab == "files" else None,
             run_line,
+            row["position"],
+            status.formatted_spend if status else None,
+            row["machine_rate"] if overview else None,
             row["continues"],
-            row["config"],
-            row["source"],
+            row["config"] if tab == "config" else None,
+            row["source"] if tab == "config" else None,
             row["launched_as"],
-            row["body"],
-            row["gaps"],
+            row["body"] if console else None,
+            row["gaps"] if console else None,
             bool(row["at"]),
             bool(row["launcher_at"]),
             error,
         )
         token = sha256(json.dumps(facts, ensure_ascii=False).encode()).hexdigest()
-        ages = [
-            "no files yet" if _no_files(row) else f"last file write {_age(row['last_write'], now)}"
-        ]
-        ages.extend(
-            _observation_ages(row, now, launcher=status is not None, files="files observed")
-        )
+        written = "no files yet" if _no_files(row) else _age(row["last_write"], now)
+        ages = _observation_ages(row, now, launcher=status is not None, files="files observed")
+        if not overview:
+            ages.insert(0, written if _no_files(row) else f"last file write {written}")
         collected = f"Last collected {_age(row['collected'], now)}" if row["collected"] else ""
-        observation = _observation("run", token, " · ".join(ages), collected)
+        observation = _observation("run", token, " · ".join(ages), collected, written)
         if observe:
             return observation
-        evaluation = row["kind"] == "evaluation"
         experiment = escape(row["experiment"])
         page = f"/experiments/{quote(row['experiment'])}"
         title = f"Evaluation · {escape(address)}" if evaluation else escape(address)
@@ -654,7 +678,8 @@ class _ViewSnapshot:
         heading = (
             f'<a href="{page}">{breadcrumb}</a>'
             f'<header class="head"><h1>{title}</h1></header>'
-            f"<p>{run_line}</p>{row['continues'] or ''}{observation}"
+            f"<p>{run_line}</p>"
+            f"{row['continues'] or ''}"
         )
         if evaluation:
             heading += f'<p>Scores are in the <a href="{page}#report">{experiment} report</a>.</p>'
@@ -665,23 +690,51 @@ class _ViewSnapshot:
             )
         if error:
             heading += f'<p role="status">{escape(error)}</p>'
-        if evaluation and status is None:
-            return _document(address, heading)
-        below = _console(row, collected)
         if evaluation:
-            return _document(address, heading + below)
-        below += _config(row) + _checkpoint_section(row)
-        if row["payload"] is None:
-            tabs = f'<nav class="tabs" aria-label="Run sections"><a href="#charts">Charts</a>{_TRAINING_TABS}</nav>'
-            curves = "No metric curves recorded." if row["at"] else _UNREAD.format("Curves")
+            return _document(
+                address, heading + observation + (_console(row, collected) if status else "")
+            )
+        tabs = "".join(
+            f'<a href="?tab={name}"'
+            + (' aria-current="page"' if name == tab else "")
+            + f">{name.title()}</a>"
+            for name in _RUN_TABS
+        )
+        heading += f'<nav class="tabs" aria-label="Run tabs">{tabs}</nav>'
+        if tab == "overview":
+            heading += _run_numbers(row, status, state, written)
+        heading += observation
+        if tab == "files":
+            files = self.db.execute(
+                "SELECT value FROM files,json_each(files.names) WHERE files.address=?",
+                (row["address"],),
+            )
+            names = "".join(f"<li><code>{escape(key)}</code></li>" for (key,) in files)
+            body = (
+                f"<ul>{names}</ul>"
+                if names
+                else (
+                    "<p>No files recorded.</p>"
+                    if row["at"]
+                    else f"<p>{_UNREAD.format('Files')}</p>"
+                )
+            )
             return _document(
                 address,
-                heading
-                + tabs
-                + f'<section class="sec" id="charts"><h2>Charts</h2><p>{curves}</p></section>'
-                + below,
+                heading + '<section class="sec"><h2>Files</h2>' + body + "</section>",
             )
-        return render_run(address, row["payload"], heading, below, _TRAINING_TABS)
+        if tab == "console":
+            return _document(address, heading + _console(row, collected))
+        if tab == "config":
+            return _document(address, heading + _config(row))
+        if tab == "checkpoints":
+            return _document(address, heading + _checkpoint_section(row))
+        side = _console(row, collected) + _checkpoint_section(row) if tab == "overview" else ""
+        if row["payload"] is not None:
+            return render_run(address, row["payload"], heading, side)
+        curves = "No metric curves recorded." if row["at"] else _UNREAD.format("Curves")
+        body = f'<section class="sec" id="charts"><h2>Charts</h2><p>{curves}</p></section>'
+        return _document(address, heading + body + side)
 
     def _request_console(self, row: sqlite3.Row, status: Status | None) -> None:
         # Session shutdown can still retain final logs after the run itself ended.
@@ -928,7 +981,11 @@ class _ViewSnapshot:
             status = _status(row)
             if status and not status.done:
                 unfinished.append(status.run)
-            score = row["latest"] if (row["definition"], row["panel_order"]) == panel else None
+            score = (
+                " · ".join(_SCORES.validate_json(row["latest"]))
+                if row["latest"] and (row["definition"], row["panel_order"]) == panel
+                else None
+            )
             last_write = (
                 "no files yet" if _no_files(row) else f"last write {_age(row['last_write'], now)}"
             )
@@ -973,7 +1030,7 @@ class _ViewSnapshot:
         )
 
     def _detail(self, address: str, pick: str, tab: str, curves: str | None, now: datetime) -> str:
-        row = self._read_run(address, charts=tab == "curves", mounted=curves)
+        row = self._read_run(address, charts="payload" if tab == "curves" else None, mounted=curves)
         assert row is not None  # Selected from this read transaction.
         status = _status(row)
         if tab == "console":
@@ -1085,8 +1142,8 @@ def _hold_files(
     for key in keep:
         db.execute("DELETE FROM next_files WHERE address=?", (key,))
         db.execute(
-            """INSERT INTO next_files(address,experiment,inputs,last_write)
-               SELECT address,experiment,inputs,last_write FROM files WHERE address=?""",
+            """INSERT INTO next_files(address,experiment,inputs,last_write,names,names_version)
+               SELECT address,experiment,inputs,last_write,names,names_version FROM files WHERE address=?""",
             (key,),
         )
     return held
@@ -1097,7 +1154,7 @@ def _stage_run(
     storage: ListedStorage,
     run: LocatedRun,
     address: str,
-    sealed: list[str],
+    keys: list[str],
     report: Report | None,
     clock: str,
     previous: str | None,
@@ -1108,37 +1165,75 @@ def _stage_run(
         digest.update(clock.encode() + b"\0")
         digest.update(report.model_dump_json(include=report.model_fields_set).encode())
         definition = digest.hexdigest()
+    names = json.dumps(keys) if report is not None else None
+    sealed = [key for key in keys if not key.endswith(".open")]
     for key in sealed:
         digest.update(f"{key}\0{storage.objects[key]}\0".encode())
     inputs = digest.hexdigest()
-    metadata = reached = payload = headline = latest = None
-    if previous != inputs:
-        data = read_located(storage, run, sealed, whole_blocks=True)
-        metadata = data.model_dump_json(exclude={"last_write"}, round_trip=True)
-        if report is not None:
-            charts = run_chart_data(storage.storage, data, report, clock)
-            payload = charts.payload
-            if charts.headline is not None:
-                headline = charts.headline.model_dump_json(exclude_defaults=True)
-                latest = charts.headline.latest()
-            reached = _CLOCKS.dump_json(data.reached).decode()
+    data = read_located(storage, run, sealed, whole_blocks=True) if previous != inputs else None
     db.execute(
-        """INSERT INTO next_files(address,experiment,inputs,reached,preferred,last_write,definition,headline,latest,metadata,payload)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT INTO next_files(address,experiment,inputs,last_write,names,names_version)
+           VALUES(?,?,?,?,?,?)""",
         (
             address,
             run.file.experiment,
             inputs,
-            reached,
-            report.clock if report else None,
             run.last_write.isoformat() if run.last_write else None,
-            definition,
-            headline,
-            latest,
-            metadata,
-            payload,
+            names,
+            sha256(names.encode()).hexdigest() if names is not None else None,
         ),
     )
+    if data is None:
+        return
+    metadata = data.model_dump_json(exclude={"last_write"}, round_trip=True)
+    if report is None:
+        db.execute("UPDATE next_files SET metadata=? WHERE address=?", (metadata, address))
+        return
+    charts = run_chart_data(storage.storage, data, report, clock)
+    headline = charts.headline
+    reached = data.reached
+    preferred = (
+        report.clock
+        if report.clock in reached
+        else next((c.name for c in data.clocks if c.name in reached), next(iter(reached), None))
+    )
+    db.execute(
+        """UPDATE next_files SET metadata=?,reached=?,preferred=?,definition=?,headline=?,latest=?,
+           overview=?,payload=?,pace=?,sample_ms=? WHERE address=?""",
+        (
+            metadata,
+            _CLOCKS.dump_json(reached).decode(),
+            preferred,
+            definition,
+            headline.model_dump_json(exclude_defaults=True) if headline else None,
+            json.dumps(headline.latest()) if headline else None,
+            charts.overview,
+            charts.payload,
+            _CLOCKS.dump_json(_mean_pace(data, reached)).decode(),
+            data.blocks[-1].header.wall_last if data.blocks else None,
+            address,
+        ),
+    )
+
+
+def _mean_pace(data: RunData, reached: dict[str, float]) -> dict[str, float]:
+    """Clock units per second between this run's first and latest sealed rows."""
+    if not data.blocks:
+        return {}
+    first, last = data.blocks[0].header, data.blocks[-1].header
+    seconds = (last.wall_last - first.wall_first) / 1000
+    if seconds <= 0:
+        return {}
+    # Subtract the first recorded coordinate so the child never claims its parent's steps.
+    start = {c.name: c.first for c in first.clocks if c.first is not None}
+    return {
+        c.name: (c.last - start[c.name]) / seconds
+        for c in last.clocks
+        if c.last is not None
+        and c.name in start
+        and c.last >= start[c.name]
+        and c.last == reached.get(c.name)
+    }
 
 
 def _store_run(
@@ -1149,6 +1244,7 @@ def _store_run(
     reached: dict[str, float],
     preferred: str | None,
     file_sources: RunSources,
+    machine_rate: Decimal | None,
 ) -> None:
     stored = run.stored
     file = stored.file if stored else None
@@ -1176,8 +1272,6 @@ def _store_run(
     # Once files exist, even an empty sealed clock belongs to them. The
     # launcher can still supply a target on a different clock.
     clocks = status.clocks if stored is None and status else reached
-    if stored and preferred not in clocks:
-        preferred = next((c.name for c in stored.clocks if c.name in clocks), None)
     file_config = file.config_json if file else None
     fields = {
         "address": address,
@@ -1200,6 +1294,7 @@ def _store_run(
         "launcher_config": record.config_json if record and file_config is None else None,
         "source": _source(record) if record and training else None,
         "status": status.model_dump_json() if status else None,
+        "machine_rate": f"${machine_rate:.2f}/hour" if machine_rate is not None else None,
         "max_attempts": job.max_attempts if job else None,
     }
     # Keep unchanged rows out of the WAL. Only the fixed column names form SQL.
@@ -1290,15 +1385,58 @@ def _state_reason(state: str, status: Status | None) -> str:
 
 
 def _run_line(
-    row: sqlite3.Row, state: str, status: Status | None, *, on_machine: str | None = None
+    row: sqlite3.Row,
+    state: str,
+    status: Status | None,
+    *,
+    on_machine: str | None = None,
+    overview: bool = False,
 ) -> str:
     parts = [f'<span class="pill">{escape(state)}</span>']
-    facts = [row["position"]]
+    facts = [] if overview else [row["position"]]
     if status:
         facts.append(_state_reason(state, status))
-        facts.extend(launcher_facts(status, row["max_attempts"], on_machine=on_machine))
+        facts.extend(
+            fact
+            for fact in launcher_facts(status, row["max_attempts"], on_machine=on_machine)
+            if not overview or fact != status.formatted_spend
+        )
     parts.extend(f"<span>{escape(fact)}</span>" for fact in facts if fact)
     return " · ".join(parts)
+
+
+def _run_numbers(row: sqlite3.Row, status: Status | None, state: str, written: str) -> str:
+    target = status.until if status else None
+    clock = target.clock if target else row["preferred"]
+    rates = _CLOCKS.validate_json(row["pace"]) if row["pace"] else {}
+    rate = rates.get(clock) if clock else None
+    values = [
+        ("Clock", row["position"]),
+        ("Latest score", row["score"]),
+        ("Mean pace", f"{rate:.4g} {clock}/s" if rate is not None else None),
+    ]
+    if state == "running" and target and rate:
+        reached = _CLOCKS.validate_json(row["reached"])[target.clock]
+        seconds = max(0, target.value - reached) / rate
+        try:
+            end = datetime.fromtimestamp(row["sample_ms"] / 1000, UTC) + timedelta(seconds=seconds)
+        except (OverflowError, ValueError, OSError):
+            pass  # The projected date lies outside the calendar.
+        else:
+            values.append(("Ends about", end.strftime("%Y-%m-%d %H:%M UTC")))
+    values.extend(
+        (
+            ("Dollars", status.formatted_spend if status else None),
+            ("Machine rate", row["machine_rate"]),
+        )
+    )
+    return (
+        '<dl class="run-numbers">'
+        + "".join(
+            f"<div><dt>{label}</dt><dd>{escape(value or '—')}</dd></div>" for label, value in values
+        )
+        + f'<div><dt>Last file write</dt><dd id="last-write">{escape(written)}</dd></div></dl>'
+    )
 
 
 def _is_open(row: sqlite3.Row, state: str) -> bool:
@@ -1426,8 +1564,13 @@ def _checkpoints(stored: RunData) -> str | None:
             f"{k} {number(v) if float(v).is_integer() else f'{v:.4g}'}"
             for k, v in checkpoint.at.items()
         )
+        marker = (
+            f' data-last-checkpoint="{escape(json.dumps(checkpoint.at))}"'
+            if checkpoint is stored.checkpoints[-1]
+            else ""
+        )
         rows.append(
-            f"<tr><td>{checkpoint.ordinal}</td><td>{escape(checkpoint.name)}</td><td>{escape(clocks)}</td></tr>"
+            f"<tr{marker}><td>{checkpoint.ordinal}</td><td>{escape(checkpoint.name)}</td><td>{escape(clocks)}</td></tr>"
         )
     return _table(("Ordinal", "Checkpoint", "Clock position"), rows) if rows else None
 
@@ -1465,10 +1608,12 @@ def _age(at: str | None, now: datetime) -> str:
     return f"{seconds} s ago"
 
 
-def _observation(page: str, token: str, message: str, collected: str = "") -> str:
+def _observation(
+    page: str, token: str, message: str, collected: str = "", written: str = ""
+) -> str:
     return (
         f'<p class="context" id="{page}-observation" data-refresh="{_REFRESH * 1000}" '
-        f'data-version="{token}" data-collected="{escape(collected)}">{escape(message)}</p>'
+        f'data-version="{token}" data-collected="{escape(collected)}" data-written="{escape(written)}">{escape(message)}</p>'
     )
 
 
@@ -1592,7 +1737,11 @@ class Server(ThreadingHTTPServer):
 
         with self.index.snapshot() as view:
             if path.startswith("/runs/"):
-                html = view.run(path.removeprefix("/runs/"), observe=observe)
+                html = view.run(
+                    path.removeprefix("/runs/"),
+                    tab=query.get("tab", ["overview"])[0],
+                    observe=observe,
+                )
                 if html is None:
                     return None
                 rail = view.rail("/")

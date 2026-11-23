@@ -94,7 +94,18 @@ from etude.experiment_file import experiment_named, refuse_renamed
 from etude.home import home
 from etude.identity import SAFE_NAME
 from etude.records import BUILT_IN_NAMES, Record, RunRecord
-from etude.report import Counters, Curve, Elapsed, Flame, Matches, Pace, Report, Score, Series
+from etude.report import (
+    Counters,
+    Curve,
+    Elapsed,
+    Flame,
+    Matches,
+    MetricPanel,
+    Pace,
+    Report,
+    Score,
+    Series,
+)
 from etude.run import RunListing, as_storage, declared
 from etude.storage import (
     DirectoryStorage,
@@ -787,7 +798,7 @@ class Headline(Record):
     log: bool = False
     curves: dict[str, Trace]
 
-    def latest(self) -> str:
+    def latest(self) -> list[str]:
         """Latest drawable bucket of each metric, labelled for the run table."""
         values = []
         for key, trace in self.curves.items():
@@ -795,19 +806,26 @@ class Headline(Record):
                 if x is not None and y is not None and (not self.log or y > 0):
                     values.append(f"{key} {y:.4g} {self.unit}".rstrip())
                     break
-        return " · ".join(values)
+        return values
+
+
+def _ml_panels(report: Report, data: Training, *, preview: bool = False) -> tuple[MetricPanel, ...]:
+    if report.other_metrics:
+        named, timers = set(report.keys()), _flames(report)
+        other = tuple(k for k in data.metrics if k not in named and not k.startswith(timers))
+        if other:
+            panel = Series(
+                title=other[0] if preview else "Other logged metrics",
+                keys=other[:1] if preview else other,
+            )
+            return (*report.ml, panel)
+    return report.ml
 
 
 def _headline(report: Report, data: Training, clock: str) -> Headline | None:
     measured = data.series.get(clock, {})
     logged = set(data.metrics)
-    panels = list(report.ml)
-    if report.other_metrics:
-        named, timers = set(report.keys()), _flames(report)
-        other = tuple(k for k in data.metrics if k not in named and not k.startswith(timers))
-        if other:
-            panels.append(Series(title="Other logged metrics", keys=other))
-    for order, panel in enumerate(panels):
+    for order, panel in enumerate(_ml_panels(report, data)):
         curves: dict[str, Trace] = {}
         unit = ""
         if isinstance(panel, Series | Counters):
@@ -848,7 +866,33 @@ def _headline(report: Report, data: Training, clock: str) -> Headline | None:
 @dataclass(frozen=True)
 class RunCharts:
     payload: str
+    overview: str
     headline: Headline | None
+
+
+def _overview(page: Page) -> Page:
+    # Diagnostics can occupy either slot. At most the first two measured metric
+    # groups can appear, regardless of which diagnostics the report renderer draws.
+    training = page.training
+    report = page.report.model_copy(update={"ml": _ml_panels(page.report, training, preview=True)})
+    logged = set(training.metrics)
+    groups = [
+        p.keys
+        for p in (*report.ml, *report.perf)
+        if isinstance(p, Series | Counters) and not logged.isdisjoint(p.keys)
+    ]
+    keys = {k for group in groups[:2] for k in group}
+    preview = training.model_copy(
+        update={
+            "metrics": tuple(k for k in training.metrics if k in keys),
+            "series": {
+                clock: {k: trace for k, trace in traces.items() if k in keys}
+                for clock, traces in training.series.items()
+            },
+            "bands": {},  # Run charts draw one seed.
+        }
+    )
+    return page.model_copy(update={"report": report, "training": preview})
 
 
 def run_chart_data(storage: Storage, data: RunData, report: Report, clock: str) -> RunCharts:
@@ -856,20 +900,22 @@ def run_chart_data(storage: Storage, data: RunData, report: Report, clock: str) 
     page = _assemble(data.experiment, None, storage, report, None, (), [data], _Evals())
     return RunCharts(
         _payload(page.model_dump(mode="json") | {"run_charts": True}, None),
+        _payload(_overview(page).model_dump(mode="json") | {"run_charts": True}, None),
         _headline(report, page.training, clock),
     )
 
 
-def render_run(address: str, charts: str, heading: str, details: str, tabs: str) -> str:
+def render_run(address: str, charts: str, heading: str, beside: str) -> str:
     """Show already-indexed chart data alongside the current run status."""
     return _inline(
         "page.html",
         address,
         charts,
         heading,
-        details,
-        tabs,
-        sections=(("charts", "Charts"), ("performance", "Performance")),
+        beside=beside,
+        sections=(("charts", "Charts"),)
+        if beside
+        else (("charts", "Charts"), ("performance", "Performance")),
     )
 
 
@@ -2062,12 +2108,17 @@ def _inline(
     title: str,
     payload: str,
     heading: str = "",
-    details: str = "",
-    tabs: str = "",
     *,
+    beside: str = "",
     sections: tuple[tuple[str, str], ...] = (("perf", "Perf"), ("ml", "ML details")),
 ) -> str:
     # Substitute in the template once; run data and console text can contain any marker.
+    metrics = "".join(
+        f'<section class="sec" id="{key}"><h2>{label} <span id="{key}-sub"></span>'
+        f'<div class="sec-controls" id="{key}-controls"></div></h2>'
+        f'<div class="grid" id="{key}-body"></div></section>'
+        for key, label in sections
+    )
     fields = {
         "__UPLOT_CSS__": read_asset("vendor/uPlot.min.css"),
         "__PAGE_CSS__": read_asset("page.css"),
@@ -2076,17 +2127,14 @@ def _inline(
         "__TITLE__": escape(title),
         "__DATA__": payload,
         "<!--view-heading-->": heading,
-        "<!--view-details-->": details,
         "<!--metric-tabs-->": "".join(
             f'<a href="#{key}" data-s="{key}">{label}</a>' for key, label in sections
         ),
-        "<!--metric-sections-->": "".join(
-            f'<section class="sec" id="{key}"><h2>{label} <span id="{key}-sub"></span>'
-            f'<div class="sec-controls" id="{key}-controls"></div></h2>'
-            f'<div class="grid" id="{key}-body"></div></section>'
-            for key, label in sections
+        "<!--metric-sections-->": (
+            f'<div class="run-overview"><div>{metrics}</div><aside>{beside}</aside></div>'
+            if beside
+            else metrics
         ),
-        "<!--view-tabs-->": tabs,
     }
     return re.sub("|".join(map(re.escape, fields)), lambda m: fields[m[0]], read_asset(template))
 

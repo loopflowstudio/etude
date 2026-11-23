@@ -15,13 +15,12 @@ __PAGE_CSS__
   <div class="head" data-report-only><h1 id="title"></h1><span class="pill" id="pill"></span></div>
   <div class="context" id="context" data-report-only></div>
   <div class="controls" data-report-only><div class="legend-jobs" id="jobs" role="group" aria-label="Jobs"></div><span id="chips" style="display:contents"></span></div>
-  <nav class="tabs" id="tabs"><a href="#evals" data-s="evals" data-report-only>Evals</a><!--metric-tabs--><!--view-tabs--></nav>
+  <nav class="tabs" id="tabs" data-report-only><a href="#evals" data-s="evals">Evals</a><!--metric-tabs--></nav>
   <section class="sec" id="evals" data-report-only><h2>Evals <span id="evals-sub"></span><div class="sec-controls" id="evals-controls"></div></h2><div class="grid" id="evals-body"></div></section>
   <!--metric-sections-->
   <details id="runs-box" data-report-only><summary>Runs</summary><div class="scroll"><table id="runs"></table></div></details>
   <details id="coverage-box" data-report-only><summary>Evaluated checkpoints</summary><div class="scroll"><table id="coverage"></table></div></details>
   <details id="failures-box" open data-report-only><summary>Failed matches</summary><div class="scroll"><table id="failures"></table></div></details>
-  <!--view-details-->
 </div>
 <script type="application/json" id="data">__DATA__</script>
 <script>__UPLOT_JS__</script>
@@ -122,6 +121,8 @@ function hasDiagnostic(panel) {
   }
 }
 const diagnostics = D.run_charts ? panels.filter(hasDiagnostic) : [];
+const overview = document.querySelector(".run-overview");
+const checkpoint = overview?.querySelector("[data-last-checkpoint]");
 const draws = []; const later = f => draws.push(f);
 
 const color = j => css(j.color);
@@ -379,12 +380,22 @@ function renderMetrics(vis) {
     document.getElementById(section).style.display = display;
     for (const tab of document.querySelectorAll(`#tabs a[data-s="${section}"]`)) tab.style.display = display;
     if (empty) {
-      if (section === "charts") host.appendChild(node("p", "na", T.metrics.length ? "Timer metrics are shown under Performance." : "No metric curves recorded."));
+      if (section === "charts") {
+        const message = overview ? "No report panels to show here. Open Charts for all recorded metrics."
+          : T.metrics.length ? "Timer metrics are shown under Performance." : "No metric curves recorded.";
+        host.appendChild(node("p", "na", message));
+      }
       return;
     }
     if (!TRAINED) { host.appendChild(node("div", "na", "No training runs")); document.getElementById(section + "-sub").textContent = ""; return; }
     control(ctl, "X axis", CLOCKS, clockKey); control(ctl, "Lines", [["on", "Smoothed"], ["off", "Raw"]], "smooth");
     const clock = S[clockKey], opts = {xLabel: clock, band: true, sync: section};
+    if (checkpoint && panels.some(p => ["series", "pace", "elapsed"].includes(p.kind))) {
+      opts.checkpoint = JSON.parse(checkpoint.dataset.lastCheckpoint)[clock];
+      if (opts.checkpoint != null) {
+        ctl.appendChild(node("span", "checkpoint-key", `Dashed line · last checkpoint at ${clock} ${num(opts.checkpoint)}`));
+      }
+    }
     const missing = [];
     const prep = (pts, j) => S.smooth === "on"
       ? [{label: j.label, color: color(j), opacity: 0.25, width: 1, faint: true, points: pts.map(p => ({...p, lo: null, hi: null}))}, {label: j.label, color: color(j), dotted: j.baseline, points: smoothed(pts)}]
@@ -474,7 +485,10 @@ function renderMetrics(vis) {
     if (!D.run_charts && missing.length) { const m = node("div", "missing card full", "Named by a panel but not logged by these runs: "); m.style.border = "0"; m.style.padding = "0"; missing.forEach(k => m.appendChild(node("code", null, k))); host.appendChild(m); }
     document.getElementById(section + "-sub").textContent = clockMeaning(clock);
   }
-  if (D.run_charts) {
+  if (overview) {
+    const first = [...R.ml, ...R.perf].filter(p => runMetrics.includes(p) || hasDiagnostic(p)).slice(0, 2);
+    metricSection("charts", first, "mlclock");
+  } else if (D.run_charts) {
     metricSection("charts", runMetrics, "mlclock", otherMetrics);
     metricSection("performance", diagnostics, "pclock");
   } else {
@@ -560,18 +574,10 @@ if (D.run_charts) {
 }
 
 // Section nav highlights the section in view.
-const tabs = [...document.querySelectorAll("nav.tabs a")];
+const tabs = [...document.querySelectorAll("#tabs a[data-s]")];
 const io = new IntersectionObserver(entries => { for (const en of entries) if (en.isIntersecting) tabs.forEach(t => t.classList.toggle("on", t.dataset.s === en.target.id)); }, {rootMargin: "-40% 0px -55% 0px"});
-for (const tab of tabs) {
-  const section = document.getElementById(tab.dataset.s);
-  io.observe(section);
-  // Jump within the run while keeping its selected clocks and filters in the hash.
-  if (D.run_charts) tab.addEventListener("click", event => {
-    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-    event.preventDefault();
-    section.scrollIntoView();
-  });
-}
+for (const tab of tabs) io.observe(document.getElementById(tab.dataset.s));
+
 render();
 let pending; addEventListener("resize", () => { clearTimeout(pending); pending = setTimeout(render, 120); });
 if (D.refresh) setInterval(() => { if (S.live === "1" && !document.hidden) location.reload(); }, D.refresh * 1000);

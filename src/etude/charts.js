@@ -95,7 +95,9 @@ function line(host, series, o = {}) {
     for (const text of notes.length ? notes : [o.empty || "Nothing recorded for this selection"]) host.appendChild(node("div", "na chart-empty", text));
     return;
   }
-  const xs = [...new Set(series.flatMap(s => s.points.filter(p => p.x != null).map(p => p.x)))].sort((a, b) => a - b);
+  const positions = new Set(series.flatMap(s => s.points.filter(p => p.x != null).map(p => p.x)));
+  if (o.checkpoint != null) positions.add(o.checkpoint);
+  const xs = [...positions].sort((a, b) => a - b);
   const maps = series.map(s => new Map(s.points.filter(p => p.x != null).map(p => [p.x, p])));
   const column = (m, f) => xs.map(x => { const p = m.get(x); if (!p || p.skip) return undefined; return drawn(p) ? f(p) : null; });
   const muted = css("--muted"), grid = css("--grid"), ink2 = css("--ink-2");
@@ -133,6 +135,14 @@ function line(host, series, o = {}) {
       draw: [u => {
         const c = u.ctx, base = u.bbox.top + u.bbox.height - toPx(6);
         c.save(); c.lineWidth = toPx(1.5);
+        if (o.checkpoint != null) {
+          const x = u.valToPos(o.checkpoint, "x", true);
+          if (x >= u.bbox.left && x <= u.bbox.left + u.bbox.width) {
+            c.save(); c.strokeStyle = ink2; c.setLineDash([toPx(4), toPx(3)]);
+            c.beginPath(); c.moveTo(x, u.bbox.top); c.lineTo(x, u.bbox.top + u.bbox.height); c.stroke();
+            c.restore();
+          }
+        }
         // Whiskers: a sparse line's own intervals.
         for (const [i, color] of whiskers) for (const p of series[i].points.filter(drawn)) {
           if (p.lo == null) continue;

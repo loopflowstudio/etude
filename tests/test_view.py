@@ -443,7 +443,7 @@ def test_ingestion_reads_only_the_new_block_and_publishes_its_last_point(tmp_pat
     with Server(measured, None, ("127.0.0.1", 0)) as server:
         _ingest(server)
         first = server.page("/runs/lab/base@0") or ""
-        assert ">running<" in first and "last file write" in first and _loss(first) == [7.0]
+        assert ">running<" in first and "Last file write" in first and _loss(first) == [7.0]
         assert "Console was not recorded." in first
         before = measured.requests, measured.listings
         measured.got.clear()
@@ -746,6 +746,80 @@ def test_indexed_experiment_opens_its_default_report_separately(tmp_path: Path) 
         assert _loss(server.page("/experiments/lab/report") or "") == [8.0]
 
 
+def test_run_overview_and_tab_polls_use_only_indexed_clock_cost_and_files(tmp_path: Path) -> None:
+    backend = bench(home())
+    backend.clock.now = datetime.now(UTC) - timedelta(hours=2)
+    (address,) = backend.scheduler.queue(
+        job(name="base", experiment="lab", until="steps=400"), rent="l4"
+    )
+    backend.scheduler.tick()
+    backend.run(1)
+    source = DirectoryStorage(tmp_path / "runs")
+    _start_run(source, address, 7)
+    # This run first wrote at step 100. Only the next 60 steps took this minute.
+    writer = "123456abcdef"
+    rows = Builder(["steps"])
+    start = int(datetime(2026, 11, 22, 3, tzinfo=UTC).timestamp() * 1000)
+    rows.add(start, {"steps": 100}, {"loss": 7, "validation": 6})
+    rows.add(start + 60_000, {"steps": 160}, {"loss": 3, "validation": 4})
+    write_block(source.root / address, tail_key(0, writer), rows.columns(writer, 0))
+    mark = CheckpointRecord(ordinal=1, at={"steps": 120}, artifact=ArtifactRef(uri="weights.pt"))
+    source.put(address + "/checkpoints/first.json", mark.model_dump_json().encode())
+    measured = MeasuredStorage(source)
+    route = "/runs/" + address
+    with Server(measured, None, ("127.0.0.1", 0)) as view:
+        _ingest(view)
+        reads = measured.listings, measured.requests, measured.bytes
+        overview = _get(view, route)
+        assert 'href="?tab=overview" aria-current="page"' in overview
+        assert set(_page_data(overview).training.series["steps"]) == {"loss"}
+        for label, value in (
+            ("Clock", "steps 160 / 400"),
+            ("Latest score", "loss 3"),
+            ("Mean pace", "1 steps/s"),
+            ("Ends about", "2026-11-22 03:05 UTC"),
+            ("Dollars", "~$0.59"),
+            ("Machine rate", "$0.59/hour"),
+        ):
+            assert f"<dt>{label}</dt><dd>{value}</dd>" in overview
+        assert (
+            '<dt>Last file write</dt><dd id="last-write">' in overview and " s ago</dd>" in overview
+        )
+        assert "<h2>Console</h2>" in overview and "<h2>Checkpoints</h2>" in overview
+        assert 'data-last-checkpoint="{&quot;steps&quot;: 120.0}"' in overview
+        poll = _get(view, route + "?observe=1")
+        assert _version(poll) == _version(overview) and "<script" not in poll
+        for tab, expected in (
+            ("charts", "<h2>Performance "),
+            ("console", "<h2>Console</h2>"),
+            ("config", "<h2>Config</h2>"),
+            ("checkpoints", ">weights.pt<"),
+            ("files", f">{address}/checkpoints/first.json<"),
+        ):
+            page = _get(view, route + f"?tab={tab}")
+            assert f'href="?tab={tab}" aria-current="page"' in page and expected in page
+            assert '<dl class="run-numbers">' not in page
+            assert ('id="data"' in page) == (tab == "charts")
+            if tab == "charts":
+                assert set(_page_data(page).training.series["steps"]) == {"loss", "validation"}
+            assert _version(_get(view, route + f"?observe=1&tab={tab}")) == _version(page)
+        assert (measured.listings, measured.requests, measured.bytes) == reads
+        files = _get(view, route + "?tab=files")
+        source.put(address + "/progress.open", b"unsealed")
+        view.refresh_files()
+        assert _version(_get(view, route + "?observe=1&tab=files")) != _version(files)
+        assert f">{address}/progress.open<" in _get(view, route + "?tab=files")
+        assert _version(_get(view, route + "?observe=1")) == _version(overview)
+        source.put(
+            address + "/outcome.json",
+            RunOutcome(state="finished", counters=RunCounters()).model_dump_json().encode(),
+        )
+        view.refresh_files()
+        ended = _get(view, route)
+        assert ">finished<" in ended and "<dt>Ends about</dt>" not in ended
+    backend.store.close()
+
+
 def test_compact_run_link_opens_with_charts_and_links_back_to_its_experiment(
     tmp_path: Path,
 ) -> None:
@@ -755,7 +829,8 @@ def test_compact_run_link_opens_with_charts_and_links_back_to_its_experiment(
         view.refresh_files()
         page = _get(view, "/runs/coin")
         assert '<a href="/experiments/coin">Experiment overview</a>' in page
-        assert page.index("<h2>Charts ") < page.index("<h2>Performance ")
+        charts = _get(view, "/runs/coin?tab=charts")
+        assert charts.index("<h2>Charts ") < charts.index("<h2>Performance ")
         assert _loss(page) == [7]
         report = _get(view, "/experiments/coin/report")
         assert report.index("<h2>Perf ") < report.index("<h2>ML details ")
@@ -997,7 +1072,7 @@ def test_continuation_link_from_queue_to_delivery_survives_view_restart(
             and f"etude logs --run {parent}" in parent_graph
         )
         assert _loss(parent_graph, "updates") == [7]
-        assert "updates 150 / 150" in parent_graph and "last file write 2 h ago" in parent_graph
+        assert "updates 150 / 150" in parent_graph and 'id="last-write">2 h ago' in parent_graph
         assert f">{phase}<" in child_graph
         if phase in ("queued", "setting up"):
             assert "Target updates 200" in child_graph and 'id="data"' not in child_graph
@@ -1487,7 +1562,8 @@ def test_run_console_opens_on_the_last_500_lines_of_retained_output(tmp_path: Pa
         assert "Some console output is missing" in page and f"etude logs --run {run}" in page
         assert "line <1>\n" in backend.scheduler.logs(run=run).streams[-1].text
         for section in ("console", "config", "checkpoints"):
-            assert f'href="#{section}"' in page and f'id="{section}"' in page
+            assert f'href="?tab={section}"' in page
+            assert f'id="{section}"' in _get(server, f"/runs/{run}?tab={section}")
     backend.store.close()
 
 
@@ -1612,7 +1688,7 @@ def test_failed_listing_shows_fresh_queue_and_machines(
         with Server(measured, declaration, ("127.0.0.1", 0)) as server:
             _ingest(server)
             reads = measured.listings, measured.requests
-            supplied = unescape(_get(server, "/runs/" + queued))
+            supplied = unescape(_get(server, "/runs/" + queued + "?tab=config"))
             assert ">queued<" in supplied and '{"rate":3}' in supplied
             for path in ("/", "/experiments/lab/status"):
                 page = _get(server, path)
@@ -1632,7 +1708,10 @@ def test_failed_listing_shows_fresh_queue_and_machines(
                 )
             else:
                 assert ">queued<" in graph and "File observation unavailable" in graph
-                for detail in ("Config details", "Curves", "Checkpoints"):
+                assert "Config details appear once" in _get(
+                    server, "/runs/" + alias + "?tab=config"
+                )
+                for detail in ("Curves", "Checkpoints"):
                     assert f"{detail} appear once the view has read the run files." in graph
                 assert (
                     "No metric curves recorded" not in graph
@@ -1657,7 +1736,7 @@ def test_failed_listing_shows_fresh_queue_and_machines(
             source.delete(key)
         _ingest(recovered)
         assert recovered.page("/runs/lab/compact") is None
-        assert "No config recorded." in _get(recovered, "/runs/" + alias)
+        assert "No config recorded." in _get(recovered, "/runs/" + alias + "?tab=config")
         assert "No runs recorded." in _get(recovered, "/experiments/unstarted/status")
         assert ">queued<" in (recovered.page("/runs/" + alias) or "")
         assert ">studio</th>" in (recovered.page("/machines/status") or "")
@@ -1999,7 +2078,7 @@ def test_silent_file_run_reopens_on_the_next_observation(tmp_path: Path) -> None
         _ingest(server)
         html = server.page("/runs/lab/base@0") or ""
         assert ">no end recorded<" in html
-        assert "last file write" in html and "at least 10 minutes" in html
+        assert "Last file write" in html and "at least 10 minutes" in html
         assert _version(_get(server, "/runs/lab/base@0?observe=1")) == _version(html)
         status = server.page("/experiments/lab/status") or ""
         assert (
@@ -2077,7 +2156,9 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
         _publish_ssh(server)
         route = "/runs/" + identity
         queued = unescape(server.page(route) or "")
-        assert ">queued<" in queued and '{"queued":"config"}' in queued
+        assert ">queued<" in queued and '{"queued":"config"}' in unescape(
+            _get(server, route + "?tab=config")
+        )
         assert "Target steps 40" in queued and "Waiting for retained console" in queued
         backend.scheduler.tick()
         _reporting(backend, log_bytes=100)
@@ -2120,11 +2201,12 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
             and "last loop 2 h ago" in page
             and "launcher observed" not in page
         )
-        assert "&lt;writer&gt;" in page and "<writer>" not in page
+        config = _get(server, route + "?tab=config")
+        assert "&lt;writer&gt;" in config and "<writer>" not in config
         assert "steps 12" in page and "<td>1</td>" in page
         assert "steps-12" in page and "steps 12 / 40" in page
         revision = git(repo, "rev-parse", "HEAD")
-        assert revision in page and "on main" in page
+        assert revision in config and "on main" in config
         assert (
             attempt.machine in page
             and "L4" in page
@@ -2139,7 +2221,12 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
         check = _get(server, "/runs/lab/compact?observe=1")
         stored = server.page("/runs/lab/compact") or ""
         assert _version(page) != _version(check) == _version(stored)
-        assert "&lt;writer&gt;" in stored and "steps-12" in stored
+        stored_config = _get(server, "/runs/lab/compact?tab=config")
+        assert (
+            "&lt;writer&gt;" in stored_config
+            and revision not in stored_config
+            and "steps-12" in stored
+        )
         assert "steps 12" in stored and _loss(stored) == [7]
         assert "Launcher observation unavailable" in stored
         assert all(

@@ -25,7 +25,7 @@ const points = (m, job, opponent = "") => m.jobPoints(job, "updates", m.evalValu
 
 // Run the shipped page and chart renderer; only the browser DOM and plotting
 // library are replaced. Assertions see displayed text and the plotted values.
-function renderPage(data, hash = "") {
+function renderPage(data, hash = "", overview = null) {
   class Element {
     constructor() { this.children = []; this.style = {}; this.text = ""; }
     set textContent(text) { this.text = String(text); this.children = []; }
@@ -38,7 +38,10 @@ function renderPage(data, hash = "") {
   }
   const elements = new Map(), plots = [];
   const document = {
-    createElement: () => new Element(), querySelectorAll: () => [],
+    createElement: () => new Element(),
+    querySelectorAll: () => [],
+    querySelector: selector => selector === ".run-overview" && overview
+      ? {querySelector: () => ({dataset: {lastCheckpoint: JSON.stringify(overview)}})} : null,
     getElementById: id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); },
   };
   const full = {
@@ -49,7 +52,7 @@ function renderPage(data, hash = "") {
   };
   document.getElementById("data").textContent = JSON.stringify(full);
   const browser = vm.createContext({
-    document, URLSearchParams, location: {hash}, history: {replaceState() {}}, addEventListener() {},
+    document, devicePixelRatio: 1, URLSearchParams, location: {hash}, history: {replaceState() {}}, addEventListener() {},
     getComputedStyle: () => ({getPropertyValue: () => "#112233"}),
     IntersectionObserver: class { observe() {} },
     uPlot: class {
@@ -402,6 +405,30 @@ test("a live run leads with measured groups from either report section", () => {
   assert.match(render().sectionText("performance"), /Pace.*Elapsed/);
 });
 
+test("Overview draws the first two report panels and marks the last checkpoint on their clock", () => {
+  const keys = ["return", "loss", "accuracy"];
+  const data = page([], [], {
+    jobs: [{name: "a", runs: ["a"]}], runs: [{name: "a"}], checkpoints: [], clocks: [{name: "steps"}],
+    metrics: keys, series: {steps: Object.fromEntries(keys.map(key => [key, [{owner: "a", x: [10, 20], mean: [1, 2]}]]))},
+  });
+  data.run_charts = true;
+  data.report = {clock: "steps", ml: keys.map(key => ({kind: "series", title: key, keys: [key]}))};
+  const view = renderPage(data, "", {steps: 15});
+  assert.equal(view.plots.length, 2);
+  assert.match(view.sectionText("charts"), /return.*loss/);
+  assert.doesNotMatch(view.sectionText("charts"), /accuracy/);
+  for (const plot of view.plots) {
+    assert.deepEqual([...plot.values[0]], [10, 15, 20]);
+    const paths = [], ctx = {
+      save() {}, restore() {}, setLineDash() {}, beginPath() {}, stroke() {},
+      moveTo(x, y) { paths.push([x, y]); }, lineTo(x, y) { paths.push([x, y]); },
+    };
+    plot.options.hooks.draw[0]({ctx, bbox: {top: 2, left: 0, width: 20, height: 20}, valToPos: x => x});
+    assert.deepEqual(paths, [[15, 2], [15, 22]]);
+  }
+  assert.equal(renderPage(data).plots.length, 3);
+});
+
 test("a timer-only run shows its measured breakdown under Performance", () => {
   const data = page([], [], {
     jobs: [{name: "a", launch: "a", label: "Learner", runs: ["a"]}], runs: [{name: "a", at: {steps: 1}}],
@@ -477,7 +504,7 @@ test("a visible run updates dates in place and reloads only when its content cha
   let tick, requests = [], navigations = 0, status = 503;
   const browser = vm.createContext({
     document,
-    location: {pathname: url, reload: () => navigations++},
+    URLSearchParams, location: {pathname: url, search: "?tab=charts", reload: () => navigations++},
     fetch: async path => {
       requests.push(path);
       return {ok: status === 200, status, text: async () => ""};
@@ -502,7 +529,7 @@ test("a visible run updates dates in place and reloads only when its content cha
   document.hidden = true;
   await tick();
   assert.equal(navigations, 0);
-  assert.deepEqual(requests, [url + "?observe=1", url + "?observe=1"]);
+  assert.deepEqual(requests, [url + "?observe=1&tab=charts", url + "?observe=1&tab=charts"]);
   document.hidden = false;
   await tick();
   assert.equal(navigations, 1);

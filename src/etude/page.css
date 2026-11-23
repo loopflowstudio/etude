@@ -181,3 +181,13 @@ body:has(> #view-rail) { display: grid; grid-template-columns: 12rem minmax(0, 1
 .command-bar:not(:empty) { margin-top: 14px; }
 .command-bar button { cursor: copy; text-align: left; overflow-wrap: anywhere; color: var(--ink); background: var(--wash); border: 1px solid var(--line); border-radius: 5px; padding: 5px 8px; }
 @media (max-width: 940px) { .experiment-split { grid-template-columns: minmax(0, 1fr); } }
+
+.run-numbers { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: 12px; margin: 18px 0 8px; }
+.run-numbers div { border-top: 1px solid var(--line); padding-top: 6px; }
+.run-numbers dt, .checkpoint-key { color: var(--ink-2); font-size: 12px; }
+.run-numbers dd { margin: 2px 0; font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+nav[aria-label="Run tabs"] a[aria-current] { border-color: var(--ink); color: var(--ink); }
+.run-overview { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 20px; }
+.run-overview #charts-body { grid-template-columns: minmax(0, 1fr); }
+.run-overview pre.console { max-height: 14rem; }
+@media (max-width: 940px) { .run-overview { grid-template-columns: minmax(0, 1fr); } }

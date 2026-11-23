@@ -158,7 +158,8 @@ opened before the run appears names the source the view is watching.
 | `/experiments/NAME/status` | The table and URL-selected detail used to refresh Status |
 | `/experiments/NAME/report` | The same report pane, opened on its own |
 | `/experiments/NAME/report?observe=1` | Whether the waiting report can load |
-| `/runs/ADDRESS` | A training run’s progress, curves, console, config and checkpoints, or an evaluation’s status and link to its report |
+| `/runs/ADDRESS` | Training Overview, or an evaluation’s status and link to its report |
+| `/runs/ADDRESS?tab=charts` | All training charts. The URL also selects Console, Config, Checkpoints or Files. |
 | `/runs/ADDRESS?observe=1` | Current source ages and the version of the run shown in the tab |
 | `/machines` | Held machines with their pool or on-demand, readiness, window and cost. Each occupied slot links to its run and shows its state and clock. |
 | `/machines/status` | The inventory used to refresh the Machines page |
@@ -203,7 +204,21 @@ that interval from the last write to the start of the listing that supplied
 the run’s file facts. During a storage outage, the run keeps its last
 observed file state.
 
-**Runs.** Charts opens with the recorded series and counters from `report()`,
+**Runs.** Open `/runs/prototype/coin@0` for **Overview**. It shows the
+clock, latest headline score, mean pace, dollars spent, occupied machine’s
+rental rate and last file write. The first two report panels with data sit
+beside the console tail and saved checkpoints. A dashed line marks the
+latest checkpoint when the curve’s clock places it. The default group of
+ungrouped metrics previews its first metric here. Charts shows the whole group.
+
+Mean pace divides the change in the displayed clock between the first and
+latest sealed training rows by their elapsed seconds. Both rows must give
+that clock. For a running job with a target and positive pace, **Ends about**
+adds the remaining clock distance divided by that pace to the latest row’s
+time. The estimate is shown in UTC.
+
+Open **Files** for the indexed storage keys belonging to the run, including
+open metric blocks. Copy a tab’s URL to share that view. **Charts** opens with the recorded series and counters from `report()`,
 in `ml` order, then `perf` order. Remaining metrics follow in first-logged
 order. The report supplies the default clock, units and scales. Performance
 appears when a diagnostic has data, such as a timer breakdown or a measured
@@ -247,11 +262,11 @@ The experiment report shows their scores separately. After copying a new
 launch with `etude sync`, the same run path shows its recorded outcome from
 the copied files alone.
 
-Opening a launched run requests the same retained console you can read with
+Opening Overview or Console for a launched training run requests the retained
+console available through
 `etude logs --run RUN`. The first visit can show **Waiting for retained console**
 until the next launcher poll. It opens at the end of the last 500 lines of
-retained output, dates the latest collection and marks gaps. Use the section
-links above the curves to jump to Console, Config or Checkpoints. Plain
+retained output, dates the latest collection and marks gaps. Plain
 `etude train` writes its console to the terminal.
 
 **Refresh.** Every 5 seconds, a visible tab checks the view’s index. A finished

@@ -210,9 +210,11 @@ The view indexes files and launcher standing independently under
 `ETUDE_HOME/views`. Each file pass compares the listed object versions and
 accepted report panels with the previous pass, including after a restart. One
 reader per index stages updated run metadata and charts in a private SQLite
-table. An open block updates the run's file timestamp. A change to sealed
-inputs replaces the file record, its full chart and its first ML panel together.
-The overview reads just that panel from each run, choosing the earliest one in
+table. The listing supplies each training run’s Files tab. Open blocks can
+change its inventory and last write between sealed chart generations. A change to sealed
+inputs replaces the file record, its full charts, its two-panel preview and
+its first ML panel together.
+The experiment list reads just that panel from each run, choosing the earliest one in
 the experiment’s report order. If a run file is temporarily unavailable during a
 report edit, its dot remains. Its curve rejoins the card when its indexed panel
 matches the current report and clock. Local report declarations run separately. Each experiment keeps its last accepted panels through an
@@ -236,8 +238,9 @@ A successful empty reply releases previously held runs.
 
 Status and graph requests read the committed index. Only a successful launcher
 poll replaces the retained endpoint. Pages show its placement, aliases and
-console when it matches the selected endpoint. Opening a run requests its
-console for the next launcher poll until the last attempt’s transcript settles.
+console when it matches the selected endpoint. Opening a page that shows a
+console requests its tail for the next launcher poll until the last attempt’s
+transcript settles.
 A visible run tab reads the same indexed row every five seconds. Its change
 token covers the sealed inputs and report panels, displayed run facts, retained
 console and errors. The check skips the chart table. When only source ages
