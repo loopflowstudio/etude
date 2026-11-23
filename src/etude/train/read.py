@@ -950,6 +950,37 @@ class _Records:
     folder_of: dict[str, str]
 
 
+def writer_name(name: str) -> str | None:
+    """Writer identified by a run-relative attempt record (excluding block manifests)."""
+    directory, _, leaf = name.partition("/")
+    if (
+        directory == "metrics"
+        and "/" not in leaf
+        and leaf.endswith(".json")
+        and not leaf.endswith((".index.json", ".permanent.json"))
+    ):
+        return leaf.removesuffix(".json")
+    return None
+
+
+def read_run_metadata(
+    storage: Storage, run: LocatedRun, keys: Sequence[str], *, require_writers: bool
+) -> RunData:
+    """Resolve an outcome from sorted declaration, outcome and writer keys for this run."""
+    writers = [
+        (key, writer)
+        for folder in run.folders
+        for key in under(keys, folder)
+        if (writer := writer_name(key[len(folder) :])) is not None
+    ]
+    if len(writers) == 1 and not require_writers and run.file.kind != "evaluation":
+        key, writer = writers[0]
+        data = read_located(storage, run, [k for k in keys if k != key])
+        if data.outcome and data.outcome.writer == writer:
+            return data
+    return read_located(storage, run, keys)
+
+
 def _records(storage: Storage, keys: Collection[tuple[str, str]]) -> _Records:
     """The run's checkpoint records and its writers, with their folders."""
     checkpoints: list[CheckpointRecord] = []
@@ -961,7 +992,7 @@ def _records(storage: Storage, keys: Collection[tuple[str, str]]) -> _Records:
         # `checkpoints/NAME.json`. Nothing else, such as an eval run's files, is read.
         if kind not in ("metrics", "checkpoints") or "/" in leaf or not leaf.endswith(".json"):
             continue
-        if kind == "metrics" and leaf.endswith((".index.json", ".permanent.json")):
+        if kind == "metrics" and writer_name(name) is None:
             continue  # an index, read with the blocks
         body = storage.get(folder + name)
         try:

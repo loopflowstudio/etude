@@ -9,7 +9,7 @@ import sys
 import threading
 from collections.abc import Iterator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from contextlib import AbstractContextManager, closing
+from contextlib import AbstractContextManager, closing, contextmanager
 from datetime import UTC, datetime, timedelta, tzinfo
 from html import unescape
 from http.client import HTTPConnection
@@ -38,7 +38,7 @@ from etude.page import Headline, Page, Pages, _run_file
 from etude.records import ArtifactRef, Clock, RunCounters, RunOutcome, RunRecord, RunWriter, Tally
 from etude.run import sync
 from etude.spec import RunRequest, Until
-from etude.storage import DirectoryStorage, S3Storage, storage_from_uri
+from etude.storage import DirectoryStorage, ListedStorage, S3Storage, storage_from_uri
 from etude.train.block import Builder
 from etude.train.tracking import write_block
 from etude.view import Server, _machines_table
@@ -682,9 +682,9 @@ def test_a_run_accepts_the_next_listing_after_a_missing_input(
         if previously_read:
             assert _loss(graph) == [7] and "files observed 11 min ago" in graph
         else:
-            assert ">queued<" in graph and "File observation unavailable" in graph
-            assert "Curves appear once the view has read the run files." in graph
-            assert "Waiting for run files" in _get(view, "/experiments/lab/report")
+            assert ">queued<" in graph and "Loading charts…" in graph
+            assert "FileNotFoundError" in graph and "files observed 0 s ago" in graph
+            assert _version(_get(view, "/experiments/lab/report?observe=1")) == "ready"
         view.refresh_files()
         graph = _get(view, "/runs/" + address)
         assert _loss(graph) == [7] and "files observed 11 min ago" not in graph
@@ -737,6 +737,213 @@ def test_bucket_listing_validates_held_objects_without_another_get(tmp_path: Pat
             assert ">finished<" in html and _loss(html) == [2.0]
             _ingest(server)
             assert client.requests == reads + 1
+
+
+@contextmanager
+def _historical_bucket(directory: Path) -> Iterator[tuple[S3Storage, CountedClient]]:
+    source = DirectoryStorage(directory)
+    for address in ("live/a", "hist1/job@0", "hist1/job@1", "hist2/job@0"):
+        experiment, name = address.split("/")
+        with open_run(
+            experiment=experiment,
+            run=name,
+            clocks=["updates"],
+            directory=directory,
+            config={"batch": 32},
+        ) as run:
+            run.log({"loss": 7}, updates=1)
+        mark = CheckpointRecord(
+            ordinal=1, at={"updates": 1}, artifact=ArtifactRef(uri="weights.pt")
+        )
+        source.put(address + "/checkpoints/first.json", mark.model_dump_json().encode())
+    source.delete("live/a/outcome.json")
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="history")
+        bucket = S3Storage("history", client=client)
+        for key in source.keys(""):
+            bucket.put(key, source.get(key))
+        yield bucket, client
+
+
+def test_bucket_discovery_publishes_before_charting_and_opens_only_the_requested_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with _historical_bucket(tmp_path) as (bucket, client):
+        get = ListedStorage.get
+        reading, release = threading.Event(), threading.Event()
+        pause = "live/a/"
+
+        def held(storage: ListedStorage, key: str) -> bytes:
+            if key.startswith(pause) and key.endswith(".blk"):
+                reading.set()
+                assert release.wait(10)
+            return get(storage, key)
+
+        monkeypatch.setattr(ListedStorage, "get", held)
+        route = "/runs/hist1/job@0"
+        with Server(bucket, None, ("127.0.0.1", 0)) as view, ThreadPoolExecutor(1) as driver:
+            ingestion = driver.submit(_ingest, view)
+            try:
+                assert reading.wait(5)
+                for url in ("/", "/reports"):
+                    page = _get(view, url)
+                    assert all(
+                        f"/experiments/{name}" in page for name in ("live", "hist1", "hist2")
+                    )
+                reads = client.list_pages, client.requests
+                table = _get(view, "/experiments/hist1")
+                assert all(f'title="hist1/job@{seed}"' in table for seed in (0, 1))
+                assert (client.list_pages, client.requests) == reads
+            finally:
+                release.set()
+            ingestion.result(5)
+            historic_reads = {k for k in client.read if k.startswith("hist")}
+            assert len(historic_reads) == 6
+            assert all(k.endswith(("/run.json", "/outcome.json")) for k in historic_reads)
+            assert client.list_pages == 1
+
+            pause = "hist1/job@0/"
+            reading.clear()
+            release.clear()
+            try:
+                initial = _get(view, route)
+                assert "Loading charts…" in initial and "Loading checkpoints…" in initial
+                assert reading.wait(5)
+                assert "Loading checkpoints…" in _get(
+                    view, "/experiments/hist1?run=job@0&tab=checkpoints"
+                )
+                assert _version(_get(view, route + "?observe=1")) == _version(initial)
+            finally:
+                release.set()
+            view.index._requests.submit(lambda: None).result(5)
+            later = _get(view, route)
+            assert _version(initial) != _version(later) and _loss(later, "updates") == [7]
+            assert ">weights.pt<" in later
+            acquired = {k for k in client.read if k.startswith("hist")} - historic_reads
+            assert all(k.startswith(pause) for k in acquired)
+            assert any(k.endswith(".blk") for k in acquired)
+            assert any("/checkpoints/" in k for k in acquired)
+            warm = client.list_pages, client.requests, client.bytes
+            for suffix in ("", "?tab=charts", "?tab=files", "?tab=config", "?observe=1"):
+                _get(view, route + suffix)
+            assert (client.list_pages, client.requests, client.bytes) == warm
+
+        # The visit survives restart. A later checkpoint is indexed without another visit.
+        with Server(bucket, None, ("127.0.0.1", 0)) as restarted:
+            assert ">weights.pt<" in _get(restarted, route + "?tab=checkpoints")
+            assert (client.list_pages, client.requests, client.bytes) == warm
+            key = "hist1/job@0/checkpoints/second.json"
+            mark = CheckpointRecord(
+                ordinal=2, at={"updates": 2}, artifact=ArtifactRef(uri="final.pt")
+            )
+            bucket.put(key, mark.model_dump_json().encode())
+            restarted.refresh_files()
+            assert ">final.pt<" in _get(restarted, route + "?tab=checkpoints")
+            assert (client.list_pages, client.requests) == (warm[0] + 1, warm[1] + 1)
+
+
+def test_bucket_discovery_recognizes_a_resume_after_an_earlier_writers_outcome(
+    tmp_path: Path,
+) -> None:
+    with _historical_bucket(tmp_path) as (bucket, client):
+        address = "hist2/job@0/"
+        writer = RunWriter(
+            writer="012345abcdef",
+            run=address.rstrip("/"),
+            attempt="second",
+            host="fixture",
+            started_ms=int(datetime.now(UTC).timestamp() * 1000) + 1000,
+        )
+        bucket.put(address + "metrics/012345abcdef.json", writer.model_dump_json().encode())
+        with Server(bucket, None, ("127.0.0.1", 0)) as view:
+            _ingest(view)
+            assert "/experiments/hist2" in _get(view, "/status").split("<h2>Completed</h2>")[0]
+            assert ">Open</td>" in _get(view, "/reports").split(">hist2</a>", 1)[1]
+            assert any(k.startswith(address) and k.endswith(".blk") for k in client.read)
+            assert not any(k.startswith("hist1/") and k.endswith(".blk") for k in client.read)
+
+
+def test_a_bucket_run_that_finishes_unopened_fetches_its_final_chart_on_visit(
+    tmp_path: Path,
+) -> None:
+    with (
+        _historical_bucket(tmp_path) as (bucket, client),
+        Server(bucket, None, ("127.0.0.1", 0)) as view,
+    ):
+        _ingest(view)
+        assert "<td>loss 7</td>" in _get(view, "/experiments/live")
+        local = DirectoryStorage(tmp_path)
+        prior = set(local.keys("live/a/"))
+        with open_run(
+            experiment="live",
+            run="a",
+            clocks=["updates"],
+            directory=tmp_path,
+            config={"batch": 32},
+            resume=True,
+        ) as run:
+            run.log({"loss": 3}, updates=2)
+        added = set(local.keys("live/a/")) - prior
+        (last,) = (key for key in added if key.endswith(".blk"))
+        for key in added:
+            bucket.put(key, local.get(key))
+        view.refresh_files()
+        page = _get(view, "/experiments/live")
+        assert ">finished<" in page and "<td>loss 7</td>" not in page and last not in client.read
+        assert "Loading charts…" in _get(view, "/experiments/live?run=a&tab=curves")
+        view.index._requests.submit(lambda: None).result(5)
+        assert "<td>loss 3</td>" in _get(view, "/experiments/live") and last in client.read
+
+
+def test_cold_checkpoint_request_retains_metadata_through_an_outage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with (
+        _historical_bucket(tmp_path) as (bucket, client),
+        Server(bucket, None, ("127.0.0.1", 0)) as view,
+    ):
+        _ingest(view)
+        route = "/runs/hist2/job@0"
+        get = ListedStorage.get
+
+        def unavailable(storage: ListedStorage, key: str) -> bytes:
+            if key.endswith(".blk"):
+                raise OSError("bucket offline https://fixture.invalid/signature")
+            return get(storage, key)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(ListedStorage, "get", unavailable)
+            assert "Loading checkpoints…" in _get(
+                view, "/experiments/hist2?run=job@0&tab=checkpoints"
+            )
+            view.index._requests.submit(lambda: None).result(5)
+            html = _get(view, route + "?tab=config")
+            assert ">finished<" in html and "batch" in html
+            assert "bucket offline [redacted URL]" in html and "fixture.invalid" not in html
+            view.index._requests.submit(lambda: None).result(5)
+        _get(view, route + "?observe=1")
+        view.index._requests.submit(lambda: None).result(5)
+        html = _get(view, route)
+        assert _loss(html, "updates") == [7] and "bucket offline" not in html
+        assert client.list_pages == 1
+
+
+def test_live_and_served_headlines_use_the_final_logged_value(tmp_path: Path) -> None:
+    with open_run(experiment="lab", run="linear", clocks=["updates"], directory=tmp_path) as run:
+        for updates in range(1, 601):
+            run.log({"value": updates / 2}, updates=updates)
+    with Server(tmp_path, None, ("127.0.0.1", 0)) as view:
+        _ingest(view)
+        overview = _get(view, "/runs/lab/linear")
+        assert "<dt>Latest metric</dt><dd>value 300</dd>" in overview
+        trace = _page_data(overview).training.series["updates"]["value"][0]
+        assert trace.mean[-1] == 299
+        assert "<td>value 300</td>" in _get(view, "/experiments/lab")
+        _get(view, "/experiments/lab/report")
+        assert "<td>value 300</td>" in _get(view, "/reports")
 
 
 def test_two_files_with_one_name_leave_runs_refreshing(tmp_path: Path) -> None:

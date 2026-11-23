@@ -143,13 +143,18 @@ and accepts a directory (as a path or the `file://` address Etude prints),
 Bucket sources need read credentials. Viewing requires no machine-provider key.
 The view listens on `127.0.0.1:8765` by default and prints its address.
 
-Use this computer’s runs directory or a small bucket prefix for the local
-view. On a cold start, the view lists the entire source and downloads the
-run metadata and sealed training metrics for every experiment into
-`ETUDE_HOME/cache`. File-backed runs appear together after that first pass
-finishes. Passing one experiment file selects its report code and still
-scans the whole source. For large buckets, the planned hosted view will
-receive updates pushed by trainers.
+To browse a bucket’s history, open the experiment list. The view lists the
+source and reads run declarations, outcomes and any writer records it needs
+to identify a resume. Experiments and run tables appear before charts load.
+Open runs chart in the background. A directory also charts its completed
+runs, one experiment at a time.
+
+In S3 or R2, opening a historical run or selecting its **Curves** or
+**Checkpoints** tab loads that run’s metrics and checkpoint records. You can
+read its state, config and file names while it loads. The view remembers
+which runs you opened across restarts. Opening an experiment’s **Report**
+reads the data for that report separately. Passing an experiment file
+selects its report code and still discovers runs across the source.
 
 While the view advertises its address in `ETUDE_HOME/view`, `train`, `launch`,
 `queue` and `status RUN` print a `view:` link for each run. A declared run
@@ -209,9 +214,13 @@ top row. Printing omits it.
 An authored series keeps its title and metric keys. When no authored series
 has a drawable value, each run contributes its first drawable ungrouped metric
 in logging order. Its key titles the curve and labels the value in the run
-table’s **Latest metric** column. Counters and diagnostics can lead when there
-is no drawable series. Metric curves use the report clock and keep
-their last values after training ends. Hover over a curve to read its value.
+table’s **Latest metric** column. The curve draws bucket means. **Latest
+metric** shows the last finite logged endpoint on the report clock. If a
+reduced bucket ends in a nonfinite value, the display uses its finite mean.
+A log panel uses positive values. Counters and diagnostics can lead when there
+is no drawable series. Metric curves use the report clock. When a bucket run
+finishes with new files before anyone has viewed it, opening the run loads
+its final curve. Hover over a curve to read its value.
 A panel without a curve leaves the run summary on its own. Each dot links to
 a run and names its state. Dollars sum the launcher’s recorded run costs,
 with `~` when any share is estimated.

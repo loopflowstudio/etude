@@ -322,7 +322,7 @@ def view(
     ] = None,
     source: Annotated[
         str | None,
-        typer.Option(help="read every experiment in this runs directory or small bucket prefix"),
+        typer.Option(help="a runs directory or bucket URI"),
     ] = None,
     host: Annotated[str, typer.Option(help="the address to bind")] = "127.0.0.1",
     port: Annotated[int, typer.Option(min=0, max=65535)] = 8765,

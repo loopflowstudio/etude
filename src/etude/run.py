@@ -15,6 +15,7 @@ import threading
 import time
 from bisect import bisect_left
 from collections.abc import Callable, Collection, Container, Iterator, Mapping, Sequence
+from concurrent.futures import Executor
 from dataclasses import dataclass
 from datetime import datetime
 from functools import cached_property
@@ -572,6 +573,7 @@ class RunListing:
         run: str | None = None,
         missing: Callable[[str, FileNotFoundError], RunRecord | None] | None = None,
         known: DeclarationCache | None = None,
+        executor: Executor | None = None,
     ) -> None:
         self.storage = storage
         self.objects = objects
@@ -580,6 +582,7 @@ class RunListing:
         self.folders = self._all_folders
         if run is not None:
             self.folders = {run: self.folders[run]} if run in self.folders else {}
+        self._executor = executor
         self._missing = missing
         self._known = {} if known is None else known
         if known is not None:
@@ -598,7 +601,8 @@ class RunListing:
             try:
                 record = RunRecord.model_validate_json(self.storage.get(key))
             except FileNotFoundError as error:
-                record = self._missing(folder, error) if self._missing else None
+                # The next listing can recover even if its version tag has not changed.
+                return self._missing(folder, error) if self._missing else None
             except ValidationError:
                 record = None
             kept = version, record
@@ -608,12 +612,18 @@ class RunListing:
     @cached_property
     def declarations(self) -> list[LocatedRun]:
         found: dict[tuple[str, str, str], tuple[RunRecord, list[str]]] = {}
-        for name, folders in self.folders.items():
-            for folder in folders:
-                if (file := self.declaration(folder)) is not None:
-                    # A tournament name can occur in several independent launches.
-                    copy = folder if file.kind == "evaluation" else ""
-                    found.setdefault((file.experiment, name, copy), (file, []))[1].append(folder)
+        folders = [folder for copies in self.folders.values() for folder in copies]
+        records = (
+            self._executor.map(self.declaration, folders)
+            if self._executor
+            else map(self.declaration, folders)
+        )
+        for folder, file in zip(folders, records, strict=True):
+            if file is not None:
+                # A tournament name can occur in several independent launches.
+                copy = folder if file.kind == "evaluation" else ""
+                name = folder.rstrip("/").rsplit("/", 1)[-1]
+                found.setdefault((file.experiment, name, copy), (file, []))[1].append(folder)
         return [
             LocatedRun(
                 name=name,
