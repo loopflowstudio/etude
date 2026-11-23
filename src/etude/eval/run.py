@@ -61,9 +61,8 @@ from etude.eval.result import EvalResult as EvalResult
 from etude.eval.result import Result as Result
 from etude.eval.result import Row
 from etude.eval.result import Tables as Tables
-from etude.eval.schedule import ordered
 from etude.records import RunCounters, RunWriter, Tally
-from etude.run import Declared, Run, StorageDestination, declare, destinations, report_progress
+from etude.run import Declared, Run, StorageDestination, report_progress
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage, Storage, run_prefix
 
@@ -779,60 +778,3 @@ def play_together(
         )
         for each in plays
     )
-
-
-@contextmanager
-def _evaluating_matches(
-    *,
-    experiment: str,
-    environment: Environment,
-    matches: Sequence[Match],
-    run: str | None = None,
-    directory: Path | str | None = None,
-    storages: Sequence[Storage] = (),
-    rollups: Sequence[Rollup] = (),
-    resume: bool = False,
-    progress: _Report | None = None,
-) -> Iterator[EvalRun]:
-    if len({scheduled.key for scheduled in matches}) != len(matches):
-        raise EtudeError("duplicate_match", 422)
-    names = [rollup.name for rollup in rollups]
-    if len(set(names)) != len(names) or set(names) & set(ETUDE_TABLES):
-        raise EtudeError("rollup_name_refused", 422) from ValueError(names)
-    declared = declare(
-        experiment=experiment,
-        clocks=(),
-        run=run,
-        kind="evaluation",
-        directory=directory,
-        resume=resume,
-    )
-    if declared.record.kind != "evaluation":
-        raise EtudeError("run_is_not_an_eval_run", 409)
-    path = declared.root / "environment.json"
-    if not path.is_file():
-        DirectoryStorage(declared.root).put(
-            "environment.json", environment.model_dump_json().encode()
-        )
-    elif Environment.model_validate_json(path.read_bytes()) != environment:
-        raise EtudeError("eval_run_environment_conflict", 409)
-    writer = EvalRun(
-        declared.root,
-        declared.name,
-        destinations(declared.base, storages),
-        tuple(rollups),
-        experiment=experiment,
-        environment=environment,
-        matches=list(ordered(matches)),
-        progress=progress,
-    )
-    try:
-        yield writer
-    except Stopped:
-        writer.finish("stopped")
-        raise
-    except BaseException:
-        writer.finish("failed")
-        raise
-    else:
-        writer.finish("finished")

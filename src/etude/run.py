@@ -28,6 +28,7 @@ from pydantic import ValidationError
 from etude.block_file import parse
 from etude.carriage import (
     EVAL_BLOCK_PACK,
+    RUN_FILES,
     RecordedFile,
     checkpoint_file,
     immutable,
@@ -199,23 +200,14 @@ class StorageDestination:
                 out: list[OutFile] = []
                 for index, key in enumerate(keys):
                     path = files.root / key
-                    if key == "outcome.json" and snapshot.outcome is not None:
-                        fingerprint = sha256(snapshot.outcome).hexdigest()
+                    if (frozen := snapshot.frozen(key)) is not None:
+                        fingerprint = sha256(frozen).hexdigest()
+                        if key in snapshot.pointers:
+                            out.append(OutFile(key=key, sha256=fingerprint, size_bytes=len(frozen)))
+                            # Pruning needs the acknowledged save name.
+                            fingerprint = frozen.decode()
                         if files.shipped(receipt, key) != fingerprint:
-                            deliveries.append(Delivery(key, fingerprint, snapshot.outcome))
-                        continue
-                    if key in snapshot.pointers:
-                        pointer_body = snapshot.pointers[key]
-                        fingerprint = pointer_body.decode()
-                        out.append(
-                            OutFile(
-                                key=key,
-                                sha256=sha256(pointer_body).hexdigest(),
-                                size_bytes=len(pointer_body),
-                            )
-                        )
-                        if files.shipped(receipt, key) != fingerprint:
-                            deliveries.append(Delivery(key, fingerprint, pointer_body))
+                            deliveries.append(Delivery(key, fingerprint, frozen))
                         continue
                     if key.startswith("out/"):
                         # Recipes save by atomic replacement. A link keeps the
@@ -339,6 +331,7 @@ def sync(
     base = Path(directory)
     undelivered: dict[str, dict[str, str]] = {}
     member_roots: set[Path] = set()
+    targets = destinations(base, storages)
     for root in sorted(run_directories(base)):
         if root in member_roots:
             continue  # The parent ships these under its own address.
@@ -353,7 +346,6 @@ def sync(
             relative = root.relative_to(base).as_posix()
             if relative.endswith("/" + run):
                 run = relative
-        targets = destinations(base, storages)
         prune(files, targets)
         for destination in targets:
             reason = ship(files, run, destination)
@@ -503,7 +495,6 @@ def as_storage(source: Storage | Path | str) -> Storage:
 # `environment.json`, `tournament.json` and `blocks` are an eval run's (`etude.eval`);
 # `tables` and `matches` an eval run's of the per-file layout, kept until converted.
 RUN_FOLDERS = ("metrics", "checkpoints", "blocks", "tables", "matches")
-RUN_FILES = ("run.json", "environment.json", "tournament.json", "state.json", "outcome.json")
 RUN_DATA = frozenset((*RUN_FOLDERS, "out", "artifacts"))
 
 

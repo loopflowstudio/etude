@@ -7,7 +7,7 @@ from typing import IO
 
 import pytest
 
-from etude.carriage import publication, put_back, restore_set
+from etude.carriage import Publication, publication, put_back, restore_set
 from etude.launch.aws import Keys
 from etude.launch.records import Storage as Place
 from etude.launch.schemas import Work
@@ -302,6 +302,33 @@ def test_a_folder_checkpoint_is_delivered_once_and_relayed_member_by_member(tmp_
         ).read_bytes()
 
 
+def test_host_relay_keeps_the_group_outcome_that_preceded_its_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = DirectoryStorage(tmp_path)
+    group = RunRecord(
+        id="league/group", experiment="league", kind="evaluation", members=("league/a",)
+    )
+    storage.put("run.json", group.model_dump_json().encode())
+    failed = RunOutcome(state="failed", counters=RunCounters()).model_dump_json().encode()
+    storage.put("outcome.json", failed)
+    block = "league/a/blocks/retry/block.json"
+
+    def finish_after_listing(root: Path, *, tail_seconds: float) -> Publication:
+        snapshot = publication(root, tail_seconds=tail_seconds)
+        storage.put(block, b"sealed")
+        storage.put(
+            "outcome.json",
+            RunOutcome(state="finished", counters=RunCounters()).model_dump_json().encode(),
+        )
+        return snapshot
+
+    monkeypatch.setattr("etude.carriage.publication", finish_after_listing)
+    relayed = restore_set(tmp_path)
+    assert block not in relayed
+    assert relayed["outcome.json"] == failed
+
+
 @pytest.mark.parametrize("delivered", [False, True], ids=["before-first-match", "both-tournaments"])
 def test_group_end_follows_both_members_and_a_fresh_machine_restores_them(
     tmp_path: Path,
@@ -310,7 +337,7 @@ def test_group_end_follows_both_members_and_a_fresh_machine_restores_them(
     storage = Writes()
     address = "league/evals-test"
     courier, _, root = machine(tmp_path / "old", storage, run=address)
-    members = ("league/ladder", "league/gauntlet")
+    members = ("league/blocks", "league/gauntlet")
     record = RunRecord(id=address, experiment="league", kind="evaluation", members=members)
     files = DirectoryStorage(root)
     files.put("run.json", record.model_dump_json().encode())
@@ -359,6 +386,9 @@ def test_group_end_follows_both_members_and_a_fresh_machine_restores_them(
     assert Counter(method for method, _ in storage.asked[reads:]) == {"GET": 2}
     fresh, _, restored = machine(tmp_path / "fresh", storage, run=address)
     fresh.restore(links, [work])
+    if delivered:
+        for member in members:
+            assert (restored / member / "blocks/one/scores.parquet").read_bytes() == b"scores"
     assert restore_set(restored) == restore_set(root) == journal.held(address)
     writes = storage.writes.copy()
     fresh._track(address, done=False)

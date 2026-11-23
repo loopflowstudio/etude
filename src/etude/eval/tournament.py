@@ -58,6 +58,7 @@ from etude.eval.records import (
     Match,
     MatchRecord,
     Player,
+    Rollup,
     RoundRobin,
     Seated,
     TournamentRun,
@@ -70,10 +71,11 @@ from etude.eval.records import (
     resolve_player,
     validate_checkpoints,
 )
-from etude.eval.run import ETUDE_TABLES, EvalRun, _evaluating_matches, _Report
+from etude.eval.run import ETUDE_TABLES, EvalRun, _Report
 from etude.eval.schedule import ordered
 from etude.records import Digest, Record
-from etude.run import RunListing, declare, declared, run_folders, under
+from etude.run import RunListing, declare, declared, destinations, run_folders, under
+from etude.stopping import Stopped
 from etude.storage import DirectoryStorage, Storage, default_root
 
 __all__ = ("evaluating", "scores", "ScorePoint", "Scores")
@@ -132,9 +134,9 @@ def evaluating(
             )
             for match in matches
         )
-        with _evaluating_matches(
+        with _open_evaluation(
+            tournament,
             experiment=experiment,
-            environment=tournament,
             matches=matches,
             run=run,
             directory=directory,
@@ -179,7 +181,7 @@ def evaluating(
         or os.environ.get("ETUDE_RUN")
         or (f"{folder_name(tournament.name)}.{digest(added.model_dump(mode='json'))[:12]}")
     )
-    with _evaluating_tournament(
+    with _open_evaluation(
         added,
         experiment=experiment,
         matches=pending,
@@ -192,30 +194,68 @@ def evaluating(
 
 
 @contextmanager
-def _evaluating_tournament(
-    recorded: TournamentRun,
+def _open_evaluation(
+    definition: Environment | TournamentRun,
     *,
     experiment: str,
     matches: Sequence[Match],
-    run: str,
+    run: str | None = None,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
+    rollups: Sequence[Rollup] = (),
     resume: bool = False,
     progress: _Report | None = None,
 ) -> Iterator[EvalRun]:
-    _record(recorded, experiment, run, directory, resume=resume)
-    with _evaluating_matches(
+    """Open the run once. A tournament also records the definition it will resume."""
+    if isinstance(definition, TournamentRun):
+        environment = definition.tournament.environment
+        rollups = definition.tournament.rollups
+    else:
+        environment = definition
+    if len({scheduled.key for scheduled in matches}) != len(matches):
+        raise EtudeError("duplicate_match", 422)
+    names = [rollup.name for rollup in rollups]
+    if len(set(names)) != len(names) or set(names) & set(ETUDE_TABLES):
+        raise EtudeError("rollup_name_refused", 422) from ValueError(names)
+    declared = declare(
         experiment=experiment,
-        environment=recorded.tournament.environment,
-        matches=matches,
+        clocks=(),
         run=run,
+        kind=KIND,
         directory=directory,
-        storages=storages,
-        rollups=recorded.tournament.rollups,
-        resume=True,
+        resume=resume,
+    )
+    if declared.record.kind != KIND:
+        raise EtudeError("run_is_not_an_eval_run", 409)
+    if isinstance(definition, TournamentRun):
+        _record_tournament(declared.root, definition)
+    path = declared.root / _ENVIRONMENT_FILE
+    if not path.is_file():
+        DirectoryStorage(declared.root).put(
+            _ENVIRONMENT_FILE, environment.model_dump_json().encode()
+        )
+    elif Environment.model_validate_json(path.read_bytes()) != environment:
+        raise EtudeError("eval_run_environment_conflict", 409)
+    writer = EvalRun(
+        declared.root,
+        declared.name,
+        destinations(declared.base, storages),
+        tuple(rollups),
+        experiment=experiment,
+        environment=environment,
+        matches=list(ordered(matches)),
         progress=progress,
-    ) as active:
-        yield active
+    )
+    try:
+        yield writer
+    except Stopped:
+        writer.finish("stopped")
+        raise
+    except BaseException:
+        writer.finish("failed")
+        raise
+    else:
+        writer.finish("finished")
 
 
 class Delivered(Record):
@@ -488,18 +528,11 @@ def _found(seated: Seated) -> tuple[str, str, tuple[tuple[tuple[str | None, ...]
     return seated.seating, str(seated.checkpoint), pairings
 
 
-def _record(
-    added: TournamentRun, experiment: str, run: str, directory: Path | str | None, *, resume: bool
-) -> None:
-    """Write `tournament.json` in the eval run's folder; a resumed run must have been held alike."""
-    declared = declare(
-        experiment=experiment, clocks=(), run=run, kind=KIND, directory=directory, resume=resume
-    )
-    if declared.record.kind != KIND:
-        raise EtudeError("run_is_not_an_eval_run", 409)
-    path = declared.root / TOURNAMENT_FILE
+def _record_tournament(root: Path, added: TournamentRun) -> None:
+    """A resumed tournament must have been held with the same definition."""
+    path = root / TOURNAMENT_FILE
     if not path.is_file():
-        DirectoryStorage(declared.root).put(TOURNAMENT_FILE, added.model_dump_json().encode())
+        DirectoryStorage(root).put(TOURNAMENT_FILE, added.model_dump_json().encode())
     elif _resumed(TournamentRun.model_validate_json(path.read_bytes())) != _resumed(added):
         raise EtudeError("eval_run_tournament_conflict", 409)
 

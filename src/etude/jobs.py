@@ -76,7 +76,7 @@ from etude.eval.run import (
     _terminable,
     play_together,
 )
-from etude.eval.tournament import _evaluating_tournament
+from etude.eval.tournament import _open_evaluation
 from etude.identity import run_address, stored_owner
 from etude.launch.records import Status
 from etude.out import MEMBERSHIP, OutFile, OutFiles, OutMember
@@ -850,7 +850,7 @@ def hold_group(
                 raise EtudeError("evaluation_names_no_experiment", 422)
             member = lifetime.enter_context(ExitStack())
             active = member.enter_context(
-                _evaluating_tournament(
+                _open_evaluation(
                     spec.tournament,
                     experiment=spec.experiment,
                     matches=spec.matches,

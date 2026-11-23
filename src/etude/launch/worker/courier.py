@@ -369,7 +369,11 @@ class Courier:
                 raise StorageUnavailable(f"restored file {key} is missing or has changed length")
             # Reuse the received bytes for verification and the sent marker;
             # restoring a large out file needs no second read from disk.
-            digest = hashlib.sha256(body).hexdigest() if key.startswith("out/") else None
+            digest = (
+                hashlib.sha256(body).hexdigest()
+                if key.startswith("out/") or key == "outcome.json"
+                else None
+            )
             if named is not None and (len(body) != named.size_bytes or digest != named.sha256):
                 raise StorageUnavailable(f"restored file {key} differs from its checkpoint record")
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -378,8 +382,6 @@ class Courier:
             partial.replace(target)
             if digest is not None:
                 self._sent[run, key] = pointers[key].decode() if key in pointers else digest
-            elif key == "outcome.json":
-                self._sent[run, key] = hashlib.sha256(body).hexdigest()
             else:
                 self._restored(run, key, target)
         if membership is not None:
@@ -595,28 +597,21 @@ class Courier:
             # skipped; what replaced it is seen on the next pass.
             try:
                 with attribute(purpose=purpose(key, recorded)):
-                    if key == "outcome.json" and snapshot.outcome is not None:
-                        digest = hashlib.sha256(snapshot.outcome).hexdigest()
-                        if self._sent.get((run, key)) != digest:
-                            self._runs[run].write_bytes(key, snapshot.outcome)
-                            self._sent[run, key] = digest
-                    elif key.startswith("out/"):
+                    if (frozen := snapshot.frozen(key)) is not None:
+                        fingerprint = hashlib.sha256(frozen).hexdigest()
                         if key in snapshot.pointers:
-                            pointer_body = snapshot.pointers[key]
-                            digest = hashlib.sha256(pointer_body).hexdigest()
-                            if self._sent.get((run, key)) != pointer_body.decode():
-                                self._runs[run].write_bytes(key, pointer_body)
-                                self._sent[run, key] = pointer_body.decode()
-                            out.append(
-                                OutFile(key=key, sha256=digest, size_bytes=len(pointer_body))
-                            )
-                        else:
-                            out.append(self._put_out(run, key, recorded.get(key)))
+                            out.append(OutFile(key=key, sha256=fingerprint, size_bytes=len(frozen)))
+                            fingerprint = frozen.decode()
+                        if self._sent.get((run, key)) != fingerprint:
+                            self._runs[run].write_bytes(key, frozen)
+                            self._sent[run, key] = fingerprint
+                    elif key.startswith("out/"):
+                        out.append(self._put_out(run, key, recorded.get(key)))
                     else:
                         self._put(folder / key, run, key)
             except FileNotFoundError:
                 if save_pointer(key) is not None or snapshot.outcome is not None:
-                    raise  # never publish a pointer after skipping one of its files
+                    raise  # A pointer or a final outcome must follow all its files.
                 continue
         if (folder / "out").is_dir() or (folder / OUT_PRESENT).is_file():
             body = OutFiles(files=tuple(out)).model_dump_json()

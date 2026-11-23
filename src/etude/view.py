@@ -512,22 +512,19 @@ class ChartIndex:
             state = state_of(metadata, experiment, retained=tuple(retained.values()))
             runs: tuple[TrainingRunSummary | EvalRunSummary, ...] = (*state.runs, *state.eval_runs)
             for run in runs:
-                data = run._data
                 record = retained[run.status.run].record if run.status else None
-                if isinstance(run, EvalRunSummary):
-                    address = run.address
-                elif data:
-                    address = data.address
-                else:
-                    assert record is not None  # Every summary has files or a launcher record.
-                    address = record.id
+                # Stored training charts keep their compact address through a launcher alias.
+                address = (
+                    run._data.address
+                    if isinstance(run, TrainingRunSummary) and run._data
+                    else run.address
+                )
                 chart = files.get(address)
                 _store_run(
                     db,
                     address,
                     experiment,
                     run,
-                    data,
                     record,
                     _CLOCKS.validate_json(chart["reached"]) if chart and chart["reached"] else {},
                     chart["preferred"] if chart else None,
@@ -805,10 +802,13 @@ def _hold_files(
 ) -> dict[str, str]:
     # A group is observed as one run. Keep its previous generation in full
     # if a member or its root changed again during the read.
-    folders = {
-        run.folders[0]: run.file for run in listing.declarations if run.file.kind == "evaluation"
-    }
+    addresses: dict[str, str] = {}
     if any(key.endswith("/") for key in vanished):
+        folders = {
+            run.folders[0]: run.file
+            for run in listing.declarations
+            if run.file.kind == "evaluation"
+        }
         # Only removed or missed copies lack a staged row. Each contains metadata
         # for one physical folder, independent of how many matches it delivered.
         old = db.execute("""SELECT address,metadata FROM files
@@ -829,8 +829,6 @@ def _hold_files(
         addresses = {
             key: run_address(file.id, file.experiment) for key, file in folders.items()
         } | owners
-    else:
-        addresses = {}
     for key, reason in vanished.items():
         if key.endswith("/") and key not in addresses:
             # The discovery itself is incomplete. Until its declaration can
@@ -891,11 +889,11 @@ def _store_run(
     address: str,
     experiment: str,
     run: TrainingRunSummary | EvalRunSummary,
-    stored: RunData | None,
     record: RunRecord | None,
     reached: dict[str, float],
     preferred: str | None,
 ) -> None:
+    stored = run._data
     file = stored.file if stored else None
     job = record.launch.spec if record else None
     status = run.status

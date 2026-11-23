@@ -167,9 +167,7 @@ def state_of(
                 for m in spec.matches
             )
             summary = evals.get(record.id) or jobs.EvalRunSummary(name=name, state="queued")
-            evals[record.id] = _join_allocation(
-                replace(summary, matches=matches), summary._data, item
-            )
+            evals[record.id] = _join_allocation(replace(summary, matches=matches), item)
             continue
         launch = record.launch.spec.name
         training = find_training_run(runs.values(), record.id, launch, record.seed)
@@ -184,7 +182,7 @@ def state_of(
                 state="queued",
                 checkpoints=jobs.Checkpoints(),
             )
-        runs[training.name] = _join_allocation(training, training._data, item)
+        runs[training.name] = _join_allocation(training, item)
     return jobs.ExperimentState(
         experiment=experiment,
         runs=tuple(runs.values()),
@@ -224,16 +222,18 @@ def locate_evaluation_members(
             continue
         # A retained launch alone cannot claim a standalone tournament of the same name.
         member = run_address(record.id, record.experiment)
-        parent, sep, rest = folder.rstrip("/").rpartition("/" + member)
-        if sep and not rest:
-            parent_record = folders.get(parent + "/")
-            if parent_record and parent_record.members is not None:
-                continue  # A portable group declares its entire membership.
-            parts = parent.split("/")
-            for candidate in ("/".join(parts[-2:]), parts[-1]):
-                if (candidate, member) in legacy:
-                    owners[folder] = candidate
-                    break
+        suffix = "/" + member + "/"
+        if not folder.endswith(suffix):
+            continue
+        parent = folder.removesuffix(suffix)
+        parent_record = folders.get(parent + "/")
+        if parent_record and parent_record.members is not None:
+            continue  # A portable group declares its entire membership.
+        parts = parent.split("/")
+        for candidate in ("/".join(parts[-2:]), parts[-1]):
+            if (candidate, member) in legacy:
+                owners[folder] = candidate
+                break
     return owners
 
 
@@ -247,19 +247,15 @@ def _evaluations(
         {d.eval_folder: d.file for d in copies if d.eval_folder and d.file}, launches
     )
     inputs: dict[str, list[RunData]] = defaultdict(list)
-    roots: dict[str, list[RunData]] = defaultdict(list)
     for data in copies:
         owner = owners.get(data.eval_folder or "")
         inputs[owner or data.address].append(data)
-        if owner is None:
-            roots[data.address].append(data)
 
     summaries: dict[str, jobs.EvalRunSummary] = {}
     for address, files in inputs.items():
         # A copied launch may have a newer writer or a later delivery of that writer's end.
-        candidates = roots[address]
         root = max(
-            candidates,
+            (data for data in files if data.eval_folder not in owners),
             key=lambda d: (
                 d.writers[-1].started_ms if d.writers else -1,
                 d.outcome is not None,
@@ -267,21 +263,23 @@ def _evaluations(
             ),
             default=None,
         )
+        state = root.stored_state if root else "running"
         summaries[address] = jobs.EvalRunSummary(
             name=address.removeprefix(experiment + "/"),
-            state=root.stored_state if root else "running",
+            state=state,
             last_write=max((d.last_write for d in files if d.last_write), default=None),
             _data=root,
-            file_state=root.stored_state if root else "running",
+            file_state=state,
         )
     return summaries
 
 
 def _join_allocation[Run: (jobs.TrainingRunSummary, jobs.EvalRunSummary)](
-    run: Run, data: RunData | None, item: Standing
+    run: Run, item: Standing
 ) -> Run:
     """Join the accepted file outcome to the allocation that could have written it."""
     status = item.status
+    data = run._data
     writers = data.writers if data else ()
     latest = writers[-1] if writers else None
     outcome = data.outcome if data else None

@@ -4,7 +4,7 @@ A run's folder (`etude.storage.run_directory`) reaches storage by one of
 two carriers: the tracker's shipper (`etude.run`) when a script runs
 on its own, and the launcher's courier (`etude.launch.worker.courier`) when it
 was launched, so the job's environment never holds bucket credentials. Both
-decide here which files are ready (`listing`), their order, the transfer's
+decide here which files are ready (`publication`), their order, the transfer's
 purpose, what a writer retired (`retired`), and which objects are never sent
 twice (`immutable`): Etude's own blocks, tables and checkpoints, and any
 file an author writes under a run's `artifacts/` folder. An eval run's
@@ -75,6 +75,8 @@ def checkpoint_key(address: str) -> str:
 
 
 ARTIFACTS = "artifacts"
+# Portable records at a run root, including the historical state.json outcome.
+RUN_FILES = ("run.json", "environment.json", "tournament.json", "state.json", "outcome.json")
 # An eval run's sealed block is a folder `blocks/WRITTEN.WRITER/`; its index is written last.
 EVAL_BLOCKS = "blocks"
 EVAL_BLOCK_INDEX = "block.json"
@@ -131,9 +133,8 @@ def _rank(key: str) -> int:
 
 
 def _listing(root: Path, *, tail_seconds: float) -> list[str]:
-    """Ready files as slash-separated keys, ordered by delivery rank then key.
+    """Ready files as slash-separated keys.
 
-    Out files share the first rank, so their membership is already in key order.
     A file still being written (`.open`, `.partial`) waits until it is whole,
     and anything under a folder starting with `.` (a carrier's own markers)
     never leaves. A tail is ready once it is `tail_seconds` old: 0 once its
@@ -156,7 +157,7 @@ def _listing(root: Path, *, tail_seconds: float) -> list[str]:
         if path.suffix == ".tail" and tail_seconds > 0 and now - stat.st_mtime < tail_seconds:
             continue
         keys.append(name.as_posix())
-    return sorted(keys, key=lambda key: (_rank(key), key))
+    return keys
 
 
 POINTER = "current.json"
@@ -265,11 +266,15 @@ def recovery_files(
 
 @dataclass(frozen=True)
 class Publication:
-    """One delivery's selected files and frozen pointers, captured before any upload."""
+    """One delivery's ordered files, state pointers and run outcome."""
 
     keys: tuple[str, ...]
     pointers: Mapping[str, bytes]
     outcome: bytes | None
+
+    def frozen(self, key: str) -> bytes | None:
+        """Content captured before listing the files it commits."""
+        return self.outcome if key == "outcome.json" else self.pointers.get(key)
 
 
 def publication(root: Path, *, tail_seconds: float) -> Publication:
@@ -464,20 +469,14 @@ def evaluation_files(keys: Collection[str], declaration: bytes | None) -> set[st
             raise ValueError("invalid evaluation recovery path")
         if key == "outcome.json" or key.startswith("metrics/") and key.endswith(".json"):
             found.add(key)
-        else:
-            parent, _, leaf = key.rpartition("/")
-            if parent in folders and leaf in (
-                "run.json",
-                "environment.json",
-                "tournament.json",
-                "state.json",
-                "outcome.json",
-            ):
-                found.add(key)
-            elif any(
-                key.partition("/" + kind + "/")[0] in folders
-                for kind in (EVAL_BLOCKS, "tables", "matches")
-            ):
+            continue
+        # Interpret the path inside its tournament. A member can itself be named "blocks".
+        parent = key.rpartition("/")[0]
+        while parent and parent not in folders:
+            parent = parent.rpartition("/")[0]
+        if parent:
+            name = key[len(parent) + 1 :]
+            if name in RUN_FILES or name.startswith((EVAL_BLOCKS + "/", "tables/", "matches/")):
                 found.add(key)
     return found
 
@@ -489,20 +488,20 @@ def restore_set(root: Path) -> dict[str, bytes]:
     all of out, and the note of every checkpoint name
     `taken`. Metric blocks and other copied milestones remain in storage.
     """
-    keys = [f"{CHECKPOINTS}/{path.name}" for path in sorted((root / CHECKPOINTS).glob("*.json"))]
-    if (root / "run.json").is_file():
-        keys.append("run.json")
+    files: dict[str, bytes] = {}
+    declaration = root / "run.json"
+    if declaration.is_file():
+        files["run.json"] = declaration.read_bytes()
+    snapshot = publication(root, tail_seconds=0)
+    keys = evaluation_files(snapshot.keys, files.get("run.json"))
+    keys.update(f"{CHECKPOINTS}/{path.name}" for path in (root / CHECKPOINTS).glob("*.json"))
+    keys.update(key for key in snapshot.keys if key.startswith("out/"))
     wanted = resume_file(root)
     if wanted is not None and (root / wanted.key).is_file():
-        keys.append(wanted.key)
-    snapshot = publication(root, tail_seconds=0)
-    keys.extend(key for key in snapshot.keys if key.startswith("out/"))
-    declaration = (root / "run.json").read_bytes() if "run.json" in keys else None
-    keys.extend(sorted(evaluation_files(snapshot.keys, declaration)))
-    files = {
-        key: snapshot.pointers[key] if key in snapshot.pointers else (root / key).read_bytes()
-        for key in dict.fromkeys(keys)
-    }
+        keys.add(wanted.key)
+    for key in sorted(keys):
+        body = snapshot.frozen(key)
+        files[key] = body if body is not None else (root / key).read_bytes()
     if (root / "out").is_dir() or (root / OUT_PRESENT).is_file():
         files[OUT_PRESENT] = b""
     files[STORED] = "".join(name + "\n" for name in sorted(taken(root))).encode()
