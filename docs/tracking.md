@@ -155,6 +155,14 @@ opened before the run appears names the source the view is watching.
 | `/runs/ADDRESS?observe=1` | Current source ages and the version of the run shown in the tab |
 | `/machines` | Held machines with their pool or on-demand, readiness, window and cost. Each occupied slot links to its run and shows its state and clock. |
 | `/machines/status` | The inventory used to refresh the Machines page |
+| `/reports` | Links to each experiment’s report |
+
+Use the side rail to switch pages, open an active experiment or jump to a
+held machine’s row. Idle machines are marked. The hourly total counts each
+held rental once, including idle rentals. The loop age dates the last
+scheduler heartbeat. The rail updates with the visible page, including
+beside a report you have already built. Below 700 px it becomes a scrollable
+top row. Printing omits it.
 
 **Experiments.** The experiment page opens with its run status table. The
 report loads in a separate frame so you can read status during a report build.

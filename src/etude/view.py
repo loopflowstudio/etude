@@ -77,15 +77,18 @@ _UNREAD = "{} appear once the view has read the run files."
 _CLOCKS = TypeAdapter(dict[str, float])
 
 # A changed schema starts a fresh rebuildable index.
-_SCHEMA = """
+_MAY_BE_OPEN = "file_state IN ('running','queued') OR phase != 'done'"
+_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS runs (
     address TEXT PRIMARY KEY, experiment TEXT NOT NULL, kind TEXT NOT NULL,
     eval_last_write TEXT, file_job TEXT, file_state TEXT, file_position TEXT, file_config TEXT, file_continues TEXT, checkpoints TEXT,
     launched_as TEXT, launcher_job TEXT, launcher_state TEXT, launcher_position TEXT,
-    launcher_config TEXT, launcher_continues TEXT, source TEXT, status TEXT, max_attempts INTEGER
+    launcher_config TEXT, launcher_continues TEXT, source TEXT, status TEXT, max_attempts INTEGER,
+    phase TEXT GENERATED ALWAYS AS (json_extract(status,'$.phase')) VIRTUAL
 );
 CREATE INDEX IF NOT EXISTS launcher_address ON runs(launched_as,experiment) WHERE launched_as IS NOT NULL;
 CREATE INDEX IF NOT EXISTS experiment_runs ON runs(experiment, address);
+CREATE INDEX IF NOT EXISTS open_runs ON runs(experiment) WHERE {_MAY_BE_OPEN};
 CREATE TABLE IF NOT EXISTS files (
     address TEXT PRIMARY KEY, experiment TEXT NOT NULL, inputs TEXT NOT NULL, reached TEXT,
     preferred TEXT, last_write TEXT, metadata TEXT NOT NULL
@@ -101,7 +104,7 @@ CREATE TABLE IF NOT EXISTS consoles (
     run TEXT PRIMARY KEY, body TEXT NOT NULL, collected TEXT, gaps INTEGER NOT NULL, final_attempt INTEGER
 );
 CREATE TABLE IF NOT EXISTS observation (
-    id INTEGER PRIMARY KEY, at TEXT, file_error TEXT, launcher_at TEXT, last_loop TEXT, server TEXT, machines TEXT, standing TEXT
+    id INTEGER PRIMARY KEY, at TEXT, file_error TEXT, launcher_at TEXT, last_loop TEXT, server TEXT, machines TEXT, machine_rail TEXT, standing TEXT
 );
 CREATE TABLE IF NOT EXISTS declarations (
     experiment TEXT PRIMARY KEY, file TEXT NOT NULL, accepted TEXT, error TEXT
@@ -115,12 +118,14 @@ _OBSERVED = """
 WITH observed AS (
     SELECT at, file_error, server IS :remote AS matches,
            CASE WHEN server IS :remote THEN launcher_at END AS launcher_at,
-           CASE WHEN server IS :remote THEN last_loop END AS last_loop
+           CASE WHEN server IS :remote THEN last_loop END AS last_loop,
+           CASE WHEN server IS :remote THEN machine_rail END AS machine_rail
     FROM observation WHERE id=1
 )
 """
 _VISIBLE = f"""{_OBSERVED}, visible AS (
-    SELECT runs.address, runs.experiment, kind, coalesce(eval_last_write,files.last_write) AS last_write, files.inputs,
+    SELECT runs.address, runs.experiment, kind, ({_MAY_BE_OPEN}) AS may_be_open,
+           CASE WHEN matches THEN phase END AS phase, coalesce(eval_last_write,files.last_write) AS last_write, files.inputs,
            CASE WHEN held_files.address IS NULL THEN at ELSE held_files.observed_at END AS at,
            file_error, launcher_at, last_loop, checkpoints,
            coalesce(CASE WHEN matches THEN launcher_job END, file_job) AS job,
@@ -282,13 +287,14 @@ class ChartIndex:
             return  # Another view has already published a newer answer.
 
         db.execute(
-            """INSERT INTO observation(id,server,launcher_at,last_loop,standing) VALUES(1,?,?,?,?)
+            """INSERT INTO observation(id,server,launcher_at,last_loop,machine_rail,standing) VALUES(1,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET server=excluded.server,launcher_at=excluded.launcher_at,
-                   last_loop=excluded.last_loop,standing=excluded.standing""",
+                   last_loop=excluded.last_loop,machine_rail=excluded.machine_rail,standing=excluded.standing""",
             (
                 remote,
                 stamp,
                 launcher.last_loop.isoformat() if launcher.last_loop else None,
+                _held_machines(launcher.machines) if launcher.machines is not None else None,
                 launcher.model_dump_json(exclude={"consoles"}, round_trip=True),
             ),
         )
@@ -540,40 +546,57 @@ class ChartIndex:
             "DELETE FROM consoles WHERE NOT EXISTS (SELECT 1 FROM runs WHERE launched_as=consoles.run)"
         )
 
+    @contextmanager
+    def snapshot(self) -> Iterator[_ViewSnapshot]:
+        with self._connect() as db:
+            db.execute("BEGIN")
+            yield _ViewSnapshot(db, selected(), self)
+
+    def request_console(self, remote: str | None, run: str) -> None:
+        with self._console_lock:
+            if remote == self._server:
+                self._wanted.add(run)
+
+
+@dataclass(frozen=True)
+class _ViewSnapshot:
+    """One index snapshot for the page and its rail, scoped to the selected launcher."""
+
+    db: sqlite3.Connection
+    remote: str | None
+    index: ChartIndex
+
     def run(self, address: str, *, observe: bool = False) -> str | None:
-        remote = selected()
+        remote = self.remote
         # The document reads its chart in the same snapshot as its change token.
         payload = (
             "NULL" if observe else "(SELECT payload FROM charts WHERE address=visible.address)"
         )
-        with self._connect() as db:
-            row = db.execute(
-                _VISIBLE
-                + f"""
-                SELECT visible.*, {payload} AS payload, declarations.error AS report_error,
-                       consoles.body, consoles.collected, consoles.gaps, consoles.final_attempt AS console_attempt
-                FROM visible
-                LEFT JOIN consoles ON consoles.run=visible.launched_as
-                LEFT JOIN declarations USING(experiment)
-                WHERE address=coalesce(
-                    (SELECT address FROM runs WHERE address=:address),
-                    (SELECT address FROM runs WHERE launched_as=:address AND (SELECT matches FROM observed))
-                )
-                """,
-                {"remote": remote, "address": address},
-            ).fetchone()
+        row = self.db.execute(
+            _VISIBLE
+            + f"""
+            SELECT visible.*, {payload} AS payload, declarations.error AS report_error,
+                   consoles.body, consoles.collected, consoles.gaps, consoles.final_attempt AS console_attempt
+            FROM visible
+            LEFT JOIN consoles ON consoles.run=visible.launched_as
+            LEFT JOIN declarations USING(experiment)
+            WHERE address=coalesce(
+                (SELECT address FROM runs WHERE address=:address),
+                (SELECT address FROM runs WHERE launched_as=:address AND (SELECT matches FROM observed))
+            )
+            """,
+            {"remote": remote, "address": address},
+        ).fetchone()
         if row is None:
             return self.waiting() if observe else None
         now = datetime.now(UTC)
         state = _display_state(row)
         status = _status(row)
         run_line = _run_line(row, state, status)
-        error = self.read_error(remote, row["file_error"], report=row["report_error"])
+        error = self.index.read_error(remote, row["file_error"], report=row["report_error"])
         # Session shutdown can still retain final logs after the run itself ended.
         if status is not None and (not status.done or row["console_attempt"] != status.attempts):
-            with self._console_lock:
-                if remote == self._server:
-                    self._wanted.add(row["launched_as"])
+            self.index.request_console(remote, row["launched_as"])
 
         # inputs identifies the sealed files and their report panels. Hash the displayed
         # launcher facts at their rendered precision so a sub-cent change leaves the chart mounted.
@@ -612,7 +635,7 @@ class ChartIndex:
         heading = (
             f'<a href="{page}">{breadcrumb}</a>'
             f'<header class="head"><h1>{title}</h1></header>'
-            f"<p>{run_line}</p>{row['continues'] or ''}{observation}{_refresh_script()}"
+            f"<p>{run_line}</p>{row['continues'] or ''}{observation}"
         )
         if evaluation:
             heading += f'<p>Scores are in the <a href="{page}#report">{experiment} report</a>.</p>'
@@ -642,42 +665,41 @@ class ChartIndex:
         return render_run(address, row["payload"], heading, below, _TRAINING_TABS)
 
     def waiting(self) -> str:
-        source = self.source.uri("run.json").removesuffix("run.json")
+        source = self.index.source.uri("run.json").removesuffix("run.json")
         message = f"Waiting for the run to appear in {source}."
-        if error := self.read_error(selected(), self.error):
+        row = self.db.execute("SELECT file_error FROM observation WHERE id=1").fetchone()
+        if error := self.index.read_error(self.remote, row[0] if row else None):
             message += " " + error
         return _observation("run", "waiting", message)
 
     def _list_runs(
-        self, remote: str | None, experiment: str | None = None
+        self, experiment: str | None = None
     ) -> tuple[sqlite3.Row | None, list[sqlite3.Row]]:
         # Both tables and their ages come from one generation. Leave large chart,
         # console and machine payloads out of these reads.
         query = _VISIBLE + (
-            "SELECT experiment,address,job,state,position,status,max_attempts,last_write,at,continues FROM visible"
+            "SELECT experiment,address,job,state,phase,position,status,max_attempts,last_write,at,continues FROM visible"
         )
-        params = {"experiment": experiment, "remote": remote}
-        with self._connect() as db:
-            db.execute("BEGIN")
-            observation = db.execute(
-                _OBSERVED
-                + """SELECT at,file_error,last_loop,launcher_at,
-                          (SELECT error FROM declarations WHERE experiment=:experiment) AS report_error
-                   FROM observed""",
-                params,
-            ).fetchone()
-            if observation is None:
-                return None, []
-            rows = (
-                db.execute(query + " ORDER BY experiment,address", params)
-                if experiment is None
-                else db.execute(query + " WHERE experiment=:experiment ORDER BY address", params)
-            )
-            return observation, rows.fetchall()
+        params = {"experiment": experiment, "remote": self.remote}
+        observation = self.db.execute(
+            _OBSERVED
+            + """SELECT at,file_error,last_loop,launcher_at,
+                      (SELECT error FROM declarations WHERE experiment=:experiment) AS report_error
+               FROM observed""",
+            params,
+        ).fetchone()
+        if observation is None:
+            return None, []
+        rows = (
+            self.db.execute(query + " ORDER BY experiment,address", params)
+            if experiment is None
+            else self.db.execute(query + " WHERE experiment=:experiment ORDER BY address", params)
+        )
+        return observation, rows.fetchall()
 
     def experiments(self) -> str:
-        remote = selected()
-        observation, rows = self._list_runs(remote)
+        remote = self.remote
+        observation, rows = self._list_runs()
         now = datetime.now(UTC)
         opened: list[str] = []
         completed: list[str] = []
@@ -694,7 +716,7 @@ class ChartIndex:
                 if written and (latest is None or written > latest):
                     latest = written
                 status = _status(run)
-                if _is_open(status, state):
+                if _is_open(run, state):
                     address = run["address"]
                     detail = _run_line(run, state, status)
                     active.append(f"<div>{_run_link(address)} · {detail}</div>")
@@ -718,20 +740,19 @@ class ChartIndex:
         return _live_status(
             body,
             stale=stale,
-            error=self.read_error(remote, observation["file_error"] if observation else None),
+            error=self.index.read_error(remote, observation["file_error"] if observation else None),
         )
 
     def machines(self) -> str:
-        if remote := selected():
+        if remote := self.remote:
             return _live_status(
                 f"<p>The launcher database is on {escape(remote)}. "
                 "Run <code>etude machines</code> to list its machines.</p>",
             )
-        with self._connect() as db:
-            row = db.execute(
-                "SELECT at,file_error,launcher_at,last_loop,machines FROM observation WHERE id=1 AND server IS NULL"
-            ).fetchone()
-        error = self.read_error(None, row["file_error"] if row else None)
+        row = self.db.execute(
+            "SELECT at,file_error,launcher_at,last_loop,machines FROM observation WHERE id=1 AND server IS NULL"
+        ).fetchone()
+        error = self.index.read_error(None, row["file_error"] if row else None)
         if row is None or (row["launcher_at"] is None and not error):
             body = "<p>Waiting for the first local observation.</p>"
         elif row["machines"] is not None:
@@ -743,22 +764,79 @@ class ChartIndex:
             body = "<p>No launcher is used here.</p>"
         return _live_status(body, error=error)
 
+    def reports(self, declared: dict[str, Path]) -> str:
+        names = set(declared)
+        names.update(
+            row[0]
+            for row in self.db.execute(
+                _VISIBLE + "SELECT DISTINCT experiment FROM visible", {"remote": self.remote}
+            )
+        )
+        links = "".join(
+            f'<li><a href="/experiments/{quote(name)}/report">{escape(name)}</a></li>'
+            for name in sorted(names)
+        )
+        return _live_status(f"<ul>{links}</ul>" if links else "<p>No experiments yet.</p>")
+
+    def rail(self, section: str) -> str:
+        # The partial index skips completed history, and no chart or console is selected.
+        rows = self.db.execute(
+            _VISIBLE
+            + "SELECT experiment,state,phase,last_write,at FROM visible WHERE may_be_open ORDER BY experiment",
+            {"remote": self.remote},
+        )
+        links = []
+        for name, runs in groupby(rows, itemgetter("experiment")):
+            states = {state for row in runs if _is_open(row, state := _display_state(row))}
+            if states:
+                label = escape(", ".join(sorted(states)))
+                links.append(
+                    f'<a href="/experiments/{quote(name)}"><i class="state-dot" '
+                    f'role="img" aria-label="{label}" title="{label}"></i>{escape(name)}</a>'
+                )
+        row = self.db.execute(
+            _OBSERVED + "SELECT at,machine_rail,last_loop FROM observed",
+            {"remote": self.remote},
+        ).fetchone()
+        empty = "None" if row and row["at"] else "Awaiting file observation"
+        opened = "".join(links) or f"<span>{empty}</span>"
+        machines = row["machine_rail"] if row else None
+        loop = (
+            "last loop " + _age(row["last_loop"], datetime.now(UTC))
+            if row and row["last_loop"]
+            else "Loop age unavailable"
+        )
+        nav = []
+        for path, label in (
+            ("/", "Experiments"),
+            ("/machines", "Machines"),
+            ("/reports", "Reports"),
+        ):
+            current = ' aria-current="location"' if path == section else ""
+            nav.append(f'<a href="{path}"{current}>{label}</a>')
+        return (
+            f'<nav id="view-rail" aria-label="Live view" data-refresh="{_REFRESH * 1000}">'
+            f'<div class="rail-pages">{"".join(nav)}</div>'
+            f'<div class="rail-group"><h2>Open experiments</h2>{opened}</div>'
+            f'<div class="rail-group"><h2>Held machines</h2>{machines or "<span>Inventory unavailable</span>"}</div>'
+            f'<div class="rail-loop">{loop}</div></nav>'
+        )
+
     def report_ready(self, experiment: str, *, declared: bool) -> bool | None:
         """Whether a known experiment has indexed files. Unknown experiments have no page."""
-        with self._connect() as db:
-            row = db.execute(
-                _VISIBLE
-                + """SELECT CASE
-                        WHEN EXISTS (SELECT 1 FROM files WHERE experiment=:experiment) THEN 1
-                        WHEN :declared OR EXISTS (SELECT 1 FROM visible WHERE experiment=:experiment) THEN 0
-                     END""",
-                {"experiment": experiment, "declared": declared, "remote": selected()},
-            ).fetchone()
+        row = self.db.execute(
+            _VISIBLE
+            + """SELECT CASE
+                    WHEN EXISTS (SELECT 1 FROM files WHERE experiment=:experiment) THEN 1
+                    WHEN :declared OR EXISTS (SELECT 1 FROM visible WHERE experiment=:experiment) THEN 0
+                 END""",
+            {"experiment": experiment, "declared": declared, "remote": self.remote},
+        ).fetchone()
         return bool(row[0]) if row[0] is not None else None
 
     def experiment_status(self, experiment: str, *, declared: bool) -> str | None:
-        remote = selected()
-        observation, rows = self._list_runs(remote, experiment)
+        remote = self.remote
+        observation, rows = self._list_runs(experiment)
         if not declared and not rows:
             return None
         now = datetime.now(UTC)
@@ -792,7 +870,7 @@ class ChartIndex:
             f'{table}<p class="context">{escape(ages)}</p>'
             '<p class="lbl">No machine samples recorded.</p></section>',
             stale=stale,
-            error=self.read_error(
+            error=self.index.read_error(
                 remote,
                 observation["file_error"] if observation else None,
                 report=observation["report_error"] if observation else None,
@@ -969,6 +1047,17 @@ def _handoff(experiment: str, edge: Continuation, parent: str | None) -> str:
     return f'<div class="context">Continued from {link} at {escape(edge.clock)} {number(edge.value)}</div>'
 
 
+def _held_machines(machines: tuple[MachineStatus, ...]) -> str:
+    links = []
+    for status in machines:
+        name = status.machine.name
+        idle = ' <span class="idle">idle</span>' if not status.runs else ""
+        links.append(f'<a href="/machines#machine-{quote(name)}">{escape(name)}{idle}</a>')
+    rate = sum(status.cost.rental.usd_per_hour for status in machines if status.cost)
+    held = "".join(links) or "<span>None</span>"
+    return f'{held}<span class="rail-rate">${rate:.2f} an hour</span>'
+
+
 def _machines_table(db: sqlite3.Connection, machines: tuple[MachineStatus, ...]) -> str:
     if not machines:
         return "<p>No machines held.</p>"
@@ -997,7 +1086,7 @@ def _machines_table(db: sqlite3.Connection, machines: tuple[MachineStatus, ...])
         if warning := machine_warning(status):
             description += f"<div>{escape(warning)}</div>"
         rows.append(
-            f'<tr><th scope="row">{escape(machine.name)}</th><td>{escape(machine.supply)}</td>'
+            f'<tr id="machine-{escape(machine.name)}"><th scope="row">{escape(machine.name)}</th><td>{escape(machine.supply)}</td>'
             f"<td>{description}</td><td>{''.join(runs) or 'Idle'}</td></tr>"
         )
     return _table(
@@ -1026,8 +1115,8 @@ def _run_line(
     return " · ".join(parts)
 
 
-def _is_open(status: Status | None, state: str) -> bool:
-    return not status.done if status else state in ("queued", "running")
+def _is_open(row: sqlite3.Row, state: str) -> bool:
+    return row["phase"] != "done" if row["phase"] else state in ("queued", "running")
 
 
 def _live_status(body: str, *, stale: bool = False, error: str | None = None) -> str:
@@ -1058,17 +1147,16 @@ def _experiments_table(title: str, rows: list[str]) -> str:
     return f'<section class="sec"><h2>{title}</h2>{table}</section>'
 
 
-def _status_page(title: str, status: str, *, before: str = "", after: str = "") -> str:
+def _status_page(title: str, status: str, *, after: str = "") -> str:
     return _document(
         title,
-        f'{before}<header class="head"><h1>{escape(title)}</h1></header>{status}'
-        f"{_refresh_script()}{after}",
+        f'<header class="head"><h1>{escape(title)}</h1></header>{status}{after}',
     )
 
 
 def _display_state(row: sqlite3.Row) -> str:
     state: str = row["state"]
-    if state == "running" and row["status"] is None and row["last_write"]:
+    if state == "running" and row["phase"] is None and row["last_write"]:
         if datetime.fromisoformat(row["at"]) - datetime.fromisoformat(row["last_write"]) >= _SILENT:
             return "no end recorded"
     return state
@@ -1196,9 +1284,11 @@ def _observation(page: str, token: str, message: str, collected: str = "") -> st
     )
 
 
-def _refresh_script() -> str:
-    script = read_asset("refresh_status.js")
-    return f'<p id="status-error" role="status"></p><script>{script}</script>'
+def _shell(html: str, rail: str) -> str:
+    # Both document templates put body tags outside escaped author content.
+    opening = f'<body>{rail}<div class="view-body"><p id="status-error" role="status"></p>'
+    closing = f"</div><script>{read_asset('refresh_status.js')}</script></body>"
+    return html.replace("<body>", opening, 1).replace("</body>", closing, 1)
 
 
 def _document(title: str, body: str) -> str:
@@ -1206,7 +1296,7 @@ def _document(title: str, body: str) -> str:
     return (
         f'<!doctype html><html lang="en"><meta charset="utf-8">'
         f'<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f'<title>{escape(title)} · Etude</title><style>{css}</style><main class="wrap">{body}</main></html>'
+        f'<title>{escape(title)} · Etude</title><style>{css}</style><body><main class="wrap">{body}</main></body></html>'
     )
 
 
@@ -1290,54 +1380,69 @@ class Server(ThreadingHTTPServer):
     def page(self, route: str, *, refresh: bool = False) -> str | None:
         url = urlsplit(route)
         path = unquote(url.path)
-        observe = parse_qs(url.query).get("observe") == ["1"]
-        if path.startswith("/runs/"):
-            return self.index.run(path.removeprefix("/runs/"), observe=observe)
-        if path in ("/", "/status"):
-            overview = self.index.experiments()
-            return (
-                _status_page("Experiments", overview, before='<a href="/machines">Machines</a>')
-                if path == "/"
-                else overview
-            )
-        if path in ("/machines", "/machines/status"):
-            listing = self.index.machines()
-            return (
-                _status_page("Machines", listing, before='<a href="/">Experiments</a>')
-                if path == "/machines"
-                else listing
-            )
-        if not path.startswith("/experiments/"):
-            return None
-        experiment, _, component = path.removeprefix("/experiments/").partition("/")
-        if component == "report":
-            return self._report(experiment, refresh=refresh, observe=observe)
-        if component not in ("", "status"):
-            return None
-        status = self.index.experiment_status(experiment, declared=experiment in self.files)
-        if component or status is None:
-            return status
-        return _status_page(
-            experiment,
-            status,
-            before='<a href="/">Experiments</a>',
-            after=f'<iframe id="report" title="Experiment report" src="/experiments/{quote(experiment)}/report" style="width:100%;height:80vh;border:0"></iframe>',
-        )
-
-    def _report(self, experiment: str, *, refresh: bool, observe: bool) -> str | None:
-        """Wait for indexed files, then share the first build and explicit refreshes."""
-        ready = self.index.report_ready(experiment, declared=experiment in self.files)
-        if ready is None:
-            return None
-        with self._lock:
-            html = self._html.get(experiment)
-            if not ready and html is None:
+        query = parse_qs(url.query)
+        observe = query.get("observe") == ["1"]
+        if report := re.fullmatch(r"/experiments/([^/]+)/report", path):
+            experiment = report[1]
+            with self.index.snapshot() as view:
+                ready = view.report_ready(experiment, declared=experiment in self.files)
+                if ready is None:
+                    return None
+                rail = "" if query.get("embed") == ["1"] else view.rail("/reports")
+            # Release the index snapshot before building or waiting on an authored report.
+            with self._lock:
+                waiting = not ready and experiment not in self._html
+            if waiting:
                 if refresh:
                     raise ValueError("Waiting for run files.")
                 notice = _observation("report", "waiting", "Waiting for run files.")
-                return notice if observe else _document(experiment, notice + _refresh_script())
+                return notice + rail if observe else _shell(_document(experiment, notice), rail)
             if observe:
-                return _observation("report", "ready", "Building report…")
+                return _observation("report", "ready", "Building report…") + rail
+            report_html = self._report(experiment, refresh=refresh)
+            return _shell(report_html, rail) if rail else report_html
+
+        with self.index.snapshot() as view:
+            if path.startswith("/runs/"):
+                html = view.run(path.removeprefix("/runs/"), observe=observe)
+                if html is None:
+                    return None
+                rail = view.rail("/")
+                return html + rail if observe else _shell(html, rail)
+
+            route = path.removesuffix("/status") or "/"
+            after = ""
+            section = "/"
+            if route == "/":
+                title, status = "Experiments", view.experiments()
+            elif route == "/machines":
+                title, status = "Machines", view.machines()
+                section = route
+            elif route == "/reports":
+                title, status = "Reports", view.reports(self.files)
+                section = route
+            elif match := re.fullmatch(r"/experiments/([^/]+)(/status)?/?", path):
+                title = match[1]
+                found = view.experiment_status(title, declared=title in self.files)
+                if found is None:
+                    return None
+                status = found
+                after = (
+                    f'<iframe id="report" title="Experiment report" src="/experiments/{quote(title)}/report?embed=1" '
+                    'style="width:100%;height:80vh;border:0"></iframe>'
+                )
+                route = "/experiments/" + title
+            else:
+                return None
+            rail = view.rail(section)
+            if path == route.rstrip("/") + "/status":
+                return status + rail
+            return _shell(_status_page(title, status, after=after), rail)
+
+    def _report(self, experiment: str, *, refresh: bool) -> str:
+        """Share the first build and explicit refreshes between report readers."""
+        with self._lock:
+            html = self._html.get(experiment)
             if not refresh and html is not None:
                 return html
             shared = self._pending.get(experiment)
@@ -1400,7 +1505,8 @@ class _Handler(BaseHTTPRequestHandler):
             status = 200 if html else 404
             if html is None and urlsplit(self.path).path.startswith("/runs/"):
                 # A train prints its link before the next listing can discover it.
-                html = _document("Run", self.server.index.waiting() + _refresh_script())
+                with self.server.index.snapshot() as view:
+                    html = _shell(_document("Run", view.waiting()), view.rail("/"))
             body = (html or "Not found.").encode()
         except (Exception, SystemExit) as error:
             reason = explain(error)
@@ -1408,8 +1514,11 @@ class _Handler(BaseHTTPRequestHandler):
                 html = _document(
                     "Experiment report",
                     f'<p role="status">Report build failed: {escape(reason)}</p>'
-                    '<form method="get"><button>Retry report</button></form>',
+                    '<button onclick="location.reload()">Retry report</button>',
                 )
+                if parse_qs(urlsplit(self.path).query).get("embed") != ["1"]:
+                    with self.server.index.snapshot() as view:
+                        html = _shell(html, view.rail("/reports"))
                 body, status = html.encode(), 500
             else:
                 body, status = reason.encode(), 404 if isinstance(error, ValueError) else 500

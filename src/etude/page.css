@@ -121,3 +121,30 @@ details { margin-top: 18px; } details summary { cursor: pointer; color: var(--in
 .tip-row { display: grid; grid-template-columns: 14px auto 1fr; gap: 8px; align-items: center; }
 .tip-label { color: var(--ink-2); }
 @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } .sec-controls { margin-left: 0; } }
+
+/* The live view shares the report's typography and keeps its chart column shrinkable. */
+body:has(> #view-rail) { display: grid; grid-template-columns: 12rem minmax(0, 1fr); align-items: start; }
+.view-body { min-width: 0; }
+.view-body > #status-error { margin: 12px 16px 0; }
+#view-rail { position: sticky; top: 0; height: 100vh; overflow: auto; padding: 22px 12px; background: var(--wash); border-right: 1px solid var(--line); font-size: 13px; }
+#view-rail a { display: block; padding: 4px 8px; color: var(--ink); text-decoration: none; overflow-wrap: anywhere; border-radius: 4px; }
+#view-rail a:hover { text-decoration: underline; }
+#view-rail a[aria-current] { background: var(--surface); font-weight: 600; }
+.rail-group { margin-top: 22px; }
+.rail-group h2 { margin: 0 8px 4px; font-size: 12px; font-weight: 600; color: var(--ink-2); }
+.rail-group > span, .rail-loop { display: block; padding: 3px 8px; color: var(--ink-2); }
+.rail-rate { margin-top: 16px; border-top: 1px solid var(--line); }
+.state-dot { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border: 1px solid currentColor; border-radius: 50%; }
+.state-dot[aria-label*="running"] { color: var(--j1); background: currentColor; }
+.state-dot[aria-label*="failed"] { color: var(--bad); background: currentColor; }
+#view-rail .idle { color: var(--ink-2); }
+@media (width < 700px) {
+  body:has(> #view-rail) { display: block; }
+  #view-rail { position: static; display: flex; align-items: center; gap: 14px; height: auto; padding: 6px 8px; border: 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .rail-pages, .rail-group { display: flex; align-items: center; margin: 0; }
+  .rail-rate { margin: 0; border: 0; }
+}
+@media print {
+  body:has(> #view-rail) { display: block; }
+  #view-rail { display: none; }
+}

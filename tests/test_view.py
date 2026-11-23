@@ -427,7 +427,8 @@ def test_first_broken_report_shows_default_panels_and_a_sanitized_error(tmp_path
         route = "/experiments/lab/report"
         failed = _get(server, route, status=500)
         assert "Retry report" in failed and "token=[redacted]" in failed
-        assert "fixture-value" not in failed and "data-refresh=" not in failed
+        assert "fixture-value" not in failed and 'id="report-observation"' not in failed
+        assert '<nav id="view-rail"' in failed
         file.write_text(REPORTED.replace("Report()", "Report(other_metrics=True)"))
         built = _get(server, route)
         assert "Refresh report" in built and _loss(built) == [7]
@@ -736,7 +737,7 @@ def test_indexed_experiment_opens_its_default_report_separately(tmp_path: Path) 
         _ingest(server)
         before = (source.requests, source.listings)
         html = server.page("/experiments/lab") or ""
-        assert 'src="/experiments/lab/report"' in html and 'href="/runs/lab/base@0"' in html
+        assert 'src="/experiments/lab/report?embed=1"' in html and 'href="/runs/lab/base@0"' in html
         assert (source.requests, source.listings) == before
         assert _loss(server.page("/experiments/lab/report") or "") == [8.0]
 
@@ -812,7 +813,7 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
         assert reason and reason in row(html, queued) and "Target steps 40" in row(html, queued)
         assert ">baseline<" in row(html, local) and ">steps 1<" in row(html, local)
         assert ">score<" in row(html, evaluation) and ">finished<" in row(html, evaluation)
-        assert "last loop 2 h ago" in html and 'src="/experiments/lab/report"' in html
+        assert "last loop 2 h ago" in html and 'src="/experiments/lab/report?embed=1"' in html
         eval_page = status("/runs/" + evaluation)
         assert f"Evaluation · {evaluation}" in eval_page and ">finished<" in eval_page
         assert 'href="/experiments/lab#report">lab report</a>' in eval_page
@@ -1111,6 +1112,77 @@ def test_continuation_link_from_queue_to_delivery_survives_view_restart(
             assert f"Continued from {parent} at updates 150" in html and parent_page not in html
 
 
+def test_side_rail_follows_open_experiments_and_held_rentals_on_every_page(tmp_path: Path) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    _start_run(source, "local/base", 7)
+    _start_run(source, "archive/base", 3)
+    finished = RunOutcome(state="finished", counters=RunCounters()).model_dump_json().encode()
+    source.put("archive/base/outcome.json", finished)
+    backend = bench(home())
+    (active,) = backend.scheduler.queue(job(name="learn", experiment="lab"), rent="l4")
+    backend.scheduler.tick()
+    backend.run(1)
+    busy = backend.scheduler.read(active).machine
+    assert busy
+    idle = backend.scheduler.rent("l4", hours=1)
+    (queued,) = backend.scheduler.queue(job(name="wait", experiment="next"), rent="l4")
+    (home() / "server-heartbeat").write_text((datetime.now(UTC) - timedelta(hours=2)).isoformat())
+    measured = MeasuredStorage(source)
+
+    def rail(html: str) -> str:
+        assert html.count('<nav id="view-rail"') == 1
+        return html.split('<nav id="view-rail"', 1)[1].split("</nav>", 1)[0]
+
+    with Server(measured, None, ("127.0.0.1", 0)) as view:
+        _ingest(view)
+        reads = measured.listings, measured.requests, measured.bytes
+        reports = _get(view, "/reports")
+        assert 'href="/experiments/archive/report"' in reports
+        assert (measured.listings, measured.requests, measured.bytes) == reads
+        # Building a report is explicit. Its frame and standalone page share that build.
+        assert '<nav id="view-rail"' not in _get(view, "/experiments/local/report?embed=1")
+        reads = measured.listings, measured.requests, measured.bytes
+        for page, section in (
+            ("/", "/"),
+            ("/machines", "/machines"),
+            ("/reports", "/reports"),
+            ("/experiments/lab", "/"),
+            ("/runs/local/base", "/"),
+            ("/runs/" + queued, "/"),
+            ("/experiments/local/report", "/reports"),
+            ("/experiments/next/report", "/reports"),
+        ):
+            nav = rail(_get(view, page))
+            assert all(f'href="{url}"' in nav for url in ("/", "/machines", "/reports"))
+            assert f'href="{section}" aria-current="location"' in nav
+            assert 'title="running"></i>local</a>' in nav
+            assert 'title="queued"></i>next</a>' in nav
+            assert all(f'href="/experiments/{name}"' in nav for name in ("local", "lab", "next"))
+            assert "archive" not in nav
+            assert f'href="/machines#machine-{idle}">{idle} <span class="idle">idle</span>' in nav
+            assert f'href="/machines#machine-{busy}">{busy}</a>' in nav
+            assert "$1.18 an hour" in nav and "last loop 2 h ago" in nav
+        assert 'href="/experiments/next"' in rail(_get(view, "/runs/missing", status=404))
+        assert f'id="machine-{busy}"' in _get(view, "/machines")
+        assert (measured.listings, measured.requests, measured.bytes) == reads
+
+        version = _version(_get(view, "/runs/" + active))
+        source.put("local/base/outcome.json", finished)
+        view.refresh_files()
+        reads = measured.listings, measured.requests, measured.bytes
+        observed = _get(view, "/runs/" + active + "?observe=1")
+        assert _version(observed) == version
+        for html in (
+            observed,
+            _get(view, "/status"),
+            _get(view, "/experiments/local/report?observe=1"),
+        ):
+            assert 'href="/experiments/local"' not in rail(html)
+            assert 'href="/experiments/lab"' in rail(html)
+        assert (measured.listings, measured.requests, measured.bytes) == reads
+    backend.store.close()
+
+
 def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: Path) -> None:
     backend = bench(home(), slots=2)
     backend.scheduler.add_machine("bench", "bench")
@@ -1147,7 +1219,7 @@ def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: 
         row = next(r for r in html.split("</tr>") if f">{machine}</th>" in r)
         assert "rented until" in row and "~$" in row and ">l4</td>" in row
         assert all(f'href="/runs/{address}"' in row for address in (first, second))
-        assert "ready," in row and row.count(machine) == 1
+        assert "ready," in row and machine not in row.rsplit("</th>", 1)[1]
         assert "running" in row and "steps 1 / 40" in row and queued not in html
         assert "Idle" in html and "never expires" in html
         assert backend.scheduler.read(first).clocks == {"steps": 2}
@@ -1239,7 +1311,7 @@ def test_incomplete_directory_listing_keeps_file_facts_until_recovery(
 
     with Server(measured, None, ("127.0.0.1", 0)) as server:
         _ingest(server)
-        report_path = "/experiments/lab/report"
+        report_path = "/experiments/lab/report?embed=1"
         original = _get(server, report_path)
         monkeypatch.setattr(os, "scandir", deny_lab)
         _advance_view_clock(monkeypatch, minutes=11)
@@ -1577,7 +1649,7 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
             assert ">queued<" in (server.page("/runs/" + queued) or "")
             assert (measured.listings, measured.requests, measured.bytes, exchanges) == (*reads, 2)
             assert not ended.is_set()
-            report_route = "/experiments/local/report"
+            report_route = "/experiments/local/report?embed=1"
             cached_report = server.page(report_route)
             assert cached_report
             endpoint.write_text("second")
@@ -1588,7 +1660,9 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
                 graph = view.page("/runs/local") or ""
                 assert _loss(graph) == [7, 3] and "steps 2" in graph
                 assert "Launcher observation unavailable" in graph and "files observed " in graph
-                assert 'src="/experiments/local/report"' in (view.page("/experiments/local") or "")
+                assert 'src="/experiments/local/report?embed=1"' in (
+                    view.page("/experiments/local") or ""
+                )
                 status = view.page("/experiments/local/status") or ""
                 assert "steps 2" in status and "Launcher observation unavailable" in status
                 overview = view.page("/") or ""
@@ -1651,6 +1725,7 @@ def test_machines_without_a_launcher_or_with_a_selected_server(
         monkeypatch.delenv("ETUDE_SERVER_LOCAL", raising=False)
         html = server.page("/machines") or ""
         assert "team@fixture" in html and "<code>etude machines</code>" in html
+        assert "Inventory unavailable" in html and "an hour</span>" not in html
         assert "No launcher" not in html and 'data-refresh="5000"' in html
         assert (source.listings, source.requests, source.bytes) == reads
 
@@ -1992,5 +2067,5 @@ def test_evaluation_link_survives_partial_delivery_failed_read_and_replacement(
         restarted.refresh_files()
         assert "both scores delivered" in check(restarted, "finished")
         assert "1 finished" in _get(restarted, "/status")
-        assert restarted.index.report_ready("grouped", declared=False)
+        assert _version(_get(restarted, "/experiments/grouped/report?observe=1")) == "ready"
     backend.store.close()

@@ -4,7 +4,7 @@ refresh.onclick = async () => {
   const status = document.getElementById("refresh-status");
   status.textContent = "Refreshing…";
   try {
-    const response = await fetch(location.pathname, {method: "POST"});
+    const response = await fetch(location.href, {method: "POST"});
     if (!response.ok) throw new Error(await response.text());
     location.reload();
   } catch (error) {

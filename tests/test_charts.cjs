@@ -456,14 +456,20 @@ test("a visible run updates dates in place and reloads only when its content cha
     textContent: "files observed 1 min ago",
   };
   const collected = {}, error = {};
+  const nav = {
+    id: "view-rail", contains: () => false,
+    replaceWith: next => { visibleNav = next; }, scrollTo() {},
+  };
+  let visibleNav = nav;
   const document = {
     hidden: false,
     querySelector: () => observation,
-    getElementById: id => ({"run-observation": observation, "console-collected": collected, "status-error": error})[id],
+    getElementById: id => ({"view-rail": visibleNav, "run-observation": observation, "console-collected": collected, "status-error": error})[id],
     // Supply the fragment the browser would parse from the successful response.
     createElement: () => ({content: {firstElementChild: next}}),
   };
   const next = {
+    nextElementSibling: {...nav, textContent: "local and lab"},
     id: observation.id, dataset: {version: "step-1", collected: "Last collected 2 min ago"},
     textContent: "files observed 2 min ago",
   };
@@ -489,6 +495,7 @@ test("a visible run updates dates in place and reloads only when its content cha
   status = 200;
   await tick();
   assert.equal(error.textContent, "");
+  assert.equal(visibleNav.textContent, "local and lab");
   assert.equal(observation.textContent, "files observed 2 min ago");
   assert.equal(collected.textContent, "Last collected 2 min ago");
   next.dataset.version = "step-2";

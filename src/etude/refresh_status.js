@@ -1,8 +1,22 @@
-// Visible tabs check the index. A waiting report stops polling once its files arrive.
+// Visible tabs refresh the rail and the page from one observation.
 (() => {
-  const {id, dataset: {refresh, version}} = document.querySelector("[data-refresh]");
-  const path = version ? location.pathname + "?observe=1" : location.pathname.replace(/\/$/, "") + "/status";
+  const hasRail = Boolean(document.getElementById("view-rail"));
+  const {id, dataset: {version, refresh}} = document.querySelector("[data-refresh]:not(#view-rail)")
+    || document.getElementById("view-rail");
+  const railOnly = id === "view-rail";
   const error = document.getElementById("status-error");
+  const path = railOnly || version
+    ? location.pathname + (hasRail ? "?observe=1" : "?observe=1&embed=1")
+    : location.pathname.replace(/\/$/, "") + "/status";
+
+  function replace(current, next) {
+    const focus = document.activeElement;
+    const href = current.contains(focus) && focus.getAttribute("href");
+    const {scrollLeft, scrollTop} = current;
+    current.replaceWith(next);
+    if (href) next.querySelector(`a[href=${CSS.escape(href)}]`)?.focus({preventScroll: true});
+    next.scrollTo(scrollLeft, scrollTop);
+  }
 
   async function check() {
     let navigating = false;
@@ -13,9 +27,14 @@
       const template = document.createElement("template");
       template.innerHTML = await response.text();
       const next = template.content.firstElementChild;
-      if (next?.id !== id || (version && !next.dataset.version)) throw new Error("Invalid observation");
+      if (!railOnly && (next?.id !== id || (version && !next.dataset.version))) throw new Error("Invalid observation");
       if (document.hidden) return;
 
+      if (hasRail) {
+        const nav = next.nextElementSibling;
+        if (nav?.id !== "view-rail") throw new Error("Missing navigation");
+        replace(document.getElementById("view-rail"), nav);
+      }
       const current = document.getElementById(id);
       if (version) {
         current.textContent = next.textContent;
@@ -29,11 +48,8 @@
           collected.textContent = next.dataset.collected;
           collected.hidden = !next.dataset.collected;
         }
-      } else {
-        const link = document.activeElement;
-        const href = current.contains(link) && link.getAttribute("href");
-        current.replaceWith(next);
-        if (href) next.querySelector(`a[href=${CSS.escape(href)}]`)?.focus({preventScroll: true});
+      } else if (!railOnly) {
+        replace(current, next);
       }
       error.textContent = "";
     } catch (cause) {
