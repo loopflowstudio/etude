@@ -24,7 +24,6 @@ from etude.observations import (
     AttemptObservation,
     ConsoleObservation,
     ViewGrantTarget,
-    evaluation_file,
     evidence_file,
     member_folder,
 )
@@ -106,9 +105,7 @@ class AttemptPublisher:
             root = self.root / member
             if root.resolve() == root.absolute():
                 yield member + "/run.json"
-                yield from (
-                    member + "/" + key for key in self._run_files(root) if evaluation_file(key)
-                )
+                yield from (member + "/" + key for key in self._run_files(root))
         yield from self._run_files(self.root)
 
     def _run_files(self, root: Path) -> Iterator[str]:
@@ -118,16 +115,18 @@ class AttemptPublisher:
         if metrics.is_dir() and not metrics.is_symlink():
             keys = ["metrics/" + p.name for p in metrics.iterdir() if not p.is_symlink()]
             yield from sorted(key for key in keys if key.endswith(".json") and evidence_file(key))
-            for block in select(b for k in keys if evidence_file(k) and (b := parse(k))):
-                yield block.key
-        for folder in ("artifacts", "checkpoints"):
-            directory = root / folder
-            if directory.is_dir() and not directory.is_symlink():
-                yield from sorted(
-                    key
-                    for path in directory.glob("*.json")
-                    if evidence_file(key := folder + "/" + path.name)
-                )
+            if root == self.root:
+                for block in select(b for k in keys if evidence_file(k) and (b := parse(k))):
+                    yield block.key
+        if root == self.root:
+            for folder in ("artifacts", "checkpoints"):
+                directory = root / folder
+                if directory.is_dir() and not directory.is_symlink():
+                    yield from sorted(
+                        key
+                        for path in directory.glob("*.json")
+                        if evidence_file(key := folder + "/" + path.name)
+                    )
         blocks = root / "blocks"
         if blocks.is_dir() and not blocks.is_symlink():
             for index in sorted(blocks.glob("*/block.json")):

@@ -35,11 +35,9 @@ class ProcessStart:
     ) -> None:
         home = self.root / packet.session
         home.mkdir(parents=True, mode=0o700)
-        for attempt, target in (view_grants or {}).items():
-            target.place(home, attempt)
         for work in packet.work:
             DirectoryJournal._place_source(home, work)
-        write(home / "packet.json", packet.model_dump_json())
+        packet.place(home, view_grants or {})
         with log_to(home / "bootstrap.log"):
             write_log("bootstrap", "local source preparation completed")
             write_log("bootstrap", CLOSED)

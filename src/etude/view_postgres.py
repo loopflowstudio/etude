@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
@@ -18,11 +19,12 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from psycopg import Connection
+from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 
-from etude.block_file import parse
+from etude.block_file import BlockFile, parse
 from etude.carriage import immutable
 from etude.checkpoints import CheckpointRecord
 from etude.errors import EtudeError, explain
@@ -49,7 +51,7 @@ from etude.view import (
     ReportSummary,
     RunDetail,
     RunRow,
-    ViewFreshness,
+    attempt_position,
     checkpoint_table,
     declaration_commit,
     format_position,
@@ -151,8 +153,9 @@ class PostgresStorage:
 def _lock_run(db: Connection, grant: ViewGrant) -> int:
     """All evidence for an address is ordered by the same row lock."""
     db.execute(
-        "INSERT INTO runs(address,experiment) VALUES (%s,%s) ON CONFLICT DO NOTHING",
-        (grant.run, grant.run.split("/")[0].split("@")[0]),
+        """INSERT INTO runs(address,experiment,latest_attempt_number)
+           VALUES (%s,%s,%s) ON CONFLICT DO NOTHING""",
+        (grant.run, grant.experiment, grant.attempt_number),
     )
     row = db.execute(
         "SELECT latest_attempt_number FROM runs WHERE address=%s FOR UPDATE", (grant.run,)
@@ -165,6 +168,72 @@ def _lock_run(db: Connection, grant: ViewGrant) -> int:
             (grant.attempt_number, grant.run),
         )
     return max(int(row[0]), grant.attempt_number)
+
+
+@dataclass(frozen=True)
+class _RunFile:
+    """Facts established by the portable parser before taking the run's write lock."""
+
+    member: str
+    record: RunRecord | None
+    block: BlockFile | None
+    tables: list[str]
+    staged: bool
+
+    @classmethod
+    def read(cls, grant: ViewGrant, key: str, digest: str, body: bytes) -> _RunFile:
+        member, name = evidence_member(key)
+        block = parse(name)
+        tables: list[str] = []
+        staged = name.endswith(".parquet")
+        record = None
+        if block:
+            try:
+                columns = decode(body)
+            except (KeyError, OverflowError, IndexError, ValueError):
+                raise EtudeError("invalid_metric_block", 422) from None
+            if (
+                (columns.writer, columns.first, columns.last)
+                != (block.writer, block.first, block.last)
+                or block.first > block.last
+                or block.level > 2**31 - 1
+            ):
+                raise EtudeError("metric_block_name_mismatch", 422)
+        elif name == "run.json":
+            record = RunRecord.model_validate_json(body)
+            if (
+                run_address(record.id, record.experiment) != (member or grant.run)
+                or any(not member_folder(m) for m in record.members or ())
+                or (member and (record.members is not None or record.kind != "evaluation"))
+            ):
+                raise EtudeError("run_address_mismatch", 422)
+        elif name.startswith("checkpoints/"):
+            CheckpointRecord.model_validate_json(body)
+        elif name == "outcome.json":
+            RunOutcome.model_validate_json(body)
+        elif name.startswith("artifacts/"):
+            if name != f"artifacts/{digest}.json":
+                raise EtudeError("view_artifact_digest_mismatch", 422)
+            RowTable.model_validate_json(body)
+        elif name == "environment.json":
+            Environment.model_validate_json(body)
+        elif name == "tournament.json":
+            TournamentRun.model_validate_json(body, context={"experiment": grant.experiment})
+        elif staged:
+            _validate_parquet(body)
+        elif name.endswith("/block.json"):
+            index = Block.model_validate_json(body, context={"experiment": grant.experiment})
+            if name != f"blocks/{index.name}/block.json":
+                raise EtudeError("view_block_name_mismatch", 422)
+            folder = key.rsplit("/", 1)[0]
+            tables = [folder + "/" + f for f in index.files if f.endswith(".parquet")]
+            if any(evidence_member(t)[0] != member for t in tables):
+                raise EtudeError("invalid_view_table", 422)
+        else:
+            writer = RunWriter.model_validate_json(body)
+            if name != f"metrics/{writer.writer}.json":
+                raise EtudeError("writer_record_name_mismatch", 422)
+        return cls(member, record, block, tables, staged)
 
 
 class PostgresView:
@@ -244,9 +313,7 @@ class PostgresView:
                 (
                     observation.outcome or observation.phase,
                     observation.context.machine,
-                    str(observation.tally)
-                    if observation.tally
-                    else format_position(observation.clocks, None, observation.context.until),
+                    attempt_position(observation),
                     grant.run,
                 ),
             )
@@ -254,76 +321,22 @@ class PostgresView:
     def accept_file(
         self, grant: ViewGrant, key: str, digest: str, modified: datetime, body: bytes
     ) -> None:
-        member, name = evidence_member(key)
-        block = parse(name)
-        tables: list[str] = []
-        staged = name.endswith(".parquet")
-        record = None
-        if block:
-            try:
-                columns = decode(body)
-            except (KeyError, OverflowError, IndexError, ValueError):
-                raise EtudeError("invalid_metric_block", 422) from None
-            if (
-                (columns.writer, columns.first, columns.last)
-                != (block.writer, block.first, block.last)
-                or block.first > block.last
-                or block.level > 2**31 - 1
-            ):
-                raise EtudeError("metric_block_name_mismatch", 422)
-        elif name == "run.json":
-            record = RunRecord.model_validate_json(body)
-            if (
-                run_address(record.id, record.experiment) != (member or grant.run)
-                or any(not member_folder(m) for m in record.members or ())
-                or (member and (record.members is not None or record.kind != "evaluation"))
-            ):
-                raise EtudeError("run_address_mismatch", 422)
-        elif name.startswith("checkpoints/"):
-            CheckpointRecord.model_validate_json(body)
-        elif name == "outcome.json":
-            RunOutcome.model_validate_json(body)
-        elif name.startswith("artifacts/"):
-            if name != f"artifacts/{digest}.json":
-                raise EtudeError("view_artifact_digest_mismatch", 422)
-            RowTable.model_validate_json(body)
-        elif name == "environment.json":
-            Environment.model_validate_json(body)
-        elif name == "tournament.json":
-            TournamentRun.model_validate_json(
-                body, context={"experiment": grant.run.split("/")[0].split("@")[0]}
-            )
-        elif staged:
-            _validate_parquet(body)
-        elif name.endswith("/block.json"):
-            index = Block.model_validate_json(
-                body, context={"experiment": grant.run.split("/")[0].split("@")[0]}
-            )
-            if name != f"blocks/{index.name}/block.json":
-                raise EtudeError("view_block_name_mismatch", 422)
-            folder = key.rsplit("/", 1)[0]
-            tables = [folder + "/" + f for f in index.files if f.endswith(".parquet")]
-            if any(evidence_member(t)[0] != member for t in tables):
-                raise EtudeError("invalid_view_table", 422)
-        else:
-            writer = RunWriter.model_validate_json(body)
-            if name != f"metrics/{writer.writer}.json":
-                raise EtudeError("writer_record_name_mismatch", 422)
-
+        file = _RunFile.read(grant, key, digest, body)
+        block = file.block
         address = grant.run
         with self.pool.connection() as db:
             latest = _lock_run(db, grant)
             if not immutable(key) and grant.attempt_number < latest:
                 raise EtudeError("superseded_attempt", 409)
-            if member:
+            if file.member:
                 root = db.execute(
                     """SELECT convert_from(body,'UTF8')::jsonb FROM run_files
                        WHERE address=%s AND key='run.json'""",
                     (address,),
                 ).fetchone()
-                if not root or member not in (root[0].get("members") or ()):
+                if not root or file.member not in (root[0].get("members") or ()):
                     raise EtudeError("undeclared_view_member", 409)
-                if record and record.experiment != root[0]["experiment"]:
+                if file.record and file.record.experiment != root[0]["experiment"]:
                     raise EtudeError("view_member_experiment_mismatch", 422)
             old = db.execute(
                 "SELECT sha256 FROM run_files WHERE address=%s AND key=%s",
@@ -334,16 +347,14 @@ class PostgresView:
                     return
                 if immutable(key):
                     raise EtudeError("view_evidence_conflict", 409)
-            if tables:
-                present = db.execute(
-                    "SELECT key FROM run_files WHERE address=%s AND key=ANY(%s)", (address, tables)
-                )
-                if {row[0] for row in present} != set(tables):
-                    raise EtudeError("view_block_tables_missing", 409)
-                db.execute(
+            if file.tables:
+                visible = db.execute(
                     "UPDATE run_files SET visible=true WHERE address=%s AND key=ANY(%s)",
-                    (address, tables),
+                    (address, file.tables),
                 )
+                # A missing table rolls this transaction back, keeping the entire block staged.
+                if visible.rowcount != len(set(file.tables)):
+                    raise EtudeError("view_block_tables_missing", 409)
             if block:
                 cover = (
                     address,
@@ -386,10 +397,10 @@ class PostgresView:
                     block.first if block else None,
                     block.last if block else None,
                     block.level if block else None,
-                    not staged,
+                    not file.staged,
                 ),
             )
-            if record and not member:
+            if (record := file.record) and not file.member:
                 db.execute(
                     "UPDATE runs SET experiment=%s,job=%s,kind=%s WHERE address=%s",
                     (
@@ -399,7 +410,7 @@ class PostgresView:
                         address,
                     ),
                 )
-            if staged:
+            if file.staged:
                 return
             db.execute(
                 """UPDATE runs SET accepted_rev=accepted_rev+1,
@@ -577,13 +588,13 @@ class PostgresSnapshot:
     def __init__(self, db: Connection) -> None:
         self.db = db
 
-    def freshness(self) -> ViewFreshness:
+    def open_experiments(self) -> tuple[str, ...]:
         rows = self.db.execute(
             """SELECT DISTINCT experiment FROM runs
                WHERE last_push_at > now()-interval '10 minutes'
                AND coalesce(attempt_state,file_state,'running') IN ('running','setting_up') ORDER BY experiment"""
         )
-        return ViewFreshness(tuple(row[0] for row in rows))
+        return tuple(row[0] for row in rows)
 
     def rows(self, experiment: str | None) -> list[RunRow]:
         # Cards need downsampled headlines; the experiment table only needs their latest values.
@@ -629,70 +640,36 @@ class PostgresSnapshot:
     def detail(
         self, address: str, *, tab: str, observe: bool, mounted: str | None = None
     ) -> RunDetail | None:
-        db = self.db
         payload = "NULL"
-        columns = "checkpoints" if tab in ("overview", "checkpoints") else "NULL"
-        if tab in ("overview", "charts", "curves"):
+        if not observe and tab in ("overview", "charts", "curves"):
             payload = "overview" if tab == "overview" else "payload"
-        if observe:
-            columns = payload = "NULL"
-        join = "" if columns == payload == "NULL" else "LEFT JOIN run_charts USING(address)"
-        # A fragment retaining its mounted curves selects the payload only when the projection changes.
+        marks = "checkpoints" if not observe and tab in ("overview", "checkpoints") else "NULL"
+        join = "" if marks == payload == "NULL" else "LEFT JOIN run_charts USING(address)"
         args: tuple[str, ...] = (address,)
         if mounted and payload != "NULL":
+            # Publication advances this revision for both evidence and changed panel definitions.
             args = (mounted, address)
-            payload = f"CASE WHEN concat(published_rev,'-',panel_definition)<>%s THEN {payload} END"
+            payload = f"CASE WHEN published_rev::text<>%s THEN {payload} END"
         attempt = (
             "observation" if not observe and tab in ("console", "overview", "config") else "NULL"
         )
-        row = db.execute(
-            f"""SELECT published_rev,last_push_at,projection_error,{payload},latest_attempt_number,
-                       producer_seq,finished,{attempt},{columns},experiment,kind,panel_definition,file_state
-                FROM runs {join} LEFT JOIN attempts ON attempts.address=runs.address
-                    AND attempts.number=runs.latest_attempt_number WHERE runs.address=%s""",
-            args,
-        ).fetchone()
-        if not row:
-            return None
-        (
-            rev,
-            received,
-            error,
-            chart,
-            number,
-            seq,
-            finished,
-            observation,
-            marks,
-            experiment,
-            kind,
-            definition,
-            state,
-        ) = row
         files = (
-            tuple(
-                r[0]
-                for r in db.execute(
-                    "SELECT key FROM run_files WHERE address=%s AND visible ORDER BY key",
-                    (address,),
-                )
-            )
+            "ARRAY(SELECT key FROM run_files WHERE address=runs.address AND visible ORDER BY key)"
             if tab == "files" and not observe
-            else ()
+            else "ARRAY[]::text[]"
         )
-        return RunDetail(
-            revision=rev,
-            received=received,
-            error=error,
-            payload=chart,
-            attempt_number=number,
-            sequence=seq,
-            finished=finished,
-            attempt=AttemptObservation.model_validate_json(observation) if observation else None,
-            checkpoints=marks,
-            experiment=experiment,
-            kind=kind,
-            definition=definition,
-            file_state=state,
-            files=files,
-        )
+        with self.db.cursor(row_factory=dict_row) as cursor:
+            row = cursor.execute(
+                f"""SELECT published_rev AS revision,last_push_at AS received,projection_error AS error,
+                           {payload} AS payload,latest_attempt_number AS attempt_number,producer_seq AS sequence,
+                           coalesce(attempt_state,file_state,'running') AS phase,
+                           {attempt} AS attempt,{marks} AS checkpoints,experiment,kind,{files} AS files
+                    FROM runs {join} LEFT JOIN attempts ON attempts.address=runs.address
+                        AND attempts.number=runs.latest_attempt_number WHERE runs.address=%s""",
+                args,
+            ).fetchone()
+        if row is None:
+            return None
+        if row["attempt"] is not None:
+            row["attempt"] = AttemptObservation.model_validate_json(row["attempt"])
+        return RunDetail.model_validate(row)

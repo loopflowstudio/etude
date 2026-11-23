@@ -97,8 +97,9 @@ def test_failed_input_delivery_retries_the_whole_initial_directory(tmp_path: Pat
     b.store.fail_before_start(first, "input_undelivered", b.clock())
     # The worker never claimed the first attempt: the second must still seed out.
     retry = first.model_copy(update={"id": "retry", "number": 2})
-    work = b.scheduler._work(retry, b.store.session(retry.session), {})
-    assert work is not None
+    handoff = b.scheduler._work(retry, b.store.session(retry.session))
+    assert handoff is not None
+    work, _ = handoff
     session = tmp_path / "machine/sessions/retry"
     home = session / "attempts/retry"
     home.mkdir(parents=True)

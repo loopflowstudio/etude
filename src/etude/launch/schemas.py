@@ -15,7 +15,7 @@ from pydantic import Field
 
 from etude.launch.records import Cause, Limit, Outcome, Output, Prepared
 from etude.launch.storage.download import Download
-from etude.launch.storage.files import read_result
+from etude.launch.storage.files import read_result, write
 from etude.launch.storage.s3 import Grant
 from etude.launch.usage import Transfer
 from etude.observations import ViewGrantTarget
@@ -54,6 +54,12 @@ class Work(Record):
     inputs: tuple[Input, ...] = ()  # delivered to SESSION/inputs/SHA256
     environment: tuple[Variable, ...] = ()
 
+    def place(self, session: Path, grant: ViewGrantTarget | None) -> None:
+        """Publish kept work only after its private grant is in place."""
+        if grant:
+            grant.place(session, self.attempt)
+        write(session / "work" / f"{self.attempt}.json", self.model_dump_json())
+
 
 class Packet(Record):
     delivery_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
@@ -68,6 +74,12 @@ class Packet(Record):
     cap_units: Decimal | None = None
     max_units_per_hour: Decimal | None = None
     slots: int = Field(default=1, ge=1)  # attempts the worker runs at once
+
+    def place(self, session: Path, grants: dict[str, ViewGrantTarget]) -> None:
+        """Make the packet executable after installing its grants outside the packet."""
+        for attempt, grant in grants.items():
+            grant.place(session, attempt)
+        write(session / "packet.json", self.model_dump_json())
 
 
 class Progress(Record):

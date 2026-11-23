@@ -49,13 +49,12 @@ class DirectoryJournal:
         """Nothing to do ahead: a session's source is written beside it when it starts."""
 
     def add(self, session_id: str, work: Work, view_grant: ViewGrantTarget | None = None) -> None:
-        added = self._root / session_id / "work"
+        session = self._root / session_id
+        added = session / "work"
         added.mkdir(exist_ok=True)
         if not (added / f"{work.attempt}.json").exists():
-            self._place_source(self._root / session_id, work)
-            if view_grant:
-                view_grant.place(self._root / session_id, work.attempt)
-            write(added / f"{work.attempt}.json", work.model_dump_json())
+            self._place_source(session, work)
+            work.place(session, view_grant)
 
     @staticmethod
     def _place_source(home: Path, work: Work) -> None:

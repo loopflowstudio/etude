@@ -157,15 +157,14 @@ reads the data for that report separately. Passing an experiment file
 selects its report code and still discovers runs across the source.
 The [hosted view](#hosted-view) receives updates directly from launched workers.
 
-While the view advertises its address in `ETUDE_HOME/view`, `train`, `launch`,
-`queue`, `continue` and `status RUN` print a `view:` link for each run (when the
-launcher has `ETUDE_VIEW_URL` set, `launch`, `queue`, `continue` and
-`status RUN` print that [hosted view](#hosted-view) address instead). A declared
-run uses `EXPERIMENT/JOB@SEED`, such as `prototype/coin@0`. For a file defining
-only `train(config)`, the address is the experiment name. `train --json`
-prints the link on stderr. Starting a second local view redirects links to it.
-When it closes, a surviving local view advertises again at its next index pass.
-A link opened before the run appears names the source the view is watching.
+A local view advertises its address in `ETUDE_HOME/view`. While it runs,
+`train`, `launch`, `queue`, `continue` and `status RUN` print a `view:` link.
+Launchers configured for a hosted view print its address. A declared run uses
+`EXPERIMENT/JOB@SEED`, such as `prototype/coin@0`. For a file defining only
+`train(config)`, the address is the experiment name. `train --json` prints the
+link on stderr. Starting a second local view redirects links to it. When it
+closes, a surviving view advertises again at its next index pass. A link
+opened before the run appears names the source the view is watching.
 
 | Path | What you see |
 | --- | --- |
@@ -358,11 +357,6 @@ selected server and directs you to `etude machines`.
 
 ### Hosted view
 
-Run `etude view --push` backed by Postgres so launched jobs publish sealed
-curves, attempt status and console output to a shared URL as they run. The
-hosted view receives all run data over HTTP and never reads back from a bucket
-or launcher database.
-
 ```text
 # On the view host (install etude-sdk[hosted], plus eval for evaluation results)
 $ export ETUDE_VIEW_DATABASE_URL=postgresql://user@host/etude_view
@@ -379,75 +373,44 @@ $ uv run etude launch examples/prototype.py --pool lab --job coin --seed 0
 view: http://127.0.0.1:8765/runs/prototype/coin@0
 ```
 
-Loopback works when the worker runs on the same host; for remote or rented
-workers, set `ETUDE_VIEW_URL` to the view's reachable HTTPS origin. Open the
-printed link for the latest attempt, config, checkpoint records and console on
-Overview. Select **Charts** for the sealed curves, or follow the experiment
-breadcrumb to see the run beside its peers. The experiment card shows its first
-drawable metric panel. The table shows that panel’s latest values and the
-selected run’s console, curves, config or checkpoints. These pages refresh every
-5 seconds while visible.
+This example uses a worker on the view host. For remote workers, set
+`ETUDE_VIEW_URL` to the reachable HTTPS origin. Supply the same
+`ETUDE_VIEW_SECRET` to the launcher and the view from your secret store.
+The launcher requires the URL and secret together. It gives each worker a
+private token scoped to its run and attempt. Workers refuse HTTP redirects.
 
-Open **Report** on the experiment or select it from **Reports**. The first visit
-builds the report from evidence already in Postgres. To pick up new results or
-edits to the experiment file on the view host, choose **Refresh report**. A
-successful build replaces the saved report. If the declaration fails, the
-previous build remains available, including after restarting the web process.
+Run `etude view-upgrade` before starting a release. The server checks the
+schema revision at startup and serves health checks at `/healthz`. Both
+commands accept `--database-url` in place of `ETUDE_VIEW_DATABASE_URL`.
+Only the view host needs the hosted extra. Install the eval extra there
+to receive Parquet tables and build evaluation reports.
 
-**Mode and upgrades.** Plain `etude view [PATH] [--source SOURCE]` stays in local
-pull mode even if `ETUDE_VIEW_DATABASE_URL` is set. `--push` explicitly enables
-HTTP ingest and Postgres storage: it reads `ETUDE_VIEW_DATABASE_URL` (or
-`--database-url URL`) and requires `ETUDE_VIEW_SECRET`, failing at startup if
-either is missing. Passing `--push` with `--source`, or `--database-url` without
-`--push`, is an error.
+Plain `etude view [PATH] [--source SOURCE]` reads its local index even with a
+database URL in the environment. Use `--push` to receive observations.
+The two modes have separate data sources. `--push` with `--source` and
+`--database-url` without `--push` are errors. A push view leaves the local
+address in `ETUDE_HOME/view` available.
 
-Run `etude view-upgrade [--database-url URL]` (reading
-`ETUDE_VIEW_DATABASE_URL` when omitted) before starting a release against
-Postgres. Ordinary `etude view --push` checks the schema revision at startup and
-prints the `etude view-upgrade` command on mismatch. Push mode also serves
-`GET /healthz` for deployment checks and does not overwrite `ETUDE_HOME/view`.
-Only the view host needs `etude-sdk[hosted]` (and `etude-sdk[eval]` when
-receiving and displaying evaluation results); submitting terminals and
-workers need no Postgres driver.
+Open the link printed by `launch`, `queue`, `continue` or `status RUN`.
+The selected launcher supplies the hosted origin, including over SSH.
+Without a configured origin, the command uses the invoking computer’s local
+view. `quote` prints no link. Plain `etude train` publishes only to its
+configured tracking destinations.
 
-**Publishing from launchers.** Inject `ETUDE_VIEW_URL` and `ETUDE_VIEW_SECRET`
-together into the launcher's environment (your shell or SSH `etude server`) from
-your secret store. Setting only one fails submission immediately. For each
-attempt (initial launch, queued placement, retry or continuation), the launcher
-signs an attempt-scoped token bound to that run and attempt and hands it
-privately to the worker—never the shared secret, provider keys or signed bucket
-links. `launch`, `queue`, `continue` and `status RUN` read the launcher's
-configured `ETUDE_VIEW_URL` (locally or over SSH from the selected
-`etude server`) and print `view: <origin>/runs/<address>`, falling back to
-`ETUDE_HOME/view` when no hosted view is configured. `quote` publishes nothing
-and prints no links. Plain `etude train` does not push to a hosted view.
-
-**What is pushed and persisted.** Workers push attempt status, machine and
-hardware display details, config, an incremental tail of the last 500 console
-lines, run and outcome records, checkpoint records, sealed training metrics and
-content-addressed JSON row tables. Eval groups also send tournament and
-environment records. Each sealed eval block becomes visible when its index and
-all the Parquet tables it names have arrived. Match results appear in the
-experiment report. Packed blobs stay in canonical storage.
-Each file may be up to 32 MiB. Checkpoint weights stay in the run’s canonical
-storage. A replacement attempt owns the current status and console. Opening
-the link after a web restart shows the last committed observation.
-
-Run `uv run --extra hosted pytest -q tests/test_hosted_view.py` to exercise
-the launch, receiver outage, retry and worker handoffs with a disposable Postgres.
-The fixture also launches an eval group, edits its report and reopens the saved
-result after a web restart.
-
-| Situation | What appears |
+| Surface | Evidence at the shared URL |
 | --- | --- |
-| Link opened before first push | Waiting run page naming the hosted push feed |
-| View unreachable during training | Job, canonical bucket delivery and cleanup continue unaffected; a live or resumed worker catches up (including folded blocks). A lost machine can leave a permanent gap on the site; the bucket remains the portable scientific record. |
-| Worker silent with no outcome or retry | Last push time and **no end recorded** after 10 minutes without a push |
-| Machine details | Overview shows the assigned machine and any reported hardware. The side rail and Machines page explain where to find launcher inventory. Dollars show `—`. |
-| Files | Names the evidence received for the run. Fetch job outputs and checkpoint weights from canonical storage. |
-| Projection error | Previous complete chart stays visible with the sanitized error shown |
+| Overview and Charts | The latest attempt, machine, config, checkpoint records, last 500 console lines and sealed curves. Before the first push the page waits. After 10 minutes of silence an unfinished attempt shows **no end recorded**. |
+| Experiments | Each card shows its first drawable metric panel. The table shows the latest values and the selected run’s details. Visible pages refresh every 5 seconds. |
+| Report | The first visit builds from Postgres. **Refresh report** picks up new results and edits to the declaration on the view host. The last successful build survives declaration errors and web restarts. |
+| Files | Run and outcome records, metric blocks, checkpoint records and JSON row tables. Eval groups include tournament and environment records. A sealed eval block appears once its index and every referenced Parquet table have arrived. |
+| Machines and Dollars | The launcher holds inventory and spending. The hosted view shows the assigned machine and reported hardware for each attempt. |
 
-The hosted view UI has no login; place authentication or a private network in
-front of it when exposing it beyond `127.0.0.1`. HTTP ingest endpoints require
-the attempt-scoped token, and workers refuse HTTP redirects so tokens are not
-forwarded elsewhere.
+Each pushed file can be up to 32 MiB. Weights, job outputs and packed match
+blobs stay in canonical storage. During a view outage, training and bucket
+delivery continue. A live or resumed worker catches up from its local files,
+including compacted blocks. If the machine is lost, a gap can persist.
+Projection errors leave the last complete chart visible with the error.
+
+The view reads all run data from Postgres. Ingest requires an attempt token.
+The UI has no login. Use authentication or a private network when exposing it
+beyond loopback.

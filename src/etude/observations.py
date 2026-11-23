@@ -89,6 +89,11 @@ class ViewGrant(Record):
     attempt_number: int = Field(ge=1)
     exp: int
 
+    @property
+    def experiment(self) -> str:
+        """Experiment inferred from the address before its run record arrives."""
+        return self.run.partition("/")[0].partition("@")[0]
+
     def sign(self, secret: bytes) -> str:
         payload = base64.urlsafe_b64encode(self.model_dump_json().encode())
         return payload.decode() + "." + hmac.digest(secret, payload, "sha256").hex()

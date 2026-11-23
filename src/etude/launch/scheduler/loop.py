@@ -1917,8 +1917,7 @@ class Scheduler:
     ) -> None:
         self._store.check_lock(session.supply)
         try:
-            grants: dict[str, ViewGrantTarget] = {}
-            packet = self._packet(session, grants)
+            packet, grants = self._packet(session)
         except _RELAY_WAITS as error:
             self._await_relay(session, error)
             return
@@ -2141,8 +2140,8 @@ class Scheduler:
         return self._service(holder).held(run)
 
     def _work(
-        self, attempt: RunAttempt, session: Session, grants: dict[str, ViewGrantTarget]
-    ) -> Work | None:
+        self, attempt: RunAttempt, session: Session
+    ) -> tuple[Work, ViewGrantTarget | None] | None:
         """What the attempt's machine is sent; None when the attempt ended undelivered."""
         run = self._store.run(attempt.run)
         spec = run.launch.spec
@@ -2176,42 +2175,47 @@ class Scheduler:
         )
         if not self._relay(attempt, work):
             return None
+        return work, self._view_grant(attempt, session, spec)
+
+    def _view_grant(
+        self, attempt: RunAttempt, session: Session, spec: Job
+    ) -> ViewGrantTarget | None:
         try:
             signer = ViewSigner.configured()
         except LauncherError as error:
             self._diagnose(
                 "hosted view", "attempt will run without publication", error, attempt=attempt.id
             )
-            return work
-        if signer:
-            delivery = self._store.supply(session.supply).delivery_seconds
-            rental = self._store.rental_for(session)
-            expires = (
-                rental.deadline + timedelta(seconds=delivery or 0)
-                if rental
-                else self._clock()
-                + timedelta(seconds=max(13 * 3600, attempt.limit_seconds + (delivery or 3600)))
-            )
-            grant = ViewGrant(
-                origin=signer.origin,
-                run=run.id,
-                attempt=attempt.id,
-                attempt_number=attempt.number,
-                exp=int(expires.timestamp()),
-            )
-            grants[attempt.id] = ViewGrantTarget(
-                origin=signer.origin,
-                token=grant.sign(signer.secret),
-                context=ViewContext(
-                    machine=session.machine,
-                    hardware=session.hardware,
-                    max_attempts=spec.max_attempts,
-                    until=spec.until,
-                    source=spec.revision,
-                    config=sanitize(spec.config) if spec.config else spec.config,
-                ),
-            )
-        return work
+            return None
+        if signer is None:
+            return None
+        delivery = self._store.supply(session.supply).delivery_seconds
+        rental = self._store.rental_for(session)
+        expires = (
+            rental.deadline + timedelta(seconds=delivery or 0)
+            if rental
+            else self._clock()
+            + timedelta(seconds=max(13 * 3600, attempt.limit_seconds + (delivery or 3600)))
+        )
+        grant = ViewGrant(
+            origin=signer.origin,
+            run=attempt.run,
+            attempt=attempt.id,
+            attempt_number=attempt.number,
+            exp=int(expires.timestamp()),
+        )
+        return ViewGrantTarget(
+            origin=signer.origin,
+            token=grant.sign(signer.secret),
+            context=ViewContext(
+                machine=session.machine,
+                hardware=session.hardware,
+                max_attempts=spec.max_attempts,
+                until=spec.until,
+                source=spec.revision,
+                config=sanitize(spec.config) if spec.config else spec.config,
+            ),
+        )
 
     def _hand(self, session: Session, attempt: RunAttempt) -> None:
         """Add placed work to a kept session; while its run's folder cannot be relayed, it waits.
@@ -2220,13 +2224,13 @@ class Scheduler:
         each pass, so the wait ends when the holding machine answers.
         """
         try:
-            grants: dict[str, ViewGrantTarget] = {}
-            work = self._work(attempt, session, grants)
+            handoff = self._work(attempt, session)
         except _RELAY_WAITS as error:
             self._await_relay(session, error, attempt=attempt.id)
             return
-        if work is not None:
-            self._service(session).add(session.id, work, grants.get(attempt.id))
+        if handoff is not None:
+            work, grant = handoff
+            self._service(session).add(session.id, work, grant)
 
     def _await_relay(
         self, session: Session, error: Exception, *, attempt: str | None = None
@@ -2241,12 +2245,12 @@ class Scheduler:
         )
         self._trouble[session.supply] = "waiting for the machine or storage holding a run's folder"
 
-    def _packet(self, session: Session, grants: dict[str, ViewGrantTarget]) -> Packet:
+    def _packet(self, session: Session) -> tuple[Packet, dict[str, ViewGrantTarget]]:
         """What one session is sent: its deadline, its work and where its records go."""
         rental = self._store.rental_for(session)
         attempts = self._store.attempts(session=session.id)
         first = [a for a in attempts if not a.added and a.outcome is None]
-        work = tuple(w for a in first if (w := self._work(a, session, grants)) is not None)
+        handoffs = [h for attempt in first if (h := self._work(attempt, session)) is not None]
         supply = self._store.supply(session.supply)
         cap_units: Decimal | None = None
         max_units_per_hour: Decimal | None = None
@@ -2255,12 +2259,12 @@ class Scheduler:
                 cap_units = rental.cap_usd / rental.usd_per_unit
             if isinstance(supply, OnDemand) and supply.max_usd_per_hour is not None:
                 max_units_per_hour = supply.max_usd_per_hour / rental.usd_per_unit
-        return Packet(
+        packet = Packet(
             delivery_seconds=supply.delivery_seconds,
             log_seconds=supply.log_seconds,
             session=session.id,
             deadline=None if rental is None else rental.deadline,
-            work=work,
+            work=tuple(work for work, _ in handoffs),
             # A machine with slots takes work as they free, so its session is kept.
             kept=rental is not None or supply.slots > 1 or any(a.added for a in attempts),
             cap_usd=Decimal(0) if rental is None else rental.cap_usd,
@@ -2269,6 +2273,8 @@ class Scheduler:
             autorun=session.autorun,
             slots=supply.slots,
         )
+
+        return packet, {work.attempt: grant for work, grant in handoffs if grant is not None}
 
     def _read_journal(self, session: Session, service: Execution) -> Observation:
         """Retain both collection traffic and worker events, including final collection."""

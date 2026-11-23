@@ -460,9 +460,7 @@ class Courier:
                     self._inbox = before  # the same inbox still contains un-applied work
                     _diagnose("source fetch", error, attempt)
                     raise
-                if entry.view_grant:
-                    entry.view_grant.place(self._home, attempt)
-                write(target, entry.work.model_dump_json())
+                entry.work.place(self._home, entry.view_grant)
         if inbox.finish:
             (self._home / "finish").touch()  # after any work, so the session runs it first
 
@@ -829,9 +827,7 @@ def _serve(
             for work in packet.work:
                 courier.initialize_out(work)
         write_log("source fetch", "completed")
-        for attempt, target in bootstrap.view_grants.items():
-            target.place(home, attempt)
-        write(home / "packet.json", packet.model_dump_json())
+        packet.place(home, bootstrap.view_grants)
         # Persist start intent before user code can run. A lost write reply must not
         # leave running code with no durable evidence that it might have started.
         startup_timeout()

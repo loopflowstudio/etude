@@ -45,7 +45,7 @@ from tests.launch.test_worker_attempts import local
 
 
 @pytest.fixture
-def postgres(tmp_path: Path) -> Iterator[str]:
+def postgres(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     # The test wheel supplies PostgreSQL locally even when the host has only libpq.
     binaries = Path(str(distribution("pgserver").locate_file("pgserver/pginstall/bin")))
     data = tmp_path / "postgres"
@@ -83,7 +83,11 @@ def postgres(tmp_path: Path) -> Iterator[str]:
             capture_output=True,
         )
         try:
-            yield "postgresql://etude@/postgres?" + urlencode({"host": socket})
+            url = "postgresql://etude@/postgres?" + urlencode({"host": socket})
+            monkeypatch.setenv("ETUDE_VIEW_DATABASE_URL", url)
+            monkeypatch.delenv("ETUDE_VIEW_URL", raising=False)
+            assert main(["view-upgrade"]) == 0
+            yield url
         finally:
             subprocess.run(
                 [binaries / "pg_ctl", "-D", data, "-m", "immediate", "-w", "stop"],
@@ -163,8 +167,6 @@ def test_worker_publishes_live_curve(
     route = "/runs/" + address + "?tab=charts"
     secret = secrets.token_hex()
     monkeypatch.setenv("ETUDE_VIEW_SECRET", secret)
-    monkeypatch.setenv("ETUDE_VIEW_DATABASE_URL", postgres)
-    monkeypatch.delenv("ETUDE_VIEW_URL", raising=False)
     view_home = tmp_path / "view-home"
     monkeypatch.setenv("ETUDE_HOME", str(view_home))
     view_home.mkdir()
@@ -186,7 +188,6 @@ with Path({str(reads)!r}).open("a") as log:
     log.write("view started\\n")
 sys.addaudithook(audit)
 """)
-    assert main(["view-upgrade"]) == 0
     barrier = tmp_path / "release"
     sealed = tmp_path / "sealed"
     finish = tmp_path / "finish"
@@ -381,7 +382,12 @@ while not Path({str(finish)!r}).exists():
             assert 'id="view-rail"' in _get(origin + page_path + join + "observe=1")
         polls = sql_log.read_bytes()[mark:].decode()
         assert "run_charts" not in polls and "run_files" not in polls
+        mark = sql_log.stat().st_size
         files = _get(origin + "/runs/" + address + "?tab=files")
+        sql = sql_log.read_bytes()[mark:].decode()
+        # The selected detail includes its file names. Only the rail needs another query.
+        assert sql.count(": SELECT") == 2 and sql.count("FROM run_files") == 1
+        assert "run_charts" not in sql
         assert tail_key not in files and "run.json" in files and "canonical storage" in files
         with psycopg.connect(postgres) as db:
             old = db.execute("SELECT observation FROM attempts WHERE number=1").fetchone()
@@ -467,14 +473,11 @@ def test_ssh_worker_receives_private_grant_for_packet_and_kept_work(
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("ETUDE_REMOTE_PYTHON", sys.executable)
     monkeypatch.setenv("ETUDE_VIEW_SECRET", secrets.token_hex())
-    monkeypatch.setenv("ETUDE_VIEW_DATABASE_URL", postgres)
-    monkeypatch.delenv("ETUDE_VIEW_URL", raising=False)
     sessions = tmp_path / "remote/sessions"
     ssh = SSH("bench", str(sessions))
     service = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
     scheduler = Scheduler(open_database(tmp_path / "launcher.db"), {"ssh": lambda _: service})
     scheduler.add_machine("bench", "bench")
-    assert main(["view-upgrade"]) == 0
     with _view(tmp_path) as origin:
         monkeypatch.setenv("ETUDE_VIEW_URL", origin)
         job = Job(command="echo ssh-console", max_hours=0.02, max_usd=Decimal(1))
@@ -498,9 +501,6 @@ def test_group_results_and_edited_report_survive_restart(
 ) -> None:
     secret = secrets.token_hex()
     monkeypatch.setenv("ETUDE_VIEW_SECRET", secret)
-    monkeypatch.setenv("ETUDE_VIEW_DATABASE_URL", postgres)
-    monkeypatch.delenv("ETUDE_VIEW_URL", raising=False)
-    assert main(["view-upgrade"]) == 0
     probe = tmp_path / "offline"
     probe.mkdir()
     (probe / "sitecustomize.py").write_text("""
@@ -560,9 +560,8 @@ if __name__ == "__main__":
         later = f"{int(written) + 1:020d}.{writer}"
         later_key = key.replace(name, later)
         index_key = index.relative_to(root).as_posix().replace(name, later)
-        body = json.dumps(
-            {**json.loads(index.read_bytes()), "written_ns": int(written) + 1}
-        ).encode()
+        index_data = {**json.loads(index.read_bytes()), "written_ns": int(written) + 1}
+        body = json.dumps(index_data).encode()
         assert _post(origin, token, index_key, body) == 409
         assert _post(origin, token, later_key, b"invalid parquet") == 422
         for path in index.parent.glob("*.parquet"):
@@ -575,6 +574,9 @@ if __name__ == "__main__":
                 )
                 == 200
             )
+        # A rejected index may already have some tables. All stay hidden until it commits.
+        incomplete = {**index_data, "tables": [*index_data["tables"], "missing"]}
+        assert _post(origin, token, index_key, json.dumps(incomplete).encode()) == 409
         files_url = origin + "/runs/" + address + "?tab=files"
         assert later_key not in _get(files_url)
         assert _post(origin, token, index_key, body) == 200

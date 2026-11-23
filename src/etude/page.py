@@ -837,20 +837,21 @@ def _build_page(
     local_versions = runs.local_versions(experiment) if state is not None else None
     referenced = {experiment} | find_line_experiments(wanted)
     versions = source.versions_for(referenced)
-    cache_key = _page_cache_key(
-        experiment=experiment,
-        file=loaded.path,
-        source=_source_name(storage),
-        report=report,
-        origin=loaded.origin,
-        notes=loaded.notes,
-        versions=versions,
-        state=state,
-        wanted=wanted,
-        local_versions=local_versions or {},
-    )
-    if cache_path and (cached := _load_cached_page(cache_path, cache_key)) is not None:
-        return _BuiltPage(cached, loaded.sources, referenced, versions, local_versions)
+    if cache_path is not None:
+        cache_key = _page_cache_key(
+            experiment=experiment,
+            file=loaded.path,
+            source=_source_name(storage),
+            report=report,
+            origin=loaded.origin,
+            notes=loaded.notes,
+            versions=versions,
+            state=state,
+            wanted=wanted,
+            local_versions=local_versions or {},
+        )
+        if (cached := _load_cached_page(cache_path, cache_key)) is not None:
+            return _BuiltPage(cached, loaded.sources, referenced, versions, local_versions)
     evals = _read_evals(runs, state, report, wanted) if state is not None else _Evals()
     # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
     unended = [
@@ -876,7 +877,7 @@ def _build_page(
         # cold build and retain only the first drawable metric's summary.
         metric = _ungrouped_metric(source, page)
         page = page.model_copy(update={"ungrouped_metric": metric})
-    if cache_path:
+    if cache_path is not None:
         _save_cached_page(cache_path, cache_key, page)
     return _BuiltPage(page, loaded.sources, referenced, versions, local_versions)
 
