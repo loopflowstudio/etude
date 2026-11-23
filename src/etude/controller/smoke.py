@@ -125,7 +125,7 @@ def _evaluate(
             SmokeStep(step="eval", name="eval", outcome="skipped", detail="no eval_jobs(state)")
         ]
     listing = RunListing.read(source)
-    state = observe(source, experiment, keys=listing.keys, declarations=listing.declarations)
+    state = observe(listing, experiment)
     definition = read_experiment(path)
     function = definition.eval
     assert function is not None
@@ -154,10 +154,9 @@ def _evaluate(
         else:
             runnable.append(job)
     lines = read_tournament_lines(
-        source,
+        listing,
         state,
         [job.recorded() for job in runnable],
-        listing=listing,
     )
     batches: dict[str, list[Job]] = {}
     for job in runnable:

@@ -101,7 +101,8 @@ uv run etude report examples --open
 commit to git. For a folder, it writes one page per experiment file and an
 `index.html` with their scores. `--watch SECONDS` rewrites on change.
 
-Each report lists the source again. For a large S3 or R2 source, Etude
+Each build lists the source once. Training, tournaments and the evaluation database
+share that listing across the reports in the build. For a large S3 or R2 source, Etude
 remembers key boundaries in its local cache to divide later listings into
 parallel requests across reports, live view refreshes and `statsdb` reads.
 Added, replaced and deleted records show up on the next build.
@@ -179,6 +180,7 @@ the first drawable ML series, including ungrouped metrics. Different latest
 values appear as a low–high range. These build details stay with the
 served report until a successful refresh. Restarting the view clears them.
 
+The breadcrumb above an experiment, run or report links back to Experiments.
 Use the side rail to switch pages, open an active experiment or jump to a
 held machine’s row. Idle machines are marked. The hourly total counts each
 held rental once, including idle rentals. The loop age dates the last

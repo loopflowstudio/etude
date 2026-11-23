@@ -14,7 +14,7 @@ import secrets
 import threading
 import time
 from bisect import bisect_left
-from collections.abc import Callable, Container, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Container, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from functools import cached_property
@@ -62,6 +62,7 @@ from etude.storage import (
     run_directory,
     run_prefix,
     storage_from_uri,
+    with_versions,
 )
 
 
@@ -537,35 +538,14 @@ def under(keys: Sequence[str], prefix: str) -> Iterator[str]:
         yield key
 
 
-def declared(
-    storage: Storage,
-    folder: str,
-    listed: Container[str],
-    *,
-    missing: Callable[[str, FileNotFoundError], RunRecord | None] | None = None,
-) -> RunRecord | None:
-    """The valid declaration a run folder holds, else None.
-
-    The folder is asked only when its `run.json` is in `listed`, the source's listing.
-    """
-    if folder + "run.json" not in listed:
-        return None
-    try:
-        return RunRecord.model_validate_json(storage.get(folder + "run.json"))
-    except FileNotFoundError as error:
-        return missing(folder, error) if missing else None
-    except ValidationError:
-        return None
-
-
 def runs(source: Storage | Path | str) -> list[tuple[str, str]]:
     """Every (experiment, run) under this directory or bucket, at any depth.
 
     A run is listed once its declaration, `run.json`, has arrived.
     """
     storage = as_storage(source)
-    keys = storage.keys("")
-    return sorted({(run.file.experiment, run.name) for run in located_runs(storage, keys)})
+    listing = RunListing.read(storage)
+    return sorted({(run.file.experiment, run.name) for run in listing.declarations})
 
 
 class LocatedRun(Record):
@@ -577,73 +557,113 @@ class LocatedRun(Record):
     last_write: datetime | None = None
 
 
+type DeclarationCache = dict[str, tuple[str | None, RunRecord | None]]
+
+
 class RunListing:
     """One source discovery. Training copies share a declaration. Tournament copies
     keep their physical folder until the observer can identify their launch."""
 
     def __init__(
         self,
-        keys: Sequence[str],
-        declaration: Callable[[str], RunRecord | None],
+        storage: Storage,
+        objects: Mapping[str, str | None],
         *,
         run: str | None = None,
-        objects: Mapping[str, str] | None = None,
+        missing: Callable[[str, FileNotFoundError], RunRecord | None] | None = None,
+        known: DeclarationCache | None = None,
     ) -> None:
-        self.keys = keys
-        self.folders = run_folders(keys)
-        by_name = self.folders if run is None else {run: self.folders.get(run, [])}
+        self.storage = storage
+        self.objects = objects
+        self.keys = sorted(objects)
+        self._all_folders = run_folders(self.keys)
+        self.folders = self._all_folders
+        if run is not None:
+            self.folders = {run: self.folders[run]} if run in self.folders else {}
+        self._missing = missing
+        self._known = {} if known is None else known
+        if known is not None:
+            for key in known.keys() - objects.keys():
+                del known[key]
+
+    def declaration(self, folder: str) -> RunRecord | None:
+        """Read a folder's declaration once per version, including an invalid declaration."""
+        key = folder + "run.json"
+        if key not in self.objects:
+            return None
+        version = self.objects[key]
+        kept = self._known.get(key)
+        if kept is None or kept[0] != version:
+            record: RunRecord | None
+            try:
+                record = RunRecord.model_validate_json(self.storage.get(key))
+            except FileNotFoundError as error:
+                record = self._missing(folder, error) if self._missing else None
+            except ValidationError:
+                record = None
+            kept = version, record
+            self._known[key] = kept
+        return kept[1]
+
+    @cached_property
+    def declarations(self) -> list[LocatedRun]:
         found: dict[tuple[str, str, str], tuple[RunRecord, list[str]]] = {}
-        for name, folders in by_name.items():
+        for name, folders in self.folders.items():
             for folder in folders:
-                if (file := declaration(folder)) is not None:
+                if (file := self.declaration(folder)) is not None:
                     # A tournament name can occur in several independent launches.
                     copy = folder if file.kind == "evaluation" else ""
                     found.setdefault((file.experiment, name, copy), (file, []))[1].append(folder)
-        self.declarations = [
+        return [
             LocatedRun(
                 name=name,
                 file=file,
                 folders=tuple(folders),
-                last_write=self._last_write(folders, objects) if objects is not None else None,
+                last_write=self._last_write(folders),
             )
             for (_, name, _), (file, folders) in sorted(found.items())
         ]
 
     @classmethod
     def read(
-        cls,
-        storage: Storage,
-        *,
-        objects: Mapping[str, str] | None = None,
-        run: str | None = None,
-        missing: Callable[[str, FileNotFoundError], RunRecord | None] | None = None,
+        cls, storage: Storage, *, run: str | None = None, known: DeclarationCache | None = None
     ) -> RunListing:
-        if objects is None:
-            objects = storage.versions("")
-        return cls(
-            sorted(objects),
-            lambda folder: declared(storage, folder, objects, missing=missing),
-            run=run,
-            objects=objects,
-        )
+        versions = storage.versions("")
+        return cls(with_versions(storage, versions), versions, run=run, known=known)
+
+    def versions_for(self, experiments: Collection[str]) -> dict[str, str]:
+        """Versions of the files owned by these experiments in this listing."""
+        return {
+            key: version
+            for run in self.declarations
+            if run.file.experiment in experiments
+            for key in self.keys_in(run.folders)
+            if (version := self.objects[key]) is not None
+        }
 
     @cached_property
     def _members(self) -> dict[str, list[str]]:
         members: dict[str, list[str]] = {
-            folder: [] for folders in self.folders.values() for folder in folders
+            folder: [] for folders in self._all_folders.values() for folder in folders
         }
         for key in self.keys:
             if (folder := _owning_folder(key, members)) is not None:
-                members[folder].append(key)
+                members[folder].append(key[len(folder) :])
         return members
 
     def keys_in(self, folders: Sequence[str]) -> Iterator[str]:
         """Visible keys owned by these copies, excluding nested runs and delivery bookkeeping."""
         for folder in folders:
-            yield from self._members[folder]
+            for name in self.names_in(folder):
+                if not name.startswith(".") and "/." not in name:
+                    yield folder + name
 
-    def _last_write(self, folders: Sequence[str], objects: Mapping[str, str]) -> datetime | None:
-        versions = (objects[key] for key in self.keys_in(folders))
+    def names_in(self, folder: str) -> Sequence[str]:
+        """Every owned name, including hidden artifacts in historical per-file evals."""
+        return self._members[folder]
+
+    def _last_write(self, folders: Sequence[str]) -> datetime | None:
+        versions = (self.objects[key] for key in self.keys_in(folders))
         return max(
             (
                 v.modified
@@ -654,21 +674,14 @@ class RunListing:
         )
 
 
-def located_runs(
-    storage: Storage, keys: Sequence[str], *, run: str | None = None
-) -> list[LocatedRun]:
-    listed = set(keys)
-    return RunListing(keys, lambda folder: declared(storage, folder, listed), run=run).declarations
-
-
 def _owning_folder(key: str, roots: Container[str]) -> str | None:
-    """The nearest run that owns this visible file. Hidden delivery bookkeeping has no owner."""
-    parent, _, name = key.rpartition("/")
-    while parent and not name.startswith("."):
+    """The nearest run folder containing this object."""
+    parent = key.rpartition("/")[0]
+    while parent:
         folder = parent + "/"
         if folder in roots:
             return folder
-        parent, _, name = parent.rpartition("/")
+        parent = parent.rpartition("/")[0]
     return None
 
 

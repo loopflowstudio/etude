@@ -51,7 +51,7 @@ from etude.records import (
     RunWriter,
     SourceKey,
 )
-from etude.run import LocatedRun, RunListing, as_storage, located_runs, under
+from etude.run import LocatedRun, RunListing, as_storage, under
 from etude.storage import ListedStorage, Storage, run_prefix
 from etude.train.block import (
     COUNT,
@@ -855,7 +855,7 @@ def lines(data: Sequence[RunData]) -> dict[str, str]:
 
 
 def read_all(
-    source: Storage | Path | str,
+    source: RunListing | Storage | Path | str,
     experiment: str | None = None,
     *,
     metrics: frozenset[str] | None = None,
@@ -867,21 +867,25 @@ def read_all(
 
     With `metrics`, retain only these keys and `prefixes`, reading each
     immutable block once instead of the cumulative metric indexes.
-    A caller supplying its own keys and declarations also supplies any write dates.
+    Pass a RunListing to read several experiments from one observation. A caller
+    supplying its own keys and declarations also supplies any write dates.
     """
-    storage = as_storage(source)
-    if keys is None and declarations is None:
-        listing = RunListing.read(storage)
-        keys, declarations = listing.keys, listing.declarations
-    else:
-        keys = sorted(storage.versions("") if keys is None else keys)
-        if declarations is None:
-            declarations = located_runs(storage, keys)
+    if keys is not None:
+        # A caller supplying only names has no observed versions or write dates.
+        storage = source.storage if isinstance(source, RunListing) else as_storage(source)
+        source = RunListing(storage, dict.fromkeys(keys))
+    listing = source if isinstance(source, RunListing) else RunListing.read(as_storage(source))
+    if declarations is None:
+        declarations = listing.declarations
     data = []
     for located in declarations:
         file = located.file
         if experiment in (None, file.experiment):
-            data.append(read_located(storage, located, keys, metrics=metrics, prefixes=prefixes))
+            data.append(
+                read_located(
+                    listing.storage, located, listing.keys, metrics=metrics, prefixes=prefixes
+                )
+            )
     return sorted(data, key=lambda one: (one.experiment, one.name))
 
 

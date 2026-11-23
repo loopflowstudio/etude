@@ -409,7 +409,7 @@ class ChartIndex:
             row = db.execute("SELECT metadata FROM files WHERE address=?", (folder,)).fetchone()
             return RunData.model_validate_json(row[0]).file if row else None
 
-        listing = RunListing.read(storage, objects=objects, missing=missing_declaration)
+        listing = RunListing(storage, objects, missing=missing_declaration)
         previous = dict(db.execute("SELECT address,inputs FROM files"))
         for experiment, members in groupby(listing.declarations, lambda r: r.file.experiment):
             runs = list(members)
@@ -681,10 +681,9 @@ class _ViewSnapshot:
         experiment = escape(row["experiment"])
         page = f"/experiments/{quote(row['experiment'])}"
         title = f"Evaluation · {escape(address)}" if evaluation else escape(address)
-        breadcrumb = "Experiment overview" if address == row["experiment"] else experiment
         heading = (
-            f'<a href="{page}">{breadcrumb}</a>'
-            f'<header class="head"><h1>{title}</h1></header>'
+            _breadcrumbs(row["experiment"], run=address)
+            + f'<header class="head"><h1>{title}</h1></header>'
             f"<p>{run_line}</p>"
             f"{row['continues'] or ''}"
         )
@@ -750,44 +749,35 @@ class _ViewSnapshot:
 
     def waiting(self) -> str:
         message = f"Waiting for the run to appear in {self.index.source_uri}."
-        row = self.db.execute("SELECT file_error FROM observation WHERE id=1").fetchone()
-        if error := self.index.read_error(self.remote, row[0] if row else None):
+        row = self._observation
+        if error := self.index.read_error(self.remote, row["file_error"] if row else None):
             message += " " + error
         return _observation("run", "waiting", message)
 
-    def _list_runs(
-        self, experiment: str | None = None
-    ) -> tuple[sqlite3.Row | None, list[sqlite3.Row]]:
+    def _list_runs(self, experiment: str | None = None) -> list[sqlite3.Row]:
+        if self._observation is None:
+            return []
         # Lists read the panel projection they display, never a full run chart.
-        projection = "headline" if experiment is None else "latest,launched_as"
-        query = (
+        if experiment is None:
+            projection, selection = "headline", "ORDER BY experiment,address"
+        else:
+            projection, selection = (
+                "latest,launched_as",
+                "WHERE experiment=:experiment ORDER BY address",
+            )
+        return self.db.execute(
             _VISIBLE
             + f"""
             SELECT experiment,address,job,state,phase,position,status,last_write,at,
                    continues,listed,definition,panel_order,{projection}
-            FROM visible LEFT JOIN charts USING(address)
-        """
-        )
-        params = {"experiment": experiment, "remote": self.remote}
-        observation = self.db.execute(
-            _OBSERVED
-            + """SELECT at,file_error,last_loop,launcher_at,
-                      (SELECT error FROM declarations WHERE experiment=:experiment) AS report_error
-               FROM observed""",
-            params,
-        ).fetchone()
-        if observation is None:
-            return None, []
-        rows = (
-            self.db.execute(query + " ORDER BY experiment,address", params)
-            if experiment is None
-            else self.db.execute(query + " WHERE experiment=:experiment ORDER BY address", params)
-        )
-        return observation, rows.fetchall()
+            FROM visible LEFT JOIN charts USING(address) {selection}
+            """,
+            {"experiment": experiment, "remote": self.remote},
+        ).fetchall()
 
     def experiments(self) -> str:
-        remote = self.remote
-        observation, rows = self._list_runs()
+        observation = self._observation
+        rows = self._list_runs()
         now = datetime.now(UTC)
         opened: list[str] = []
         completed: list[str] = []
@@ -855,7 +845,9 @@ class _ViewSnapshot:
         return _live_status(
             body,
             stale=stale,
-            error=self.index.read_error(remote, observation["file_error"] if observation else None),
+            error=self.index.read_error(
+                self.remote, observation["file_error"] if observation else None
+            ),
         )
 
     def machines(self) -> str:
@@ -938,7 +930,7 @@ class _ViewSnapshot:
     @cached_property
     def _observation(self) -> sqlite3.Row | None:
         row: sqlite3.Row | None = self.db.execute(
-            _OBSERVED + "SELECT at,machine_rail,last_loop,launcher_at FROM observed",
+            _OBSERVED + "SELECT * FROM observed",
             {"remote": self.remote},
         ).fetchone()
         return row
@@ -1006,8 +998,8 @@ class _ViewSnapshot:
     def experiment_status(
         self, experiment: str, *, file: Path | None, run: str | None, tab: str, curves: str | None
     ) -> str | None:
-        remote = self.remote
-        observation, rows = self._list_runs(experiment)
+        observation = self._observation
+        rows = self._list_runs(experiment)
         if file is None and not rows:
             return None
         now = datetime.now(UTC)
@@ -1077,6 +1069,9 @@ class _ViewSnapshot:
         if observation:
             launcher = any(row["status"] for row in rows)
             ages = " · ".join(_observation_ages(observation, now, launcher=launcher))
+        declaration = self.db.execute(
+            "SELECT error FROM declarations WHERE experiment=?", (experiment,)
+        ).fetchone()
         return _live_status(
             _command_bar(file, self.index.source_uri, unfinished)
             + f'<div class="experiment-split"><section class="sec"><h2>Runs</h2>{table}</section>{detail}</div>'
@@ -1084,9 +1079,9 @@ class _ViewSnapshot:
             '<p class="lbl">No machine samples recorded.</p></section>',
             stale=stale,
             error=self.index.read_error(
-                remote,
+                self.remote,
                 observation["file_error"] if observation else None,
-                report=observation["report_error"] if observation else None,
+                report=declaration[0] if declaration else None,
             ),
         )
 
@@ -1673,9 +1668,29 @@ def _observation(
     )
 
 
-def _shell(html: str, rail: str) -> str:
+def _breadcrumbs(experiment: str | None, *, run: str | None = None, report: bool = False) -> str:
+    pages = [("Experiments", "/")]
+    if experiment is not None:
+        path = f"/experiments/{quote(experiment, safe='')}"
+        pages.append((experiment, path))
+        if report:
+            pages.append(("Report", path + "/report"))
+    if run is not None:
+        label = run.removeprefix(experiment + "/") if experiment else run
+        pages.append((label, run_path(run)))
+    links = []
+    for i, (label, url) in enumerate(pages):
+        current = ' aria-current="page"' if i == len(pages) - 1 else ""
+        links.append(f'<a href="{escape(url)}"{current}>{escape(label)}</a>')
+    separator = '<span aria-hidden="true">›</span>'
+    return f'<nav class="breadcrumbs" aria-label="Breadcrumb">{separator.join(links)}</nav>'
+
+
+def _shell(html: str, rail: str, breadcrumbs: str = "") -> str:
     # Both document templates put body tags outside escaped author content.
-    opening = f'<body>{rail}<div class="view-body"><p id="status-error" role="status"></p>'
+    opening = (
+        f'<body>{rail}<div class="view-body"><p id="status-error" role="status"></p>{breadcrumbs}'
+    )
     closing = f"</div><script>{read_asset('refresh_status.js')}</script></body>"
     return html.replace("<body>", opening, 1).replace("</body>", closing, 1)
 
@@ -1827,6 +1842,7 @@ class Server(ThreadingHTTPServer):
             fragment = path.endswith("/status")
             route = path.removesuffix("/status") or "/"
             section = "/"
+            breadcrumbs = ""
             if route == "/":
                 title, status = "Experiments", view.experiments()
             elif route == "/machines":
@@ -1851,6 +1867,7 @@ class Server(ThreadingHTTPServer):
                     return None
                 status = found
                 if not fragment:
+                    breadcrumbs = _breadcrumbs(title)
                     status = (
                         '<nav class="tabs" id="experiment-tabs" aria-label="Experiment">'
                         '<a href="#status" aria-current="page">Status</a><a href="#report">Report</a></nav>'
@@ -1868,7 +1885,7 @@ class Server(ThreadingHTTPServer):
                     f"<script>{read_asset('vendor/uPlot.iife.min.js')}</script>"
                     f"<script>{read_asset('charts.js')}</script>"
                 )
-            return _shell(_status_page(title, status), rail)
+            return _shell(_status_page(title, status), rail, breadcrumbs)
 
     def _report_page(
         self, experiment: str, *, observe: bool, embed: bool, refresh: bool
@@ -1881,15 +1898,20 @@ class Server(ThreadingHTTPServer):
         # Release the index snapshot before building or waiting on an authored report.
         with self._lock:
             waiting = not ready and experiment not in self._served
+        breadcrumbs = _breadcrumbs(experiment, report=True) if rail and not observe else ""
         if waiting:
             if refresh:
                 raise ValueError("Waiting for run files.")
             notice = _observation("report", "waiting", "Waiting for run files.")
-            return notice + rail if observe else _shell(_document(experiment, notice), rail)
+            return (
+                notice + rail
+                if observe
+                else _shell(_document(experiment, notice), rail, breadcrumbs)
+            )
         if observe:
             return _observation("report", "ready", "Building report…") + rail
         report_html = self._report(experiment, refresh=refresh)
-        return _shell(report_html, rail) if rail else report_html
+        return _shell(report_html, rail, breadcrumbs) if rail else report_html
 
     def _report(self, experiment: str, *, refresh: bool) -> str:
         """Share the first build and explicit refreshes between report readers."""
@@ -1957,13 +1979,13 @@ class _Handler(BaseHTTPRequestHandler):
         self._respond(refresh=False)
 
     def do_POST(self) -> None:  # noqa: N802
-        if not self._is_report():
+        if not self._report_route():
             self.send_error(405)
             return
         self._respond(refresh=True)
 
-    def _is_report(self) -> bool:
-        return _REPORT_ROUTE.fullmatch(unquote(urlsplit(self.path).path)) is not None
+    def _report_route(self) -> re.Match[str] | None:
+        return _REPORT_ROUTE.fullmatch(unquote(urlsplit(self.path).path))
 
     def _respond(self, *, refresh: bool) -> None:
         html: str | None = None
@@ -1973,11 +1995,17 @@ class _Handler(BaseHTTPRequestHandler):
             if html is None and urlsplit(self.path).path.startswith("/runs/"):
                 # A train prints its link before the next listing can discover it.
                 with self.server.index.snapshot() as view:
-                    html = _shell(_document("Run", view.waiting()), view.rail("/"))
+                    address = unquote(urlsplit(self.path).path.removeprefix("/runs/"))
+                    experiment, _, _ = address.rpartition("/")
+                    html = _shell(
+                        _document("Run", view.waiting()),
+                        view.rail("/"),
+                        _breadcrumbs(experiment or None, run=address),
+                    )
             body = (html or "Not found.").encode()
         except (Exception, SystemExit) as error:
             reason = explain(error)
-            if not refresh and self._is_report():
+            if not refresh and (route := self._report_route()):
                 html = _document(
                     "Experiment report",
                     f'<p role="status">Report build failed: {escape(reason)}</p>'
@@ -1985,7 +2013,9 @@ class _Handler(BaseHTTPRequestHandler):
                 )
                 if parse_qs(urlsplit(self.path).query).get("embed") != ["1"]:
                     with self.server.index.snapshot() as view:
-                        html = _shell(html, view.rail("/reports"))
+                        html = _shell(
+                            html, view.rail("/reports"), _breadcrumbs(route[1], report=True)
+                        )
                 body, status = html.encode(), 500
             else:
                 body, status = reason.encode(), 404 if isinstance(error, ValueError) else 500

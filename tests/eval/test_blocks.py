@@ -156,6 +156,8 @@ def per_file(
 def test_a_per_file_run_converts_to_blocks_with_the_same_rows_and_blobs(tmp_path: Path) -> None:
     players = pair(tmp_path)
     old, expected = per_file(tmp_path, players)
+    evidence = old.root / "a/artifacts/evidence"
+    evidence.rename(evidence.with_name(".evidence"))
     old_keys = old.keys("a/")
     # Readers refuse the old layout, naming the command that converts it.
     with pytest.raises(EtudeError) as refused:

@@ -80,7 +80,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import cache, cached_property
+from functools import cache
 from html import escape
 from importlib.util import cache_from_source
 from pathlib import Path
@@ -94,7 +94,7 @@ from etude.eval.records import Gap, Scheduled, Tournament, find_line_experiments
 from etude.experiment_file import experiment_named, refuse_renamed
 from etude.home import home
 from etude.identity import SAFE_NAME
-from etude.records import BUILT_IN_NAMES, Record, RunRecord
+from etude.records import BUILT_IN_NAMES, Record
 from etude.report import (
     Counters,
     Curve,
@@ -107,14 +107,13 @@ from etude.report import (
     Score,
     Series,
 )
-from etude.run import RunListing, as_storage, declared
+from etude.run import DeclarationCache, RunListing, as_storage
 from etude.storage import (
     DirectoryStorage,
     S3Storage,
     Storage,
     default_root,
     store_identity,
-    with_versions,
 )
 from etude.train.read import RunData, read_all, read_located
 from etude.train.report import BUCKETS, Trace, Training, training
@@ -545,41 +544,6 @@ def experiment_files(directory: Path, *, known: Collection[Path] = ()) -> list[P
     return list(found.values())
 
 
-class _ReportListing:
-    """One place's version listing, shared by every report in this build."""
-
-    def __init__(self, place: Storage, known: dict[str, tuple[str, RunRecord | None]]) -> None:
-        self.objects = place.versions("")
-        self.place = with_versions(place, self.objects)
-        for key in known.keys() - self.objects.keys():
-            del known[key]
-        self.known = known
-
-    @cached_property
-    def runs(self) -> RunListing:
-        keys = sorted(self.objects)
-        return RunListing(keys, self._declaration, objects=self.objects)
-
-    def _declaration(self, folder: str) -> RunRecord | None:
-        key = folder + "run.json"
-        version = self.objects.get(key)
-        if version is None:
-            return None
-        kept = self.known.get(key)
-        if kept is None or kept[0] != version:
-            kept = (version, declared(self.place, folder, self.objects))
-            self.known[key] = kept
-        return kept[1]
-
-    def versions(self, experiments: Collection[str]) -> dict[str, str]:
-        return {
-            key: self.objects[key]
-            for run in self.runs.declarations
-            if run.file.experiment in experiments
-            for key in self.runs.keys_in(run.folders)
-        }
-
-
 class Pages:
     """Experiments' pages from one source, each built again only when its inputs change.
 
@@ -602,7 +566,7 @@ class Pages:
         )
         self._built: dict[tuple[Path | None, str], _BuiltPage] = {}
         self._known: set[Path] = set()
-        self._declared: dict[str, dict[str, tuple[str, RunRecord | None]]] = {}
+        self._declared: dict[str, DeclarationCache] = {}
 
     def build(self, file: Path | None, *, experiment: str | None = None) -> Page:
         """`build`'s page, kept from the last call while its inputs are the same."""
@@ -622,14 +586,14 @@ class Pages:
                 built[file] = explain(error)
         return built
 
-    def _listings(self) -> list[_ReportListing]:
+    def _listings(self) -> list[RunListing]:
         return [
-            _ReportListing(place, self._declared.setdefault(store_identity(place), {}))
+            RunListing.read(place, known=self._declared.setdefault(store_identity(place), {}))
             for place in self._places
         ]
 
     def _build(
-        self, file: Path | None, listings: Sequence[_ReportListing], experiment: str | None = None
+        self, file: Path | None, listings: Sequence[RunListing], experiment: str | None = None
     ) -> Page:
         name = _experiment_name(file, experiment)
         key = (file, name)
@@ -639,8 +603,8 @@ class Pages:
         if (
             kept is not None
             and kept.sources == sources
-            and kept.versions == listings[0].versions(kept.experiments)
-            and (local is None or kept.local_versions == local.versions({name}))
+            and kept.versions == listings[0].versions_for(kept.experiments)
+            and (local is None or kept.local_versions == local.versions_for({name}))
         ):
             return kept.page
         built = _build_page(name, _ReportFile(file, sources), listings[0], local)
@@ -720,7 +684,7 @@ def build(
     experiment's.
     """
     name = _experiment_name(file, experiment)
-    return _build_page(name, _ReportFile(file), _ReportListing(as_storage(source), {})).page
+    return _build_page(name, _ReportFile(file), RunListing.read(as_storage(source))).page
 
 
 # Bump whenever derived Page fields change without changing inputs.
@@ -816,22 +780,20 @@ def _save_cached_page(path: Path, key: str, page: Page) -> None:
 def _build_page(
     experiment: str,
     loaded: _ReportFile,
-    source: _ReportListing,
-    local: _ReportListing | None = None,
+    source: RunListing,
+    local: RunListing | None = None,
 ) -> _BuiltPage:
-    storage, listing = source.place, source.runs
+    storage = source.storage
     report = loaded.report
     cache_path = _page_cache_path(experiment, storage)
     data = read_all(
-        storage,
+        source,
         experiment,
         metrics=None if report.other_metrics else frozenset(report.keys()),
         prefixes=_flames(report),
-        keys=listing.keys,
-        declarations=listing.declarations,
     )
     if not data:
-        held = sorted({run.file.experiment for run in listing.declarations})
+        held = sorted({run.file.experiment for run in source.declarations})
         raise ValueError(
             f"no runs of {experiment!r} in {_source_name(storage)}"
             + (f"; it holds {', '.join(held)}" if held else "; it holds no runs")
@@ -848,10 +810,10 @@ def _build_page(
         if local is None:
             here = DirectoryStorage(default_root())
             if store_identity(here) != store_identity(storage):
-                local = _ReportListing(here, {})
-    local_versions = local.versions({experiment}) if local is not None else {}
+                local = RunListing.read(here)
+    local_versions = local.versions_for({experiment}) if local is not None else {}
     referenced = {experiment} | find_line_experiments(wanted)
-    versions = source.versions(referenced)
+    versions = source.versions_for(referenced)
     cache_key = _page_cache_key(
         experiment=experiment,
         file=loaded.path,
@@ -866,7 +828,7 @@ def _build_page(
     )
     if (cached := _load_cached_page(cache_path, cache_key)) is not None:
         return _BuiltPage(cached, loaded.sources, referenced, versions, local_versions)
-    evals = _read_evals(source, state, report, wanted) if state is not None else _Evals()
+    evals = _read_evals(source, local, state, report, wanted) if state is not None else _Evals()
     # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
     unended = [
         run.name
@@ -895,25 +857,25 @@ def _build_page(
     return _BuiltPage(page, loaded.sources, referenced, versions, local_versions)
 
 
-def _ungrouped_metric(source: _ReportListing, page: Page) -> str | None:
+def _ungrouped_metric(source: RunListing, page: Page) -> str | None:
     named, timers = set(page.report.keys()), _flames(page.report)
     clock = page._report_clock()
     keys: list[str] = []
     values: list[float] = []
     records = (
         r
-        for r in source.runs.declarations
+        for r in source.declarations
         if r.file.experiment == page.experiment and r.file.kind != "evaluation"
     )
-    for located in sorted(records, key=lambda r: r.name):
+    for located in records:
         if clock not in BUILT_IN_NAMES and not any(c.name == clock for c in located.file.clocks):
             continue
         # Project individual block headers. Once a key has values, later runs
         # need only that key and earlier candidates that may have been gaps.
         run = read_located(
-            source.place,
+            source.storage,
             located,
-            source.runs.keys,
+            source.keys,
             metrics=frozenset(keys),
             prefixes=() if values else ("",),
         )
@@ -1337,7 +1299,8 @@ class _Evals:
 
 
 def _read_evals(
-    source: _ReportListing,
+    source: RunListing,
+    local: RunListing | None,
     state: ExperimentState,
     report: Report,
     wanted: Sequence[Tournament],
@@ -1346,8 +1309,8 @@ def _read_evals(
     # it is used: only an experiment with evaluations reads it, so a report without loads none.
     from etude.eval.query import _open_statsdb  # noqa: PLC0415
 
-    held, refused = _held_tournaments(wanted, state, source)
-    db = _open_statsdb(state.experiment, source.place, keys=source.runs.keys)
+    held, refused = _held_tournaments(wanted, state, source, local)
+    db = _open_statsdb(state.experiment, source)
     try:
         saved = _saved_checkpoints(db)
         players, placement = _players(db, saved, {run.name: run.line for run in state.runs})
@@ -1393,7 +1356,8 @@ class _HeldTournament:
 def _held_tournaments(
     asked: Sequence[Tournament],
     state: ExperimentState,
-    source: _ReportListing,
+    source: RunListing,
+    local: RunListing | None,
 ) -> tuple[list[_HeldTournament], tuple[str, ...]]:
     """Each tournament as held so far, and a note for each one drawn otherwise than asked.
 
@@ -1406,7 +1370,7 @@ def _held_tournaments(
     """
     # The optional `eval` extra, imported where it is used (`_read_evals`).
     from etude.eval.records import TournamentRun, assemble  # noqa: PLC0415
-    from etude.eval.tournament import played, stored_runs  # noqa: PLC0415
+    from etude.eval.tournament import StoredRuns, played  # noqa: PLC0415
     from etude.experiment import read_tournament_lines  # noqa: PLC0415 - optional eval dependency
 
     wanted: dict[str, Tournament] = {}
@@ -1415,7 +1379,8 @@ def _held_tournaments(
     refused: list[str] = []
     # Read once for every tournament drawn: a page plays nothing, so nothing changes meanwhile.
     experiment = state.experiment
-    runs = stored_runs(experiment, storages=[source.place], listing=source.runs)
+    places = (local, source) if local is not None else (source,)
+    runs = StoredRuns.read(experiment, *places)
     for name, held in runs.tournaments.items():
         try:
             recorded = assemble(held)
@@ -1436,7 +1401,7 @@ def _held_tournaments(
                     f" eval_jobs(state) now defines it otherwise ({error.code})."
                 )
         wanted[name] = recorded
-    lines = read_tournament_lines(source.place, state, wanted.values(), listing=source.runs)
+    lines = read_tournament_lines(source, state, wanted.values())
     held_tournaments = []
     for name, given in sorted(wanted.items()):
         try:

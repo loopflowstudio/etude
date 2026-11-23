@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -876,11 +877,25 @@ def test_compact_run_link_opens_with_charts_and_links_back_to_its_experiment(
     with Server(source, None, ("127.0.0.1", 0)) as view:
         view.refresh_files()
         page = _get(view, "/runs/coin")
-        assert '<a href="/experiments/coin">Experiment overview</a>' in page
+        marker = '<nav class="breadcrumbs" aria-label="Breadcrumb">'
+        experiment = "/experiments/coin"
+
+        def trail(html: str) -> list[tuple[str, str]]:
+            assert html.count(marker) == 1
+            nav = html.split(marker, 1)[1].split("</nav>", 1)[0]
+            assert nav.count('aria-current="page"') == 1
+            return re.findall(r'<a href="([^"]+)"[^>]*>([^<]+)</a>', nav)
+
+        parents = [("/", "Experiments"), (experiment, "coin")]
+        assert trail(_get(view, experiment)) == parents
+        assert trail(page) == [*parents, ("/runs/coin", "coin")]
         charts = _get(view, "/runs/coin?tab=charts")
         assert charts.index("<h2>Charts ") < charts.index("<h2>Performance ")
         assert _loss(page) == [7]
         report = _get(view, "/experiments/coin/report")
+        assert trail(report) == [*parents, (experiment + "/report", "Report")]
+        assert marker not in _get(view, experiment + "/report?embed=1")
+        assert marker not in _get(view, experiment + "/status")
         assert report.index("<h2>Perf ") < report.index("<h2>ML details ")
         assert 'id="refresh-report"' in report
 
@@ -1599,6 +1614,13 @@ def test_side_rail_follows_open_experiments_and_held_rentals_on_every_page(tmp_p
     with Server(measured, None, ("127.0.0.1", 0)) as view:
         _ingest(view)
         reads = measured.listings, measured.requests, measured.bytes
+        statements: list[str] = []
+        with view.index.snapshot() as snapshot:
+            snapshot.db.set_trace_callback(statements.append)
+            assert 'href="/experiments/lab"' in snapshot.experiments()
+            assert 'href="/experiments/lab"' in snapshot.rail("/")
+            # One observation, the experiment rows and the rail's open runs.
+            assert len(statements) == 3
         reports = _get(view, "/reports")
         assert 'href="/experiments/archive/report"' in reports
         assert (measured.listings, measured.requests, measured.bytes) == reads

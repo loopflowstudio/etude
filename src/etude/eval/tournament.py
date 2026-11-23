@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -75,9 +75,9 @@ from etude.eval.records import (
 from etude.eval.run import ETUDE_TABLES, EvalRun, _Report
 from etude.eval.schedule import ordered
 from etude.records import Digest, Record
-from etude.run import RunListing, declare, declared, destinations, run_folders, under
+from etude.run import RunListing, declare, destinations
 from etude.stopping import Stopped
-from etude.storage import DirectoryStorage, Storage, default_root
+from etude.storage import DirectoryStorage, Storage, default_root, store_identity
 
 __all__ = ("evaluating", "scores", "ScorePoint", "Scores")
 
@@ -330,6 +330,26 @@ class _Folder:
     held: TournamentRun | None
     environment: str
 
+    @classmethod
+    def read(cls, listing: RunListing, experiment: str, run: str, folder: str) -> _Folder | None:
+        tournament = folder + TOURNAMENT_FILE
+        environment_file = folder + _ENVIRONMENT_FILE
+        if tournament not in listing.objects and environment_file not in listing.objects:
+            return None  # Reading tournaments needs no training declarations.
+        record = listing.declaration(folder)
+        if record is None or record.experiment != experiment or record.members is not None:
+            return None
+        place = listing.storage
+        held = None
+        if tournament in listing.objects:
+            held = TournamentRun.model_validate_json(
+                place.get(tournament), context={"experiment": experiment}
+            )
+            environment = held.tournament.environment
+        else:
+            environment = Environment.model_validate_json(place.get(environment_file))
+        return cls(place, run, folder, tuple(listing.names_in(folder)), held, environment.identity)
+
 
 @dataclass(frozen=True)
 class _EnvironmentResults:
@@ -348,71 +368,37 @@ class StoredRuns:
     are read the first time a tournament in its environment asks for them.
     """
 
-    def __init__(self, experiment: str, folders: Sequence[_Folder]) -> None:
+    def __init__(self, experiment: str, folders: Iterable[_Folder]) -> None:
         self.experiment = experiment
-        self._folders = tuple(folders)
+        self.folders = tuple(folders)
         self._records: dict[tuple[str, str], list[MatchRecord]] = {}
         self._blocks: dict[str, dict[str, Block]] = {}
         self._by_environment: dict[str, _EnvironmentResults] = {}
 
     @classmethod
-    def read(
-        cls,
-        experiment: str,
-        place: Storage,
-        *,
-        listing: RunListing | None = None,
-    ) -> StoredRuns:
-        """Read one source, optionally using the caller's existing listing."""
-        keys = listing.keys if listing is not None else sorted(place.keys(""))
-        listed = set(keys)
-        if listing is None:
-            by_run = run_folders(keys)
-        else:
-            by_run = {}
-            for located in listing.declarations:
-                if located.file.experiment == experiment and located.file.members is None:
-                    by_run.setdefault(located.name, []).extend(located.folders)
-        folders: list[_Folder] = []
-        for run, held_in in sorted(by_run.items()):
-            for folder in held_in:
-                held_file = folder + TOURNAMENT_FILE in listed
-                if not held_file and folder + _ENVIRONMENT_FILE not in listed:
-                    continue
-                if listing is None:
-                    record = declared(place, folder, listed)
-                    if record is None or record.experiment != experiment:
-                        continue
-                names = tuple(key[len(folder) :] for key in under(keys, folder))
-                if held_file:
-                    held = TournamentRun.model_validate_json(
-                        place.get(folder + TOURNAMENT_FILE), context={"experiment": experiment}
-                    )
-                    folders.append(
-                        _Folder(
-                            place, run, folder, names, held, held.tournament.environment.identity
-                        )
-                    )
-                else:
-                    given = Environment.model_validate_json(place.get(folder + _ENVIRONMENT_FILE))
-                    folders.append(_Folder(place, run, folder, names, None, given.identity))
+    def read(cls, experiment: str, *listings: RunListing) -> StoredRuns:
+        """Read the tournament folders in the same listings that supplied the experiment."""
+        folders = (
+            found
+            for listing in listings
+            for run, copies in sorted(listing.folders.items())
+            for folder in copies
+            if (found := _Folder.read(listing, experiment, run, folder)) is not None
+        )
         return cls(experiment, folders)
 
     @cached_property
     def tournaments(self) -> dict[str, list[TournamentRun]]:
         """What each eval run held for a tournament added, by tournament, in run order."""
         found: dict[str, dict[str, TournamentRun]] = {}
-        for each in self._folders:
+        for each in self.folders:
             if each.held is not None:
                 found.setdefault(each.held.tournament.name, {}).setdefault(each.run, each.held)
         return {name: [runs[run] for run in sorted(runs)] for name, runs in sorted(found.items())}
 
-    def folders(self) -> tuple[_Folder, ...]:
-        return self._folders
-
     def records(self, each: _Folder) -> list[MatchRecord]:
         """The match records of a folder's blocks, read the first time they are asked for."""
-        key = (each.place.name, each.folder)
+        key = (store_identity(each.place), each.folder)
         if key not in self._records:
             self._records[key] = [
                 record
@@ -434,7 +420,7 @@ class StoredRuns:
         if cached is not None:
             return cached
         records: dict[str, list[MatchRecord]] = {}
-        for each in self._folders:
+        for each in self.folders:
             if each.environment == environment:
                 records.setdefault(each.run, []).extend(self.records(each))
         newest: dict[Digest, tuple[int, str]] = {}
@@ -473,24 +459,11 @@ def stored_runs(
     *,
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
-    listing: RunListing | None = None,
 ) -> StoredRuns:
-    """The experiment's eval runs in this computer's eval folder and `storages`.
-
-    A supplied listing belongs to the single entry in `storages`.
-    """
-    if listing is not None and len(storages) != 1:
-        raise EtudeError("listing_needs_one_storage", 422)
+    """The experiment's eval runs in this computer's eval folder and `storages`."""
     base = Path(directory) if directory is not None else default_root()
-    places = {each.name: each for each in [DirectoryStorage(base), *storages]}
-    folders = [
-        folder
-        for place in places.values()
-        for folder in StoredRuns.read(
-            experiment, place, listing=listing if storages and place is storages[0] else None
-        ).folders()
-    ]
-    return StoredRuns(experiment, folders)
+    places = {store_identity(each): each for each in (DirectoryStorage(base), *storages)}
+    return StoredRuns.read(experiment, *(RunListing.read(place) for place in places.values()))
 
 
 def _added(

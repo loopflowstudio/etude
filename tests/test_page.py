@@ -424,7 +424,9 @@ def test_seated_headline_uses_the_latest_evaluated_checkpoint_of_the_job(tmp_pat
     assert page.model_copy(update={"points": whole}).headline() == "scores.won 1"
 
 
-def test_policy_key_report_resolves_cross_experiment_seats_once(tmp_path: Path) -> None:
+def test_policy_key_report_resolves_cross_experiment_seats_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source = DirectoryStorage(tmp_path / "source")
     for experiment, seed in (("frontier", 0), ("frontier", 1), ("rival", 0)):
         with open_run(
@@ -456,14 +458,26 @@ def eval_jobs(state):
         checkpoints=state.policy(PolicyKey()).checkpoints, play=play, repo=None, max_hours=1)
         for name in ("first", "second")]
 """)
+    local = tmp_path / "local"
+    monkeypatch.setenv("ETUDE_TRACK_DIR", str(local))
+    local_listings = 0
+    versions = DirectoryStorage.versions
+
+    def count_local(storage: DirectoryStorage, prefix: str) -> dict[str, str]:
+        nonlocal local_listings
+        if storage.root == local:
+            local_listings += 1
+        return versions(storage, prefix)
+
+    monkeypatch.setattr(DirectoryStorage, "versions", count_local)
     measured = MeasuredStorage(source)
     page = build(measured, file)
     assert [(c.tournament, c.unplayed) for c in page.coverage] == [("first", 2), ("second", 2)]
-    assert measured.requests == 16  # 12 discovery reads, four existing statsdb reads
-    assert measured.listings == 1
+    assert measured.requests == 13  # 12 discovery reads and the checkpoint statsdb ingests
+    assert (measured.listings, local_listings) == (1, 1)
     for seed in (0, 1):
-        # Two tournaments share the external checkpoint/outcome reads. Statsdb separately
-        # reads declarations to retain its own experiment membership.
+        # The report, both tournaments and statsdb share the same declarations.
+        assert measured.got.count(f"frontier/small@{seed}/run.json") == 1
         assert measured.got.count(f"frontier/small@{seed}/checkpoints/updates-100.json") == 1
         assert measured.got.count(f"frontier/small@{seed}/outcome.json") == 1
     assert not any(key.endswith("weights.pt") for key in measured.got)

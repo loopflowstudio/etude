@@ -25,6 +25,7 @@ from etude.launch.records import Pool
 from etude.out import MEMBERSHIP, OutFile, OutFiles
 from etude.page import build
 from etude.records import ArtifactRef, RunRecord
+from etude.run import RunListing
 from etude.spec import Job, RunRequest, job_id
 from etude.storage import DirectoryStorage, default_root
 from tests.eval.games import play
@@ -892,8 +893,8 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         run.checkpoint(path, updates=1)
     decisions = advance(definition, source=source, directory=tmp_path / "evals")
     assert [(decision.new, decision.played) for decision in decisions] == [(1, 1)]
-    stored = StoredRuns.read("fresh_policy", source)
-    assert sum(len(stored.records(folder)) for folder in stored.folders()) == 1
+    stored = StoredRuns.read("fresh_policy", RunListing.read(source))
+    assert sum(len(stored.records(folder)) for folder in stored.folders) == 1
 
 
 def test_policy_key_of_a_job_added_to_a_started_experiment_is_queued(
@@ -1022,8 +1023,8 @@ def eval_jobs(state):
     assert measured.requests == 12  # three declarations, writers, checkpoints and outcomes
     assert all(measured.got.count(key) == 1 for key in measured.got)
     assert not any(key.endswith("weights.pt") for key in measured.got)
-    stored = StoredRuns.read("rival", source)
-    matches = [record.match for folder in stored.folders() for record in stored.records(folder)]
+    stored = StoredRuns.read("rival", RunListing.read(source))
+    matches = [record.match for folder in stored.folders for record in stored.records(folder)]
     assert {
         tuple(
             player.checkpoint.key

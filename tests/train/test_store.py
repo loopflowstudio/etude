@@ -101,7 +101,7 @@ def test_a_folder_listed_without_a_declaration_is_not_asked_for_one(tmp_path: Pa
         assert client.requests == len(client.read) == 3  # declaration, attempt, state
         client.requests = 0
         assert runs(bucket) == [("e", "r")]
-        assert client.requests == 1
+        assert client.requests == 0  # The listing confirms the cached declaration’s ETag.
 
 
 def test_a_run_whose_declaration_is_invalid_reads_without_one(tmp_path: Path) -> None:

@@ -122,7 +122,7 @@ def advance(
     if max_usd is not None and (not max_usd.is_finite() or max_usd < 0):
         raise LauncherError("--max-usd must be a finite, nonnegative dollar limit")
     listing = RunListing.read(source)
-    state = observe(source, experiment.name, keys=listing.keys, declarations=listing.declarations)
+    state = observe(listing, experiment.name)
     committed = state.committed_usd
     print(
         f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: "
@@ -194,10 +194,9 @@ def advance(
                 print(line)
             raise
     policy_lines = read_tournament_lines(
-        source,
+        listing,
         state,
         [job.recorded() for job in jobs],
-        listing=listing,
     )
     smoke = Smoke()
     if smoke_file_first and not quote:
@@ -219,7 +218,7 @@ def advance(
     taken = {run.address for run in state.eval_runs}
     decisions: list[TournamentDecision] = []
     stopped_runs: set[str] = set()
-    stored = StoredRuns.read(experiment.name, source, listing=listing) if jobs else None
+    stored = StoredRuns.read(experiment.name, listing) if jobs else None
     groups: dict[str, list[_PendingEvaluation]] = {}
     for declaration in jobs:
         recorded = declaration.recorded()

@@ -32,7 +32,7 @@ __all__ = ("observe",)
 
 
 def observe(
-    source: Storage | Path | str,
+    source: RunListing | Storage | Path | str,
     experiment: str,
     *,
     keys: Sequence[str] | None = None,
@@ -52,21 +52,14 @@ def observe(
 
 
 def read_tournament_lines(
-    source: Storage,
+    listing: RunListing,
     state: jobs.ExperimentState,
     tournaments: Iterable[Tournament | TournamentRun],
-    *,
-    listing: RunListing,
 ) -> tuple[Line, ...]:
     """Read the lines reachable by these tournaments, sharing one source discovery."""
     found = list(state.lines)
     for name in sorted(find_line_experiments(tournaments) - {state.experiment}):
-        found.extend(
-            line.seen_from(state.experiment)
-            for line in observe(
-                source, name, keys=listing.keys, declarations=listing.declarations
-            ).lines
-        )
+        found.extend(line.seen_from(state.experiment) for line in observe(listing, name).lines)
     return tuple(found)
 
 
