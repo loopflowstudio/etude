@@ -249,10 +249,12 @@ class AttemptPublisher:
             if failure and not failed:
                 print("hosted view: " + failure, file=sys.stderr, flush=True)
             failed = failure is not None
-            delay = min(delay * 2, 30) if failed else 1
-            if final:
+            if final and not failed:
                 return
-            self.finish.wait(delay)
+            delay = min(delay * 2, 30) if failed else 1
+            # The final flush retries within its allowance: a receiver restart must not
+            # leave a finished run reading as running.
+            (self.stop if final else self.finish).wait(0.25 if final else delay)
 
 
 @contextmanager
