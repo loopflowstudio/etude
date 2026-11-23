@@ -684,7 +684,8 @@ def test_a_run_accepts_the_next_listing_after_a_missing_input(
         if previously_read:
             assert _loss(graph) == [7] and "files observed 11 min ago" in graph
         else:
-            assert ">queued<" in graph and "Loading charts…" in graph
+            assert ">queued<" in graph and "Charts could not be read; retrying." in graph
+            assert "Loading charts…" not in graph
             assert "FileNotFoundError" in graph and "files observed 0 s ago" in graph
             assert _version(_get(view, "/experiments/lab/report?observe=1")) == "ready"
         view.refresh_files()

@@ -122,6 +122,10 @@ CREATE TABLE IF NOT EXISTS observation (
 CREATE TABLE IF NOT EXISTS declarations (
     experiment TEXT PRIMARY KEY, file TEXT NOT NULL, accepted TEXT, error TEXT
 );
+-- Run declarations that are not Etude's, by the listing version that was rejected.
+CREATE TABLE IF NOT EXISTS ignored_declarations (
+    key TEXT PRIMARY KEY, version TEXT NOT NULL
+);
 """
 
 
@@ -209,9 +213,6 @@ class ChartIndex:
         with self._connect() as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.executescript(_SCHEMA)
-            # Additive discovery evidence can share previously built chart databases.
-            db.execute("""CREATE TABLE IF NOT EXISTS ignored_declarations (
-                          key TEXT PRIMARY KEY, version TEXT NOT NULL)""")
             self._known: DeclarationCache = {
                 key: (tag, None)
                 for key, tag in db.execute("SELECT key,version FROM ignored_declarations")
