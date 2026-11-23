@@ -135,8 +135,11 @@ launcher facts. A launched evaluation groups every tournament with new matches i
 `EXPERIMENT/evals-DIGEST`: add a second `Benchmark` to `eval_jobs` and raise `games` on
 both to get a two-member group, then count rows per tournament in `statsdb`. To see a broken `report()`, write a syntax error into the file while a run
 writes and restore it after. `etude server set` refuses an unreachable host, so reach a
-failed launcher read with `chmod 0 home/launcher.sqlite` across a view restart (stop
-`etude wait` first) and restore `0644` before finishing.
+failed launcher read with `chmod 0 home/launcher.sqlite` (stop `etude wait` first); an
+open view shows `Launcher unavailable` within one poll and recovers without a restart.
+Restore the file's original mode (`0600`) before finishing. A Playwright driver that
+reads `inner_text` from tabs that reload itself must catch the read: a reload mid-read
+raises and ends the driver silently while the launched job keeps running.
 
 To drive the experiment page's report pane, give the experiment's `report()` QA
 instrumentation: append a line to a gitignored log per call, `time.sleep(3)`, and raise
