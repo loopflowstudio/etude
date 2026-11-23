@@ -743,6 +743,22 @@ def test_indexed_experiment_opens_its_default_report_separately(tmp_path: Path) 
         assert _loss(server.page("/experiments/lab/report") or "") == [8.0]
 
 
+def test_a_metric_no_report_panel_names_leads_its_run_overview_and_card(tmp_path: Path) -> None:
+    # The prototype's report declares scores only; its run logs one metric.
+    source = DirectoryStorage(tmp_path / "runs")
+    _start_run(source, "lab/base@0", 7)
+    _seal(source.root / "lab/base@0", 1, 3.0)
+    file = experiment_file(tmp_path, "lab", REPORTED)
+    with Server(source, file, ("127.0.0.1", 0)) as view:
+        _ingest(view)
+        _publish_declarations(view)
+        overview = _get(view, "/runs/lab/base@0")
+        assert _loss(overview) == [7.0, 3.0]
+        assert "<dt>Latest score</dt><dd>loss 3</dd>" in overview
+        assert "loss 3" in _get(view, "/experiments/lab")
+        assert '"loss"' in _get(view, "/")
+
+
 def test_run_overview_and_tab_polls_use_only_indexed_clock_cost_and_files(tmp_path: Path) -> None:
     backend = bench(home())
     backend.clock.now = datetime.now(UTC) - timedelta(hours=2)

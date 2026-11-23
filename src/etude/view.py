@@ -735,7 +735,11 @@ class _ViewSnapshot:
             (row["address"],),
         )
         names = "".join(f"<li><code>{escape(key)}</code></li>" for (key,) in files)
-        body = f"<ul>{names}</ul>" if names else _empty_section(row, "Files", "No files recorded.")
+        body = (
+            f'<ul class="file-keys">{names}</ul>'
+            if names
+            else _empty_section(row, "Files", "No files recorded.")
+        )
         return f'<section class="sec"><h2>Files</h2>{body}</section>'
 
     def waiting(self) -> str:

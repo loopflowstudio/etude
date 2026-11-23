@@ -126,6 +126,9 @@ details { margin-top: 18px; } details summary { cursor: pointer; color: var(--in
 body:has(> #view-rail) { display: grid; grid-template-columns: 12rem minmax(0, 1fr); align-items: start; }
 .view-body { min-width: 0; }
 .view-body > #status-error { margin: 12px 16px 0; }
+/* A breadcrumb or report button above the heading keeps the heading's top margin. */
+.view-body > .wrap:not(:has(> .head:first-child)) { padding-top: 16px; }
+.file-keys code { overflow-wrap: anywhere; }
 #view-rail { position: sticky; top: 0; height: 100vh; overflow: auto; padding: 22px 12px; background: var(--wash); border-right: 1px solid var(--line); font-size: 13px; }
 #view-rail a { display: block; padding: 4px 8px; color: var(--ink); text-decoration: none; overflow-wrap: anywhere; border-radius: 4px; }
 #view-rail a:hover { text-decoration: underline; }

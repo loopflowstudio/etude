@@ -898,6 +898,9 @@ def _overview(page: Page) -> Page:
 
 def run_chart_data(storage: Storage, data: RunData, report: Report, clock: str) -> RunCharts:
     """Project the full run and the card from one reading of its bucketed curves."""
+    # A run page draws every recorded metric, as charts.js does for run charts,
+    # so its overview and headline also fall back to metrics no panel names.
+    report = report.model_copy(update={"other_metrics": True})
     page = _assemble(data.experiment, None, storage, report, None, (), [data], _Evals())
     return RunCharts(
         _payload(page.model_dump(mode="json") | {"run_charts": True}, None),
