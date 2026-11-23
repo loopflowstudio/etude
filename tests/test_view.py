@@ -821,6 +821,21 @@ def test_bucket_discovery_remembers_foreign_declarations_until_their_version_cha
             assert client.read[key] - before == 4096
 
 
+def test_a_declaration_without_an_address_leaves_the_other_runs_publishing(
+    tmp_path: Path,
+) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    _start_run(source, "lab/base@0", 7)
+    # A folder copied under another experiment keeps the id it had before.
+    copied = RunRecord(id="lab/base@0", experiment="moved")
+    source.put("moved/base@0/run.json", copied.model_dump_json().encode())
+    with Server(source, None, ("127.0.0.1", 0)) as server:
+        _ingest(server)
+        home = _get(server, "/")
+        assert "Run files:" not in home and "/experiments/lab" in home
+        assert "/experiments/moved" not in home
+
+
 def test_bucket_discovery_publishes_before_charting_and_opens_only_the_requested_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

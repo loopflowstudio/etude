@@ -630,9 +630,13 @@ def _read_declaration(storage: Storage, key: str, version: str | None) -> RunRec
             return None
     body = storage.get(key)
     try:
-        return RunRecord.model_validate_json(body)
-    except ValidationError:
+        record = RunRecord.model_validate_json(body)
+        # Readers address every run; one that has no address is not a run
+        # here, rather than an error for the whole source.
+        run_address(record.id, record.experiment)
+    except ValueError:
         return None
+    return record
 
 
 class RunListing:
