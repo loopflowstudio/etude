@@ -1060,7 +1060,7 @@ def test_a_game_failure_retains_in_flight_outcomes_and_resume_skips_successes(
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     # Keep acceptance order deterministic: failure, success, then another failure.
-    monkeypatch.setattr("etude.eval.run.ordered", lambda matches: iter(matches))
+    monkeypatch.setattr("etude.eval.tournament.ordered", lambda matches: iter(matches))
 
     def completed(
         fs: Iterable[Future[object]],

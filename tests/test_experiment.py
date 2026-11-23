@@ -30,7 +30,15 @@ from etude.experiment import observe
 from etude.jobs import EvalJob, ExperimentState, OutMembers, _hold, evaluation_group
 from etude.launch.records import Outcome, Standing, Status
 from etude.out import MEMBERSHIP, OutFile, OutFiles
-from etude.records import Clock, RunCounters, RunOutcome, RunRecord, RunSubmission
+from etude.records import (
+    Clock,
+    Continuation,
+    RunCounters,
+    RunOutcome,
+    RunRecord,
+    RunSubmission,
+    SourceKey,
+)
 from etude.spec import Job, RunRequest
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage
@@ -992,6 +1000,41 @@ def test_launcher_phase_preserves_compact_training_addresses_and_terminal_outcom
     assert run.name == "ppo@0"
     assert run.status == launcher.status("ppo/base@0")
     assert run.state == (phase if outcome == "stopped" and phase != "succeeded" else outcome)
+
+
+def test_a_continuation_keeps_its_own_launcher_status_beside_its_parents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    for name, parent in (("base@0", None), ("c1", "base@0")):
+        open_run(
+            experiment="ppo",
+            run=name,
+            job="base",
+            seed=0,
+            directory=tmp_path / name,
+            storages=[bucket],
+            clocks=["updates"],
+            continues=None
+            if parent is None
+            else Continuation(
+                parent=SourceKey(namespace="local", kind="run", source_id=parent),
+                clock="updates",
+                value=1,
+            ),
+        ).finish("finished", timeout=30)
+    launcher = _Launcher()
+    launcher.outcome = "succeeded"
+    launcher.launched.extend(
+        RunRequest(id=f"ppo/{name}", seed=0, job=Job(name="base", experiment="ppo", command="true"))
+        for name in ("base@0", "c1")
+    )
+    monkeypatch.setattr(client, "standing", launcher.standing)
+    state = observe(bucket, "ppo")
+    assert {run.name: run.status for run in state.runs} == {
+        "base@0": launcher.status("ppo/base@0"),
+        "c1": launcher.status("ppo/c1"),
+    }
 
 
 @pytest.mark.parametrize("phase", ["queued", "running"])

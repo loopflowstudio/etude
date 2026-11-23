@@ -83,13 +83,17 @@ def read_tournament_lines(
 def find_training_run(
     runs: Iterable[jobs.TrainingRunSummary], address: str | None, job: str, seed: int | None
 ) -> jobs.TrainingRunSummary | None:
-    """Match the run name, or its recorded job and seed for compact spellings."""
-    for run in runs:
-        if address is not None and run.name == address.removeprefix(run.experiment + "/"):
-            return run
-        if run.launch == job and run.seed == seed:
-            return run
-    return None
+    """Match the run name, or else its recorded job and seed for compact spellings.
+
+    A continuation shares its parent's job and seed, so an exact name wins
+    over every job-and-seed match.
+    """
+    runs = tuple(runs)
+    if address is not None:
+        for run in runs:
+            if run.name == address.removeprefix(run.experiment + "/"):
+                return run
+    return next((run for run in runs if run.launch == job and run.seed == seed), None)
 
 
 def state_of(
