@@ -1396,6 +1396,80 @@ def report() -> Report:
         assert '"owner":"a"' in _get(view, "/status")
 
 
+def test_reports_index_and_poll_show_the_last_served_build_without_source_reads(
+    tmp_path: Path, repository: tuple[Path, Path]
+) -> None:
+    repo, _ = repository
+    file = experiment_file(
+        repo,
+        "lab",
+        "from etude.report import Report, Series\n"
+        "def report() -> Report:\n"
+        "    return Report(ml=(Series(title='Return', keys=('reward',), unit='pts'),))\n",
+    )
+    git(repo, "add", file.name)
+    git(repo, "commit", "-m", "Declare the report")
+    commit = git(repo, "rev-parse", "--short=12", "HEAD")
+    experiment_file(repo, "unused", COUNTED)
+    source = DirectoryStorage(tmp_path / "runs")
+    for seed, reward in enumerate((3, 12)):
+        with open_run(
+            experiment="lab", run=f"base@{seed}", clocks=["steps"], directory=source.root
+        ) as run:
+            run.log({"reward": 90}, steps=1)
+            run.log({"reward": reward}, steps=2)
+    _start_run(source, "active/base", 2)
+    measured = MeasuredStorage(source)
+    with Server(measured, repo, ("127.0.0.1", 0)) as view:
+        _ingest(view)
+
+        def rows() -> dict[str, str]:
+            reads = measured.listings, measured.requests, measured.bytes
+            indexed: dict[str, str] = {}
+            for route in ("/reports", "/reports/status"):
+                table = _get(view, route).split("<tbody>")[1].split("</tbody>")[0]
+                found = {
+                    row.split('href="/experiments/')[1].split('/report">')[0]: row
+                    for row in table.split("</tr>")
+                    if row
+                }
+                assert len(found) == table.count("<tr>") == 3
+                assert set(found) == {"active", "lab", "unused"}
+                if indexed:
+                    assert found == indexed
+                indexed = found
+            assert (measured.listings, measured.requests, measured.bytes) == reads
+            return indexed
+
+        cold = rows()
+        assert "<td>Never</td>" in cold["unused"]
+        assert "<td>Open</td><td>Never</td><td>Default</td>" in cold["active"]
+        assert "<td>Completed</td><td>Never</td>" in cold["lab"]
+        route = "/experiments/lab/report"
+        assert "base@1" in _get(view, route)
+        built = rows()["lab"]
+        stamp = datetime.fromisoformat(built.split('<time datetime="')[1].split('"')[0])
+        assert f"{stamp:%Y-%m-%d %H:%M:%S UTC}</time>" in built
+        assert f"<td>{commit}</td><td>reward 12 pts</td><td>2</td>" in built
+        assert "Refresh report" in _get(view, "/experiments/active/report")
+        assert "<td>Default</td><td>loss 2</td><td>1</td>" in rows()["active"]
+
+        # A newly indexed run changes live state. Only a successful report refresh
+        # replaces the revision, score and membership shown beside that state.
+        _start_run(source, "lab/next", 5)
+        view.refresh_files()
+        opened = built.replace("<td>Completed</td>", "<td>Open</td>")
+        assert rows()["lab"] == opened
+        file.write_text("raise ValueError('broken report')\n")
+        with pytest.raises(ValueError, match="broken report"):
+            view.page(route, refresh=True)
+        assert rows()["lab"] == opened
+        file.write_text(COUNTED.replace("return Report()", "return Report(other_metrics=True)"))
+        view.page(route, refresh=True)
+        refreshed = rows()["lab"]
+        assert "<td>Working tree</td>" in refreshed and refreshed.endswith("<td>3</td>")
+
+
 def test_side_rail_follows_open_experiments_and_held_rentals_on_every_page(tmp_path: Path) -> None:
     source = DirectoryStorage(tmp_path / "runs")
     _start_run(source, "local/base", 7)

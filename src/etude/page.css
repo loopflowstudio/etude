@@ -155,6 +155,10 @@ body:has(> #view-rail) { display: grid; grid-template-columns: 12rem minmax(0, 1
 .experiment-card figcaption { font-weight: 500; }
 .experiment-card figcaption small, .experiment-card footer { display: block; color: var(--ink-2); font-size: 12px; font-weight: 400; }
 .experiment-card p { margin: 2px 0 6px; }
+.reports-index tbody tr { position: relative; }
+.reports-index tbody tr:hover, .reports-index tbody tr:focus-within { background: var(--wash); }
+.reports-index td a::after { content: ""; position: absolute; inset: 0; }
+.reports-index th, .reports-index time { white-space: nowrap; }
 .run-dots { display: flex; flex-wrap: wrap; margin-top: 8px; }
 .run-dot { display: grid; place-items: center; width: 24px; height: 24px; color: var(--ink-2); }
 .run-dot .state-dot { margin: 0; }

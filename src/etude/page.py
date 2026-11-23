@@ -322,6 +322,25 @@ class Page(Record):
     latest_result_ms: int | None
     absent: tuple[Absent, ...]
 
+    def headline_score(self) -> str | None:
+        """Highest latest run value for the first drawable ML metric, on the report clock."""
+        clocks = [c.name for c in self.training.clocks]
+        if not clocks:
+            return None
+        clock = self.report.clock if self.report.clock in clocks else clocks[0]
+        measured = self.training.series.get(clock, {})
+        for panel in _ml_panels(self.report, self.training):
+            if not isinstance(panel, Series | Counters):
+                continue
+            log = isinstance(panel, Series) and panel.scale == "log"
+            for key in panel.keys:
+                values = (trace.latest(log=log) for trace in measured.get(key, ()))
+                highest = max((v for v in values if v is not None), default=None)
+                if highest is not None:
+                    unit = panel.unit if isinstance(panel, Series) else ""
+                    return f"{key} {highest:.4g} {unit}".rstrip()
+        return None
+
 
 class Entry(Record):
     """One experiment file on the index: its page without line data, or why it has none."""
@@ -802,10 +821,8 @@ class Headline(Record):
         """Latest drawable bucket of each metric, labelled for the run table."""
         values = []
         for key, trace in self.curves.items():
-            for x, y in zip(reversed(trace.x), reversed(trace.mean), strict=True):
-                if x is not None and y is not None and (not self.log or y > 0):
-                    values.append(f"{key} {y:.4g} {self.unit}".rstrip())
-                    break
+            if (value := trace.latest(log=self.log)) is not None:
+                values.append(f"{key} {value:.4g} {self.unit}".rstrip())
         return values
 
 

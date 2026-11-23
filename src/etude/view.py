@@ -14,6 +14,7 @@ import re
 import shlex
 import signal
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -24,6 +25,7 @@ from contextlib import ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from functools import cached_property
 from hashlib import sha256
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -151,6 +153,15 @@ _VISIBLE = f"""{_OBSERVED}, visible AS (
 class _PendingReport:
     previous: str | None
     future: Future[ReportDeclaration]
+
+
+@dataclass(frozen=True)
+class _ServedReport:
+    html: str
+    built: datetime
+    declaration: str
+    score: str | None
+    runs: int
 
 
 @dataclass(frozen=True)
@@ -872,7 +883,7 @@ class _ViewSnapshot:
             body = "<p>No launcher is used here.</p>"
         return _live_status(body, error=error)
 
-    def reports(self, declared: dict[str, Path]) -> str:
+    def reports(self, declared: dict[str, Path], served: dict[str, _ServedReport]) -> str:
         names = set(declared)
         names.update(
             row[0]
@@ -880,28 +891,59 @@ class _ViewSnapshot:
                 _VISIBLE + "SELECT DISTINCT experiment FROM visible", {"remote": self.remote}
             )
         )
-        links = "".join(
-            f'<li><a href="/experiments/{quote(name)}/report">{escape(name)}</a></li>'
-            for name in sorted(names)
+        rows = []
+        for name in sorted(names):
+            report = served.get(name)
+            state = "Open" if name in self._open_experiments else "Completed"
+            built = (
+                f'<time datetime="{report.built.isoformat()}">{report.built:%Y-%m-%d %H:%M:%S UTC}</time>'
+                if report
+                else "Never"
+            )
+            declaration = report.declaration if report else ("—" if name in declared else "Default")
+            score = escape(report.score) if report and report.score else "—"
+            rows.append(
+                f'<tr><td><a href="/experiments/{quote(name)}/report">{escape(name)}</a></td>'
+                f"<td>{state}</td><td>{built}</td><td>{escape(declaration)}</td>"
+                f"<td>{score}</td><td>{report.runs if report else '—'}</td></tr>"
+            )
+        columns = (
+            "Experiment",
+            "State",
+            "Built in this view",
+            "Declared at",
+            "Headline score",
+            "Training runs drawn",
         )
-        return _live_status(f"<ul>{links}</ul>" if links else "<p>No experiments yet.</p>")
+        return _live_status(
+            f'<div class="reports-index">{_table(columns, rows)}</div>'
+            if rows
+            else "<p>No experiments yet.</p>"
+        )
 
-    def rail(self, section: str) -> str:
+    @cached_property
+    def _open_experiments(self) -> dict[str, set[str]]:
         # The partial index skips completed history, and no chart or console is selected.
         rows = self.db.execute(
             _VISIBLE
             + "SELECT experiment,state,phase,last_write,at FROM visible WHERE may_be_open ORDER BY experiment",
             {"remote": self.remote},
         )
-        links = []
+        opened = {}
         for name, runs in groupby(rows, itemgetter("experiment")):
             states = {state for row in runs if _is_open(row, state := _display_state(row))}
             if states:
-                label = escape(", ".join(sorted(states)))
-                links.append(
-                    f'<a href="/experiments/{quote(name)}"><i class="state-dot" '
-                    f'role="img" aria-label="{label}" title="{label}"></i>{escape(name)}</a>'
-                )
+                opened[name] = states
+        return opened
+
+    def rail(self, section: str) -> str:
+        links = []
+        for name, states in self._open_experiments.items():
+            label = escape(", ".join(sorted(states)))
+            links.append(
+                f'<a href="/experiments/{quote(name)}"><i class="state-dot" '
+                f'role="img" aria-label="{label}" title="{label}"></i>{escape(name)}</a>'
+            )
         row = self.db.execute(
             _OBSERVED + "SELECT at,machine_rail,last_loop FROM observed",
             {"remote": self.remote},
@@ -1633,6 +1675,42 @@ def _document(title: str, body: str) -> str:
     )
 
 
+def _declaration_commit(file: Path) -> str | None:
+    """Only attribute a local declaration to HEAD when its file is clean and tracked."""
+    try:
+        status = subprocess.run(
+            [
+                "git",
+                "--no-optional-locks",
+                "--literal-pathspecs",
+                "-C",
+                str(file.parent),
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                "--no-ahead-behind",
+                "--ignored",
+                "--untracked-files=all",
+                "--",
+                file.name,
+            ],
+            capture_output=True,
+        )
+    except OSError:
+        return None
+    lines = status.stdout.splitlines()
+    if status.returncode or any(not line.startswith(b"# ") for line in lines):
+        return None
+    return next(
+        (
+            m[1].decode()
+            for line in lines
+            if (m := re.fullmatch(rb"# branch\.oid ([0-9a-f]+)", line))
+        ),
+        None,
+    )
+
+
 class Server(ThreadingHTTPServer):
     def __init__(
         self, source: Storage | Path | str, path: Path | None, address: tuple[str, int]
@@ -1644,7 +1722,7 @@ class Server(ThreadingHTTPServer):
         self._find_files()
         self._building = threading.Lock()
         self._lock = threading.Lock()
-        self._html: dict[str, str] = {}
+        self._served: dict[str, _ServedReport] = {}
         self._pending: dict[str, Future[str]] = {}
         self._address = ExitStack()
         super().__init__(address, _Handler)
@@ -1724,7 +1802,7 @@ class Server(ThreadingHTTPServer):
                 rail = "" if query.get("embed") == ["1"] else view.rail("/reports")
             # Release the index snapshot before building or waiting on an authored report.
             with self._lock:
-                waiting = not ready and experiment not in self._html
+                waiting = not ready and experiment not in self._served
             if waiting:
                 if refresh:
                     raise ValueError("Waiting for run files.")
@@ -1756,7 +1834,9 @@ class Server(ThreadingHTTPServer):
                 title, status = "Machines", view.machines()
                 section = route
             elif route == "/reports":
-                title, status = "Reports", view.reports(self.files)
+                with self._lock:
+                    served = self._served.copy()
+                title, status = "Reports", view.reports(self.files, served)
                 section = route
             elif match := re.fullmatch(r"/experiments/([^/]+)(/status)?/?", path):
                 title = match[1]
@@ -1795,9 +1875,9 @@ class Server(ThreadingHTTPServer):
     def _report(self, experiment: str, *, refresh: bool) -> str:
         """Share the first build and explicit refreshes between report readers."""
         with self._lock:
-            html = self._html.get(experiment)
-            if not refresh and html is not None:
-                return html
+            report = self._served.get(experiment)
+            if not refresh and report is not None:
+                return report.html
             shared = self._pending.get(experiment)
             if shared is None:
                 self._pending[experiment] = Future()
@@ -1808,24 +1888,40 @@ class Server(ThreadingHTTPServer):
         # socket while an authored report is still building.
         try:
             with self._building:
-                html = self._build_report(experiment)
+                report = self._build_report(experiment)
         except BaseException as error:
             with self._lock:
                 self._pending.pop(experiment).set_exception(error)
             raise
         with self._lock:
-            self._html[experiment] = html
-            self._pending.pop(experiment).set_result(html)
-        return html
+            self._served[experiment] = report
+            self._pending.pop(experiment).set_result(report.html)
+        return report.html
 
-    def _build_report(self, experiment: str) -> str:
-        page = self.pages.build(self.files.get(experiment), experiment=experiment)
+    def _build_report(self, experiment: str) -> _ServedReport:
+        file = self.files.get(experiment)
+        commit = _declaration_commit(file) if file else None
+        page = self.pages.build(file, experiment=experiment)
         control = (
             '<button id="refresh-report">Refresh report</button> '
             '<span id="refresh-status" role="status"></span>'
             f"<script>{read_asset('refresh_report.js')}</script>"
         )
-        return render(page, heading=control)
+        html = render(page, heading=control)
+        declaration = "Default"
+        if page.origin:
+            declaration = (
+                commit[:12]
+                if file and commit and _declaration_commit(file) == commit
+                else "Working tree"
+            )
+        return _ServedReport(
+            html=html,
+            built=datetime.now(UTC),
+            declaration=declaration,
+            score=page.headline_score(),
+            runs=len(page.training.runs),
+        )
 
 
 class _Handler(BaseHTTPRequestHandler):

@@ -99,6 +99,13 @@ class Trace(Record):
     nonfinite: int = 0
     seeds: list[int] | None = None
 
+    def latest(self, *, log: bool) -> float | None:
+        """Last drawable bucket on this trace's axis."""
+        for x, y in zip(reversed(self.x), reversed(self.mean), strict=True):
+            if x is not None and y is not None and (not log or y > 0):
+                return y
+        return None
+
 
 class Timer(Record):
     name: str

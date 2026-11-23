@@ -163,7 +163,17 @@ opened before the run appears names the source the view is watching.
 | `/runs/ADDRESS?observe=1` | Current source ages and the version of the run shown in the tab |
 | `/machines` | Held machines with their pool or on-demand, readiness, window and cost. Each occupied slot links to its run and shows its state and clock. |
 | `/machines/status` | The inventory used to refresh the Machines page |
-| `/reports` | Links to each experiment’s report |
+| `/reports` | Experiment states and the reports built in this view |
+| `/reports/status` | The rows used to refresh the reports index |
+
+Open **Reports** to see which experiments are open or completed. Select a
+row to open its report. **Never** means this view has yet to build it.
+After a successful build, the row shows its UTC build time, the declaration
+file’s Git revision (**Working tree** for a local version, **Default** for
+the built-in report), and the number of training runs included. The headline
+uses the first ML metric with drawable values on the report clock and shows
+the highest of the runs’ latest values. These build details stay with the
+served report until a successful refresh. Restarting the view clears them.
 
 Use the side rail to switch pages, open an active experiment or jump to a
 held machine’s row. Idle machines are marked. The hourly total counts each
