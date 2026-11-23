@@ -25,8 +25,10 @@ Later passes see new checkpoints and submit their eval matches. Supply finite
 runs; eval seeds are indices in the match generator's panel.
 
 Inside a declaration, `state.run("base@0").state` gives the training run's
-state. Its `status` holds the launcher's retained phase, machine, clocks and
-cost when the launcher knows the run. Its `last_write` gives the latest UTC
+state. Its `status` holds the launcher's retained phase, allocation ID
+(`attempt`), machine, clocks and cost. Its `allocation_phase` gives a more
+specific phase when known, including setup and a confirmed stop while the
+launcher still holds the slot. Its `last_write` gives the latest UTC
 modification time among its stored files, including copies. Evaluation runs
 in `state.eval_runs` carry the same fields. A file-only run has `status=None`.
 A queued run with no files has `last_write=None`, as does a listing without

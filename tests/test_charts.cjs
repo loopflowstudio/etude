@@ -45,7 +45,7 @@ function renderPage(data, hash = "") {
     experiment: "test", notes: [], environments: [], commits: [], failures: [], generated_ms: 0,
     scores: [{table: "games", value: "win", unit: "games"}], ...data,
     report: {evals: [{kind: "curve", title: "Score"}], perf: [], ml: [], ...data.report},
-    training: {metrics: [], series: {}, bands: {}, ...data.training, runs: data.training.runs.map(r => ({rows: 0, writers: [], ...r}))},
+    training: {metrics: [], series: {}, bands: {}, timers: [], ...data.training, runs: data.training.runs.map(r => ({rows: 0, writers: [], ...r}))},
   };
   document.getElementById("data").textContent = JSON.stringify(full);
   const browser = vm.createContext({
@@ -374,6 +374,55 @@ test("explicit absent metric keys remain visible as report warnings", () => {
   assert.match(renderPage(data).sectionText("ml"), /Named by a panel but not logged by these runs: misspelt\/loss/);
 });
 
+
+test("a live run leads with measured groups from either report section", () => {
+  const data = page([], [], {
+    jobs: [{name: "a", launch: "a", runs: ["a"]}], runs: [{name: "a"}],
+    checkpoints: [], clocks: [{name: "steps"}, {name: "updates", kind: "step"}],
+    metrics: ["loss", "accuracy"],
+    series: {updates: {loss: [{owner: "a", x: [4], mean: [7]}], accuracy: [{owner: "a", x: [4], mean: [0.5]}]}},
+  });
+  data.report = {clock: "updates", perf: [
+    {kind: "pace", title: "Pace"}, {kind: "elapsed", title: "Elapsed"},
+    {kind: "attempts", title: "Writers"}, {kind: "flame", title: "Timers", prefix: "time/"},
+    {kind: "series", title: "Training loss", keys: ["loss", "missing"], scale: "log", unit: "nats"},
+  ]};
+  const render = () => renderPage({...data, run_charts: true});
+  const first = render();
+  assert.match(first.sectionText("charts"), /Training loss.*nats.*log scale.*Other logged metrics.*accuracy/);
+  assert.doesNotMatch(first.sectionText("charts"), /missing/);
+  assert.deepEqual([...first.plots[0].values[1]], [7]);
+  assert.equal(first.plots[0].options.axes[0].label, "updates");
+  assert.equal(first.plots[0].options.scales.y.log, 10);
+  assert.equal(first.display("performance"), "none");
+  data.training.checkpoints.push({run: "a", ordinal: 1, align: 4, at: {updates: 4}, elapsed: 3, pace: {updates: null}});
+  assert.match(render().sectionText("performance"), /Elapsed/);
+  assert.doesNotMatch(render().sectionText("performance"), /Pace/);
+  data.training.checkpoints.push({run: "a", ordinal: 2, align: 8, at: {updates: 8}, elapsed: 5, pace: {updates: 2}});
+  assert.match(render().sectionText("performance"), /Pace.*Elapsed/);
+});
+
+test("a timer-only run shows its measured breakdown under Performance", () => {
+  const data = page([], [], {
+    jobs: [{name: "a", launch: "a", label: "Learner", runs: ["a"]}], runs: [{name: "a", at: {steps: 1}}],
+    checkpoints: [], clocks: [{name: "steps", kind: "step"}], metrics: ["time/train"],
+    timers: [{run: "a", prefix: "time/", tree: {name: "active", seconds: 2, children: [
+      {name: "train", seconds: 2, status: "recorded", children: []},
+    ]}}],
+  });
+  data.report = {ml: [{kind: "flame", title: "Training timers", prefix: "time/"}]};
+  const view = renderPage({...data, run_charts: true});
+  assert.match(view.sectionText("charts"), /Timer metrics are shown under Performance/);
+  assert.match(view.sectionText("performance"), /Training timers.*seconds logged under time\//);
+});
+
+test("declared clocks alone leave Charts with an empty message", () => {
+  const data = page([], [], {runs: [{name: "a"}], jobs: [], clocks: [{name: "steps"}], checkpoints: []});
+  const view = renderPage({...data, run_charts: true});
+  assert.equal(view.display("charts"), "");
+  assert.equal(view.sectionText("charts"), "No metric curves recorded.");
+  assert.equal(view.display("performance"), "none");
+});
 
 test("pace plots restart boundaries as null gaps between measured intervals", () => {
   const data = page([], [], {

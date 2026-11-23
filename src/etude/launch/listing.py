@@ -12,13 +12,17 @@ from etude.launch.source import line
 from etude.records import RunRecord
 
 
-def launcher_facts(status: Status, max_attempts: int) -> list[str]:
+def launcher_facts(
+    status: Status, max_attempts: int, *, on_machine: str | None = None
+) -> list[str]:
     """Launcher details shared by a CLI status and an indexed run line."""
     facts = status.facts()
-    if status.machine:
+    if status.machine and status.machine != on_machine:
         facts.append(f"machine {status.machine}")
-    if status.hardware:
-        facts[-1] += f" ({status.hardware})"
+        if status.hardware:
+            facts[-1] += f" ({status.hardware})"
+    elif status.hardware:
+        facts.append(str(status.hardware))
     if status.attempts:
         facts.append(f"{status.attempts} of {max_attempts} attempts used")
     return facts
@@ -107,16 +111,18 @@ def show_ondemands(scheduler: Scheduler) -> None:
         print(each.name, "; ".join(parts) + _marks(scheduler, each.name), sep="  ")
 
 
-def describe_machine(status: MachineStatus) -> str:
-    """The same state, window and dollars appear in the machine list and live view."""
+def describe_machine(status: MachineStatus, *, available: str = "available") -> str:
+    """Acquisition state, rental or owned window, and cost for CLI and web listings."""
     machine = status.machine
+    state = status.state
+    readiness = available if state == "available" else state
     if machine.kind != "rented":
         where = f" ({_here()})" if machine.kind == "local" else ""
         expiry = "never expires"
         if machine.expires_at is not None:
             verb = "expired" if machine.expired(status.observed_at) else "expires"
             expiry = f"{verb} {machine.expires_at:%Y-%m-%d %H:%M} UTC"
-        return f"{status.state}, owned{where}, ${machine.cost_usd:.2f} committed, {expiry}"
+        return f"{readiness}, owned{where}, ${machine.cost_usd:.2f} committed, {expiry}"
     if machine.refused_at is not None:
         return f"unavailable, nothing rented {machine.refused_at:%Y-%m-%d %H:%M} UTC"
     spent = status.cost
@@ -135,7 +141,7 @@ def describe_machine(status: MachineStatus) -> str:
     if status.spot:
         window += ", spot"
     hardware = f"{machine.hardware}, " if machine.hardware else ""
-    return f"{status.state}, {hardware}{window}, {cost}"
+    return f"{readiness}, {hardware}{window}, {cost}"
 
 
 def machine_warning(status: MachineStatus) -> str | None:

@@ -21,6 +21,7 @@ import pytest
 from moto import mock_aws
 
 from etude.block_file import block_key, tail_key
+from etude.checkpoints import CheckpointRecord
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.home import home
@@ -29,8 +30,8 @@ from etude.launch.logs import snapshot_stream
 from etude.launch.records import GPU
 from etude.launch.server import LauncherObservation, PythonClient
 from etude.page import Page, Pages, _run_file
-from etude.records import Clock, RunCounters, RunOutcome, RunRecord
-from etude.spec import RunRequest
+from etude.records import ArtifactRef, Clock, RunCounters, RunOutcome, RunRecord, RunWriter
+from etude.spec import RunRequest, Until
 from etude.storage import DirectoryStorage, S3Storage
 from etude.train.block import Builder
 from etude.train.tracking import write_block
@@ -268,10 +269,12 @@ def _start_run(
     _seal(source.root / address, 0, loss)
 
 
-def _seal(root: Path, sequence: int, loss: float) -> str:
-    writer = "123456abcdef"
+def _seal(
+    root: Path, sequence: int, loss: float, *, writer: str = "123456abcdef", step: int | None = None
+) -> str:
     builder = Builder(["steps"])
-    builder.add(1000 + sequence, {"steps": float(sequence + 1)}, {"loss": loss})
+    step = sequence + 1 if step is None else step
+    builder.add(999 + step, {"steps": float(step)}, {"loss": loss})
     name = tail_key(sequence, writer)
     write_block(root, name, builder.columns(writer, sequence))
     return name
@@ -731,6 +734,22 @@ def test_indexed_experiment_opens_its_default_report_separately(tmp_path: Path) 
         assert _loss(server.page("/experiments/lab/report") or "") == [8.0]
 
 
+def test_compact_run_link_opens_with_charts_and_links_back_to_its_experiment(
+    tmp_path: Path,
+) -> None:
+    source = DirectoryStorage(tmp_path)
+    _start_run(source, "coin", 7)
+    with Server(source, None, ("127.0.0.1", 0)) as view:
+        view.refresh_files()
+        page = _get(view, "/runs/coin")
+        assert '<a href="/experiments/coin">Experiment overview</a>' in page
+        assert page.index("<h2>Charts ") < page.index("<h2>Performance ")
+        assert _loss(page) == [7]
+        report = _get(view, "/experiments/coin/report")
+        assert report.index("<h2>Perf ") < report.index("<h2>ML details ")
+        assert 'id="refresh-report"' in report
+
+
 def test_first_evaluation_files_enable_the_report_without_training_curves(tmp_path: Path) -> None:
     source = DirectoryStorage(tmp_path / "runs")
     record = RunRecord(id="lab/duel", experiment="lab", kind="evaluation")
@@ -834,25 +853,92 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
     backend.store.close()
 
 
-def test_written_files_supersede_a_setup_phase_the_loop_has_not_revisited(
-    tmp_path: Path,
+@pytest.mark.parametrize("resume", [False, True], ids=["lost", "finished"])
+def test_replacement_allocation_keeps_the_curve_and_supplies_the_phase(
+    tmp_path: Path, resume: bool
 ) -> None:
     backend = bench(home())
-    spec = job(name="learn", experiment="lab", until="steps=40")
-    (run,) = backend.scheduler.queue(RunRequest(id="learn@0", seed=0, job=spec), rent="l4")
+    spec = job(name="learn", experiment="lab", until="steps=40", max_attempts=2)
+    request = RunRequest(id="learn@0", seed=0, job=spec)
+    (run,) = backend.scheduler.queue(request, rent="l4")
     backend.scheduler.tick()
-    assert backend.scheduler.read(run).phase in ("renting", "setting_up")
+    first = backend.scheduler.attempts(run)[0]
     source = DirectoryStorage(tmp_path / "runs")
-    with Server(source, None, ("127.0.0.1", 0)) as server:
-        _ingest(server)
-        phase = backend.scheduler.read(run).phase.replace("_", " ")
-        assert phase in _get(server, "/runs/" + run)
-        # The job wrote rows before any loop recorded its start.
-        _start_run(source, run, 7, job="learn", seed=0)
-        _ingest(server)
-        for path in ("/runs/" + run, "/experiments/lab", "/", "/machines"):
-            assert phase not in _get(server, path)
-        assert "steps 1 / 40" in _get(server, "/runs/" + run)
+    measured = MeasuredStorage(source)
+    _start_run(source, run, 7, job="learn", seed=0)
+
+    def writer(name: str, attempt: str, start: int) -> None:
+        record = RunWriter(writer=name, host="lab", attempt=attempt, started_ms=start)
+        source.put(f"{run}/metrics/{name}.json", record.model_dump_json().encode())
+
+    def finish(name: str | None, *, stopped: bool = False) -> None:
+        outcome = RunOutcome(
+            state="stopped" if stopped else "finished", counters=RunCounters(), writer=name
+        )
+        source.put(f"{run}/outcome.json", outcome.model_dump_json().encode())
+
+    def check(view: Server, phase: str, loss: list[int], *, occupied: bool = True) -> None:
+        reads = measured.listings, measured.requests, measured.bytes
+        graph = _get(view, "/runs/" + run)
+        assert _loss(graph) == loss and ">weights.pt<" in graph
+        pages = [
+            graph,
+            _get(view, "/experiments/lab/status"),
+            _get(view, "/status").split("<h2>Completed")[0],
+        ]
+        if occupied:
+            pages.append(_get(view, "/machines/status"))
+        for page in pages:
+            assert f'<span class="pill">{phase}</span>' in page and f">steps {len(loss)} /" in page
+        assert (measured.listings, measured.requests, measured.bytes) == reads
+
+    checkpoint = CheckpointRecord(
+        ordinal=1, at={"steps": 1}, wall_ms=1000, artifact=ArtifactRef(uri="weights.pt")
+    )
+    source.put(f"{run}/checkpoints/first.json", checkpoint.model_dump_json().encode())
+    with Server(measured, None, ("127.0.0.1", 0)) as view:
+        _ingest(view)
+        check(view, "setting up", [7])  # a row without an allocation cannot confirm execution
+        writer("123456abcdef", first.id, 999)
+        view.refresh_files()
+        check(view, "running", [7])
+        backend.run(1)
+        if resume:
+            finish("123456abcdef")
+            view.refresh_files()
+            check(view, "finished", [7])
+            backend.run(600)
+            extended = spec.model_copy(update={"until": Until(clock="steps", value=80)})
+            backend.scheduler.queue(
+                RunRequest(id=run, seed=0, job=extended, resume=True), rent="l4"
+            )
+            view.refresh_launcher()
+            check(view, "queued", [7], occupied=False)
+            backend.scheduler.tick()
+        else:
+            backend.service.kill(first.session)
+            backend.run(1)
+        second = backend.scheduler.attempts(run)[1]
+        view.refresh_launcher()
+        check(view, "setting up", [7])
+
+    with Server(measured, None, ("127.0.0.1", 0)) as restarted:
+        check(restarted, "setting up", [7])
+        if not resume:
+            # A delayed legacy end and its only writer are still on the lost machine.
+            finish(None)
+            restarted.refresh_files()
+            check(restarted, "setting up", [7])
+        writer("abcdef123456", second.id, 1001)
+        restarted.refresh_files()
+        check(restarted, "running", [7])
+        _seal(source.root / run, 0, 3, writer="abcdef123456", step=2)
+        restarted.refresh_files()
+        check(restarted, "running", [7, 3])
+        finish("abcdef123456", stopped=not resume)
+        restarted.refresh_files()
+        check(restarted, "finished" if resume else "stopped", [7, 3])
+        assert backend.scheduler.read(run).phase == "setting_up"
     backend.store.close()
 
 
@@ -886,6 +972,7 @@ def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: 
         row = next(r for r in html.split("</tr>") if f">{machine}</th>" in r)
         assert "rented until" in row and "~$" in row and ">l4</td>" in row
         assert all(f'href="/runs/{address}"' in row for address in (first, second))
+        assert "ready," in row and row.count(machine) == 1
         assert "running" in row and "steps 1 / 40" in row and queued not in html
         assert "Idle" in html and "never expires" in html
         assert backend.scheduler.read(first).clocks == {"steps": 2}
@@ -893,7 +980,7 @@ def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: 
         line = header.split("<p>", 1)[1].split("</p>", 1)[0]
         assert line.count("running") == line.count("steps") == 1
         assert "steps 1 / 40" in line and machine in line
-        for path in ("/", "/experiments/lab", "/machines"):
+        for path in ("/", "/experiments/lab"):
             page = server.page(path) or ""
             assert line in page and "last loop" not in page and "launcher observed" not in page
         assert "steps 2 / 40" in (server.page("/runs/" + second) or "")

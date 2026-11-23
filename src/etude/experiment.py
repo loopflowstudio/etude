@@ -12,7 +12,6 @@ from dataclasses import replace
 from decimal import Decimal
 from graphlib import TopologicalSorter
 from pathlib import Path
-from typing import Literal
 
 import etude.jobs as jobs
 from etude.checkpoints import PolicyKey
@@ -141,18 +140,22 @@ def state_of(
                 last_write=data.last_write,
             )
         )
+    evaluations = {
+        d.name: d
+        for d in every
+        if d.file and d.experiment == experiment and d.file.kind == "evaluation"
+    }
     eval_runs = [
         jobs.EvalRunSummary(
             name=d.name,
             state=d.stored_state,
             last_write=d.last_write,
         )
-        for d in every
-        if d.file is not None and d.experiment == experiment and d.file.kind == "evaluation"
+        for d in evaluations.values()
     ]
     committed = Decimal(0)
     for item in retained:
-        record, status = item.record, item.status
+        record = item.record
         committed += item.committed_usd
         name = record.id.removeprefix(experiment + "/")
         # Evaluation matches are part of the executable job's public config.
@@ -171,18 +174,12 @@ def state_of(
             prior = next((r for r in eval_runs if r.name == name), None)
             if prior is not None:
                 eval_runs.remove(prior)
-            eval_runs.append(
-                jobs.EvalRunSummary(
-                    name=name,
-                    state=_launcher_state(
-                        prior.state if prior else "running",
-                        item,
-                    ),
-                    matches=matches,
-                    status=status,
-                    last_write=prior.last_write if prior else None,
-                )
+            summary = (
+                replace(prior, matches=matches)
+                if prior
+                else jobs.EvalRunSummary(name=name, state="queued", matches=matches)
             )
+            eval_runs.append(_join_allocation(summary, evaluations.get(name), item))
         else:
             prior_training = next(
                 (
@@ -194,36 +191,69 @@ def state_of(
                 None,
             )
             if prior_training is None:
-                runs.append(
-                    jobs.TrainingRunSummary(
-                        name=name,
-                        experiment=experiment,
-                        job=record.launch.spec.name,
-                        launch=record.launch.spec.name,
-                        line=name,
-                        seed=record.seed,
-                        state=_launcher_state("running", item),
-                        checkpoints=jobs.Checkpoints(),
-                        status=status,
-                    )
+                prior_training = jobs.TrainingRunSummary(
+                    name=name,
+                    experiment=experiment,
+                    job=record.launch.spec.name,
+                    launch=record.launch.spec.name,
+                    line=name,
+                    seed=record.seed,
+                    state="queued",
+                    checkpoints=jobs.Checkpoints(),
                 )
+                runs.append(_join_allocation(prior_training, None, item))
             else:
-                runs[runs.index(prior_training)] = replace(
-                    prior_training, state=_launcher_state(prior_training.state, item), status=status
+                runs[runs.index(prior_training)] = _join_allocation(
+                    prior_training, prior_training._data, item
                 )
     return jobs.ExperimentState(
         experiment=experiment, runs=tuple(runs), eval_runs=tuple(eval_runs), committed_usd=committed
     )
 
 
-def _launcher_state(
-    state: Literal["queued", "running", "stopped", "finished", "failed"], item: Standing
-) -> Literal["queued", "running", "stopped", "finished", "failed"]:
-    """Stored terminal outcomes win; the launcher owns continuation after a stop."""
-    if state in {"finished", "failed"}:
-        return state
-    if item.status.done:
-        if item.status.outcome == "succeeded":
-            return "stopped" if state == "stopped" else "finished"
-        return "failed"
-    return item.placement
+def _join_allocation[Run: (jobs.TrainingRunSummary, jobs.EvalRunSummary)](
+    run: Run, data: RunData | None, item: Standing
+) -> Run:
+    """Join the accepted file outcome to the allocation that could have written it."""
+    status = item.status
+    writers = data.writers if data else ()
+    executing = status.attempt is not None and any(w.attempt == status.attempt for w in writers)
+    outcome = data.outcome if data else None
+    if outcome:
+        # read_located accepts only the latest writer's named end, or a
+        # legacy end with at most one writer. A resume needs positive attribution.
+        writer = writers[-1] if writers else None
+        ended_on = writer.attempt if writer else None
+        ended_here = (
+            status.attempt is not None
+            and ended_on == status.attempt
+            and writer is not None
+            and outcome.writer == writer.writer
+        )
+        if ended_on and status.attempt and ended_on != status.attempt:
+            outcome = None
+        elif item.record.launch.resume_after and not ended_here:
+            outcome = None
+        elif outcome.state != "stopped":
+            return replace(run, state=outcome.state, status=status)
+        elif ended_here and status.phase not in ("queued", "done"):
+            # The tracking context stopped, but the launcher still owns continuation.
+            return replace(run, state=item.placement, allocation_phase="stopped", status=status)
+
+    if status.done:
+        if status.outcome == "succeeded":
+            return replace(
+                run,
+                state="stopped" if outcome and outcome.state == "stopped" else "finished",
+                status=status,
+            )
+        return replace(run, state="failed", status=status)
+    phase = status.phase
+    if phase in ("renting", "setting_up") and executing:
+        return replace(run, state="running", status=status)
+    return replace(
+        run,
+        state=item.placement,
+        status=status,
+        allocation_phase=phase if phase in ("renting", "setting_up", "stopping") else None,
+    )

@@ -162,6 +162,11 @@ class OutMembers(tuple[OutMember, ...]):
         return tuple(member.input(under + "/" + member.path) for member in self)
 
 
+# A refinement while the launcher still holds work, including a writer's
+# confirmed stop before the launcher schedules its continuation.
+type _AllocationPhase = Literal["renting", "setting_up", "stopping", "stopped"]
+
+
 @dataclass(frozen=True)
 class TrainingRunSummary:
     name: str
@@ -181,6 +186,7 @@ class TrainingRunSummary:
     _data: RunData | None = field(default=None, repr=False, compare=False)
     status: Status | None = field(default=None, hash=False)
     last_write: datetime | None = None
+    allocation_phase: _AllocationPhase | None = None
 
     @property
     def address(self) -> str:
@@ -212,6 +218,7 @@ class EvalRunSummary:
     matches: tuple[str, ...] = ()
     status: Status | None = field(default=None, hash=False)
     last_write: datetime | None = None
+    allocation_phase: _AllocationPhase | None = None
 
 
 @dataclass(frozen=True)

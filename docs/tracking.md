@@ -153,7 +153,7 @@ opened before the run appears names the source the view is watching.
 | `/experiments/NAME/report?observe=1` | Whether the waiting report can load |
 | `/runs/ADDRESS` | A training run’s progress, curves, console, config and checkpoints, or an evaluation’s status and link to its report |
 | `/runs/ADDRESS?observe=1` | Current source ages and the version of the run shown in the tab |
-| `/machines` | Held machines with their pool or on-demand, state, window and cost. Each occupied slot links to its run and shows its state and clock. |
+| `/machines` | Held machines with their pool or on-demand, readiness, window and cost. Each occupied slot links to its run and shows its state and clock. |
 | `/machines/status` | The inventory used to refresh the Machines page |
 
 **Experiments.** The experiment page opens with its run status table. The
@@ -170,11 +170,20 @@ that interval from the last write to the start of the listing that supplied
 the run’s file facts. During a storage outage, the run keeps its last
 observed file state.
 
-**Runs.** A training run draws its `report()` `perf` and `ml` panels, followed by the
-remaining metrics in first-logged order. Checkpoints show the clock positions
-at which they were saved. For a launched run, the page also shows placement,
+**Runs.** Charts opens with the recorded series and counters from `report()`,
+in `ml` order, then `perf` order. Remaining metrics follow in first-logged
+order. The report supplies the default clock, units and scales. Performance
+appears when a diagnostic has data, such as a timer breakdown or a measured
+writer span. Checkpoint pace starts with the first measured interval on a
+step clock. A writer restart leaves a gap. Checkpoints show their saved
+clock positions. For a launched run, the page also shows placement,
 hardware, cost, attempts and source revision when available. All four pages
 show the launcher’s clock until run files appear, then the sealed file position.
+A replacement allocation shows **setting up** beside the previous curve and
+checkpoints. Its writer can confirm **running** before the next launcher
+poll. An explicit resume shows **queued** as soon as the launcher reopens
+the run. A recorded result for the current allocation can appear while its
+machine slot is still occupied.
 `last file write` dates the run files. On a run page, `files observed` dates
 the listing that supplied that run’s file facts. On the overview, experiment
 and machine pages, `Run files listed` dates the most recent successful listing.

@@ -592,8 +592,9 @@ class ChartIndex:
         experiment = escape(row["experiment"])
         page = f"/experiments/{quote(row['experiment'])}"
         title = f"Evaluation · {escape(address)}" if evaluation else escape(address)
+        breadcrumb = "Experiment overview" if address == row["experiment"] else experiment
         heading = (
-            f'<a href="{page}">{experiment}</a>'
+            f'<a href="{page}">{breadcrumb}</a>'
             f'<header class="head"><h1>{title}</h1></header>'
             f"<p>{run_line}</p>{observation}{_refresh_script()}"
         )
@@ -613,9 +614,15 @@ class ChartIndex:
             return _document(address, heading + below)
         below += _run_details(row)
         if row["payload"] is None:
-            tabs = f'<nav class="tabs" aria-label="Run sections">{_TRAINING_TABS}</nav>'
+            tabs = f'<nav class="tabs" aria-label="Run sections"><a href="#charts">Charts</a>{_TRAINING_TABS}</nav>'
             curves = "No metric curves recorded." if row["at"] else _UNREAD.format("Curves")
-            return _document(address, heading + tabs + f"<p>{curves}</p>" + below)
+            return _document(
+                address,
+                heading
+                + tabs
+                + f'<section class="sec" id="charts"><h2>Charts</h2><p>{curves}</p></section>'
+                + below,
+            )
         return render_run(address, row["payload"], heading, below, _TRAINING_TABS)
 
     def waiting(self) -> str:
@@ -854,7 +861,7 @@ def _store_run(
         "checkpoints": _checkpoints(stored) if stored and training else None,
         "launched_as": status.run if status else None,
         "launcher_job": (job.name or "Evaluation") if job and not (file and training) else None,
-        "launcher_state": run.state if status else None,
+        "launcher_state": (run.allocation_phase or run.state).replace("_", " ") if status else None,
         "launcher_position": _position(clocks, preferred, status.until) if status else None,
         "launcher_config": record.config_json if record and file_config is None else None,
         "source": _source(record) if record and training else None,
@@ -885,43 +892,44 @@ def _machines_table(db: sqlite3.Connection, machines: tuple[MachineStatus, ...])
         for run in status.runs:
             row = db.execute(
                 """SELECT address,launcher_state AS state,launcher_position AS position,status,
-                          max_attempts,last_write
-                   FROM runs LEFT JOIN files USING(address) WHERE launched_as=?""",
+                          max_attempts
+                   FROM runs WHERE launched_as=?""",
                 (run,),
             ).fetchone()
             address = row["address"] if row else run
-            detail = _run_line(row, row["state"], _status(row)) if row else ""
+            detail = (
+                _run_line(row, row["state"], _status(row), on_machine=machine.name) if row else ""
+            )
             runs.append(f"<div>{_run_link(address)}{(' · ' + detail) if detail else ''}</div>")
-        description = escape(describe_machine(status))
+        description = escape(describe_machine(status, available="ready"))
         if warning := machine_warning(status):
             description += f"<div>{escape(warning)}</div>"
         rows.append(
             f'<tr><th scope="row">{escape(machine.name)}</th><td>{escape(machine.supply)}</td>'
             f"<td>{description}</td><td>{''.join(runs) or 'Idle'}</td></tr>"
         )
-    return _table(("Machine", "Pool or on-demand", "State, window and cost", "Runs"), rows)
+    return _table(
+        ("Machine", "Pool or on-demand", "Readiness, window and cost", "Occupied slots"), rows
+    )
 
 
 def _status(row: sqlite3.Row) -> Status | None:
     return Status.model_validate_json(row["status"]) if row["status"] is not None else None
 
 
-def _run_line(row: sqlite3.Row, state: str, status: Status | None) -> str:
+def _run_line(
+    row: sqlite3.Row, state: str, status: Status | None, *, on_machine: str | None = None
+) -> str:
     parts = [f'<span class="pill">{escape(state)}</span>']
     facts = [row["position"]]
     if status:
-        if status.phase == "queued":
+        if state == "queued":
             facts.append(status.reason)
         elif status.done:
             if status.outcome != state and (state, status.outcome) != ("finished", "succeeded"):
                 facts.append(status.outcome)
             facts.append(status.cause)
-        elif status.phase == "stopping" or (
-            # Written files prove the job started, whatever the last loop saw.
-            status.phase in ("renting", "setting_up") and row["last_write"] is None
-        ):
-            facts.append(status.phase.replace("_", " "))
-        facts.extend(launcher_facts(status, row["max_attempts"]))
+        facts.extend(launcher_facts(status, row["max_attempts"], on_machine=on_machine))
     parts.extend(f"<span>{escape(fact)}</span>" for fact in facts if fact)
     return " · ".join(parts)
 

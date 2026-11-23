@@ -15,10 +15,9 @@ __PAGE_CSS__
   <div class="head" data-report-only><h1 id="title"></h1><span class="pill" id="pill"></span></div>
   <div class="context" id="context" data-report-only></div>
   <div class="controls" data-report-only><div class="legend-jobs" id="jobs" role="group" aria-label="Jobs"></div><span id="chips" style="display:contents"></span></div>
-  <nav class="tabs" id="tabs"><a href="#evals" data-s="evals" data-report-only>Evals</a><a href="#perf" data-s="perf">Perf</a><a href="#ml" data-s="ml">ML details</a><!--view-tabs--></nav>
+  <nav class="tabs" id="tabs"><a href="#evals" data-s="evals" data-report-only>Evals</a><!--metric-tabs--><!--view-tabs--></nav>
   <section class="sec" id="evals" data-report-only><h2>Evals <span id="evals-sub"></span><div class="sec-controls" id="evals-controls"></div></h2><div class="grid" id="evals-body"></div></section>
-  <section class="sec" id="perf"><h2>Perf <span id="perf-sub"></span><div class="sec-controls" id="perf-controls"></div></h2><div class="grid" id="perf-body"></div></section>
-  <section class="sec" id="ml"><h2>ML details <span id="ml-sub"></span><div class="sec-controls" id="ml-controls"></div></h2><div class="grid" id="ml-body"></div></section>
+  <!--metric-sections-->
   <details id="runs-box" data-report-only><summary>Runs</summary><div class="scroll"><table id="runs"></table></div></details>
   <details id="coverage-box" data-report-only><summary>Evaluated checkpoints</summary><div class="scroll"><table id="coverage"></table></div></details>
   <details id="failures-box" open data-report-only><summary>Failed matches</summary><div class="scroll"><table id="failures"></table></div></details>
@@ -113,7 +112,21 @@ const CLOCKS = clockNames.map(c => [c, c]);
 const panels = [...R.perf, ...R.ml];
 const namedMetrics = new Set(panels.flatMap(panel => panel.keys || []));
 const flamePrefixes = panels.filter(panel => panel.kind === "flame").map(panel => panel.prefix);
-const otherMetrics = T.metrics.filter(key => !namedMetrics.has(key) && !flamePrefixes.some(prefix => key.startsWith(prefix)));
+const otherMetrics = T.metrics.filter(key => !namedMetrics.has(key) && !flamePrefixes.some(prefix => key.startsWith(prefix) && (!D.run_charts || key.length > prefix.length)));
+// A run leads with its recorded metrics. A diagnostic earns its card from
+// the same measurements the renderer uses, including gaps between writers.
+const metricPanel = p => p.kind === "series" || p.kind === "counters";
+function hasDiagnostic(panel) {
+  switch (panel.kind) {
+    case "pace": return T.checkpoints.some(m => Object.values(m.pace).some(v => v != null));
+    case "elapsed": return T.checkpoints.length > 0;
+    case "attempts": return T.runs.some(r => r.writers.some(w => w.last_row != null && w.last_row > w.started));
+    case "flame": return T.timers.some(t => t.prefix === panel.prefix);
+    default: return false;
+  }
+}
+const runMetrics = D.run_charts ? [...R.ml, ...R.perf].filter(p => metricPanel(p) && p.keys.some(k => T.metrics.includes(k))) : [];
+const diagnostics = D.run_charts ? panels.filter(hasDiagnostic) : [];
 const draws = []; const later = f => draws.push(f);
 
 const color = j => css(j.color);
@@ -367,10 +380,13 @@ function renderMetrics(vis) {
     const ctl = document.getElementById(section + "-controls"); ctl.replaceChildren();
     // A section the report gives no panel is not drawn: no header, controls or tab.
     const empty = panels.length === 0 && others.length === 0;
-    const display = empty ? "none" : "";
+    const display = empty && section !== "charts" ? "none" : "";
     document.getElementById(section).style.display = display;
     for (const tab of document.querySelectorAll(`#tabs a[data-s="${section}"]`)) tab.style.display = display;
-    if (empty) return;
+    if (empty) {
+      if (section === "charts") host.appendChild(node("p", "na", T.metrics.length ? "Timer metrics are shown under Performance." : "No metric curves recorded."));
+      return;
+    }
     if (!TRAINED) { host.appendChild(node("div", "na", "No training runs")); document.getElementById(section + "-sub").textContent = ""; return; }
     control(ctl, "X axis", CLOCKS, clockKey); control(ctl, "Lines", [["on", "Smoothed"], ["off", "Raw"]], "smooth");
     const clock = S[clockKey], opts = {xLabel: clock, band: true, sync: section};
@@ -416,12 +432,12 @@ function renderMetrics(vis) {
           }
         }
       } else if (panel.kind === "pace") {
-        const c = card(host, panel.title, "each step clock per wall second, between checkpoints · gaps: an attempt began", "full");
+        const c = card(host, panel.title, "each step clock per wall second, between checkpoints · gaps where no interval was measured", "full");
         if (!stepClocks.length || !T.checkpoints.length) { c.appendChild(node("div", "na", "No step clock and checkpoint to measure pace between")); continue; }
         const grid = node("div", "grid multiples"); c.appendChild(grid);
         for (const k of stepClocks) {
           const m = node("div"), h = node("div"); m.append(node("div", "mini-title", `${k} per second`), h); grid.appendChild(m);
-          later(() => line(h, series(vis, j => jobPoints(j, clock, mk => mk.pace[k] == null ? {missing: true, meta: "an attempt began since the last checkpoint"} : {y: mk.pace[k]})), {...opts, compact: true, height: 140}));
+          later(() => line(h, series(vis, j => jobPoints(j, clock, mk => mk.pace[k] == null ? {missing: true, meta: "no measured interval on this clock"} : {y: mk.pace[k]})), {...opts, compact: true, height: 140}));
         }
       } else if (panel.kind === "elapsed") {
         const c = card(host, panel.title, "wall hours since the run first started");
@@ -451,11 +467,16 @@ function renderMetrics(vis) {
       const c = card(host, "Other logged metrics", "named by no panel", "full"), grid = node("div", "grid multiples"); c.appendChild(grid);
       for (const k of others) { const m = node("div"), h = node("div"); m.append(node("div", "mini-title mono", k), h); grid.appendChild(m); chartKey(h, k, "linear", 130, true); }
     }
-    if (missing.length) { const m = node("div", "missing card full", "Named by a panel but not logged by these runs: "); m.style.border = "0"; m.style.padding = "0"; missing.forEach(k => m.appendChild(node("code", null, k))); host.appendChild(m); }
+    if (!D.run_charts && missing.length) { const m = node("div", "missing card full", "Named by a panel but not logged by these runs: "); m.style.border = "0"; m.style.padding = "0"; missing.forEach(k => m.appendChild(node("code", null, k))); host.appendChild(m); }
     document.getElementById(section + "-sub").textContent = clockMeaning(clock);
   }
-  metricSection("perf", R.perf, "pclock");
-  metricSection("ml", R.ml, "mlclock", otherMetrics);
+  if (D.run_charts) {
+    metricSection("charts", runMetrics, "mlclock", otherMetrics);
+    metricSection("performance", diagnostics, "pclock");
+  } else {
+    metricSection("perf", R.perf, "pclock");
+    metricSection("ml", R.ml, "mlclock", otherMetrics);
+  }
 }
 
 // ---- Flame: width is seconds, rows are timer depth. The zoom path applies to every job.

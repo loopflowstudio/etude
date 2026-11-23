@@ -625,7 +625,15 @@ def run_chart_data(storage: Storage, data: RunData, report: Report) -> str:
 
 def render_run(address: str, charts: str, heading: str, details: str, tabs: str) -> str:
     """Show already-indexed chart data alongside the current run status."""
-    return _inline("page.html", address, charts, heading, details, tabs)
+    return _inline(
+        "page.html",
+        address,
+        charts,
+        heading,
+        details,
+        tabs,
+        sections=(("charts", "Charts"), ("performance", "Performance")),
+    )
 
 
 def _assemble(
@@ -1746,7 +1754,14 @@ def read_asset(name: str) -> str:
 
 
 def _inline(
-    template: str, title: str, payload: str, heading: str = "", details: str = "", tabs: str = ""
+    template: str,
+    title: str,
+    payload: str,
+    heading: str = "",
+    details: str = "",
+    tabs: str = "",
+    *,
+    sections: tuple[tuple[str, str], ...] = (("perf", "Perf"), ("ml", "ML details")),
 ) -> str:
     # Substitute in the template once; run data and console text can contain any marker.
     fields = {
@@ -1758,6 +1773,15 @@ def _inline(
         "__DATA__": payload,
         "<!--view-heading-->": heading,
         "<!--view-details-->": details,
+        "<!--metric-tabs-->": "".join(
+            f'<a href="#{key}" data-s="{key}">{label}</a>' for key, label in sections
+        ),
+        "<!--metric-sections-->": "".join(
+            f'<section class="sec" id="{key}"><h2>{label} <span id="{key}-sub"></span>'
+            f'<div class="sec-controls" id="{key}-controls"></div></h2>'
+            f'<div class="grid" id="{key}-body"></div></section>'
+            for key, label in sections
+        ),
         "<!--view-tabs-->": tabs,
     }
     return re.sub("|".join(map(re.escape, fields)), lambda m: fields[m[0]], read_asset(template))

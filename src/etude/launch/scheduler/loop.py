@@ -1321,7 +1321,9 @@ class Scheduler:
                 delivered = self._store.last_delivery(last.id)
                 since = delivered or last.planned_at or session.planned_at
                 delivery_age = max(0.0, (now - since).total_seconds())
+        superseded = last is not None and last.number <= record.launch.resume_after
         seen = Status(
+            attempt=last.id if last is not None and not superseded else None,
             run=run,
             delivery_age_seconds=delivery_age,
             phase="queued",
@@ -1353,7 +1355,6 @@ class Scheduler:
             return seen.model_copy(
                 update={"phase": "setting_up" if last.started_at is None else "running"}
             )
-        superseded = last is not None and last.number <= record.launch.resume_after
         retry = (
             last is None
             or superseded

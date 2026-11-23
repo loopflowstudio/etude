@@ -517,6 +517,7 @@ class Status(Record):
     attempts: int
     rental_ended: bool | None  # True only on a dated confirmation
 
+    attempt: str | None = None  # latest allocation after the explicit resume boundary
     machine: str | None = None
     hardware: Hardware | None = None
     estimated: bool = False
