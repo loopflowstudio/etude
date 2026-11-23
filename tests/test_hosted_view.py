@@ -93,9 +93,19 @@ def postgres(tmp_path: Path) -> Iterator[str]:
 
 
 @contextmanager
-def _view(probe: Path, port: int = 0) -> Iterator[str]:
+def _view(probe: Path, port: int = 0, *, file: Path | None = None) -> Iterator[str]:
     with subprocess.Popen(
-        ["uv", "run", "--no-sync", "etude", "view", "--push", "--port", str(port)],
+        [
+            "uv",
+            "run",
+            "--no-sync",
+            "etude",
+            "view",
+            *([str(file)] if file else []),
+            "--push",
+            "--port",
+            str(port),
+        ],
         stdout=subprocess.PIPE,
         text=True,
         env={
@@ -262,11 +272,27 @@ while not Path({str(finish)!r}).exists():
                 pytest.fail("first sealed point and console did not reach the view")
             assert "running" in overview and "batch=2" in overview and "dummy-" not in overview
             assert page.training.series["steps"]["loss"][0].mean == [7.0]
+            cards = _get(origin + "/")
+            assert "/experiments/lab" in cards and '"loss"' in cards and 'class="run-dot"' in cards
+            experiment = _get(origin + "/experiments/lab?run=coin@0")
+            assert "loss 7" in experiment and "trainer ready" in experiment
+            assert "Machine inventory unavailable" in _get(origin + "/machines")
+            assert _training(_get(origin + "/experiments/lab/report")).training.series["steps"][
+                "loss"
+            ][0].mean == [7.0]
             tail = next((source.root / address / "metrics").glob("*.tail"))
             tail_key, tail_body = (
                 tail.relative_to(source.root / address).as_posix(),
                 tail.read_bytes(),
             )
+            with psycopg.connect(postgres, autocommit=True) as db:
+                db.execute(
+                    "UPDATE runs SET last_push_at=now()-interval '11 minutes' WHERE address=%s",
+                    (address,),
+                )
+                cards = _get(origin + "/status")
+                assert "1 no end recorded" in cards and "No open experiments" in cards
+                assert "no end recorded" in _get(origin + route + "&observe=1")
             live.close()
             barrier.touch()
             deadline = time.monotonic() + 20
@@ -339,8 +365,24 @@ while not Path({str(finish)!r}).exists():
         mark = sql_log.stat().st_size
         assert "Last push" in _get(origin + route + "&observe=1")
         sql = sql_log.read_bytes()[mark:].decode()
-        assert sql.count("FROM runs") == 1
+        # One run observation and one open-experiment rail in the same snapshot.
+        assert sql.count("FROM runs") == 2
         assert "run_charts" not in sql and "run_files" not in sql
+        mark = sql_log.stat().st_size
+        for page_path in (
+            "/",
+            "/reports",
+            "/machines",
+            "/experiments/lab?tab=curves",
+            "/experiments/lab/report",
+            "/runs/" + address + "?tab=files",
+        ):
+            join = "&" if "?" in page_path else "?"
+            assert 'id="view-rail"' in _get(origin + page_path + join + "observe=1")
+        polls = sql_log.read_bytes()[mark:].decode()
+        assert "run_charts" not in polls and "run_files" not in polls
+        files = _get(origin + "/runs/" + address + "?tab=files")
+        assert tail_key not in files and "run.json" in files and "canonical storage" in files
         with psycopg.connect(postgres) as db:
             old = db.execute("SELECT observation FROM attempts WHERE number=1").fetchone()
             assert old
@@ -449,3 +491,122 @@ def test_ssh_worker_receives_private_grant_for_packet_and_kept_work(
                 assert token not in path.read_text()
             overview = _get(origin + "/runs/" + run)
             assert "ssh-console" in overview and "Final output" in overview and "bench" in overview
+
+
+def test_group_results_and_edited_report_survive_restart(
+    postgres: str, tmp_path: Path, command_python: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = secrets.token_hex()
+    monkeypatch.setenv("ETUDE_VIEW_SECRET", secret)
+    monkeypatch.setenv("ETUDE_VIEW_DATABASE_URL", postgres)
+    monkeypatch.delenv("ETUDE_VIEW_URL", raising=False)
+    assert main(["view-upgrade"]) == 0
+    probe = tmp_path / "offline"
+    probe.mkdir()
+    (probe / "sitecustomize.py").write_text("""
+import sys
+
+def offline(event: str, args: tuple[object, ...]) -> None:
+    if event in ("sqlite3.connect","socket.connect"):
+        raise RuntimeError("hosted reports must use Postgres evidence")
+
+sys.addaudithook(offline)
+""")
+    file = tmp_path / "grouped.py"
+    declaration = """from etude.report import Report, Score, Series
+
+def report() -> Report:
+    return Report(score=Score(table="scores",value="score"),baseline="first",
+                  ml=(Series(title="Progress",keys=("first",)),))
+"""
+    file.write_text(declaration)
+    recipe = tmp_path / "evaluate.py"
+    recipe.write_text("""from etude.jobs import hold_group
+from tests.test_eval_groups import group, job
+
+if __name__ == "__main__":
+    hold_group(group(job("duel",None)))
+""")
+    host = tmp_path / "host"
+    host.mkdir()
+    scheduler = local(host)
+    job = Job(
+        command=shlex.join([command_python, str(recipe)]),
+        experiment="grouped",
+        max_hours=0.05,
+        max_usd=Decimal(1),
+    )
+    request = RunRequest(id="games@0", job=job, seed=0)
+    report = "/experiments/grouped/report"
+    with _view(probe, file=file) as origin:
+        monkeypatch.setenv("ETUDE_VIEW_URL", origin)
+        (address,) = scheduler.launch(request)
+        (status,) = scheduler.wait(address, every=0.05, timeout=45)
+        assert status.outcome == "succeeded"
+        (attempt,) = scheduler.attempts(address)
+        private = host / "sessions" / attempt.session / ".view" / (attempt.id + ".json")
+        token = ViewGrantTarget.model_validate_json(private.read_bytes()).token
+        assert address in _get(origin + "/experiments/grouped")
+        page = _training(_get(origin + report))
+        assert page.report.baseline == "first" and any(cell.value == 7 for cell in page.cells)
+        assert "Eval only" in _get(origin + "/reports")
+        root = host / "track" / address
+        index = next(root.rglob("block.json"))
+        table = next(index.parent.glob("*.parquet"))
+        key = table.relative_to(root).as_posix()
+        # A different seal time names a second block. Its staged table is hidden until the index commits.
+        name = index.parent.name
+        written, writer = name.split(".")
+        later = f"{int(written) + 1:020d}.{writer}"
+        later_key = key.replace(name, later)
+        index_key = index.relative_to(root).as_posix().replace(name, later)
+        body = json.dumps(
+            {**json.loads(index.read_bytes()), "written_ns": int(written) + 1}
+        ).encode()
+        assert _post(origin, token, index_key, body) == 409
+        assert _post(origin, token, later_key, b"invalid parquet") == 422
+        for path in index.parent.glob("*.parquet"):
+            assert (
+                _post(
+                    origin,
+                    token,
+                    path.relative_to(root).as_posix().replace(name, later),
+                    path.read_bytes(),
+                )
+                == 200
+            )
+        files_url = origin + "/runs/" + address + "?tab=files"
+        assert later_key not in _get(files_url)
+        assert _post(origin, token, index_key, body) == 200
+        assert later_key in _get(files_url)
+        train = tmp_path / "training.py"
+        train.write_text("""from etude.train.tracking import track
+
+with track(clocks=["steps"]) as run:
+    run.log({"first": 3, "second": 4}, steps=1)
+    run.log_table("examples", [{"sample": 2}], steps=1)
+""")
+        training_job = job.model_copy(update={"command": shlex.join([command_python, str(train)])})
+        (trained,) = scheduler.launch(RunRequest(id="train@0", job=training_job, seed=0))
+        assert scheduler.wait(trained, every=0.05, timeout=30)[0].outcome == "succeeded"
+        table_url = origin + "/experiments/grouped/status"
+        assert "first 3" in _get(table_url)
+        artifacts = list((host / "track" / trained / "artifacts").glob("*.json"))
+        assert len(artifacts) == 1 and artifacts[0].name in _get(
+            origin + "/runs/" + trained + "?tab=files"
+        )
+        file.write_text(declaration.replace("first", "second"))
+        assert _training(_get(origin + report)).report.baseline == "first"
+        with urlopen(Request(origin + report, data=b""), timeout=10) as response:
+            assert _training(response.read().decode()).report.baseline == "second"
+        assert "second 4" in _get(table_url)
+        file.write_text("raise ValueError('invalid declaration')\n")
+        with pytest.raises(HTTPError) as failed:
+            urlopen(Request(origin + report, data=b""), timeout=10)
+        assert "invalid declaration" in failed.value.read().decode()
+        failed.value.close()
+    with _view(probe, file=file) as origin:
+        restored = _training(_get(origin + report))
+        assert restored.report.baseline == "second" and any(
+            cell.value == 7 for cell in restored.cells
+        )

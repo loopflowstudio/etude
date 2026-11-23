@@ -1,4 +1,4 @@
-"""Publish sealed training evidence from the attempt's host, independently of delivery."""
+"""Publish sealed run evidence from the attempt's host, independently of delivery."""
 
 import os
 import stat
@@ -24,8 +24,11 @@ from etude.observations import (
     AttemptObservation,
     ConsoleObservation,
     ViewGrantTarget,
-    training_file,
+    evaluation_file,
+    evidence_file,
+    member_folder,
 )
+from etude.records import RunRecord
 
 
 class _JobConsole:
@@ -94,23 +97,46 @@ class AttemptPublisher:
         self.halt = halt
         self.finish = threading.Event()
         self.stop = threading.Event()
+        self._members: tuple[str, ...] = ()
         self._sent: dict[str, tuple[int, int, int]] = {}
 
     def _files(self) -> Iterator[str]:
         yield "run.json"
-        metrics = self.root / "metrics"
+        for member in self._members:
+            root = self.root / member
+            if root.resolve() == root.absolute():
+                yield member + "/run.json"
+                yield from (
+                    member + "/" + key for key in self._run_files(root) if evaluation_file(key)
+                )
+        yield from self._run_files(self.root)
+
+    def _run_files(self, root: Path) -> Iterator[str]:
+        yield "environment.json"
+        yield "tournament.json"
+        metrics = root / "metrics"
         if metrics.is_dir() and not metrics.is_symlink():
             keys = ["metrics/" + p.name for p in metrics.iterdir() if not p.is_symlink()]
-            yield from sorted(key for key in keys if key.endswith(".json") and training_file(key))
-            for block in select(b for k in keys if training_file(k) and (b := parse(k))):
+            yield from sorted(key for key in keys if key.endswith(".json") and evidence_file(key))
+            for block in select(b for k in keys if evidence_file(k) and (b := parse(k))):
                 yield block.key
-        checkpoints = self.root / "checkpoints"
-        if checkpoints.is_dir() and not checkpoints.is_symlink():
-            yield from sorted(
-                "checkpoints/" + p.name
-                for p in checkpoints.glob("*.json")
-                if training_file("checkpoints/" + p.name)
-            )
+        for folder in ("artifacts", "checkpoints"):
+            directory = root / folder
+            if directory.is_dir() and not directory.is_symlink():
+                yield from sorted(
+                    key
+                    for path in directory.glob("*.json")
+                    if evidence_file(key := folder + "/" + path.name)
+                )
+        blocks = root / "blocks"
+        if blocks.is_dir() and not blocks.is_symlink():
+            for index in sorted(blocks.glob("*/block.json")):
+                name = index.relative_to(root).as_posix()
+                if evidence_file(name) and not index.parent.is_symlink():
+                    for path in sorted(index.parent.glob("*.parquet")):
+                        if evidence_file(key := path.relative_to(root).as_posix()):
+                            yield key
+                    yield name
         yield "outcome.json"
 
     def _send(self, key: str) -> None:
@@ -139,6 +165,9 @@ class AttemptPublisher:
                 "X-Etude-Modified-At": datetime.fromtimestamp(info.st_mtime, UTC).isoformat(),
             },
         )
+        if key == "run.json":
+            record = RunRecord.model_validate_json(body)
+            self._members = tuple(name for name in record.members or () if member_folder(name))
         self._sent[key] = version
 
     def _post(self, route: str, body: bytes, headers: dict[str, str]) -> None:
@@ -187,10 +216,18 @@ class AttemptPublisher:
         self.last = observation
         self.heartbeat = time.monotonic() + 60
 
+    def stopping(self) -> bool:
+        # An owned host receives TERM on normal completion, while final evidence is in flight.
+        return (
+            self.stop.is_set()
+            or self.halt.is_set()
+            and not (self.journal / "finished.json").exists()
+        )
+
     def run(self) -> None:
         failed = False
         delay = 1
-        while not (self.halt.is_set() or self.stop.is_set()):
+        while not self.stopping():
             final = self.finish.is_set()
             failure: str | None = None
             try:
@@ -199,7 +236,7 @@ class AttemptPublisher:
                 except ValueError as error:
                     failure = explain(error)
                 for key in self._files():
-                    if self.halt.is_set() or self.stop.is_set():
+                    if self.stopping():
                         return
                     try:
                         self._send(key)
@@ -208,7 +245,7 @@ class AttemptPublisher:
                     except ValueError as error:
                         # One refused record must not starve later sealed blocks.
                         failure = explain(error)
-            except (OSError, HTTPException) as error:
+            except (OSError, ValueError, HTTPException) as error:
                 failure = explain(error)
             if failure and not failed:
                 print("hosted view: " + failure, file=sys.stderr, flush=True)
@@ -245,6 +282,6 @@ def publish_attempt(
         until = time.monotonic() + min(
             5, max(0, (deadline - datetime.now(UTC)).total_seconds()) if deadline else 5
         )
-        while thread.is_alive() and not halt.is_set() and time.monotonic() < until:
+        while thread.is_alive() and not publisher.stopping() and time.monotonic() < until:
             thread.join(min(0.1, max(0, until - time.monotonic())))
         publisher.stop.set()

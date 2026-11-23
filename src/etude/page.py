@@ -552,6 +552,8 @@ class _ReportRuns:
     source: RunListing
     local_storage: DirectoryStorage | None
     local_declarations: DeclarationCache
+    local_evidence: bool
+    line_source: Callable[[str], RunListing] | None
 
     @cached_property
     def local(self) -> RunListing | None:
@@ -575,10 +577,20 @@ class Pages:
     listing for run discovery.
     """
 
-    def __init__(self, source: Storage | Path | str) -> None:
+    def __init__(
+        self,
+        source: Storage | Path | str,
+        *,
+        local: bool = True,
+        line_source: Callable[[str], RunListing] | None = None,
+    ) -> None:
         self.storage = as_storage(source)
-        here = DirectoryStorage(default_root())
-        self._local = here if store_identity(here) != store_identity(self.storage) else None
+        self._use_local = local
+        self._line_source = line_source
+        here = DirectoryStorage(default_root()) if local else None
+        self._local = (
+            here if here and store_identity(here) != store_identity(self.storage) else None
+        )
         self._source_declarations: DeclarationCache = {}
         self._local_declarations: DeclarationCache = {}
         self._built: dict[tuple[Path | None, str], _BuiltPage] = {}
@@ -607,6 +619,8 @@ class Pages:
             RunListing.read(self.storage, known=self._source_declarations),
             self._local,
             self._local_declarations,
+            self._use_local,
+            self._line_source,
         )
 
     def _build(self, file: Path | None, runs: _ReportRuns, experiment: str | None = None) -> Page:
@@ -616,6 +630,7 @@ class Pages:
         sources = _source_versions(file, kept.sources if kept else ())
         if (
             kept is not None
+            and self._line_source is None
             and kept.sources == sources
             and kept.versions == runs.source.versions_for(kept.experiments)
             and (kept.local_versions is None or kept.local_versions == runs.local_versions(name))
@@ -798,7 +813,7 @@ def _build_page(
     source = runs.source
     storage = source.storage
     report = loaded.report
-    cache_path = _page_cache_path(experiment, storage)
+    cache_path = _page_cache_path(experiment, storage) if runs.local_evidence else None
     data = read_all(
         source,
         experiment,
@@ -818,7 +833,7 @@ def _build_page(
         # Only reports with evaluations need the optional eval dependency.
         from etude.experiment import state_of  # noqa: PLC0415
 
-        state = state_of(data, experiment)
+        state = state_of(data, experiment, retained=None if runs.local_evidence else ())
         wanted = loaded.tournaments(state)
     local_versions = runs.local_versions(experiment) if state is not None else None
     referenced = {experiment} | find_line_experiments(wanted)
@@ -835,7 +850,7 @@ def _build_page(
         wanted=wanted,
         local_versions=local_versions or {},
     )
-    if (cached := _load_cached_page(cache_path, cache_key)) is not None:
+    if cache_path and (cached := _load_cached_page(cache_path, cache_key)) is not None:
         return _BuiltPage(cached, loaded.sources, referenced, versions, local_versions)
     evals = _read_evals(runs, state, report, wanted) if state is not None else _Evals()
     # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
@@ -862,7 +877,8 @@ def _build_page(
         # cold build and retain only the first drawable metric's summary.
         metric = _ungrouped_metric(source, page)
         page = page.model_copy(update={"ungrouped_metric": metric})
-    _save_cached_page(cache_path, cache_key, page)
+    if cache_path:
+        _save_cached_page(cache_path, cache_key, page)
     return _BuiltPage(page, loaded.sources, referenced, versions, local_versions)
 
 
@@ -1406,7 +1422,14 @@ def _held_tournaments(
                     f" eval_jobs(state) now defines it otherwise ({error.code})."
                 )
         wanted[name] = recorded
-    lines = read_tournament_lines(listings.source, state, wanted.values())
+    lines = read_tournament_lines(
+        listings.source,
+        state,
+        wanted.values(),
+        stored=None
+        if listings.local_evidence
+        else (listings.line_source or (lambda _: listings.source)),
+    )
     held_tournaments = []
     for name, given in sorted(wanted.items()):
         try:

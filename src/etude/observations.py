@@ -1,4 +1,4 @@
-"""Attempt-scoped authority and portable training evidence shared by publisher and receiver."""
+"""Attempt-scoped authority and portable run evidence shared by publisher and receiver."""
 
 import base64
 import hmac
@@ -14,6 +14,7 @@ from pydantic import AfterValidator, AwareDatetime, Field, model_validator
 
 from etude.block_file import NAME
 from etude.errors import EtudeError, LauncherError
+from etude.identity import SAFE_NAME
 from etude.launch.records import Cause, Hardware, Outcome
 from etude.records import Tally
 from etude.spec import Record, Until
@@ -21,14 +22,42 @@ from etude.spec import Record, Until
 MAX_OBSERVATION_BYTES = 8 * 1024 * 1024
 MAX_FILE_BYTES = 32 * 1024 * 1024
 _WRITER_RECORD = re.compile(r"metrics/[0-9a-f]{12}\.json")
+_EVAL_BLOCK = re.compile(r"blocks/[0-9]{20}\.[0-9a-f]+/(?:block\.json|[A-Za-z0-9_]+\.parquet)")
+_ARTIFACT = re.compile(r"artifacts/[0-9a-f]{64}\.json")
 
 
-def training_file(key: str) -> bool:
-    return key in ("run.json", "outcome.json") or bool(
-        _WRITER_RECORD.fullmatch(key)
-        or NAME.fullmatch(key)
+def member_folder(name: str) -> bool:
+    parts = name.split("/")
+    return len(parts) <= 2 and all(
+        SAFE_NAME.fullmatch(part) and part not in {"out", "artifacts"} for part in parts
+    )
+
+
+def evaluation_file(key: str) -> bool:
+    return key in ("run.json", "outcome.json", "tournament.json", "environment.json") or bool(
+        _WRITER_RECORD.fullmatch(key) or _EVAL_BLOCK.fullmatch(key)
+    )
+
+
+def evidence_file(key: str) -> bool:
+    """Portable evidence relative to a run root."""
+    return evaluation_file(key) or bool(
+        NAME.fullmatch(key)
+        or _ARTIFACT.fullmatch(key)
         or re.fullmatch(r"checkpoints/[^./][^/]*\.json", key)
     )
+
+
+def evidence_member(key: str) -> tuple[str, str]:
+    """Split a group-relative key. The receiver checks membership against the root declaration."""
+    if evidence_file(key):
+        return "", key
+    parts = key.split("/")
+    for count in (1, 2):
+        folder, name = "/".join(parts[:count]), "/".join(parts[count:])
+        if member_folder(folder) and evaluation_file(name):
+            return folder, name
+    raise ValueError("invalid view evidence key")
 
 
 def _origin(value: str) -> str:

@@ -6,8 +6,13 @@ holding that lock, then publishes only if its revision still names that evidence
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
+from tempfile import NamedTemporaryFile
+from threading import Lock
 
 from alembic import command
 from alembic.config import Config
@@ -21,13 +26,36 @@ from etude.block_file import parse
 from etude.carriage import immutable
 from etude.checkpoints import CheckpointRecord
 from etude.errors import EtudeError, explain
-from etude.observations import AttemptObservation, ViewGrant
-from etude.page import DEFAULT_REPORT, experiment_files, read_report, run_chart_data
+from etude.eval.block import Block
+from etude.eval.records import Environment, TournamentRun
+from etude.identity import run_address
+from etude.observations import AttemptObservation, ViewGrant, evidence_member, member_folder
+from etude.page import (
+    DEFAULT_REPORT,
+    Pages,
+    ReportDeclaration,
+    experiment_files,
+    read_report,
+    run_chart_data,
+)
 from etude.records import BUILT_IN_NAMES, RunOutcome, RunRecord, RunWriter
-from etude.run import LocatedRun
+from etude.report import Report
+from etude.run import LocatedRun, RunListing
+from etude.storage import ObjectVersion
 from etude.train.block import decode
 from etude.train.read import read_located
-from etude.view import RunChart, checkpoint_table
+from etude.train.records import RowTable
+from etude.view import (
+    ReportSummary,
+    RunDetail,
+    RunRow,
+    ViewFreshness,
+    checkpoint_table,
+    declaration_commit,
+    format_position,
+    panel_definition,
+    render_report,
+)
 
 
 def _migrations() -> Config:
@@ -48,27 +76,49 @@ def upgrade(url: str) -> None:
 
 
 class PostgresStorage:
-    """Read one run's relative evidence keys within its projection transaction."""
+    """Visible evidence in one snapshot, relative to a run or grouped by physical run for a report."""
 
     name = "Hosted push feed"
 
-    def __init__(self, db: Connection, address: str) -> None:
-        self.db, self.address = db, address
+    def __init__(
+        self, db: Connection, *, address: str | None = None, experiment: str | None = None
+    ) -> None:
+        self.db, self.address, self.experiment = db, address, experiment
 
     def versions(self, prefix: str) -> dict[str, str]:
-        return dict(
-            self.db.execute(
-                "SELECT key, sha256 FROM run_files WHERE address=%s AND starts_with(key,%s)",
+        if self.address is not None:
+            rows = self.db.execute(
+                "SELECT key,sha256,modified_at FROM run_files WHERE address=%s AND visible AND starts_with(key,%s)",
                 (self.address, prefix),
-            ).fetchall()
-        )
+            )
+        else:
+            # Prefix each physical root with its own namespace. A compact run
+            # and a tournament inside a different group may have the same name.
+            rows = self.db.execute(
+                """SELECT replace(address,'/','!') || '/' || address || '/' || key,sha256,modified_at
+                   FROM runs JOIN run_files USING(address) WHERE experiment=%s AND visible""",
+                (self.experiment,),
+            )
+        return {
+            key: ObjectVersion(digest, at) for key, digest, at in rows if key.startswith(prefix)
+        }
 
     def keys(self, prefix: str) -> list[str]:
         return sorted(self.versions(prefix))
 
+    def _location(self, key: str) -> tuple[str, str]:
+        if self.address is not None:
+            return self.address, key
+        scope, _, rest = key.partition("/")
+        address = scope.replace("!", "/")
+        if not rest.startswith(address + "/"):
+            raise FileNotFoundError(key)
+        return address, rest[len(address) + 1 :]
+
     def get(self, key: str) -> bytes:
         row = self.db.execute(
-            "SELECT body FROM run_files WHERE address=%s AND key=%s", (self.address, key)
+            "SELECT body FROM run_files WHERE address=%s AND key=%s AND visible",
+            self._location(key),
         ).fetchone()
         if row is None:
             raise FileNotFoundError(key)
@@ -76,15 +126,17 @@ class PostgresStorage:
 
     def get_range(self, key: str, start: int, length: int) -> bytes:
         row = self.db.execute(
-            "SELECT substring(body FROM %s::int FOR %s::int) FROM run_files WHERE address=%s AND key=%s",
-            (start + 1, length, self.address, key),
+            "SELECT substring(body FROM %s::int FOR %s::int) FROM run_files WHERE address=%s AND key=%s AND visible",
+            (start + 1, length, *self._location(key)),
         ).fetchone()
         if row is None:
             raise FileNotFoundError(key)
         return bytes(row[0])
 
     def uri(self, key: str) -> str:
-        return f"etude-view:/{self.address}/{key}"
+        info = self.db.info
+        location = sha256(f"{info.host}/{info.port}/{info.dbname}".encode()).hexdigest()[:20]
+        return f"etude-view://{location}/{self.address or self.experiment}/{key}"
 
     def put(self, key: str, data: bytes) -> None:
         raise TypeError("view evidence is read-only")
@@ -98,14 +150,18 @@ class PostgresStorage:
 
 def _lock_run(db: Connection, grant: ViewGrant) -> int:
     """All evidence for an address is ordered by the same row lock."""
-    db.execute("INSERT INTO runs(address) VALUES (%s) ON CONFLICT DO NOTHING", (grant.run,))
+    db.execute(
+        "INSERT INTO runs(address,experiment) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+        (grant.run, grant.run.split("/")[0].split("@")[0]),
+    )
     row = db.execute(
         "SELECT latest_attempt_number FROM runs WHERE address=%s FOR UPDATE", (grant.run,)
     ).fetchone()
     assert row is not None
     if grant.attempt_number > row[0]:
         db.execute(
-            "UPDATE runs SET latest_attempt_number=%s, last_push_at=now() WHERE address=%s",
+            """UPDATE runs SET latest_attempt_number=%s,last_push_at=now(),
+               attempt_state=NULL,machine=NULL,attempt_position=NULL WHERE address=%s""",
             (grant.attempt_number, grant.run),
         )
     return max(int(row[0]), grant.attempt_number)
@@ -124,13 +180,12 @@ class PostgresView:
                 )
                 if current != (ScriptDirectory.from_config(_migrations()).get_current_head(),):
                     raise ValueError("hosted view schema needs etude view-upgrade")
-                pending = db.execute(
-                    "SELECT address FROM runs WHERE published_rev < accepted_rev"
-                ).fetchall()
             files = experiment_files(path) if path and path.is_dir() else [path] if path else []
-            self.reports = {file.stem: read_report(file, None).report for file in files}
-            for (address,) in pending:
-                self._project(address)
+            self.files = {file.stem: file for file in files}
+            self._building = Lock()
+            self._declarations: dict[Path, ReportDeclaration] = {}
+            self._reading_declarations = Lock()
+            self._refresh_projections()
         except BaseException:
             self.close()
             raise
@@ -183,12 +238,27 @@ class PostgresView:
                     body,
                 ),
             )
-            db.execute("UPDATE runs SET last_push_at=now() WHERE address=%s", (grant.run,))
+            db.execute(
+                """UPDATE runs SET last_push_at=now(),attempt_state=%s,machine=%s,attempt_position=%s
+                   WHERE address=%s""",
+                (
+                    observation.outcome or observation.phase,
+                    observation.context.machine,
+                    str(observation.tally)
+                    if observation.tally
+                    else format_position(observation.clocks, None, observation.context.until),
+                    grant.run,
+                ),
+            )
 
     def accept_file(
         self, grant: ViewGrant, key: str, digest: str, modified: datetime, body: bytes
     ) -> None:
-        block = parse(key)
+        member, name = evidence_member(key)
+        block = parse(name)
+        tables: list[str] = []
+        staged = name.endswith(".parquet")
+        record = None
         if block:
             try:
                 columns = decode(body)
@@ -201,17 +271,43 @@ class PostgresView:
                 or block.level > 2**31 - 1
             ):
                 raise EtudeError("metric_block_name_mismatch", 422)
-        elif key == "run.json":
+        elif name == "run.json":
             record = RunRecord.model_validate_json(body)
-            if record.id != grant.run:
+            if (
+                run_address(record.id, record.experiment) != (member or grant.run)
+                or any(not member_folder(m) for m in record.members or ())
+                or (member and (record.members is not None or record.kind != "evaluation"))
+            ):
                 raise EtudeError("run_address_mismatch", 422)
-        elif key.startswith("checkpoints/"):
+        elif name.startswith("checkpoints/"):
             CheckpointRecord.model_validate_json(body)
-        elif key == "outcome.json":
+        elif name == "outcome.json":
             RunOutcome.model_validate_json(body)
+        elif name.startswith("artifacts/"):
+            if name != f"artifacts/{digest}.json":
+                raise EtudeError("view_artifact_digest_mismatch", 422)
+            RowTable.model_validate_json(body)
+        elif name == "environment.json":
+            Environment.model_validate_json(body)
+        elif name == "tournament.json":
+            TournamentRun.model_validate_json(
+                body, context={"experiment": grant.run.split("/")[0].split("@")[0]}
+            )
+        elif staged:
+            _validate_parquet(body)
+        elif name.endswith("/block.json"):
+            index = Block.model_validate_json(
+                body, context={"experiment": grant.run.split("/")[0].split("@")[0]}
+            )
+            if name != f"blocks/{index.name}/block.json":
+                raise EtudeError("view_block_name_mismatch", 422)
+            folder = key.rsplit("/", 1)[0]
+            tables = [folder + "/" + f for f in index.files if f.endswith(".parquet")]
+            if any(evidence_member(t)[0] != member for t in tables):
+                raise EtudeError("invalid_view_table", 422)
         else:
             writer = RunWriter.model_validate_json(body)
-            if key != f"metrics/{writer.writer}.json":
+            if name != f"metrics/{writer.writer}.json":
                 raise EtudeError("writer_record_name_mismatch", 422)
 
         address = grant.run
@@ -219,6 +315,16 @@ class PostgresView:
             latest = _lock_run(db, grant)
             if not immutable(key) and grant.attempt_number < latest:
                 raise EtudeError("superseded_attempt", 409)
+            if member:
+                root = db.execute(
+                    """SELECT convert_from(body,'UTF8')::jsonb FROM run_files
+                       WHERE address=%s AND key='run.json'""",
+                    (address,),
+                ).fetchone()
+                if not root or member not in (root[0].get("members") or ()):
+                    raise EtudeError("undeclared_view_member", 409)
+                if record and record.experiment != root[0]["experiment"]:
+                    raise EtudeError("view_member_experiment_mismatch", 422)
             old = db.execute(
                 "SELECT sha256 FROM run_files WHERE address=%s AND key=%s",
                 (address, key),
@@ -228,6 +334,16 @@ class PostgresView:
                     return
                 if immutable(key):
                     raise EtudeError("view_evidence_conflict", 409)
+            if tables:
+                present = db.execute(
+                    "SELECT key FROM run_files WHERE address=%s AND key=ANY(%s)", (address, tables)
+                )
+                if {row[0] for row in present} != set(tables):
+                    raise EtudeError("view_block_tables_missing", 409)
+                db.execute(
+                    "UPDATE run_files SET visible=true WHERE address=%s AND key=ANY(%s)",
+                    (address, tables),
+                )
             if block:
                 cover = (
                     address,
@@ -254,8 +370,8 @@ class PostgresView:
             db.execute(
                 """
                 INSERT INTO run_files(address,key,sha256,body,attempt_number,modified_at,
-                                      writer,seq_first,seq_last,level)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                      writer,seq_first,seq_last,level,visible)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT(address,key) DO UPDATE SET sha256=excluded.sha256,body=excluded.body,
                     attempt_number=excluded.attempt_number,modified_at=excluded.modified_at
                 """,
@@ -270,8 +386,21 @@ class PostgresView:
                     block.first if block else None,
                     block.last if block else None,
                     block.level if block else None,
+                    not staged,
                 ),
             )
+            if record and not member:
+                db.execute(
+                    "UPDATE runs SET experiment=%s,job=%s,kind=%s WHERE address=%s",
+                    (
+                        record.experiment or address,
+                        record.job_name or record.name,
+                        record.kind,
+                        address,
+                    ),
+                )
+            if staged:
+                return
             db.execute(
                 """UPDATE runs SET accepted_rev=accepted_rev+1,
                        last_push_at=CASE WHEN latest_attempt_number=%s THEN now() ELSE last_push_at END
@@ -279,6 +408,41 @@ class PostgresView:
                 (grant.attempt_number, address),
             )
         self._project(address)
+
+    def _panels(self, experiment: str) -> Report:
+        file = self.files.get(experiment)
+        if file is None:
+            return DEFAULT_REPORT
+        with self._reading_declarations:
+            accepted = read_report(file, self._declarations.get(file))
+            self._declarations[file] = accepted
+            return accepted.report
+
+    def _refresh_projections(self, experiment: str | None = None) -> None:
+        # Find changed definitions from small summaries before reading any metric blocks.
+        where = "AND experiment=%s" if experiment is not None else ""
+        with self.pool.connection() as db:
+            rows = db.execute(
+                f"""SELECT address,experiment,run_clock,panel_definition,accepted_rev,
+                           published_rev<accepted_rev OR projection_error IS NOT NULL
+                    FROM runs WHERE accepted_rev>0 {where} ORDER BY experiment""",
+                (experiment,) if experiment is not None else (),
+            ).fetchall()
+        for address, name, default_clock, definition, revision, pending in rows:
+            if not pending:
+                try:
+                    report = self._panels(name)
+                    if panel_definition(report, report.clock or default_clock) == definition:
+                        continue
+                except (Exception, SystemExit):
+                    pass  # Projection records the sanitized failure and leaves the chart intact.
+            # Fence any projection in flight with an older declaration, including across web processes.
+            with self.pool.connection() as db:
+                db.execute(
+                    "UPDATE runs SET accepted_rev=accepted_rev+1 WHERE address=%s AND accepted_rev=%s",
+                    (address, revision),
+                )
+            self._project(address)
 
     def _project(self, address: str) -> None:
         with self.pool.connection() as db:
@@ -288,30 +452,58 @@ class PostgresView:
             ).fetchone()
             assert row is not None
             revision = row[0]
-            storage = PostgresStorage(db, address)
+            storage = PostgresStorage(db, address=address)
             try:
                 record = RunRecord.model_validate_json(storage.get("run.json"))
                 run = LocatedRun(name=address.rsplit("/", 1)[-1], file=record, folders=("",))
-                data = read_located(storage, run, storage.keys(""), whole_blocks=True)
-                report = self.reports.get(record.experiment, DEFAULT_REPORT)
-                clock = report.clock or next((c.name for c in record.clocks), BUILT_IN_NAMES[0])
-                charts = run_chart_data(storage, data, report, clock)
+                # Hosted eval curves come from the experiment report. Only the group root owns its lifecycle.
+                evaluation = record.kind == "evaluation"
+                keys = (
+                    sorted(storage.keys("metrics/") + storage.keys("outcome.json"))
+                    if evaluation
+                    else storage.keys("")
+                )
+                data = read_located(storage, run, keys, whole_blocks=True)
+                report = self._panels(record.experiment)
+                default_clock = next((c.name for c in record.clocks), BUILT_IN_NAMES[0])
+                clock = report.clock or default_clock
+                charts = None if evaluation else run_chart_data(storage, data, report, clock)
                 checkpoints = checkpoint_table(data)
+                definition = panel_definition(report, clock)
+                headline = charts.headline if charts else None
                 error = None
-            except Exception as exc:
+            except (Exception, SystemExit) as exc:
                 charts, error = None, explain(exc)
         with self.pool.connection() as db:
-            if charts is None:
+            if error is not None:
                 db.execute(
                     "UPDATE runs SET projection_error=%s WHERE address=%s AND accepted_rev=%s",
                     (error, address, revision),
                 )
                 return
-            if db.execute(
-                """UPDATE runs SET published_rev=%s, projection_error=NULL
+            if (
+                db.execute(
+                    """UPDATE runs SET published_rev=%s, projection_error=NULL,experiment=%s,kind=%s,job=%s,
+                       file_state=%s,position=%s,headline=%s,latest=%s,panel_order=%s,panel_definition=%s,run_clock=%s
                    WHERE address=%s AND accepted_rev=%s RETURNING address""",
-                (revision, address, revision),
-            ).fetchone():
+                    (
+                        revision,
+                        record.experiment or address,
+                        record.kind,
+                        record.job_name or record.name,
+                        data.stored_state,
+                        format_position(data.reached, clock),
+                        headline.model_dump_json(exclude_defaults=True) if headline else None,
+                        " · ".join(headline.latest()) if headline else None,
+                        headline.order if headline else None,
+                        definition,
+                        default_clock,
+                        address,
+                        revision,
+                    ),
+                ).fetchone()
+                and charts is not None
+            ):
                 db.execute(
                     """
                     INSERT INTO run_charts(address,overview,payload,checkpoints) VALUES (%s,%s,%s,%s)
@@ -320,32 +512,187 @@ class PostgresView:
                     (address, charts.overview, charts.payload, checkpoints),
                 )
 
-    def run_chart(self, address: str, *, overview: bool, observe: bool) -> RunChart | None:
+    @contextmanager
+    def snapshot(self) -> Iterator[PostgresSnapshot]:
         with self.pool.connection() as db:
             db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            # A status poll does not visit run_charts or run_files.
-            payload = "NULL" if observe else "overview" if overview else "payload"
-            join = "" if observe else "LEFT JOIN run_charts USING(address)"
-            detail = "observation" if overview and not observe else "NULL"
-            checkpoints = "checkpoints" if overview and not observe else "NULL"
-            row = db.execute(
-                f"""SELECT published_rev,last_push_at,projection_error,{payload},latest_attempt_number,
-                           producer_seq,finished,{detail},{checkpoints}
-                    FROM runs {join} LEFT JOIN attempts ON attempts.address=runs.address
-                        AND attempts.number=runs.latest_attempt_number WHERE runs.address=%s""",
-                (address,),
-            ).fetchone()
-            if not row:
-                return None
-            rev, received, error, chart, number, seq, finished, observation, marks = row
-            return RunChart(
-                rev,
-                received,
-                error,
-                chart,
-                number,
-                seq,
-                finished,
-                AttemptObservation.model_validate_json(observation) if observation else None,
-                marks,
+            yield PostgresSnapshot(db)
+
+    def report(self, experiment: str, *, refresh: bool) -> str:
+        with self._building:
+            with self.snapshot() as view:
+                if not refresh and (saved := view.report_html(experiment)) is not None:
+                    return saved
+                file = self.files.get(experiment)
+                commit = declaration_commit(file) if file else None
+
+                def listing(name: str) -> RunListing:
+                    return RunListing.read(PostgresStorage(view.db, experiment=name))
+
+                pages = Pages(
+                    PostgresStorage(view.db, experiment=experiment),
+                    local=False,
+                    line_source=listing,
+                )
+                # Use the snapshot time to fence builds finishing out of order on separate web hosts.
+                started = view.db.execute("SELECT transaction_timestamp()").fetchone()
+                assert started
+                report = render_report(pages.build(file, experiment=experiment), file, commit)
+            with self.pool.connection() as db:
+                db.execute(
+                    """INSERT INTO reports(experiment,html,built_at,declaration,headline,runs_label)
+                       VALUES (%s,%s,%s,%s,%s,%s)
+                       ON CONFLICT(experiment) DO UPDATE SET html=excluded.html,built_at=excluded.built_at,
+                       declaration=excluded.declaration,headline=excluded.headline,runs_label=excluded.runs_label
+                       WHERE reports.built_at<=excluded.built_at""",
+                    (
+                        experiment,
+                        report.html,
+                        started[0],
+                        report.declaration,
+                        report.headline,
+                        str(report.runs),
+                    ),
+                )
+            if refresh:
+                self._refresh_projections(experiment)
+            return report.html
+
+
+def _validate_parquet(body: bytes) -> None:
+    # DuckDB is the optional evaluation dependency. Check the footer before retaining an immutable key.
+    import duckdb  # noqa: PLC0415
+
+    with NamedTemporaryFile(suffix=".parquet") as file:
+        file.write(body)
+        file.flush()
+        try:
+            with duckdb.connect(":memory:") as reader:
+                reader.execute("SELECT * FROM parquet_schema(?) LIMIT 1", [file.name]).fetchone()
+        except duckdb.Error as error:
+            raise EtudeError("invalid_view_parquet", 422) from error
+
+
+class PostgresSnapshot:
+    def __init__(self, db: Connection) -> None:
+        self.db = db
+
+    def freshness(self) -> ViewFreshness:
+        rows = self.db.execute(
+            """SELECT DISTINCT experiment FROM runs
+               WHERE last_push_at > now()-interval '10 minutes'
+               AND coalesce(attempt_state,file_state,'running') IN ('running','setting_up') ORDER BY experiment"""
+        )
+        return ViewFreshness(tuple(row[0] for row in rows))
+
+    def rows(self, experiment: str | None) -> list[RunRow]:
+        # Cards need downsampled headlines; the experiment table only needs their latest values.
+        panel = "headline,NULL" if experiment is None else "NULL,latest"
+        where = "" if experiment is None else "WHERE experiment=%s"
+        rows = self.db.execute(
+            f"""SELECT experiment,address,job,coalesce(attempt_state,file_state,'running'),
+                   last_push_at,coalesce(nullif(attempt_position,''),position),machine,panel_order,panel_definition,{panel}
+                FROM runs {where} ORDER BY experiment,address""",
+            () if experiment is None else (experiment,),
+        )
+        return [RunRow(*row) for row in rows]
+
+    def report_html(self, experiment: str) -> str | None:
+        row = self.db.execute(
+            "SELECT html FROM reports WHERE experiment=%s", (experiment,)
+        ).fetchone()
+        return str(row[0]) if row else None
+
+    def report_index(self) -> dict[str, ReportSummary]:
+        return {
+            name: ReportSummary(
+                at, declaration, headline, "Eval only" if label == "Eval only" else int(label)
             )
+            for name, at, declaration, headline, label in self.db.execute(
+                "SELECT experiment,built_at,declaration,headline,runs_label FROM reports"
+            )
+        }
+
+    def experiments(self) -> set[str]:
+        return {r[0] for r in self.db.execute("SELECT DISTINCT experiment FROM runs")}
+
+    def report_ready(self, experiment: str, *, declared: bool) -> bool | None:
+        row = self.db.execute(
+            """SELECT CASE
+                 WHEN EXISTS(SELECT 1 FROM runs WHERE experiment=%s AND job IS NOT NULL) THEN true
+                 WHEN %s OR EXISTS(SELECT 1 FROM runs WHERE experiment=%s) THEN false END""",
+            (experiment, declared, experiment),
+        ).fetchone()
+        assert row
+        return None if row[0] is None else bool(row[0])
+
+    def detail(
+        self, address: str, *, tab: str, observe: bool, mounted: str | None = None
+    ) -> RunDetail | None:
+        db = self.db
+        payload = "NULL"
+        columns = "checkpoints" if tab in ("overview", "checkpoints") else "NULL"
+        if tab in ("overview", "charts", "curves"):
+            payload = "overview" if tab == "overview" else "payload"
+        if observe:
+            columns = payload = "NULL"
+        join = "" if columns == payload == "NULL" else "LEFT JOIN run_charts USING(address)"
+        # A fragment retaining its mounted curves selects the payload only when the projection changes.
+        args: tuple[str, ...] = (address,)
+        if mounted and payload != "NULL":
+            args = (mounted, address)
+            payload = f"CASE WHEN concat(published_rev,'-',panel_definition)<>%s THEN {payload} END"
+        attempt = (
+            "observation" if not observe and tab in ("console", "overview", "config") else "NULL"
+        )
+        row = db.execute(
+            f"""SELECT published_rev,last_push_at,projection_error,{payload},latest_attempt_number,
+                       producer_seq,finished,{attempt},{columns},experiment,kind,panel_definition,file_state
+                FROM runs {join} LEFT JOIN attempts ON attempts.address=runs.address
+                    AND attempts.number=runs.latest_attempt_number WHERE runs.address=%s""",
+            args,
+        ).fetchone()
+        if not row:
+            return None
+        (
+            rev,
+            received,
+            error,
+            chart,
+            number,
+            seq,
+            finished,
+            observation,
+            marks,
+            experiment,
+            kind,
+            definition,
+            state,
+        ) = row
+        files = (
+            tuple(
+                r[0]
+                for r in db.execute(
+                    "SELECT key FROM run_files WHERE address=%s AND visible ORDER BY key",
+                    (address,),
+                )
+            )
+            if tab == "files" and not observe
+            else ()
+        )
+        return RunDetail(
+            revision=rev,
+            received=received,
+            error=error,
+            payload=chart,
+            attempt_number=number,
+            sequence=seq,
+            finished=finished,
+            attempt=AttemptObservation.model_validate_json(observation) if observation else None,
+            checkpoints=marks,
+            experiment=experiment,
+            kind=kind,
+            definition=definition,
+            file_state=state,
+            files=files,
+        )

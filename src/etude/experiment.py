@@ -8,7 +8,7 @@ Author-facing types are defined in `etude.jobs`.
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -55,11 +55,18 @@ def read_tournament_lines(
     listing: RunListing,
     state: jobs.ExperimentState,
     tournaments: Iterable[Tournament | TournamentRun],
+    *,
+    stored: Callable[[str], RunListing] | None = None,
 ) -> tuple[Line, ...]:
     """Read the lines reachable by these tournaments, sharing one source discovery."""
     found = list(state.lines)
     for name in sorted(find_line_experiments(tournaments) - {state.experiment}):
-        found.extend(line.seen_from(state.experiment) for line in observe(listing, name).lines)
+        external = (
+            state_of(read_all(stored(name), name, metrics=frozenset()), name, retained=())
+            if stored
+            else observe(listing, name)
+        )
+        found.extend(line.seen_from(state.experiment) for line in external.lines)
     return tuple(found)
 
 

@@ -364,7 +364,7 @@ hosted view receives all run data over HTTP and never reads back from a bucket
 or launcher database.
 
 ```text
-# On the view host (install etude-sdk[hosted], plus eval for evaluation reports)
+# On the view host (install etude-sdk[hosted], plus eval for evaluation results)
 $ export ETUDE_VIEW_DATABASE_URL=postgresql://user@host/etude_view
 $ export ETUDE_VIEW_SECRET=...
 $ uv run --extra hosted etude view-upgrade
@@ -382,7 +382,17 @@ view: http://127.0.0.1:8765/runs/prototype/coin@0
 Loopback works when the worker runs on the same host; for remote or rented
 workers, set `ETUDE_VIEW_URL` to the view's reachable HTTPS origin. Open the
 printed link for the latest attempt, config, checkpoint records and console on
-Overview. Charts shows the sealed training curves. Both refresh every 5 seconds.
+Overview. Select **Charts** for the sealed curves, or follow the experiment
+breadcrumb to see the run beside its peers. The experiment card shows its first
+drawable metric panel. The table shows that panel’s latest values and the
+selected run’s console, curves, config or checkpoints. These pages refresh every
+5 seconds while visible.
+
+Open **Report** on the experiment or select it from **Reports**. The first visit
+builds the report from evidence already in Postgres. To pick up new results or
+edits to the experiment file on the view host, choose **Refresh report**. A
+successful build replaces the saved report. If the declaration fails, the
+previous build remains available, including after restarting the web process.
 
 **Mode and upgrades.** Plain `etude view [PATH] [--source SOURCE]` stays in local
 pull mode even if `ETUDE_VIEW_DATABASE_URL` is set. `--push` explicitly enables
@@ -397,7 +407,7 @@ Postgres. Ordinary `etude view --push` checks the schema revision at startup and
 prints the `etude view-upgrade` command on mismatch. Push mode also serves
 `GET /healthz` for deployment checks and does not overwrite `ETUDE_HOME/view`.
 Only the view host needs `etude-sdk[hosted]` (and `etude-sdk[eval]` when
-building reports for experiments with evaluations); submitting terminals and
+receiving and displaying evaluation results); submitting terminals and
 workers need no Postgres driver.
 
 **Publishing from launchers.** Inject `ETUDE_VIEW_URL` and `ETUDE_VIEW_SECRET`
@@ -414,22 +424,27 @@ and prints no links. Plain `etude train` does not push to a hosted view.
 
 **What is pushed and persisted.** Workers push attempt status, machine and
 hardware display details, config, an incremental tail of the last 500 console
-lines, run and outcome records, checkpoint records and sealed training metrics.
+lines, run and outcome records, checkpoint records, sealed training metrics and
+content-addressed JSON row tables. Eval groups also send tournament and
+environment records. Each sealed eval block becomes visible when its index and
+all the Parquet tables it names have arrived. Match results appear in the
+experiment report. Packed blobs stay in canonical storage.
 Each file may be up to 32 MiB. Checkpoint weights stay in the run’s canonical
 storage. A replacement attempt owns the current status and console. Opening
 the link after a web restart shows the last committed observation.
 
 Run `uv run --extra hosted pytest -q tests/test_hosted_view.py` to exercise
 the launch, receiver outage, retry and worker handoffs with a disposable Postgres.
-Hosted experiment pages, reports, artifact records and evaluation tables are
-planned for the next milestone.
+The fixture also launches an eval group, edits its report and reopens the saved
+result after a web restart.
 
 | Situation | What appears |
 | --- | --- |
 | Link opened before first push | Waiting run page naming the hosted push feed |
 | View unreachable during training | Job, canonical bucket delivery and cleanup continue unaffected; a live or resumed worker catches up (including folded blocks). A lost machine can leave a permanent gap on the site; the bucket remains the portable scientific record. |
 | Worker silent with no outcome or retry | Last push time and **no end recorded** after 10 minutes without a push |
-| Machine details | Overview shows the machine assigned to the attempt and hardware when known. |
+| Machine details | Overview shows the assigned machine and any reported hardware. The side rail and Machines page explain where to find launcher inventory. Dollars show `—`. |
+| Files | Names the evidence received for the run. Fetch job outputs and checkpoint weights from canonical storage. |
 | Projection error | Previous complete chart stays visible with the sanitized error shown |
 
 The hosted view UI has no login; place authentication or a private network in

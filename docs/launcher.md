@@ -278,8 +278,11 @@ costs and links each occupied slot to its run. See the [live view guide](trackin
 The server holds the provider credentials. Jobs receive only scoped grants.
 Set `ETUDE_VIEW_URL` and `ETUDE_VIEW_SECRET` in the launcher or server
 environment to have launched workers push live curves, attempt status and
-console tails to a shared [hosted view](tracking.md#hosted-view); `launch`,
-`queue`, `continue` and `status RUN` then print its links automatically.
+console tails to a shared [hosted view](tracking.md#hosted-view). `launch`,
+`queue`, `continue` and `status RUN` print the run link. Follow its experiment
+breadcrumb to compare runs and open the report. Evaluation workers publish
+sealed matches to the same experiment. **Refresh report** includes newly
+received scores. Use `etude machines` on the launcher for inventory and billing.
 
 ## Upgrading Etude
 

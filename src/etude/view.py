@@ -19,9 +19,9 @@ import sys
 import threading
 import time
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterator, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import ExitStack, closing, contextmanager
+from contextlib import AbstractContextManager, ExitStack, closing, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -55,10 +55,11 @@ from etude.observations import (
     MAX_OBSERVATION_BYTES,
     AttemptObservation,
     ViewGrant,
-    training_file,
+    evidence_member,
 )
 from etude.page import (
     DEFAULT_REPORT,
+    Page,
     Pages,
     ReportDeclaration,
     experiment_files,
@@ -170,12 +171,16 @@ class _PendingReport:
 
 
 @dataclass(frozen=True)
-class _ServedReport:
-    html: str
+class ReportSummary:
     built: datetime
     declaration: str
     headline: str | None
     runs: int | Literal["Eval only"]
+
+
+@dataclass(frozen=True)
+class ServedReport(ReportSummary):
+    html: str
 
 
 @dataclass(frozen=True)
@@ -446,7 +451,7 @@ class ChartIndex:
                 clocks = dict.fromkeys(c.name for file in training for c in file.clocks)
                 clocks.update(dict.fromkeys(BUILT_IN_NAMES))
                 clock = report.clock if report and report.clock in clocks else next(iter(clocks))
-                definition = _definition(report, clock) if report else None
+                definition = panel_definition(report, clock) if report else None
                 for run in runs:
                     evaluation = run.file.kind == "evaluation"
                     address = run.folders[0] if evaluation else run_address(run.file.id, experiment)
@@ -713,7 +718,7 @@ class ChartIndex:
                 checkpoint_table(data),
                 _CLOCKS.dump_json(_mean_pace(data, reached)).decode(),
                 data.blocks[-1].header.wall_last if data.blocks else None,
-                _definition(report, row["clock"]),
+                panel_definition(report, row["clock"]),
                 headline.model_dump_json(exclude_defaults=True) if headline else None,
                 json.dumps(headline.latest()) if headline else None,
                 charts.overview,
@@ -1028,11 +1033,8 @@ class _ViewSnapshot:
                 if status is not None:
                     costs.append(status)
                 address = run["address"]
-                facts = (address, state, run["position"], status.machine if status else None)
-                label = escape(" · ".join(fact for fact in facts if fact))
                 dots.append(
-                    f'<a class="run-dot" href="{run_path(address)}" aria-label="{label}" title="{label}">'
-                    f'<i class="state-dot" aria-hidden="true" data-state="{escape(state)}"></i></a>'
+                    _run_dot(address, state, run["position"], status.machine if status else None)
                 )
                 if (run["definition"], run["panel_order"]) == panel and run["headline"]:
                     panels.append(run["headline"])
@@ -1050,15 +1052,7 @@ class _ViewSnapshot:
             )
             if latest:
                 dated = f"last write <span>{_age(latest, now)}</span>"
-            chart = ""
-            if panels:
-                data = ",".join(panels).replace("<", "\\u003c")
-                chart = f'<div class="card-charts"><script type="application/json">[{data}]</script></div>'
-            group.append(
-                f'<article class="card experiment-card"><h3><a href="/experiments/{quote(name)}">{escape(name)}</a></h3>'
-                f'{chart}<div class="run-dots">{"".join(dots)}</div>'
-                f"<p>{totals}</p><footer>{spend}{dated}</footer></article>"
-            )
+            group.append(_card(name, panels, dots, totals, spend + dated))
         if observation:
             body = (
                 _experiment_cards("Open", opened) + _experiment_cards("Completed", completed)
@@ -1093,7 +1087,7 @@ class _ViewSnapshot:
                 body = machines + f'<p class="context">{escape(ages)}</p>'
         return _live_status(body, error=error)
 
-    def reports(self, declared: dict[str, Path], served: dict[str, _ServedReport]) -> str:
+    def reports(self, declared: dict[str, Path], served: dict[str, ServedReport]) -> str:
         visible = {
             row[0]
             for row in self.db.execute(
@@ -1102,37 +1096,8 @@ class _ViewSnapshot:
         }
         row = self._observation
         unstarted = "Not started" if row and row["at"] else "Waiting"
-        rows = []
-        for name in sorted(visible | declared.keys()):
-            report = served.get(name)
-            state = "Completed" if name in visible else unstarted
-            if name in self._open_experiments:
-                state = "Open"
-            built = (
-                f'<time datetime="{report.built.isoformat()}">{report.built:%Y-%m-%d %H:%M:%S UTC}</time>'
-                if report
-                else "Never"
-            )
-            declaration = report.declaration if report else ("—" if name in declared else "Default")
-            headline = escape(report.headline) if report and report.headline else "—"
-            rows.append(
-                f'<tr><td><a href="/experiments/{quote(name)}/report">{escape(name)}</a></td>'
-                f"<td>{state}</td><td>{built}</td><td>{escape(declaration)}</td>"
-                f"<td>{headline}</td><td>{report.runs if report else '—'}</td></tr>"
-            )
-        columns = (
-            "Experiment",
-            "State",
-            "Built in this view",
-            "Declared at",
-            "Headline",
-            "Runs drawn",
-        )
-        return _live_status(
-            f'<div class="reports-index">{_table(columns, rows)}</div>'
-            if rows
-            else "<p>No experiments yet.</p>",
-            error=self._errors(),
+        return _reports(
+            visible, self._open_experiments, declared, served, unstarted, self._errors()
         )
 
     @cached_property
@@ -1187,21 +1152,7 @@ class _ViewSnapshot:
         elif machines is None:
             label = outage or ("No launcher" if launcher_at else "Awaiting launcher")
             machines = f"<span>{label}</span>"
-        nav = []
-        for path, label in (
-            ("/", "Experiments"),
-            ("/machines", "Machines"),
-            ("/reports", "Reports"),
-        ):
-            current = ' aria-current="location"' if path == section else ""
-            nav.append(f'<a href="{path}"{current}>{label}</a>')
-        return (
-            f'<nav id="view-rail" aria-label="Live view" data-refresh="{_REFRESH * 1000}">'
-            f'<div class="rail-pages">{"".join(nav)}</div>'
-            f'<div class="rail-group"><h2>Open experiments</h2>{opened}</div>'
-            f'<div class="rail-group"><h2>Held machines</h2>{machines}</div>'
-            f"{loop}</nav>"
-        )
+        return _rail(section, opened, machines, loop)
 
     def report_ready(self, experiment: str, *, declared: bool) -> bool | None:
         """Whether a known experiment has indexed files. Unknown experiments have no page."""
@@ -1216,7 +1167,14 @@ class _ViewSnapshot:
         return bool(row[0]) if row[0] is not None else None
 
     def experiment_status(
-        self, experiment: str, *, file: Path | None, run: str | None, tab: str, curves: str | None
+        self,
+        experiment: str,
+        *,
+        file: Path | None,
+        run: str | None,
+        tab: str,
+        curves: str | None,
+        observe: bool = False,
     ) -> str | None:
         observation = self._observation
         rows = self._list_runs(experiment)
@@ -1276,7 +1234,7 @@ class _ViewSnapshot:
                 f"<td>{escape(status.formatted_spend) if status else '—'}</td></tr>"
             )
             if address == selected:
-                detail = self._detail(address, pick, tab, curves, now)
+                detail = self._detail(address, pick, tab, curves, now, observe=observe)
         if rows:
             table = _table(("Run", "State", "Clock", "Latest metric", "Machine", "Dollars"), body)
             if not detail:
@@ -1301,8 +1259,17 @@ class _ViewSnapshot:
             error=self._errors(declaration[0] if declaration else None),
         )
 
-    def _detail(self, address: str, pick: str, tab: str, curves: str | None, now: datetime) -> str:
-        row = self._read_run(address, tab, mounted=curves)
+    def _detail(
+        self,
+        address: str,
+        pick: str,
+        tab: str,
+        curves: str | None,
+        now: datetime,
+        *,
+        observe: bool = False,
+    ) -> str:
+        row = self._read_run(address, tab, mounted=curves, observe=observe and tab == "curves")
         assert row is not None  # Selected from this read transaction.
         status = _status(row)
         if tab != "curves":
@@ -1325,17 +1292,100 @@ class _ViewSnapshot:
             )
         if row["chart_error"] and tab in ("curves", "checkpoints"):
             section += f'<p role="status">{escape(row["chart_error"])}</p>'
-        tabs = "".join(
-            f'<a id="detail-{name}" href="{pick}{name}#run-detail"'
-            + (' aria-current="page"' if name == tab else "")
-            + f">{name.title()}</a>"
-            for name in _DETAIL_TABS
+        return _run_detail(address, pick, tab, section, _run_line(row, _display_state(row), status))
+
+
+def _reports(
+    visible: set[str],
+    opened: Collection[str],
+    declared: Collection[str],
+    served: Mapping[str, ReportSummary],
+    unstarted: str,
+    error: str | None = None,
+) -> str:
+    rows = []
+    for name in sorted(visible | set(declared)):
+        report = served.get(name)
+        state = "Completed" if name in visible else unstarted
+        if name in opened:
+            state = "Open"
+        built = (
+            f'<time datetime="{report.built.isoformat()}">{report.built:%Y-%m-%d %H:%M:%S UTC}</time>'
+            if report
+            else "Never"
         )
-        return (
-            f'<aside id="run-detail" class="run-detail"><h2>{_run_link(address)}</h2>'
-            f"<p>{_run_line(row, _display_state(row), status)}</p>"
-            f'<nav aria-label="Run detail">{tabs}</nav>{section}</aside>'
+        declaration = report.declaration if report else ("—" if name in declared else "Default")
+        headline = escape(report.headline) if report and report.headline else "—"
+        rows.append(
+            f'<tr><td><a href="/experiments/{quote(name)}/report">{escape(name)}</a></td>'
+            f"<td>{state}</td><td>{built}</td><td>{escape(declaration)}</td>"
+            f"<td>{headline}</td><td>{report.runs if report else '—'}</td></tr>"
         )
+    columns = (
+        "Experiment",
+        "State",
+        "Built in this view",
+        "Declared at",
+        "Headline",
+        "Runs drawn",
+    )
+    return _live_status(
+        f'<div class="reports-index">{_table(columns, rows)}</div>'
+        if rows
+        else "<p>No experiments yet.</p>",
+        error=error,
+    )
+
+
+def _run_detail(address: str, pick: str, tab: str, section: str, summary: str) -> str:
+    tabs = "".join(
+        f'<a id="detail-{name}" href="{pick}{name}#run-detail"'
+        + (' aria-current="page"' if name == tab else "")
+        + f">{name.title()}</a>"
+        for name in _DETAIL_TABS
+    )
+    return (
+        f'<aside id="run-detail" class="run-detail"><h2>{_run_link(address)}</h2>'
+        f"<p>{summary}</p>"
+        f'<nav aria-label="Run detail">{tabs}</nav>{section}</aside>'
+    )
+
+
+def _rail(section: str, opened: str, machines: str, loop: str = "") -> str:
+    nav = []
+    for path, label in (
+        ("/", "Experiments"),
+        ("/machines", "Machines"),
+        ("/reports", "Reports"),
+    ):
+        current = ' aria-current="location"' if path == section else ""
+        nav.append(f'<a href="{path}"{current}>{label}</a>')
+    return (
+        f'<nav id="view-rail" aria-label="Live view" data-refresh="{_REFRESH * 1000}">'
+        f'<div class="rail-pages">{"".join(nav)}</div>'
+        f'<div class="rail-group"><h2>Open experiments</h2>{opened}</div>'
+        f'<div class="rail-group"><h2>Held machines</h2>{machines}</div>'
+        f"{loop}</nav>"
+    )
+
+
+def _experiment_tabs(title: str, status: str) -> str:
+    return (
+        '<nav class="tabs" id="experiment-tabs" aria-label="Experiment">'
+        '<a href="#status" aria-current="page">Status</a><a href="#report">Report</a></nav>'
+        f'{status}<iframe hidden id="report" title="Experiment report" '
+        f'data-src="/experiments/{quote(title)}/report?embed=1"></iframe>'
+    )
+
+
+def _list_page(title: str, status: str, rail: str, section: str, breadcrumbs: str) -> str:
+    if section == "/":
+        status += (
+            f"<style>{read_asset('vendor/uPlot.min.css')}</style>"
+            f"<script>{read_asset('vendor/uPlot.iife.min.js')}</script>"
+            f"<script>{read_asset('charts.js')}</script>"
+        )
+    return _shell(_status_page(title, status), rail, breadcrumbs)
 
 
 def _command_bar(file: Path | None, source: str, unfinished: list[str]) -> str:
@@ -1493,7 +1543,7 @@ def _stage_discovery(
     return None
 
 
-def _definition(report: Report, clock: str) -> str:
+def panel_definition(report: Report, clock: str) -> str:
     return sha256(
         (clock + "\0" + report.model_dump_json(include=report.model_fields_set)).encode()
     ).hexdigest()
@@ -1567,12 +1617,12 @@ def _store_run(
         else None,
         "file_job": file_job,
         "file_state": file_state,
-        "file_position": _position(clocks, preferred) if stored else None,
+        "file_position": format_position(clocks, preferred) if stored else None,
         "file_config": file_config,
         "launched_as": status.run if status else None,
         "launcher_job": (job.name or "Evaluation") if job and not (file and training) else None,
         "launcher_state": (run.allocation_phase or run.state).replace("_", " ") if status else None,
-        "launcher_position": _position(clocks, preferred, status.until) if status else None,
+        "launcher_position": format_position(clocks, preferred, status.until) if status else None,
         "launcher_config": record.config_json if record and file_config is None else None,
         "source": _source(record) if record and training else None,
         "status": status.model_dump_json() if status else None,
@@ -1744,6 +1794,27 @@ def _table(columns: tuple[str, ...], rows: list[str]) -> str:
     )
 
 
+def _run_dot(address: str, state: str, position: str | None, machine: str | None) -> str:
+    facts = (address, state, position, machine)
+    label = escape(" · ".join(fact for fact in facts if fact))
+    return (
+        f'<a class="run-dot" href="{run_path(address)}" aria-label="{label}" title="{label}">'
+        f'<i class="state-dot" aria-hidden="true" data-state="{escape(state)}"></i></a>'
+    )
+
+
+def _card(name: str, panels: list[str], dots: list[str], totals: str, footer: str) -> str:
+    chart = ""
+    if panels:
+        data = ",".join(panels).replace("<", "\\u003c")
+        chart = f'<div class="card-charts"><script type="application/json">[{data}]</script></div>'
+    return (
+        f'<article class="card experiment-card"><h3><a href="/experiments/{quote(name)}">{escape(name)}</a></h3>'
+        f'{chart}<div class="run-dots">{"".join(dots)}</div>'
+        f"<p>{totals}</p><footer>{footer}</footer></article>"
+    )
+
+
 def _experiment_cards(title: str, cards: list[str]) -> str:
     body = (
         f'<div class="grid multiples">{"".join(cards)}</div>'
@@ -1806,7 +1877,9 @@ def _observation_ages(
     return ages
 
 
-def _position(clocks: dict[str, float], preferred: str | None, target: Until | None = None) -> str:
+def format_position(
+    clocks: dict[str, float], preferred: str | None, target: Until | None = None
+) -> str:
     if target:
         limit = number(target.value)
         at = clocks.get(target.clock)
@@ -1962,7 +2035,7 @@ def _document(title: str, body: str) -> str:
     )
 
 
-def _declaration_commit(file: Path) -> str | None:
+def declaration_commit(file: Path) -> str | None:
     """Only attribute a local declaration to HEAD when its file is clean and tracked."""
     try:
         status = subprocess.run(
@@ -1998,6 +2071,97 @@ def _declaration_commit(file: Path) -> str | None:
     )
 
 
+class _PageSnapshot(Protocol):
+    def run(self, address: str, *, tab: str, observe: bool = False) -> str | None: ...
+    def rail(self, section: str) -> str: ...
+    def experiments(self) -> str: ...
+    def machines(self) -> str: ...
+    def experiment_status(
+        self,
+        experiment: str,
+        *,
+        file: Path | None,
+        run: str | None,
+        tab: str,
+        curves: str | None,
+        observe: bool = False,
+    ) -> str | None: ...
+
+
+def _report_page(
+    experiment: str, ready: bool, rail: str, observe: bool, refresh: bool, build: Callable[[], str]
+) -> str:
+    breadcrumbs = _breadcrumbs(experiment, report=True) if rail and not observe else ""
+    if not ready:
+        if refresh:
+            raise ValueError("Waiting for run files.")
+        notice = _observation("report", "waiting", "Waiting for run files.")
+        return (
+            notice + rail if observe else _shell(_document(experiment, notice), rail, breadcrumbs)
+        )
+    if observe:
+        return _observation("report", "ready", "Building report…") + rail
+    report_html = build()
+    return _shell(report_html, rail, breadcrumbs) if rail else report_html
+
+
+def _browse_page(
+    view: _PageSnapshot,
+    path: str,
+    query: dict[str, list[str]],
+    files: Mapping[str, Path],
+    reports: Callable[[], str],
+    *,
+    observe: bool,
+) -> str | None:
+    if path.startswith("/runs/"):
+        html = view.run(
+            path.removeprefix("/runs/"),
+            tab=query.get("tab", ["overview"])[0],
+            observe=observe,
+        )
+        if html is None:
+            return None
+        rail = view.rail("/")
+        return html + rail if observe else _shell(html, rail)
+
+    fragment = observe or path.endswith("/status")
+    route = path.removesuffix("/status") or "/"
+    section = "/"
+    breadcrumbs = ""
+    if route == "/":
+        title, status = "Experiments", view.experiments()
+    elif route == "/machines":
+        title, status = "Machines", view.machines()
+        section = route
+    elif route == "/reports":
+        title, status = "Reports", reports()
+        section = route
+    elif match := re.fullmatch(r"/experiments/([^/]+)(/status/?|/)?", path):
+        fragment = observe or match[2] == "/status"
+        title = match[1]
+        found = view.experiment_status(
+            title,
+            file=files.get(title),
+            run=query.get("run", [""])[0] or None,
+            tab=query.get("tab", ["console"])[0],
+            curves=query.get("curves", [None])[0] if fragment else None,
+            observe=observe,
+        )
+        if found is None:
+            return None
+        status = found
+        if not fragment:
+            breadcrumbs = _breadcrumbs(title)
+            status = _experiment_tabs(title, status)
+    else:
+        return None
+    rail = view.rail(section)
+    if fragment:
+        return status + rail
+    return _list_page(title, status, rail, section, breadcrumbs)
+
+
 class Server(ThreadingHTTPServer):
     def __init__(
         self, source: Storage | Path | str, path: Path | None, address: tuple[str, int]
@@ -2009,7 +2173,7 @@ class Server(ThreadingHTTPServer):
         self._find_files()
         self._building = threading.Lock()
         self._lock = threading.Lock()
-        self._served: dict[str, _ServedReport] = {}
+        self._served: dict[str, ServedReport] = {}
         self._pending: dict[str, Future[str]] = {}
         self._address = ExitStack()
         super().__init__(address, _Handler)
@@ -2086,64 +2250,13 @@ class Server(ThreadingHTTPServer):
             )
 
         with self.index.snapshot() as view:
-            if path.startswith("/runs/"):
-                html = view.run(
-                    path.removeprefix("/runs/"),
-                    tab=query.get("tab", ["overview"])[0],
-                    observe=observe,
-                )
-                if html is None:
-                    return None
-                rail = view.rail("/")
-                return html + rail if observe else _shell(html, rail)
 
-            fragment = path.endswith("/status")
-            route = path.removesuffix("/status") or "/"
-            section = "/"
-            breadcrumbs = ""
-            if route == "/":
-                title, status = "Experiments", view.experiments()
-            elif route == "/machines":
-                title, status = "Machines", view.machines()
-                section = route
-            elif route == "/reports":
+            def reports() -> str:
                 with self._lock:
                     served = self._served.copy()
-                title, status = "Reports", view.reports(self.files, served)
-                section = route
-            elif match := re.fullmatch(r"/experiments/([^/]+)(/status/?|/)?", path):
-                fragment = match[2] == "/status"
-                title = match[1]
-                found = view.experiment_status(
-                    title,
-                    file=self.files.get(title),
-                    run=query.get("run", [""])[0] or None,
-                    tab=query.get("tab", ["console"])[0],
-                    curves=query.get("curves", [None])[0] if fragment else None,
-                )
-                if found is None:
-                    return None
-                status = found
-                if not fragment:
-                    breadcrumbs = _breadcrumbs(title)
-                    status = (
-                        '<nav class="tabs" id="experiment-tabs" aria-label="Experiment">'
-                        '<a href="#status" aria-current="page">Status</a><a href="#report">Report</a></nav>'
-                        f'{status}<iframe hidden id="report" title="Experiment report" '
-                        f'data-src="/experiments/{quote(title)}/report?embed=1"></iframe>'
-                    )
-            else:
-                return None
-            rail = view.rail(section)
-            if fragment:
-                return status + rail
-            if section == "/":
-                status += (
-                    f"<style>{read_asset('vendor/uPlot.min.css')}</style>"
-                    f"<script>{read_asset('vendor/uPlot.iife.min.js')}</script>"
-                    f"<script>{read_asset('charts.js')}</script>"
-                )
-            return _shell(_status_page(title, status), rail, breadcrumbs)
+                return view.reports(self.files, served)
+
+            return _browse_page(view, path, query, self.files, reports, observe=observe)
 
     def _report_page(
         self, experiment: str, *, observe: bool, embed: bool, refresh: bool
@@ -2156,20 +2269,14 @@ class Server(ThreadingHTTPServer):
         # Release the index snapshot before building or waiting on an authored report.
         with self._lock:
             waiting = not ready and experiment not in self._served
-        breadcrumbs = _breadcrumbs(experiment, report=True) if rail and not observe else ""
-        if waiting:
-            if refresh:
-                raise ValueError("Waiting for run files.")
-            notice = _observation("report", "waiting", "Waiting for run files.")
-            return (
-                notice + rail
-                if observe
-                else _shell(_document(experiment, notice), rail, breadcrumbs)
-            )
-        if observe:
-            return _observation("report", "ready", "Building report…") + rail
-        report_html = self._report(experiment, refresh=refresh)
-        return _shell(report_html, rail, breadcrumbs) if rail else report_html
+        return _report_page(
+            experiment,
+            not waiting,
+            rail,
+            observe,
+            refresh,
+            lambda: self._report(experiment, refresh=refresh),
+        )
 
     def _report(self, experiment: str, *, refresh: bool) -> str:
         """Share the first build and explicit refreshes between report readers."""
@@ -2197,32 +2304,34 @@ class Server(ThreadingHTTPServer):
             self._pending.pop(experiment).set_result(report.html)
         return report.html
 
-    def _build_report(self, experiment: str) -> _ServedReport:
+    def _build_report(self, experiment: str) -> ServedReport:
         file = self.files.get(experiment)
-        commit = _declaration_commit(file) if file else None
+        commit = declaration_commit(file) if file else None
         page = self.pages.build(file, experiment=experiment)
-        control = (
-            '<button id="refresh-report">Refresh report</button> '
-            '<span id="refresh-status" role="status"></span>'
-            f"<script>{read_asset('refresh_report.js')}</script>"
+        return render_report(page, file, commit)
+
+
+def render_report(page: Page, file: Path | None, commit: str | None) -> ServedReport:
+    control = (
+        '<button id="refresh-report">Refresh report</button> '
+        '<span id="refresh-status" role="status"></span>'
+        f"<script>{read_asset('refresh_report.js')}</script>"
+    )
+    html = render(page, heading=control)
+    declaration = "Default"
+    if page.origin:
+        declaration = (
+            commit[:12]
+            if file and commit and declaration_commit(file) == commit
+            else "Working tree"
         )
-        html = render(page, heading=control)
-        declaration = "Default"
-        if page.origin:
-            declaration = (
-                commit[:12]
-                if file and commit and _declaration_commit(file) == commit
-                else "Working tree"
-            )
-        return _ServedReport(
-            html=html,
-            built=datetime.now(UTC),
-            declaration=declaration,
-            headline=page.headline(),
-            runs="Eval only"
-            if page.selections and not page.training.runs
-            else len(page.training.runs),
-        )
+    return ServedReport(
+        html=html,
+        built=datetime.now(UTC),
+        declaration=declaration,
+        headline=page.headline(),
+        runs="Eval only" if page.selections and not page.training.runs else len(page.training.runs),
+    )
 
 
 class _ViewHandler(BaseHTTPRequestHandler):
@@ -2314,7 +2423,7 @@ def run_view(server: ThreadingHTTPServer, origin: str) -> None:
 
 
 @dataclass(frozen=True)
-class RunChart:
+class RunDetail:
     revision: int
     received: datetime
     error: str | None
@@ -2324,14 +2433,34 @@ class RunChart:
     finished: bool | None
     attempt: AttemptObservation | None
     checkpoints: str | None
+    experiment: str
+    kind: str | None
+    definition: str | None
+    file_state: str | None
+    files: tuple[str, ...]
+
+    @property
+    def generation(self) -> str:
+        return f"{self.revision}-{self.definition or ''}"
 
 
-def _attempt_panel(chart: RunChart) -> str:
+def _attempt_panel(chart: RunDetail, tab: str) -> str:
     attempt = chart.attempt
+    if tab == "files":
+        files = "".join(f"<li><code>{escape(key)}</code></li>" for key in chart.files)
+        return f'<section class="sec"><h2>Files</h2><p>Evidence received by this view. Checkpoint weights and job outputs remain in canonical storage.</p><ul class="file-keys">{files}</ul></section>'
+    marks = chart.checkpoints or "<p>No checkpoint records received.</p>"
+    checkpoints = f'<section class="sec"><h2>Checkpoints</h2>{marks}</section>'
+    if tab == "checkpoints":
+        return checkpoints
     if attempt is None:
-        return ""
+        return "<p>Waiting for an attempt observation.</p>"
     context = attempt.context
-    position = _position(attempt.clocks, None, context.until)
+    position = (
+        str(attempt.tally)
+        if attempt.tally
+        else format_position(attempt.clocks, None, context.until)
+    )
     details = [
         f"Attempt {chart.attempt_number} of {context.max_attempts}",
         attempt.outcome or attempt.phase.replace("_", " "),
@@ -2341,14 +2470,16 @@ def _attempt_panel(chart: RunChart) -> str:
         attempt.cause or "",
     ]
     panel = "<p>" + " · ".join(escape(d) for d in details if d) + "</p>"
+    config = ""
     if context.source:
-        panel += f"<p>Source <code>{escape(context.source)}</code></p>"
+        config += f"<p>Source <code>{escape(context.source)}</code></p>"
     if context.config is not None:
-        panel += (
+        config += (
             f'<section class="sec"><h2>Config</h2><pre>{escape(context.config)}</pre></section>'
         )
-    if chart.checkpoints:
-        panel += f'<section class="sec"><h2>Checkpoints</h2>{chart.checkpoints}</section>'
+    if tab == "config":
+        return config or "<p>No config received.</p>"
+    panel += config + checkpoints
     console = attempt.console
     label = "Waiting for retained console."
     if console:
@@ -2357,13 +2488,231 @@ def _attempt_panel(chart: RunChart) -> str:
             label += " · silent" if console.complete else " · no output yet"
     output = _retained_output(console.body, console.gaps) if console else ""
     return (
-        panel
-        + f'<section class="sec" id="console"><h2>Console</h2><p>{label}</p>{output}</section>'
-    )
+        panel if tab == "overview" else ""
+    ) + f'<section class="sec" id="console"><h2>Console</h2><p>{label}</p>{output}</section>'
+
+
+@dataclass(frozen=True)
+class RunRow:
+    experiment: str
+    address: str
+    job: str | None
+    phase: str
+    received: datetime
+    position: str | None
+    machine: str | None
+    order: int | None
+    definition: str | None
+    headline: str | None
+    latest: str | None
+
+    def state(self, now: datetime) -> str:
+        if self.phase in ("running", "setting_up") and now - self.received >= _SILENT:
+            return "no end recorded"
+        return self.phase
+
+
+@dataclass(frozen=True)
+class ViewFreshness:
+    opened: tuple[str, ...]
+
+    def rail(self, section: str) -> str:
+        links = "".join(
+            f'<a href="/experiments/{quote(name)}">{escape(name)}</a>' for name in self.opened
+        )
+        return _rail(
+            section, links or "<span>None</span>", "<span>Machine inventory unavailable here</span>"
+        )
+
+
+class ViewSnapshot(Protocol):
+    def freshness(self) -> ViewFreshness: ...
+    def rows(self, experiment: str | None) -> list[RunRow]: ...
+    def detail(
+        self, address: str, *, tab: str, observe: bool, mounted: str | None = None
+    ) -> RunDetail | None: ...
+    def report_index(self) -> dict[str, ReportSummary]: ...
+    def report_html(self, experiment: str) -> str | None: ...
+    def report_ready(self, experiment: str, *, declared: bool) -> bool | None: ...
+    def experiments(self) -> set[str]: ...
 
 
 class ViewReader(Protocol):
-    def run_chart(self, address: str, *, overview: bool, observe: bool) -> RunChart | None: ...
+    @property
+    def files(self) -> Mapping[str, Path]: ...
+    def snapshot(self) -> AbstractContextManager[ViewSnapshot]: ...
+    def report(self, experiment: str, *, refresh: bool) -> str: ...
+
+
+def _hosted_cards(rows: list[RunRow], freshness: ViewFreshness, now: datetime) -> str:
+    if not rows:
+        return _live_status("<p>Waiting for runs in the hosted push feed.</p>")
+    opened: list[str] = []
+    completed: list[str] = []
+    for name, members in groupby(rows, lambda r: r.experiment):
+        runs = list(members)
+        panel = _hosted_panel(runs)
+        totals = Counter(r.state(now) for r in runs)
+        summary = " · ".join(f"{count} {escape(state)}" for state, count in sorted(totals.items()))
+        dots = [_run_dot(r.address, r.state(now), r.position, r.machine) for r in runs]
+        panels = [r.headline for r in runs if r.headline and (r.definition, r.order) == panel]
+        age = _age(max(r.received for r in runs).isoformat(), now)
+        cards = opened if name in freshness.opened else completed
+        cards.append(_card(name, panels, dots, summary, "Last push " + age))
+    return _live_status(
+        _experiment_cards("Open", opened) + _experiment_cards("Completed", completed)
+    )
+
+
+def _hosted_panel(rows: list[RunRow]) -> tuple[str | None, int | None]:
+    newest = max((r for r in rows if r.order is not None), key=lambda r: r.received, default=None)
+    if newest is None:
+        return None, None
+    return newest.definition, min(
+        r.order for r in rows if r.definition == newest.definition and r.order is not None
+    )
+
+
+def _hosted_experiment(
+    view: ViewSnapshot,
+    experiment: str,
+    rows: list[RunRow],
+    run: str | None,
+    tab: str,
+    curves: str | None,
+    observe: bool,
+) -> str:
+    now = datetime.now(UTC)
+    if tab not in _DETAIL_TABS:
+        tab = "console"
+    addresses = {r.address for r in rows}
+    selected = rows[0].address if rows else None
+    if run:
+        selected = next((key for key in (run, experiment + "/" + run) if key in addresses), None)
+    panel = _hosted_panel(rows)
+    detail = ""
+    body = []
+    for row in rows:
+        short = row.address.removeprefix(experiment + "/")
+        pick = f"/experiments/{quote(experiment)}?run={quote(row.address, safe='@')}&amp;tab="
+        state = escape(row.state(now))
+        current = ' aria-current="true"' if row.address == selected else ""
+        metric = row.latest if (row.definition, row.order) == panel else None
+        body.append(
+            f'<tr><td><a title="{escape(row.address)}" href="{pick}{tab}#run-detail"{current}>{escape(short)}</a>'
+            f'<small>{escape(row.job or "")}</small></td><td><span class="pill">{state}</span></td>'
+            f"<td>{escape(row.position or '—')}<small>Last push {_age(row.received.isoformat(), now)}</small></td>"
+            f"<td>{escape(metric or '—')}</td><td>{escape(row.machine or '—')}</td><td>—</td></tr>"
+        )
+        if row.address == selected:
+            found = view.detail(selected, tab=tab, observe=observe, mounted=curves)
+            assert found is not None
+            if tab == "curves" and found.kind == "evaluation":
+                section = '<p>Evaluation scores are in the <a href="#report">Report</a> tab.</p>'
+            elif tab == "curves":
+                data = (
+                    f'<script type="application/json">{found.payload}</script>'
+                    if found.payload
+                    else ""
+                )
+                section = (
+                    f'<div class="run-curves" data-generation="{found.generation}">{data}</div>'
+                )
+            else:
+                section = _attempt_panel(found, tab)
+            if found.error:
+                section += f'<p role="status">{escape(found.error)}</p>'
+            detail = _run_detail(selected, pick, tab, section, state)
+    table = (
+        _table(("Run", "State", "Clock", "Latest metric", "Machine", "Dollars"), body)
+        if rows
+        else "<p>Waiting for the first push.</p>"
+    )
+    return _live_status(
+        f'<div class="experiment-split"><section class="sec"><h2>Runs</h2>{table}</section>{detail}</div>'
+    )
+
+
+def _waiting_for_push() -> str:
+    return _observation("run", "waiting", "Waiting for the run to appear in the hosted push feed.")
+
+
+def _hosted_run(address: str, chart: RunDetail | None, tab: str, observe: bool) -> str | None:
+    if chart is None:
+        return _waiting_for_push() if observe else None
+    now = datetime.now(UTC)
+    message = (
+        "Last push "
+        + _age(chart.received.isoformat(), now)
+        + (f" · {chart.error}" if chart.error else "")
+    )
+    token = f"{chart.generation}-{sha256((chart.error or '').encode()).hexdigest()[:12]}"
+    stale = (
+        chart.finished is False or chart.finished is None and chart.file_state in (None, "running")
+    ) and now - chart.received >= _SILENT
+    token += f"-{chart.attempt_number}-{chart.sequence}-{int(stale)}"
+    notice = _observation("run", token, message + (" · no end recorded" if stale else ""))
+    if observe:
+        return notice
+    heading = (
+        _breadcrumbs(chart.experiment, run=address)
+        + f'<header class="head"><h1>{escape(address)}</h1></header>'
+        + _run_tabs(tab, _RUN_TABS)
+        + notice
+    )
+    if chart.kind == "evaluation":
+        heading += f'<p>Evaluation scores are in the <a href="/experiments/{quote(chart.experiment)}#report">experiment report</a>.</p>'
+    if tab in ("overview", "charts") and chart.kind != "evaluation":
+        html = _chart_page(
+            address,
+            chart.payload,
+            heading,
+            _attempt_panel(chart, tab) if tab == "overview" else "",
+            "<p>Waiting for sealed metrics.</p>",
+        )
+    else:
+        html = _document(address, heading + (_attempt_panel(chart, tab) if tab != "charts" else ""))
+    return html
+
+
+class _HostedPages:
+    """Render a single committed push snapshot with the same routes as the pull view."""
+
+    def __init__(self, view: ViewSnapshot) -> None:
+        self.view = view
+        self.freshness = view.freshness()
+
+    def rail(self, section: str) -> str:
+        return self.freshness.rail(section)
+
+    def run(self, address: str, *, tab: str, observe: bool = False) -> str | None:
+        tab = tab if tab in _RUN_TABS else "overview"
+        return _hosted_run(
+            address, self.view.detail(address, tab=tab, observe=observe), tab, observe
+        )
+
+    def experiments(self) -> str:
+        return _hosted_cards(self.view.rows(None), self.freshness, datetime.now(UTC))
+
+    def machines(self) -> str:
+        return _live_status(
+            "<p>Machine inventory unavailable here. Run <code>etude machines</code> on the launcher.</p>"
+        )
+
+    def experiment_status(
+        self,
+        experiment: str,
+        *,
+        file: Path | None,
+        run: str | None,
+        tab: str,
+        curves: str | None,
+        observe: bool = False,
+    ) -> str | None:
+        rows = self.view.rows(experiment)
+        if not rows and file is None:
+            return None
+        return _hosted_experiment(self.view, experiment, rows, run, tab, curves, observe)
 
 
 class ObservationWriter(Protocol):
@@ -2395,44 +2744,67 @@ class _PushHandler(_ViewHandler):
         url = urlsplit(self.path)
         if url.path == "/healthz":
             return self._reply(200, "ok")
-        if not url.path.startswith("/runs/"):
-            return self._reply(404)
-        address = unquote(url.path.removeprefix("/runs/"))
+        self._page(refresh=False)
+
+    def _page(self, *, refresh: bool) -> None:
+        url = urlsplit(self.path)
         query = parse_qs(url.query)
+        path = unquote(url.path)
         observe = query.get("observe") == ["1"]
-        overview = query.get("tab") != ["charts"]
+        reader = self.server.reader
+        html: str | None
         try:
-            chart = self.server.reader.run_chart(address, overview=overview, observe=observe)
-        except Exception as error:
-            print(explain(error), file=sys.stderr, flush=True)
-            return self._reply(503, "Hosted view unavailable.")
-        if chart is None:
-            notice = _observation(
-                "run", "waiting", "Waiting for the run to appear in the hosted push feed."
-            )
-        else:
-            age = _age(chart.received.isoformat(), datetime.now(UTC))
-            message = "Last push " + age + (f" · {chart.error}" if chart.error else "")
-            token = f"{chart.revision}-{sha256((chart.error or '').encode()).hexdigest()[:12]}"
-            stale = chart.finished is False and datetime.now(UTC) - chart.received >= _SILENT
-            token += f"-{chart.attempt_number}-{chart.sequence}-{int(stale)}"
-            if stale:
-                message += " · no end recorded"
-            notice = _observation("run", token, message)
-        if observe:
-            return self._reply(200, notice, "text/html")
-        tabs = _run_tabs("overview" if overview else "charts", ("overview", "charts"))
-        heading = f'<header class="head"><h1>{escape(address)}</h1></header>' + tabs + notice
-        html = _chart_page(
-            address,
-            chart.payload if chart else None,
-            heading,
-            _attempt_panel(chart) if chart and overview else "",
-            "<p>Waiting for sealed metrics.</p>",
-        )
-        self._reply(200 if chart else 404, _shell(html, ""), "text/html")
+            if report := _REPORT_ROUTE.fullmatch(path):
+                experiment = report[1]
+                with reader.snapshot() as view:
+                    ready = view.report_ready(experiment, declared=experiment in reader.files)
+                    rail = "" if query.get("embed") == ["1"] else view.freshness().rail("/reports")
+                    saved = (
+                        view.report_html(experiment)
+                        if ready and not observe and not refresh
+                        else None
+                    )
+                if ready is None:
+                    return self._reply(404)
+                # Release the read transaction before building a missing or explicitly refreshed report.
+                html = _report_page(
+                    experiment,
+                    ready,
+                    rail,
+                    observe,
+                    refresh,
+                    lambda: saved or reader.report(experiment, refresh=refresh),
+                )
+                code = 200
+            else:
+                with reader.snapshot() as view:
+                    pages = _HostedPages(view)
+
+                    def reports() -> str:
+                        return _reports(
+                            view.experiments(),
+                            pages.freshness.opened,
+                            reader.files,
+                            view.report_index(),
+                            "Not started",
+                        )
+
+                    html = _browse_page(pages, path, query, reader.files, reports, observe=observe)
+                    code = 200 if html else 404
+                    if html is None and path.startswith("/runs/"):
+                        html = _shell(
+                            _document(path.removeprefix("/runs/"), _waiting_for_push()),
+                            pages.rail("/"),
+                        )
+        except (Exception, SystemExit) as error:
+            reason = explain(error)
+            print(reason, file=sys.stderr, flush=True)
+            return self._reply(503, reason)
+        self._reply(code, html or "Not found.", "text/html")
 
     def do_POST(self) -> None:  # noqa: N802
+        if _REPORT_ROUTE.fullmatch(unquote(urlsplit(self.path).path)):
+            return self._page(refresh=True)
         is_file = self.path == "/api/observations/file"
         if not is_file and self.path != "/api/observations":
             return self._reply(404)
@@ -2467,7 +2839,8 @@ class _PushHandler(_ViewHandler):
             key = self.headers.get("X-Etude-Key", "")
             digest = self.headers.get("X-Etude-Sha256", "")
             modified = datetime.fromisoformat(self.headers.get("X-Etude-Modified-At", ""))
-            if not training_file(key) or modified.utcoffset() is None:
+            evidence_member(key)
+            if modified.utcoffset() is None:
                 raise EtudeError("invalid_view_file", 422)
             body = self.rfile.read(size)
             if len(body) != size or sha256(body).hexdigest() != digest:
