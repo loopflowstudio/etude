@@ -57,7 +57,9 @@ weights = torch.load(save / files["model"])
 
 Read the folder selected by `current.json`. Other folders may still be in
 progress or awaiting deletion. Named state has its own pointer under
-`out/state/NAME/`.
+`out/state/NAME/`. Every published file under the selected `save-N` folder
+(including nested directories and `.tail` files) is delivered before
+`current.json`.
 
 All paths in `files` are relative to the selected folder. Registered objects
 map their name to `<name>.pt`. Custom files map their path to itself, for
