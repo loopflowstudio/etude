@@ -195,7 +195,7 @@ blocks on `readline` never sends it). Require exit 75. The next plain
 `etude train experiment.py` prints `stopped; --job coin --seed 0 --resume`;
 follow it, then read `etude.train.read.read(etude.storage.default_root(), "experiment",
 "coin@0").points("heads", "updates")` and require each update once, in order,
-across two metric writers. Use `uv run python` for the driver. A background
+across two metric writers. Use `uv run python` for the driver. To check block selection, copy the run folder on every poll while it writes: the copies hold level-1 recent blocks and tails that the final fold later replaces with a level-2 block. Put those back beside the finished files in a copy and read it with `--source`; each update must still read once. A long run's `Latest metric` is the latest bucket mean, not its last row. A background
 shell job may ignore SIGINT; do not signal processes by a broad name pattern.
 
 Training code calls `track(config=config)` only inside Etude's assigned run.
