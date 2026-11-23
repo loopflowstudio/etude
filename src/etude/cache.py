@@ -223,14 +223,15 @@ def _discard(path: Path) -> None:
 
 def _admit(partial: Path, target: Path) -> None:
     """Publish a completed acquisition as held content, under the capacity lock."""
-    with _lock(target.parent / "capacity.lock"):
+    with lock_file(target.parent / "capacity.lock"):
         partial.chmod(0o444)  # verified content never changes; holders may link it
         partial.replace(target)
         partial.with_suffix(".json").unlink(missing_ok=True)
 
 
 @contextmanager
-def _lock(path: Path) -> Iterator[None]:
+def lock_file(path: Path) -> Iterator[None]:
+    """Hold an exclusive advisory lock within the caller's deadline."""
     with path.open("a") as lock:
         while True:
             remaining()
@@ -363,11 +364,11 @@ class Cache:
         larger than the whole allowance, `destination` itself.
         """
         key = content.name
-        with _lock(self._locked(key)):
+        with lock_file(self._locked(key)):
             target = self.root / key
             if target.exists():
                 if not self._verified(target, content):
-                    with _lock(self.root / "capacity.lock"):
+                    with lock_file(self.root / "capacity.lock"):
                         target.unlink()
                     raise Corrupt("cached download digest mismatch")
                 source.reused(content.size_bytes, None, None)
@@ -392,7 +393,7 @@ class Cache:
             )
             etag = self._acquire(content, partial, source)
             if not self._verified(partial, content):
-                with _lock(self.root / "capacity.lock"):
+                with lock_file(self.root / "capacity.lock"):
                     _discard(partial)
                 raise ContentMismatch("download length or SHA256 mismatch")
             if cacheable:
@@ -516,11 +517,11 @@ class Cache:
         if not path.exists():
             yield None
             return
-        with _lock(self._locked(content.name)):
+        with lock_file(self._locked(content.name)):
             if self._verified(path, content):
                 yield path
                 return
-            with _lock(self.root / "capacity.lock"):
+            with lock_file(self.root / "capacity.lock"):
                 path.unlink(missing_ok=True)
         yield None
 
@@ -552,7 +553,7 @@ class Cache:
         if content.size_bytes > self.max_bytes:
             return False
         key = content.name
-        with _lock(self._locked(key)):
+        with lock_file(self._locked(key)):
             target = self.root / key
             if target.exists():
                 target.touch()
@@ -567,7 +568,7 @@ class Cache:
     def _make_room(self, key: str, size: int) -> bool:
         # Reserve capacity under the cache-wide lock. Other acquisitions hold
         # their content lock, so eviction never removes an active reader/writer.
-        with _lock(self.root / "capacity.lock"):
+        with lock_file(self.root / "capacity.lock"):
             used = self._usage()
             if used is not None and used + size <= self.max_bytes:
                 return self._reserve(key, size, used)

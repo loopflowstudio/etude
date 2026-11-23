@@ -19,14 +19,14 @@ import os
 import shutil
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
+from copy import copy
 from datetime import datetime
-from itertools import pairwise
+from itertools import islice, pairwise
 from pathlib import Path
 from stat import S_ISREG
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, NamedTuple, Protocol, cast
 from urllib.parse import quote, unquote, urlsplit
 
 from etude.cache import Artifact, Cache, Fetched
@@ -154,6 +154,14 @@ def _storage_request[T](operation: Callable[[], T]) -> T:
 _LIST_RANGES = 48
 
 
+class _KeyRange(NamedTuple):
+    """Keys under a bucket prefix, after an exclusive lower bound through an inclusive upper."""
+
+    prefix: str
+    after: str | None = None
+    through: str | None = None
+
+
 class S3Storage:
     """An S3 or R2 bucket reached with the author's own credentials.
 
@@ -193,27 +201,17 @@ class S3Storage:
         if host == "s3.amazonaws.com":
             host = f"s3.{self.client.meta.region_name or 'us-east-1'}.amazonaws.com"
         self._where = f"{endpoint.scheme}://{bucket}.{host}/"
-        # Scoped ETags from a fresh `versions` listing; trusted only inside `_revalidating`.
-        self._listed_etags: dict[str, str] | None = None
+        self._listed_versions: dict[str, str] | None = None
 
-    @contextmanager
-    def _revalidating(self, listed: Mapping[str, str]) -> Iterator[None]:
-        """Trust ETags already returned by a fresh `versions` listing during one read pass."""
-        previous = self._listed_etags
-        etags: dict[str, str] = {}
-        for key, tag in listed.items():
-            etag = tag.partition(":")[0]
-            if etag and etag != "None":
-                etags[key] = etag
-        self._listed_etags = etags
-        try:
-            yield
-        finally:
-            self._listed_etags = previous
+    def _with_versions(self, versions: Mapping[str, str]) -> S3Storage:
+        """Read against this listing without changing what concurrent readers trust."""
+        listed = copy(self)
+        listed._listed_versions = dict(versions)
+        return listed
 
     def put(self, key: str, data: bytes) -> None:
-        if self._listed_etags is not None:
-            self._listed_etags.pop(key, None)
+        if self._listed_versions is not None:
+            self._listed_versions.pop(key, None)
         _storage_request(
             lambda: self.client.put_object(
                 Bucket=self.bucket, Key=self.prefix + key, Body=data, ChecksumAlgorithm="SHA256"
@@ -221,8 +219,8 @@ class S3Storage:
         )
 
     def put_file(self, key: str, path: Path) -> None:
-        if self._listed_etags is not None:
-            self._listed_etags.pop(key, None)
+        if self._listed_versions is not None:
+            self._listed_versions.pop(key, None)
         # boto3 splits a large file into parts, checksums and retries each itself.
         _storage_request(
             lambda: self.client.upload_file(
@@ -244,8 +242,8 @@ class S3Storage:
         return Artifact(location=location, immutable=immutable(key))
 
     def delete(self, key: str) -> bool:
-        if self._listed_etags is not None:
-            self._listed_etags.pop(key, None)
+        if self._listed_versions is not None:
+            self._listed_versions.pop(key, None)
         try:
             _storage_request(
                 lambda: self.client.delete_object(Bucket=self.bucket, Key=self.prefix + key)
@@ -270,167 +268,112 @@ class S3Storage:
     def versions(self, prefix: str, *, split_points: Sequence[str] = ()) -> dict[str, str]:
         """List current versions. Optional source-relative keys divide the prefix into ranges."""
         base = self.prefix + prefix
-        strip = len(self.prefix)
 
-        def tag(item: dict[str, Any]) -> str:
-            return f"{item.get('ETag')}:{item.get('Size')}:{item.get('LastModified')}"
-
-        def list_range(
-            target: str,
-            start_after: str | None = None,
-            stop_at: str | None = None,
-            token: str | None = None,
-        ) -> dict[str, str]:
-            part: dict[str, str] = {}
-            kwargs: dict[str, Any] = {"Bucket": self.bucket, "Prefix": target}
-            if start_after is not None:
-                kwargs["StartAfter"] = start_after
-            if token is not None:
-                kwargs["ContinuationToken"] = token
+        def pages(span: _KeyRange, **options: str) -> Iterator[dict[str, Any]]:
+            if span.after is not None:
+                options["StartAfter"] = span.after
             while True:
                 remaining()
-                page = self.client.list_objects_v2(**kwargs)
-                for item in page.get("Contents", []):
-                    key = item["Key"]
-                    if stop_at is None or key <= stop_at:
-                        part[key[strip:]] = tag(item)
-                    if stop_at is not None and key >= stop_at:
-                        return part
+                page = self.client.list_objects_v2(
+                    Bucket=self.bucket, Prefix=span.prefix, **options
+                )
+                yield page
                 if not page.get("IsTruncated"):
+                    return
+                options["ContinuationToken"] = page["NextContinuationToken"]
+
+        def objects(page: dict[str, Any], through: str | None = None) -> dict[str, str]:
+            return {
+                item["Key"][
+                    len(self.prefix) :
+                ]: f"{item.get('ETag')}:{item.get('Size')}:{item.get('LastModified')}"
+                for item in page.get("Contents", ())
+                if through is None or item["Key"] <= through
+            }
+
+        def read_range(span: _KeyRange) -> dict[str, str]:
+            part: dict[str, str] = {}
+            for page in pages(span):
+                part.update(objects(page, span.through))
+                contents = page.get("Contents", ())
+                if span.through is not None and contents and contents[-1]["Key"] >= span.through:
                     break
-                kwargs["ContinuationToken"] = page["NextContinuationToken"]
             return part
 
-        def list_delimiter(target: str) -> tuple[dict[str, str], list[str]]:
-            part: dict[str, str] = {}
-            prefixes: list[str] = []
-            kwargs: dict[str, Any] = {"Bucket": self.bucket, "Prefix": target, "Delimiter": "/"}
-            while True:
-                remaining()
-                page = self.client.list_objects_v2(**kwargs)
-                for item in page.get("Contents", []):
-                    part[item["Key"][strip:]] = tag(item)
-                for common in page.get("CommonPrefixes", []):
-                    prefixes.append(common["Prefix"])
-                if not page.get("IsTruncated"):
-                    break
-                kwargs["ContinuationToken"] = page["NextContinuationToken"]
-            prefixes.sort()
-            return part, prefixes
-
-        def first_two_pages(target: str) -> tuple[dict[str, str], str | None, str | None]:
-            remaining()
-            page = self.client.list_objects_v2(Bucket=self.bucket, Prefix=target)
-            contents = page.get("Contents", [])
-            items = {item["Key"][strip:]: tag(item) for item in contents}
-            if not page.get("IsTruncated"):
-                return items, None, None
-            remaining()
-            page2 = self.client.list_objects_v2(
-                Bucket=self.bucket, Prefix=target, ContinuationToken=page["NextContinuationToken"]
-            )
-            contents2 = page2.get("Contents", [])
-            for item in contents2:
-                items[item["Key"][strip:]] = tag(item)
-            if not page2.get("IsTruncated"):
-                return items, None, None
-            last_key = (
-                contents2[-1]["Key"] if contents2 else (contents[-1]["Key"] if contents else None)
-            )
-            return items, page2.get("NextContinuationToken"), last_key
-
-        def submit_ranges(
-            pool: ThreadPoolExecutor, target: str, after: str | None, bounds: Sequence[str]
-        ) -> list[Future[dict[str, str]]]:
-            # StartAfter is exclusive. The preceding range owns the boundary key if it exists.
+        def ranges(span: _KeyRange, bounds: Sequence[str]) -> list[_KeyRange]:
             return [
-                pool.submit(copy_context().run, list_range, target, lower, upper)
-                for lower, upper in pairwise((after, *bounds, None))
+                _KeyRange(span.prefix, a, b)
+                for a, b in pairwise((span.after, *bounds, span.through))
             ]
 
-        def prefix_ranges(
-            pool: ThreadPoolExecutor, target: str, prefixes: list[str], after: str | None = None
-        ) -> list[Future[dict[str, str]]]:
-            if after is not None:
-                prefixes = [p for p in prefixes if p > after or after.startswith(p)]
-            if not prefixes:
-                return []
-            ranges = min(_LIST_RANGES, len(prefixes))
-            bounds = [prefixes[i * len(prefixes) // ranges] for i in range(1, ranges)]
-            return submit_ranges(pool, target, after, bounds)
+        def discover(
+            span: _KeyRange, *, root: bool = False
+        ) -> tuple[dict[str, str], list[_KeyRange]]:
+            # Small prefixes finish in one or two pages. For larger ones the directory listing
+            # supplies boundaries and any direct objects between the subdirectories.
+            part: dict[str, str] = {}
+            after = span.after
+            for page in islice(pages(span), 1 if root else 2):
+                part.update(objects(page))
+                if not page.get("IsTruncated"):
+                    return part, []
+                if contents := page.get("Contents"):
+                    after = contents[-1]["Key"]
+
+            children: list[str] = []
+            # List from the beginning here: StartAfter would omit the directory containing 'after'.
+            for page in pages(_KeyRange(span.prefix), Delimiter="/"):
+                part.update(objects(page))
+                children.extend(child["Prefix"] for child in page.get("CommonPrefixes", ()))
+            children = [
+                key for key in children if after is None or key > after or after.startswith(key)
+            ]
+            if not children:
+                return part, []
+            if root and len(children) < 32:
+                return part, [
+                    _KeyRange(key, after if after is not None and after.startswith(key) else None)
+                    for key in children
+                ]
+            count = min(_LIST_RANGES, len(children))
+            bounds = [children[i * len(children) // count] for i in range(1, count)]
+            return part, ranges(_KeyRange(span.prefix, after), bounds)
 
         def collect() -> dict[str, str]:
-            if (
+            root = _KeyRange(base)
+            warm = (
                 0 < len(split_points) < _LIST_RANGES
                 and all(key and key.startswith(prefix) for key in split_points)
                 and all(a < b for a, b in pairwise(split_points))
-            ):
-                bounds = [self.prefix + key for key in split_points]
-                with ThreadPoolExecutor(max_workers=32) as pool:
-                    listed: dict[str, str] = {}
-                    for future in submit_ranges(pool, base, None, bounds):
-                        listed.update(future.result())
-                    return listed
+            )
+            if warm:
+                work = ranges(root, [self.prefix + key for key in split_points])
+                found: dict[str, str] = {}
+            else:
+                found, work = discover(root, root=True)
+                if not work:
+                    return found
 
-            first = self.client.list_objects_v2(Bucket=self.bucket, Prefix=base)
-            if not first.get("IsTruncated"):
-                return {item["Key"][strip:]: tag(item) for item in first.get("Contents", [])}
-            # Fan out breadth-first from the caller thread so pool workers never wait on the pool.
-            part, prefixes = list_delimiter(base)
-            if not prefixes:
-                return part
             with ThreadPoolExecutor(max_workers=32) as pool:
-                if len(prefixes) >= 32:
-                    for future in prefix_ranges(pool, base, prefixes):
-                        part.update(future.result())
-                    return part
-                first_futures = [(sub, pool.submit(first_two_pages, sub)) for sub in prefixes]
-                truncated: list[tuple[str, str, str | None]] = []
-                for sub, page_fut in first_futures:
-                    items, next_token, last_key = page_fut.result()
-                    part.update(items)
-                    if next_token is not None:
-                        truncated.append((sub, next_token, last_key))
-                if not truncated:
-                    return part
-                delim_futures = [
-                    (sub, next_token, last_key, pool.submit(list_delimiter, sub))
-                    for sub, next_token, last_key in truncated
-                ]
-                range_tasks: list[Future[dict[str, str]]] = []
-                for sub, next_token, last_key, delim_fut in delim_futures:
-                    direct, sub_prefixes = delim_fut.result()
-                    part.update(direct)
-                    if len(sub_prefixes) >= 32:
-                        range_tasks.extend(prefix_ranges(pool, sub, sub_prefixes, last_key))
-                    elif len(sub_prefixes) >= 2:
-                        for child in sub_prefixes:
-                            if (
-                                last_key is not None
-                                and child < last_key
-                                and not last_key.startswith(child)
-                            ):
-                                continue
-                            sa = (
-                                last_key
-                                if last_key is not None and last_key.startswith(child)
-                                else None
-                            )
-                            range_tasks.append(pool.submit(list_range, child, sa))
-                    else:
-                        range_tasks.append(pool.submit(list_range, sub, None, None, next_token))
-                for future in range_tasks:
-                    part.update(future.result())
-                return part
+                # A few top-level folders can each conceal many runs. Probe one more level
+                # in parallel before issuing all ranges; workers never wait on this pool.
+                if not warm and work[0].prefix != base:
+                    probes = [pool.submit(copy_context().run, discover, span) for span in work]
+                    work = []
+                    for probe in probes:
+                        part, children = probe.result()
+                        found.update(part)
+                        work.extend(children)
+                reads = [pool.submit(copy_context().run, read_range, span) for span in work]
+                for read in reads:
+                    found.update(read.result())
+            return found
 
         found = _storage_request(collect)
-        if self._listed_etags is not None:
-            for key in [k for k in self._listed_etags if k.startswith(prefix)]:
-                del self._listed_etags[key]
-            for key, value in found.items():
-                etag = value.partition(":")[0]
-                if etag and etag != "None":
-                    self._listed_etags[key] = etag
+        if self._listed_versions is not None:
+            for key in [k for k in self._listed_versions if k.startswith(prefix)]:
+                del self._listed_versions[key]
+            self._listed_versions.update(found)
         return found
 
 
@@ -452,8 +395,8 @@ class _Object:
 
     def changed(self, etag: str) -> Fetched | None:
         if (
-            self.storage._listed_etags is not None
-            and self.storage._listed_etags.get(self.key) == etag
+            self.storage._listed_versions is not None
+            and self.storage._listed_versions.get(self.key, "").partition(":")[0] == etag
         ):
             return None
         return self._get({"IfNoneMatch": etag})

@@ -19,10 +19,9 @@ reader of checkpoints, or of an eval run, reads no metric data.
 
 from __future__ import annotations
 
-import zlib
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from hashlib import sha256
 from pathlib import Path
@@ -59,7 +58,6 @@ from etude.train.block import (
     MIN,
     STATISTICS,
     SUM,
-    Array,
     ArrayLocation,
     ClockColumn,
     Columns,
@@ -98,6 +96,14 @@ class Points(Arrays):
         return len(self.x)
 
 
+@dataclass
+class _BlockReads:
+    """Block bodies and decoded clocks shared by the charts for one job."""
+
+    blocks: dict[str, StoredBlock] = field(default_factory=dict)
+    clocks: dict[tuple[str, ArrayLocation, int], Floats] = field(default_factory=dict)
+
+
 class RunData(Arrays):
     """One run as written: every row, including superseded ones, by column."""
 
@@ -112,13 +118,7 @@ class RunData(Arrays):
     _read_blocks: Callable[[], tuple[StoredBlock, ...]] = PrivateAttr()
     _read_out: Callable[[], tuple[OutMember, ...]] = PrivateAttr(default=tuple)
     _stretches_cache: dict[str, list[list[_Extent]]] = PrivateAttr(default_factory=dict)
-    _block_bodies: dict[str, bytes] | None = PrivateAttr(default=None)
-    _clock_arrays: dict[tuple[str, str], Floats] | None = PrivateAttr(default=None)
-    _rollup_clocks: dict[tuple[str, int, str], Floats] | None = PrivateAttr(default=None)
-
-    @cached_property
-    def _located(self) -> dict[str, StoredBlock]:
-        return {block.key: block for block in self.blocks}
+    _reads: _BlockReads | None = PrivateAttr(default=None)
 
     @cached_property
     def _block_index(self) -> dict[str, _BlockIndex]:
@@ -127,54 +127,29 @@ class RunData(Arrays):
     @contextmanager
     def _reading_blocks(self) -> Iterator[None]:
         """Keep each accessed block's bytes and decoded clock arrays for one multi-metric pass."""
-        self._block_bodies = {}
-        self._clock_arrays = {}
-        self._rollup_clocks = {}
+        previous = self._reads
+        self._reads = _BlockReads()
         try:
             yield
         finally:
-            self._block_bodies = None
-            self._clock_arrays = None
-            self._rollup_clocks = None
+            self._reads = previous
 
-    def _array(
-        self, block: StoredBlock, location: ArrayLocation, dtype: str, width: int = 1
-    ) -> Array:
-        if block.body is not None or self._block_bodies is None:
-            return block.array(location, dtype, width)
-        body = self._block_bodies.get(block.key)
-        if body is None:
-            body = block.storage.get(block.key)
-            self._block_bodies[block.key] = body
-        start = block.description.start + location.offset
-        data = body[start : start + location.length]
-        if len(data) != location.length or zlib.crc32(data) != location.crc32:
-            raise EtudeError("block_array_damaged", 422)
-        array = np.frombuffer(data, dtype=dtype)
-        return array if width == 1 else array.reshape(-1, width)
+    def _read_block(self, block: StoredBlock) -> StoredBlock:
+        if self._reads is None or block.body is not None:
+            return block
+        blocks = self._reads.blocks
+        if block.key not in blocks:
+            blocks[block.key] = replace(block, body=block.storage.get(block.key))
+        return blocks[block.key]
 
-    def _clock_array(self, block: StoredBlock, clock: str) -> Floats:
-        if self._clock_arrays is not None:
-            cached = self._clock_arrays.get((block.key, clock))
-            if cached is not None:
-                return cached
-        column = self._block_index[block.key].clocks[clock]
-        values = self._array(block, column.data, "<f8")
-        if self._clock_arrays is not None:
-            self._clock_arrays[(block.key, clock)] = values
-        return values
-
-    def _rollup_clock_array(
-        self, block: StoredBlock, factor: int, clock: str, location: ArrayLocation
-    ) -> Floats:
-        if self._rollup_clocks is not None:
-            cached = self._rollup_clocks.get((block.key, factor, clock))
-            if cached is not None:
-                return cached
-        values = self._array(block, location, "<f8", 2)
-        if self._rollup_clocks is not None:
-            self._rollup_clocks[(block.key, factor, clock)] = values
-        return values
+    def _clock_array(self, block: StoredBlock, location: ArrayLocation, width: int = 1) -> Floats:
+        if self._reads is None:
+            return block.array(location, "<f8", width)
+        clocks = self._reads.clocks
+        key = (block.key, location, width)
+        if key not in clocks:
+            clocks[key] = self._read_block(block).array(location, "<f8", width)
+        return clocks[key]
 
     def _stretches_for(self, clock: str) -> list[list[_Extent]]:
         cached = self._stretches_cache.get(clock)
@@ -187,19 +162,15 @@ class RunData(Arrays):
     def _place_block(self, block: StoredBlock, clock: str) -> _Placed:
         h = block.header
         column = self._block_index[block.key].clocks.get(clock)
-        if column is None:
-            return _Placed(block.key, h.writer, h.first, h.wall_first, None)
-        if column.increasing and column.first is not None and column.last is not None:
-            return _Placed(
-                block.key,
-                h.writer,
-                h.first,
-                h.wall_first,
-                _Given(column.first, column.last, column.first),
-            )
-        x = self._clock_array(block, clock)
-        x = x[~np.isnan(x)]
-        given = _Given(float(x.min()), float(x.max()), float(x[0])) if len(x) else None
+        given = None
+        if column is not None:
+            if column.increasing and column.first is not None and column.last is not None:
+                given = _Given(column.first, column.last, column.first)
+            else:
+                x = self._clock_array(block, column.data)
+                x = x[~np.isnan(x)]
+                if len(x):
+                    given = _Given(float(x.min()), float(x.max()), float(x[0]))
         return _Placed(block.key, h.writer, h.first, h.wall_first, given)
 
     @cached_property
@@ -280,17 +251,14 @@ class RunData(Arrays):
 
     def points(self, metric: str, clock: str = HOURS_SINCE_START) -> Points:
         """The metric's values on the clock, by the reading rules in this module's note."""
-        located = self._located
         parts = [
-            self._stretch_points(stretch, located.__getitem__, metric, clock)
-            for stretch in self._stretches_for(clock)
+            self._stretch_points(stretch, metric, clock) for stretch in self._stretches_for(clock)
         ]
         return _latest_writes([p.x for p in parts], [p.y for p in parts])
 
     def _stretch_points(
         self,
         stretch: Sequence[_Extent],
-        blocks: Callable[[str], StoredBlock],
         metric: str,
         clock: str,
     ) -> Points:
@@ -298,22 +266,16 @@ class RunData(Arrays):
         xs: list[Floats] = []
         ys: list[Floats] = []
         for extent in stretch:
-            block = blocks(extent.key)
-            columns = self._block_index[block.key].metrics.get(metric)
+            index = self._block_index[extent.key]
+            columns = index.metrics.get(metric)
             if not columns:
                 continue
-            logged = self._clock_array(block, clock)
+            block = self._read_block(index.block)
+            logged = self._clock_array(block, index.clocks[clock].data)
             for column in columns:
-                x = (
-                    logged
-                    if column.rows is None
-                    else logged[self._array(block, column.rows, "<u4")]
-                )
-                keep = ~np.isnan(x)
-                if extent.cutoff is not None:
-                    keep &= x <= extent.cutoff
+                x, keep = _counted(block, column, logged, extent)
                 xs.append(x[keep])
-                ys.append(self._array(block, column.data, "<f8")[keep])
+                ys.append(block.array(column.data, "<f8")[keep])
         return _latest_writes(xs, ys)
 
     def read_table(self, name: str, clock: str) -> tuple[TablePoint, ...]:
@@ -322,21 +284,23 @@ class RunData(Arrays):
         Resolve only after supersession, using the selected block's own storage
         and run prefix. Unreferenced artifacts never participate in history.
         """
-        located = self._located
         points: list[TablePoint] = []
         for stretch in self._stretches_for(clock):
             # Counted rows in write order: their clock values, and each one's block and digest.
             xs: list[Floats] = []
             tables: list[tuple[StoredBlock, str | None]] = []
             for extent in stretch:
-                block = located[extent.key]
+                indexed = self._block_index[extent.key]
+                block = indexed.block
                 column = next(
                     (c for c in block.header.series if c.kind == "text" and c.name == name), None
                 )
                 if column is None:
                     continue
-                x, keep = _counted(block, column, self._clock_array(block, clock), extent)
-                codes = self._array(block, column.data, DTYPES["text"])[keep]
+                block = self._read_block(block)
+                logged = self._clock_array(block, indexed.clocks[clock].data)
+                x, keep = _counted(block, column, logged, extent)
+                codes = block.array(column.data, DTYPES["text"])[keep]
                 xs.append(x[keep])
                 tables.extend((block, column.labels[int(code)]) for code in codes)
             if not xs:
@@ -362,7 +326,6 @@ class RunData(Arrays):
         """
         if limit < 1:
             raise ValueError("chart limit must be positive")
-        located = self._located
         stretches = self._stretches_for(clock)
         # Blocks whose counted rows overlap repeat clock values, and only the
         # exact path picks the latest write among them.
@@ -383,28 +346,24 @@ class RunData(Arrays):
         )
         groups: list[_Groups] = []
         for extent in extents:
-            block = located[extent.key]
-            index = self._block_index[block.key]
+            index = self._block_index[extent.key]
+            block = index.block
             columns = index.metrics.get(metric)
             if not columns:
                 continue
             column = columns[0]
-            clock_col = index.clocks.get(clock)
-            bounds = (
-                None
-                if clock_col is None or clock_col.first is None or clock_col.last is None
-                else (clock_col.first, clock_col.last)
-            )
+            # Every placed extent has this clock.
+            axis = index.clocks[clock]
             if (
-                clock_col is None
-                or not clock_col.increasing
-                or bounds is None
+                not axis.increasing
+                or axis.first is None
+                or axis.last is None
                 or column.rows is not None
             ):
                 return buckets(self.points(metric, clock), limit, span=span)
             # A block the cutoff falls inside is read raw, so its roll-up groups
             # are never split; blocks wholly before it keep their roll-ups.
-            cut = extent.cutoff if extent.cutoff is not None and bounds[1] > extent.cutoff else None
+            cut = extent.cutoff if extent.cutoff is not None and axis.last > extent.cutoff else None
             if span is not None and (extent.high < span[0] or extent.low > span[1]):
                 continue
             inline = block.description.overview
@@ -419,22 +378,21 @@ class RunData(Arrays):
                 statistics = np.asarray(inline.series[metric], dtype="<f8")
                 groups.append(_Groups(endpoints[:, 0], endpoints[:, 1], statistics))
                 continue
+            block = self._read_block(block)
             levels = [level for level in index.rollups if level.factor <= target]
             if (
                 levels
                 and cut is None
-                and (span is None or span[0] <= bounds[0] and bounds[1] <= span[1])
+                and (span is None or span[0] <= axis.first and axis.last <= span[1])
             ):
                 level = levels[-1]
-                endpoints = self._rollup_clock_array(
-                    block, level.factor, clock, level.clocks[clock]
-                )
-                statistics = self._array(block, level.series[metric], "<f8", STATISTICS)
+                endpoints = self._clock_array(block, level.clocks[clock], 2)
+                statistics = block.array(level.series[metric], "<f8", STATISTICS)
                 groups.append(_Groups(endpoints[:, 0], endpoints[:, 1], statistics))
             else:
-                # Raw is still column-selective: never fetch other metrics.
-                x = self._clock_array(block, clock)
-                y = self._array(block, column.data, "<f8")
+                # Decode only the selected raw columns.
+                x = self._clock_array(block, axis.data)
+                y = block.array(column.data, "<f8")
                 if cut is not None:
                     x, y = x[x <= cut], y[x <= cut]
                 if span is not None:
@@ -581,6 +539,7 @@ class _RollupIndex:
 
 @dataclass(frozen=True, slots=True)
 class _BlockIndex:
+    block: StoredBlock
     clocks: dict[str, ClockColumn]
     metrics: dict[str, tuple[SeriesColumn, ...]]
     rollups: tuple[_RollupIndex, ...]
@@ -593,6 +552,7 @@ def _index_block(block: StoredBlock) -> _BlockIndex:
         if column.kind == "metric":
             metrics.setdefault(column.name, []).append(column)
     return _BlockIndex(
+        block=block,
         clocks={c.name: c for c in h.clocks},
         metrics={name: tuple(cols) for name, cols in metrics.items()},
         rollups=tuple(

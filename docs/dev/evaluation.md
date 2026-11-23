@@ -428,7 +428,8 @@ rollup, and never its blobs. A rollup's totals are added to, never summed
 again from earlier blocks. `read_blobs` reads each pack's adjacent blobs in one range,
 kept on this computer, so asking again reads nothing. The store stays the authority: `statsdb(..., rebuild=True)`
 reads everything again, and a database from another Etude schema is rebuilt
-on its own. One process opens it at a time; another gets `statsdb_in_use`.
+automatically. Each connection reads a snapshot. If new blocks arrive while a
+reader holds the current snapshot, catch-up publishes a new one for later readers.
 Experiments are never joined: each has its own database.
 
 `compare(db, table=, value=, per=, where=, by=)` sets each subject against

@@ -1141,3 +1141,35 @@ def test_report_lists_current_versions_across_stale_bucket_splits(tmp_path: Path
         before = client.list_pages
         assert {run.name for run in build(bucket, file).training.runs} == {"historical", "later"}
         assert client.list_pages - before == 2
+
+
+def test_cold_bucket_listing_covers_a_partially_read_nested_prefix(tmp_path: Path) -> None:
+    # Tiny LIST pages exercise both levels of cold discovery with a few objects.
+    def small_pages(params: dict[str, object], **_: object) -> None:
+        params["MaxKeys"] = 3
+
+    with mock_aws():
+        client = boto3.client("s3", region_name="us-east-1")
+        client.create_bucket(Bucket="nested")
+        client.meta.events.register("before-parameter-build.s3.ListObjectsV2", small_pages)
+        bucket = S3Storage("nested", "runs", client=client, cache=Cache(tmp_path / "cache"))
+        keys = {"a", "exp/b", "exp/run-c", "exp/z", "final"}
+        keys.update(f"exp/run-{run}/{i}" for run in ("a", "b", "d") for i in range(5))
+        for key in keys:
+            bucket.put(key, key.encode())
+        assert bucket.versions("").keys() == keys
+
+
+def test_a_report_listing_validates_only_its_own_reads(tmp_path: Path) -> None:
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="scoped")
+        storage = S3Storage("scoped", client=client, cache=Cache(tmp_path / "cache"))
+        storage.put("run.json", b"first")
+        report = storage._with_versions(storage.versions(""))
+        assert report.get("run.json") == report.get("run.json") == b"first"
+        assert client.requests == 1
+
+        storage.put("run.json", b"second")
+        assert storage.get("run.json") == b"second"
+        assert client.requests == 2

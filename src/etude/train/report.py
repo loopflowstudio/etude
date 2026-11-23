@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from contextlib import ExitStack
 from typing import Literal
 
@@ -310,12 +310,12 @@ def _marks(run: RunData) -> list[Mark]:
     return marks
 
 
-def _timers(run: RunData, prefix: str) -> Timers | None:
+def _timers(run: RunData, prefix: str, metrics: Iterable[str]) -> Timers | None:
     """The run's icicle under `prefix`, or None when it logged no timer there."""
     totals: dict[tuple[str, ...], float] = {}
     # Any clock every row gives; a declared one also covers rows logged before Etude's.
     clock = run.clocks[0].name if run.clocks else HOURS_SINCE_START
-    for metric in run.metrics():
+    for metric in metrics:
         if metric.startswith(prefix) and len(metric) > len(prefix):
             reduced = run.chart(metric, clock, 1)
             finite = reduced.count - reduced.nonfinite
@@ -361,20 +361,13 @@ def _timers(run: RunData, prefix: str) -> Timers | None:
 def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Training:
     """What the page draws from these runs; `prefixes` name the timer trees to sum."""
     clocks: dict[str, Clock] = {}
-    run_clocks: dict[str, set[str]] = {}
     for run in data:
-        declared_names: set[str] = set()
         for declared in run.clocks:
             clocks.setdefault(declared.name, declared)
-            declared_names.add(declared.name)
-        run_clocks[run.name] = declared_names
     clocks.update({clock.name: clock for clock in BUILT_IN_CLOCKS})
-    metrics: dict[str, None] = {}
-    run_metrics: dict[str, set[str]] = {}
-    for run in data:
-        names = run.metrics()
-        metrics.update(dict.fromkeys(names))
-        run_metrics[run.name] = set(names)
+    run_clocks = {run.name: {c.name for c in run.clocks} for run in data}
+    run_metrics = {run.name: dict.fromkeys(run.metrics()) for run in data}
+    metrics = tuple(dict.fromkeys(metric for names in run_metrics.values() for metric in names))
     jobs = _jobs(data)
     by_name = {run.name: run for run in data}
     unique_prefixes = tuple(dict.fromkeys(prefixes))
@@ -384,9 +377,7 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
     # Process one job's runs at a time so each block is read once and freed before the next job.
     for job in jobs:
         members = [by_name[name] for name in job.runs]
-        job_metrics = [
-            metric for metric in metrics if any(metric in run_metrics[r.name] for r in members)
-        ]
+        job_metrics = dict.fromkeys(metric for run in members for metric in run_metrics[run.name])
         with ExitStack() as stack:
             for run in members:
                 stack.enter_context(run._reading_blocks())
@@ -407,16 +398,16 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
                         bands_by_key.setdefault((clock, metric), []).append(band)
             for prefix in unique_prefixes:
                 for run in members:
-                    if (found := _timers(run, prefix)) is not None:
+                    if (found := _timers(run, prefix, run_metrics[run.name])) is not None:
                         timers_by_key[(prefix, run.name)] = found
     series: dict[str, dict[str, tuple[Trace, ...]]] = {}
     bands: dict[str, dict[str, tuple[Trace, ...]]] = {}
     for clock in clocks:
         for metric in metrics:
             if (by_run := traces_by_key.get((clock, metric))) is not None:
-                ordered = tuple(by_run[run.name] for run in data if run.name in by_run)
-                if ordered:
-                    series.setdefault(clock, {})[metric] = ordered
+                series.setdefault(clock, {})[metric] = tuple(
+                    by_run[run.name] for run in data if run.name in by_run
+                )
             if (means := bands_by_key.get((clock, metric))) is not None:
                 bands.setdefault(clock, {})[metric] = tuple(means)
     return Training(
@@ -424,7 +415,7 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
         jobs=jobs,
         runs=tuple(_summary(run) for run in data),
         checkpoints=tuple(mark for run in data for mark in _marks(run)),
-        metrics=tuple(metrics),
+        metrics=metrics,
         series=series,
         bands=bands,
         timers=tuple(

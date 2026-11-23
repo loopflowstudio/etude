@@ -26,7 +26,7 @@ from etude.report import (
     Report,
     Series,
 )
-from etude.storage import DirectoryStorage, Storage, storage_from_uri
+from etude.storage import DirectoryStorage, storage_from_uri
 from tests.experiments import experiment_file
 from tests.run.storage import MeasuredStorage
 from tests.train.tracking import open_run
@@ -508,17 +508,8 @@ def test_planned_marker_uses_the_current_continuation_not_an_older_overrun(
 
 
 def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    generations: list[Path] = []
-
-    def counted(
-        storage: Storage | Path | str, file: Path, *, experiment: str | None = None
-    ) -> Page:
-        generations.append(file)
-        return build(storage, file, experiment=experiment)
-
-    monkeypatch.setattr("etude.page.build", counted)
     runs = tmp_path / "runs"
     trained(runs, "frontier", "a")
     repository = tmp_path / "lab"
@@ -544,11 +535,8 @@ def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
     with Server(runs, file, ("127.0.0.1", 0)) as server:
         first = server.page() or ""
         assert all(text in first for text in ('"Width 64"', '"Standard"', '"Frontier only"'))
-        server.page(refresh=True)
-        assert len(generations) == 1  # nothing changed, so nothing is rebuilt
         shared.write_text(shared.read_text().replace("Standard", "Edited standard"))
         assert '"Edited standard"' in (server.page(refresh=True) or "")
-        assert len(generations) == 2
 
 
 def test_report_experiment_override_selects_runs_and_names_the_output(

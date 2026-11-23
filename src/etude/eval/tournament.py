@@ -38,6 +38,7 @@ import re
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -285,16 +286,16 @@ class _Folder:
     names: tuple[str, ...]
     # Its `tournament.json`; else None, and `environment` is its `environment.json`'s.
     held: TournamentRun | None
-    environment: str | None
+    environment: str
 
 
 @dataclass(frozen=True)
 class _EnvironmentResults:
     """Standing outcomes and seated checkpoints of every eval run in one environment."""
 
-    delivered: dict[Digest, str]
-    failed: dict[Digest, bool]
-    checkpoints_by_key: dict[str, tuple[CheckpointRef, ...]]
+    delivered: dict[Digest, str] = field(default_factory=dict)
+    failed: dict[Digest, bool] = field(default_factory=dict)
+    checkpoints_by_key: dict[str, tuple[CheckpointRef, ...]] = field(default_factory=dict)
 
 
 class StoredRuns:
@@ -342,12 +343,17 @@ class StoredRuns:
                     held = TournamentRun.model_validate_json(
                         place.get(folder + TOURNAMENT_FILE), context={"experiment": experiment}
                     )
-                    folders.append(_Folder(place, run, folder, names, held, None))
+                    folders.append(
+                        _Folder(
+                            place, run, folder, names, held, held.tournament.environment.identity
+                        )
+                    )
                 else:
                     given = Environment.model_validate_json(place.get(folder + _ENVIRONMENT_FILE))
                     folders.append(_Folder(place, run, folder, names, None, given.identity))
         return cls(experiment, folders)
 
+    @cached_property
     def tournaments(self) -> dict[str, list[TournamentRun]]:
         """What each eval run held for a tournament added, by tournament, in run order."""
         found: dict[str, dict[str, TournamentRun]] = {}
@@ -384,12 +390,7 @@ class StoredRuns:
             return cached
         records: dict[str, list[MatchRecord]] = {}
         for each in self._folders:
-            alike = (
-                each.held.tournament.environment.identity == environment
-                if each.held is not None
-                else each.environment == environment
-            )
-            if alike:
+            if each.environment == environment:
                 records.setdefault(each.run, []).extend(self.records(each))
         newest: dict[Digest, tuple[int, str]] = {}
         failures: dict[Digest, tuple[int, str, bool]] = {}
@@ -490,10 +491,13 @@ def _called(
     it is not the checkpoint's. `wanted_only` calls for what `added` defines
     alone, still refusing a definition the stored eval runs conflict with.
     """
-    stored = _Stored(held=(), delivered={}, failed={})
-    if runs is not None:
-        stored = _stored(added.tournament, runs)
-    tournament = assemble([*stored.held, added])
+    held = runs.tournaments.get(added.tournament.name, []) if runs is not None else []
+    stored = (
+        runs.environment_results(added.tournament.environment.identity)
+        if runs is not None
+        else _EnvironmentResults()
+    )
+    tournament = assemble([*held, added])
     known = {_found(each) for each in tournament.seated}
     if wanted_only:
         tournament = assemble([added]).model_copy(update={"seated": tournament.seated})
@@ -583,38 +587,6 @@ def _resumed(value: object) -> JsonValue:
     if isinstance(value, (tuple, list)):
         return [_resumed(each) for each in value]
     return _JSON.validate_python(value)
-
-
-@dataclass(frozen=True)
-class _Stored:
-    """What the experiment's stored eval runs hold of a tournament and its environment."""
-
-    # The tournament's eval runs, in run order.
-    held: tuple[TournamentRun, ...]
-    # Each match an eval run in the environment holds as done, to the run that recorded it
-    # last: of runs holding it, the latest record's, then the last by name, as `statsdb`
-    # ranks `matches.newest`.
-    delivered: dict[Digest, str]
-    # Each match that failed there, with no done record anywhere.
-    failed: dict[Digest, bool]
-    checkpoints_by_key: dict[str, tuple[CheckpointRef, ...]] = field(default_factory=dict)
-
-
-def _stored(tournament: Benchmark | RoundRobin, runs: StoredRuns) -> _Stored:
-    """The tournament's eval runs of the experiment, and how the experiment's eval runs in
-    its environment played each match; each run's blocks read once however many
-    tournaments ask (`StoredRuns`)."""
-    held: dict[str, TournamentRun] = {}
-    for each in runs.folders():
-        if each.held is not None and each.held.tournament.name == tournament.name:
-            held.setdefault(each.run, each.held)
-    results = runs.environment_results(tournament.environment.identity)
-    return _Stored(
-        held=tuple(held[run] for run in sorted(held)),
-        delivered=results.delivered,
-        failed=results.failed,
-        checkpoints_by_key=results.checkpoints_by_key,
-    )
 
 
 def _experiment(place: Storage, folder: str) -> str | None:
