@@ -69,9 +69,63 @@ registered state when due: by default every five minutes, or at `save_every`
 steps / `save_every_seconds` seconds. Call save each iteration; completion and
 planned stop save too. Register everything required to continue learning.
 
-For counters and other JSON state, pass `extra=YourPydanticModel()` to resume;
-the returned instance contains restored fields. The prototype uses this without
-PyTorch. The [persistence reference](dev/training.md) describes the stored layout.
+For frameworks without `state_dict`, or custom files beside JSON counters,
+register `export` and `restore` callbacks in `run.resume(...)` without PyTorch:
+
+```python
+from pathlib import Path
+
+from pydantic import BaseModel
+
+from etude.train.tracking import track
+
+
+class Counts(BaseModel):
+    games: int = 0
+
+
+def train(config: Config) -> None:
+    with track(config=config) as run:
+        learner = build_learner(config, seed=run.seed)
+
+        def export_weights(folder: Path) -> None:
+            learner.write(folder / "weights.bin")
+
+        def restore_weights(folder: Path) -> None:
+            learner.read(folder / "weights.bin")
+
+        counts = run.resume(
+            export=export_weights,
+            restore=restore_weights,
+            extra=Counts(),
+            name="learner",
+        )
+        for update in run.steps("updates", to=config.updates, save_every=25):
+            counts.games += learner.step()
+            run.save(name="learner")
+```
+
+Both callbacks take a `Path` and return `None`. `export(folder)` writes regular
+files (including nested relative paths) into an empty staging directory;
+`restore(folder)` reads from the selected committed save folder and applies them
+to live state. On a fresh run, `restore` is skipped and `counts` starts as the
+supplied `Counts()` instance. On a resumed run (`etude train train.py --resume`),
+Etude checks the seed, manifest and exported files, restores any registered
+`**objects`, populates `extra` in place, calls `restore(folder)` and returns
+that same `extra` instance. Omitting `extra` returns the restored save `Path`,
+or `None` on first use.
+
+Use `name=` to isolate independent state namespaces, matched by
+`run.save(name=...)`. `export`, `restore`, `extra` and `name` are reserved
+keyword arguments and cannot name `**objects`. Calling `run.save(export=fn, name=...)`
+updates a namespace's exporter before checking whether a save is due;
+registering `restore=` without any `export=` raises `ValueError` on save so
+`current.json` is never overwritten without your files. Exported files are
+recorded in the save manifest and must not be symlinks, `state.json`,
+dot-prefixed paths, `.open`/`.partial` files or names colliding with registered
+`<object>.pt` files. If `restore` raises, registration does not complete,
+though objects or `extra` restored before it may already be updated. The
+[persistence reference](dev/training.md) describes the stored layout.
 
 A save is a whole snapshot, selected by a pointer written last. A crash while
 saving leaves the previous complete save. A second attempt reloads that save;
@@ -79,9 +133,11 @@ rows past its continuation coordinate are superseded. Scientific coordinates
 remain steps, transitions or optimizer updates, not rental time.
 
 Ctrl-C once requests a saved stop at the next safe boundary; a second interrupt
-is immediate. Respect `run.should_stop` in loops that do not use `run.steps`.
-A stopped attempt exits with code 75 and can continue elsewhere. Never launch
-a new process that deletes saves: delivery owns acknowledgment and retention.
+is immediate. Stopping before any declared clock moves writes no step-0 save;
+stopping after progress saves every registered namespace whose clocks moved.
+Respect `run.should_stop` in loops that do not use `run.steps`. A stopped attempt
+exits with code 75 and can continue elsewhere. Never launch a new process that
+deletes saves: delivery owns acknowledgment and retention.
 
 ## Checkpoints
 

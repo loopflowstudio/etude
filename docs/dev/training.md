@@ -58,7 +58,15 @@ weights = torch.load(save / files["model"])
 Always go through `current.json`. A save folder it does not name is one
 being written or one waiting to be removed, and may be incomplete. Each entry
 of `files` names a file in its own save's folder; no save reads another's.
-Named state is in `out/state/NAME/`, with its own `current.json`.
+Registered `**objects` map `<name>` to `<name>.pt`; files written by an
+`export(folder)` callback are inventoried under their portable relative POSIX
+paths (`{"weights.bin": "weights.bin"}`). `State.write` refuses symlinks,
+`state.json`, dot-prefixed path components, `.open`/`.partial` suffixes,
+collisions with registered `**objects` and writing when `restore=` is
+registered without an `export=` callback. Existing saves written with
+`files={}` remain readable and still pass their committed folder to
+`restore(path)`. Named state is in `out/state/NAME/`, with its own
+`current.json`.
 
 On this computer runs are under `~/.etude/track` (moved by `ETUDE_HOME`);
 under a launch the same folder is in your bucket. Using Etude to write a loop
@@ -99,6 +107,10 @@ def train(config: SearchConfig) -> None:
 Returning normally short of the target would read as finished. Files you
 write in `run.out` yourself are carried one at a time, so write each
 atomically and keep what one resume needs in one file: a machine lost between
-two of them leaves one new and one old. `run.save(fn)` is the way to keep
-several files together. A name ending `.partial` is never sent, and anything
-under a folder whose name starts with `.` stays on the machine.
+two of them leaves one new and one old. Registering `export=` and `restore=`
+on `run.resume(...)` (or updating `export=` via `run.save(export=fn)`) is the
+way to keep several files together in one committed save. On a planned stop,
+`run.steps` skips saving namespaces whose declared clocks have not moved from
+`last_at` (or `0.0` on a fresh run), avoiding empty step-0 snapshots. A name
+ending `.partial` is never sent, and anything under a folder whose name starts
+with `.` stays on the machine.
