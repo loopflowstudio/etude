@@ -67,14 +67,17 @@ never import each other.
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import json
+import os
 import runpy
 import sys
+import tempfile
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from html import escape
@@ -83,15 +86,23 @@ from importlib.util import cache_from_source
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 
 from etude.errors import EtudeError, explain
-from etude.eval.records import Gap, Scheduled, Tournament
+from etude.eval.records import Benchmark, Gap, Scheduled, Tournament
 from etude.experiment_file import experiment_named, refuse_renamed
+from etude.identity import SAFE_NAME
 from etude.records import BUILT_IN_NAMES, Record
 from etude.report import Counters, Curve, Flame, Matches, Report, Score, Series
-from etude.run import LocatedRun, as_storage, declared, located_runs, run_folders, runs, under
-from etude.storage import DirectoryStorage, S3Storage, Storage, default_root
+from etude.run import Listing, as_storage, declared, run_folders, under
+from etude.storage import (
+    DirectoryStorage,
+    S3Storage,
+    Storage,
+    default_root,
+    store_identity,
+    with_versions,
+)
 from etude.train.read import RunData, read_all
 from etude.train.report import Training, training
 
@@ -381,16 +392,16 @@ class Pages:
 
     def _build(self, file: Path, listings: Sequence[dict[str, str]]) -> Page:
         if not file.is_file():
-            # The build says why there is no page.
             return build(self.storage, file, experiment=self.experiment)
+        experiment = self.experiment or file.stem
         runs = tuple(
-            self._versions(place, self.experiment or file.stem, listed)
+            self._versions(with_versions(place, listed), experiment, listed)
             for place, listed in zip(self._places, listings, strict=True)
         )
         kept = self._built.get(file)
         if kept is not None and kept[0] == _Inputs(files=_sources(file), runs=runs):
             return kept[1]
-        page = build(self.storage, file, experiment=self.experiment)
+        page = _build_page(self.storage, file, experiment, listed=listings[0])
         # After the build, so the neighbours this run imported are among its inputs.
         self._built[file] = (_Inputs(files=_sources(file), runs=runs), page)
         return page
@@ -483,41 +494,182 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
     holds no run of this one, and `EtudeError` for a file that is not an
     experiment's.
     """
-    storage = as_storage(source)
-    experiment = experiment or file.stem
+    return _build_page(as_storage(source), file, experiment or file.stem)
+
+
+# Bump whenever derived Page fields change without changing inputs.
+_PAGE_CACHE_VERSION = 2
+
+
+def _page_cache_path(experiment: str, storage: Storage) -> Path:
+    home = Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser()
+    source = store_identity(storage)
+    store = hashlib.sha256(source.encode()).hexdigest()[:16]
+    stem = (
+        f"{experiment}.{store}"
+        if SAFE_NAME.match(experiment)
+        else hashlib.sha256(f"{experiment}\0{source}".encode()).hexdigest()[:24]
+    )
+    return home / "pages" / f"{stem}.json"
+
+
+def _page_cache_key(
+    *,
+    experiment: str,
+    file: Path,
+    source: str,
+    report: Report,
+    origin: str | None,
+    notes: Sequence[str],
+    versions: Mapping[str, str],
+    state: ExperimentState | None,
+    wanted: Sequence[Tournament],
+    local_versions: Mapping[str, str],
+) -> str:
+    """Digest of every evaluated input that determines `Page`, including external files read by code."""
+    inputs = {
+        "v": _PAGE_CACHE_VERSION,
+        "experiment": experiment,
+        "file": str(file),
+        "source": source,
+        "report": report.model_dump_json(),
+        "ml_set": "ml" in report.model_fields_set,
+        "origin": origin,
+        "notes": notes,
+        "versions": versions,
+        "local": local_versions,
+        "wanted": [t.model_dump_json() for t in wanted],
+        # RunData on a summary is lazy. Fingerprint its stored source via versions above.
+        "state": None
+        if state is None
+        else {
+            "committed_usd": str(state.committed_usd),
+            "runs": [
+                (
+                    r.name,
+                    r.state,
+                    r.job,
+                    r.launch,
+                    r.line,
+                    r.seed,
+                    [c.model_dump(mode="json") for c in r.checkpoints],
+                )
+                for r in state.runs
+            ],
+            "eval_runs": [(e.name, e.state, e.matches) for e in state.eval_runs],
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _referenced_experiments(experiment: str, wanted: Sequence[Tournament]) -> set[str]:
+    """Experiments whose stored runs this report or its relative seats depend on."""
+    named = {experiment}
+    for tournament in wanted:
+        benchmark = tournament.definition
+        if not isinstance(benchmark, Benchmark) or not any(s.relative for s in benchmark.seatings):
+            continue
+        named.update(benchmark.experiments)
+        named.update(
+            c.policy.experiment
+            for c in tournament.checkpoints
+            if c.policy is not None and c.policy.experiment is not None
+        )
+    return named
+
+
+def _load_cached_page(path: Path, expected_key: str) -> Page | None:
+    try:
+        with path.open("rb") as stream:
+            if stream.readline(128).decode("ascii", "replace").strip() != expected_key:
+                return None
+            return Page.model_validate_json(stream.read())
+    except (OSError, ValidationError):
+        return None
+
+
+def _save_cached_page(path: Path, key: str, page: Page) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=path.parent) as staging:
+            pending = Path(staging) / path.name
+            with pending.open("wb") as stream:
+                stream.write(key.encode())
+                stream.write(b"\n")
+                stream.write(page.model_dump_json().encode())
+            pending.replace(path)
+    except OSError:
+        pass
+
+
+def _build_page(
+    storage: Storage,
+    file: Path,
+    experiment: str,
+    *,
+    listed: Mapping[str, str] | None = None,
+) -> Page:
     names = _run_file(file)
     report, origin, notes = _report(names.get("report"), file)
     flames = tuple(panel.prefix for panel in (*report.perf, *report.ml) if isinstance(panel, Flame))
-    listed = storage.keys("")
-    declarations = located_runs(storage, listed)
+    cache_path = _page_cache_path(experiment, storage)
+    listing = Listing.read(storage, listed)
     data = read_all(
-        storage,
+        listing.storage,
         experiment,
         metrics=None if report.other_metrics else frozenset(report.keys()),
         prefixes=flames,
-        keys=listed,
-        declarations=declarations,
+        keys=listing.keys,
+        declarations=listing.declarations,
     )
     if not data:
-        held = sorted({name for name, _ in runs(storage)})
+        held = sorted({run.file.experiment for run in listing.declarations})
         raise ValueError(
             f"no runs of {experiment!r} in {_source_name(storage)}"
             + (f"; it holds {', '.join(held)}" if held else "; it holds no runs")
         )
     trained = [run for run in data if run.file is None or run.file.kind != "evaluation"]
-    found = names.get("eval_jobs")
-    want: Callable[..., object] | None = None
-    if found is not None:
-        if not callable(found):
-            raise EtudeError("experiment_eval_is_not_a_function", 422) from ValueError(file)
-        want = found
-    evals = (
-        _read_evals(storage, experiment, report, want, data, keys=listed, declarations=declarations)
-        if want is not None or len(trained) < len(data)
-        else _Evals()
+    want = names.get("eval_jobs")
+    if want is not None and not callable(want):
+        raise EtudeError("experiment_eval_is_not_a_function", 422) from ValueError(file)
+    state = None
+    wanted: list[Tournament] = []
+    local_versions: dict[str, str] = {}
+    if want is not None or len(trained) < len(data):
+        # Only reports with evaluations need the optional eval dependency.
+        from etude.experiment import state_of  # noqa: PLC0415
+
+        state = state_of(data, experiment)
+        if want is not None:
+            wanted = _wanted(want, state)
+        here = DirectoryStorage(default_root())
+        if store_identity(here) != store_identity(storage):
+            local_versions = Listing.read(here).experiment_versions({experiment})
+    source_name = _source_name(storage)
+    referenced = _referenced_experiments(experiment, wanted)
+    cache_key = _page_cache_key(
+        experiment=experiment,
+        file=file,
+        source=source_name,
+        report=report,
+        origin=origin,
+        notes=notes,
+        versions=listing.experiment_versions(referenced),
+        state=state,
+        wanted=wanted,
+        local_versions=local_versions,
     )
+    if (cached := _load_cached_page(cache_path, cache_key)) is not None:
+        return cached
+    evals = _read_evals(listing, state, report, wanted) if state is not None else _Evals()
     # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
-    unended = [run.name for run in data if run not in trained and run.outcome is None]
+    unended = [
+        run.name
+        for run in data
+        if run.file and run.file.kind == "evaluation" and run.outcome is None
+    ]
     partial = (
         (f"Partial results: no recorded end yet for {', '.join(unended)}.",) if unended else ()
     )
@@ -528,17 +680,17 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
         report = report.model_copy(
             update={
                 "ml": tuple(
-                    panel.model_copy(update={"keys": keys})
+                    panel.model_copy(update={"keys": kept_keys})
                     for panel in report.ml
                     if isinstance(panel, Series | Counters)
-                    and (keys := tuple(key for key in panel.keys if key in measured.metrics))
+                    and (kept_keys := tuple(key for key in panel.keys if key in measured.metrics))
                 )
             }
         )
-    return Page(
+    page = Page(
         experiment=experiment,
         file=str(file),
-        source=_source_name(storage),
+        source=source_name,
         report=report,
         origin=origin,
         notes=(*notes, *partial, *_without_hours(trained), *evals.notes),
@@ -559,6 +711,8 @@ def build(source: Storage | Path | str, file: Path, *, experiment: str | None = 
         latest_result_ms=evals.latest_result_ms,
         absent=evals.absent,
     )
+    _save_cached_page(cache_path, cache_key, page)
+    return page
 
 
 def _without_hours(trained: Sequence[RunData]) -> tuple[str, ...]:
@@ -694,25 +848,17 @@ class _Evals:
 
 
 def _read_evals(
-    storage: Storage,
-    experiment: str,
+    listing: Listing,
+    state: ExperimentState,
     report: Report,
-    want: Callable[..., object] | None,
-    data: Sequence[RunData],
-    *,
-    keys: Sequence[str],
-    declarations: Sequence[LocatedRun],
+    wanted: Sequence[Tournament],
 ) -> _Evals:
     # The optional `eval` extra (DuckDB, and the etude.eval modules over it), imported where
     # it is used: only an experiment with evaluations reads it, so a report without loads none.
-    from etude.eval.query import statsdb  # noqa: PLC0415
-    from etude.experiment import state_of  # noqa: PLC0415
+    from etude.eval.query import _open_statsdb  # noqa: PLC0415
 
-    state = state_of(data, experiment)
-    held, refused = _held_tournaments(
-        want, state, storage, experiment, keys=keys, declarations=declarations
-    )
-    db = statsdb(experiment, storage)
+    held, refused = _held_tournaments(wanted, state, listing)
+    db = _open_statsdb(state.experiment, listing.storage, keys=listing.keys)
     try:
         saved = _saved_checkpoints(db)
         players, placement = _players(db, saved, {run.name: run.line for run in state.runs})
@@ -756,13 +902,9 @@ class _HeldTournament:
 
 
 def _held_tournaments(
-    want: Callable[..., object] | None,
+    asked: Sequence[Tournament],
     state: ExperimentState,
-    storage: Storage,
-    experiment: str,
-    *,
-    keys: Sequence[str] | None = None,
-    declarations: Sequence[LocatedRun] | None = None,
+    listing: Listing,
 ) -> tuple[list[_HeldTournament], tuple[str, ...]]:
     """Each tournament as held so far, and a note for each one drawn otherwise than asked.
 
@@ -779,15 +921,18 @@ def _held_tournaments(
     from etude.experiment import read_tournament_lines  # noqa: PLC0415 - optional eval dependency
 
     wanted: dict[str, Tournament] = {}
-    if want is not None:
-        for tournament in _wanted(want, state):
-            wanted.setdefault(tournament.definition.name, tournament)
+    for tournament in asked:
+        wanted.setdefault(tournament.definition.name, tournament)
+    experiment = state.experiment
     refused: list[str] = []
     # Read once for every tournament drawn: a page plays nothing, so nothing changes meanwhile.
-    keys = storage.keys("") if keys is None else keys
-    declarations = located_runs(storage, keys) if declarations is None else declarations
-    runs = stored_runs(experiment, storages=[storage], keys=keys, declarations=declarations)
-    for name, held in runs.tournaments().items():
+    runs = stored_runs(
+        experiment,
+        storages=[listing.storage],
+        keys=listing.keys,
+        declarations=listing.declarations,
+    )
+    for name, held in runs.tournaments.items():
         try:
             recorded = assemble(held)
         except EtudeError as error:
@@ -796,10 +941,10 @@ def _held_tournaments(
                 f"Tournament {name} is not shown: its eval runs disagree ({error.code})."
             )
             continue
-        asked = wanted.get(name)
-        if asked is not None:
+        requested = wanted.get(name)
+        if requested is not None:
             try:
-                assemble([*held, TournamentRun(tournament=asked.definition)])
+                assemble([*held, TournamentRun(tournament=requested.definition)])
                 continue
             except EtudeError as error:
                 refused.append(
@@ -808,14 +953,14 @@ def _held_tournaments(
                 )
         wanted[name] = recorded
     lines = read_tournament_lines(
-        storage,
+        listing.storage,
         state,
         [
             TournamentRun(tournament=t.definition, checkpoints=t.checkpoints)
             for t in wanted.values()
         ],
-        keys=keys,
-        declarations=declarations,
+        keys=listing.keys,
+        declarations=listing.declarations,
     )
     held_tournaments = []
     for name, given in sorted(wanted.items()):
@@ -1036,19 +1181,30 @@ def _points(
         for seating in each.tournament.definition.seatings
         if seating.seeds == "one"
     }
-    scored: dict[tuple[int, int, int], list[Cell]] = {}
+    scored: dict[tuple[int, int, int], list[tuple[Cell, str]]] = {}
     for cell in cells:
         if cell.opponent is not None and not cell.fixed:
-            scored.setdefault((cell.selection, cell.subject, cell.opponent), []).append(cell)
+            scored.setdefault((cell.selection, cell.subject, cell.opponent), []).append(
+                (cell, json.dumps(cell.split, sort_keys=True))
+            )
+    by_seating: dict[str, list[_HeldFor]] = {}
+    for key in pairs.keys() | gaps.keys():
+        by_seating.setdefault(key.seating, []).append(key)
     points: list[Point] = []
     for number, selection in enumerate(selections):
         if not _seated(selection):
             continue
         parts = _parts(selection)
+        matched: set[_HeldFor] = set()
+        for part in parts:
+            if part.seating is None:
+                continue
+            for key in by_seating.get(part.seating, ()):
+                if _holds(part, key.tournament, key.seating):
+                    matched.add(key)
         chosen: dict[str, list[_HeldFor]] = {}
-        for key in sorted(pairs.keys() | gaps.keys()):
-            if any(_holds(part, key.tournament, key.seating) for part in parts):
-                chosen.setdefault(key.checkpoint, []).append(key)
+        for key in sorted(matched):
+            chosen.setdefault(key.checkpoint, []).append(key)
         for checkpoint, here in chosen.items():
             ref, place = refs[checkpoint], saved.get(checkpoint)
             stood = Point(
@@ -1062,9 +1218,8 @@ def _points(
             # By view, score and split: the cells of this checkpoint's pairs.
             met: dict[tuple[str | None, int, str], list[Cell]] = {}
             for subject, opponent in sorted({pair for key in here for pair in pairs.get(key, ())}):
-                for cell in scored.get((number, subject, opponent), ()):
-                    view = (cell.commit, cell.score, json.dumps(cell.split, sort_keys=True))
-                    met.setdefault(view, []).append(cell)
+                for cell, split_key in scored.get((number, subject, opponent), ()):
+                    met.setdefault((cell.commit, cell.score, split_key), []).append(cell)
             for counted in met.values():
                 points.append(
                     stood.model_copy(
@@ -1232,54 +1387,89 @@ def _commits(db: duckdb.DuckDBPyConnection) -> tuple[Commit, ...]:
     return tuple(Commit(commit=commit, matches=matches) for commit, matches in found)
 
 
-def _literal(text: str) -> str:
-    return "'" + text.replace("'", "''") + "'"
+@dataclass(frozen=True)
+class _HeldIndex:
+    """In-memory index of `_page_held` and `_page_scheduled` for partitioning compare rows."""
+
+    match_rank: dict[tuple[str, str], tuple[str, int]]
+    by_view_tournament: dict[tuple[str, str], set[tuple[str, str]]]
+    by_tournament_seating: dict[tuple[str, str], set[str]]
+    by_tournament_tag: dict[tuple[str, str], set[str]]
+    checkpoint_matches: set[str]
+
+    def newest_once(self, pairs: set[tuple[str, str]]) -> set[tuple[str, str]]:
+        """Each match in `pairs` once per environment, from its newest delivery (`matches.newest`)."""
+        best: dict[tuple[str, str], tuple[int, str]] = {}
+        for run, match in pairs:
+            environment, newest = self.match_rank[(run, match)]
+            key = (environment, match)
+            prior = best.get(key)
+            if prior is None or newest < prior[0]:
+                best[key] = (newest, run)
+        return {(run, match) for (_, match), (_, run) in best.items()}
+
+    def matches(self, selection: Selection, *, view: str) -> set[tuple[str, str]]:
+        """The `(run, match)` pairs a selection counts in `view`."""
+        if isinstance(selection, tuple):
+            unioned: set[tuple[str, str]] = set()
+            for part in selection:
+                unioned.update(self.matches(part, view=view))
+            return self.newest_once(unioned)
+        if isinstance(selection, OutsideTournaments):
+            return set(self.by_view_tournament.get((view, ""), ()))
+        if selection.tournament is None:
+            pairs = {
+                pair
+                for held_view, tournament in self.by_view_tournament
+                if held_view == view and tournament
+                for pair in self._selected(tournament, selection, view)
+            }
+            return self.newest_once(pairs)
+        return self._selected(selection.tournament, selection, view)
+
+    def _selected(self, tournament: str, selection: Matches, view: str) -> set[tuple[str, str]]:
+        pairs = self.by_view_tournament.get((view, tournament), set())
+        if selection.seating is not None:
+            allowed = self.by_tournament_seating.get((tournament, selection.seating), set())
+        elif selection.tag is not None:
+            allowed = self.by_tournament_tag.get((tournament, selection.tag), set())
+        else:
+            return pairs
+        return {pair for pair in pairs if pair[1] in allowed}
 
 
-def _where(selection: Selection, *, view: str) -> str:
-    """The rows of a selection's matches in a view of `_page_held`, as a condition
-    `compare` applies to an author table."""
-    if isinstance(selection, tuple):
-        # Two tournaments may hold different deliveries of the same match.
-        return _newest_once(" or ".join(f"({_where(s, view=view)})" for s in selection) or "false")
-    if isinstance(selection, OutsideTournaments):
-        return (
-            "(run, match) in (select run, match from _page_held"
-            f" where view = {_literal(view)} and tournament = '')"
-        )
-    if selection.tournament is None:
-        # Every tournament's, whichever tournament called for each match.
-        named = "".join(
-            f" and s.{column} = {_literal(value)}"
-            for column, value in (("seating", selection.seating), ("tag", selection.tag))
-            if value is not None
-        )
-        return _newest_once(
-            "(run, match) in (select h.run, h.match from _page_held h join _page_scheduled s"
-            " on s.tournament = h.tournament and s.match = h.match"
-            f" where h.view = {_literal(view)} and h.tournament != ''{named})"
-        )
-    tournament = _literal(selection.tournament)
-    held = (
-        "(run, match) in (select run, match from _page_held"
-        f" where view = {_literal(view)} and tournament = {tournament})"
-    )
-    scheduled = f"select match from _page_scheduled where tournament = {tournament}"
-    if selection.seating is not None:
-        held += f" and match in ({scheduled} and seating = {_literal(selection.seating)})"
-    if selection.tag is not None:
-        held += f" and match in ({scheduled} and tag = {_literal(selection.tag)})"
-    return held
-
-
-def _newest_once(where: str) -> str:
-    """Each match `where` selects once, from its newest delivery in each environment
-    (`matches.newest`), as a single tournament's selection counts it."""
-    return (
-        "(run, match) in (select m.run, m.match from matches m"
-        f" join runs r using (run) where ({where})"
-        " qualify row_number() over (partition by r.environment, m.match"
-        " order by m.newest) = 1)"
+def _held_index(db: duckdb.DuckDBPyConnection) -> _HeldIndex:
+    match_rank: dict[tuple[str, str], tuple[str, int]] = {}
+    by_view_tournament: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    for view, tournament, run, match, environment, newest in db.sql(
+        "select h.view, h.tournament, h.run, h.match, r.environment, m.newest"
+        " from _page_held h join runs r using (run) join matches m using (run, match)"
+    ).fetchall():
+        pair = (str(run), str(match))
+        match_rank[pair] = (str(environment), int(newest) if newest is not None else sys.maxsize)
+        by_view_tournament.setdefault((str(view), str(tournament)), set()).add(pair)
+    by_tournament_seating: dict[tuple[str, str], set[str]] = {}
+    by_tournament_tag: dict[tuple[str, str], set[str]] = {}
+    for tournament, match, seating, tag in db.sql(
+        "select tournament, match, seating, tag from _page_scheduled"
+    ).fetchall():
+        t_name, m_key = str(tournament), str(match)
+        if seating is not None:
+            by_tournament_seating.setdefault((t_name, str(seating)), set()).add(m_key)
+        if tag is not None:
+            by_tournament_tag.setdefault((t_name, str(tag)), set()).add(m_key)
+    checkpoint_matches = {
+        str(match)
+        for (match,) in db.sql(
+            "select distinct match from seats where player in (select player from _page_checkpoints)"
+        ).fetchall()
+    }
+    return _HeldIndex(
+        match_rank=match_rank,
+        by_view_tournament=by_view_tournament,
+        by_tournament_seating=by_tournament_seating,
+        by_tournament_tag=by_tournament_tag,
+        checkpoint_matches=checkpoint_matches,
     )
 
 
@@ -1375,7 +1565,11 @@ def _cells(
     `environments` are by identity, the newest latest match first.
     """
     # The optional `eval` extra, imported where it is used (`_read_evals`).
-    from etude.eval.query import KEYS, NUMERIC, compare  # noqa: PLC0415
+    from etude.eval.query import (  # noqa: PLC0415
+        KEYS,
+        NUMERIC,
+        _match_scores,
+    )
     from etude.eval.run import ETUDE_TABLES  # noqa: PLC0415
 
     # A rollup's totals have no matches to compare over.
@@ -1396,9 +1590,20 @@ def _cells(
     index = {each.key: number for number, each in enumerate(players)}
     anchors = sum(not each.placed for each in players)
     place = {identity: number for number, identity in enumerate(environments)}
+    held_idx = _held_index(db)
+    has_groups = db.sql('select 1 from "groups" limit 1').fetchone() is not None
+    views = (None, *(each.commit for each in commits))
+    # Cache non-union selection match sets once across all scores and splits.
+    selection_sets: dict[tuple[str, int], set[tuple[str, str]]] = {
+        (commit or "", chosen): held_idx.matches(selection, view=commit or "")
+        for commit in views
+        for chosen, selection in enumerate(selections)
+        if not isinstance(selection, tuple)
+    }
     cells: list[Cell] = []
     absent: list[Absent] = []
     teams: set[str] = set()
+    held_where = "(run, match) in (select distinct run, match from _page_held)"
     for number, score in enumerate(scores):
         held = columns.get(score.table, {})
         if missing := [c for c in (score.value, score.per) if c is not None and c not in held]:
@@ -1409,59 +1614,73 @@ def _cells(
         splits = [
             by for size in range(len(named) + 1) for by in itertools.combinations(named, size)
         ]
-        for commit in (None, *(each.commit for each in commits)):
+        # Fetch per-match sufficient stats once per (score, split), then partition in memory.
+        split_rows = {
+            by: _match_scores(
+                db,
+                table=score.table,
+                value=score.value,
+                per=score.per,
+                where=held_where,
+                by=by,
+                has_groups=has_groups,
+            )
+            for by in splits
+            if held_idx.match_rank
+        }
+        for commit in views:
+            view = commit or ""
             # Components precede unions; only this view's results resolve them.
             recorded: set[int] = set()
             for chosen, selection in enumerate(selections):
                 if isinstance(selection, tuple):
-                    selection = tuple(
+                    resolved_selection = tuple(
                         resolved
                         for wanted in selection
                         if (resolved := _resolve_matches(wanted, selections, recorded)) is not None
                     )
-                where = _where(selection, view=commit or "")
+                    active_matches = held_idx.matches(resolved_selection, view=view)
+                else:
+                    active_matches = selection_sets[(view, chosen)]
+                if not active_matches:
+                    continue
                 # An anchor's strength needs two anchors to have met.
-                for fixed, by in itertools.product(
-                    (False, True) if anchors > 1 else (False,), splits
-                ):
-                    condition = where
-                    if fixed:
-                        condition += (
-                            " and match not in (select match from seats"
-                            " where player in (select player from _page_checkpoints))"
-                        )
-                    for found in compare(
-                        db,
-                        table=score.table,
-                        value=score.value,
-                        per=score.per,
-                        where=condition,
-                        by=by,
-                    ):
-                        if len(found.subject) != 1 or (found.opponent and len(found.opponent) != 1):
-                            teams.add(f"{score.table}.{score.value}")
-                            continue  # a team
-                        if fixed and found.opponent is not None:
-                            continue  # pairs of anchors are in the unrestricted cells
-                        recorded.add(chosen)
-                        cells.append(
-                            Cell(
-                                selection=chosen,
-                                commit=commit,
-                                environment=place[found.environment],
-                                score=number,
-                                subject=index[found.subject[0]],
-                                opponent=None
-                                if found.opponent is None
-                                else index[found.opponent[0]],
-                                fixed=fixed,
-                                split=found.split,
-                                value=found.value,
-                                interval=found.interval,
-                                rows=found.rows,
-                                matches=found.matches,
+                for fixed in (False, True) if anchors > 1 else (False,):
+                    pairs = (
+                        {
+                            pair
+                            for pair in active_matches
+                            if pair[1] not in held_idx.checkpoint_matches
+                        }
+                        if fixed
+                        else active_matches
+                    )
+                    for scores_by_match in split_rows.values():
+                        for found in scores_by_match.comparisons(pairs, against_all=fixed):
+                            if len(found.subject) != 1 or (
+                                found.opponent and len(found.opponent) != 1
+                            ):
+                                teams.add(f"{score.table}.{score.value}")
+                                continue
+                            recorded.add(chosen)
+                            cells.append(
+                                Cell(
+                                    selection=chosen,
+                                    commit=commit,
+                                    environment=place[found.environment],
+                                    score=number,
+                                    subject=index[found.subject[0]],
+                                    opponent=None
+                                    if found.opponent is None
+                                    else index[found.opponent[0]],
+                                    fixed=fixed,
+                                    split=found.split,
+                                    value=found.value,
+                                    interval=found.interval,
+                                    rows=found.rows,
+                                    matches=found.matches,
+                                )
                             )
-                        )
     cells, mixed = _newest_environment(cells, list(environments.values()))
     # "Against all" repeats the only opponent a subject met.
     met: dict[tuple[int, str | None, int, int], set[int]] = {}

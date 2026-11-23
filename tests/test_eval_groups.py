@@ -17,6 +17,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 
+import duckdb
 import pytest
 from pydantic import ValidationError
 
@@ -31,7 +32,7 @@ from etude.eval.agents import AgentConnection, Answer, Forward, Request
 from etude.eval.batching import _Batches
 from etude.eval.game import Execution, Performance, _performance
 from etude.eval.match import environment
-from etude.eval.query import statsdb
+from etude.eval.query import _kept_path, statsdb
 from etude.eval.records import Code, Config, Match, RoundRobin, checkpoint_player
 from etude.eval.resources import (
     Cpus,
@@ -401,11 +402,11 @@ def test_an_execution_deadline_is_a_retryable_failure_not_a_success(
 
 def test_statsdb_rebuilds_the_last_released_schema_with_retry_flags(tmp_path: Path) -> None:
     hold_group(group(job("prior", None)), directory=tmp_path)
-    old = statsdb("grouped", tmp_path)
-    old.sql("drop index matches_identity")
-    old.sql("alter table matches drop column retry")
-    old.sql("update kept.statsdb set schema = 14")
-    old.close()
+    statsdb("grouped", tmp_path).close()
+    with duckdb.connect(_kept_path("grouped", DirectoryStorage(tmp_path))) as old:
+        old.sql("drop index matches_identity")
+        old.sql("alter table matches drop column retry")
+        old.sql("update kept.statsdb set schema = 14")
     upgraded = statsdb("grouped", tmp_path)
     try:
         assert upgraded.sql("select state, retry from matches").fetchall() == [("done", False)]

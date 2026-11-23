@@ -26,7 +26,7 @@ from etude.report import (
     Report,
     Series,
 )
-from etude.storage import DirectoryStorage, Storage, storage_from_uri
+from etude.storage import DirectoryStorage, storage_from_uri
 from tests.experiments import experiment_file
 from tests.run.storage import MeasuredStorage
 from tests.train.tracking import open_run
@@ -508,17 +508,8 @@ def test_planned_marker_uses_the_current_continuation_not_an_older_overrun(
 
 
 def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    generations: list[Path] = []
-
-    def counted(
-        storage: Storage | Path | str, file: Path, *, experiment: str | None = None
-    ) -> Page:
-        generations.append(file)
-        return build(storage, file, experiment=experiment)
-
-    monkeypatch.setattr("etude.page.build", counted)
     runs = tmp_path / "runs"
     trained(runs, "frontier", "a")
     repository = tmp_path / "lab"
@@ -544,11 +535,8 @@ def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
     with Server(runs, file, ("127.0.0.1", 0)) as server:
         first = server.page() or ""
         assert all(text in first for text in ('"Width 64"', '"Standard"', '"Frontier only"'))
-        server.page(refresh=True)
-        assert len(generations) == 1  # nothing changed, so nothing is rebuilt
         shared.write_text(shared.read_text().replace("Standard", "Edited standard"))
         assert '"Edited standard"' in (server.page(refresh=True) or "")
-        assert len(generations) == 2
 
 
 def test_report_experiment_override_selects_runs_and_names_the_output(
@@ -638,10 +626,71 @@ def eval_jobs(state):
     page = build(measured, file)
     assert [(c.tournament, c.unplayed) for c in page.coverage] == [("first", 2), ("second", 2)]
     assert measured.requests == 16  # 12 discovery reads, four existing statsdb reads
-    assert measured.listings == 2
+    assert measured.listings == 1
     for seed in (0, 1):
         # Two tournaments share the external checkpoint/outcome reads. Statsdb separately
         # reads declarations to retain its own experiment membership.
         assert measured.got.count(f"frontier/small@{seed}/checkpoints/updates-100.json") == 1
         assert measured.got.count(f"frontier/small@{seed}/outcome.json") == 1
     assert not any(key.endswith("weights.pt") for key in measured.got)
+
+
+def test_page_cache_reuses_unchanged_build_and_invalidates_on_external_data_edit(
+    tmp_path: Path,
+) -> None:
+    runs = tmp_path / "runs"
+    with open_run(
+        experiment="lab",
+        run="a",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=runs,
+    ) as run:
+        run.log({"loss": 1.0}, updates=1)
+    label = tmp_path / "label.txt"
+    label.write_text("First")
+    file = experiment_file(
+        tmp_path / "experiments",
+        "lab",
+        f"""
+from pathlib import Path
+from etude.report import Report
+
+def report() -> Report:
+    return Report(labels={{"a": Path({str(label)!r}).read_text().strip()}})
+""",
+    )
+    first_source = MeasuredStorage(DirectoryStorage(runs))
+    first = build(first_source, file)
+    assert first.report.labels == {"a": "First"}
+    assert any(
+        key.endswith((".blk", ".tail", ".index.json", ".permanent.json"))
+        for key in first_source.got
+    )
+
+    # Unchanged inputs: reuses the persisted Page without touching any metric block or index.
+    second_source = MeasuredStorage(DirectoryStorage(runs))
+    second = build(second_source, file)
+    assert second == first
+    assert not any(
+        key.endswith((".blk", ".tail", ".index.json", ".permanent.json"))
+        for key in second_source.got
+    )
+
+    # Editing a non-Python file read by report() invalidates the cache on the very next build.
+    label.write_text("Edited")
+    third = build(MeasuredStorage(DirectoryStorage(runs)), file)
+    assert third.report.labels == {"a": "Edited"}
+
+    # Another experiment writing to the same source does not invalidate this experiment's page.
+    with open_run(
+        experiment="other",
+        run="z",
+        clocks=[Clock(name="updates", kind="step", meaning="updates")],
+        directory=runs,
+    ) as other:
+        other.log({"loss": 2.0}, updates=1)
+    after_other = MeasuredStorage(DirectoryStorage(runs))
+    assert build(after_other, file) == third
+    assert not any(
+        key.endswith((".blk", ".tail", ".index.json", ".permanent.json")) for key in after_other.got
+    )

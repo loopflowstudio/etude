@@ -53,7 +53,14 @@ from etude.records import (
     RunWriter,
     Tally,
 )
-from etude.storage import DirectoryStorage, Storage, run_directory, run_prefix, storage_from_uri
+from etude.storage import (
+    DirectoryStorage,
+    Storage,
+    run_directory,
+    run_prefix,
+    storage_from_uri,
+    with_versions,
+)
 
 
 class Run:
@@ -549,6 +556,33 @@ class LocatedRun(Record):
     name: str
     file: RunRecord
     folders: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Listing:
+    """One consistent listing of a storage source: pinned reader, sorted keys and declarations."""
+
+    storage: Storage
+    versions: Mapping[str, str]
+    keys: tuple[str, ...]
+    declarations: tuple[LocatedRun, ...]
+
+    @classmethod
+    def read(cls, storage: Storage, listed: Mapping[str, str] | None = None) -> Listing:
+        versions = storage.versions("") if listed is None else listed
+        pinned = with_versions(storage, versions)
+        keys = tuple(sorted(versions))
+        return cls(pinned, versions, keys, tuple(located_runs(pinned, keys)))
+
+    def experiment_versions(self, experiments: Container[str]) -> dict[str, str]:
+        """Object versions inside run folders declared for any experiment in `experiments`."""
+        found: dict[str, str] = {}
+        for run in self.declarations:
+            if run.file.experiment in experiments:
+                for folder in run.folders:
+                    for key in under(self.keys, folder):
+                        found[key] = self.versions[key]
+        return found
 
 
 def located_runs(
