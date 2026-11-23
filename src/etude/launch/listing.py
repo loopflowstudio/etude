@@ -5,7 +5,15 @@ from collections.abc import Sequence
 from decimal import Decimal
 
 from etude.identity import run_address
-from etude.launch.records import Availability, Machine, MachineStatus, Quote, Status
+from etude.launch.records import (
+    Availability,
+    HourlyRate,
+    Machine,
+    MachineStatus,
+    Quote,
+    Spend,
+    Status,
+)
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.server import PythonClient
 from etude.launch.source import line
@@ -128,10 +136,13 @@ def describe_machine(status: MachineStatus, *, available: str = "available") -> 
     spent = status.cost
     assert spent is not None  # A listed rental has either a refusal or a paid window.
     rental = spent.rental
-    cost = f"{'~' if spent.estimated else ''}${spent.usd:.2f}"
     if rental.billed_through is not None:
         cost = f"${rental.billed_usd:.4f} billed" + (
             f" + ~${spent.unbilled_usd:.4f}" if spent.estimated else ""
+        )
+    else:
+        cost = Spend(usd=spent.usd, unit=rental.unit, units=spent.units).format_cost(
+            estimated=spent.estimated
         )
     window = (
         f"rented, ended {machine.deleted_at:%Y-%m-%d %H:%M} UTC"
@@ -158,23 +169,49 @@ def show_machines(scheduler: Scheduler, *, ended: bool) -> None:
             print(warning)
 
 
+def _rate(rate: HourlyRate) -> str:
+    if rate.unit == "usd":
+        assert rate.usd_per_hour is not None
+        return f"at {_per_hour(rate.usd_per_hour)}"
+    label = rate.unit.upper()
+    if rate.usd_per_unit is None:
+        if rate.units_per_hour is None:
+            return f"in {label} (rate observed on assign)"
+        return f"at {_amount(rate.units_per_hour)} {label}/hour"
+    conversion = f"{_amount(rate.usd_per_unit)}/{label}"
+    if rate.units_per_hour is None:
+        return f"in {label} at ${conversion} (rate observed on assign)"
+    native = f"{_amount(rate.units_per_hour)} {label}/hour"
+    hourly = (
+        rate.units_per_hour * rate.usd_per_unit if rate.usd_per_hour is None else rate.usd_per_hour
+    )
+    return f"at {native} ({_per_hour(hourly)} at ${conversion})"
+
+
 def show_quote(quote: Quote) -> None:
     """First-wave placements and planned rental costs under the quoted windows."""
     for each in quote.machines:
+        rate = _rate(each)
         if each.machine is not None:
             where = f"machine {each.machine}" + (
-                f" at {_per_hour(each.usd_per_hour)}" if each.usd_per_hour else ""
+                f" {rate}" if (each.usd_per_hour or each.unit != "usd") else ""
             )
         else:
-            where = f"rent {each.hardware or 'a machine'} at {_per_hour(each.usd_per_hour)}"
+            where = f"rent {each.hardware or 'a machine'} {rate}"
         if each.spot:
             where += ", spot"
         if each.slots > 1:
             where += f", {each.slots} slots"
             if each.alongside:
                 where += " with " + ", ".join(each.alongside)
-        print(each.run, where, f"planned rental cost ${each.max_usd:.2f}", sep="  ")
-    print(f"planned first-wave rental cost: ${quote.max_usd:.2f}; nothing rented")
+        planned = (
+            "planned rental cost unknown until assign"
+            if each.max_usd is None
+            else f"planned rental cost ${each.max_usd:.2f}"
+        )
+        print(each.run, where, planned, sep="  ")
+    total = "unknown until assign" if quote.max_usd is None else f"${quote.max_usd:.2f}"
+    print(f"planned first-wave rental cost: {total}; nothing rented")
     if quote.limit_usd is not None:
         print(f"job rental budget: ${quote.limit_usd:.2f}")
     print(
@@ -183,19 +220,33 @@ def show_quote(quote: Quote) -> None:
     )
 
 
+def _amount(value: Decimal) -> str:
+    return f"{value.quantize(Decimal('0.0001')).normalize():f}"
+
+
 def _per_hour(usd: Decimal) -> str:
     """A provider's hourly price to four decimal places: Vast's float sums carry binary noise."""
-    return f"${usd.quantize(Decimal('0.0001')).normalize():f}/hour"
+    return f"${_amount(usd)}/hour"
 
 
 def show_availability(answer: Availability) -> None:
     offer = answer.offer
-    ceiling = (
-        "no ceiling" if answer.max_usd_per_hour is None else f"ceiling ${answer.max_usd_per_hour}"
-    )
+    if answer.max_usd_per_hour is None:
+        ceiling = "no ceiling"
+    elif offer.usd_per_hour is None:
+        ceiling = f"ceiling ${answer.max_usd_per_hour} checked on assign"
+    else:
+        ceiling = f"ceiling ${answer.max_usd_per_hour}"
     market = ", spot" if answer.spot else ""
     if offer.available:
-        description = f"{offer.hardware or 'a machine'} at {_per_hour(offer.usd_per_hour)}{market} ({ceiling})  available"
+        rate = _rate(offer)
+        extras: list[str] = []
+        if offer.balance is not None:
+            extras.append(f"{offer.balance:.2f} {offer.unit.upper()} balance")
+        if offer.active is not None:
+            extras.append(f"{offer.active} active")
+        meta = f" [{', '.join(extras)}]" if extras else ""
+        description = f"{offer.hardware or 'a machine'} {rate}{market}{meta} ({ceiling})  available"
     else:
         description = f"none available: {offer.reason}" if offer.reason else "none available"
     print(

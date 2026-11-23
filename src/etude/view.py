@@ -1048,7 +1048,7 @@ class _ViewSnapshot:
                 f'<td><span class="pill">{escape(state)}</span><small>{escape(reason)}</small></td>'
                 f"<td>{escape(row['position'] or '—')}<small>{last_write}</small></td>"
                 f"<td>{escape(metric or '—')}</td><td>{machine}</td>"
-                f"<td>{status.formatted_spend if status else '—'}</td></tr>"
+                f"<td>{escape(status.formatted_spend) if status else '—'}</td></tr>"
             )
             if address == selected:
                 detail = self._detail(address, pick, tab, curves, now)

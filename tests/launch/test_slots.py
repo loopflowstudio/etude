@@ -10,6 +10,7 @@ import pytest
 
 from etude.errors import LauncherError
 from etude.launch.database import launcher_file
+from etude.launch.executor import ProviderService
 from etude.launch.executor import local as local_service
 from etude.launch.provisioner.machines import Safeguards
 from etude.launch.records import Machine, OnDemand, Pool
@@ -133,8 +134,9 @@ def test_quote_shows_runs_sharing_one_rental(tmp_path: Path) -> None:
         ("trial/baseline@3", ()),
     ]
     assert {q.slots for q in quote.machines} == {2}
-    assert quote.machines[0].max_usd == quote.machines[1].max_usd
-    assert quote.machines[0].max_usd + quote.machines[1].max_usd == quote.machines[2].max_usd
+    first, second, third = (q.max_usd for q in quote.machines)
+    assert first is not None and second is not None and first == second
+    assert first + second == third
 
 
 def test_launch_places_a_cohort_on_one_machine_when_its_slots_hold_it(tmp_path: Path) -> None:
@@ -220,25 +222,21 @@ def test_strict_rental_funds_only_the_seeds_placed(tmp_path: Path, seeds: int) -
 
 @pytest.mark.parametrize(("increment", "share"), [(0, "0.2875"), (1, "0.46")])
 def test_group_includes_setup_and_provider_rounding(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, increment: int, share: str
+    tmp_path: Path, increment: int, share: str
 ) -> None:
     b = bench(tmp_path, usd_per_hour="0.69")
-    monkeypatch.setattr(
-        b.scheduler._services["runpod"],
-        "safeguards",
-        Safeguards(reservation_hours=increment),
-        raising=False,
-    )
-    b.scheduler.add_ondemand(
+    provider = ProviderService(lambda _: b.service, Safeguards(reservation_hours=increment))
+    scheduler = Scheduler(b.store, {"runpod": provider}, b.clock)
+    scheduler.add_ondemand(
         OnDemand(name="shared", template=L4, max_machines=1, slots=3, setup_seconds=900)
     )
     job = JOB.model_copy(update={"max_usd": Decimal(share)})
     short = job.model_copy(update={"max_usd": Decimal(share) - Decimal("0.0001")})
     with pytest.raises(LauncherError, match="job dollars do not cover the hours"):
-        b.scheduler.quote(short.runs(1, 2, 3), rent="shared")
-    quote = b.scheduler.quote(job.runs(1, 2, 3), rent="shared")
+        scheduler.quote(short.runs(1, 2, 3), rent="shared")
+    quote = scheduler.quote(job.runs(1, 2, 3), rent="shared")
     assert [q.max_usd for q in quote.machines] == [Decimal(share)] * 3
-    b.scheduler.launch(job.runs(1, 2, 3), rent="shared")
+    scheduler.launch(job.runs(1, 2, 3), rent="shared")
     (rental,) = b.store.rentals()
     assert (rental.deadline - b.clock()).total_seconds() == 4500
     assert rental.cap_usd == quote.max_usd
@@ -267,7 +265,7 @@ def test_waiting_run_funds_only_the_extension(tmp_path: Path, rate: str, window:
     requests = [*JOB.runs(1), *waiting.runs(2)]
     quote = b.scheduler.quote(requests, rent="l4")
     assert [q.max_usd for q in quote.machines] == [Decimal(rate)]
-    assert quote.max_usd <= Decimal(rate) + Decimal("0.10")
+    assert quote.max_usd is not None and quote.max_usd <= Decimal(rate) + Decimal("0.10")
     b.scheduler.launch(requests, rent="l4")
     (rental,) = b.store.rentals()
     assert (rental.deadline - b.clock()).total_seconds() == window
@@ -312,7 +310,11 @@ def test_resume_reserves_its_unfinished_share_only_on_other_machines(tmp_path: P
     # one-second gap between stopping and rejoining by shortening the target.
     same = RunRequest(id="s1", seed=1, job=job.model_copy(update={"max_hours": 0.999}), resume=True)
     (q,) = b.scheduler.quote([same], rent="l4").machines
-    assert q.machine == machine and Decimal("0.27") < q.max_usd < Decimal("0.28")
+    assert (
+        q.machine == machine
+        and q.max_usd is not None
+        and Decimal("0.27") < q.max_usd < Decimal("0.28")
+    )
     b.scheduler.launch(same, rent="l4")
     assert b.scheduler.attempts(run)[-1].machine == machine
     assert b.service.creates == 1

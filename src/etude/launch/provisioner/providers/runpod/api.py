@@ -180,6 +180,7 @@ class RunPodAPI(PodHTTP):
             "env": env,
         }
         if isinstance(hardware, GPU):
+            assert hardware.min_memory_gb is not None and hardware.min_vcpus is not None
             payload["gpu"] = {
                 "id": hardware.id,
                 "count": hardware.count,

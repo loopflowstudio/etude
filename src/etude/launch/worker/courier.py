@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextvars import copy_context
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import IO
 
@@ -776,9 +776,11 @@ def _serve(
     courier: Courier | None = None
     deadline: float | None = None
     delivery_seconds: float | None = None
+    rental_deadline: datetime | None = None
     try:
         if until := os.environ.get("ETUDE_DEADLINE"):
-            deadline = time.monotonic() + (datetime.fromisoformat(until) - _now()).total_seconds()
+            rental_deadline = datetime.fromisoformat(until)
+            deadline = time.monotonic() + (rental_deadline - _now()).total_seconds()
         raw = None
         while raw is None:  # startup allowance and the independent rental guardian both apply
             startup_timeout()
@@ -794,6 +796,12 @@ def _serve(
         bootstrap = Bootstrap.model_validate_json(raw)
         packet = bootstrap.packet
         delivery_seconds = packet.delivery_seconds
+        if rental_deadline is not None:
+            # Provider-trimmed deadlines (e.g. Colab cap on assign) must also bound attempts.py
+            # so work still stops cleanly before delivery_seconds.
+            work_deadline = rental_deadline - timedelta(seconds=delivery_seconds or 0)
+            if packet.deadline is None or work_deadline < packet.deadline:
+                packet = packet.model_copy(update={"deadline": work_deadline})
         os.environ["ETUDE_LOG_SECONDS"] = (
             str(packet.log_seconds) if packet.log_seconds is not None else ""
         )

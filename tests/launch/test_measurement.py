@@ -210,12 +210,12 @@ def test_several_run_git_and_database_counts(
             8,
             ("numpy", "pydantic", "etude.launch.worker", "etude.launch.scheduler"),
         ),
-        # Client composition includes four modules each for Vast and Lium, three
-        # each for EC2 and Lambda, the VM host script they share, the AWS signer,
-        # the request every provider shares, the storage socket policy it forwards
-        # to workers, and shared run-identity validation.
+        # Client composition includes four modules each for Vast, Lium and Colab,
+        # three each for EC2 and Lambda, the VM host script they share, the AWS
+        # signer, the request every provider shares, the storage socket policy
+        # it forwards to workers, and shared run-identity validation.
         # The layout adds provisioner/scheduler packages and two scheduler leaves.
-        (["pools"], 69, ("numpy", "boto3", "etude.launch.worker")),
+        (["pools"], 73, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
             36,  # includes the shared Etude home path and S3's AWS signer

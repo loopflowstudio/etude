@@ -62,6 +62,8 @@ class Packet(Record):
     kept: bool = False  # stay until the deadline and take work as it is added
     autorun: bool = False
     cap_usd: Decimal = Decimal(0)
+    cap_units: Decimal | None = None
+    max_units_per_hour: Decimal | None = None
     slots: int = Field(default=1, ge=1)  # attempts the worker runs at once
 
 

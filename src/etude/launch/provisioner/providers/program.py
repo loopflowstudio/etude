@@ -21,7 +21,7 @@ class Program:
         self._bucket, self._prefix = bucket, prefix
         self._digest: str | None = None
 
-    def prepare(self, request: MachineRequest, image: Image) -> dict[str, str]:
+    def prepare(self, request: MachineRequest, image: Image | None = None) -> dict[str, str]:
         """Publish once per composition; issue fresh links for each rental."""
         assert request.deadline is not None and request.bootstrap is not None
         timeouts = storage_environment()
@@ -32,10 +32,9 @@ class Program:
             if self._bucket.get(key) is None:
                 self._bucket.put(key, code, once=True)
             self._digest = digest
-        return {
+        env = {
             **timeouts,
             "ETUDE_LOG_SECONDS": "" if request.log_seconds is None else str(request.log_seconds),
-            "ETUDE_IMAGE": image.model_dump_json(),
             "ETUDE_SESSION": request.session,
             "ETUDE_STARTUP_DEADLINE": request.startup_deadline.isoformat()
             if request.startup_deadline
@@ -51,6 +50,9 @@ class Program:
             "ETUDE_PACKAGE_SHA256": self._digest,
             "ETUDE_PROGRAM": base64.b64encode(program_archive(guardian=True)).decode(),
         }
+        if image is not None:
+            env["ETUDE_IMAGE"] = image.model_dump_json()
+        return env
 
 
 def boot_source(module: str) -> str:
