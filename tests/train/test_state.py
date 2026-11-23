@@ -1,7 +1,11 @@
 """A recipe resumes only committed state and never enters another phase after a stop."""
 
 import json
+import subprocess
+import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic import BaseModel
@@ -18,7 +22,31 @@ class Counts(BaseModel):
     games: int = 0
 
 
-def test_custom_state_and_counts_resume_together_after_relay(tmp_path: Path) -> None:
+def test_custom_state_and_counts_resume_together_after_relay_without_torch(tmp_path: Path) -> None:
+    # The child starts here, so even an optional import that catches ImportError is counted.
+    attempts = tmp_path / "torch-imports"
+    attempts.touch()
+    (tmp_path / "torch.py").write_text(
+        "from pathlib import Path\n"
+        "with Path('torch-imports').open('a') as log:\n"
+        "    log.write('torch\\n')\n"
+        "raise ImportError('PyTorch unavailable')\n"
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path\n"
+            "from tests.train.test_state import _round_trip_after_relay\n"
+            "_round_trip_after_relay(Path.cwd())",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    assert attempts.read_text().splitlines() == []
+
+
+def _round_trip_after_relay(tmp_path: Path) -> None:
     weights = b""
     counts = Counts()
 
@@ -54,7 +82,9 @@ def test_custom_state_and_counts_resume_together_after_relay(tmp_path: Path) -> 
         assert list(run.steps("updates", to=4)) == [3, 4]
 
 
-def test_per_step_export_and_legacy_unlisted_files(tmp_path: Path) -> None:
+def test_per_step_export_and_legacy_unlisted_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     value = 0
 
     def export(folder: Path) -> None:
@@ -83,9 +113,15 @@ def test_per_step_export_and_legacy_unlisted_files(tmp_path: Path) -> None:
     with open_run(directory=tmp_path, experiment="e", run="r", resume=True) as resumed:
         assert resumed.resume(restore=restore, extra=Counts()).games == 6
         assert value == 10
-        for _ in resumed.steps("updates", to=3):
-            with pytest.raises(ValueError, match="requires an export"):
-                resumed.save()
+        stop = tmp_path / "stop"
+        monkeypatch.setenv("ETUDE_STOP_FILE", str(stop))
+        steps = resumed.steps("updates", to=4, save_every=1)
+        assert next(steps) == 3
+        with pytest.raises(ValueError, match="requires an export"):
+            resumed.save()
+        stop.touch()
+        with pytest.raises(ValueError, match="requires an export"):
+            next(steps)
         assert resumed.resume(restore=restore) == saved.path
 
 
@@ -140,11 +176,150 @@ def test_stop_saves_custom_state_only_after_progress(
         assert saved.record.at["updates"] == 1
 
 
-def test_two_models_and_extra_resume_from_one_save(tmp_path: Path) -> None:
+def test_stop_in_a_new_clock_saves_files_and_counts_only_after_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stop = tmp_path / "stop"
+    monkeypatch.setenv("ETUDE_STOP_FILE", str(stop))
+    value = 10
+
+    def export(folder: Path) -> None:
+        (folder / "weights").write_text(str(value))
+
+    def restore(folder: Path) -> None:
+        nonlocal value
+        value = int((folder / "weights").read_text())
+
+    with open_run(directory=tmp_path, run="r") as run:
+        run.resume(export=export, extra=Counts(games=3))
+        for _ in run.steps("updates", to=1):
+            run.save()
+
+    with open_run(directory=tmp_path, run="r", resume=True) as run:
+        original = run.resume(export=export, restore=restore)
+        stop.touch()
+        with pytest.raises(Stopped):
+            list(run.steps("fits", to=2))
+        assert original is not None and run.resume() == original
+
+    stop.unlink()
+    value = 0
+    with open_run(directory=tmp_path, run="r", resume=True) as run:
+        counts = run.resume(export=export, restore=restore, extra=Counts())
+        with pytest.raises(Stopped):
+            for fit in run.steps("fits", to=2):
+                value += fit
+                counts.games += 3
+                stop.touch()
+
+    stop.unlink()
+    value = 0
+    with open_run(directory=tmp_path, run="r", resume=True) as run:
+        assert run.resume(restore=restore, extra=Counts()).games == 6
+        assert value == 11
+        assert run.at("updates") == 1 and list(run.steps("fits", to=2)) == [2]
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        ("export", "export must be callable"),
+        ("restore", "restore must be callable"),
+        ("seed", "saved seed"),
+        ("manifest", "files"),
+        ("missing file", "missing or nonportable file"),
+        ("extra", "games"),
+    ],
+)
+def test_failed_registration_preserves_live_state(
+    tmp_path: Path, failure: str, message: str
+) -> None:
+    def export(folder: Path) -> None:
+        (folder / "weights").write_bytes(b"original")
+
+    def restore(folder: Path) -> None:
+        pytest.fail("restore ran before registration was validated")
+
+    with open_run(directory=tmp_path) as run:
+        counts = run.resume(export=export, extra=Counts(), name="learner")
+        for step in run.steps("updates", to=2, save_every=1):
+            counts.games += 3
+            if step == 2:
+                saved = read_state(run.out / "state/learner")
+                assert saved is not None
+                manifest = saved.path / "state.json"
+                data = json.loads(manifest.read_bytes())
+                if failure == "seed":
+                    data["seed"] = run.seed + 1
+                elif failure == "extra":
+                    data["extra"]["games"] = "invalid"
+                elif failure == "manifest":
+                    del data["files"]
+                elif failure == "missing file":
+                    (saved.path / "weights").unlink()
+                manifest.write_text(json.dumps(data))
+                # Exercise runtime validation for an untyped recipe.
+                invalid = cast(Callable[[Path], None], 1)
+                with pytest.raises((TypeError, ValueError), match=message):
+                    run.resume(
+                        name="learner",
+                        extra=Counts(),
+                        restore=invalid if failure == "restore" else restore,
+                        export=invalid if failure == "export" else None,
+                    )
+            run.save(name="learner")
+        latest = read_state(run.out / "state/learner")
+        assert latest is not None and latest.record.extra == {"games": 6}
+        assert (latest.path / "weights").read_bytes() == b"original"
+
+
+def test_raising_restore_leaves_first_registration_unavailable(tmp_path: Path) -> None:
+    def restore(folder: Path) -> None:
+        raise RuntimeError("unreadable weights")
+
+    with open_run(directory=tmp_path, run="r") as run:
+        run.resume()
+        for _ in run.steps("updates", to=1):
+            run.save()
+    with open_run(directory=tmp_path, run="r", resume=True) as run:
+        with pytest.raises(RuntimeError, match="unreadable weights"):
+            run.resume(restore=restore)
+        with pytest.raises(ValueError, match="register state"):
+            run.save()
+
+
+@pytest.mark.parametrize("collision", ["model", "model.pt"])
+def test_export_collision_preserves_registered_object(tmp_path: Path, collision: str) -> None:
+    torch = pytest.importorskip("torch")  # optional training dependency
+    model = torch.nn.Linear(1, 1)
+
+    def export(folder: Path) -> None:
+        (folder / collision).write_bytes(b"custom")
+
+    with open_run(directory=tmp_path) as run:
+        run.resume(model=model)
+        for step in run.steps("updates", to=2, save_every=1):
+            if step == 1:
+                run.save()
+            else:
+                with pytest.raises(ValueError, match="export"):
+                    run.save(export=export)
+        restored = torch.nn.Linear(1, 1)
+        path = run.resume(model=restored)
+        assert path is not None and torch.equal(model.weight, restored.weight)
+        saved = read_state(run.out / "state")
+        assert saved is not None and saved.record.at["updates"] == 1
+
+
+def test_two_models_custom_files_and_extra_resume_from_one_save(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")  # optional training dependency
     model, rival = torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.25)
     config = Counts(games=3)
+
+    def export(folder: Path) -> None:
+        (folder / "custom").write_bytes(b"custom weights")
+
     with open_run(
         experiment="e",
         run="r",
@@ -153,7 +328,9 @@ def test_two_models_and_extra_resume_from_one_save(tmp_path: Path) -> None:
         config=config,
         strict=True,
     ) as run:
-        counts = run.resume(model=model, rival=rival, optimizer=optimizer, extra=Counts())
+        counts = run.resume(
+            export=export, model=model, rival=rival, optimizer=optimizer, extra=Counts()
+        )
         for value in run.steps("updates", to=2, save_every=1):
             counts.games += value
             run.log({"loss": value})
@@ -162,6 +339,15 @@ def test_two_models_and_extra_resume_from_one_save(tmp_path: Path) -> None:
         expected_rival = rival.weight.detach().clone()
     model2, rival2 = torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)
     optimizer2 = torch.optim.SGD(model2.parameters(), lr=0.01)
+    counts = Counts()
+    custom = b""
+
+    def restore(folder: Path) -> None:
+        nonlocal custom
+        assert counts.games == 3
+        assert torch.equal(model2.weight, expected)
+        custom = (folder / "custom").read_bytes()
+
     with open_run(
         resume=True,
         experiment="e",
@@ -171,9 +357,15 @@ def test_two_models_and_extra_resume_from_one_save(tmp_path: Path) -> None:
         config=config,
         strict=True,
     ) as resumed:
-        restored = resumed.resume(model=model2, rival=rival2, optimizer=optimizer2, extra=Counts())
-        assert restored.games == 3
-        assert torch.equal(model2.weight, expected)
+        restored = resumed.resume(
+            restore=restore,
+            export=export,
+            model=model2,
+            rival=rival2,
+            optimizer=optimizer2,
+            extra=counts,
+        )
+        assert restored is counts and custom == b"custom weights"
         assert torch.equal(rival2.weight, expected_rival)
         assert optimizer2.param_groups[0]["lr"] == 0.25
         assert list(resumed.steps("updates", to=4, save_every=1)) == [3, 4]
