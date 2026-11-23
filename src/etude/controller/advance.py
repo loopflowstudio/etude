@@ -14,7 +14,6 @@ from typing import Literal
 from etude.controller.declarations import (
     Experiment,
     asked,
-    find_training_run,
     format_known_run,
     read_training_jobs,
     select_runs,
@@ -24,9 +23,8 @@ from etude.errors import EtudeError, LauncherError
 from etude.eval.records import digest
 from etude.eval.result import EvalResult
 from etude.eval.tournament import StoredRuns, played
-from etude.experiment import observe, read_tournament_lines
+from etude.experiment import TrainingRuns, observe, read_tournament_lines
 from etude.jobs import (
-    Checkpoints,
     EvalGroup,
     EvalJob,
     Evaluation,
@@ -41,9 +39,10 @@ from etude.jobs import (
 from etude.launch import client
 from etude.launch.listing import show_quote
 from etude.launch.server import selected
-from etude.run import located_runs
+from etude.run import RunListing
 from etude.spec import Job, RunRequest, Smoke, Until
 from etude.storage import Storage, default_root
+from etude.view_link import print_view
 
 
 @dataclass
@@ -101,44 +100,6 @@ def _fits(job: Job, committed: Decimal, max_usd: Decimal | None) -> bool:
     return max_usd is None or committed + (job.max_usd or Decimal(0)) <= max_usd
 
 
-def _resumed(
-    request: RunRequest, experiment: str, until: Until | None
-) -> tuple[RunRequest, Decimal]:
-    """The request as a resume under its standing record's id, and the dollars that record releases."""
-    request = request.model_copy(
-        update={
-            "resume": True,
-            "job": request.job.model_copy(update={"until": until or request.job.until}),
-        }
-    )
-    for item in client.standing(experiment):
-        if item.record.launch.spec.name == request.job.name and item.record.seed == request.seed:
-            return request.model_copy(update={"id": item.record.id}), item.committed_usd
-    return request, Decimal(0)
-
-
-def _print_lines(lines: dict[str | None, str]) -> None:
-    """Print the training lines in declared order, once, and forget them."""
-    for line in lines.values():
-        print(line)
-    lines.clear()
-
-
-def _queued(request: RunRequest, experiment: str) -> TrainingRunSummary:
-    assert request.id is not None
-    name = request.id.removeprefix(experiment + "/")
-    return TrainingRunSummary(
-        name=name,
-        experiment=experiment,
-        job=request.job.name,
-        launch=request.job.name,
-        line=name,
-        state="queued",
-        checkpoints=Checkpoints(),
-        seed=request.seed,
-    )
-
-
 def advance(
     experiment: Experiment,
     *,
@@ -160,9 +121,8 @@ def advance(
     """One pass. Existing addresses stay put; explicit retries preserve delivered matches."""
     if max_usd is not None and (not max_usd.is_finite() or max_usd < 0):
         raise LauncherError("--max-usd must be a finite, nonnegative dollar limit")
-    listed = source.keys("")
-    declarations = located_runs(source, listed)
-    state = observe(source, experiment.name, keys=listed, declarations=declarations)
+    listing = RunListing.read(source)
+    state = observe(listing, experiment.name)
     committed = state.committed_usd
     print(
         f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: "
@@ -174,7 +134,7 @@ def advance(
     new: list[RunRequest] = []
     requests: list[RunRequest] = []
     # One line per declared run, keyed by address; a new run's line waits for its placement.
-    lines: dict[str | None, str] = {}
+    lines: dict[str | None, tuple[str, str | None]] = {}
     if mode != "local" and callable(experiment.training):
         assert experiment.file is not None
         requests = read_training_jobs(
@@ -184,42 +144,59 @@ def advance(
             state=state,
             function=experiment.training,
         )
+        known = TrainingRuns(state.runs, requested=(r.id for r in requests))
         if job is not None or seed is not None:
             requests = select_runs(requests, job=job, seed=seed)
         if resume and len(requests) != 1:
             raise LauncherError("--resume needs one run; select --job and --seed")
         for request in requests:
+            prior = known.find(request.id, request.job, request.seed)
             if resume:
-                request, released = _resumed(request, experiment.name, until)
-                committed -= released
-            elif known := format_known_run(request, find_training_run(request, state)):
-                lines[request.id] = known
+                standing = prior.standing if prior else None
+                if standing:
+                    committed -= standing.committed_usd
+                request = request.model_copy(
+                    update={
+                        "id": standing.record.id if standing else request.id,
+                        "resume": True,
+                        "job": request.job.model_copy(update={"until": until or request.job.until}),
+                    }
+                )
+            elif prior is not None:
+                lines[request.id] = format_known_run(request, prior), prior.address
                 continue
             if not _fits(request.job, committed, max_usd):
                 lines[request.id] = (
-                    f"{request.id}  new, not queued: --max-usd {max_usd} (${committed:.2f} committed)"
+                    f"{request.id}  new, not queued: --max-usd {max_usd} (${committed:.2f} committed)",
+                    None,
                 )
                 continue
             new.append(request)
-            lines[request.id] = f"{request.id}  new"
+            lines[request.id] = f"{request.id}  new", None
             committed += request.job.max_usd or Decimal(0)
     jobs: list[EvalJob] = []
     if experiment.eval is not None and evaluate:
         # This pass's new runs have no checkpoints yet, but their policies already exist
         # for eval_jobs. Selection/resume passes skip evaluation, so every run here is new.
-        asking = replace(state, runs=(*state.runs, *(_queued(r, experiment.name) for r in new)))
+        queued = []
+        for request in new:
+            assert request.id is not None  # Declarations have assigned addresses.
+            name = request.id.removeprefix(experiment.name + "/")
+            queued.append(
+                TrainingRunSummary.queued(name, experiment.name, request.job.name, request.seed)
+            )
+        asking = replace(state, runs=(*state.runs, *queued))
         try:
             jobs = asked(experiment.eval, asking)
         except EtudeError:
             # A policy of a run this pass left out (`--max-usd`) is missing; say which and why.
-            _print_lines(lines)
+            for line, _ in lines.values():
+                print(line)
             raise
     policy_lines = read_tournament_lines(
-        source,
+        listing,
         state,
         [job.recorded() for job in jobs],
-        keys=listed,
-        declarations=declarations,
     )
     smoke = Smoke()
     if smoke_file_first and not quote:
@@ -236,19 +213,12 @@ def advance(
         key for run in state.eval_runs if run.state in {"queued", "running"} for key in run.matches
     }
     failed = {
-        key: f"{experiment.name}/{run.name}"
-        for run in state.eval_runs
-        if run.state == "failed"
-        for key in run.matches
+        key: run.address for run in state.eval_runs if run.state == "failed" for key in run.matches
     }
-    taken = {f"{experiment.name}/{run.name}" for run in state.eval_runs}
+    taken = {run.address for run in state.eval_runs}
     decisions: list[TournamentDecision] = []
     stopped_runs: set[str] = set()
-    stored = (
-        StoredRuns.read(experiment.name, source, keys=listed, declarations=declarations)
-        if jobs
-        else None
-    )
+    stored = StoredRuns.read(experiment.name, listing) if jobs else None
     groups: dict[str, list[_PendingEvaluation]] = {}
     for declaration in jobs:
         recorded = declaration.recorded()
@@ -328,7 +298,7 @@ def advance(
             wave = {machine.run for machine in quoted.machines}
             for request in new:
                 verb = "launch" if request.id in wave else "queue"
-                lines[request.id] = f"{request.id}  new, would {verb}"
+                lines[request.id] = f"{request.id}  new, would {verb}", None
             for decision in decisions:
                 if decision.launched:
                     decision.state = "would launch" if decision.launched in wave else "would queue"
@@ -339,15 +309,21 @@ def advance(
                 item.record.id: item.placement for item in client.standing(experiment.name)
             }
             for request in new:
-                lines[request.id] = f"{request.id}  new, {placed[request.id]}"
+                lines[request.id] = f"{request.id}  new, {placed[request.id]}", request.id
             for decision in decisions:
                 if decision.launched:
                     decision.state = placed[decision.launched]
-    _print_lines(lines)
+    for line, address in lines.values():
+        print(line)
+        if not quote and address is not None:
+            print_view(address)
     if quoted is not None:
         show_quote(quoted)
     for decision in decisions:
         _show_tournament(decision)
+    if not quote:
+        for address in dict.fromkeys(d.launched for d in decisions if d.launched is not None):
+            print_view(address)
     if stopped_runs and not quote:
         raise EtudeError("launched_pass_failed", 409, detail=", ".join(sorted(stopped_runs)))
     return decisions

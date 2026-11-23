@@ -7,14 +7,14 @@ from typing import IO
 
 import pytest
 
-from etude.carriage import publication, put_back, restore_set
+from etude.carriage import Publication, publication, put_back, restore_set
 from etude.launch.aws import Keys
 from etude.launch.records import Storage as Place
 from etude.launch.schemas import Work
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket
 from etude.out import MEMBERSHIP
-from etude.records import Clock
+from etude.records import Clock, RunCounters, RunOutcome, RunRecord, RunWriter
 from etude.run import RunFiles, StorageDestination, prune
 from etude.storage import DirectoryStorage
 from etude.storage_timeout import StorageUnavailable
@@ -300,3 +300,96 @@ def test_a_folder_checkpoint_is_delivered_once_and_relayed_member_by_member(tmp_
         assert (target / checkpoint.file / member).read_bytes() == (
             checkpoint.path / member
         ).read_bytes()
+
+
+def test_host_relay_keeps_the_group_outcome_that_preceded_its_listing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = DirectoryStorage(tmp_path)
+    group = RunRecord(
+        id="league/group", experiment="league", kind="evaluation", members=("league/a",)
+    )
+    storage.put("run.json", group.model_dump_json().encode())
+    failed = RunOutcome(state="failed", counters=RunCounters()).model_dump_json().encode()
+    storage.put("outcome.json", failed)
+    block = "league/a/blocks/retry/block.json"
+
+    def finish_after_listing(root: Path, *, tail_seconds: float) -> Publication:
+        snapshot = publication(root, tail_seconds=tail_seconds)
+        storage.put(block, b"sealed")
+        storage.put(
+            "outcome.json",
+            RunOutcome(state="finished", counters=RunCounters()).model_dump_json().encode(),
+        )
+        return snapshot
+
+    monkeypatch.setattr("etude.carriage.publication", finish_after_listing)
+    relayed = restore_set(tmp_path)
+    assert block not in relayed
+    assert relayed["outcome.json"] == failed
+
+
+@pytest.mark.parametrize("delivered", [False, True], ids=["before-first-match", "both-tournaments"])
+def test_group_end_follows_both_members_and_a_fresh_machine_restores_them(
+    tmp_path: Path,
+    delivered: bool,
+) -> None:
+    storage = Writes()
+    address = "league/evals-test"
+    courier, _, root = machine(tmp_path / "old", storage, run=address)
+    members = ("league/blocks", "league/gauntlet")
+    record = RunRecord(id=address, experiment="league", kind="evaluation", members=members)
+    files = DirectoryStorage(root)
+    files.put("run.json", record.model_dump_json().encode())
+    files.put(
+        "outcome.json",
+        RunOutcome(state="failed", counters=RunCounters()).model_dump_json().encode(),
+    )
+    files.put(
+        "metrics/abcdef123456.json",
+        RunWriter(writer="abcdef123456", run=address, attempt="a1", host="test", started_ms=42)
+        .model_dump_json()
+        .encode(),
+    )
+    for member in members if delivered else ():
+        files.put(
+            member + "/run.json",
+            RunRecord(id=member, experiment="league", kind="evaluation").model_dump_json().encode(),
+        )
+        files.put(member + "/tournament.json", b"tournament")
+        files.put(member + "/blocks/one/scores.parquet", b"scores")
+        files.put(member + "/blocks/one/block.json", b"sealed")
+    courier._track(address, done=True)
+    sent = list(storage.writes)
+    assert sent[0].endswith("/" + address + "/run.json")
+    assert sent[-1].endswith("/" + address + "/outcome.json")
+    assert len(sent) == (11 if delivered else 3) and all(
+        count == 1 for count in storage.writes.values()
+    )
+
+    work = Work(
+        attempt="a2",
+        command="true",
+        limit_seconds=30,
+        limit_kind="out_of_time",
+        seed=None,
+        until=None,
+        config=None,
+        repo=None,
+        commit=None,
+        run=address,
+        resumes=True,
+    )
+    journal = _journal(storage)
+    reads = len(storage.asked)
+    links = journal._restore([work])
+    assert Counter(method for method, _ in storage.asked[reads:]) == {"GET": 2}
+    fresh, _, restored = machine(tmp_path / "fresh", storage, run=address)
+    fresh.restore(links, [work])
+    if delivered:
+        for member in members:
+            assert (restored / member / "blocks/one/scores.parquet").read_bytes() == b"scores"
+    assert restore_set(restored) == restore_set(root) == journal.held(address)
+    writes = storage.writes.copy()
+    fresh._track(address, done=False)
+    assert storage.writes == writes

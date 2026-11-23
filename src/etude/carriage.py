@@ -4,7 +4,7 @@ A run's folder (`etude.storage.run_directory`) reaches storage by one of
 two carriers: the tracker's shipper (`etude.run`) when a script runs
 on its own, and the launcher's courier (`etude.launch.worker.courier`) when it
 was launched, so the job's environment never holds bucket credentials. Both
-decide here which files are ready (`listing`), their order, the transfer's
+decide here which files are ready (`publication`), their order, the transfer's
 purpose, what a writer retired (`retired`), and which objects are never sent
 twice (`immutable`): Etude's own blocks, tables and checkpoints, and any
 file an author writes under a run's `artifacts/` folder. An eval run's
@@ -27,7 +27,7 @@ import json
 import re
 import shutil
 import time
-from collections.abc import Container, Iterable, Mapping, Sequence
+from collections.abc import Collection, Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from errno import EEXIST, ENOTEMPTY
 from hashlib import sha256
@@ -75,6 +75,8 @@ def checkpoint_key(address: str) -> str:
 
 
 ARTIFACTS = "artifacts"
+# Portable records at a run root, including the historical state.json outcome.
+RUN_FILES = ("run.json", "environment.json", "tournament.json", "state.json", "outcome.json")
 # An eval run's sealed block is a folder `blocks/WRITTEN.WRITER/`; its index is written last.
 EVAL_BLOCKS = "blocks"
 EVAL_BLOCK_INDEX = "block.json"
@@ -117,6 +119,10 @@ def purpose(key: str, recorded: Container[str] = ()) -> Literal["checkpoint", "r
 def _rank(key: str) -> int:
     # All out files precede records, including checkpoints recorded in place.
     # Ordering needs only paths; carriers read records for verification.
+    if key == "run.json":
+        return -1
+    if key == "outcome.json":
+        return 4  # A launch closes after its tournament results have arrived.
     if key.startswith("out/") or checkpoint_file(key):
         return 0
     if key.endswith("/" + EVAL_BLOCK_INDEX) and _eval_block(key.rpartition("/")[0]):
@@ -127,9 +133,8 @@ def _rank(key: str) -> int:
 
 
 def _listing(root: Path, *, tail_seconds: float) -> list[str]:
-    """Ready files as slash-separated keys, ordered by delivery rank then key.
+    """Ready files as slash-separated keys.
 
-    Out files share the first rank, so their membership is already in key order.
     A file still being written (`.open`, `.partial`) waits until it is whole,
     and anything under a folder starting with `.` (a carrier's own markers)
     never leaves. A tail is ready once it is `tail_seconds` old: 0 once its
@@ -152,7 +157,7 @@ def _listing(root: Path, *, tail_seconds: float) -> list[str]:
         if path.suffix == ".tail" and tail_seconds > 0 and now - stat.st_mtime < tail_seconds:
             continue
         keys.append(name.as_posix())
-    return sorted(keys, key=lambda key: (_rank(key), key))
+    return keys
 
 
 POINTER = "current.json"
@@ -261,15 +266,24 @@ def recovery_files(
 
 @dataclass(frozen=True)
 class Publication:
-    """One delivery's selected files and frozen pointers, captured before any upload."""
+    """One delivery's ordered files, state pointers and run outcome."""
 
     keys: tuple[str, ...]
     pointers: Mapping[str, bytes]
+    outcome: bytes | None
+
+    def frozen(self, key: str) -> bytes | None:
+        """Content captured before listing the files it commits."""
+        return self.outcome if key == "outcome.json" else self.pointers.get(key)
 
 
 def publication(root: Path, *, tail_seconds: float) -> Publication:
     # Pointers are read before the listing: a save committed in between waits
     # for the next pass instead of travelling under the pointer before it.
+    try:
+        outcome = (root / "outcome.json").read_bytes()
+    except FileNotFoundError:
+        outcome = None
     bodies = {
         path.relative_to(root).as_posix(): path.read_bytes()
         for path in (*root.glob("out/state/current.json"), *root.glob("out/state/*/current.json"))
@@ -279,10 +293,12 @@ def publication(root: Path, *, tail_seconds: float) -> Publication:
     # The listing follows no link, so a linked pointer or state folder selects nothing.
     listed = set(keys)
     pointers = {key: body for key, body in bodies.items() if key in listed and state_pointer(key)}
-    selected = _committed(keys, pointers)
+    selected = _committed(
+        (key for key in keys if key != "outcome.json" or outcome is not None), pointers
+    )
     # Pointers follow every save file, including arbitrarily named callback files.
     selected.sort(key=lambda key: (key in pointers, _rank(key), key))
-    return Publication(keys=tuple(selected), pointers=pointers)
+    return Publication(keys=tuple(selected), pointers=pointers, outcome=outcome)
 
 
 def prune_state(root: Path, pointers: Mapping[str, bytes]) -> None:
@@ -424,6 +440,47 @@ def taken(root: Path) -> set[str]:
     return here | _stored(root)
 
 
+def evaluation_files(keys: Collection[str], declaration: bytes | None) -> set[str]:
+    """Group lifecycle and durable tournament inputs, including pre-declaration launches."""
+    if declaration is None:
+        # Released groups have no root declaration. Their tournaments are
+        # directly below the assigned folder at compact or qualified addresses.
+        folders = {
+            key.rpartition("/")[0]
+            for key in keys
+            if key.endswith("/tournament.json")
+            and key.count("/") in (1, 2)
+            and key.split("/", 1)[0] not in ("out", ARTIFACTS)
+        }
+    else:
+        members = json.loads(declaration).get("members")
+        if members is None:
+            return set()
+        if not isinstance(members, list) or any(
+            not isinstance(m, str) or not within(m) for m in members
+        ):
+            raise ValueError("invalid evaluation member folders")
+        folders = set(members)
+    if not folders:
+        return set()
+    found = set()
+    for key in keys:
+        if not within(key):
+            raise ValueError("invalid evaluation recovery path")
+        if key == "outcome.json" or key.startswith("metrics/") and key.endswith(".json"):
+            found.add(key)
+            continue
+        # Interpret the path inside its tournament. A member can itself be named "blocks".
+        parent = key.rpartition("/")[0]
+        while parent and parent not in folders:
+            parent = parent.rpartition("/")[0]
+        if parent:
+            name = key[len(parent) + 1 :]
+            if name in RUN_FILES or name.startswith((EVAL_BLOCKS + "/", "tables/", "matches/")):
+                found.add(key)
+    return found
+
+
 def restore_set(root: Path) -> dict[str, bytes]:
     """What a later attempt on another host needs of this folder, by key.
 
@@ -431,18 +488,20 @@ def restore_set(root: Path) -> dict[str, bytes]:
     all of out, and the note of every checkpoint name
     `taken`. Metric blocks and other copied milestones remain in storage.
     """
-    keys = [f"{CHECKPOINTS}/{path.name}" for path in sorted((root / CHECKPOINTS).glob("*.json"))]
-    if (root / "run.json").is_file():
-        keys.append("run.json")
+    files: dict[str, bytes] = {}
+    declaration = root / "run.json"
+    if declaration.is_file():
+        files["run.json"] = declaration.read_bytes()
+    snapshot = publication(root, tail_seconds=0)
+    keys = evaluation_files(snapshot.keys, files.get("run.json"))
+    keys.update(f"{CHECKPOINTS}/{path.name}" for path in (root / CHECKPOINTS).glob("*.json"))
+    keys.update(key for key in snapshot.keys if key.startswith("out/"))
     wanted = resume_file(root)
     if wanted is not None and (root / wanted.key).is_file():
-        keys.append(wanted.key)
-    snapshot = publication(root, tail_seconds=0)
-    keys.extend(key for key in snapshot.keys if key.startswith("out/"))
-    files = {
-        key: snapshot.pointers[key] if key in snapshot.pointers else (root / key).read_bytes()
-        for key in dict.fromkeys(keys)
-    }
+        keys.add(wanted.key)
+    for key in sorted(keys):
+        body = snapshot.frozen(key)
+        files[key] = body if body is not None else (root / key).read_bytes()
     if (root / "out").is_dir() or (root / OUT_PRESENT).is_file():
         files[OUT_PRESENT] = b""
     files[STORED] = "".join(name + "\n" for name in sorted(taken(root))).encode()
@@ -487,6 +546,11 @@ def reconcile_out(root: Path, keys: Container[str]) -> None:
                     raise
 
 
+def replace_on_restore(key: str) -> bool:
+    """Out files and attempt outcomes may change between full restorations."""
+    return key.startswith("out/") or key.rsplit("/", 1)[-1] in ("state.json", "outcome.json")
+
+
 def put_back(root: Path, files: Mapping[str, bytes]) -> None:
     """Restore relayed files, retaining existing records and replacing out files.
 
@@ -499,7 +563,14 @@ def put_back(root: Path, files: Mapping[str, bytes]) -> None:
     # input must never clear unrelated out files.
     if STORED in files:
         reconcile_out(root, files)
-    ordered = sorted(files, key=lambda key: (checkpoint_file(key) or key.startswith("out/"), key))
+    ordered = sorted(
+        files,
+        key=lambda key: (
+            key == "outcome.json",
+            checkpoint_file(key) or key.startswith("out/"),
+            key,
+        ),
+    )
     recorded: dict[str, RecordedFile] | None = None
     for key in ordered:
         target = root / key
@@ -508,7 +579,7 @@ def put_back(root: Path, files: Mapping[str, bytes]) -> None:
         if key == STORED:
             note_stored(root, files[key].decode().split("\n")[:-1])
             continue
-        if target.exists() and not key.startswith("out/"):
+        if target.exists() and not replace_on_restore(key):
             continue
         if recorded is None and (checkpoint_file(key) or key.startswith("out/")):
             recorded = recorded_files(root)

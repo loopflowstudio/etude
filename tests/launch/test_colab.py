@@ -797,6 +797,8 @@ def test_provider_units_migration_preserves_existing_rows(
 ) -> None:
     known = migrations()
     preceding = known[: next(i for i, m in enumerate(known) if m.name == "provider_units")]
+    # Both upgrades stand for merged builds, whatever this branch has yet to merge.
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in known})
     with monkeypatch.context() as old:
         old.setattr(database, "migrations", lambda: preceding)
         upgrade(tmp_path)
@@ -810,7 +812,6 @@ def test_provider_units_migration_preserves_existing_rows(
         )
         store._db.commit()
         store.close()
-    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in known})
     result = upgrade(tmp_path)
     assert "provider_units" in result.applied
     store = open_home(tmp_path)

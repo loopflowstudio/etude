@@ -3,19 +3,27 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
-import threading
-from concurrent.futures import Future, ThreadPoolExecutor
-from http.client import HTTPConnection
 from pathlib import Path
 
 import pytest
 
 from etude.cli import main
 from etude.errors import EtudeError
-from etude.page import Index, Page, Pages, Server, build, experiment_files, index, render, target
+from etude.page import (
+    Drawn,
+    Page,
+    Pages,
+    PanelSelection,
+    Point,
+    build,
+    experiment_files,
+    index,
+    render,
+    run_chart_data,
+    target,
+)
 from etude.records import Clock
 from etude.report import (
     Anchors,
@@ -24,9 +32,11 @@ from etude.report import (
     Matrix,
     Ranking,
     Report,
+    Score,
     Series,
 )
 from etude.storage import DirectoryStorage, storage_from_uri
+from etude.train.read import read_all
 from tests.experiments import experiment_file
 from tests.run.storage import MeasuredStorage
 from tests.train.tracking import open_run
@@ -71,6 +81,42 @@ def test_the_report_is_the_files_and_the_experiment_is_named_for_it(tmp_path: Pa
     assert (page.experiment, page.origin, page.notes) == ("lab", "lab.py:report", ())
     assert page.report.evals == (Matrix(rows="opponent_deck", columns="deck"),)
     assert [run.name for run in page.training.runs] == ["a"]
+
+
+def test_edit_during_report_build_is_used_on_the_next_refresh(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    trained(runs, "lab", "a")
+    # The declaration edits its file after Python has loaded its first version.
+    replacement = (
+        "from etude.report import Report\ndef report(): return Report(baseline='second')\n"
+    )
+    file = experiment_file(
+        tmp_path / "experiments",
+        "lab",
+        "from pathlib import Path\nfrom etude.report import Report\n"
+        f"def report():\n    Path(__file__).write_text({replacement!r})\n"
+        "    return Report(baseline='first')\n",
+    )
+    pages = Pages(runs)
+    assert pages.build(file).report.baseline == "first"
+    assert pages.build(file).report.baseline == "second"
+
+
+def test_refresh_tracks_a_helper_first_imported_by_eval_jobs(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    trained(runs, "lab", "a")
+    folder = tmp_path / "experiments"
+    helper = experiment_file(folder, "late_report_jobs", "JOBS = []\n")
+    file = experiment_file(
+        folder,
+        "lab",
+        "def eval_jobs(state):\n    from late_report_jobs import JOBS\n    return JOBS\n",
+    )
+    pages = Pages(runs)
+    assert pages.build(file).experiment == "lab"
+    helper.write_text("raise ValueError('edited evaluation declaration')\n")
+    with pytest.raises(ValueError, match="edited evaluation declaration"):
+        pages.build(file)
 
 
 def test_checkpoints_with_no_etude_clock_are_named_with_the_reason(tmp_path: Path) -> None:
@@ -179,8 +225,20 @@ def test_a_folder_holds_the_files_that_define_eval_or_report_and_none_is_run(
         Path("more/ladder.py"),
     ]
     experiment_file(folder / "copy", "lab", REPORTED)
-    with pytest.raises(EtudeError, match="experiment_named_twice"):
+    with pytest.raises(EtudeError, match="experiment_named_twice: copy/lab.py and lab.py"):
         experiment_files(folder)
+
+
+def test_a_folder_holding_etude_home_ignores_the_sources_it_retains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "lab"
+    monkeypatch.setenv("ETUDE_HOME", str(folder / "home"))
+    monkeypatch.setenv("ETUDE_TRACK_DIR", str(folder / "runs"))
+    experiment_file(folder, "paced", REPORTED)
+    # A launch keeps a copy of the source for each attempt under Etude's home.
+    experiment_file(folder / "home/sessions/a1/attempts/b2/src", "paced", REPORTED)
+    assert experiment_files(folder) == [folder / "paced.py"]
 
 
 def test_a_folders_report_is_an_index_of_its_experiments_pages(
@@ -193,7 +251,7 @@ def test_a_folders_report_is_an_index_of_its_experiments_pages(
     experiment_file(folder, "broken", "def report(): ...\n\nraise RuntimeError('typo')\n")
     experiment_file(folder, "fresh", REPORTED)
     built = Pages(runs).build_each(folder)
-    found = index(runs, built, href=lambda stem: f"{stem}.html")
+    found = index(runs, built)
     rows = {entry.experiment: entry for entry in found.entries}
     assert rows["broken"].page is None
     assert rows["broken"].error is not None and "RuntimeError: typo" in rows["broken"].error
@@ -207,57 +265,6 @@ def test_a_folders_report_is_an_index_of_its_experiments_pages(
     assert main(["report", str(folder), "--source", str(runs)]) == 0
     assert capsys.readouterr().out.strip() == str(runs / "reports/index.html")
     assert sorted(p.name for p in (runs / "reports").iterdir()) == ["index.html", "lab.html"]
-    # Served, it is the index at / and each experiment's page at /STEM.
-    server = Server(runs, folder, ("127.0.0.1", 0))
-    try:
-        assert '"href": "/lab"' in (server.page("/") or "")
-        assert "lab.py:report" in (server.page("/lab") or "")
-        assert server.page("/elsewhere") is None
-    finally:
-        server.server_close()
-
-
-COUNTED = """
-from pathlib import Path
-
-from etude.report import Report
-
-with Path(__file__).with_suffix(".built").open("a") as built:
-    built.write("built\\n")
-
-
-def report() -> Report:
-    return Report()
-"""
-
-
-def test_a_served_page_refreshes_on_demand_only_when_its_files_change(tmp_path: Path) -> None:
-    runs = tmp_path / "runs"
-    trained(runs, "lab", "a")
-    trained(runs, "other", "c")
-    file = experiment_file(tmp_path / "experiments", "lab", COUNTED)
-    builds = file.with_suffix(".built")  # the file runs once for every page built
-    measured = MeasuredStorage(DirectoryStorage(runs))
-    server = Server(measured, file, ("127.0.0.1", 0))
-    try:
-        assert '"name": "a"' in (server.page("/") or "")
-        reads = measured.requests, measured.listings
-        server.page("/")
-        assert (measured.requests, measured.listings) == reads
-        assert builds.read_text().count("built") == 1
-        # Another experiment's run is not this page's input; a run of its own is.
-        trained(runs, "other", "d")
-        server.page("/", refresh=True)
-        assert builds.read_text().count("built") == 1
-        trained(runs, "lab", "b")
-        assert '"name": "b"' not in (server.page("/") or "")
-        assert '"name": "b"' in (server.page("/", refresh=True) or "")
-        assert builds.read_text().count("built") == 2
-        file.write_text(COUNTED + "# edited\n")
-        server.page("/", refresh=True)
-        assert builds.read_text().count("built") == 3
-    finally:
-        server.server_close()
 
 
 def test_a_page_carries_its_charts_and_needs_no_network(tmp_path: Path) -> None:
@@ -277,201 +284,6 @@ def test_an_absent_experiments_error_names_the_source_as_it_was_given(tmp_path: 
     given = re.escape(f"no runs of 'fresh' in {tmp_path / 'runs'};")
     with pytest.raises(ValueError, match=given):
         build(tmp_path / "runs", experiment_file(tmp_path, "fresh"))
-
-
-def test_refresh_failure_preserves_the_last_page_and_recovers(tmp_path: Path) -> None:
-    runs = tmp_path / "runs"
-    trained(runs, "lab", "a")
-    file = experiment_file(tmp_path, "lab", REPORTED)
-    with Server(runs, file, ("127.0.0.1", 0)) as server:
-        original = server.page()
-        assert original is not None
-        assert '"refresh": null' in original and '"served": true' in original
-        file.write_text("raise RuntimeError('broken report')\n")
-        with pytest.raises(RuntimeError, match="broken report"):
-            server.page(refresh=True)
-        assert server.page() == original  # includes its original generation timestamp
-        file.write_text(REPORTED.replace("Report()", 'Report(labels={"a": "Readable"})'))
-        refreshed = server.page(refresh=True)
-        assert refreshed != original and '"Readable"' in (refreshed or "")
-        assert server.page() == refreshed
-
-
-def test_refresh_reads_an_edited_neighbour_the_file_imports(tmp_path: Path) -> None:
-    runs = tmp_path / "runs"
-    trained(runs, "lab", "a")
-    folder = tmp_path / "experiments"
-    helper = experiment_file(folder, "lab_names", 'NAME = "First"\n')
-    file = experiment_file(
-        folder,
-        "lab",
-        "from etude.report import Report\nfrom lab_names import NAME\n\n\n"
-        "def report() -> Report:\n    return Report(labels={'a': NAME})\n",
-    )
-    with Server(runs, file, ("127.0.0.1", 0)) as server:
-        os.utime(helper, ns=(1_700_000_000_000_000_000, 1_700_000_000_000_000_000))
-        assert '"First"' in (server.page() or "")
-        # Same size and second: Python's bytecode cache must not hide this edit.
-        helper.write_text('NAME = "Other"\n')
-        os.utime(helper, ns=(1_700_000_000_000_000_001, 1_700_000_000_000_000_001))
-        assert '"Other"' in (server.page(refresh=True) or "")
-        helper.write_text("NAME = (\n")
-        with pytest.raises(SyntaxError):
-            server.page(refresh=True)
-        helper.write_text('NAME = "Repaired name"\n')
-        assert '"Repaired name"' in (server.page(refresh=True) or "")
-
-
-def test_concurrent_refreshes_join_one_generation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    runs = tmp_path / "runs"
-    trained(runs, "lab", "a")
-    file = experiment_file(tmp_path, "lab", REPORTED)
-    started, release, joined = threading.Event(), threading.Event(), threading.Event()
-    build_page = Pages.build
-    generations = 0
-
-    def blocked_build(self: Pages, path: Path) -> Page:
-        nonlocal generations
-        generations += 1
-        started.set()
-        if not release.wait(5):
-            raise TimeoutError("test generation was not released")
-        return build_page(self, path)
-
-    class Joined(Future[str | None]):
-        def result(self, timeout: float | None = None) -> str | None:
-            # Only the waiter reaches result() while the owner is still building.
-            joined.set()
-            return super().result(timeout)
-
-    monkeypatch.setattr(Pages, "build", blocked_build)
-    monkeypatch.setattr("etude.page.Future", Joined)
-    with Server(runs, file, ("127.0.0.1", 0)) as server, ThreadPoolExecutor(2) as pool:
-        first = pool.submit(server.page, refresh=True)
-        try:
-            assert started.wait(5)
-            second = pool.submit(server.page, refresh=True)
-            assert joined.wait(5)
-        finally:
-            release.set()
-        assert first.result(5) == second.result(5) == server.page()
-        assert generations == 1
-
-
-def test_served_folder_index_reuses_output_until_refresh(tmp_path: Path) -> None:
-    runs, folder = tmp_path / "runs", tmp_path / "experiments"
-    trained(runs, "lab", "a")
-    file = experiment_file(folder, "lab", REPORTED)
-    measured = MeasuredStorage(DirectoryStorage(runs))
-    with Server(measured, folder, ("127.0.0.1", 0)) as server:
-        first = server.page()
-        reads = measured.requests, measured.listings
-        assert server.page() == first
-        assert (measured.requests, measured.listings) == reads
-        trained(runs, "lab", "b")
-        assert '"name": "b"' not in (server.page() or "")
-        assert '"name": "b"' in (server.page(refresh=True) or "")
-        assert '"name": "b"' in (server.page("/lab") or "")
-        assert '"refresh": null' in (first or "")
-        detail = server.page("/lab")
-        file.write_text(REPORTED + "\nraise RuntimeError('broken token=fixture-credential')\n")
-        failed = server.page(refresh=True)
-        assert failed is not None and "broken token=[redacted]" in failed
-        assert "fixture-credential" not in failed
-        assert server.page("/lab") == detail
-
-
-def test_http_folder_refresh_keeps_syntax_failures_and_recovers(tmp_path: Path) -> None:
-    runs, folder = tmp_path / "runs", tmp_path / "experiments"
-    trained(runs, "lab", "a")
-    file = experiment_file(folder, "lab", REPORTED)
-    # Remember recognised files even if their first build had no page to retain.
-    empty = experiment_file(folder, "empty", REPORTED)
-    experiment_file(folder, "helper", "def utility(): ...\n")
-    with Server(runs, folder, ("127.0.0.1", 0)) as server:
-        worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
-        worker.start()
-        client = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
-
-        def request(method: str, route: str) -> tuple[int, str]:
-            client.request(method, route)
-            reply = client.getresponse()
-            return reply.status, reply.read().decode()
-
-        def entries(html: str) -> Index:
-            payload = html.split('<script type="application/json" id="data">', 1)[1]
-            return Index.model_validate_json(payload.split("</script>", 1)[0], extra="ignore")
-
-        try:
-            status, html = request("GET", "/")
-            assert status == 200
-            assert {e.experiment for e in entries(html).entries} == {"lab", "empty"}
-            status, original = request("GET", "/lab")
-            assert status == 200
-            file.write_text(REPORTED + "\ndef token=fixture-credential\n")
-            empty.write_text("def report(\n")
-            for _ in range(2):
-                status, html = request("POST", "/")
-                rows = {e.experiment: e for e in entries(html).entries}
-                assert status == 200 and set(rows) == {"lab", "empty"}
-                assert rows["lab"].href == "/lab"
-                assert all(e.error and "SyntaxError" in e.error for e in rows.values())
-                assert "fixture-credential" not in html
-                assert request("GET", rows["lab"].href) == (200, original)
-            status, error = request("POST", "/lab")
-            assert status == 500 and "SyntaxError" in error
-            assert "fixture-credential" not in error
-            assert request("GET", "/lab") == (200, original)
-            file.write_text(REPORTED.replace("Report()", 'Report(labels={"a": "Repaired"})'))
-            empty.unlink()
-            status, html = request("POST", "/")
-            (row,) = entries(html).entries
-            assert status == 200 and row.error is None and row.experiment == "lab"
-            status, repaired = request("GET", row.href)
-            assert status == 200 and '"Repaired"' in repaired and repaired != original
-            file.unlink()
-            status, html = request("POST", "/")
-            assert status == 200 and entries(html).entries == ()
-        finally:
-            client.close()
-            server.shutdown()
-            worker.join(timeout=5)
-            assert not worker.is_alive()
-
-
-def test_http_refresh_reports_failures_without_replacing_the_cached_page(tmp_path: Path) -> None:
-    runs = tmp_path / "runs"
-    trained(runs, "lab", "a")
-    file = experiment_file(tmp_path, "lab", REPORTED)
-    with Server(runs, file, ("127.0.0.1", 0)) as server:
-        worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
-        worker.start()
-        client = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
-        try:
-            client.request("GET", "/")
-            reply = client.getresponse()
-            assert reply.status == 200 and reply.getheader("Cache-Control") == "no-store"
-            original = reply.read()
-            file.write_text("raise RuntimeError('cannot generate token=fixture-credential')\n")
-            client.request("POST", "/")
-            reply = client.getresponse()
-            error = reply.read()
-            assert reply.status == 500 and b"cannot generate token=[redacted]" in error
-            assert b"fixture-credential" not in error
-            client.request("GET", "/")
-            reply = client.getresponse()
-            assert reply.status == 200 and reply.read() == original
-            file.write_text(REPORTED)
-            client.request("POST", "/")
-            reply = client.getresponse()
-            assert reply.status == 200 and b'"served": true' in reply.read()
-        finally:
-            client.close()
-            server.shutdown()
-            worker.join(timeout=5)
-            assert not worker.is_alive()
 
 
 def test_planned_marker_uses_the_current_continuation_not_an_older_overrun(
@@ -507,38 +319,6 @@ def test_planned_marker_uses_the_current_continuation_not_an_older_overrun(
     assert build(runs, file).training.runs[0].at["updates"] == 1200
 
 
-def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(
-    tmp_path: Path,
-) -> None:
-    runs = tmp_path / "runs"
-    trained(runs, "frontier", "a")
-    repository = tmp_path / "lab"
-    repository.mkdir()
-    (repository / "pyproject.toml").write_text("[project]\nname = 'lab'\n")
-    experiment_file(repository / "lab_reports", "__init__")
-    shared = experiment_file(
-        repository / "lab_reports",
-        "reports",
-        "from etude.report import EvalPanel, Matrix, Report\n\n\n"
-        "def standard_report(evals: tuple[EvalPanel, ...] = ()) -> Report:\n"
-        "    return Report(labels={'a': 'Width 64'}, evals=(Matrix(title='Standard', rows='deck', columns='opponent'), *evals))\n",
-    )
-    # As an editable install of the repository puts it on the path.
-    sys.path.insert(0, str(repository))
-    file = experiment_file(
-        repository / "experiments",
-        "frontier",
-        "from etude.report import Matrix, Report\nfrom lab_reports.reports import standard_report\n"
-        "\n\ndef report() -> Report:\n"
-        "    return standard_report(evals=(Matrix(title='Frontier only', rows='deck', columns='seat'),))\n",
-    )
-    with Server(runs, file, ("127.0.0.1", 0)) as server:
-        first = server.page() or ""
-        assert all(text in first for text in ('"Width 64"', '"Standard"', '"Frontier only"'))
-        shared.write_text(shared.read_text().replace("Standard", "Edited standard"))
-        assert '"Edited standard"' in (server.page(refresh=True) or "")
-
-
 def test_report_experiment_override_selects_runs_and_names_the_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -551,22 +331,13 @@ def test_report_experiment_override_selects_runs_and_names_the_output(
     for name, score in (("coin", 1), ("wide", 9)):
         with open_run(experiment=name, run=name, directory=source) as run:
             run.log({"score": score}, updates=1)
-    pages = Pages(source, experiment="wide")
-    assert pages.build(file).experiment == "wide"
-    assert pages.build(file).training == build(source, file, experiment="wide").training
+    page = Pages(source).build(file, experiment="wide")
+    assert page.experiment == "wide"
+    assert page.training == build(source, file, experiment="wide").training
     assert main(["report", str(file), "--experiment", "wide", "--source", str(source)]) == 0
     assert capsys.readouterr().out.strip() == str(source / "reports/wide.html")
     assert (source / "reports/wide.html").is_file()
     assert not (source / "reports/coin.html").exists()
-    server = Server(source, file, ("127.0.0.1", 0), experiment="wide")
-    try:
-        html = server.page() or ""
-        payload = html.split('<script type="application/json" id="data">', 1)[1]
-        page = Page.model_validate_json(payload.split("</script>", 1)[0], extra="ignore")
-        assert page.experiment == "wide"
-        assert page.training == pages.build(file).training
-    finally:
-        server.server_close()
     assert main(["report", str(tmp_path), "--experiment", "wide"]) == 1
     assert "--experiment needs one Python file" in capsys.readouterr().err
 
@@ -588,9 +359,100 @@ def test_default_rl_panels_use_logged_keys_but_explicit_panels_keep_missing_keys
         Series(title="Losses", keys=("rl/loss", "rl/value_loss") if explicit else ("rl/loss",)),
     )
     assert page.training.series["updates"]["rl/loss"][0].mean == [0.5]
+    assert page.headline() == "rl/loss 0.5"
 
 
-def test_policy_key_report_resolves_cross_experiment_seats_once(tmp_path: Path) -> None:
+def test_report_headline_keeps_the_logged_endpoint_of_a_reduced_curve(tmp_path: Path) -> None:
+    with open_run(experiment="lab", run="a", clocks=["updates"], directory=tmp_path) as run:
+        for updates in range(1, 601):
+            run.log({"rl/loss": updates / 2}, updates=updates)
+    page = build(tmp_path, experiment_file(tmp_path, "lab", "def train(config): pass"))
+    trace = page.training.series["updates"]["rl/loss"][0]
+    assert (len(trace.mean), trace.mean[-1], trace.last) == (120, 299, 300)
+    assert page.headline() == "rl/loss 300"
+
+
+def test_selective_report_finds_the_first_ungrouped_metric_drawable_across_runs(
+    tmp_path: Path,
+) -> None:
+    source = MeasuredStorage(DirectoryStorage(tmp_path / "runs"))
+    file = experiment_file(tmp_path, "lab", REPORTED)
+    for name, loss in (("a", float("nan")), ("b", 0.42), ("c", 0.25)):
+        with open_run(
+            experiment="lab", run=name, clocks=["updates"], directory=tmp_path / "runs"
+        ) as run:
+            run.log({"loss": loss, "reward": 7.0}, updates=150)
+    pages = Pages(source)
+    page = pages.build(file)
+    assert page.headline() == "loss 0.25–0.42" and not page.training.metrics
+    assert source.listings == 1
+    assert not any(key.endswith((".index.json", ".permanent.json")) for key in source.got)
+    reads, size = source.requests, source.bytes
+    assert pages.build(file).headline() == page.headline()
+    assert (source.listings, source.requests, source.bytes) == (2, reads, size)
+
+
+def test_card_skips_empty_ungrouped_metrics_and_keeps_authored_series_together(
+    tmp_path: Path,
+) -> None:
+    storage = DirectoryStorage(tmp_path)
+    with open_run(experiment="lab", run="a", clocks=["updates"], directory=tmp_path) as run:
+        run.log({"empty": float("nan"), "loss": 3, "reward": 7}, updates=1)
+    (data,) = read_all(storage)
+    card = run_chart_data(storage, data, Report(), "updates").headline
+    assert card and (card.title, card.latest()) == ("loss", ["loss 3"])
+    report = Report(ml=(Series(title="Training", keys=("reward", "loss")),))
+    card = run_chart_data(storage, data, report, "updates").headline
+    assert card and (card.title, card.latest()) == ("Training", ["reward 7", "loss 3"])
+
+
+def test_seated_headline_uses_the_latest_evaluated_checkpoint_of_the_job(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    for seed in (0, 1):
+        with open_run(
+            experiment="coin",
+            run=f"coin@{seed}",
+            job="coin",
+            seed=seed,
+            clocks=["updates"],
+            directory=runs,
+        ) as run:
+            for step in (100, 200):
+                weights = run.out / f"weights-{step}"
+                weights.write_text(str(step))
+                run.checkpoint(weights, updates=step)
+    seating = Matches(seating="prediction")
+    score = Score(table="scores", value="won")
+    points = tuple(
+        Point(
+            selection=0,
+            score=0,
+            run=f"coin@{seed}",
+            ordinal=ordinal,
+            line=None,
+            at={"updates": 100 * ordinal},
+            value=value,
+        )
+        for seed, ordinal, value in ((0, 1, 0), (1, 1, 0.5), (0, 2, 1))
+    )
+    page = build(runs, None, experiment="coin").model_copy(
+        update={
+            "report": Report(score=score, evals=(Curve(matches=seating),)),
+            "selections": (seating,),
+            "scores": (score,),
+            "panel_selections": (PanelSelection(selection=0),),
+            "drawn": (Drawn(seated=True, tournaments=("coin",)),),
+            "points": points,
+        }
+    )
+    assert page.headline() == "scores.won 0.25"
+    whole = (*points[:-1], points[-1].model_copy(update={"whole": True}))
+    assert page.model_copy(update={"points": whole}).headline() == "scores.won 1"
+
+
+def test_policy_key_report_resolves_cross_experiment_seats_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source = DirectoryStorage(tmp_path / "source")
     for experiment, seed in (("frontier", 0), ("frontier", 1), ("rival", 0)):
         with open_run(
@@ -622,17 +484,38 @@ def eval_jobs(state):
         checkpoints=state.policy(PolicyKey()).checkpoints, play=play, repo=None, max_hours=1)
         for name in ("first", "second")]
 """)
+    local = tmp_path / "local"
+    monkeypatch.setenv("ETUDE_TRACK_DIR", str(local))
+    local_listings = 0
+    versions = DirectoryStorage.versions
+
+    def count_local(storage: DirectoryStorage, prefix: str) -> dict[str, str]:
+        nonlocal local_listings
+        if storage.root == local:
+            local_listings += 1
+        return versions(storage, prefix)
+
+    monkeypatch.setattr(DirectoryStorage, "versions", count_local)
     measured = MeasuredStorage(source)
-    page = build(measured, file)
+    pages = Pages(measured)
+    page = pages.build(file)
     assert [(c.tournament, c.unplayed) for c in page.coverage] == [("first", 2), ("second", 2)]
-    assert measured.requests == 16  # 12 discovery reads, four existing statsdb reads
-    assert measured.listings == 1
+    assert measured.requests == 13  # 12 discovery reads and the checkpoint statsdb ingests
+    assert (measured.listings, local_listings) == (1, 1)
     for seed in (0, 1):
-        # Two tournaments share the external checkpoint/outcome reads. Statsdb separately
-        # reads declarations to retain its own experiment membership.
+        # The report, both tournaments and statsdb share the same declarations.
+        assert measured.got.count(f"frontier/small@{seed}/run.json") == 1
         assert measured.got.count(f"frontier/small@{seed}/checkpoints/updates-100.json") == 1
         assert measured.got.count(f"frontier/small@{seed}/outcome.json") == 1
     assert not any(key.endswith("weights.pt") for key in measured.got)
+
+    # Only reports with evaluation depend on locally played matches.
+    for _ in range(2):
+        assert len(pages.build(None, experiment="frontier").training.runs) == 2
+    assert (measured.listings, local_listings) == (3, 1)
+    reads = measured.requests
+    assert pages.build(file) == page
+    assert (measured.listings, local_listings, measured.requests) == (4, 2, reads)
 
 
 def test_page_cache_reuses_unchanged_build_and_invalidates_on_external_data_edit(

@@ -24,6 +24,17 @@ Later passes see new checkpoints and submit their eval matches. Supply finite
 `max_hours` and `max_usd` on jobs that can rent. Training seeds make independent
 runs; eval seeds are indices in the match generator's panel.
 
+Inside a declaration, `state.run("base@0").state` gives the training run's
+state. Its `status` holds the launcher's retained phase, allocation ID
+(`attempt`), machine, clocks and cost. Its `allocation_phase` gives a more
+specific phase when known, including setup and a confirmed stop while the
+launcher still holds the slot. Its `last_write` gives the latest UTC
+modification time among its stored files, including copies. Evaluation runs
+in `state.eval_runs` carry the same fields. A file-only run has `status=None`.
+A queued run with no files has `last_write=None`, as does a listing without
+modification times. A training summary's `address` preserves the spelling
+used by the launcher or the stored declaration.
+
 `Job` is also available from `etude.spec` for arbitrary shell commands. Its
 `inputs`, `environment`, `prepare`, `runtime`, `setup` and `cleanup`
 control execution. Typed jobs derive their command from an importable Python
@@ -205,6 +216,7 @@ window sizing, provider rounding and retries.
 | `status`, `machines`, `logs` | Reads retained evidence; prints freshness/incompleteness. |
 | `wait` | Advances work until the selected runs finish and the machines rented for them are deleted. |
 | `logs --run RUN --follow --timeout SECONDS` | Collects new logs and follows them. |
+| `view [PATH]` | Shows run progress and the machines holding each run. |
 | `cancel RUN` | Requests cancellation and cleanup. |
 | `fetch RUN FILE DIRECTORY` | Copies one file the run wrote into `DIRECTORY` and verifies its fingerprint. |
 
@@ -256,12 +268,20 @@ explains recovery and retention.
 The optional SSH server keeps the scheduler running independently of this
 terminal. Configure it with `etude server` commands; `etude server --help`
 lists setup, selection and run operations. Client calls use the selected server;
-tracking reads and reports still read their explicit local or bucket source.
-The server needs the provider credentials; jobs receive only scoped grants.
+tracking and reports read the chosen directory or bucket. A local `etude view`
+polls the selected server for run placement, scheduler heartbeat and requested
+consoles at most once every 30 seconds. Pass `--source` to read the corresponding
+run files. For a selected server, `/machines` names the host and points to
+`etude machines`. With a local launcher, that page shows machine windows and
+costs and links each occupied slot to its run. See the [live view guide](tracking.md#live-view).
+
+The server holds the provider credentials. Jobs receive only scoped grants.
 
 ## Upgrading Etude
 
 Run `etude database upgrade` explicitly when installing a newer release.
+The live machine inventory adds indexes to the launcher database. Run the
+upgrade on the computer holding that database, including a selected server.
 Ordinary reads never migrate your operational `launcher.sqlite` or silently
 select a backup. Mixed client/worker releases must meet the release's reader
 floor. Keep the running server's version aligned with its database.

@@ -71,22 +71,24 @@ class CountedClient:
     def __init__(self, client: Any) -> None:
         self.client = client
         self.list_pages = 0
-        self._list_lock = Lock()
+        self._counts_lock = Lock()
         self.bytes = 0
         self.requests = 0  # reads asked for, a check that sent no body included
         self.read: dict[str, int] = {}  # body bytes sent, by key
 
     def get_object(self, **fields: Any) -> Any:
-        self.requests += 1
+        with self._counts_lock:
+            self.requests += 1
         reply = self.client.get_object(**fields)
         body = reply["Body"].read()
-        self.bytes += len(body)
-        self.read[fields["Key"]] = self.read.get(fields["Key"], 0) + len(body)
+        with self._counts_lock:
+            self.bytes += len(body)
+            self.read[fields["Key"]] = self.read.get(fields["Key"], 0) + len(body)
         reply["Body"] = io.BytesIO(body)
         return reply
 
     def list_objects_v2(self, **fields: Any) -> Any:
-        with self._list_lock:
+        with self._counts_lock:
             self.list_pages += 1
         return self.client.list_objects_v2(**fields)
 

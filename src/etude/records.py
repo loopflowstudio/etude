@@ -144,6 +144,10 @@ class RunRecord(Record):
     config: str | None = Field(default=None, max_length=1024 * 1024)
     continues: Continuation | None = None
     start: str | None = None
+    # Relative tournament folders owned by this evaluation launch.
+    members: tuple[str, ...] | None = Field(
+        default=None, exclude_if=lambda members: members is None
+    )
     submission: RunSubmission | None = Field(
         default=None, exclude_if=lambda submission: submission is None
     )
@@ -177,6 +181,10 @@ class RunRecord(Record):
 
     @model_validator(mode="after")
     def _identity(self) -> Self:
+        if self.members is not None and (
+            self.kind != "evaluation" or any(not within(member) for member in self.members)
+        ):
+            raise ValueError("invalid_evaluation_members")
         names = [clock.name for clock in self.clocks]
         if len(set(names)) != len(names):
             raise ValueError("duplicate_clock")
@@ -190,11 +198,7 @@ class RunRecord(Record):
 
     @property
     def source_key(self) -> SourceKey:
-        return SourceKey(
-            namespace=self.namespace,
-            kind=self.source_kind,
-            source_id=self.id.removeprefix(self.experiment + "/"),
-        )
+        return SourceKey(namespace=self.namespace, kind=self.source_kind, source_id=self.name)
 
     @property
     def config_json(self) -> str | None:
@@ -214,7 +218,7 @@ class RunRecord(Record):
 
     @property
     def name(self) -> str:
-        return self.source_key.source_id
+        return self.id.removeprefix(self.experiment + "/")
 
 
 class RunCounters(Record):

@@ -25,7 +25,7 @@ const points = (m, job, opponent = "") => m.jobPoints(job, "updates", m.evalValu
 
 // Run the shipped page and chart renderer; only the browser DOM and plotting
 // library are replaced. Assertions see displayed text and the plotted values.
-function renderPage(data, hash = "") {
+function chartBrowser(hash = "", overview = null) {
   class Element {
     constructor() { this.children = []; this.style = {}; this.text = ""; }
     set textContent(text) { this.text = String(text); this.children = []; }
@@ -33,23 +33,21 @@ function renderPage(data, hash = "") {
     append(...children) { this.children.push(...children); }
     appendChild(child) { this.append(child); return child; }
     replaceChildren(...children) { this.text = ""; this.children = children; }
-    setAttribute() {}
+    setAttribute(key, value) { (this.attributes ??= {})[key] = value; }
     addEventListener() {}
   }
   const elements = new Map(), plots = [];
   const document = {
-    createElement: () => new Element(), querySelectorAll: () => [],
+    createElement: () => new Element(),
+    querySelectorAll: () => [],
+    querySelector: selector => selector === ".run-overview" && overview
+      ? {querySelector: () => ({dataset: {lastCheckpoint: JSON.stringify(overview)}})} : null,
     getElementById: id => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); },
   };
-  const full = {
-    experiment: "test", notes: [], environments: [], commits: [], failures: [], generated_ms: 0,
-    scores: [{table: "games", value: "win", unit: "games"}], ...data,
-    report: {evals: [{kind: "curve", title: "Score"}], perf: [], ml: [], ...data.report},
-    training: {metrics: [], series: {}, bands: {}, ...data.training, runs: data.training.runs.map(r => ({rows: 0, writers: [], ...r}))},
-  };
-  document.getElementById("data").textContent = JSON.stringify(full);
+  const location = new URL("http://localhost/runs/test?tab=charts" + hash);
   const browser = vm.createContext({
-    document, URLSearchParams, location: {hash}, history: {replaceState() {}}, addEventListener() {},
+    document, devicePixelRatio: 1, URLSearchParams, location,
+    history: {replaceState(_state, _title, url) { location.href = new URL(url, location).href; }}, addEventListener() {},
     getComputedStyle: () => ({getPropertyValue: () => "#112233"}),
     IntersectionObserver: class { observe() {} },
     uPlot: class {
@@ -57,10 +55,65 @@ function renderPage(data, hash = "") {
       destroy() {}
     },
   });
-  const script = fs.readFileSync("src/etude/page.html", "utf8").split("<script>\n")[1].split("</script>")[0];
-  vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\n" + script, browser);
-  return {text: document.getElementById("evals-body").textContent, plots, sectionText: id => document.getElementById(id + "-body").textContent, display: id => document.getElementById(id).style.display};
+  vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8"), browser);
+  return {browser, document, location, plots};
 }
+
+function renderPage(data, hash = "", overview = null) {
+  const {browser, document, location, plots} = chartBrowser(hash, overview);
+  const full = {
+    experiment: "test", notes: [], environments: [], commits: [], failures: [], generated_ms: 0,
+    scores: [{table: "games", value: "win", unit: "games"}], ...data,
+    report: {evals: [{kind: "curve", title: "Score"}], perf: [], ml: [], ...data.report},
+    training: {metrics: [], series: {}, bands: {}, timers: [], ...data.training, runs: data.training.runs.map(r => ({rows: 0, writers: [], ...r}))},
+  };
+  document.getElementById("data").textContent = JSON.stringify(full);
+  const script = fs.readFileSync("src/etude/page.html", "utf8").split("<script>\n")[1].split("</script>")[0];
+  vm.runInContext(script, browser);
+  function click(section, text) {
+    const find = el => el.onclick && el.textContent === text ? el : el.children.filter(c => typeof c !== "string").map(find).find(Boolean);
+    find(document.getElementById(section + "-controls")).onclick();
+  }
+  return {location, click, text: document.getElementById("evals-body").textContent, plots, sectionText: id => document.getElementById(id + "-body").textContent, display: id => document.getElementById(id).style.display};
+}
+
+test("experiment card captions name the metric once and keep its clock, units and scale", () => {
+  const {browser, document} = chartBrowser();
+  const host = document.createElement("div"), data = document.createElement("script");
+  const curves = {loss: {owner: "a", x: [598], mean: [299], last: 300}};
+  data.textContent = JSON.stringify([
+    {title: "loss", clock: "updates", curves},
+    {title: "Training", clock: "updates", unit: "nats", log: true, curves},
+  ]);
+  host.classList = {contains: () => false};
+  host.querySelector = () => data;
+  browser.drawExperimentCurves({querySelectorAll: () => [host]});
+  const captions = host.children.slice(1).map(figure => figure.children[0]);
+  assert.deepEqual(captions.map(c => [c.text, c.children[0].textContent]), [
+    ["loss", "updates"], ["Training", "loss · nats · log scale · updates"],
+  ]);
+  for (const figure of host.children.slice(1)) {
+    assert.equal(figure.children[1].attributes["aria-label"], "a: 300, last plotted bucket at updates 598");
+  }
+});
+
+test("single-series headers show the logged endpoint and grouped seeds keep their mean", () => {
+  const data = page([], [], {
+    jobs: [{name: "a", label: "Solo", runs: ["a"]}, {name: "b", label: "Pair", runs: ["b1", "b2"]}],
+    runs: ["a", "b1", "b2"].map(name => ({name})), checkpoints: [], clocks: [{name: "updates"}],
+    metrics: ["value"], series: {updates: {value: [{owner: "a", x: [598], mean: [299], last: 300}]}},
+    bands: {updates: {value: [{owner: "b", x: [598], mean: [150], low: [140], high: [160], seeds: [2]}]}},
+  });
+  for (const scale of ["linear", "log"]) {
+    data.report = {clock: "updates", ml: [{kind: "series", title: "Value", keys: ["value"], scale}]};
+    const view = renderPage({...data, run_charts: true});
+    assert.match(view.sectionText("charts"), /Solo 300.*Pair 150/);
+    assert.ok(view.plots[0].values.some(line => line.includes(299)));
+  }
+  const trace = data.training.series.updates.value[0];
+  Object.assign(trace, {x: [100, 598], mean: [40, -1], last: 0});
+  assert.match(renderPage({...data, run_charts: true}).sectionText("charts"), /Solo 40/);
+});
 
 test("a section the report gives no panel is hidden, header and controls with it", () => {
   const data = page([player("u100", "learner", 100)], [[0, null, 0.5]]);
@@ -206,6 +259,19 @@ test("union curves keep jobs separate", () => {
   assert.equal(context.model(data).usesSelection, true);
 });
 
+test("the index headline uses the primary curve and its first named anchor", () => {
+  const anchor = name => ({name, placed: false, config: "{}", at: {}});
+  const data = page([player("u150", "learner", 150), anchor("Z"), anchor("alpha")],
+    [[0, 1, 0.25], [0, 2, 0.75], [0, null, 0.5]]);
+  data.scores = [{table: "scores", value: "won"}];
+  data.report.evals = [{kind: "curve"}];
+  const [head] = context.headline(data, context.model(data));
+  assert.equal(head.against, "alpha");
+  assert.equal(head.latest.y, 0.75);
+  data.report.evals = [{kind: "anchors"}];
+  assert.equal(context.headline(data, context.model(data))[0].latest, null);
+});
+
 test("job labels retain seed counts and baseline identity", () => {
   const data = page([], [], {jobs: [{name: "large", launch: "large", label: "large · 2 seeds", runs: ["a", "b"]}], runs: [], checkpoints: [], clocks: []});
   data.report.labels = {large: "Large model"}; data.report.baseline = "large";
@@ -254,22 +320,22 @@ test("score tooltips name the interval and row unit without changing values", ()
 
 test("refresh failure leaves the page visible and a later success reloads once", async () => {
   const status = {textContent: ""};
+  const button = {};
   let reloads = 0, requests = 0, fail = true;
   const browser = vm.createContext({
-    document: {getElementById: () => status},
-    location: {pathname: "/lab", reload: () => { reloads++; }},
+    document: {getElementById: id => id === "refresh-report" ? button : status},
+    location: {pathname: "/experiments/lab/report", reload: () => { reloads++; }},
     fetch: async () => { requests++; return {ok: !fail, text: async () => "source unavailable"}; },
   });
-  vm.runInContext(fs.readFileSync("src/etude/charts.js", "utf8") + "\nthis.refreshPage = refreshPage;", browser);
+  vm.runInContext(fs.readFileSync("src/etude/refresh_report.js", "utf8"), browser);
   assert.equal(requests, 0); // loading the chart script never polls
-  await browser.refreshPage(true);
+  await button.onclick();
   assert.equal(requests, 1); assert.equal(reloads, 0);
   assert.match(status.textContent, /Refresh failed: source unavailable.*last successful generation/);
+  assert.equal(button.disabled, false);
   fail = false;
-  await browser.refreshPage(true);
+  await button.onclick();
   assert.equal(requests, 2); assert.equal(reloads, 1);
-  await browser.refreshPage(false);
-  assert.equal(requests, 2); assert.equal(reloads, 2); // snapshots only reload
 });
 
 // A seating held for checkpoints of line "learner": each one's point (`Page.points`), scored
@@ -375,6 +441,101 @@ test("explicit absent metric keys remain visible as report warnings", () => {
 });
 
 
+test("a live run leads with measured groups from either report section", () => {
+  const data = page([], [], {
+    jobs: [{name: "a", launch: "a", runs: ["a"]}], runs: [{name: "a"}],
+    checkpoints: [], clocks: [{name: "steps"}, {name: "updates", kind: "step"}],
+    metrics: ["loss", "accuracy"],
+    series: {updates: {loss: [{owner: "a", x: [4], mean: [7]}], accuracy: [{owner: "a", x: [4], mean: [0.5]}]}},
+  });
+  data.report = {clock: "updates", perf: [
+    {kind: "pace", title: "Pace"}, {kind: "elapsed", title: "Elapsed"},
+    {kind: "attempts", title: "Writers"}, {kind: "flame", title: "Timers", prefix: "time/"},
+    {kind: "series", title: "Training loss", keys: ["loss", "missing"], scale: "log", unit: "nats"},
+  ]};
+  const render = () => renderPage({...data, run_charts: true});
+  const first = render();
+  assert.match(first.sectionText("charts"), /Training loss.*nats.*log scale.*Other logged metrics.*accuracy/);
+  assert.doesNotMatch(first.sectionText("charts"), /missing/);
+  assert.deepEqual([...first.plots[0].values[1]], [7]);
+  assert.equal(first.plots[0].options.axes[0].label, "updates");
+  assert.equal(first.plots[0].options.scales.y.log, 10);
+  assert.equal(first.display("performance"), "none");
+  data.training.checkpoints.push({run: "a", ordinal: 1, align: 4, at: {updates: 4}, elapsed: 3, pace: {updates: null}});
+  assert.match(render().sectionText("performance"), /Elapsed/);
+  assert.doesNotMatch(render().sectionText("performance"), /Pace/);
+  data.training.checkpoints.push({run: "a", ordinal: 2, align: 8, at: {updates: 8}, elapsed: 5, pace: {updates: 2}});
+  assert.match(render().sectionText("performance"), /Pace.*Elapsed/);
+});
+
+test("run links retain only changed chart controls and preserve section anchors", () => {
+  const data = page([], [], {
+    jobs: [{name: "a", runs: ["a"]}], runs: [{name: "a"}], checkpoints: [],
+    clocks: [{name: "updates"}, {name: "steps"}], metrics: ["loss"],
+    series: {updates: {loss: [{owner: "a", x: [150], mean: [0.42]}]}},
+  });
+  data.run_charts = true;
+  data.report = {clock: "updates", ml: [{kind: "series", title: "Losses", keys: ["loss"]}]};
+  const view = renderPage(data);
+  assert.equal(view.location.hash, "");
+  assert.deepEqual([...view.plots[0].options.scales.x.range], [0, 150]);
+  view.click("charts", "Raw");
+  assert.equal(view.location.hash, "#smooth=off");
+  view.click("charts", "steps");
+  const restored = renderPage(data, view.location.hash + "&sel=3&hide=a");
+  assert.equal(restored.location.hash, "#mlclock=steps&smooth=off");
+  restored.click("charts", "Smoothed");
+  restored.click("charts", "updates");
+  assert.equal(restored.location.href, "http://localhost/runs/test?tab=charts");
+  assert.equal(renderPage({...data, run_charts: false}, "#ml").location.hash, "#ml");
+});
+
+test("Overview draws the first two report panels and marks the last checkpoint on their clock", () => {
+  const keys = ["return", "loss", "accuracy"];
+  const data = page([], [], {
+    jobs: [{name: "a", runs: ["a"]}], runs: [{name: "a"}], checkpoints: [], clocks: [{name: "steps"}],
+    metrics: keys, series: {steps: Object.fromEntries(keys.map(key => [key, [{owner: "a", x: [10, 20], mean: [1, 2]}]]))},
+  });
+  data.run_charts = true;
+  data.report = {clock: "steps", ml: keys.map(key => ({kind: "series", title: key, keys: [key]}))};
+  const view = renderPage(data, "", {steps: 15});
+  assert.equal(view.plots.length, 2);
+  assert.match(view.sectionText("charts"), /return.*loss/);
+  assert.doesNotMatch(view.sectionText("charts"), /accuracy/);
+  for (const plot of view.plots) {
+    assert.deepEqual([...plot.values[0]], [10, 15, 20]);
+    const paths = [], ctx = {
+      save() {}, restore() {}, setLineDash() {}, beginPath() {}, stroke() {},
+      moveTo(x, y) { paths.push([x, y]); }, lineTo(x, y) { paths.push([x, y]); },
+    };
+    plot.options.hooks.draw[0]({ctx, bbox: {top: 2, left: 0, width: 20, height: 20}, valToPos: x => x});
+    assert.deepEqual(paths, [[15, 2], [15, 22]]);
+  }
+  assert.equal(renderPage(data).plots.length, 3);
+});
+
+test("a timer-only run shows its measured breakdown under Performance", () => {
+  const data = page([], [], {
+    jobs: [{name: "a", launch: "a", label: "Learner", runs: ["a"]}], runs: [{name: "a", at: {steps: 1}}],
+    checkpoints: [], clocks: [{name: "steps", kind: "step"}], metrics: ["time/train"],
+    timers: [{run: "a", prefix: "time/", tree: {name: "active", seconds: 2, children: [
+      {name: "train", seconds: 2, status: "recorded", children: []},
+    ]}}],
+  });
+  data.report = {ml: [{kind: "flame", title: "Training timers", prefix: "time/"}]};
+  const view = renderPage({...data, run_charts: true});
+  assert.match(view.sectionText("charts"), /Timer metrics are shown under Performance/);
+  assert.match(view.sectionText("performance"), /Training timers.*seconds logged under time\//);
+});
+
+test("declared clocks alone leave Charts with an empty message", () => {
+  const data = page([], [], {runs: [{name: "a"}], jobs: [], clocks: [{name: "steps"}], checkpoints: []});
+  const view = renderPage({...data, run_charts: true});
+  assert.equal(view.display("charts"), "");
+  assert.equal(view.sectionText("charts"), "No metric curves recorded.");
+  assert.equal(view.display("performance"), "none");
+});
+
 test("pace plots restart boundaries as null gaps between measured intervals", () => {
   const data = page([], [], {
     jobs: [{name: "a", launch: "a", label: "A", runs: ["a"]}],
@@ -384,9 +545,12 @@ test("pace plots restart boundaries as null gaps between measured intervals", ()
     })),
   });
   data.report = {clock: "updates", perf: [{kind: "pace", title: "Pace"}]};
-  const rendered = renderPage(data);
-  assert.equal(rendered.plots.length, 1);
-  assert.deepEqual([...rendered.plots[0].values[1]], [null, 10, null, 10]);
+  for (const run_charts of [false, true]) {
+    const rendered = renderPage({...data, run_charts});
+    assert.equal(rendered.plots.length, 1);
+    assert.deepEqual([...rendered.plots[0].values[1]], [null, 10, null, 10]);
+    assert.equal(rendered.text === "", run_charts);
+  }
 });
 
 test("a curve finds its score when the score carries a range", () => {
@@ -396,4 +560,68 @@ test("a curve finds its score when the score carries a range", () => {
   assert.equal(context.curveScore(D, {score: {table: "plays", value: "won", per: "won", range: [0, 1]}}, 0), 1);
   assert.equal(context.curveScore(D, {score: {table: "plays", value: "won", per: "won", range: [0, 2]}}, 0), -1);
   assert.equal(context.curveScore(D, {}, 0), 0);
+});
+
+test("a visible run updates dates in place and reloads only when its content changes", async () => {
+  const observation = {
+    id: "run-observation", dataset: {refresh: "5000", version: "step-1"},
+    textContent: "files observed 1 min ago",
+  };
+  const collected = {}, error = {};
+  const nav = {
+    id: "view-rail", contains: () => false,
+    replaceWith: next => { visibleNav = next; }, scrollTo() {},
+  };
+  let visibleNav = nav;
+  const document = {
+    hidden: false,
+    querySelector: () => observation,
+    getElementById: id => ({"view-rail": visibleNav, "run-observation": observation, "console-collected": collected, "status-error": error})[id],
+    // Supply the fragment the browser would parse from the successful response.
+    createElement: () => ({content: {firstElementChild: next}}),
+  };
+  const next = {
+    nextElementSibling: {...nav, textContent: "local and lab"},
+    id: observation.id, dataset: {version: "step-1", collected: "Last collected 2 min ago"},
+    textContent: "files observed 2 min ago",
+  };
+  const url = "/runs/lab/base@0";
+  let tick, requests = [], navigations = 0, status = 503;
+  const browser = vm.createContext({
+    document,
+    URLSearchParams, location: {pathname: url, search: "?tab=charts", reload: () => navigations++},
+    fetch: async path => {
+      requests.push(path);
+      return {ok: status === 200, status, text: async () => ""};
+    },
+    setTimeout: (callback, delay) => {
+      assert.equal(delay, 5000);
+      tick = () => { tick = undefined; return callback(); };
+    },
+  });
+  vm.runInContext(fs.readFileSync("src/etude/refresh_status.js", "utf8"), browser);
+
+  await tick();
+  assert.match(error.textContent, /503/);
+  assert.equal(observation.textContent, "files observed 1 min ago");
+  status = 200;
+  await tick();
+  assert.equal(error.textContent, "");
+  assert.equal(visibleNav.textContent, "local and lab");
+  assert.equal(observation.textContent, "files observed 2 min ago");
+  assert.equal(collected.textContent, "Last collected 2 min ago");
+  next.dataset.version = "step-2";
+  document.hidden = true;
+  await tick();
+  assert.equal(navigations, 0);
+  assert.equal(requests.length, 2);
+  for (const request of requests) {
+    const poll = new URL(request, "http://localhost");
+    assert.equal(poll.pathname, url);
+    assert.deepEqual(Object.fromEntries(poll.searchParams), {tab: "charts", observe: "1"});
+  }
+  document.hidden = false;
+  await tick();
+  assert.equal(navigations, 1);
+  assert.equal(tick, undefined); // A slow navigation must finish before another check.
 });

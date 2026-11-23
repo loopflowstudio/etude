@@ -95,7 +95,9 @@ function line(host, series, o = {}) {
     for (const text of notes.length ? notes : [o.empty || "Nothing recorded for this selection"]) host.appendChild(node("div", "na chart-empty", text));
     return;
   }
-  const xs = [...new Set(series.flatMap(s => s.points.filter(p => p.x != null).map(p => p.x)))].sort((a, b) => a - b);
+  const positions = new Set(series.flatMap(s => s.points.filter(p => p.x != null).map(p => p.x)));
+  if (o.checkpoint != null) positions.add(o.checkpoint);
+  const xs = [...positions].sort((a, b) => a - b);
   const maps = series.map(s => new Map(s.points.filter(p => p.x != null).map(p => [p.x, p])));
   const column = (m, f) => xs.map(x => { const p = m.get(x); if (!p || p.skip) return undefined; return drawn(p) ? f(p) : null; });
   const muted = css("--muted"), grid = css("--grid"), ink2 = css("--ink-2");
@@ -120,9 +122,10 @@ function line(host, series, o = {}) {
   const yf = o.yFormat || fmt, xf = o.xFormat || num;
   const axis = {stroke: muted, grid: {stroke: grid, width: 1}, ticks: {stroke: grid, width: 1, size: 4}, font: "11px ui-sans-serif, -apple-system, sans-serif", labelFont: "11px ui-sans-serif, -apple-system, sans-serif"};
   const toPx = v => v * devicePixelRatio;
+  const xScale = xs.length === 1 && xs[0] > 0 ? {time: false, range: [0, xs[0]]} : {time: false};
   const opts = {
     width, height, legend: {show: false}, bands, series: spec,
-    scales: {x: {time: false}, y: o.log ? {distr: 3, log: 10} : o.range ? {range: () => o.range} : {}},
+    scales: {x: xScale, y: o.log ? {distr: 3, log: 10} : o.range ? {range: () => o.range} : {}},
     axes: o.spark ? [{show: false}, {show: false}] : [
       {...axis, label: o.compact ? null : o.xLabel, labelSize: o.compact ? 0 : 18, values: (u, vs, a, space, incr) => tickLabels(vs, xf, incr), space: o.compact ? 50 : 70},
       // A log axis labels its powers of ten; the ticks between stay unlabelled.
@@ -133,6 +136,14 @@ function line(host, series, o = {}) {
       draw: [u => {
         const c = u.ctx, base = u.bbox.top + u.bbox.height - toPx(6);
         c.save(); c.lineWidth = toPx(1.5);
+        if (o.checkpoint != null) {
+          const x = u.valToPos(o.checkpoint, "x", true);
+          if (x >= u.bbox.left && x <= u.bbox.left + u.bbox.width) {
+            c.save(); c.strokeStyle = ink2; c.setLineDash([toPx(4), toPx(3)]);
+            c.beginPath(); c.moveTo(x, u.bbox.top); c.lineTo(x, u.bbox.top + u.bbox.height); c.stroke();
+            c.restore();
+          }
+        }
         // Whiskers: a sparse line's own intervals.
         for (const [i, color] of whiskers) for (const p of series[i].points.filter(drawn)) {
           if (p.lo == null) continue;
@@ -356,7 +367,10 @@ function model(D) {
   // Opponents are the anchors checkpoints met, by name; checkpoints met are head-to-head games.
   function opponents(score, sel) {
     const seen = new Set(D.cells.filter(c => c.selection === sel && c.score === score && !c.fixed && placed(c.subject)).map(c => c.opponent));
-    const anchors = [...seen].filter(o => o != null && !placed(o)).sort((a, b) => D.players[a].name.localeCompare(D.players[b].name));
+    // Use the same name order as the served headline, independent of browser locale.
+    const names = i => D.players[i].name.toLowerCase();
+    const anchors = [...seen].filter(o => o != null && !placed(o)).sort((a, b) =>
+      names(a) < names(b) ? -1 : names(a) > names(b) ? 1 : a - b);
     return [...anchors.map(o => [String(o), D.players[o].name]), ...(seen.has(null) || !anchors.length ? [["", "all opponents"]] : [])];
   }
   // Why a checkpoint has no value here. Failed and not yet played break a line; a checkpoint
@@ -430,7 +444,7 @@ function headline(D, M) {
   const opp = seated || sel == null ? "" : (M.opponents(score, sel)[0] || [""])[0];
   const clock = M.alignClock || "hours_since_start";
   return M.JOBS.map(j => {
-    const pts = sel == null || !D.scores.length ? [] : M.jobPoints(j, clock, M.evalValue(score, sel, {}, opp));
+    const pts = panel < 0 || sel == null || !D.scores.length ? [] : M.jobPoints(j, clock, M.evalValue(score, sel, {}, opp));
     const done = M.evaluated(pts);
     return {job: j, points: pts, latest: done.length ? done[done.length - 1] : null, against: seated ? "as seated" : opp === "" ? "all opponents" : D.players[+opp].name};
   });
@@ -459,27 +473,70 @@ function latestActivity(D) {
   return Math.max(...times) || null;
 }
 
-// A refresh is explicit, including when a timer was explicitly requested. Ordinary
-// reloads only view cached HTML. On failure the current DOM and timestamp survive.
-let refreshing = false;
-async function refreshPage(served) {
-  if (!served) { location.reload(); return; }
-  if (refreshing) return;
-  refreshing = true;
-  const status = document.getElementById("refresh-status");
-  if (status) status.textContent = "Refreshing…";
-  try {
-    const response = await fetch(location.pathname, {method: "POST"});
-    if (!response.ok) throw new Error(await response.text());
-    location.reload();
-  } catch (error) {
-    if (status) status.textContent = `Refresh failed: ${error.message}. Showing the last successful generation.`;
-  } finally { refreshing = false; }
+const metricPanel = p => p.kind === "series" || p.kind === "counters";
+function metricLayout(D) {
+  const panels = [...D.report.ml, ...D.report.perf];
+  const logged = new Set(D.training.metrics);
+  const named = new Set(panels.flatMap(p => p.keys || []));
+  const timers = panels.filter(p => p.kind === "flame").map(p => p.prefix);
+  const otherMetrics = D.training.metrics.filter(k => !named.has(k) && !timers.some(prefix =>
+    k.startsWith(prefix) && (!D.run_charts || k.length > prefix.length)));
+  const runMetrics = panels.filter(p => metricPanel(p) && p.keys.some(k => logged.has(k)));
+  return {logged, otherMetrics, runMetrics};
 }
-function refreshControl(host, served) {
-  if (!served) return;
-  const button = node("button", null, "Refresh"), status = node("span");
-  status.id = "refresh-status"; status.setAttribute("role", "status");
-  button.onclick = () => refreshPage(true);
-  host.append(button, status);
+
+function runCurvePanels(D) {
+  const {series, clocks} = D.training;
+  const clock = clocks.some(c => c.name === D.report.clock) || BUILT_IN.includes(D.report.clock)
+    ? D.report.clock : clocks[0]?.name ?? BUILT_IN[0];
+  const {runMetrics, otherMetrics} = metricLayout(D);
+  return [...runMetrics, {title: "Other logged metrics", keys: otherMetrics}].map(p => ({
+    title: p.title, clock, unit: p.unit, log: p.scale === "log",
+    curves: Object.fromEntries(p.keys.filter(k => series[clock]?.[k]?.length).map(k => [k, series[clock][k][0]])),
+  }));
+}
+
+// The last logged value can differ from the last plotted bucket's mean.
+function latestMetric(trace, log) {
+  const i = trace.mean.findLastIndex((y, i) => trace.x[i] != null && y != null && (!log || y > 0));
+  if (i < 0) return null;
+  const value = trace.last != null && (!log || trace.last > 0) ? trace.last : trace.mean[i];
+  return {value, bucket: trace.x[i]};
+}
+
+// Keep different metrics and clocks on separate axes, even across a held file observation.
+function drawExperimentCurves(root) {
+  destroyCharts();
+  hideTip();
+  for (const host of root.querySelectorAll(".card-charts, .run-curves")) {
+    const data = host.querySelector("script");
+    const detail = host.classList.contains("run-curves");
+    const payload = JSON.parse(data.textContent);
+    const panels = detail ? runCurvePanels(payload) : payload;
+    host.replaceChildren(data);
+    const plots = new Map();
+    panels.forEach((panel, run) => {
+      for (const [key, trace] of Object.entries(panel.curves)) {
+        const id = JSON.stringify([panel.title, key, panel.clock, panel.unit, panel.log]);
+        const points = trace.x.map((x, i) => ({x, y: trace.mean[i]}));
+        const last = latestMetric(trace, panel.log);
+        if (!last) continue;
+        if (!plots.has(id)) plots.set(id, {panel, key, lines: [], latest: []});
+        const {lines, latest} = plots.get(id);
+        lines.push({label: trace.owner, color: css(`--j${detail ? 1 : run % 8 + 1}`), points});
+        latest.push(`${trace.owner}: ${fmt(last.value)}, last plotted bucket at ${panel.clock} ${num(last.bucket)}`);
+      }
+    });
+    if (detail && !plots.size) host.appendChild(node("p", "na", "No metric curves recorded."));
+    for (const {panel, key, lines, latest} of plots.values()) {
+      const figure = node("figure"), plot = node("div");
+      const caption = node("figcaption", null, panel.title);
+      caption.appendChild(node("small", null, [key !== panel.title && key, panel.unit, panel.log && "log scale", panel.clock].filter(Boolean).join(" · ")));
+      plot.setAttribute("role", "img");
+      plot.setAttribute("aria-label", latest.join(", "));
+      figure.append(caption, plot);
+      host.appendChild(figure);
+      line(plot, lines, {compact: true, height: detail ? 156 : 116, xLabel: panel.clock, log: panel.log});
+    }
+  }
 }

@@ -73,7 +73,7 @@ import threading
 import time
 import warnings
 from collections import defaultdict
-from collections.abc import Container, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -117,9 +117,10 @@ from etude.eval.records import (
     player_checkpoint,
 )
 from etude.eval.run import ETUDE_TABLES
+from etude.home import home
 from etude.identity import SAFE_NAME
 from etude.records import Digest, Record, RunOutcome
-from etude.run import as_storage, declared, run_folders, under
+from etude.run import RunListing, as_storage
 from etude.storage import DirectoryStorage, Storage, default_root, store_identity
 
 __all__ = ("statsdb", "read_blobs", "estimate", "compare", "Estimate", "Comparison")
@@ -176,28 +177,29 @@ def statsdb(
 
 def _open_statsdb(
     experiment: str,
-    store: Storage | Path | str | None = None,
+    store: Storage | Path | str | RunListing | None,
     *,
     rebuild: bool = False,
     rollups: Sequence[Rollup] = (),
-    keys: Sequence[str] | None = None,
 ) -> duckdb.DuckDBPyConnection:
-    """Open `experiment`'s kept database read-only, catching up first only when needed."""
+    """Open a read-only snapshot, ingesting new files from this listing when needed."""
     if not SAFE_NAME.match(experiment):
         raise EtudeError("unsafe_run_or_experiment_name", 422)
-    storage = as_storage(default_root() if store is None else store)
-    path = _kept_path(experiment, storage)
+    listing = (
+        store
+        if isinstance(store, RunListing)
+        else RunListing.read(as_storage(default_root() if store is None else store))
+    )
+    path = _kept_path(experiment, listing.storage)
     # DuckDB is the optional eval dependency.
     import duckdb  # noqa: PLC0415
-
-    listed = sorted(storage.keys("")) if keys is None else keys
 
     def current() -> duckdb.DuckDBPyConnection | None:
         if rebuild or not path.exists():
             return None
         db = duckdb.connect(path.resolve(), read_only=True)
         try:
-            if not _needs_catch_up(db, experiment, listed, rollups):
+            if not _needs_catch_up(db, experiment, listing, rollups):
                 return db
         except BaseException:
             db.close()
@@ -218,16 +220,15 @@ def _open_statsdb(
                 return db
         except (duckdb.IOException, duckdb.ConnectionException) as locked:
             raise EtudeError("statsdb_in_use", 409) from locked
-        _write_catch_up(path, experiment, storage, rollups, listed, rebuild=rebuild)
+        _write_catch_up(path, experiment, listing, rollups, rebuild=rebuild)
         return duckdb.connect(path.resolve(), read_only=True)
 
 
 def _write_catch_up(
     path: Path,
     experiment: str,
-    storage: Storage,
+    listing: RunListing,
     rollups: Sequence[Rollup],
-    keys: Sequence[str],
     *,
     rebuild: bool,
 ) -> None:
@@ -245,7 +246,7 @@ def _write_catch_up(
             try:
                 rebuild = _schema(db) not in (None, SCHEMA)
                 if not rebuild:
-                    _catch_up(db, experiment, storage, rollups, keys)
+                    _catch_up(db, experiment, listing, rollups)
                     _sweep_stale_generations(path, current)
                     return
             finally:
@@ -268,7 +269,7 @@ def _write_catch_up(
             except (duckdb.IOException, duckdb.ConnectionException) as locked:
                 raise EtudeError("statsdb_in_use", 409) from locked
         with closing(duckdb.connect(generation)) as writer:
-            _catch_up(writer, experiment, storage, rollups, keys)
+            _catch_up(writer, experiment, listing, rollups)
             writer.execute("checkpoint")
         link.unlink(missing_ok=True)
         link.symlink_to(generation.name)
@@ -304,7 +305,7 @@ def _sweep_stale_generations(path: Path, keep: Path | None, *, min_age_s: float 
 class _Ingested:
     """The run declarations and object names already represented in one database."""
 
-    declarations: dict[str, str]
+    declarations: dict[str, str | None]
     kinds: dict[str, str | None]
     environments: set[str]
     seen: dict[str, set[str]]
@@ -329,31 +330,30 @@ class _Ingested:
 def _needs_catch_up(
     db: duckdb.DuckDBPyConnection,
     experiment: str,
-    keys: Sequence[str],
+    listing: RunListing,
     rollups: Sequence[Rollup],
 ) -> bool:
-    """Whether `keys` or `rollups` contain anything `db` has not ingested yet."""
+    """Whether the listing or requested rollups contain anything new for this database."""
     if _schema(db) != SCHEMA:
         return True
     if rollups:
         held_rollups = dict(db.execute("select name, digest from kept.rollups").fetchall())
         if any(held_rollups.get(rollup.name) != rollup.digest for rollup in rollups):
             return True
-    listed = set(keys)
     kept = _Ingested.read(db)
-    for run, folders in run_folders(keys).items():
+    for run, folders in listing.folders.items():
         for folder in folders:
             if folder not in kept.declarations:
-                if folder + "run.json" in listed:
+                if folder + "run.json" in listing.objects:
                     return True
                 continue
             if kept.declarations[folder] != experiment:
                 continue
             if kept.kinds[run] == KIND and run not in kept.environments:
-                if folder + _ENVIRONMENT_FILE in listed:
+                if folder + _ENVIRONMENT_FILE in listing.objects:
                     return True
                 continue
-            if any(key[len(folder) :] not in kept.seen[run] for key in under(keys, folder)):
+            if any(name not in kept.seen[run] for name in listing.names_in(folder)):
                 return True
     return (
         db.execute(
@@ -366,9 +366,8 @@ def _needs_catch_up(
 
 
 def _kept_path(experiment: str, storage: Storage) -> Path:
-    home = Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser()
     store = hashlib.sha256(store_identity(storage).encode()).hexdigest()[:16]
-    return home / "statsdb" / f"{experiment}.{store}.duckdb"
+    return home() / "statsdb" / f"{experiment}.{store}.duckdb"
 
 
 def _schema(db: duckdb.DuckDBPyConnection) -> int | None:
@@ -434,9 +433,8 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
 def _catch_up(
     db: duckdb.DuckDBPyConnection,
     experiment: str,
-    storage: Storage,
+    listing: RunListing,
     rollups: Sequence[Rollup],
-    keys: Sequence[str],
 ) -> None:
     """Read what arrived in `storage` since the last open, in one transaction.
 
@@ -444,8 +442,7 @@ def _catch_up(
     Taking in a block is a fixed number of statements however many matches
     and blobs it holds: rows arrive as one file each (`etude.eval.block.stage`).
     """
-    listed = set(keys)
-    folders_by_run = run_folders(keys)
+    storage = listing.storage
     db.execute("begin")
     try:
         created = _schema(db) is None
@@ -456,11 +453,11 @@ def _catch_up(
         kept = _Ingested.read(db)
         changed = created
         with tempfile.TemporaryDirectory(prefix="etude-statsdb-") as copies:
-            for run, folders in sorted(folders_by_run.items()):
+            for run, folders in sorted(listing.folders.items()):
                 folders = [
                     folder
                     for folder in folders
-                    if _ours(db, storage, run, folder, listed, experiment, kept)
+                    if _ours(db, listing, run, folder, experiment, kept)
                 ]
                 if not folders:
                     continue
@@ -471,8 +468,8 @@ def _catch_up(
                 # One run may be copied to several places; a file's name is the same in each.
                 located: dict[str, str] = {}
                 for place in folders:
-                    for key in under(keys, place):
-                        located.setdefault(key[len(place) :], place)
+                    for name in listing.names_in(place):
+                        located.setdefault(name, place)
                 new = sorted(located.keys() - kept.seen[run])
                 if eval_run:
                     for name in new:
@@ -509,22 +506,23 @@ def _catch_up(
 
 def _ours(
     db: duckdb.DuckDBPyConnection,
-    storage: Storage,
+    listing: RunListing,
     run: str,
     folder: str,
-    listed: Container[str],
     experiment: str,
     kept: _Ingested,
 ) -> bool:
     """Select a folder by its own declaration; retain each declaration once."""
     if folder in kept.declarations:
         return kept.declarations[folder] == experiment
-    declaration = declared(storage, folder, listed)
+    declaration = listing.declaration(folder)
     if declaration is None:
         return False
-    kept.declarations[folder] = declaration.experiment
-    db.execute("insert into kept.declarations values (?, ?)", [folder, declaration.experiment])
-    if declaration.experiment != experiment:
+    # A group is an operational run. Only its tournaments supply scientific rows.
+    owner = declaration.experiment if declaration.members is None else None
+    kept.declarations[folder] = owner
+    db.execute("insert into kept.declarations values (?, ?)", [folder, owner])
+    if owner != experiment:
         return False
     kept.kinds.setdefault(run, declaration.kind)
     db.execute(

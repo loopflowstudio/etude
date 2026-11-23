@@ -38,7 +38,7 @@ from etude.eval.block import (
 from etude.eval.records import TABLE_FILE, MatchRecord, Rollup, outcomes
 from etude.eval.run import OLD_SEAT
 from etude.records import Digest, Record
-from etude.run import as_storage, located_runs, run_folders
+from etude.run import RunListing, as_storage
 from etude.storage import Storage
 
 if TYPE_CHECKING:
@@ -122,19 +122,20 @@ def _run_files(storage: Storage, run: str, experiment: str | None) -> dict[str, 
         if experiment not in (None, label):
             raise EtudeError("run_experiment_conflict", 409)
         experiment = label
-    keys = storage.keys("")
-    identities = located_runs(storage, keys, run=run)
-    selected = [item for item in identities if experiment in (None, item.file.experiment)]
-    if len(selected) > 1:
+    listing = RunListing.read(storage, run=run)
+    identities = listing.declarations
+    selected = [
+        item
+        for item in identities
+        if experiment in (None, item.file.experiment) and item.file.members is None
+    ]
+    if len({item.file.experiment for item in selected}) > 1:
         raise EtudeError("run_experiment_ambiguous", 409, detail="supply --experiment")
-    folders = selected[0].folders if selected else ()
+    folders = tuple(folder for item in selected for folder in item.folders)
     if not identities and experiment is None:
         # Pre-declaration historical folders have no experiment to select.
-        folders = tuple(run_folders(keys).get(run, []))
-    return {
-        folder: [each[len(folder) :] for each in keys if each.startswith(folder)]
-        for folder in folders
-    }
+        folders = tuple(listing.folders.get(run, []))
+    return {folder: list(listing.names_in(folder)) for folder in folders}
 
 
 def _replaced(storage: Storage, folder: str, names: Sequence[str]) -> set[str]:

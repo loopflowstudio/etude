@@ -31,7 +31,11 @@ your report chooses whose score to show.
 An `EvalJob(tournament=PANEL, play=play, agents=Agents(load=load, build=build),
 checkpoints=saved, max_hours=...)` declares the match generator and how to play.
 For a round robin, pass `enter=(a, b, c)` instead of checkpoints. Compatible jobs
-share compute automatically; that grouping changes no scientific identity.
+share compute automatically. The launcher prints one run address for the
+group. Its directory holds the launch declaration, writer and outcome, with
+the tournaments’ result directories beneath it. A retry can reuse their
+sealed matches on a fresh machine. Queries and reports keep the original
+tournament and match identifiers.
 
 ## Config and seeds
 

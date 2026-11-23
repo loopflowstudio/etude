@@ -95,8 +95,108 @@ uv run etude smoke experiment.py
 Require one finished training run (`experiment/coin@0`), eight played matches,
 no replay on the second eval, a report under `home/track/reports/`, and smoke
 success. Inspect the report in a browser; its charts render in JavaScript.
-For live refresh use `uv run etude report experiment.py --serve --port PORT`;
-stop the exact process you started before finishing.
+For the live view run `uv run etude view . --port PORT` in the lab (record its
+PID; stop that exact process before finishing). `train`, `launch` and `status RUN`
+print `view: …/runs/ADDRESS` only while it is up. A paced plain `train(config)`
+(sleep 0.2 s per update, 300 updates) gives time to watch a run page refresh in
+place; Playwright `page.wait_for_timeout` and rereading `body` shows the clock rise.
+Count each tab's full reloads with `page.on("load", …)`: a run tab reloads when a
+block seals and stops once the final block lands; `/`, experiment and Machines tabs
+update in place, so one load each while new work appears. A finished plain run trains
+again only with `etude train FILE --resume --until updates=N` (plain re-train refuses
+`run_name_taken`). Launching in a fresh lab needs `etude database upgrade --development` first.
+`launch --pool local` starts the job itself; open the tabs before `launch`, not just
+before `wait`, to see the first updates. The launcher keeps `setting_up` until a loop runs.
+To see "no end recorded" without waiting 10 minutes, SIGKILL the train's process
+group and `touch -t` its run folder's files into the past. The QA home sits inside
+the lab, so the view must not count `home/sessions/…/src` copies as experiments.
+A second view home for the same lab (e.g. a file-only `home2` with `--source`) must sit
+outside the lab: the view skips only its own home, so the first home's retained
+sources read as `experiment_named_twice`.
+When neither browser extension is connected, drive headless system Chrome:
+`uv run --python 3.12 --with playwright --no-project python driver.py` with
+`p.chromium.launch(channel="chrome")`; no browser download is needed. For older run
+files, `cp -cR ~/.etude/track` into a private folder and pass it as `--source` with a
+private `ETUDE_HOME`.
+The view's index (`home/views/*.sqlite`) is keyed by the `etude-sdk` version, not
+the code: after fixing how charts are projected, stop the view, remove
+`home/views` and restart it, or unchanged runs keep their old projection.
+A view page that differs from the run's Charts tab is a bug worth checking with the
+prototype, whose `report()` names no training panel.
+A `nohup uv run etude view … &` ignores SIGINT; stop the view by sending SIGTERM to its
+`.venv/bin/etude` child (`pgrep -P UV_PID`), or start `.venv/bin/etude view` from a
+Python driver and send SIGINT, which is what Ctrl-C does. A launched run's console reaches
+its page only when the loop collects it, about every 30 s, so a page shows a stale tail
+between collections; check its "Last collected" age rather than expecting each refresh to move.
+`etude launch` refuses a plain `train(config)` file; declare `training_jobs()` for a
+launched run. Its `max_usd` must be above zero even on the free local pool. `etude continue --run RUN --until updates=N` writes a child run named by
+a digest (`continues.parent` in its `run.json`); require each row to carry its own
+launcher facts. A launched evaluation groups every tournament with new matches into one
+`EXPERIMENT/evals-DIGEST`: add a second `Benchmark` to `eval_jobs` and raise `games` on
+both to get a two-member group, then count rows per tournament in `statsdb`. To see a broken `report()`, write a syntax error into the file while a run
+writes and restore it after. `etude server set` refuses an unreachable host, so reach a
+failed launcher read with `chmod 0 home/launcher.sqlite` (stop `etude wait` first); an
+open view shows `Launcher unavailable` within one poll and recovers without a restart.
+Restore the file's original mode (`0600`) before finishing. A Playwright driver that
+reads `inner_text` from tabs that reload itself must catch the read: a reload mid-read
+raises and ends the driver silently while the launched job keeps running.
+
+To drive the experiment page's report pane, give the experiment's `report()` QA
+instrumentation: append a line to a gitignored log per call, `time.sleep(3)`, and raise
+while a gitignored `FAIL` file exists. The log counts declaration reads as well as builds
+(one of each per view start and source version). Open `/experiments/NAME` and
+`/experiments/NAME/report` before launching: both read "Waiting for run files.", then
+"Building report…", then the failure with **Retry report**; remove `FAIL` and click it.
+The pane is the `#report` iframe (`page.frame_locator("#report")`); count its reloads with
+`page.on("framenavigated", …)` for frames other than `page.main_frame`. Two concurrent
+POSTs to the report URL should add one `report()` call. Poll `/experiments/NAME/status`
+twice a second through a live run and require no "Run files:" note: a writer folds its
+tails between the view's listing and its read.
+
+A real selected server needs no root: run a user sshd on this Mac
+(`/usr/sbin/sshd -f CONFIG`) with `Port 2222`, `ListenAddress 127.0.0.1`, a fresh
+`HostKey`, `AuthorizedKeysFile` holding `~/.ssh/id_ed25519.pub`, `UsePAM no`,
+`StrictModes no` and `SetEnv ETUDE_HOME=/tmp/…/home`, so the server side never opens
+`~/.etude`. Put an `ssh` shim first on `PATH` (for the client, `etude view` and
+`etude wait`) that execs `/usr/bin/ssh -p 2222 -o StrictHostKeyChecking=accept-new
+-o UserKnownHostsFile=… -o BatchMode=yes "$@"`. Initialise the server's home with
+`etude database upgrade --development` under its `ETUDE_HOME`, then `etude server set
+jack@127.0.0.1`. Its pool is `server`, a server launch needs `--source`, and its
+local machine delivers to the server's `home/track` whatever `--source` says; view
+those files with `--source file:///…/home/track`. Killing the sshd PID gives a failed
+launcher read; `etude server unset` and the PID ends it.
+
+To take the view's run storage away and bring it back without spend, put a bucket on
+this Mac: `uv run --no-project --python 3.12 --with "moto[server]" moto_server -p 5055`,
+create a bucket of three or more characters, and give only the view a small asyncio TCP
+forwarder (`:5056` to `:5055`) through `AWS_ENDPOINT_URL=http://127.0.0.1:5056` with
+dummy `AWS_*` keys (the lab needs `etude-sdk[eval,s3]`). Run `etude view . --source
+s3://BUCKET/runs`. Local launches still write `home/track`, so a driver thread uploads
+changed files there straight to `:5055`, standing in for delivery. Killing the forwarder is
+the outage; starting it again is recovery. A never-reached prefix shows a fresh index
+before any successful file pass. Do not name a driver after a standard module
+(`queue.py` shadows the `queue` that boto3 imports). `etude launch --pool local` refuses
+while the one local slot is busy; use `etude queue` for a queued entry. `etude wait`
+returns once the runs it started with end, so drive a later queue entry with another wait.
+
+To count what the view reads from that bucket, have the forwarder log each request line
+(`GET /BUCKET/KEY`); discovery should show listings plus `run.json`/`outcome.json` only.
+For the real Manabot history, run the branch from `~/src/manabot` with `uv run --no-sync
+--with-editable 'REPO[s3]' etude view experiments/ --source r2://manabot/jobs`. That
+overlay leaves manabot's environment untouched. Use a private `ETUDE_HOME` and the
+Doppler R2 keys from `manabot/prd`. Cap `du -sm HOME/cache`, not the whole home: the
+view's index (`views/*.sqlite`) reaches ~80 MB and a temporary file briefly doubles the
+home. A cold first pass should publish ~58 experiments in about a minute on ~50 MB of
+cache (legacy `run.json` files get one 4 KiB ranged read), and a restart should publish
+within seconds with no new cache bytes. Delete the home afterwards.
+
+A directory source with an incomplete listing needs no bucket: under the view's
+`home/track`, `mkdir -p locked/inner && chmod 000 locked` beside the runs (never the
+run's own folder, which its writer needs), and `chmod 755` to recover; restore it in a
+`finally`. The "no end recorded" rule needs a real 10-minute window, so give that
+driver its own background run. Start long drivers with the shell tool's background
+option, not `nohup … &`: a shell `&` job ignores SIGINT and every child it spawns
+inherits that, so `etude view` then looks hung on SIGINT. SIGTERM stops it either way.
 
 For interruption, make a separate lab copy with an author-controlled pause
 (`time.sleep(0.1)` per update) and more updates. Drive `uv run etude train
@@ -104,9 +204,9 @@ experiment.py` with a Python subprocess driver: `etude train` prints no progress
 lines, so sleep a few seconds, then send SIGINT to that process (a driver that
 blocks on `readline` never sends it). Require exit 75. The next plain
 `etude train experiment.py` prints `stopped; --job coin --seed 0 --resume`;
-follow it, then read `etude.train.read.read(default_root(), "experiment",
+follow it, then read `etude.train.read.read(etude.storage.default_root(), "experiment",
 "coin@0").points("heads", "updates")` and require each update once, in order,
-across two metric writers. Use `uv run python` for the driver. A background
+across two metric writers. Use `uv run python` for the driver. To check block selection, copy the run folder on every poll while it writes: the copies hold level-1 recent blocks and tails that the final fold later replaces with a level-2 block. Put those back beside the finished files in a copy and read it with `--source`; each update must still read once. A long run's `Latest metric` is the latest bucket mean, not its last row. A background
 shell job may ignore SIGINT; do not signal processes by a broad name pattern.
 
 Training code calls `track(config=config)` only inside Etude's assigned run.
@@ -226,6 +326,8 @@ CLI and library reads across experiments, and never rent as part of validation.
 Do not complete the Task on merge alone.
 
 Before QA, read the PR's CI (`gh pr checks N`, `gh run view RUN --log-failed`).
+An `unmerged or unproven migrations` failure in a fixture that upgrades a
+non-empty home means it patches `_merged` too late: patch it before the first upgrade.
 A `launcher.sqlite is not initialized` failure can mean a fixture sets its own
 `ETUDE_HOME` or calls `client._open(path)` without `upgrade(path,
 development=True)`. Conftest initializes only its autouse home. `etude smoke`

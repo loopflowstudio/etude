@@ -13,7 +13,7 @@ from etude.controller.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.jobs import continue_from, continued_config
 from etude.out import MEMBERSHIP, OutFiles
-from etude.records import Clock, RunWriter
+from etude.records import Clock, RunRecord, RunWriter
 from etude.run import sync
 from etude.spec import Input, Job
 from etude.storage import DirectoryStorage
@@ -124,7 +124,8 @@ def test_continuation_and_report_use_the_same_position_after_an_empty_attempt(
     child = continue_from(scheduler.record(parent), f"updates={position + 1}", source=storage)
     (lineage,) = child.job.environment
     assert authored(ParentRun.model_validate_json(lineage.value).at) == {"updates": position}
-    assert storage.listings == 2
+    assert storage.listings == 1
+    assert storage.got.count(f"{parent}/run.json") == 1
     assert storage.got.count(f"{parent}/out.json") == int(carried)
     out_reads = [key for key in storage.got if key.startswith(f"{parent}/out/")]
     assert out_reads == ([] if carried else [f"{parent}/out/model", f"{parent}/out/state"])
@@ -185,6 +186,8 @@ def test_out_carries_copied_latest_checkpoint(
     destination = DirectoryStorage(tmp_path / "bucket" if carried else source)
     if carried:
         assert sync(source, storages=[destination]) == {}
+        # An earlier machine may have delivered only the declaration.
+        destination.put(f"first/{parent}/run.json", destination.get(f"{parent}/run.json"))
     storage = MeasuredStorage(destination)
     child = continue_from(scheduler.record(parent), f"updates={position + 1}", source=storage)
     (lineage,) = child.job.environment
@@ -208,8 +211,9 @@ def test_out_carries_copied_latest_checkpoint(
         sha256(b"saved at 2").hexdigest(),
         10,
     )
+    assert all(given.uri == destination.uri(f"{parent}/{given.key}") for given in child.job.inputs)
     assert all(given.run == parent for given in child.job.inputs)
-    assert storage.listings == 2
+    assert storage.listings == 1
     assert storage.got.count(f"{parent}/{MEMBERSHIP}") == int(carried)
     assert [key for key in storage.got if key.startswith(f"{parent}/out/")] == (
         [] if carried or not populated else [f"{parent}/out/samples.txt"]
@@ -226,7 +230,7 @@ def test_out_carries_copied_latest_checkpoint(
     assert authored(ParentRun.model_validate_json(explicit.job.environment[0].value).at) == {
         "updates": 2
     }
-    assert selected.listings == 2
+    assert selected.listings == 1
     assert f"{parent}/{MEMBERSHIP}" not in selected.got
     assert not any(key.startswith(f"{parent}/out/") for key in selected.got)
 
@@ -314,7 +318,7 @@ def test_continuation_requires_saved_out_or_its_latest_checkpoint(
     else:
         with pytest.raises(LauncherError, match=error):
             continue_from(scheduler.record(parent), "updates=9", source=storage)
-    assert storage.listings == 2
+    assert storage.listings == 1
     assert storage.got.count(f"{parent}/{MEMBERSHIP}") == int(carried)
     assert [key for key in storage.got if key.startswith(f"{parent}/out/")] == (
         [] if carried or not populated else [f"{parent}/out/state"]
@@ -357,7 +361,7 @@ def test_continuation_requires_saved_out_or_its_latest_checkpoint(
         assert authored(ParentRun.model_validate_json(explicit.job.environment[0].value).at) == {
             "updates": 1
         }
-        assert selected.listings == 2
+        assert selected.listings == 1
         assert f"{parent}/{MEMBERSHIP}" not in selected.got
         assert not any(
             key.startswith(f"{parent}/out/") or key.endswith(".pt") for key in selected.got
@@ -412,7 +416,7 @@ def training_jobs(python: str) -> Job:
             continued_config(record, changes)
     next_run = continue_from(record, "updates=4", source=source)
     assert next_run.job.config == record.launch.spec.config
-    assert source.listings == 2
+    assert source.listings == 1
     assert source.got.count(f"{parent}/out/state.json") == 1
     assert source.got.count(f"{parent}/out/model-3.pt") == 1
     assert len([i for i in next_run.job.inputs if i.out is not None]) == 2
@@ -499,13 +503,20 @@ def test_an_explicit_folder_checkpoint_continuation_names_every_member(tmp_path:
             (folder / "value").write_bytes(b"value weights")
 
         run.checkpoint(export, updates=2)
-    counted = MeasuredStorage(DirectoryStorage(source))
+    # Imported runs retain the producer's namespace and source kind in a handoff.
+    stored = DirectoryStorage(source)
+    key = parent + "/run.json"
+    original = RunRecord.model_validate_json(stored.get(key))
+    imported = original.model_copy(update={"namespace": "archive", "source_kind": "learner"})
+    stored.put(key, imported.model_dump_json().encode())
+    counted = MeasuredStorage(stored)
     child = continue_from(scheduler.record(parent), "updates=3", source=counted, ordinal=1)
     handed = ParentRun.model_validate_json(child.job.environment[-1].value)
     assert handed.checkpoint is not None and handed.input is not None
+    assert handed.parent == imported.source_key
     assert authored(handed.at) == {"updates": 2}
     assert {given.name for given in child.job.inputs} == {
         handed.input + "/" + name for name in ("checkpoint.json", "policy", "value")
     }
-    assert counted.listings == 2
+    assert counted.listings == 1
     assert not any("/out/" in key for key in counted.got)

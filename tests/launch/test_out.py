@@ -278,17 +278,17 @@ def test_deleted_files_stay_absent_after_restart_recovery_and_continuation(
     source = MeasuredStorage(DirectoryStorage(relayed.parent))
     with pytest.raises(LauncherError, match="latest checkpoint's out file was removed"):
         continue_from(record, "updates=4", source=source)
-    assert source.listings == 2
+    assert source.listings == 1
     assert not any("/out/" in key for key in source.got)
     source = MeasuredStorage(BucketObjects(storage, "b"))
     with pytest.raises(LauncherError, match="latest checkpoint's out file was removed"):
         continue_from(record, "updates=4", source=source)
-    assert source.got.count(member) == 1 and source.listings == 2
+    assert source.got.count(member) == 1 and source.listings == 1
     assert not any("/out/" in key for key in source.got)
     source = MeasuredStorage(BucketObjects(storage, "b"))
     child = continue_from(record, "updates=4", source=source, ordinal=1)
     assert [given.key for given in child.job.inputs] == ["out/final.pt"]
-    assert member not in source.got and source.listings == 2
+    assert member not in source.got and source.listings == 1
     assert not any("/out/" in key for key in source.got)
     # Explicit checkpoint selection still retrieves the immutable object.
     assert journal.held("run1", "out/final.pt")["out/final.pt"] == b"immutable weights"

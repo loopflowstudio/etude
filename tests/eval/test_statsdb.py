@@ -83,8 +83,9 @@ def test_an_experiment_holds_its_own_eval_runs_only(tmp_path: Path) -> None:
 def test_opening_again_reads_only_what_arrived(tmp_path: Path) -> None:
     bucket = DirectoryStorage(tmp_path / "bucket")
     players = pair(tmp_path)
+    # This compact run owns cards/, alongside the later cards/b run.
     play_matches(experiment="cards", environment=DUEL, play=play, matches=deals(players, 0, 1, 2),
-             run="a", directory=tmp_path / "a", storages=[bucket])  # fmt: skip
+             run="cards", directory=tmp_path / "a", storages=[bucket])  # fmt: skip
     first = MeasuredStorage(bucket)
     statsdb("cards", first).close()
     assert first.listings == 1 and first.requests > 0

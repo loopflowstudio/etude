@@ -24,6 +24,11 @@ class OutFile(BaseModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     size_bytes: int = Field(ge=0)
 
+    def locate(self, run: str, uri: str) -> "OutMember":
+        return OutMember(
+            run=run, key=self.key, sha256=self.sha256, size_bytes=self.size_bytes, uri=uri
+        )
+
     @model_validator(mode="after")
     def portable(self) -> Self:
         if not within(self.key) or not self.key.startswith("out/"):
@@ -39,7 +44,7 @@ class OutFiles(BaseModel):
 
 @dataclass(frozen=True)
 class OutMember:
-    """A stored out file and its producer; makes a verified input without seeding out."""
+    """A stored out file, its producer and the location of its verified bytes."""
 
     run: str
     key: str
@@ -51,9 +56,10 @@ class OutMember:
     def path(self) -> str:
         return self.key.removeprefix("out/")
 
-    def input(self, name: str) -> Input:
+    def input(self, name: str, *, out: str | None = None) -> Input:
         return Input(
             name=name,
+            out=out,
             key=self.key,
             sha256=self.sha256,
             size_bytes=self.size_bytes,

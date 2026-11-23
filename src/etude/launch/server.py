@@ -16,7 +16,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from functools import cache
 from pathlib import Path
@@ -26,18 +27,22 @@ from pydantic import Field, RootModel, TypeAdapter
 
 from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError, explain
+from etude.home import home
+from etude.launch.database import launcher_file, open_home
 from etude.launch.errors import LaunchError, SchemaAdvanced
+from etude.launch.logs import ConsoleTail
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import (
     Launch,
     LogSnapshot,
+    MachineStatus,
     Quote,
     Standing,
     Status,
     Target,
 )
 from etude.launch.scheduler.loop import Scheduler
-from etude.launch.source import freeze, home, retain, source_archive, stored
+from etude.launch.source import freeze, retain, source_archive, stored
 from etude.launch.ssh import (
     _INSTALL_CODE,
     EncodedOutput,
@@ -104,6 +109,52 @@ class StandingRequest(Record):
     job: str | None = None
 
 
+class ObservationRequest(Record):
+    operation: Literal["observation"] = "observation"
+    consoles: tuple[str, ...]
+
+
+class LauncherObservation(Record):
+    runs: tuple[Standing, ...] = ()
+    machines: tuple[MachineStatus, ...] | None = None
+    last_loop: datetime | None = None
+    consoles: dict[str, ConsoleTail] = Field(default_factory=dict)
+
+    @classmethod
+    def read(cls, consoles: tuple[str, ...], *, machines: bool = False) -> LauncherObservation:
+        with retained_scheduler() as scheduler:
+            if scheduler is None:
+                return cls()
+            runs = scheduler.standing()
+            requested = set(consoles)
+            return cls(
+                runs=runs,
+                machines=scheduler.machine_statuses() if machines else None,
+                last_loop=last_loop(),
+                consoles={
+                    item.record.id: ConsoleTail.from_snapshot(
+                        scheduler.logs(run=item.record.id), item.status
+                    )
+                    for item in runs
+                    if item.record.id in requested
+                },
+            )
+
+
+@contextmanager
+def retained_scheduler() -> Iterator[Scheduler | None]:
+    """Open this machine's existing records without configuring providers or pools."""
+    if not launcher_file(home()).exists():
+        yield None
+        return
+    store = open_home(home())
+    try:
+        with store.reading():
+            yield Scheduler(store, {})
+    finally:
+        store.close()
+
+
 class WaitRequest(Record):
     operation: Literal["wait"] = "wait"
     runs: tuple[str, ...]
@@ -131,6 +182,7 @@ type Request = Annotated[
     | OutputRequest
     | RunOperation
     | StandingRequest
+    | ObservationRequest
     | WaitRequest
     | EvidenceRequest
     | LogsRequest,
@@ -148,6 +200,7 @@ type Response = (
     | EncodedOutput
     | Usage
     | LogSnapshot
+    | LauncherObservation
     | tuple[RunRecord, ...]
     | tuple[Standing, ...]
     | Launch
@@ -418,6 +471,11 @@ class PythonClient:
             self._request(StandingRequest(experiment=experiment, job=job))
         )
 
+    def observation(self, consoles: tuple[str, ...]) -> LauncherObservation:
+        return LauncherObservation.model_validate_json(
+            self._request(ObservationRequest(consoles=consoles))
+        )
+
     def record(self, run: str) -> RunRecord:
         return RunRecord.model_validate_json(
             self._request(RunOperation(operation="record", run=run))
@@ -468,8 +526,18 @@ class PythonClient:
         )
 
 
-def receive(scheduler: Scheduler) -> int:
+def receive(open_scheduler: Callable[[], Scheduler]) -> int:
     request = _REQUEST.validate_json(sys.stdin.buffer.read())
+    response = (
+        LauncherObservation.read(request.consoles)
+        if isinstance(request, ObservationRequest)
+        else _answer(open_scheduler(), request)
+    )
+    print(ServerReply(response).model_dump_json())
+    return 0
+
+
+def _answer(scheduler: Scheduler, request: Request) -> Response:
     response: Response
     match request:
         case SubmissionRequest(operation="prepare_launch", submission=submission):
@@ -538,8 +606,7 @@ def receive(scheduler: Scheduler) -> int:
             response = scheduler.read(request.run)
         case _:
             raise LauncherError(f"unknown server operation {request.operation!r}")
-    print(ServerReply(response).model_dump_json())
-    return 0
+    return response
 
 
 def loop(scheduler: Scheduler, every: float = 1.0) -> None:
@@ -582,14 +649,18 @@ def _hand_over(program: str | None) -> NoReturn:
     os.execv(str(python), [str(python), "-m", "etude", "server", "run"])
 
 
-def warning(scheduler: Scheduler) -> str | None:
-    path = home() / "server-heartbeat"
+def last_loop() -> datetime | None:
+    """UTC timestamp written on this server after a completed scheduler tick."""
     try:
-        at = datetime.fromisoformat(path.read_text())
-        age = (datetime.now(UTC) - at).total_seconds()
-        recent = 0 <= age < 30
-    except (OSError, ValueError, TypeError):
-        recent = False
+        at = datetime.fromisoformat((home() / "server-heartbeat").read_text().strip())
+        return at.astimezone(UTC) if at.tzinfo is not None else None
+    except (ValueError, OSError):
+        return None
+
+
+def warning(scheduler: Scheduler) -> str | None:
+    at = last_loop()
+    recent = at is not None and 0 <= (datetime.now(UTC) - at).total_seconds() < 30
     if not recent and any(scheduler.read(run.id).phase == "queued" for run in scheduler.runs()):
         return "work is waiting; no server loop has run recently (etude server run)"
     return None
@@ -597,11 +668,11 @@ def warning(scheduler: Scheduler) -> str | None:
 
 def show_freshness(scheduler: Scheduler) -> None:
     """Print when the server loop last passed: how fresh the database's answers are."""
-    try:
-        at = datetime.fromisoformat((home() / "server-heartbeat").read_text().strip())
+    at = last_loop()
+    if at is not None:
         age = int((datetime.now(UTC) - at).total_seconds())
         said = f"{age} seconds ago" if 0 <= age < 120 else f"{at:%Y-%m-%d %H:%M} UTC"
-    except (OSError, ValueError, TypeError):
+    else:
         said = "never"
     print("last loop: " + said)
     if problem := warning(scheduler):

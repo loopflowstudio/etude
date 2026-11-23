@@ -33,6 +33,9 @@ class Record(BaseModel):
     model_config = ConfigDict(defer_build=True, frozen=True)
 
 
+CONTINUATION_ENV = "ETUDE_CONTINUES"
+
+
 type Param = str | int | float | bool
 
 
@@ -247,6 +250,11 @@ class Job(Record):
         """The frozen executable form stored and sent by the scheduler."""
         return self
 
+    @property
+    def continuation_json(self) -> str | None:
+        """The serialized parent handed to this job, if it continues a run."""
+        return next((v.value for v in self.environment if v.name == CONTINUATION_ENV), None)
+
     def require_hours(self) -> float:
         """The machine allowance; launch, queue and smoke require it."""
         if self.max_hours is None:
@@ -287,6 +295,12 @@ class Job(Record):
         return expand_runs([self], params=params)
 
 
+def declared_address(experiment: str | None, job: str, seed: int) -> str:
+    """The stable address assigned to a declared job and seed."""
+    name = f"{job}@{seed}"
+    return f"{experiment}/{name}" if experiment else name
+
+
 def expand_runs(
     given: Sequence[Job | RunRequest], *, params: dict[str, Param] | None = None
 ) -> list[RunRequest]:
@@ -304,8 +318,7 @@ def expand_runs(
         for seed in job.seeds:
             address = None
             if job.name:
-                local = f"{job.name}@{seed}"
-                address = f"{job.experiment}/{local}" if job.experiment else local
+                address = declared_address(job.experiment, job.name, seed)
             requests.append(RunRequest(job=job, seed=seed, params=dict(params or {}), id=address))
     return requests
 

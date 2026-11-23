@@ -44,7 +44,7 @@ from etude.jobs import (
 )
 from etude.launch.smoke import Smoked, show, smoke_home, smoke_train
 from etude.page import build, render, write
-from etude.run import located_runs
+from etude.run import RunListing
 from etude.spec import Job, RunRequest, SmokeStep
 from etude.storage import DirectoryStorage, Storage, default_root
 
@@ -124,9 +124,8 @@ def _evaluate(
         return [
             SmokeStep(step="eval", name="eval", outcome="skipped", detail="no eval_jobs(state)")
         ]
-    keys = source.keys("")
-    declarations = located_runs(source, keys)
-    state = observe(source, experiment, keys=keys, declarations=declarations)
+    listing = RunListing.read(source)
+    state = observe(listing, experiment)
     definition = read_experiment(path)
     function = definition.eval
     assert function is not None
@@ -155,7 +154,9 @@ def _evaluate(
         else:
             runnable.append(job)
     lines = read_tournament_lines(
-        source, state, [job.recorded() for job in runnable], keys=keys, declarations=declarations
+        listing,
+        state,
+        [job.recorded() for job in runnable],
     )
     batches: dict[str, list[Job]] = {}
     for job in runnable:

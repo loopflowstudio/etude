@@ -36,6 +36,7 @@ from etude.carriage import (
     purpose,
     reconcile_out,
     recorded_files,
+    replace_on_restore,
     resume_file,
     retired,
     save_pointer,
@@ -347,7 +348,8 @@ class Courier:
         keys = {key: listed[key] for key in found.keys}
         reconcile_out(folder, keys)
         recorded: dict[str, RecordedFile] | None = None
-        for key, link in sorted(keys.items()):
+        for key in sorted(keys, key=lambda key: (key == "outcome.json", key)):
+            link = keys[key]
             if not within(key):
                 raise StorageUnavailable("restore path is outside the run")
             target = folder / key
@@ -355,7 +357,7 @@ class Courier:
                 key == MEMBERSHIP
                 or checkpoint_file(key)
                 or target.exists()
-                and not key.startswith("out/")
+                and not replace_on_restore(key)
             ):
                 continue
             if recorded is None and key.startswith("out/"):
@@ -367,7 +369,11 @@ class Courier:
                 raise StorageUnavailable(f"restored file {key} is missing or has changed length")
             # Reuse the received bytes for verification and the sent marker;
             # restoring a large out file needs no second read from disk.
-            digest = hashlib.sha256(body).hexdigest() if key.startswith("out/") else None
+            digest = (
+                hashlib.sha256(body).hexdigest()
+                if key.startswith("out/") or key == "outcome.json"
+                else None
+            )
             if named is not None and (len(body) != named.size_bytes or digest != named.sha256):
                 raise StorageUnavailable(f"restored file {key} differs from its checkpoint record")
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -591,23 +597,21 @@ class Courier:
             # skipped; what replaced it is seen on the next pass.
             try:
                 with attribute(purpose=purpose(key, recorded)):
-                    if key.startswith("out/"):
+                    if (frozen := snapshot.frozen(key)) is not None:
+                        fingerprint = hashlib.sha256(frozen).hexdigest()
                         if key in snapshot.pointers:
-                            pointer_body = snapshot.pointers[key]
-                            digest = hashlib.sha256(pointer_body).hexdigest()
-                            if self._sent.get((run, key)) != pointer_body.decode():
-                                self._runs[run].write_bytes(key, pointer_body)
-                                self._sent[run, key] = pointer_body.decode()
-                            out.append(
-                                OutFile(key=key, sha256=digest, size_bytes=len(pointer_body))
-                            )
-                        else:
-                            out.append(self._put_out(run, key, recorded.get(key)))
+                            out.append(OutFile(key=key, sha256=fingerprint, size_bytes=len(frozen)))
+                            fingerprint = frozen.decode()
+                        if self._sent.get((run, key)) != fingerprint:
+                            self._runs[run].write_bytes(key, frozen)
+                            self._sent[run, key] = fingerprint
+                    elif key.startswith("out/"):
+                        out.append(self._put_out(run, key, recorded.get(key)))
                     else:
                         self._put(folder / key, run, key)
             except FileNotFoundError:
-                if save_pointer(key) is not None:
-                    raise  # never publish a pointer after skipping one of its files
+                if save_pointer(key) is not None or snapshot.outcome is not None:
+                    raise  # A pointer or a final outcome must follow all its files.
                 continue
         if (folder / "out").is_dir() or (folder / OUT_PRESENT).is_file():
             body = OutFiles(files=tuple(out)).model_dump_json()

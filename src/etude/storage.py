@@ -24,24 +24,32 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from copy import copy
-from datetime import datetime
+from datetime import UTC, datetime
 from itertools import islice, pairwise
 from pathlib import Path
 from stat import S_ISREG
-from typing import Any, Literal, NamedTuple, Protocol, cast
+from typing import Any, Literal, NamedTuple, Protocol, Self, cast
 from urllib.parse import quote, unquote, urlsplit
 
 from pydantic import ValidationError
 
-from etude.cache import Artifact, Cache, Fetched
+from etude.cache import Artifact, Cache, Fetched, Source
 from etude.carriage import immutable
 from etude.deadline import call, remaining
 from etude.errors import EtudeError
+from etude.home import home
 from etude.identity import SAFE_NAME, run_address
 from etude.records import Record, RunRecord
 from etude.storage_timeout import StorageUnavailable, socket_timeout
 
-__all__ = ("default_root", "storage_from_uri", "Storage", "DirectoryStorage", "S3Storage")
+__all__ = (
+    "default_root",
+    "storage_from_uri",
+    "Storage",
+    "DirectoryStorage",
+    "S3Storage",
+    "ObjectVersion",
+)
 
 
 def run_prefix(run: str) -> str:
@@ -76,6 +84,35 @@ class Storage(Protocol):
     def keys(self, prefix: str) -> list[str]: ...
 
     def versions(self, prefix: str) -> dict[str, str]: ...
+
+
+class ObjectVersion(str):
+    """A storage version tag with the metadata supplied by its listing.
+
+    Tags remain strings so existing Storage implementations and consumers can
+    compare or persist them. An opaque string supplies no evidence of age.
+    """
+
+    __slots__ = ("modified", "etag", "size")
+    etag: str | None
+    modified: datetime | None
+    size: int | None
+
+    def __new__(
+        cls,
+        tag: str,
+        modified: datetime | None = None,
+        *,
+        etag: str | None = None,
+        size: int | None = None,
+    ) -> Self:
+        if modified is not None and modified.utcoffset() is None:
+            raise ValueError("an object's modification time must include a time zone")
+        version = super().__new__(cls, tag)
+        version.etag = etag
+        version.size = size
+        version.modified = modified.astimezone(UTC) if modified is not None else None
+        return version
 
 
 class DirectoryStorage:
@@ -122,20 +159,33 @@ class DirectoryStorage:
         return sorted(self.versions(prefix))
 
     def versions(self, prefix: str) -> dict[str, str]:
-        """Each file's modification time and size: a replaced file changes one or both."""
-        base = self._path(prefix) if prefix else self.root
-        if not base.is_dir():
-            return {}
-        found = {}
-        for path in base.rglob("*"):
-            if path.name.endswith(".partial"):
-                continue
+        """List file times and sizes. An unreadable subtree invalidates the listing."""
+        pending = [self._path(prefix) if prefix else self.root]
+        found: dict[str, str] = {}
+        while pending:
+            folder = pending.pop()
             try:
-                stat = path.stat()
-            except FileNotFoundError:
-                continue  # replaced or removed while listed
-            if S_ISREG(stat.st_mode):
-                found[path.relative_to(self.root).as_posix()] = f"{stat.st_mtime_ns}:{stat.st_size}"
+                entries = os.scandir(folder)
+            except (FileNotFoundError, NotADirectoryError):
+                continue  # Missing prefix or a directory removed during traversal.
+            with entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            pending.append(folder / entry.name)
+                            continue
+                        if entry.name.endswith(".partial"):
+                            continue
+                        stat = entry.stat()
+                    except FileNotFoundError:
+                        continue  # Dangling symlink or file removed while listed.
+                    if S_ISREG(stat.st_mode):
+                        key = (folder / entry.name).relative_to(self.root).as_posix()
+                        found[key] = ObjectVersion(
+                            f"{stat.st_mtime_ns}:{stat.st_size}",
+                            datetime.fromtimestamp(stat.st_mtime, UTC),
+                            size=stat.st_size,
+                        )
         return found
 
 
@@ -182,7 +232,11 @@ def store_identity(storage: Storage) -> str:
 
 def with_versions(storage: Storage, versions: Mapping[str, str]) -> Storage:
     """Pin an S3/R2 reader to `versions` for ETag checks without affecting other readers."""
-    return storage._with_versions(versions) if isinstance(storage, S3Storage) else storage
+    if not isinstance(storage, S3Storage):
+        return storage
+    listed = copy(storage)
+    listed._listed_versions = dict(versions)
+    return listed
 
 
 class S3Storage:
@@ -226,12 +280,6 @@ class S3Storage:
         self._where = f"{endpoint.scheme}://{bucket}.{host}/"
         self._listed_versions: dict[str, str] | None = None
 
-    def _with_versions(self, versions: Mapping[str, str]) -> S3Storage:
-        """Read against this listing without changing what concurrent readers trust."""
-        listed = copy(self)
-        listed._listed_versions = dict(versions)
-        return listed
-
     def put(self, key: str, data: bytes) -> None:
         if self._listed_versions is not None:
             self._listed_versions.pop(key, None)
@@ -255,14 +303,21 @@ class S3Storage:
         return f"{self.provider}://{self.bucket}/{self.prefix}{key}"
 
     def get(self, key: str) -> bytes:
-        return self.cache.read(self._artifact(key), _Object(self, key))
+        return self.cache.read(*self._object(key))
 
     def get_range(self, key: str, start: int, length: int) -> bytes:
-        return self.cache.read(self._artifact(key), _Object(self, key), start=start, length=length)
+        return self.cache.read(*self._object(key), start=start, length=length)
 
-    def _artifact(self, key: str) -> Artifact:
+    def _object(self, key: str, version: str | None = None) -> tuple[Artifact, _Object]:
         location = self._where + quote(self.prefix + key, safe="-_.~/")
-        return Artifact(location=location, immutable=immutable(key))
+        if version is None and self._listed_versions is not None:
+            version = self._listed_versions.get(key)
+        artifact = Artifact(
+            location=location,
+            immutable=immutable(key),
+            listed_etag=version.etag if isinstance(version, ObjectVersion) else None,
+        )
+        return artifact, _Object(self, key)
 
     def delete(self, key: str) -> bool:
         if self._listed_versions is not None:
@@ -347,13 +402,16 @@ class S3Storage:
                 options["ContinuationToken"] = page["NextContinuationToken"]
 
         def objects(page: dict[str, Any], through: str | None = None) -> dict[str, str]:
-            return {
-                item["Key"][
-                    len(self.prefix) :
-                ]: f"{item.get('ETag')}:{item.get('Size')}:{item.get('LastModified')}"
-                for item in page.get("Contents", ())
-                if through is None or item["Key"] <= through
-            }
+            found: dict[str, str] = {}
+            for item in page.get("Contents", ()):
+                if through is None or item["Key"] <= through:
+                    etag, modified = item.get("ETag"), item.get("LastModified")
+                    size = item.get("Size")
+                    key = item["Key"][len(self.prefix) :]
+                    found[key] = ObjectVersion(
+                        f"{etag}:{size}:{modified}", modified, etag=etag, size=size
+                    )
+            return found
 
         def read_range(span: _KeyRange) -> dict[str, str]:
             part: dict[str, str] = {}
@@ -443,6 +501,43 @@ class S3Storage:
         return found
 
 
+class ListedStorage:
+    """Read objects against a listing using the same verified cache as every bucket reader.
+
+    A matching listed version answers a mutable object's freshness check. Bucket
+    locators and ETags are identical to those of unlisted readers. A compaction
+    race can be retried by the next ingestion with a fresh listing.
+    """
+
+    def __init__(self, storage: Storage, objects: dict[str, str], cache: Cache) -> None:
+        self.storage, self.objects = storage, objects
+        self.cache = storage.cache if isinstance(storage, S3Storage) else cache
+        self.name = storage.name
+        self.uri = storage.uri
+        self.put, self.put_file, self.delete = storage.put, storage.put_file, storage.delete
+
+    def versions(self, prefix: str) -> dict[str, str]:
+        return {k: v for k, v in self.objects.items() if k.startswith(prefix)}
+
+    def keys(self, prefix: str) -> list[str]:
+        return sorted(k for k in self.objects if k.startswith(prefix))
+
+    def _object(self, key: str) -> tuple[Artifact, Source]:
+        version = self.objects.get(key)
+        if version is None:
+            raise FileNotFoundError(key)
+        if isinstance(self.storage, S3Storage):
+            return self.storage._object(key, version)
+        artifact = Artifact(location=self.uri(key), immutable=immutable(key), listed_etag=version)
+        return artifact, _StoredFile(self.storage, key, version=version)
+
+    def get(self, key: str) -> bytes:
+        return self.cache.read(*self._object(key))
+
+    def get_range(self, key: str, start: int, length: int) -> bytes:
+        return self.cache.read(*self._object(key), start=start, length=length)
+
+
 class _Object:
     """One bucket object, read for the cache; reads reused from it go unrecorded."""
 
@@ -460,11 +555,6 @@ class _Object:
         return found
 
     def changed(self, etag: str) -> Fetched | None:
-        if (
-            self.storage._listed_versions is not None
-            and self.storage._listed_versions.get(self.key, "").partition(":")[0] == etag
-        ):
-            return None
         return self._get({"IfNoneMatch": etag})
 
     def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
@@ -576,7 +666,7 @@ def default_root() -> Path:
     given = os.environ.get("ETUDE_TRACK_DIR")
     if given:
         return Path(given)
-    return Path(os.environ.get("ETUDE_HOME", "~/.etude")).expanduser() / "track"
+    return home() / "track"
 
 
 def run_directory(directory: Path | str | None, experiment: str, run: str) -> tuple[Path, Path]:
@@ -587,10 +677,16 @@ def run_directory(directory: Path | str | None, experiment: str, run: str) -> tu
             raise EtudeError("unsafe_run_or_experiment_name", 422)
     base = Path(directory) if directory else default_root()
     handed = os.environ.get("ETUDE_RUN")
-    address = os.environ.get("ETUDE_RUN_ADDRESS") if handed == run else None
-    root = base / run_address(address or run, experiment)
-    if os.environ.get("ETUDE_ATTEMPT") and handed == local and (out := os.environ.get("ETUDE_OUT")):
-        root = Path(out).parent
+    out = os.environ.get("ETUDE_OUT")
+    assigned = Path(out).parent if out and os.environ.get("ETUDE_ATTEMPT") else None
+    # The assigned folder holds the launch. A tournament declared inside it
+    # retains its own address even if its local name matches the launch.
+    address = os.environ.get("ETUDE_RUN_ADDRESS") if handed == run and base != assigned else None
+    root = (
+        assigned
+        if assigned and base != assigned and handed == local
+        else base / run_address(address or run, experiment)
+    )
     if not (root / "run.json").is_file():
         # Runs stored before compact addresses: EXPERIMENT/RUN folders, then flat ones.
         for stored in (base / experiment / local, base / run):
@@ -604,27 +700,44 @@ def run_directory(directory: Path | str | None, experiment: str, run: str) -> tu
 
 
 def storage_from_uri(uri: str | Path) -> Storage:
-    """`s3://bucket/prefix` or `r2://bucket/prefix` is a bucket; anything else is a directory."""
+    """`s3://bucket/prefix` or `r2://bucket/prefix` is a bucket; anything else is a directory.
+
+    A directory may be a path or the `file://` URI that `DirectoryStorage.uri` prints.
+    """
     text = str(uri)
     providers: tuple[Literal["s3", "r2"], ...] = ("s3", "r2")
     for provider in providers:
         if text.startswith(f"{provider}://"):
             bucket, _, prefix = text.removeprefix(f"{provider}://").partition("/")
             return S3Storage(bucket, prefix, provider=provider)
+    if text.startswith("file://"):
+        parsed = urlsplit(text)
+        if parsed.netloc not in ("", "localhost"):
+            raise ValueError(f"a file URI names no other host: {text}")
+        return DirectoryStorage(unquote(parsed.path))
     return DirectoryStorage(text)
 
 
 class _StoredFile:
-    """Transport for a file with a declared length; the cache verifies its content."""
+    """A file transport. A listing supplies a version; a declared artifact supplies a size."""
 
-    def __init__(self, storage: Storage, key: str, size: int) -> None:
+    def __init__(
+        self, storage: Storage, key: str, size: int | None = None, *, version: str | None = None
+    ) -> None:
+        self.version = version
         self.storage, self.key, self.size = storage, key, size
 
     def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
-        stop = self.size if end is None else min(end + 1, self.size)
-        return Fetched(self.storage.get_range(self.key, start, stop - start), None)
+        stop = end + 1 if end is not None else self.size
+        if stop is None:
+            body = self.storage.get(self.key)[start:]
+        else:
+            if self.size is not None:
+                stop = min(stop, self.size)
+            body = self.storage.get_range(self.key, start, stop - start)
+        return Fetched(body, self.version)
 
-    def changed(self, etag: str) -> Fetched | None:
+    def changed(self, etag: str) -> Fetched:
         return self.read(0, None, None)
 
     def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
@@ -640,10 +753,11 @@ def place_artifact(artifact: Artifact, destination: Path) -> Path:
         provider, _, address = uri.partition("://")
         bucket, _, key = address.partition("/")
         storage = S3Storage(bucket, provider="r2" if provider == "r2" else "s3")
-        located = storage._artifact(key).model_copy(
+        located, source = storage._object(key)
+        named = located.model_copy(
             update={"sha256": artifact.sha256, "size_bytes": artifact.size_bytes}
         )
-        return storage.cache.place(located, destination, _Object(storage, key))
+        return storage.cache.place(named, destination, source)
     parsed = urlsplit(uri)
     if parsed.scheme not in ("", "file") or parsed.netloc:
         raise ValueError(f"unsupported artifact location: {parsed.scheme}")

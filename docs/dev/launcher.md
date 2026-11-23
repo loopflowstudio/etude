@@ -197,6 +197,76 @@ pass has completed in 30 seconds. Slow provider operations may also cause this
 warning. `wait` still exits when its runs finish. Workers read their own disk or
 bucket inboxes; they never need a reachable address for the server.
 
+`etude view` serves HTTP in a separate process. Its background poll reads
+standing, requested consoles and local machine inventory in one database
+snapshot. It reads the heartbeat from `server-heartbeat`. The scheduler's
+`MachineStatus` records supply both `etude machines` and the view. Each
+unfinished attempt occupies a slot. With a selected server, the view batches
+standing, heartbeat and requested console tails in one SSH exchange at most
+once every 30 seconds. Each tail carries the last 500 lines of the CLI transcript,
+the latest collection time and any gaps across the retained streams.
+
+The view indexes files and launcher standing independently under
+`ETUDE_HOME/views`. Each file pass compares the listed object versions and
+accepted report panels with the previous pass, including after a restart.
+Discovery lists once and publishes run metadata before any metric
+blocks or checkpoint records are read. Bucket declarations and changed
+outcomes are read concurrently. A completed training run with one matching
+writer needs only its declaration and outcome. Resumes and unfinished
+allocations use writer records to attribute the outcome.
+
+The index retains each run’s folders, keys and listed versions. A chart
+reader uses them to fetch one run without listing the bucket again. Each
+file poll charts Open and previously viewed runs first, then the other
+runs in a local directory. A chart generation contains the run’s curves,
+sealed clock positions, pace and checkpoints. Publishing it updates just
+the charted runs. The Machines page reads the same sealed clocks for its
+occupied slots. Opening a cold bucket run schedules its first
+chart on a separate thread and records the visit in SQLite. A failed read
+leaves its metadata visible and the run page shows the error. Open blocks can
+change the Files tab and last write between sealed chart generations.
+The experiment list reads the indexed headline panel from each run, preferring drawable ML series in
+report order before counters and diagnostics. If a run file is temporarily unavailable during a
+report edit, its dot remains. Its curve rejoins the card when its indexed panel
+matches the current report and clock. Local report declarations run separately. Each experiment keeps its last accepted panels through an
+incomplete edit.
+
+At commit, either publisher joins its new facts with the other source's last
+observation through `state_of`. Training submissions claim their full addresses
+first. A declared job and seed can also identify one unclaimed historical root.
+Both its stored address and its launcher link open that run. Continuations and
+independent repetitions keep their submitted addresses. If discovery fails, the index retains the previous listing and records the error. A directory traversal error
+invalidates the listing for both the index and report refresh. When a listed
+block disappears during charting, an already charted run keeps its curves
+and the start date of its last accepted listing. A cold run keeps its
+discovered metadata. The next file pass retries the chart.
+The index records an individual date only
+while a run is held. A second consecutive miss reports the affected address,
+including across a restart. Other runs take the new listing date. The silence
+check uses each run's accepted date. A failed launcher poll
+keeps that endpoint's last successful standing, inventory and console tails.
+A successful empty reply releases previously held runs.
+
+Status and graph requests read the committed index. Only a successful launcher
+poll replaces the retained endpoint. Pages show its placement, aliases and
+console when it matches the selected endpoint. Opening a page that shows a
+console requests its tail for the next launcher poll until the last attempt’s
+transcript settles.
+A visible run tab reads the same indexed row every five seconds. Its change
+token covers the sealed inputs and report panels, displayed run facts, retained
+console and errors. The check skips the chart table. When only source ages
+advance, the browser updates their labels in place.
+
+The experiment table reads the latest labelled values indexed with each
+run’s headline panel. Only the selected Curves pane reads a full run chart.
+Its poll sends the mounted file generation so an unchanged chart stays in
+the browser. The Console pane requests its selected run’s retained tail
+through the same launcher poll as the standalone run page.
+
+The first indexed training or evaluation run makes its experiment report
+ready to build. Concurrent requests share one build. During an explicit
+refresh, readers can still open the previous report until the new HTML is ready.
+
 ## Upgrading Etude
 
 ```sh
@@ -234,6 +304,9 @@ compatibility problem. `Upgrade` records backups, applied migrations, exports
 and reader requirements. Existing files are backed up before SQL changes;
 recovery snapshots are retained without automatic pruning. A failed migration
 rolls back its transaction. Rerun the explicit upgrade after resolving the error.
+
+The live inventory's additive migration, `live_machine_inventory.sql`, creates
+indexes for machines, sessions and allocated attempts.
 
 A backup restores database facts, not provider state: stop scheduling and
 reconcile live machines and attempts before restoring or resuming any queue.
@@ -703,7 +776,8 @@ starts empty. A checkpoint delivered as an input names its parent run
 (`Input(run=PARENT, key=RECORDED_FILE)`); its bytes are verified by digest.
 That key may be under `out/` when the checkpoint was recorded there by reference.
 
-`etude.jobs` reads the parent's records and `out.json` from `--source`.
+The continuation reads the parent's declaration, checkpoints and out membership
+from one listing of `--source`. Each out file keeps the URI of the copy that supplied it.
 Continuation uses those fingerprints without downloading out files; inputs
 are verified when delivered. Sources without membership, such as a local
 run, are hashed while creating the continuation. The source is where the
@@ -888,7 +962,7 @@ loop's last pass and prints when that was (`last loop: ...`); run `etude wait` o
 | --- | --- | --- | --- |
 | Read | `status`, `runs`, `logs`, `pools`, `ondemands`, `machines`, `providers`, `storages`, `server`, `usage` | database only | immediate answer with freshness |
 | Ask | `queue`, `cancel`, `terminate`, `rent`, `pool` and `ondemand` mutations, `default`, `machine add`, `provider set`, `storage add` | database only | recorded intent and an id where applicable |
-| Wait | `wait`, `launch` (with or without `--quote` or `--resume`), `availability`, `fetch`, `logs --follow`, `source`, `continue` | other machines with a time limit | completion or the limit |
+| Wait | `wait`, `launch` (with or without `--quote` or `--resume`), `availability`, `fetch`, `logs --follow`, `source`, `continue`, `report`, `view` | other machines with a time limit | completion or the limit |
 
 Server selection mutations are asks. `worker` and `server run` are waits
 because they deliberately execute long-lived loops; they retain their existing
@@ -902,7 +976,9 @@ home and touches neither the database nor another machine. `train` is the same
 kind: it calls a file's `train` here, writes the run to this computer's runs
 directory, and needs no provider key, launcher database or network; `--seconds`
 is its optional limit. `queue --smoke` and
-`launch --smoke` run it first, on this computer.
+`launch --smoke` run it first, on this computer. `view` is a wait because it
+reads buckets and serves HTTP until interrupted; it advances nothing, rents
+nothing, never migrates the database and needs no provider key.
 
 The full expectation also gives external work to the scheduler loop, makes asks
 safe to repeat with caller-chosen identities, restricts waits to watching, bounds
