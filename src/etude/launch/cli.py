@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -107,7 +106,7 @@ def status(
     scheduler = default()
     selected = resolve_runs(scheduler, runs or [], experiment=experiment, job=job)
     show_runs(scheduler, selected)
-    if runs and not os.environ.get("ETUDE_SERVER_LOCAL"):
+    if runs:
         for name in selected:
             print_view(name)
     server.show_freshness(scheduler)

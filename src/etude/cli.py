@@ -8,7 +8,6 @@ server, and turns expected failures into one line on stderr.
 
 from __future__ import annotations
 
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -543,47 +542,44 @@ def continue_run(
     """Go past a run's target from its out. This makes a new run with a parent."""
     # Continuation joins the launcher's runs with tracking's checkpoints.
     import tempfile
+    from contextlib import ExitStack
 
     from etude.carriage import put_back
+    from etude.identity import run_address
     from etude.jobs import continue_from, continued_config
-    from etude.launch.listing import resolve_runs, show_runs
-    from etude.run import located_runs
-    from etude.storage import default_root, storage_from_uri
+    from etude.launch.listing import show_runs
+    from etude.run import RunListing
+    from etude.storage import DirectoryStorage, default_root, storage_from_uri
     from etude.view_link import print_view
 
     scheduler = launch_cli.default()
     storage = storage_from_uri(source or default_root())
     try:
-        parents = [
-            scheduler.record(parent)
-            for parent in resolve_runs(scheduler, [run], experiment=experiment)
-        ]
+        parent = scheduler.record(run_address(run, experiment))
     except LauncherError as error:
         raise LauncherError(f"{error}; a changed config needs a new --experiment") from error
-    first = parents[0]
-    with tempfile.TemporaryDirectory() as relayed:
+    listing = None
+    with ExitStack() as relay:
         if source is None:
-            # A parent that ran on another owned host: its records, from there.
-            here = {item.file.id for item in located_runs(storage, storage.keys(""))}
-            for parent in parents:
-                files = None if parent.id in here else scheduler.held(parent.id)
-                if files is not None:
+            listing = RunListing.read(storage, run=parent.id.rsplit("/", 1)[-1])
+            if not any(item.file.id == parent.id for item in listing.declarations):
+                # A parent on another owned host can supply its own records.
+                if files := scheduler.held(parent.id):
+                    relayed = relay.enter_context(tempfile.TemporaryDirectory())
                     put_back(Path(relayed) / parent.id, files)
-        again = [
-            continue_from(
-                parent,
-                until,
-                source=relayed if (Path(relayed) / parent.id).is_dir() else storage,
-                ordinal=ordinal,
-                config=None if config is None else continued_config(parent, config),
-            )
-            for parent in parents
-        ]
-    ids = scheduler.queue(again[0], first.launch.pool, rent=first.launch.rent)
-    show_runs(scheduler, ids)
-    if not os.environ.get("ETUDE_SERVER_LOCAL"):
-        for child in ids:
-            print_view(child)
+                    storage = DirectoryStorage(relayed)
+                    listing = None
+        request = continue_from(
+            parent,
+            until,
+            source=storage,
+            listing=listing,
+            ordinal=ordinal,
+            config=None if config is None else continued_config(parent, config),
+        )
+    (child,) = scheduler.queue(request, parent.launch.pool, rent=parent.launch.rent)
+    show_runs(scheduler, [child])
+    print_view(child)
 
 
 # Each may reach a bucket, so it is a wait rather than a read.

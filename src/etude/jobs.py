@@ -80,7 +80,7 @@ from etude.eval.tournament import _open_evaluation
 from etude.identity import run_address, stored_owner
 from etude.launch.records import Standing, Status
 from etude.out import MEMBERSHIP, OutFile, OutFiles, OutMember
-from etude.records import ArtifactRef, Continuation, Record, RunRecord, SourceKey
+from etude.records import ArtifactRef, Continuation, Record, RunRecord
 from etude.run import RunListing, as_storage, declare, destinations, under
 from etude.spec import (
     CONTINUATION_ENV,
@@ -1056,6 +1056,7 @@ def continue_from(
     until: str,
     *,
     source: Storage | Path | str,
+    listing: RunListing | None = None,
     ordinal: int | None = None,
     config: BaseModel | None = None,
 ) -> RunRequest:
@@ -1064,15 +1065,18 @@ def continue_from(
     File inputs freeze the bytes chosen here by digest; a parent changing them
     before delivery is refused. Config is validated against the typed job's
     function before queueing. The target is absolute and must advance its clock.
-    Empty out without a latest copied checkpoint is refused before queueing.
+    A supplied listing is the parent's discovery in this source. Empty out
+    without a latest copied checkpoint is refused before queueing.
     """
     storage = as_storage(source)
     name = parent.id.rsplit("/", 1)[-1]
-    listing = RunListing.read(storage, run=name)
+    if listing is None:
+        listing = RunListing.read(storage, run=name)
     candidates = [
         item
         for item in listing.declarations
-        if not parent.experiment or item.file.experiment == parent.experiment
+        if item.name == name
+        and (not parent.experiment or item.file.experiment == parent.experiment)
     ]
     if len(candidates) != 1:
         raise LauncherError(f"run {parent.id} has no unambiguous tracked folder in {storage.name}")
@@ -1090,7 +1094,6 @@ def continue_from(
         and (inherited_input is None or not i.name.startswith(inherited_input + "/"))
         and i.out is None
     }
-    parent_key = SourceKey(namespace=declaration.namespace, kind="run", source_id=name)
     # An explicit checkpoint needs no out reads, even when the parent has out.
     out = (
         None
@@ -1162,7 +1165,11 @@ def continue_from(
         # Mutable parent tags do not change the child's job identity.
         checkpoint = checkpoint.model_copy(update={"artifact": artifact, "tags": ()})
     handed = ParentRun(
-        parent=parent_key, at=at, clocks=declaration.clocks, checkpoint=checkpoint, input=given
+        parent=declaration.source_key,
+        at=at,
+        clocks=declaration.clocks,
+        checkpoint=checkpoint,
+        input=given,
     )
     environment = (
         *(v for v in spec.environment if v.name != CONTINUATION_ENV),

@@ -13,7 +13,7 @@ from etude.controller.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.jobs import continue_from, continued_config
 from etude.out import MEMBERSHIP, OutFiles
-from etude.records import Clock, RunWriter
+from etude.records import Clock, RunRecord, RunWriter
 from etude.run import sync
 from etude.spec import Input, Job
 from etude.storage import DirectoryStorage
@@ -503,10 +503,17 @@ def test_an_explicit_folder_checkpoint_continuation_names_every_member(tmp_path:
             (folder / "value").write_bytes(b"value weights")
 
         run.checkpoint(export, updates=2)
-    counted = MeasuredStorage(DirectoryStorage(source))
+    # Imported runs retain the producer's namespace and source kind in a handoff.
+    stored = DirectoryStorage(source)
+    key = parent + "/run.json"
+    original = RunRecord.model_validate_json(stored.get(key))
+    imported = original.model_copy(update={"namespace": "archive", "source_kind": "learner"})
+    stored.put(key, imported.model_dump_json().encode())
+    counted = MeasuredStorage(stored)
     child = continue_from(scheduler.record(parent), "updates=3", source=counted, ordinal=1)
     handed = ParentRun.model_validate_json(child.job.environment[-1].value)
     assert handed.checkpoint is not None and handed.input is not None
+    assert handed.parent == imported.source_key
     assert authored(handed.at) == {"updates": 2}
     assert {given.name for given in child.job.inputs} == {
         handed.input + "/" + name for name in ("checkpoint.json", "policy", "value")

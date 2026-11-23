@@ -34,10 +34,10 @@ from etude.page import Page, Pages, _run_file
 from etude.records import ArtifactRef, Clock, RunCounters, RunOutcome, RunRecord, RunWriter, Tally
 from etude.run import sync
 from etude.spec import RunRequest, Until
-from etude.storage import DirectoryStorage, S3Storage
+from etude.storage import DirectoryStorage, S3Storage, storage_from_uri
 from etude.train.block import Builder
 from etude.train.tracking import write_block
-from etude.view import Server
+from etude.view import Server, _machines_table
 from etude.view_link import advertise, print_view
 from tests.experiments import experiment_file
 from tests.launch.counting import Counting, Counts
@@ -1004,8 +1004,16 @@ def test_continuation_link_from_queue_to_delivery_survives_view_restart(
         return child_graph
 
     with Server(measured, None, ("127.0.0.1", 0)) as view:
-        argv = ["continue", "--run", parent, "--until", "updates=200", "--source", str(source.root)]
-        assert main(argv) == 0
+        # Locating a local parent also supplies the listing for its checkpoint and out.
+        with monkeypatch.context() as patch:
+            patch.setenv("ETUDE_TRACK_DIR", str(source.root))
+            patch.setattr(
+                "etude.storage.storage_from_uri",
+                lambda root: measured if root == source.root else storage_from_uri(root),
+            )
+            listings = measured.listings
+            assert main(["continue", "--run", parent, "--until", "updates=200"]) == 0
+            assert measured.listings == listings + 1
         output = capsys.readouterr().out.splitlines()
         child = output[0].split()[0]
         child_page = "/runs/" + child
@@ -1130,6 +1138,12 @@ def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: 
         reads = measured.listings, measured.requests, measured.bytes
         assert 'href="/machines"' in (server.page("/") or "")
         html = server.page("/machines") or ""
+        statements: list[str] = []
+        with server.index._connect() as db:
+            db.set_trace_callback(statements.append)
+            slots = _machines_table(db, fleet)
+        assert len(statements) == 1
+        assert all(f'href="/runs/{address}"' in slots for address in (first, second))
         row = next(r for r in html.split("</tr>") if f">{machine}</th>" in r)
         assert "rented until" in row and "~$" in row and ">l4</td>" in row
         assert all(f'href="/runs/{address}"' in row for address in (first, second))

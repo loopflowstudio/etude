@@ -198,11 +198,7 @@ class RunRecord(Record):
 
     @property
     def source_key(self) -> SourceKey:
-        return SourceKey(
-            namespace=self.namespace,
-            kind=self.source_kind,
-            source_id=self.id.removeprefix(self.experiment + "/"),
-        )
+        return SourceKey(namespace=self.namespace, kind=self.source_kind, source_id=self.name)
 
     @property
     def config_json(self) -> str | None:
@@ -222,7 +218,7 @@ class RunRecord(Record):
 
     @property
     def name(self) -> str:
-        return self.source_key.source_id
+        return self.id.removeprefix(self.experiment + "/")
 
 
 class RunCounters(Record):

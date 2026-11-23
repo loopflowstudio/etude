@@ -51,7 +51,7 @@ def baseline(count: int) -> dict[str, Counts]:
     return {
         "status": Counts(database=49 * count + 1),
         "runs": Counts(database=17 * count + 1),
-        "tick": Counts(provider=2 * count, bucket=count, database=31 * count + 22),
+        "tick": Counts(provider=2 * count, bucket=count, database=30 * count + 22),
     }
 
 
@@ -122,7 +122,7 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
     # Creation also reads provider safeguards for affordable time and the reserved budget,
     # and the status it returns reads the machine's attempts for how many shared it.
     # Refusal pause and shutdown settlement add three indexed local reads.
-    assert wait == Counts(provider=4, bucket=1, database=106)  # known debt: wait advances work
+    assert wait == Counts(provider=4, bucket=1, database=105)  # known debt: wait advances work
 
 
 @pytest.mark.parametrize("history", [1, 4096])
@@ -169,7 +169,7 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
     with counting.record():
         b.scheduler.tick()
         admission = counting.snapshot()
-    assert admission == Counts(provider=4, bucket=1, database=112), admission.model_dump()
+    assert admission == Counts(provider=4, bucket=1, database=111), admission.model_dump()
     assert b.scheduler.attempts(run)[-1].number == history + 1
     assert b.scheduler.read(run).attempts == 1
     since = b.clock() - timedelta(seconds=60)

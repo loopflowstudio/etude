@@ -40,7 +40,7 @@ from etude.errors import explain
 from etude.experiment import find_eval_groups, locate_evaluation_members, state_of
 from etude.home import home
 from etude.identity import SAFE_NAME, run_address
-from etude.jobs import EvalRunSummary, TrainingRunSummary
+from etude.jobs import EvalRunSummary, RunState, TrainingRunSummary
 from etude.launch.listing import describe_machine, launcher_facts, machine_warning
 from etude.launch.logs import ConsoleTail
 from etude.launch.records import MachineStatus, Standing, Status
@@ -902,13 +902,22 @@ def _store_run(
     job = record.launch.spec if record else None
     status = run.status
     training = isinstance(run, TrainingRunSummary)
-    file_job = None
-    if file:
-        file_job = (
-            run.job
-            if isinstance(run, TrainingRunSummary)
-            else file.job_name or file.job or "Evaluation"
-        )
+    file_state: RunState | None
+    file_continues = joined_continues = None
+    if isinstance(run, TrainingRunSummary):
+        file_job = run.job if file else None
+        file_state = stored.stored_state if stored else None
+        if file and file.continues:
+            parent = file_sources.parent(experiment, file.continues)
+            file_continues = _handoff(experiment, file.continues, parent)
+        if run.continues:
+            joined_continues = _handoff(experiment, run.continues, run.parent_address)
+    else:
+        # A tournament can arrive before the root that names its evaluation launch.
+        file_state = run.file_state
+        file_job = (file.job_name or file.job) if file else None
+        if file_state and not file_job:
+            file_job = "Evaluation"
 
     # Once files exist, even an empty sealed clock belongs to them. The
     # launcher can still supply a target on a different clock.
@@ -916,23 +925,6 @@ def _store_run(
     if stored and preferred not in clocks:
         preferred = next((c.name for c in stored.clocks if c.name in clocks), None)
     file_config = file.config_json if file else None
-    file_state = (
-        run.file_state
-        if isinstance(run, EvalRunSummary)
-        else stored.stored_state
-        if stored
-        else None
-    )
-    file_continues = (
-        _handoff(experiment, file.continues, file_sources.parent(experiment, file.continues))
-        if training and file and file.continues
-        else None
-    )
-    joined_continues = (
-        _handoff(experiment, run.continues, run.parent_address)
-        if isinstance(run, TrainingRunSummary) and run.continues
-        else None
-    )
     fields = {
         "address": address,
         "file_continues": file_continues,
@@ -942,7 +934,7 @@ def _store_run(
         "eval_last_write": run.last_write.isoformat()
         if isinstance(run, EvalRunSummary) and run.last_write
         else None,
-        "file_job": file_job or ("Evaluation" if file_state else None),
+        "file_job": file_job,
         "file_state": file_state,
         "file_position": _position(clocks, preferred) if stored else None,
         "file_config": file_config,
@@ -980,17 +972,22 @@ def _handoff(experiment: str, edge: Continuation, parent: str | None) -> str:
 def _machines_table(db: sqlite3.Connection, machines: tuple[MachineStatus, ...]) -> str:
     if not machines:
         return "<p>No machines held.</p>"
+    occupied = [run for status in machines for run in status.runs]
+    placements = {}
+    if occupied:
+        allocated = db.execute(
+            """SELECT launched_as,address,launcher_state AS state,launcher_position AS position,
+                      status,max_attempts
+               FROM runs WHERE launched_as IN (SELECT value FROM json_each(?))""",
+            (json.dumps(occupied),),
+        )
+        placements = {row["launched_as"]: row for row in allocated}
     rows = []
     for status in machines:
         machine = status.machine
         runs = []
         for run in status.runs:
-            row = db.execute(
-                """SELECT address,launcher_state AS state,launcher_position AS position,status,
-                          max_attempts
-                   FROM runs WHERE launched_as=?""",
-                (run,),
-            ).fetchone()
+            row = placements.get(run)
             address = row["address"] if row else run
             detail = (
                 _run_line(row, row["state"], _status(row), on_machine=machine.name) if row else ""
