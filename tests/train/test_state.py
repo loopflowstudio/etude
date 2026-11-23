@@ -71,7 +71,7 @@ def _round_trip_after_relay(tmp_path: Path) -> None:
 
     with open_run(directory=tmp_path / "first", experiment="e", run="r") as run:
         assert run.resume(export=export, restore=restore, extra=counts, name="learner") is counts
-        assert run.resume(export=export, name="rival") is None
+        assert run.resume(export=export, restore=restore, name="rival") is None
         for step in run.steps("updates", to=2, save_every=1):
             counts.games += 3
             weights = bytes([0, step, 255])
@@ -86,25 +86,19 @@ def _round_trip_after_relay(tmp_path: Path) -> None:
     with open_run(directory=tmp_path / "second", experiment="e", run="r", resume=True) as run:
         assert run.resume(export=export, restore=restore, extra=counts, name="learner") is counts
         assert weights == bytes([0, 2, 255])
-        path = run.resume(restore=restore, name="rival")
+        path = run.resume(export=export, restore=restore, name="rival")
         assert path is not None and path.parent == run.out / "state/rival"
         assert weights == b"rival"
         assert list(run.steps("updates", to=4)) == [3, 4]
 
 
-def test_per_step_export_and_legacy_unlisted_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    weights = Weights()
+def test_callbacks_restore_legacy_unlisted_files(tmp_path: Path) -> None:
+    weights = Weights(10)
     with open_run(directory=tmp_path, experiment="e", run="r") as run:
-        counts = run.resume(restore=weights.restore, extra=Counts())
-        for step in run.steps("updates", to=2, save_every=2):
-            weights.value += 5
-            counts.games += 3
-            if step == 1:
-                run.save(export=weights.export)
-            else:
-                run.save()
+        counts = run.resume(export=weights.export, restore=weights.restore, extra=Counts())
+        for _ in run.steps("updates", to=1):
+            counts.games = 6
+            run.save()
         saved = read_state(run.out / "state")
         assert saved is not None
         # Earlier callback saves kept the files but listed only named PyTorch objects.
@@ -113,18 +107,26 @@ def test_per_step_export_and_legacy_unlisted_files(
         )
     weights = Weights()
     with open_run(directory=tmp_path, experiment="e", run="r", resume=True) as resumed:
-        assert resumed.resume(restore=weights.restore, extra=Counts()).games == 6
-        assert weights.value == 10
-        stop = tmp_path / "stop"
-        monkeypatch.setenv("ETUDE_STOP_FILE", str(stop))
-        steps = resumed.steps("updates", to=4, save_every=1)
-        assert next(steps) == 3
-        with pytest.raises(ValueError, match="requires an export"):
-            resumed.save()
-        stop.touch()
-        with pytest.raises(ValueError, match="requires an export"):
-            next(steps)
-        assert resumed.resume(restore=weights.restore) == saved.path
+        counts = resumed.resume(export=weights.export, restore=weights.restore, extra=Counts())
+        assert counts.games == 6 and weights.value == 10
+
+
+def test_custom_files_with_counts_require_callbacks(tmp_path: Path) -> None:
+    weights = Weights(10)
+    with open_run(directory=tmp_path) as run:
+        run.resume(extra=Counts())
+        with pytest.raises(ValueError, match="register export and restore"):
+            run.save(export=weights.export)
+        counts = run.resume(export=weights.export, restore=weights.restore, extra=Counts())
+        for update in run.steps("updates", to=1):
+            counts.games = update
+            run.save()
+        fresh = Counts()
+        with pytest.raises(ValueError, match="saved state includes custom files"):
+            run.resume(extra=fresh)
+        assert fresh.games == 0
+        path = run.resume()
+        assert path is not None and (path / "weights").read_text() == "10"
 
 
 @pytest.mark.parametrize(
@@ -161,7 +163,7 @@ def test_stop_saves_files_and_counts_only_after_a_clock_advances(
     original = None
     if prior_phase:
         with open_run(directory=tmp_path, run="r") as run:
-            counts = run.resume(export=weights.export, extra=Counts())
+            counts = run.resume(export=weights.export, restore=weights.restore, extra=Counts())
             for update in run.steps("updates", to=1):
                 weights.value = update
                 counts.games += 3
@@ -189,7 +191,7 @@ def test_stop_saves_files_and_counts_only_after_a_clock_advances(
     stop.unlink()
     weights = Weights()
     with open_run(directory=tmp_path, run="r", resume=True) as run:
-        counts = run.resume(restore=weights.restore, extra=Counts())
+        counts = run.resume(export=weights.export, restore=weights.restore, extra=Counts())
         assert weights.value == (2 if prior_phase else 1)
         assert counts.games == weights.value * 3
         if prior_phase:
@@ -201,6 +203,8 @@ def test_stop_saves_files_and_counts_only_after_a_clock_advances(
     ("invalid_callback", "manifest_fields", "message"),
     [
         ("export", {}, "export must be callable"),
+        ("missing_export", {}, "register export and restore together"),
+        ("missing_restore", {}, "register export and restore together"),
         ("restore", {}, "restore must be callable"),
         (None, {"seed": -1}, "saved seed"),
         (None, {"files": None}, "files"),
@@ -217,7 +221,9 @@ def test_failed_registration_preserves_live_state(
         pytest.fail("restore ran before registration was validated")
 
     with open_run(directory=tmp_path) as run:
-        counts = run.resume(export=weights.export, extra=Counts(), name="learner")
+        counts = run.resume(
+            export=weights.export, restore=weights.restore, extra=Counts(), name="learner"
+        )
         steps = run.steps("updates", to=2, save_every=1)
         counts.games = next(steps)
         run.save(name="learner")
@@ -230,12 +236,15 @@ def test_failed_registration_preserves_live_state(
 
         # Untyped recipes can pass a non-callable in either callback slot.
         invalid = cast(Callable[[Path], None], 1)
-        with pytest.raises((TypeError, ValueError), match=message):
+        export_callback = invalid if invalid_callback == "export" else weights.export
+        restore_callback = invalid if invalid_callback == "restore" else restore
+        error = TypeError if invalid_callback in ("export", "restore") else ValueError
+        with pytest.raises(error, match=message):
             run.resume(
                 name="learner",
                 extra=Counts(),
-                restore=invalid if invalid_callback == "restore" else restore,
-                export=invalid if invalid_callback == "export" else None,
+                restore=None if invalid_callback == "missing_restore" else restore_callback,
+                export=None if invalid_callback == "missing_export" else export_callback,
             )
 
         counts.games = next(steps)
@@ -256,7 +265,7 @@ def test_raising_restore_leaves_first_registration_unavailable(tmp_path: Path) -
             run.save()
     with open_run(directory=tmp_path, run="r", resume=True) as run:
         with pytest.raises(RuntimeError, match="unreadable weights"):
-            run.resume(restore=restore)
+            run.resume(export=Weights().export, restore=restore)
         with pytest.raises(ValueError, match="register state"):
             run.save()
 
@@ -284,14 +293,46 @@ def test_export_collision_preserves_registered_object(tmp_path: Path, collision:
         assert saved is not None and saved.record.at["updates"] == 1
 
 
+def test_custom_file_named_for_an_object_is_never_loaded_as_one(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")  # optional training dependency
+    with open_run(directory=tmp_path) as run:
+        run.resume()
+        for _ in run.steps("updates", to=1):
+            run.save(export=Weights().export)
+        with pytest.raises(ValueError, match="saved state has no object 'weights'"):
+            run.resume(weights=torch.nn.Linear(1, 1))
+
+
+def test_partial_object_restore_with_counts(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")  # optional training dependency
+    model = torch.nn.Linear(1, 1)
+    with open_run(directory=tmp_path) as run:
+        counts = run.resume(model=model, rival=torch.nn.Linear(1, 1), extra=Counts())
+        for _ in run.steps("updates", to=1):
+            counts.games = 7
+            run.save()
+        restored = torch.nn.Linear(1, 1)
+        assert run.resume(model=restored, extra=Counts()).games == 7
+        assert torch.equal(restored.weight, model.weight)
+
+
 def test_two_models_custom_files_and_extra_resume_from_one_save(tmp_path: Path) -> None:
     torch = pytest.importorskip("torch")  # optional training dependency
     model, rival = torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.25)
     config = Counts(games=3)
+    counts = Counts()
+    custom = b"custom weights"
+    expected = model.weight.detach().clone()
 
     def export(folder: Path) -> None:
-        (folder / "custom").write_bytes(b"custom weights")
+        (folder / "custom").write_bytes(custom)
+
+    def restore(folder: Path) -> None:
+        nonlocal custom
+        assert counts.games == 3
+        assert torch.equal(model.weight, expected)
+        custom = (folder / "custom").read_bytes()
 
     with open_run(
         experiment="e",
@@ -301,26 +342,23 @@ def test_two_models_custom_files_and_extra_resume_from_one_save(tmp_path: Path) 
         config=config,
         strict=True,
     ) as run:
-        counts = run.resume(
-            export=export, model=model, rival=rival, optimizer=optimizer, extra=Counts()
+        run.resume(
+            export=export,
+            restore=restore,
+            model=model,
+            rival=rival,
+            optimizer=optimizer,
+            extra=counts,
         )
         for value in run.steps("updates", to=2, save_every=1):
             counts.games += value
             run.log({"loss": value})
             run.save()
-        expected = model.weight.detach().clone()
         expected_rival = rival.weight.detach().clone()
-    model2, rival2 = torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)
-    optimizer2 = torch.optim.SGD(model2.parameters(), lr=0.01)
+    model, rival = torch.nn.Linear(1, 1), torch.nn.Linear(1, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
     counts = Counts()
     custom = b""
-
-    def restore(folder: Path) -> None:
-        nonlocal custom
-        assert counts.games == 3
-        assert torch.equal(model2.weight, expected)
-        custom = (folder / "custom").read_bytes()
-
     with open_run(
         resume=True,
         experiment="e",
@@ -333,46 +371,75 @@ def test_two_models_custom_files_and_extra_resume_from_one_save(tmp_path: Path) 
         restored = resumed.resume(
             restore=restore,
             export=export,
-            model=model2,
-            rival=rival2,
-            optimizer=optimizer2,
+            model=model,
+            rival=rival,
+            optimizer=optimizer,
             extra=counts,
         )
         assert restored is counts and custom == b"custom weights"
-        assert torch.equal(rival2.weight, expected_rival)
-        assert optimizer2.param_groups[0]["lr"] == 0.25
+        assert torch.equal(rival.weight, expected_rival)
+        assert optimizer.param_groups[0]["lr"] == 0.25
         assert list(resumed.steps("updates", to=4, save_every=1)) == [3, 4]
         assert resumed.seed == 0
     assert read(tmp_path, "e", "r").points("loss", "updates").x.tolist() == [1, 2]
     assert json.loads((tmp_path / "e/r/run.json").read_text())["config"] == '{"games": 3}'
 
 
-def test_callback_save_failure_leaves_the_previous_save_whole(tmp_path: Path) -> None:
-    with open_run(
-        experiment="e",
-        run="r",
-        directory=tmp_path,
-        clocks=[Clock(name="updates", kind="step", meaning="updates")],
-        strict=True,
-    ) as run:
+@pytest.mark.parametrize("planned_stop", [False, True], ids=["save", "planned-stop"])
+def test_failed_export_preserves_save_and_previous_exporter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, planned_stop: bool
+) -> None:
+    weights = Weights()
+    stop = tmp_path / "stop"
+    monkeypatch.setenv("ETUDE_STOP_FILE", str(stop))
+
+    def broken(folder: Path) -> None:
+        (folder / "weights").write_text("incomplete")
+        raise ValueError("optimizer failed")
+
+    with open_run(directory=tmp_path) as run:
         assert run.resume() is None
-        for value in run.steps("updates", to=2, save_every=1):
-
-            def export(folder: Path) -> None:
-                (folder / "model").write_text(str(value))
-                if value == 2:
-                    raise ValueError("optimizer failed")
-                (folder / "optimizer").write_text(str(value))
-
-            if value == 2:
-                with pytest.raises(ValueError, match="optimizer failed"):
-                    run.save(export)
-            else:
-                run.save(export)
+        steps = run.steps("updates", to=4, save_every=1)
+        weights.value = next(steps)
+        run.save(export=weights.export)
+        weights.value = next(steps)
+        with pytest.raises(ValueError, match="optimizer failed"):
+            run.save(export=broken)
         saved = read_state(run.out / "state")
-        assert saved is not None
-        assert saved.record.at["updates"] == 1
-        assert (saved.path / "model").read_text() == (saved.path / "optimizer").read_text() == "1"
+        assert saved is not None and saved.record.at["updates"] == 1
+        assert (saved.path / "weights").read_text() == "1"
+
+        if planned_stop:
+            stop.touch()
+            with pytest.raises(Stopped):
+                next(steps)
+        else:
+            run.save()
+        saved = read_state(run.out / "state")
+        assert saved is not None and saved.record.at["updates"] == 2
+        assert (saved.path / "weights").read_text() == "2"
+
+
+def test_deferred_export_is_available_on_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    weights = Weights()
+    stop = tmp_path / "stop"
+    monkeypatch.setenv("ETUDE_STOP_FILE", str(stop))
+    with open_run(directory=tmp_path) as run:
+        run.resume()
+        steps = run.steps("updates", to=3, save_every=3)
+        weights.value = next(steps)
+        run.save(export=weights.export)
+        # An untyped recipe gets immediate feedback even between saves.
+        with pytest.raises(TypeError, match="export must be callable"):
+            run.save(export=cast(Callable[[Path], None], 1))
+        assert read_state(run.out / "state") is None
+        stop.touch()
+        with pytest.raises(Stopped):
+            next(steps)
+        path = run.resume()
+        assert path is not None and (path / "weights").read_text() == "1"
 
 
 def test_stop_saves_the_pass_before_raising_and_never_enters_the_next_phase(

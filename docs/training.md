@@ -69,8 +69,9 @@ registered state when due: by default every five minutes, or at `save_every`
 steps / `save_every_seconds` seconds. Call save each iteration; completion and
 planned stop save too. Register everything required to continue learning.
 
-For custom framework files and JSON counters, register both callbacks before
-entering the loop. This example runs without PyTorch.
+For custom framework files, pass `export` and `restore` together to
+`run.resume`. You can include JSON counters in the same save. This example
+runs without PyTorch.
 
 ```python
 from pathlib import Path
@@ -113,10 +114,12 @@ symlinks, names ending in `.open` or `.partial`, and collisions with the root
 `state.json`, an object key or its `<object>.pt` file. The keywords `export`,
 `restore`, `extra` and `name` are reserved.
 
-`run.save(export=fn, name=...)` replaces that namespace's exporter immediately,
-even between saves. Registering it in `resume` also covers stops before the
-first call to `save`. Saving a namespace that has a restore callback and lacks
-an exporter raises `ValueError`. See the [persistence reference](dev/training.md).
+With `extra`, Etude requires the callback pair to save custom files or to
+resume a save that lists them. For manual loading, use `path = run.resume()`,
+read your files when `path` is present, and call `run.save(export=fn)` in the
+loop. Between saves, Etude remembers `fn` for the next save or planned stop.
+When a save is due, the new exporter takes effect once the save commits. A
+failed save keeps the previous exporter. See the [persistence reference](dev/training.md).
 
 A save is a whole snapshot, selected by a pointer written last. A crash while
 saving leaves the previous complete save. A second attempt reloads that save;

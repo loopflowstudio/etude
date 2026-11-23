@@ -457,6 +457,7 @@ class TrainingRun(Run):
     ) -> BaseModel | Path | None:
         """Register a namespace and restore objects, extra, then custom files.
 
+        Register export and restore together for custom files.
         Return the supplied extra instance, or the selected folder (None on first use).
         A failing restore leaves registration unchanged but may have mutated live state.
         """
@@ -468,11 +469,17 @@ class TrainingRun(Run):
     def save(
         self, export: Callable[[Path], None] | None = None, *, name: str | None = None
     ) -> None:
-        """Update the exporter if supplied, then save when due, at the target, or on stop."""
+        """Save when due, at the target, or on stop. A failed save keeps the prior exporter."""
         if name not in self._states:
             raise ValueError("register state with run.resume() before saving")
         state = self._states[name]
-        state.set_export(export)
+        if export is not None:
+            if not callable(export):
+                raise TypeError("export must be callable")
+            if state.extra is not None and state.restore_files is None:
+                raise ValueError(
+                    "register export and restore in run.resume() when combining custom files with extra"
+                )
         clock = self._step_clock
         due = (
             self._save_every_seconds is not None
@@ -488,14 +495,20 @@ class TrainingRun(Run):
             and self.at(clock) >= self._step_target
         )
         if due or final or self.should_stop:
-            self._save_state(state)
+            self._save_state(state, export=export)
+        elif export is not None:
+            state.export = export
 
-    def _save_state(self, state: State) -> None:
+    def _save_state(self, state: State, *, export: Callable[[Path], None] | None = None) -> None:
         wall_ms, hours = self._now()
         at = {**{clock: self.at(clock) for clock in self._clock_names}, **hours}
         with self.files.lock:
             state.write(
-                at=at, wall_ms=wall_ms, seed=self.seed, commit=os.environ.get("ETUDE_COMMIT")
+                at=at,
+                wall_ms=wall_ms,
+                seed=self.seed,
+                commit=os.environ.get("ETUDE_COMMIT"),
+                export=export,
             )
         if self._step_clock is not None:
             state.saved_step = self.at(self._step_clock)

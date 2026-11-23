@@ -103,25 +103,22 @@ class State:
         export: Callable[[Path], None] | None = None,
         restore: Callable[[Path], None] | None = None,
     ) -> None:
+        if export is not None and not callable(export):
+            raise TypeError("export must be callable")
         if restore is not None and not callable(restore):
             raise TypeError("restore must be callable")
+        if (export is None) != (restore is None):
+            raise ValueError("register export and restore together in run.resume()")
         self.folder = folder
         self.objects = register_objects(objects)
         self.extra = extra
-        self._export: Callable[[Path], None] | None = None
-        self.set_export(export)
-        self._restore = restore
+        self.export = export
+        self.restore_files = restore
         self.saved_at = time.monotonic()
         self.saved_step = 0.0
         self.last_at: dict[str, float] = {}
         if self.objects:
             _torch()  # refuse an unavailable serializer at registration
-
-    def set_export(self, export: Callable[[Path], None] | None) -> None:
-        if export is not None:
-            if not callable(export):
-                raise TypeError("export must be callable")
-            self._export = export
 
     def restore(self, *, seed: int) -> Path | None:
         found = read_state(self.folder)
@@ -130,26 +127,41 @@ class State:
         path, saved = found.path, found.record
         if saved.seed != seed:
             raise ValueError(f"saved seed was {saved.seed}, is {seed}")
-        for name, value in self.objects.items():
-            if name not in saved.files:
-                raise ValueError(f"saved state has no object {name!r}")
-            value.load_state_dict(
-                _torch().load(path / saved.files[name], map_location="cpu", weights_only=True)
+        if (
+            self.extra is not None
+            and self.restore_files is None
+            and any(name == file for name, file in saved.files.items())
+        ):
+            raise ValueError(
+                "saved state includes custom files; register export and restore in run.resume()"
             )
+        for name, value in self.objects.items():
+            file = saved.files.get(name)
+            if file is None or file == name:
+                raise ValueError(f"saved state has no object {name!r}")
+            value.load_state_dict(_torch().load(path / file, map_location="cpu", weights_only=True))
         if self.extra is not None:
             if saved.extra is None:
                 raise ValueError("saved state has no extra counts")
             loaded = type(self.extra).model_validate(saved.extra)
             for name in type(self.extra).model_fields:
                 setattr(self.extra, name, getattr(loaded, name))
-        if self._restore is not None:
-            self._restore(path)
+        if self.restore_files is not None:
+            self.restore_files(path)
         self.last_at = saved.at
         return path
 
-    def write(self, *, at: dict[str, float], wall_ms: int, seed: int, commit: str | None) -> None:
-        if self._restore is not None and self._export is None:
-            raise ValueError("saving state registered with restore requires an export callback")
+    def write(
+        self,
+        *,
+        at: dict[str, float],
+        wall_ms: int,
+        seed: int,
+        commit: str | None,
+        export: Callable[[Path], None] | None = None,
+    ) -> None:
+        if export is None:
+            export = self.export
         self.folder.mkdir(parents=True, exist_ok=True)
         number = 1 + max(
             (save_number(path.name) or 0 for path in self.folder.glob("save-*")), default=0
@@ -158,8 +170,8 @@ class State:
         with TemporaryDirectory(prefix=".save-", dir=self.folder) as temporary:
             staged = Path(temporary)
             files: dict[str, str] = {}
-            if self._export is not None:
-                self._export(staged)
+            if export is not None:
+                export(staged)
                 files = _exported_files(staged, self.objects)
             files.update(write_objects(staged, self.objects))
             saved = SavedState(
@@ -181,6 +193,7 @@ class State:
             stream.flush()
             os.fsync(stream.fileno())
         pointer.replace(self.folder / "current.json")
+        self.export = export
         self.saved_at = time.monotonic()
         self.last_at = at
 
