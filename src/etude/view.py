@@ -248,7 +248,6 @@ class ChartIndex:
                     consoles = tuple(sorted(self._wanted))
                     self._wanted.clear()
                 if remote is None:
-                    self._launcher_error = None
                     return _LauncherRead.read(None, consoles)
                 self._remote_read = self._ssh.submit(_LauncherRead.read, remote, consoles)
             if not self._remote_read.done():
@@ -259,7 +258,6 @@ class ChartIndex:
             self._remote_read = None
             self._next_standing = time.monotonic() + _REMOTE_STANDING
             return None
-        self._launcher_error = None
         return answer
 
     def read_error(
@@ -282,6 +280,7 @@ class ChartIndex:
         except Exception as error:
             self._launcher_error = (remote, f"Launcher: {explain(error)}")
             return
+        self._launcher_error = None
         if self._remote_read:
             self._remote_read = None
             self._next_standing = time.monotonic() + _REMOTE_STANDING
@@ -909,7 +908,8 @@ class _ViewSnapshot:
         return _live_status(
             f'<div class="reports-index">{_table(columns, rows)}</div>'
             if rows
-            else "<p>No experiments yet.</p>"
+            else "<p>No experiments yet.</p>",
+            error=self.index.read_error(self.remote, row["file_error"] if row else None),
         )
 
     @cached_property
@@ -948,24 +948,21 @@ class _ViewSnapshot:
         opened = "".join(links) or f"<span>{empty}</span>"
         launcher_at = row["launcher_at"] if row else None
         machines = row["machine_rail"] if row else None
-        error = self.index.read_error(self.remote, None)
+        outage = ""
+        if self.index.read_error(self.remote, None):
+            outage = "Server unavailable" if self.remote is not None else "Launcher unavailable"
         loop = ""
         if self.remote is not None or machines is not None:
             if row and row["last_loop"]:
-                loop = "last loop " + _age(row["last_loop"], datetime.now(UTC))
-            elif launcher_at:
-                loop = "No server loop"
+                age = "last loop " + _age(row["last_loop"], datetime.now(UTC))
+                loop = f"{outage} · {age}" if outage else age
             else:
-                loop = "Server unavailable" if error else "Awaiting server"
+                loop = outage or ("No server loop" if launcher_at else "Awaiting server")
             loop = f'<div class="rail-loop">{loop}</div>'
         if self.remote is not None:
             machines = f'<a href="/machines">On {escape(self.remote)}</a>'
         elif machines is None:
-            label = (
-                "No launcher"
-                if launcher_at
-                else ("Launcher unavailable" if error else "Awaiting launcher")
-            )
+            label = outage or ("No launcher" if launcher_at else "Awaiting launcher")
             machines = f"<span>{label}</span>"
         nav = []
         for path, label in (

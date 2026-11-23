@@ -1896,7 +1896,7 @@ def test_failed_listing_shows_fresh_queue_and_machines(
         patch.setattr(source, "versions", unavailable)
         with Server(measured, declaration, ("127.0.0.1", 0)) as server:
             _ingest(server)
-            reads = measured.listings, measured.requests
+            reads = measured.listings, measured.requests, measured.bytes
             supplied = unescape(_get(server, "/runs/" + queued + "?tab=config"))
             assert ">queued<" in supplied and '{"rate":3}' in supplied
             for path in ("/", "/experiments/lab/status"):
@@ -1906,6 +1906,13 @@ def test_failed_listing_shows_fresh_queue_and_machines(
                     "Run files listed 2 min ago" if warm else "File observation unavailable"
                 ) in page
             assert ">studio</th>" in (server.page("/machines") or "")
+            for path in ("/reports", "/reports/status"):
+                reports = _get(server, path)
+                assert (
+                    '<p role="status">Run files:' in reports
+                    and "fixture listing unavailable" in reports
+                )
+                assert 'href="/experiments/unstarted/report"' in reports
             graph = _get(server, "/runs/" + alias)
             if warm:
                 assert ">finished<" in graph and "steps 1" in graph and _loss(graph) == [7]
@@ -1932,7 +1939,7 @@ def test_failed_listing_shows_fresh_queue_and_machines(
                 assert "Waiting for the first file observation." in _get(
                     server, "/experiments/unstarted/status"
                 )
-            assert (measured.listings, measured.requests) == reads
+            assert (measured.listings, measured.requests, measured.bytes) == reads
     with Server(measured, declaration, ("127.0.0.1", 0)) as recovered:
         overview = recovered.page("/") or ""
         assert queued in overview and "fixture listing unavailable" in overview
@@ -2057,13 +2064,17 @@ def test_held_file_pass_publishes_launcher_and_joins_latest_placement_on_release
     backend.store.close()
 
 
+@pytest.mark.parametrize("heartbeat", [False, True], ids=["without-loop", "with-loop"])
 def test_failed_launcher_read_after_restart_preserves_queue_while_files_advance(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, heartbeat: bool
 ) -> None:
     backend = bench(home())
+    idle = backend.scheduler.rent("l4", hours=1)
     backend.scheduler.add_machine("studio", "studio")
     (queued,) = backend.scheduler.queue(job(name="learn", experiment="lab"), rent="l4")
     backend.store.close()
+    if heartbeat:
+        (home() / "server-heartbeat").write_text(datetime.now(UTC).isoformat())
     source = DirectoryStorage(tmp_path / "runs")
     _start_run(source, "local", 7)
     with Server(source, None, ("127.0.0.1", 0)) as server:
@@ -2071,6 +2082,7 @@ def test_failed_launcher_read_after_restart_preserves_queue_while_files_advance(
         assert ">queued<" in (server.page("/runs/" + queued) or "")
         assert _loss(server.page("/runs/local") or "") == [7]
         assert ">studio</th>" in (server.page("/machines") or "")
+        assert ("last loop" if heartbeat else "No server loop") in _get(server, "/reports")
 
     def incompatible(path: Path) -> Database:
         raise LauncherError("fixture needs etude database upgrade")
@@ -2083,6 +2095,12 @@ def test_failed_launcher_read_after_restart_preserves_queue_while_files_advance(
         listing = restarted.page("/machines/status") or ""
         assert ">studio</th>" in listing and "launcher observed 2 min ago" in listing
         assert "etude database upgrade" in listing
+        for path in ("/reports", "/reports/status"):
+            reports = _get(restarted, path)
+            assert '<p role="status">Launcher:' in reports and "etude database upgrade" in reports
+            loop = "Launcher unavailable" + (" · last loop 2 min ago" if heartbeat else "")
+            assert f'<div class="rail-loop">{loop}</div>' in reports
+            assert f'href="/machines#machine-{idle}">{idle} ' in reports
         queued_page = restarted.page("/runs/" + queued) or ""
         assert ">queued<" in queued_page and "launcher observed 2 min ago" in queued_page
         assert _loss(restarted.page("/runs/local") or "") == [7, 3]
@@ -2096,6 +2114,7 @@ def test_failed_launcher_read_after_restart_preserves_queue_while_files_advance(
         assert restarted.page("/runs/" + queued) is None
         assert ">studio</th>" not in (restarted.page("/machines/status") or "")
         assert "etude database upgrade" not in (restarted.page("/status") or "")
+        assert "Launcher unavailable" not in _get(restarted, "/reports/status")
 
 
 def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
@@ -2118,13 +2137,14 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
     started, release, ended = threading.Event(), threading.Event(), threading.Event()
     exchanges = 0
     elapsed = 0
+    second_online = False
     monkeypatch.setattr("etude.view.time", SimpleNamespace(monotonic=lambda: elapsed))
 
     def exchange(client: PythonClient, consoles: tuple[str, ...]) -> LauncherObservation:
         nonlocal exchanges
         exchanges += 1
         if client.address == "second":
-            if not elapsed:
+            if not second_online:
                 raise LauncherError("second is offline")
             return second if queued in consoles else second.model_copy(update={"consoles": {}})
         if exchanges == 1:
@@ -2206,6 +2226,7 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
         endpoint.write_text("third")
         assert "second is offline" not in (server.page("/runs/local") or "")
         endpoint.write_text("second")
+        second_online = True
         elapsed += 30
         _ingest(server)
         _publish_ssh(server)
@@ -2216,6 +2237,13 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
         _ingest(server)
         _publish_ssh(server)
         assert "log of " in (server.page("/runs/" + queued) or "")
+        second_online = False
+        elapsed += 30
+        _ingest(server)
+        _publish_ssh(server)
+        outage = _get(server, "/reports/status")
+        assert 'href="/machines">On second</a>' in outage and "Server unavailable" in outage
+        assert '<p role="status">Launcher:' in outage and "second is offline" in outage
 
 
 def test_machines_without_a_launcher_or_with_a_selected_server(
@@ -2224,16 +2252,20 @@ def test_machines_without_a_launcher_or_with_a_selected_server(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "file-only"))
     source = MeasuredStorage(DirectoryStorage(tmp_path / "runs"))
     with Server(source, None, ("127.0.0.1", 0)) as server:
-        assert "Awaiting launcher" in _get(server, "/")
-        with monkeypatch.context() as patch:
 
-            def unavailable(consoles: tuple[str, ...], *, machines: bool) -> LauncherObservation:
-                raise LauncherError("fixture read error")
+        def unavailable(consoles: tuple[str, ...], *, machines: bool) -> LauncherObservation:
+            raise LauncherError("fixture read error")
 
-            patch.setattr(LauncherObservation, "read", unavailable)
+        for healthy in ("Awaiting launcher", "No launcher"):
+            assert f"<span>{healthy}</span>" in _get(server, "/")
+            with monkeypatch.context() as patch:
+                patch.setattr(LauncherObservation, "read", unavailable)
+                server.refresh_launcher()
+                html = _get(server, "/")
+                assert (
+                    "<span>Launcher unavailable</span>" in html and 'class="rail-loop"' not in html
+                )
             server.refresh_launcher()
-            html = _get(server, "/")
-            assert "<span>Launcher unavailable</span>" in html and 'class="rail-loop"' not in html
         _ingest(server)
         reads = source.listings, source.requests, source.bytes
         absent = server.page("/machines/status") or ""

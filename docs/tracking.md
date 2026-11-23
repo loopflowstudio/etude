@@ -178,7 +178,9 @@ the built-in report), and **Runs drawn** (a training run count or **Eval only**)
 external line’s latest evaluated checkpoint. Before there is a score it uses
 the first drawable ML series, including ungrouped metrics. Different latest
 values appear as a low–high range. These build details stay with the
-served report until a successful refresh. Restarting the view clears them.
+served report until a successful refresh. If a run file listing or launcher
+read fails, Reports shows the error above the last known rows. Restarting
+the view clears the build details.
 
 The breadcrumb above an experiment, run or report links back to Experiments.
 Use the side rail to switch pages, open an active experiment or jump to a
@@ -187,8 +189,10 @@ held rental once, including idle rentals. The loop age dates the last
 scheduler heartbeat. A local database without a heartbeat shows **No server
 loop**, as when using `etude wait`. A file-only view shows **No launcher**.
 With a selected server, **On user@host** links to Machines. The rail shows
-**Awaiting launcher** or **Awaiting server** before an observation and labels
-a failed first read **Launcher unavailable** or **Server unavailable**.
+**Awaiting launcher** or **Awaiting server** before an observation. A failed
+read shows **Launcher unavailable** or **Server unavailable** until the next
+successful read. Previously observed held machines and the last heartbeat
+age stay visible during the outage.
 The rail updates with the visible page, including
 beside a report you have already built. Below 700 px it becomes a scrollable
 top row. Printing omits it.
