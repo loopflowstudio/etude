@@ -14,16 +14,24 @@ folder is named for the run (`run_directory`).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
+import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
+from copy import copy
 from datetime import UTC, datetime
+from itertools import islice, pairwise
 from pathlib import Path
 from stat import S_ISREG
-from typing import Any, Literal, Protocol, Self
+from typing import Any, Literal, NamedTuple, Protocol, Self, cast
 from urllib.parse import quote, unquote, urlsplit
+
+from pydantic import ValidationError
 
 from etude.cache import Artifact, Cache, Fetched, Source
 from etude.carriage import immutable
@@ -31,7 +39,7 @@ from etude.deadline import call, remaining
 from etude.errors import EtudeError
 from etude.home import home
 from etude.identity import SAFE_NAME, run_address
-from etude.records import RunRecord
+from etude.records import Record, RunRecord
 from etude.storage_timeout import StorageUnavailable, socket_timeout
 
 __all__ = (
@@ -189,6 +197,36 @@ def _storage_request[T](operation: Callable[[], T]) -> T:
         raise StorageUnavailable(f"storage request failed ({type(error).__name__})") from None
 
 
+_LIST_RANGES = 48
+
+
+class _KeyRange(NamedTuple):
+    """Keys under a bucket prefix, after an exclusive lower bound through an inclusive upper."""
+
+    prefix: str
+    after: str | None = None
+    through: str | None = None
+
+
+class _ListingHint(Record):
+    """Remembered key count and quantile boundaries for one bucket prefix."""
+
+    count: int
+    split_points: tuple[str, ...]
+
+
+def store_identity(storage: Storage) -> str:
+    """Canonical location of `storage` for local caches, distinct across endpoints and paths."""
+    if isinstance(storage, S3Storage):
+        return storage._where + storage.prefix
+    return storage.uri("_")
+
+
+def with_versions(storage: Storage, versions: Mapping[str, str]) -> Storage:
+    """Pin an S3/R2 reader to `versions` for ETag checks without affecting other readers."""
+    return storage._with_versions(versions) if isinstance(storage, S3Storage) else storage
+
+
 class S3Storage:
     """An S3 or R2 bucket reached with the author's own credentials.
 
@@ -228,8 +266,17 @@ class S3Storage:
         if host == "s3.amazonaws.com":
             host = f"s3.{self.client.meta.region_name or 'us-east-1'}.amazonaws.com"
         self._where = f"{endpoint.scheme}://{bucket}.{host}/"
+        self._listed_versions: dict[str, str] | None = None
+
+    def _with_versions(self, versions: Mapping[str, str]) -> S3Storage:
+        """Read against this listing without changing what concurrent readers trust."""
+        listed = copy(self)
+        listed._listed_versions = dict(versions)
+        return listed
 
     def put(self, key: str, data: bytes) -> None:
+        if self._listed_versions is not None:
+            self._listed_versions.pop(key, None)
         _storage_request(
             lambda: self.client.put_object(
                 Bucket=self.bucket, Key=self.prefix + key, Body=data, ChecksumAlgorithm="SHA256"
@@ -237,6 +284,8 @@ class S3Storage:
         )
 
     def put_file(self, key: str, path: Path) -> None:
+        if self._listed_versions is not None:
+            self._listed_versions.pop(key, None)
         # boto3 splits a large file into parts, checksums and retries each itself.
         _storage_request(
             lambda: self.client.upload_file(
@@ -258,6 +307,8 @@ class S3Storage:
         return Artifact(location=location, immutable=immutable(key))
 
     def delete(self, key: str) -> bool:
+        if self._listed_versions is not None:
+            self._listed_versions.pop(key, None)
         try:
             _storage_request(
                 lambda: self.client.delete_object(Bucket=self.bucket, Key=self.prefix + key)
@@ -272,23 +323,168 @@ class S3Storage:
     def keys(self, prefix: str) -> list[str]:
         return sorted(self.versions(prefix))
 
-    def versions(self, prefix: str) -> dict[str, str]:
-        """Each object's ETag, size and time, from the listing alone."""
+    @staticmethod
+    def _split_points(sorted_keys: Sequence[str]) -> tuple[str, ...]:
+        """Upper bounds for equally populated ranges in a later listing. S3 pages hold 1,000 keys."""
+        count = len(sorted_keys)
+        ranges = min(_LIST_RANGES, (count + 999) // 1000)
+        return tuple(sorted_keys[i * count // ranges - 1] for i in range(1, ranges))
 
-        def collect() -> dict[str, str]:
+    def _listing_hint_path(self, prefix: str) -> Path:
+        digest = hashlib.sha256(f"{self._where}{self.prefix}{prefix}".encode()).hexdigest()[:24]
+        return self.cache.root / "listings" / f"{digest}.json"
+
+    def _read_listing_hint(self, prefix: str) -> _ListingHint | None:
+        try:
+            return _ListingHint.model_validate_json(self._listing_hint_path(prefix).read_bytes())
+        except (OSError, ValidationError):
+            return None
+
+    def _write_listing_hint(
+        self, prefix: str, found: Mapping[str, str], prior: _ListingHint | None
+    ) -> None:
+        path = self._listing_hint_path(prefix)
+        count = len(found)
+        if count <= 1000:
+            if prior is not None:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return
+        # Refresh once the prefix has grown or shrunk enough to unbalance ranges.
+        if prior is not None and abs(count - prior.count) * 5 <= max(prior.count, 1):
+            return
+        hint = _ListingHint(count=count, split_points=self._split_points(sorted(found)))
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=path.parent) as staging:
+                pending = Path(staging) / path.name
+                pending.write_bytes(hint.model_dump_json().encode())
+                pending.replace(path)
+        except OSError:
+            pass
+
+    def versions(self, prefix: str, *, split_points: Sequence[str] | None = None) -> dict[str, str]:
+        """List current versions. Remembered prefix boundaries divide large listings into ranges."""
+        base = self.prefix + prefix
+        prior = self._read_listing_hint(prefix) if split_points is None else None
+        active_splits: Sequence[str] = (
+            (prior.split_points if prior is not None else ())
+            if split_points is None
+            else split_points
+        )
+
+        def pages(span: _KeyRange, **options: str) -> Iterator[dict[str, Any]]:
+            if span.after is not None:
+                options["StartAfter"] = span.after
+            while True:
+                remaining()
+                page = self.client.list_objects_v2(
+                    Bucket=self.bucket, Prefix=span.prefix, **options
+                )
+                yield page
+                if not page.get("IsTruncated"):
+                    return
+                options["ContinuationToken"] = page["NextContinuationToken"]
+
+        def objects(page: dict[str, Any], through: str | None = None) -> dict[str, str]:
             found: dict[str, str] = {}
-            pages = self.client.get_paginator("list_objects_v2").paginate(
-                Bucket=self.bucket, Prefix=self.prefix + prefix
-            )
-            for page in pages:
-                for item in page.get("Contents", []):
-                    tag = f"{item.get('ETag')}:{item.get('Size')}:{item.get('LastModified')}"
-                    found[item["Key"][len(self.prefix) :]] = ObjectVersion(
-                        tag, item.get("LastModified"), etag=item.get("ETag")
+            for item in page.get("Contents", ()):
+                if through is None or item["Key"] <= through:
+                    etag, modified = item.get("ETag"), item.get("LastModified")
+                    key = item["Key"][len(self.prefix) :]
+                    found[key] = ObjectVersion(
+                        f"{etag}:{item.get('Size')}:{modified}", modified, etag=etag
                     )
             return found
 
-        return _storage_request(collect)
+        def read_range(span: _KeyRange) -> dict[str, str]:
+            part: dict[str, str] = {}
+            for page in pages(span):
+                part.update(objects(page, span.through))
+                contents = page.get("Contents", ())
+                if span.through is not None and contents and contents[-1]["Key"] >= span.through:
+                    break
+            return part
+
+        def ranges(span: _KeyRange, bounds: Sequence[str]) -> list[_KeyRange]:
+            return [
+                _KeyRange(span.prefix, a, b)
+                for a, b in pairwise((span.after, *bounds, span.through))
+            ]
+
+        def discover(
+            span: _KeyRange, *, root: bool = False
+        ) -> tuple[dict[str, str], list[_KeyRange]]:
+            # Small prefixes finish in one or two pages. For larger ones the directory listing
+            # supplies boundaries and any direct objects between the subdirectories.
+            part: dict[str, str] = {}
+            after = span.after
+            for page in islice(pages(span), 1 if root else 2):
+                part.update(objects(page))
+                if not page.get("IsTruncated"):
+                    return part, []
+                if contents := page.get("Contents"):
+                    after = contents[-1]["Key"]
+
+            children: list[str] = []
+            # List from the beginning here: StartAfter would omit the directory containing 'after'.
+            for page in pages(_KeyRange(span.prefix), Delimiter="/"):
+                part.update(objects(page))
+                children.extend(child["Prefix"] for child in page.get("CommonPrefixes", ()))
+            children = [
+                key for key in children if after is None or key > after or after.startswith(key)
+            ]
+            if not children:
+                return part, []
+            if root and len(children) < 32:
+                return part, [
+                    _KeyRange(key, after if after is not None and after.startswith(key) else None)
+                    for key in children
+                ]
+            count = min(_LIST_RANGES, len(children))
+            bounds = [children[i * len(children) // count] for i in range(1, count)]
+            return part, ranges(_KeyRange(span.prefix, after), bounds)
+
+        def collect() -> dict[str, str]:
+            root = _KeyRange(base)
+            warm = (
+                0 < len(active_splits) < _LIST_RANGES
+                and all(key and key.startswith(prefix) for key in active_splits)
+                and all(a < b for a, b in pairwise(active_splits))
+            )
+            if warm:
+                work = ranges(root, [self.prefix + key for key in active_splits])
+                found: dict[str, str] = {}
+            else:
+                found, work = discover(root, root=True)
+                if not work:
+                    return found
+
+            with ThreadPoolExecutor(max_workers=32) as pool:
+                # A few top-level folders can each conceal many runs. Probe one more level
+                # in parallel before issuing all ranges; workers never wait on this pool.
+                if not warm and work[0].prefix != base:
+                    probes = [pool.submit(copy_context().run, discover, span) for span in work]
+                    work = []
+                    for probe in probes:
+                        part, children = probe.result()
+                        found.update(part)
+                        work.extend(children)
+                reads = [pool.submit(copy_context().run, read_range, span) for span in work]
+                for read in reads:
+                    found.update(read.result())
+            return found
+
+        found = _storage_request(collect)
+        if split_points is None:
+            self._write_listing_hint(prefix, found, prior)
+        if self._listed_versions is not None:
+            for key in [k for k in self._listed_versions if k.startswith(prefix)]:
+                del self._listed_versions[key]
+            self._listed_versions.update(found)
+        return found
 
 
 class ListedStorage:
@@ -300,7 +496,7 @@ class ListedStorage:
     """
 
     def __init__(self, storage: Storage, objects: dict[str, str], cache: Cache) -> None:
-        self.storage, self.objects = storage, objects
+        self.storage, self.objects = with_versions(storage, objects), objects
         self.cache = storage.cache if isinstance(storage, S3Storage) else cache
         self.name = storage.name
         self.uri = storage.uri
@@ -317,8 +513,7 @@ class ListedStorage:
         if version is None:
             raise FileNotFoundError(key)
         if isinstance(self.storage, S3Storage):
-            etag = version.etag if isinstance(version, ObjectVersion) else None
-            return self.storage._artifact(key), _Object(self.storage, key, listed_etag=etag)
+            return self.storage._artifact(key), _Object(self.storage, key)
         return Artifact(location=self.uri(key), immutable=immutable(key)), _StoredFile(
             self.storage, key, version=version
         )
@@ -335,8 +530,7 @@ class ListedStorage:
 class _Object:
     """One bucket object, read for the cache; reads reused from it go unrecorded."""
 
-    def __init__(self, storage: S3Storage, key: str, *, listed_etag: str | None = None) -> None:
-        self.listed_etag = listed_etag
+    def __init__(self, storage: S3Storage, key: str) -> None:
         self.storage, self.key = storage, key
 
     def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
@@ -350,7 +544,11 @@ class _Object:
         return found
 
     def changed(self, etag: str) -> Fetched | None:
-        return None if self.listed_etag == etag else self._get({"IfNoneMatch": etag})
+        listed = self.storage._listed_versions
+        version = listed.get(self.key) if listed is not None else None
+        if isinstance(version, ObjectVersion) and version.etag == etag:
+            return None
+        return self._get({"IfNoneMatch": etag})
 
     def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
         pass
@@ -403,10 +601,12 @@ def _client(provider: Literal["s3", "r2"]) -> Any:
         # This cloud entry point loads its SDK; local tracking does not need it.
         import boto3  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
         from botocore.config import Config  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
+        from botocore.session import get_session  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
+        from botocore.utils import parse_timestamp  # type: ignore[import-untyped,import-not-found,unused-ignore]  # noqa: PLC0415
     except ImportError:
         raise EtudeError(f"{provider}_requires_boto3", 422) from None
     timeout = socket_timeout()
-    config = Config(connect_timeout=timeout, read_timeout=timeout)
+    config = Config(connect_timeout=timeout, read_timeout=timeout, max_pool_connections=64)
     if provider == "s3":
         return boto3.client("s3", config=config)
     try:
@@ -425,7 +625,21 @@ def _client(provider: Literal["s3", "r2"]) -> Any:
             response_checksum_validation="when_required",
         )
     )
-    return boto3.client(
+
+    def _parse_r2_timestamp(value: str | int | float) -> datetime:
+        # R2 lists one UTC timestamp per key. Other response fields can use HTTP dates or epochs.
+        if isinstance(value, str) and value.endswith("Z") and "T" in value:
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                pass
+        return cast(datetime, parse_timestamp(value))  # Botocore's untyped datetime parser.
+
+    session = get_session()
+    session.get_component("response_parser_factory").set_parser_defaults(
+        timestamp_parser=_parse_r2_timestamp
+    )
+    return boto3.Session(botocore_session=session).client(
         "s3",
         endpoint_url=f"https://{account}.r2.cloudflarestorage.com",
         aws_access_key_id=access,

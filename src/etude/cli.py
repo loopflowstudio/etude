@@ -377,19 +377,20 @@ def report(
     import time
     import webbrowser
 
-    from etude.page import Page, Pages, index, render, render_index, target, write
+    from etude.page import Page, Pages, build, index, render, render_index, target, write
     from etude.storage import default_root, storage_from_uri
 
     if experiment is not None and path.is_dir():
         raise ValueError("--experiment needs one Python file")
     storage = storage_from_uri(source or default_root())
     shown: object = None
-    # A watched page is built again only once its files change.
-    pages = Pages(storage)
+    pages = None if watch is None and not path.is_dir() else Pages(storage)
     try:
         while True:
             current: Page | dict[Path, Page | str] | None
-            if path.is_dir():
+            if pages is None:
+                current = build(storage, path, experiment=experiment)
+            elif path.is_dir():
                 current = pages.build_each(path)
             else:
                 try:

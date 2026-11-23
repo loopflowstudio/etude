@@ -98,8 +98,15 @@ uv run etude report examples --open
 ```
 
 `etude report` writes a self-contained, printable HTML page you can archive or
-commit to git (for a folder, one page per experiment file and an `index.html`
-with their scores); `--watch SECONDS` rewrites on change. The report joins training progress with eval results. `Score` names the table
+commit to git. For a folder, it writes one page per experiment file and an
+`index.html` with their scores. `--watch SECONDS` rewrites on change.
+
+Each report lists the source again. For a large S3 or R2 source, Etude
+remembers key boundaries in its local cache to divide later listings into
+parallel requests across reports, live view refreshes and `statsdb` reads.
+Added, replaced and deleted records show up on the next build.
+
+The report joins training progress with eval results. `Score` names the table
 and value; add `per="opportunities"` for a sum(value)/sum(per) rate.
 Each curve can pin its own score. Curves without one use the report score.
 Curves draw training progress; `Matrix(rows=..., columns=...)` and `Ranking(by=...)`

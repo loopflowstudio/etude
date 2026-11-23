@@ -481,13 +481,14 @@ def test_taking_in_a_block_runs_the_same_statements_however_many_matches_and_blo
     opened: list[CountedConnection] = []
     connect = duckdb.connect
 
-    def counted(path: Path) -> CountedConnection:
-        opened.append(CountedConnection(connect(path)))
+    def counted(path: Path, *, read_only: bool = False) -> CountedConnection:
+        opened.append(CountedConnection(connect(path, read_only=read_only)))
         return opened[-1]
 
     players = pair(tmp_path)
     statements = []
     for count in (2, 12):
+        opened.clear()
         bucket = tmp_path / f"bucket-{count}"
         # Keep the block count fixed while varying its matches and blobs.
         with evaluating(
@@ -505,7 +506,7 @@ def test_taking_in_a_block_runs_the_same_statements_however_many_matches_and_blo
             db = statsdb("cards", bucket)
         assert db.sql("select count(*) from blobs").fetchone() == (count * 2,)
         db.close()
-        statements.append(opened[-1].statements)
+        statements.append(sum(conn.statements for conn in opened))
     assert statements[0] == statements[1]
 
 

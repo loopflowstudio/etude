@@ -10,7 +10,9 @@ from pathlib import Path
 import boto3  # type: ignore[import-untyped]
 import numpy as np
 import pytest
+from botocore.awsrequest import AWSResponse  # type: ignore[import-untyped]
 from moto import mock_aws
+from moto.core.botocore_stubber import MockRawResponse
 
 from etude.block_file import block_key, tail_key
 from etude.cache import Artifact, Cache, Content, ContentMismatch
@@ -46,6 +48,34 @@ def test_reports_fetch_each_runs_metadata_once(tmp_path: Path) -> None:
     # the source. An empty run needs no metric reads.
     assert measured.requests == 6
     assert measured.listings == 1
+
+
+def test_seed_band_reuses_the_run_traces_to_find_its_span(tmp_path: Path) -> None:
+    writer = "abcdef123456"
+    for seed, last in enumerate((2, 4)):
+        with open_run(
+            experiment="e",
+            run=f"arm@{seed}",
+            job="arm",
+            seed=seed,
+            clocks=["step"],
+            directory=tmp_path,
+        ) as run:
+            root = run.out.parent
+        block = Builder(["step"])
+        for step in (0, last):
+            block.add(step, {"step": float(step)}, {"loss": step + 2 * seed})
+        write_block(root, block_key(2, 0, 0, writer), block.columns(writer, 0))
+
+    measured = MeasuredStorage(DirectoryStorage(tmp_path))
+    file = experiment_file(tmp_path / "experiments", "e")
+    training = build(measured, file).training
+    assert [trace.mean for trace in training.series["step"]["loss"]] == [[0, 2], [2, 6]]
+    (band,) = training.bands["step"]["loss"]
+    assert band.mean == [1, 2, 6] and band.seeds == [2, 1, 1]
+    # Each seed's block is loaded once in full during training(), never via per-array range reads.
+    assert measured.ranges == 0
+    assert sum(key.endswith(".blk") for key in measured.got) == 4  # describe + one load per seed
 
 
 def test_a_folder_listed_without_a_declaration_is_not_asked_for_one(tmp_path: Path) -> None:
@@ -795,14 +825,17 @@ def test_watched_reports_read_each_bucket_file_once_per_computer(tmp_path: Path)
         first = build(S3Storage("etude-watched", client=client), file)
         assert 0 < client.bytes <= written
         read_once = client.bytes
+        requests_once = client.requests
         for _ in range(5):
             assert build(S3Storage("etude-watched", client=client), file) == first
         assert client.bytes == read_once
+        assert client.requests == requests_once
         # Kept between builds, a page is checked by publication alone while nothing changes.
         pages = Pages(S3Storage("etude-watched", client=client))
         for _ in range(3):
             assert pages.build(file) == first
         assert client.bytes == read_once
+        assert client.requests == requests_once
 
 
 def test_a_long_run_uploads_a_small_multiple_of_what_it_finally_stores(tmp_path: Path) -> None:
@@ -882,6 +915,37 @@ def test_an_r2_uri_reaches_the_accounts_endpoint_with_r2_keys(
         assert storage.uri("r/run.json") == "r2://manabot/runs/r/run.json"
         assert storage.name == "r2-manabot-runs"
         assert read(storage_from_uri("r2://manabot/runs"), "e", "r").rows == 1
+
+
+def test_r2_listing_preserves_botocore_object_versions(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("R2_ACCOUNT_ID", "fixture")
+    monkeypatch.setenv("R2_ACCESS_KEY_ID", "fixture-access")
+    monkeypatch.setenv("R2_SECRET_ACCESS_KEY", "fixture-secret")
+    timestamps = {
+        "fractional": "2026-11-22T01:02:03.123Z",
+        "seconds": "2026-11-22T01:02:03Z",
+        "http-date": "Sun, 22 Nov 2026 01:02:03 GMT",
+    }
+    contents = "".join(
+        f'<Contents><Key>{key}</Key><ETag>"abc"</ETag><Size>7</Size>'
+        f"<LastModified>{stamp}</LastModified></Contents>"
+        for key, stamp in timestamps.items()
+    )
+
+    def _list_response(**_: object) -> AWSResponse:
+        body = MockRawResponse(f"<ListBucketResult>{contents}</ListBucketResult>")
+        return AWSResponse("https://fixture", 200, {}, body)
+
+    with mock_aws():
+        s3 = S3Storage("bucket")
+        r2 = S3Storage("bucket", provider="r2")
+        for storage in (s3, r2):
+            storage.client.meta.events.register_first(
+                "before-send.s3.ListObjectsV2", _list_response
+            )
+        expected = s3.versions("")
+        assert expected.keys() == timestamps.keys()
+        assert r2.versions("") == expected
 
 
 def test_live_writer_describes_each_permanent_block_only_once(
@@ -1018,6 +1082,7 @@ def report():
         read_once = client.bytes
         assert build(S3Storage("runs", client=client, cache=cache), file) == first
         assert client.bytes == read_once
+        assert client.list_pages == 2  # one page per render on a small source
 
 
 @pytest.mark.parametrize("uri", ["s3://runs/producer/out/weights%?#.pt", "file"])
@@ -1046,3 +1111,105 @@ def test_placing_a_checkpoint_verifies_and_reuses_its_bytes(
         with pytest.raises(ContentMismatch):
             place_artifact(wrong, tmp_path / "refused")
         assert not (tmp_path / "refused").exists()
+
+
+def test_report_lists_current_versions_across_stale_bucket_splits(tmp_path: Path) -> None:
+    file = experiment_file(tmp_path / "experiments", "exp")
+    local = DirectoryStorage(tmp_path / "runs")
+    with open_run(experiment="exp", run="historical", clocks=[], directory=local.root):
+        pass
+
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="big")
+        bucket = S3Storage("big", "jobs/exp", client=client, cache=Cache(tmp_path / "cache"))
+        for key in local.keys(""):
+            bucket.put(key, local.get(key))
+        # Nested and flat run folders share the source. Its 1,040 artifacts exceed a LIST page.
+        for i in range(40):
+            for j in range(26):
+                bucket.put(f"exp/eval-{i:02d}/artifacts/b-{j:02d}", b"first")
+        first = build(bucket, file)
+        assert [run.name for run in first.training.runs] == ["historical"]
+        inventory = bucket.versions("")
+        assert len(inventory) == 1040 + len(local.keys(""))
+        (boundary,) = bucket._split_points(sorted(inventory))
+
+        before = client.list_pages
+        assert build(bucket, file) == first
+        assert client.list_pages - before == 2
+
+        bucket.delete(boundary)
+        bucket.put(boundary + "-new", b"after the deleted split")
+        bucket.put("00-first", b"below every previous key")
+        bucket.put("zz-last", b"above every previous key")
+        with open_run(experiment="exp", run="later", clocks=[], directory=local.root):
+            pass
+        for key in local.keys(""):
+            if key not in inventory:
+                bucket.put(key, local.get(key))
+        # Compare every fresh version with boto3's serial paginator, including a key
+        # newly inserted at a supplied boundary and one removed from the middle.
+        pages = client.get_paginator("list_objects_v2").paginate(Bucket="big", Prefix=bucket.prefix)
+        expected = {
+            item["Key"].removeprefix(
+                bucket.prefix
+            ): f"{item['ETag']}:{item['Size']}:{item['LastModified']}"
+            for page in pages
+            for item in page["Contents"]
+        }
+        assert (
+            boundary not in expected
+            and {boundary + "-new", "00-first", "zz-last"} <= expected.keys()
+        )
+        assert bucket.versions("", split_points=(boundary, boundary + "-new")) == expected
+        before = client.list_pages
+        assert {run.name for run in build(bucket, file).training.runs} == {"historical", "later"}
+        assert client.list_pages - before == 2
+
+        # A fresh S3Storage sharing the cache (as Pages or statsdb opens) reuses the same hints.
+        other = S3Storage("big", "jobs/exp", client=client, cache=Cache(tmp_path / "cache"))
+        before = client.list_pages
+        assert other.versions("") == expected
+        assert client.list_pages - before == 2
+
+        # When the prefix shrinks below one LIST page, stale split points are cleared.
+        for key in list(expected):
+            if key.startswith("exp/eval-"):
+                bucket.delete(key)
+        bucket.versions("")
+        before = client.list_pages
+        bucket.versions("")
+        assert client.list_pages - before == 1
+
+
+def test_cold_bucket_listing_covers_a_partially_read_nested_prefix(tmp_path: Path) -> None:
+    # Tiny LIST pages exercise both levels of cold discovery with a few objects.
+    def small_pages(params: dict[str, object], **_: object) -> None:
+        params["MaxKeys"] = 3
+
+    with mock_aws():
+        client = boto3.client("s3", region_name="us-east-1")
+        client.create_bucket(Bucket="nested")
+        client.meta.events.register("before-parameter-build.s3.ListObjectsV2", small_pages)
+        bucket = S3Storage("nested", "runs", client=client, cache=Cache(tmp_path / "cache"))
+        keys = {"a", "exp/b", "exp/run-c", "exp/z", "final"}
+        keys.update(f"exp/run-{run}/{i}" for run in ("a", "b", "d") for i in range(5))
+        for key in keys:
+            bucket.put(key, key.encode())
+        assert bucket.versions("").keys() == keys
+
+
+def test_a_report_listing_validates_only_its_own_reads(tmp_path: Path) -> None:
+    with mock_aws():
+        client = CountedClient(boto3.client("s3", region_name="us-east-1"))
+        client.create_bucket(Bucket="scoped")
+        storage = S3Storage("scoped", client=client, cache=Cache(tmp_path / "cache"))
+        storage.put("run.json", b"first")
+        report = storage._with_versions(storage.versions(""))
+        assert report.get("run.json") == report.get("run.json") == b"first"
+        assert client.requests == 1
+
+        storage.put("run.json", b"second")
+        assert storage.get("run.json") == b"second"
+        assert client.requests == 2

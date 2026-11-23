@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from etude.storage import Storage
@@ -69,6 +70,8 @@ class CountedClient:
 
     def __init__(self, client: Any) -> None:
         self.client = client
+        self.list_pages = 0
+        self._list_lock = Lock()
         self.bytes = 0
         self.requests = 0  # reads asked for, a check that sent no body included
         self.read: dict[str, int] = {}  # body bytes sent, by key
@@ -81,6 +84,11 @@ class CountedClient:
         self.read[fields["Key"]] = self.read.get(fields["Key"], 0) + len(body)
         reply["Body"] = io.BytesIO(body)
         return reply
+
+    def list_objects_v2(self, **fields: Any) -> Any:
+        with self._list_lock:
+            self.list_pages += 1
+        return self.client.list_objects_v2(**fields)
 
     def stored(self, bucket: str) -> int:
         """Every byte the bucket holds: what has been written there and not replaced."""

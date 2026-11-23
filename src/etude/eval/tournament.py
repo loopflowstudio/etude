@@ -37,7 +37,8 @@ import os
 import re
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -327,7 +328,16 @@ class _Folder:
     names: tuple[str, ...]
     # Its `tournament.json`; else None, and `environment` is its `environment.json`'s.
     held: TournamentRun | None
-    environment: str | None
+    environment: str
+
+
+@dataclass(frozen=True)
+class _EnvironmentResults:
+    """Standing outcomes and seated checkpoints of every eval run in one environment."""
+
+    delivered: dict[Digest, str] = field(default_factory=dict)
+    failed: dict[Digest, bool] = field(default_factory=dict)
+    checkpoints_by_key: dict[str, tuple[CheckpointRef, ...]] = field(default_factory=dict)
 
 
 class StoredRuns:
@@ -343,6 +353,7 @@ class StoredRuns:
         self._folders = tuple(folders)
         self._records: dict[tuple[str, str], list[MatchRecord]] = {}
         self._blocks: dict[str, dict[str, Block]] = {}
+        self._by_environment: dict[str, _EnvironmentResults] = {}
 
     @classmethod
     def read(
@@ -377,12 +388,17 @@ class StoredRuns:
                     held = TournamentRun.model_validate_json(
                         place.get(folder + TOURNAMENT_FILE), context={"experiment": experiment}
                     )
-                    folders.append(_Folder(place, run, folder, names, held, None))
+                    folders.append(
+                        _Folder(
+                            place, run, folder, names, held, held.tournament.environment.identity
+                        )
+                    )
                 else:
                     given = Environment.model_validate_json(place.get(folder + _ENVIRONMENT_FILE))
                     folders.append(_Folder(place, run, folder, names, None, given.identity))
         return cls(experiment, folders)
 
+    @cached_property
     def tournaments(self) -> dict[str, list[TournamentRun]]:
         """What each eval run held for a tournament added, by tournament, in run order."""
         found: dict[str, dict[str, TournamentRun]] = {}
@@ -411,6 +427,45 @@ class StoredRuns:
                 for record in block.matches
             ]
         return self._records[key]
+
+    def environment_results(self, environment: str) -> _EnvironmentResults:
+        """Standing outcomes and checkpoints across every eval run in `environment`, cached once."""
+        cached = self._by_environment.get(environment)
+        if cached is not None:
+            return cached
+        records: dict[str, list[MatchRecord]] = {}
+        for each in self._folders:
+            if each.environment == environment:
+                records.setdefault(each.run, []).extend(self.records(each))
+        newest: dict[Digest, tuple[int, str]] = {}
+        failures: dict[Digest, tuple[int, str, bool]] = {}
+        for run, held_records in records.items():
+            for key, record in outcomes(held_records).items():
+                if record.state == "failed":
+                    previous = failures.get(key)
+                    if previous is None or (record.wall_ms, run) > previous[:2]:
+                        failures[key] = (record.wall_ms, run, record.retry)
+                elif (record.wall_ms, run) > newest.get(key, (-1, "")):
+                    newest[key] = (record.wall_ms, run)
+        # Keep distinct artifact variants per key so conflicting checkpoints are still caught
+        # without re-scanning tens of thousands of identical seat references per tournament.
+        seen_artifacts: dict[str, dict[tuple[str | None, int | None], CheckpointRef]] = {}
+        for items in records.values():
+            for record in items:
+                for p in record.match.players:
+                    for c in player_checkpoints(p):
+                        seen_artifacts.setdefault(c.key, {}).setdefault(
+                            (c.artifact.sha256, c.artifact.size_bytes), c
+                        )
+        cached = _EnvironmentResults(
+            delivered={key: run for key, (_, run) in newest.items()},
+            failed={key: retry for key, (_, _, retry) in failures.items() if key not in newest},
+            checkpoints_by_key={
+                key: tuple(variants.values()) for key, variants in seen_artifacts.items()
+            },
+        )
+        self._by_environment[environment] = cached
+        return cached
 
 
 def stored_runs(
@@ -477,10 +532,13 @@ def _called(
     it is not the checkpoint's. `wanted_only` calls for what `added` defines
     alone, still refusing a definition the stored eval runs conflict with.
     """
-    stored = _Stored(held=(), delivered={}, failed={})
-    if runs is not None:
-        stored = _stored(added.tournament, runs)
-    tournament = assemble([*stored.held, added])
+    held = runs.tournaments.get(added.tournament.name, []) if runs is not None else []
+    stored = (
+        runs.environment_results(added.tournament.environment.identity)
+        if runs is not None
+        else _EnvironmentResults()
+    )
+    tournament = assemble([*held, added])
     known = {_found(each) for each in tournament.seated}
     if wanted_only:
         tournament = assemble([added]).model_copy(update={"seated": tournament.seated})
@@ -494,7 +552,12 @@ def _called(
     }
     seated = tuple(c for m in matches.values() for p in m.players for c in player_checkpoints(p))
     keys = {c.key for c in seated}
-    validate_checkpoints((*seated, *(c for c in stored.checkpoints if c.key in keys)))
+    validate_checkpoints(
+        (
+            *seated,
+            *(c for key in keys for c in stored.checkpoints_by_key.get(key, ())),
+        )
+    )
     ordered_keys = sorted(matches)
     played = Played(
         delivered=tuple(
@@ -558,62 +621,6 @@ def _resumed(value: object) -> JsonValue:
     if isinstance(value, (tuple, list)):
         return [_resumed(each) for each in value]
     return _JSON.validate_python(value)
-
-
-@dataclass(frozen=True)
-class _Stored:
-    """What the experiment's stored eval runs hold of a tournament and its environment."""
-
-    # The tournament's eval runs, in run order.
-    held: tuple[TournamentRun, ...]
-    # Each match an eval run in the environment holds as done, to the run that recorded it
-    # last: of runs holding it, the latest record's, then the last by name, as `statsdb`
-    # ranks `matches.newest`.
-    delivered: dict[Digest, str]
-    # Each match that failed there, with no done record anywhere.
-    failed: dict[Digest, bool]
-    checkpoints: tuple[CheckpointRef, ...] = ()
-
-
-def _stored(tournament: Benchmark | RoundRobin, runs: StoredRuns) -> _Stored:
-    """The tournament's eval runs of the experiment, and how the experiment's eval runs in
-    its environment played each match; each run's blocks read once however many
-    tournaments ask (`StoredRuns`)."""
-    held: dict[str, TournamentRun] = {}
-    records: dict[str, list[MatchRecord]] = {}
-    environment = tournament.environment.identity
-    for each in runs.folders():
-        if each.held is not None:
-            if each.held.tournament.name == tournament.name:
-                held.setdefault(each.run, each.held)
-            # A tournament's eval run is played in the tournament's environment.
-            alike = each.held.tournament.environment.identity == environment
-        else:
-            alike = each.environment == environment
-        if alike:
-            records.setdefault(each.run, []).extend(runs.records(each))
-    newest: dict[Digest, tuple[int, str]] = {}
-    failures: dict[Digest, tuple[int, str, bool]] = {}
-    for run, held_records in records.items():
-        for key, record in outcomes(held_records).items():
-            if record.state == "failed":
-                previous = failures.get(key)
-                if previous is None or (record.wall_ms, run) > previous[:2]:
-                    failures[key] = (record.wall_ms, run, record.retry)
-            elif (record.wall_ms, run) > newest.get(key, (-1, "")):
-                newest[key] = (record.wall_ms, run)
-    return _Stored(
-        held=tuple(held[run] for run in sorted(held)),
-        delivered={key: run for key, (_, run) in newest.items()},
-        failed={key: retry for key, (_, _, retry) in failures.items() if key not in newest},
-        checkpoints=tuple(
-            c
-            for items in records.values()
-            for record in items
-            for p in record.match.players
-            for c in player_checkpoints(p)
-        ),
-    )
 
 
 @contextmanager
