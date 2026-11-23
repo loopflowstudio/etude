@@ -20,7 +20,7 @@ from etude.carriage import publication
 from etude.errors import EtudeError
 from etude.page import Pages, build
 from etude.records import Clock, RunWriter
-from etude.run import RunFiles, StorageDestination, runs, sync
+from etude.run import RunFiles, RunListing, StorageDestination, runs, sync
 from etude.storage import (
     DirectoryStorage,
     S3Storage,
@@ -115,6 +115,34 @@ def test_a_run_whose_declaration_is_invalid_reads_without_one(tmp_path: Path) ->
     data = read(tmp_path, "e", "r")
     assert data.file is None
     assert len(data.writers) == 1
+
+
+@pytest.mark.parametrize(
+    ("head", "tail", "accepted"),
+    [
+        (b"", b'{"id":"r","experiment":"e"}', True),
+        (b'{"i', b'd":"r","experiment":"e"}', True),
+        (b'{"id":"r","config":"\xc3', b'\xa9","experiment":"e"}', True),
+        (b'{"resume_after":1e-', b'2,"id":"r","experiment":"e"}', True),
+        (
+            b'{"source_key":{"namespace":"local","kind":"run","source_id":"r"},',
+            b'"experiment":"e","declaration":{}}',
+            True,
+        ),
+        (b'{"params":{"foreign":[1,2]},"id":"r","experiment":"e"', b"}", True),
+        (b'{"id":"r","calendar_seconds"', b":42}", False),
+        (b'{"params":{"broken":truX', b"}}", False),
+        (b'{"id":"\xff', b'"}', False),
+    ],
+)
+def test_large_declaration_reads_only_beyond_an_inconclusive_prefix(
+    tmp_path: Path, head: bytes, tail: bytes, accepted: bool
+) -> None:
+    source = MeasuredStorage(DirectoryStorage(tmp_path))
+    body = head.rjust(4096) + tail + b" " * 8192
+    source.put("r/run.json", body)
+    assert runs(source) == ([("e", "r")] if accepted else [])
+    assert source.ranges == 1 and source.bytes == 4096 + (len(body) if accepted else 0)
 
 
 @pytest.mark.parametrize("attributed", [False, True])
@@ -1210,10 +1238,12 @@ def test_a_report_listing_validates_only_its_own_reads(tmp_path: Path) -> None:
         client.create_bucket(Bucket="scoped")
         storage = S3Storage("scoped", client=client, cache=Cache(tmp_path / "cache"))
         storage.put("run.json", b"first")
-        report = storage._with_versions(storage.versions(""))
+        report = RunListing.read(storage).storage
         assert report.get("run.json") == report.get("run.json") == b"first"
+        assert report.get_range("run.json", 1, 3) == b"irs"
         assert client.requests == 1
 
         storage.put("run.json", b"second")
+        assert storage.get_range("run.json", 1, 3) == b"eco"
         assert storage.get("run.json") == b"second"
-        assert client.requests == 2
+        assert client.requests == 3

@@ -33,7 +33,7 @@ function chartBrowser(hash = "", overview = null) {
     append(...children) { this.children.push(...children); }
     appendChild(child) { this.append(child); return child; }
     replaceChildren(...children) { this.text = ""; this.children = children; }
-    setAttribute() {}
+    setAttribute(key, value) { (this.attributes ??= {})[key] = value; }
     addEventListener() {}
   }
   const elements = new Map(), plots = [];
@@ -80,7 +80,7 @@ function renderPage(data, hash = "", overview = null) {
 test("experiment card captions name the metric once and keep its clock, units and scale", () => {
   const {browser, document} = chartBrowser();
   const host = document.createElement("div"), data = document.createElement("script");
-  const curves = {loss: {owner: "a", x: [1], mean: [3]}};
+  const curves = {loss: {owner: "a", x: [598], mean: [299], last: 300}};
   data.textContent = JSON.stringify([
     {title: "loss", clock: "updates", curves},
     {title: "Training", clock: "updates", unit: "nats", log: true, curves},
@@ -92,6 +92,27 @@ test("experiment card captions name the metric once and keep its clock, units an
   assert.deepEqual(captions.map(c => [c.text, c.children[0].textContent]), [
     ["loss", "updates"], ["Training", "loss · nats · log scale · updates"],
   ]);
+  for (const figure of host.children.slice(1)) {
+    assert.equal(figure.children[1].attributes["aria-label"], "a: 300, last plotted bucket at updates 598");
+  }
+});
+
+test("single-series headers show the logged endpoint and grouped seeds keep their mean", () => {
+  const data = page([], [], {
+    jobs: [{name: "a", label: "Solo", runs: ["a"]}, {name: "b", label: "Pair", runs: ["b1", "b2"]}],
+    runs: ["a", "b1", "b2"].map(name => ({name})), checkpoints: [], clocks: [{name: "updates"}],
+    metrics: ["value"], series: {updates: {value: [{owner: "a", x: [598], mean: [299], last: 300}]}},
+    bands: {updates: {value: [{owner: "b", x: [598], mean: [150], low: [140], high: [160], seeds: [2]}]}},
+  });
+  for (const scale of ["linear", "log"]) {
+    data.report = {clock: "updates", ml: [{kind: "series", title: "Value", keys: ["value"], scale}]};
+    const view = renderPage({...data, run_charts: true});
+    assert.match(view.sectionText("charts"), /Solo 300.*Pair 150/);
+    assert.ok(view.plots[0].values.some(line => line.includes(299)));
+  }
+  const trace = data.training.series.updates.value[0];
+  Object.assign(trace, {x: [100, 598], mean: [40, -1], last: 0});
+  assert.match(renderPage({...data, run_charts: true}).sectionText("charts"), /Solo 40/);
 });
 
 test("a section the report gives no panel is hidden, header and controls with it", () => {

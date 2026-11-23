@@ -145,14 +145,20 @@ The view listens on `127.0.0.1:8765` by default and prints its address.
 
 To browse a bucket’s history, open the experiment list. The view lists the
 source and reads run declarations, outcomes and any writer records it needs
-to identify a resume. Experiments and run tables appear before charts load.
+to identify a resume. For `run.json` files larger than 8 KiB, discovery
+checks the first 4 KiB. If the prefix rules out an Etude declaration, discovery
+skips the rest and remembers that version across restarts. When the listing
+confirms a cached Etude declaration’s version, discovery reads its prefix and body locally.
+Experiments and run tables appear before charts load.
 Open runs chart in the background. A directory also charts its completed
 runs, one experiment at a time.
 
 In S3 or R2, opening a historical run or selecting its **Curves** or
 **Checkpoints** tab loads that run’s metrics and checkpoint records. You can
-read its state, config and file names while it loads. The view remembers
-which runs you opened across restarts. Opening an experiment’s **Report**
+read its state, config and file names while it loads. If that first read
+fails, the view shows the error and the chart and checkpoint sections say
+they are retrying. The view remembers which runs you opened across restarts.
+Opening an experiment’s **Report**
 reads the data for that report separately. Passing an experiment file
 selects its report code and still discovers runs across the source.
 The [hosted view](#hosted-view) receives updates directly from launched workers.
@@ -217,7 +223,8 @@ An authored series keeps its title and metric keys. When no authored series
 has a drawable value, each run contributes its first drawable ungrouped metric
 in logging order. Its key titles the curve and labels the value in the run
 table’s **Latest metric** column. The curve draws bucket means. **Latest
-metric** shows the last finite logged endpoint on the report clock. If a
+metric** and single-run chart headers show the last finite logged endpoint
+on the report clock. A multi-seed chart header shows the final seed mean. If a
 reduced bucket ends in a nonfinite value, the display uses its finite mean.
 A log panel uses positive values. Counters and diagnostics can lead when there
 is no drawable series. Metric curves use the report clock. When a bucket run
@@ -229,9 +236,10 @@ with `~` when any share is estimated.
 
 Open `/experiments/prototype?run=coin@0&tab=curves` to see the coin’s curves
 beside the run table. Each row shows the run and job, state or queue reason,
-clock, last file write, **Latest metric** from training, machine and dollars. A dash
-means the index has no value for that cell. Select a run to inspect its
-**Console**, **Curves**, **Config** or **Checkpoints**. Picking another run
+clock, last file write, **Latest metric** from training, machine and dollars.
+**Not loaded** in the Clock column means the run’s charts have yet to load.
+Once loaded, a dash means the index has no value for that cell. Select a run
+to inspect its **Console**, **Curves**, **Config** or **Checkpoints**. Picking another run
 keeps the same tab. Copy the URL to share that selection, or open the run’s
 own page from the detail heading.
 

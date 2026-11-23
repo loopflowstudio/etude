@@ -87,23 +87,30 @@ class Storage(Protocol):
 
 
 class ObjectVersion(str):
-    """A storage version tag with its listing's modification time, if supplied.
+    """A storage version tag with the metadata supplied by its listing.
 
     Tags remain strings so existing Storage implementations and consumers can
     compare or persist them. An opaque string supplies no evidence of age.
     """
 
-    __slots__ = ("modified", "etag")
+    __slots__ = ("modified", "etag", "size")
     etag: str | None
     modified: datetime | None
+    size: int | None
 
     def __new__(
-        cls, tag: str, modified: datetime | None = None, *, etag: str | None = None
+        cls,
+        tag: str,
+        modified: datetime | None = None,
+        *,
+        etag: str | None = None,
+        size: int | None = None,
     ) -> Self:
         if modified is not None and modified.utcoffset() is None:
             raise ValueError("an object's modification time must include a time zone")
         version = super().__new__(cls, tag)
         version.etag = etag
+        version.size = size
         version.modified = modified.astimezone(UTC) if modified is not None else None
         return version
 
@@ -177,6 +184,7 @@ class DirectoryStorage:
                         found[key] = ObjectVersion(
                             f"{stat.st_mtime_ns}:{stat.st_size}",
                             datetime.fromtimestamp(stat.st_mtime, UTC),
+                            size=stat.st_size,
                         )
         return found
 
@@ -224,7 +232,11 @@ def store_identity(storage: Storage) -> str:
 
 def with_versions(storage: Storage, versions: Mapping[str, str]) -> Storage:
     """Pin an S3/R2 reader to `versions` for ETag checks without affecting other readers."""
-    return storage._with_versions(versions) if isinstance(storage, S3Storage) else storage
+    if not isinstance(storage, S3Storage):
+        return storage
+    listed = copy(storage)
+    listed._listed_versions = dict(versions)
+    return listed
 
 
 class S3Storage:
@@ -268,12 +280,6 @@ class S3Storage:
         self._where = f"{endpoint.scheme}://{bucket}.{host}/"
         self._listed_versions: dict[str, str] | None = None
 
-    def _with_versions(self, versions: Mapping[str, str]) -> S3Storage:
-        """Read against this listing without changing what concurrent readers trust."""
-        listed = copy(self)
-        listed._listed_versions = dict(versions)
-        return listed
-
     def put(self, key: str, data: bytes) -> None:
         if self._listed_versions is not None:
             self._listed_versions.pop(key, None)
@@ -297,14 +303,21 @@ class S3Storage:
         return f"{self.provider}://{self.bucket}/{self.prefix}{key}"
 
     def get(self, key: str) -> bytes:
-        return self.cache.read(self._artifact(key), _Object(self, key))
+        return self.cache.read(*self._object(key))
 
     def get_range(self, key: str, start: int, length: int) -> bytes:
-        return self.cache.read(self._artifact(key), _Object(self, key), start=start, length=length)
+        return self.cache.read(*self._object(key), start=start, length=length)
 
-    def _artifact(self, key: str) -> Artifact:
+    def _object(self, key: str, version: str | None = None) -> tuple[Artifact, _Object]:
         location = self._where + quote(self.prefix + key, safe="-_.~/")
-        return Artifact(location=location, immutable=immutable(key))
+        if version is None and self._listed_versions is not None:
+            version = self._listed_versions.get(key)
+        artifact = Artifact(
+            location=location,
+            immutable=immutable(key),
+            listed_etag=version.etag if isinstance(version, ObjectVersion) else None,
+        )
+        return artifact, _Object(self, key)
 
     def delete(self, key: str) -> bool:
         if self._listed_versions is not None:
@@ -393,9 +406,10 @@ class S3Storage:
             for item in page.get("Contents", ()):
                 if through is None or item["Key"] <= through:
                     etag, modified = item.get("ETag"), item.get("LastModified")
+                    size = item.get("Size")
                     key = item["Key"][len(self.prefix) :]
                     found[key] = ObjectVersion(
-                        f"{etag}:{item.get('Size')}:{modified}", modified, etag=etag
+                        f"{etag}:{size}:{modified}", modified, etag=etag, size=size
                     )
             return found
 
@@ -496,7 +510,7 @@ class ListedStorage:
     """
 
     def __init__(self, storage: Storage, objects: dict[str, str], cache: Cache) -> None:
-        self.storage, self.objects = with_versions(storage, objects), objects
+        self.storage, self.objects = storage, objects
         self.cache = storage.cache if isinstance(storage, S3Storage) else cache
         self.name = storage.name
         self.uri = storage.uri
@@ -513,18 +527,15 @@ class ListedStorage:
         if version is None:
             raise FileNotFoundError(key)
         if isinstance(self.storage, S3Storage):
-            return self.storage._artifact(key), _Object(self.storage, key)
-        return Artifact(location=self.uri(key), immutable=immutable(key)), _StoredFile(
-            self.storage, key, version=version
-        )
+            return self.storage._object(key, version)
+        artifact = Artifact(location=self.uri(key), immutable=immutable(key), listed_etag=version)
+        return artifact, _StoredFile(self.storage, key, version=version)
 
     def get(self, key: str) -> bytes:
-        artifact, source = self._object(key)
-        return self.cache.read(artifact, source)
+        return self.cache.read(*self._object(key))
 
     def get_range(self, key: str, start: int, length: int) -> bytes:
-        artifact, source = self._object(key)
-        return self.cache.read(artifact, source, start=start, length=length)
+        return self.cache.read(*self._object(key), start=start, length=length)
 
 
 class _Object:
@@ -544,10 +555,6 @@ class _Object:
         return found
 
     def changed(self, etag: str) -> Fetched | None:
-        listed = self.storage._listed_versions
-        version = listed.get(self.key) if listed is not None else None
-        if isinstance(version, ObjectVersion) and version.etag == etag:
-            return None
         return self._get({"IfNoneMatch": etag})
 
     def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
@@ -730,8 +737,8 @@ class _StoredFile:
             body = self.storage.get_range(self.key, start, stop - start)
         return Fetched(body, self.version)
 
-    def changed(self, etag: str) -> Fetched | None:
-        return None if etag == self.version else self.read(0, None, None)
+    def changed(self, etag: str) -> Fetched:
+        return self.read(0, None, None)
 
     def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
         pass
@@ -746,10 +753,11 @@ def place_artifact(artifact: Artifact, destination: Path) -> Path:
         provider, _, address = uri.partition("://")
         bucket, _, key = address.partition("/")
         storage = S3Storage(bucket, provider="r2" if provider == "r2" else "s3")
-        located = storage._artifact(key).model_copy(
+        located, source = storage._object(key)
+        named = located.model_copy(
             update={"sha256": artifact.sha256, "size_bytes": artifact.size_bytes}
         )
-        return storage.cache.place(located, destination, _Object(storage, key))
+        return storage.cache.place(named, destination, source)
     parsed = urlsplit(uri)
     if parsed.scheme not in ("", "file") or parsed.netloc:
         raise ValueError(f"unsupported artifact location: {parsed.scheme}")

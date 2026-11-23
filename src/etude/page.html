@@ -377,11 +377,16 @@ function renderMetrics(vis) {
     return {...p, y: mean(near.map(q => q.y)), lo: null, hi: null};
   });
   // A several-seed job is its band (mean, seed range); a one-seed job is its run's means.
-  function metricPoints(j, key, clock) {
-    const band = ((T.bands[clock] || {})[key] || []).find(l => l.owner === j.key);
-    const l = band || (j.runs.length === 1 ? ((T.series[clock] || {})[key] || []).find(l => l.owner === j.runs[0]) : null);
-    if (!l) return null;
-    return l.x.map((x, i) => ({x, y: l.mean[i], lo: band ? l.low[i] : null, hi: band ? l.high[i] : null, intervalLabel: "seed range", missing: l.mean[i] == null, meta: band ? `${l.seeds[i]} seeds` : ""}));
+  function metricLine(job, key, clock) {
+    const band = T.bands[clock]?.[key]?.find(trace => trace.owner === job.key);
+    const trace = band || (job.runs.length === 1 && T.series[clock]?.[key]?.find(t => t.owner === job.runs[0]));
+    if (!trace) return null;
+    const points = trace.x.map((x, i) => ({
+      x, y: trace.mean[i], missing: trace.mean[i] == null,
+      lo: band ? band.low[i] : null, hi: band ? band.high[i] : null,
+      intervalLabel: "seed range", meta: band ? `${band.seeds[i]} seeds` : "",
+    }));
+    return {job, trace, points};
   }
   function metricSection(section, panels, clockKey, others = []) {
     const host = document.getElementById(section + "-body"); host.replaceChildren();
@@ -413,9 +418,9 @@ function renderMetrics(vis) {
       ? [{label: j.label, color: color(j), opacity: 0.25, width: 1, faint: true, points: pts.map(p => ({...p, lo: null, hi: null}))}, {label: j.label, color: color(j), dotted: j.baseline, points: smoothed(pts)}]
       : [{label: j.label, color: color(j), dotted: j.baseline, points: pts}];
     const chartKey = (host_, key, scale, height, compact) => {
-      const lines = vis.map(j => [j, metricPoints(j, key, clock)]).filter(([, p]) => p);
+      const lines = vis.map(j => metricLine(j, key, clock)).filter(Boolean);
       const log = scale === "log";
-      later(() => line(host_, lines.flatMap(([j, pts]) => prep(log ? pts.map(p => ({...p, lo: null, hi: null})) : pts, j)), {...opts, compact, height, log}));
+      later(() => line(host_, lines.flatMap(({job, points}) => prep(log ? points.map(p => ({...p, lo: null, hi: null})) : points, job)), {...opts, compact, height, log}));
       return lines;
     };
     for (const panel of panels) {
@@ -431,11 +436,11 @@ function renderMetrics(vis) {
         const c = card(host, panel.title, panel.unit + (panel.scale === "log" ? " · log scale" : ""), present.length > 1 ? "full" : "");
         if (present.length === 1) {
           const h = node("div");
-          for (const [job, points] of chartKey(h, present[0], panel.scale, 170, false)) {
-            const last = points.findLast(p => !p.missing);
+          for (const {job, trace} of chartKey(h, present[0], panel.scale, 170, false)) {
+            const last = latestMetric(trace, panel.scale === "log");
             if (!last) continue;
             const row = node("div", "srow");
-            row.append(swatch(job), node("span", null, job.label), node("b", null, fmt(last.y)));
+            row.append(swatch(job), node("span", null, job.label), node("b", null, fmt(last.value)));
             c.appendChild(row);
           }
           c.appendChild(h);
