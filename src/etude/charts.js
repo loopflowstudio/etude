@@ -459,14 +459,39 @@ function latestActivity(D) {
   return Math.max(...times) || null;
 }
 
+const metricPanel = p => p.kind === "series" || p.kind === "counters";
+function metricLayout(D) {
+  const panels = [...D.report.ml, ...D.report.perf];
+  const logged = new Set(D.training.metrics);
+  const named = new Set(panels.flatMap(p => p.keys || []));
+  const timers = panels.filter(p => p.kind === "flame").map(p => p.prefix);
+  const otherMetrics = D.training.metrics.filter(k => !named.has(k) && !timers.some(prefix =>
+    k.startsWith(prefix) && (!D.run_charts || k.length > prefix.length)));
+  const runMetrics = panels.filter(p => metricPanel(p) && p.keys.some(k => logged.has(k)));
+  return {logged, otherMetrics, runMetrics};
+}
+
+function runCurvePanels(D) {
+  const {series, clocks} = D.training;
+  const clock = clocks.some(c => c.name === D.report.clock) || BUILT_IN.includes(D.report.clock)
+    ? D.report.clock : clocks[0]?.name ?? BUILT_IN[0];
+  const {runMetrics, otherMetrics} = metricLayout(D);
+  return [...runMetrics, {title: "Other logged metrics", keys: otherMetrics}].map(p => ({
+    title: p.title, clock, unit: p.unit, log: p.scale === "log",
+    curves: Object.fromEntries(p.keys.filter(k => series[clock]?.[k]?.length).map(k => [k, series[clock][k][0]])),
+  }));
+}
+
 // Card data contains only the first ML panel represented across the experiment's runs.
 // Keep different metrics and clocks on separate axes, even across a held file observation.
-function drawExperimentCards(root) {
+function drawExperimentCurves(root) {
   destroyCharts();
   hideTip();
-  for (const host of root.querySelectorAll(".card-charts")) {
+  for (const host of root.querySelectorAll(".card-charts, .run-curves")) {
     const data = host.querySelector("script");
-    const panels = JSON.parse(data.textContent);
+    const detail = host.classList.contains("run-curves");
+    const payload = JSON.parse(data.textContent);
+    const panels = detail ? runCurvePanels(payload) : payload;
     host.replaceChildren(data);
     const plots = new Map();
     panels.forEach((panel, run) => {
@@ -477,10 +502,11 @@ function drawExperimentCards(root) {
         if (!last) continue;
         if (!plots.has(id)) plots.set(id, {panel, key, lines: [], latest: []});
         const {lines, latest} = plots.get(id);
-        lines.push({label: trace.owner, color: css(`--j${run % 8 + 1}`), points});
+        lines.push({label: trace.owner, color: css(`--j${detail ? 1 : run % 8 + 1}`), points});
         latest.push(`${trace.owner}: ${fmt(last.y)} at ${panel.clock} ${num(last.x)}`);
       }
     });
+    if (detail && !plots.size) host.appendChild(node("p", "na", "No metric curves recorded."));
     for (const {panel, key, lines, latest} of plots.values()) {
       const figure = node("figure"), plot = node("div");
       const caption = node("figcaption", null, panel.title);
@@ -489,7 +515,7 @@ function drawExperimentCards(root) {
       plot.setAttribute("aria-label", latest.join(", "));
       figure.append(caption, plot);
       host.appendChild(figure);
-      line(plot, lines, {compact: true, height: 116, xLabel: panel.clock, log: panel.log});
+      line(plot, lines, {compact: true, height: detail ? 156 : 116, xLabel: panel.clock, log: panel.log});
     }
   }
 }

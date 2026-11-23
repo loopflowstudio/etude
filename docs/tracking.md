@@ -154,8 +154,8 @@ opened before the run appears names the source the view is watching.
 | --- | --- |
 | `/` | Experiment cards, Open before Completed, with live curves, run states, spend and latest file write |
 | `/status` | The experiment list used to refresh `/` |
-| `/experiments/NAME` | Jobs and runs with their state, clock, last file write and launcher placement or queue reason, plus the experiment report |
-| `/experiments/NAME/status` | The run status table used to refresh the experiment page |
+| `/experiments/NAME` | Run table and selected run detail on Status, with a separate Report tab |
+| `/experiments/NAME/status` | The table and URL-selected detail used to refresh Status |
 | `/experiments/NAME/report` | The same report pane, opened on its own |
 | `/experiments/NAME/report?observe=1` | Whether the waiting report can load |
 | `/runs/ADDRESS` | A training run’s progress, curves, console, config and checkpoints, or an evaluation’s status and link to its report |
@@ -178,8 +178,19 @@ A panel without a curve leaves the run summary on its own. Each dot links to
 a run and names its state. Dollars sum the launcher’s recorded run costs,
 with `~` when any share is estimated.
 
-Open an experiment to see its run status table. The
-report loads in a separate frame so you can read status during a report build.
+Open `/experiments/prototype?run=coin@0&tab=curves` to see the coin’s curves
+beside the run table. Each row shows the run and job, state or queue reason,
+clock, last file write, latest headline values, machine and dollars. A dash
+means the index has no value for that cell. Select a run to inspect its
+**Console**, **Curves**, **Config** or **Checkpoints**. Picking another run
+keeps the same tab. Copy the URL to share that selection, or open the run’s
+own page from the detail heading.
+
+Click a command to copy it for your terminal. The view supplies launch, eval
+and report commands when it knows the experiment file. The cancel command
+names the unfinished runs on the selected launcher.
+
+Open **Report** to load the experiment report in a separate frame.
 Before the first run files arrive, the pane shows **Waiting for run files**. Once the
 view indexes its first training or evaluation run, the visible tab builds the
 report. If the build fails, the pane shows the reason and offers **Retry report**.

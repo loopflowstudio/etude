@@ -71,6 +71,7 @@ _TRAINING_TABS = "".join(
     f'<a href="#{section.lower()}" data-s="{section.lower()}">{section}</a>'
     for section in ("Console", "Config", "Checkpoints")
 )
+_DETAIL_TABS = ("console", "curves", "config", "checkpoints")
 _REMOTE_STANDING = 30
 _SILENT = timedelta(minutes=10)
 # Before the first successful file pass, absence in the index is not absence in storage.
@@ -101,7 +102,7 @@ CREATE TABLE IF NOT EXISTS held_files (
 CREATE TABLE IF NOT EXISTS charts (
     address TEXT PRIMARY KEY REFERENCES files(address) ON DELETE CASCADE,
     panel_order INTEGER GENERATED ALWAYS AS (json_extract(headline,'$.order')) STORED,
-    definition TEXT NOT NULL, headline TEXT, payload TEXT NOT NULL
+    definition TEXT NOT NULL, latest TEXT, headline TEXT, payload TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS consoles (
     run TEXT PRIMARY KEY, body TEXT NOT NULL, collected TEXT, gaps INTEGER NOT NULL, final_attempt INTEGER
@@ -170,11 +171,12 @@ class _LauncherRead:
 class ChartIndex:
     def __init__(self, source: Storage, path: Path | None) -> None:
         self.source = source
+        self.source_uri = source.uri("run.json").removesuffix("run.json")
         # A view of edited report code and one using the default panels may
         # run side by side. Neither may serve the other's last generation.
         identity = "\0".join(
             (
-                source.uri("run.json"),
+                self.source_uri,
                 str(path.resolve()) if path else "",
                 version("etude-sdk"),
                 _SCHEMA,
@@ -377,7 +379,7 @@ class ChartIndex:
         # inputs need metadata and a new chart. Stage one payload at a time on disk.
         db.execute("PRAGMA temp_store=FILE")
         db.execute(
-            "CREATE TEMP TABLE next_files AS SELECT *, NULL AS definition, NULL AS headline, NULL AS payload FROM files WHERE 0"
+            "CREATE TEMP TABLE next_files AS SELECT *, NULL AS definition, NULL AS headline, NULL AS latest, NULL AS payload FROM files WHERE 0"
         )
         db.execute("CREATE UNIQUE INDEX temp.file_address ON next_files(address)")
         db.execute("CREATE TEMP TABLE next_declarations AS SELECT * FROM declarations")
@@ -478,8 +480,8 @@ class ChartIndex:
         if rebuilt:
             # Replacing a file row retires its old chart through the foreign key.
             db.execute(
-                """INSERT INTO charts(address,definition,headline,payload)
-                   SELECT address,definition,headline,payload FROM next_files WHERE payload IS NOT NULL"""
+                """INSERT INTO charts(address,definition,headline,latest,payload)
+                   SELECT address,definition,headline,latest,payload FROM next_files WHERE payload IS NOT NULL"""
             )
         db.execute(
             """DELETE FROM declarations WHERE experiment NOT IN (SELECT experiment FROM next_declarations)"""
@@ -577,13 +579,16 @@ class _ViewSnapshot:
     remote: str | None
     index: ChartIndex
 
-    def run(self, address: str, *, observe: bool = False) -> str | None:
-        remote = self.remote
+    def _read_run(
+        self, address: str, *, charts: bool, mounted: str | None = None
+    ) -> sqlite3.Row | None:
         # The document reads its chart in the same snapshot as its change token.
         payload = (
-            "NULL" if observe else "(SELECT payload FROM charts WHERE address=visible.address)"
+            "(SELECT payload FROM charts WHERE address=visible.address AND visible.inputs IS NOT :mounted)"
+            if charts
+            else "NULL"
         )
-        row = self.db.execute(
+        row: sqlite3.Row | None = self.db.execute(
             _VISIBLE
             + f"""
             SELECT visible.*, {payload} AS payload, declarations.error AS report_error,
@@ -596,8 +601,13 @@ class _ViewSnapshot:
                 (SELECT address FROM runs WHERE launched_as=:address AND (SELECT matches FROM observed))
             )
             """,
-            {"remote": remote, "address": address},
+            {"remote": self.remote, "address": address, "mounted": mounted},
         ).fetchone()
+        return row
+
+    def run(self, address: str, *, observe: bool = False) -> str | None:
+        remote = self.remote
+        row = self._read_run(address, charts=not observe)
         if row is None:
             return self.waiting() if observe else None
         now = datetime.now(UTC)
@@ -605,9 +615,7 @@ class _ViewSnapshot:
         status = _status(row)
         run_line = _run_line(row, state, status)
         error = self.index.read_error(remote, row["file_error"], report=row["report_error"])
-        # Session shutdown can still retain final logs after the run itself ended.
-        if status is not None and (not status.done or row["console_attempt"] != status.attempts):
-            self.index.request_console(remote, row["launched_as"])
+        self._request_console(row, status)
 
         # inputs identifies the sealed files and their report panels. Hash the displayed
         # launcher facts at their rendered precision so a sub-cent change leaves the chart mounted.
@@ -662,7 +670,7 @@ class _ViewSnapshot:
         below = _console(row, collected)
         if evaluation:
             return _document(address, heading + below)
-        below += _run_details(row)
+        below += _config(row) + _checkpoint_section(row)
         if row["payload"] is None:
             tabs = f'<nav class="tabs" aria-label="Run sections"><a href="#charts">Charts</a>{_TRAINING_TABS}</nav>'
             curves = "No metric curves recorded." if row["at"] else _UNREAD.format("Curves")
@@ -675,9 +683,13 @@ class _ViewSnapshot:
             )
         return render_run(address, row["payload"], heading, below, _TRAINING_TABS)
 
+    def _request_console(self, row: sqlite3.Row, status: Status | None) -> None:
+        # Session shutdown can still retain final logs after the run itself ended.
+        if status is not None and (not status.done or row["console_attempt"] != status.attempts):
+            self.index.request_console(self.remote, row["launched_as"])
+
     def waiting(self) -> str:
-        source = self.index.source.uri("run.json").removesuffix("run.json")
-        message = f"Waiting for the run to appear in {source}."
+        message = f"Waiting for the run to appear in {self.index.source_uri}."
         row = self.db.execute("SELECT file_error FROM observation WHERE id=1").fetchone()
         if error := self.index.read_error(self.remote, row[0] if row else None):
             message += " " + error
@@ -686,14 +698,15 @@ class _ViewSnapshot:
     def _list_runs(
         self, experiment: str | None = None
     ) -> tuple[sqlite3.Row | None, list[sqlite3.Row]]:
-        # The overview reads only the card projection. Both pages skip full run charts.
-        query = _VISIBLE + (
-            "SELECT experiment,address,job,state,phase,position,status,max_attempts,last_write,at,continues"
-            + (
-                ",listed,definition,panel_order,headline FROM visible LEFT JOIN charts USING(address)"
-                if experiment is None
-                else " FROM visible"
-            )
+        # Lists read the panel projection they display, never a full run chart.
+        projection = "headline" if experiment is None else "latest,launched_as"
+        query = (
+            _VISIBLE
+            + f"""
+            SELECT experiment,address,job,state,phase,position,status,last_write,at,
+                   continues,listed,definition,panel_order,{projection}
+            FROM visible LEFT JOIN charts USING(address)
+        """
         )
         params = {"experiment": experiment, "remote": self.remote}
         observation = self.db.execute(
@@ -721,17 +734,13 @@ class _ViewSnapshot:
         stale = False
         for name, members in groupby(rows, itemgetter("experiment")):
             runs = list(members)
-            # A held run can predate a report edit. Its previous panel is comparable
-            # only if the latest indexed training files use that same report and clock.
-            newest = max(
-                (r for r in runs if r["definition"]), key=itemgetter("listed", "at"), default=None
-            )
+            panel = _first_panel(runs)
             counts: Counter[str] = Counter()
             active = False
             latest: str | None = None
             dots = []
             costs = []
-            panels: dict[int, list[str]] = defaultdict(list)
+            panels: list[str] = []
             for run in runs:
                 state = _display_state(run)
                 counts[state] += 1
@@ -748,8 +757,8 @@ class _ViewSnapshot:
                     f'<a class="run-dot" href="{run_path(address)}" aria-label="{label}" title="{label}">'
                     f'<i class="state-dot" aria-hidden="true" data-state="{escape(state)}"></i></a>'
                 )
-                if newest and run["definition"] == newest["definition"] and run["headline"]:
-                    panels[run["panel_order"]].append(run["headline"])
+                if (run["definition"], run["panel_order"]) == panel and run["headline"]:
+                    panels.append(run["headline"])
             totals = " · ".join(f"{counts[state]} {escape(state)}" for state in sorted(counts))
             stale |= "no end recorded" in counts
             group = opened if active else completed
@@ -766,7 +775,7 @@ class _ViewSnapshot:
                 dated = f"last write <span>{_age(latest, now)}</span>"
             chart = ""
             if panels:
-                data = ",".join(panels[min(panels)]).replace("<", "\\u003c")
+                data = ",".join(panels).replace("<", "\\u003c")
                 chart = f'<div class="card-charts"><script type="application/json">[{data}]</script></div>'
             group.append(
                 f'<article class="card experiment-card"><h3><a href="/experiments/{quote(name)}">{escape(name)}</a></h3>'
@@ -880,29 +889,68 @@ class _ViewSnapshot:
         ).fetchone()
         return bool(row[0]) if row[0] is not None else None
 
-    def experiment_status(self, experiment: str, *, declared: bool) -> str | None:
+    def experiment_status(
+        self, experiment: str, *, file: Path | None, run: str | None, tab: str, curves: str | None
+    ) -> str | None:
         remote = self.remote
         observation, rows = self._list_runs(experiment)
-        if not declared and not rows:
+        if file is None and not rows:
             return None
         now = datetime.now(UTC)
+        base = f"/experiments/{quote(experiment)}"
+        addresses = {row["address"] for row in rows}
+        selected = rows[0]["address"] if rows else None
+        if run:
+            qualified = f"{experiment}/{run}"
+            # Delivery can match a queued launch to a differently named stored run.
+            candidates = (run, qualified)
+            selected = next((key for key in candidates if key in addresses), None)
+            if selected is None:
+                selected = next(
+                    (r["address"] for r in rows if r["launched_as"] in candidates), None
+                )
+        if tab not in _DETAIL_TABS:
+            tab = "console"
+        panel = _first_panel(rows)
         stale = False
         body = []
+        unfinished = []
+        detail = ""
         for row in rows:
+            address = row["address"]
+            short = address.removeprefix(experiment + "/")
+            # Historical compact and qualified addresses can coexist.
+            compact = short == experiment or short.startswith(experiment + "@")
+            key = address if compact or short in addresses else short
+            pick = f"{base}?run={quote(key, safe='@')}&amp;tab="
             state = _display_state(row)
             stale |= state == "no end recorded"
             status = _status(row)
-            address = row["address"]
-            last_write = "no files yet" if _no_files(row) else _age(row["last_write"], now)
-            if observation and row["at"] != observation["at"]:
-                last_write += f"<div>{_file_age(row['at'], now, 'files observed')}</div>"
-            body.append(
-                f"<tr><td>{escape(row['job'])}</td>"
-                f"<td>{_run_link(address)}{row['continues'] or ''}</td>"
-                f"<td>{_run_line(row, state, status)}</td><td>{last_write}</td></tr>"
+            if status and not status.done:
+                unfinished.append(status.run)
+            score = row["latest"] if (row["definition"], row["panel_order"]) == panel else None
+            last_write = (
+                "no files yet" if _no_files(row) else f"last write {_age(row['last_write'], now)}"
             )
-        if body:
-            table = _table(("Job", "Run", "Status", "Last file write"), body)
+            if observation and row["at"] != observation["at"]:
+                last_write += f" · {_file_age(row['at'], now, 'files observed')}"
+            reason = _state_reason(state, status)
+            machine = escape(status.machine) if status and status.machine else "—"
+            current = ' aria-current="true"' if address == selected else ""
+            body.append(
+                f'<tr><td><a title="{escape(address)}" href="{pick}{tab}#run-detail"{current}>{escape(short)}</a>'
+                f"<small>{escape(row['job'])}</small>{row['continues'] or ''}</td>"
+                f'<td><span class="pill">{escape(state)}</span><small>{escape(reason)}</small></td>'
+                f"<td>{escape(row['position'] or '—')}<small>{last_write}</small></td>"
+                f"<td>{escape(score or '—')}</td><td>{machine}</td>"
+                f"<td>{status.formatted_spend if status else '—'}</td></tr>"
+            )
+            if address == selected:
+                detail = self._detail(address, pick, tab, curves, now)
+        if rows:
+            table = _table(("Run", "State", "Clock", "Latest score", "Machine", "Dollars"), body)
+            if not detail:
+                detail = "<p>The selected run is unavailable in this experiment.</p>"
         elif observation and observation["at"]:
             table = "<p>No runs recorded.</p>"
         else:
@@ -912,8 +960,9 @@ class _ViewSnapshot:
             launcher = any(row["status"] for row in rows)
             ages = " · ".join(_observation_ages(observation, now, launcher=launcher))
         return _live_status(
-            '<section class="sec"><h2>Run status</h2>'
-            f'{table}<p class="context">{escape(ages)}</p>'
+            _command_bar(file, self.index.source_uri, unfinished)
+            + f'<div class="experiment-split"><section class="sec"><h2>Runs</h2>{table}</section>{detail}</div>'
+            f'<section><p class="context">{escape(ages)}</p>'
             '<p class="lbl">No machine samples recorded.</p></section>',
             stale=stale,
             error=self.index.read_error(
@@ -922,6 +971,76 @@ class _ViewSnapshot:
                 report=observation["report_error"] if observation else None,
             ),
         )
+
+    def _detail(self, address: str, pick: str, tab: str, curves: str | None, now: datetime) -> str:
+        row = self._read_run(address, charts=tab == "curves", mounted=curves)
+        assert row is not None  # Selected from this read transaction.
+        status = _status(row)
+        if tab == "console":
+            self._request_console(row, status)
+            collected = f"Last collected {_age(row['collected'], now)}" if row["collected"] else ""
+            section = _console(row, collected)
+        elif tab == "config":
+            section = _config(row)
+        elif tab == "checkpoints":
+            section = _checkpoint_section(row)
+        elif row["kind"] == "evaluation":
+            section = '<p>Evaluation scores are in the <a href="#report">Report</a> tab.</p>'
+        else:
+            # A poll with the mounted generation needs no chart bytes, even from SQLite.
+            token = row["inputs"]
+            data = (
+                f'<script type="application/json">{row["payload"]}</script>'
+                if row["payload"]
+                else ""
+            )
+            section = (
+                f'<div class="run-curves" data-generation="{token}">{data}</div>'
+                if token
+                else f"<p>{'No metric curves recorded.' if row['at'] else _UNREAD.format('Curves')}</p>"
+            )
+        tabs = "".join(
+            f'<a id="detail-{name}" href="{pick}{name}#run-detail"'
+            + (' aria-current="page"' if name == tab else "")
+            + f">{name.title()}</a>"
+            for name in _DETAIL_TABS
+        )
+        return (
+            f'<aside id="run-detail" class="run-detail"><h2>{_run_link(address)}</h2>'
+            f"<p>{_run_line(row, _display_state(row), status)}</p>"
+            f'<nav aria-label="Run detail">{tabs}</nav>{section}</aside>'
+        )
+
+
+def _command_bar(file: Path | None, source: str, unfinished: list[str]) -> str:
+    commands: list[tuple[str, ...]] = []
+    if file:
+        commands.extend(
+            ("etude", action, str(file), "--source", source)
+            for action in ("launch", "eval", "report")
+        )
+    if unfinished:
+        commands.append(("etude", "cancel", *unfinished))
+    if not commands:
+        return ""
+    buttons = "".join(
+        f'<button type="button" id="copy-{cmd[1]}"><code>{escape(shlex.join(cmd))}</code></button>'
+        for cmd in commands
+    )
+    return f'<div class="command-bar"><span class="lbl" aria-live="polite">Copy command</span>{buttons}</div>'
+
+
+def _first_panel(rows: list[sqlite3.Row]) -> tuple[str, int] | None:
+    # Held files from an older report or clock cannot contribute a comparable score.
+    newest = max((r for r in rows if r["definition"]), key=itemgetter("listed", "at"), default=None)
+    if newest is None:
+        return None
+    orders = [
+        r["panel_order"]
+        for r in rows
+        if r["definition"] == newest["definition"] and r["panel_order"] is not None
+    ]
+    return (newest["definition"], min(orders)) if orders else None
 
 
 def _hold_files(
@@ -992,7 +1111,7 @@ def _stage_run(
     for key in sealed:
         digest.update(f"{key}\0{storage.objects[key]}\0".encode())
     inputs = digest.hexdigest()
-    metadata = reached = payload = headline = None
+    metadata = reached = payload = headline = latest = None
     if previous != inputs:
         data = read_located(storage, run, sealed, whole_blocks=True)
         metadata = data.model_dump_json(exclude={"last_write"}, round_trip=True)
@@ -1001,10 +1120,11 @@ def _stage_run(
             payload = charts.payload
             if charts.headline is not None:
                 headline = charts.headline.model_dump_json(exclude_defaults=True)
+                latest = charts.headline.latest()
             reached = _CLOCKS.dump_json(data.reached).decode()
     db.execute(
-        """INSERT INTO next_files(address,experiment,inputs,reached,preferred,last_write,definition,headline,metadata,payload)
-           VALUES(?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT INTO next_files(address,experiment,inputs,reached,preferred,last_write,definition,headline,latest,metadata,payload)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
         (
             address,
             run.file.experiment,
@@ -1014,6 +1134,7 @@ def _stage_run(
             run.last_write.isoformat() if run.last_write else None,
             definition,
             headline,
+            latest,
             metadata,
             payload,
         ),
@@ -1153,18 +1274,28 @@ def _status(row: sqlite3.Row) -> Status | None:
     return Status.model_validate_json(row["status"]) if row["status"] is not None else None
 
 
+def _state_reason(state: str, status: Status | None) -> str:
+    if status is None:
+        return ""
+    if state == "queued":
+        return status.reason or ""
+    if not status.done:
+        return ""
+    outcome = (
+        status.outcome
+        if status.outcome != state and (state, status.outcome) != ("finished", "succeeded")
+        else None
+    )
+    return " · ".join(filter(None, (outcome, status.cause)))
+
+
 def _run_line(
     row: sqlite3.Row, state: str, status: Status | None, *, on_machine: str | None = None
 ) -> str:
     parts = [f'<span class="pill">{escape(state)}</span>']
     facts = [row["position"]]
     if status:
-        if state == "queued":
-            facts.append(status.reason)
-        elif status.done:
-            if status.outcome != state and (state, status.outcome) != ("finished", "succeeded"):
-                facts.append(status.outcome)
-            facts.append(status.cause)
+        facts.append(_state_reason(state, status))
         facts.extend(launcher_facts(status, row["max_attempts"], on_machine=on_machine))
     parts.extend(f"<span>{escape(fact)}</span>" for fact in facts if fact)
     return " · ".join(parts)
@@ -1202,10 +1333,10 @@ def _experiment_cards(title: str, cards: list[str]) -> str:
     return f'<section class="sec"><h2>{title}</h2>{body}</section>'
 
 
-def _status_page(title: str, status: str, *, after: str = "") -> str:
+def _status_page(title: str, status: str, *, after: str = "", before: str = "") -> str:
     return _document(
         title,
-        f'<header class="head"><h1>{escape(title)}</h1></header>{status}{after}',
+        f'<header class="head"><h1>{escape(title)}</h1></header>{before}{status}{after}',
     )
 
 
@@ -1258,8 +1389,6 @@ def _console(row: sqlite3.Row, collected: str) -> str:
         console = (
             '<pre id="retained-output" class="console" tabindex="0" aria-label="Retained console">'
             f"{escape(row['body'])}</pre>"
-            '<script>{const output = document.getElementById("retained-output");'
-            "output.scrollTop = output.scrollHeight;}</script>"
         )
         if row["gaps"]:
             console += "<p>Some console output is missing from retention.</p>"
@@ -1303,7 +1432,7 @@ def _checkpoints(stored: RunData) -> str | None:
     return _table(("Ordinal", "Checkpoint", "Clock position"), rows) if rows else None
 
 
-def _run_details(row: sqlite3.Row) -> str:
+def _config(row: sqlite3.Row) -> str:
     config = row["config"]
     if config is not None:
         shown = f'<pre class="scroll">{escape(config)}</pre>'
@@ -1314,12 +1443,16 @@ def _run_details(row: sqlite3.Row) -> str:
             else f"<p>{_UNREAD.format('Config details')}</p>"
         )
     source = row["source"] or ""
+    return f'<section class="sec" id="config"><h2>Config</h2>{shown}{source}</section>'
+
+
+def _checkpoint_section(row: sqlite3.Row) -> str:
     checkpoints = row["checkpoints"] or (
         "<p>No checkpoints recorded.</p>"
         if row["at"]
         else f"<p>{_UNREAD.format('Checkpoints')}</p>"
     )
-    return f'<section class="sec" id="config"><h2>Config</h2>{shown}{source}</section><section class="sec" id="checkpoints"><h2>Checkpoints</h2>{checkpoints}</section>'
+    return f'<section class="sec" id="checkpoints"><h2>Checkpoints</h2>{checkpoints}</section>'
 
 
 def _age(at: str | None, now: datetime) -> str:
@@ -1466,16 +1599,10 @@ class Server(ThreadingHTTPServer):
                 return html + rail if observe else _shell(html, rail)
 
             route = path.removesuffix("/status") or "/"
-            after = ""
+            before = after = ""
             section = "/"
             if route == "/":
                 title, status = "Experiments", view.experiments()
-                if path == "/":
-                    after = (
-                        f"<style>{read_asset('vendor/uPlot.min.css')}</style>"
-                        f"<script>{read_asset('vendor/uPlot.iife.min.js')}</script>"
-                        f"<script>{read_asset('charts.js')}</script>"
-                    )
             elif route == "/machines":
                 title, status = "Machines", view.machines()
                 section = route
@@ -1484,13 +1611,23 @@ class Server(ThreadingHTTPServer):
                 section = route
             elif match := re.fullmatch(r"/experiments/([^/]+)(/status)?/?", path):
                 title = match[1]
-                found = view.experiment_status(title, declared=title in self.files)
+                found = view.experiment_status(
+                    title,
+                    file=self.files.get(title),
+                    run=query.get("run", [""])[0] or None,
+                    tab=query.get("tab", ["console"])[0],
+                    curves=query.get("curves", [""])[0] if path.endswith("/status") else None,
+                )
                 if found is None:
                     return None
                 status = found
+                before = (
+                    '<nav class="tabs" id="experiment-tabs" aria-label="Experiment">'
+                    '<a href="#status" aria-current="page">Status</a><a href="#report">Report</a></nav>'
+                )
                 after = (
-                    f'<iframe id="report" title="Experiment report" src="/experiments/{quote(title)}/report?embed=1" '
-                    'style="width:100%;height:80vh;border:0"></iframe>'
+                    f'<iframe hidden id="report" title="Experiment report" data-src="/experiments/{quote(title)}/report?embed=1" '
+                    "></iframe>"
                 )
                 route = "/experiments/" + title
             else:
@@ -1498,7 +1635,13 @@ class Server(ThreadingHTTPServer):
             rail = view.rail(section)
             if path == route.rstrip("/") + "/status":
                 return status + rail
-            return _shell(_status_page(title, status, after=after), rail)
+            if section == "/":
+                after += (
+                    f"<style>{read_asset('vendor/uPlot.min.css')}</style>"
+                    f"<script>{read_asset('vendor/uPlot.iife.min.js')}</script>"
+                    f"<script>{read_asset('charts.js')}</script>"
+                )
+            return _shell(_status_page(title, status, before=before, after=after), rail)
 
     def _report(self, experiment: str, *, refresh: bool) -> str:
         """Share the first build and explicit refreshes between report readers."""

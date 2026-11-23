@@ -787,6 +787,16 @@ class Headline(Record):
     log: bool = False
     curves: dict[str, Trace]
 
+    def latest(self) -> str:
+        """Latest drawable bucket of each metric, labelled for the run table."""
+        values = []
+        for key, trace in self.curves.items():
+            for x, y in zip(reversed(trace.x), reversed(trace.mean), strict=True):
+                if x is not None and y is not None and (not self.log or y > 0):
+                    values.append(f"{key} {y:.4g} {self.unit}".rstrip())
+                    break
+        return " · ".join(values)
+
 
 def _headline(report: Report, data: Training, clock: str) -> Headline | None:
     measured = data.series.get(clock, {})

@@ -110,13 +110,8 @@ function control(host, label, options, key, apply = render) {
 const CLOCKS = clockNames.map(c => [c, c]);
 // Clock and smoothing choices redraw the same ordered set of metrics.
 const panels = [...R.perf, ...R.ml];
-const logged = new Set(T.metrics);
-const namedMetrics = new Set(panels.flatMap(panel => panel.keys || []));
-const flamePrefixes = panels.filter(panel => panel.kind === "flame").map(panel => panel.prefix);
-const otherMetrics = T.metrics.filter(key => !namedMetrics.has(key) && !flamePrefixes.some(prefix => key.startsWith(prefix) && (!D.run_charts || key.length > prefix.length)));
-// A run leads with its recorded metrics. A diagnostic earns its card from
-// the same measurements the renderer uses, including gaps between writers.
-const metricPanel = p => p.kind === "series" || p.kind === "counters";
+const {logged, otherMetrics, runMetrics} = metricLayout(D);
+// A diagnostic earns its card from the same measurements the renderer uses.
 function hasDiagnostic(panel) {
   switch (panel.kind) {
     case "pace": return T.checkpoints.some(m => Object.values(m.pace).some(v => v != null));
@@ -126,7 +121,6 @@ function hasDiagnostic(panel) {
     default: return false;
   }
 }
-const runMetrics = D.run_charts ? [...R.ml, ...R.perf].filter(p => metricPanel(p) && p.keys.some(k => logged.has(k))) : [];
 const diagnostics = D.run_charts ? panels.filter(hasDiagnostic) : [];
 const draws = []; const later = f => draws.push(f);
 

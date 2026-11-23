@@ -738,7 +738,10 @@ def test_indexed_experiment_opens_its_default_report_separately(tmp_path: Path) 
         _ingest(server)
         before = (source.requests, source.listings)
         html = server.page("/experiments/lab") or ""
-        assert 'src="/experiments/lab/report?embed=1"' in html and 'href="/runs/lab/base@0"' in html
+        assert (
+            'data-src="/experiments/lab/report?embed=1"' in html
+            and 'href="/runs/lab/base@0"' in html
+        )
         assert (source.requests, source.listings) == before
         assert _loss(server.page("/experiments/lab/report") or "") == [8.0]
 
@@ -804,7 +807,7 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
             return html
 
         def row(html: str, address: str) -> str:
-            return next(r for r in html.split("</tr>") if f'href="/runs/{address}"' in r)
+            return next(r for r in html.split("</tr>") if f'title="{address}"' in r)
 
         _ingest(server)
         html = status("/experiments/lab")
@@ -814,7 +817,7 @@ def test_experiment_status_tracks_jobs_placement_and_sealed_clocks(tmp_path: Pat
         assert reason and reason in row(html, queued) and "Target steps 40" in row(html, queued)
         assert ">baseline<" in row(html, local) and ">steps 1<" in row(html, local)
         assert ">score<" in row(html, evaluation) and ">finished<" in row(html, evaluation)
-        assert "last loop 2 h ago" in html and 'src="/experiments/lab/report?embed=1"' in html
+        assert "last loop 2 h ago" in html and 'data-src="/experiments/lab/report?embed=1"' in html
         eval_page = status("/runs/" + evaluation)
         assert f"Evaluation · {evaluation}" in eval_page and ">finished<" in eval_page
         assert 'href="/experiments/lab#report">lab report</a>' in eval_page
@@ -984,7 +987,7 @@ def test_continuation_link_from_queue_to_delivery_survives_view_restart(
         rows = [row for row in table.split("<tr>") if "<td>" in row]
         assert len(rows) == 2
         for path, label in ((parent_page, "finished"), (child_page, phase)):
-            row = next(row for row in rows if row.split('href="', 1)[1].startswith(path + '"'))
+            row = next(row for row in rows if f'title="{path.removeprefix("/runs/")}"' in row)
             assert f">{label}<" in row and (handoff in row) == (path == child_page)
         parent_graph = _get(view, parent_page)
         child_graph = _get(view, child_page)
@@ -1114,6 +1117,76 @@ def test_continuation_link_from_queue_to_delivery_survives_view_restart(
             assert f"Continued from {parent} at updates 150" in html and parent_page not in html
 
 
+def test_experiment_detail_links_and_polls_read_only_the_selected_indexed_run(
+    tmp_path: Path,
+) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    file = experiment_file(
+        tmp_path / "experiment files",
+        "lab",
+        """
+from etude.report import Report
+
+def report() -> Report:
+    return Report(other_metrics=True)
+""",
+    )
+    for seed in (0, 2):
+        with open_run(
+            experiment="lab",
+            run=f"base@{seed}",
+            config={"label": f"seed-{seed}"},
+            clocks=["steps"],
+            directory=source.root,
+        ) as run:
+            run.log({"loss": 8 - seed}, steps=3)
+            run.log({"loss": 6 - seed}, steps=6)
+        checkpoint = CheckpointRecord(
+            ordinal=1, at={"steps": 6}, wall_ms=1000, artifact=ArtifactRef(uri=f"seed-{seed}.pt")
+        )
+        source.put(f"lab/base@{seed}/checkpoints/first.json", checkpoint.model_dump_json().encode())
+    backend = bench(home())
+    (queued,) = backend.scheduler.queue(job(name="queued", experiment="lab"), rent="l4")
+    measured = MeasuredStorage(source)
+    base = "/experiments/lab"
+    with Server(measured, file, ("127.0.0.1", 0)) as view:
+        _ingest(view)
+        _publish_declarations(view)
+        reads = measured.listings, measured.requests, measured.bytes
+        for route in (base, base + "/status"):
+            html = _get(view, route + "?run=base@2&tab=config")
+            table, detail = html.split('<aside id="run-detail" class="run-detail">')
+            assert table.count('<a title="lab/') == 3
+            assert all(
+                f"<th>{col}</th>" in table
+                for col in ("Run", "State", "Clock", "Latest score", "Machine", "Dollars")
+            )
+            assert ">loss 4</td>" in table and ">loss 6</td>" in table
+            assert 'href="/experiments/lab?run=base@0&amp;tab=config#run-detail"' in table
+            assert all(
+                f"etude {action} &#x27;{file}&#x27;" in table
+                for action in ("launch", "eval", "report")
+            )
+            assert f"etude cancel {queued}</code>" in table
+            assert 'href="/runs/lab/base@2"' in detail and "<h2>Config</h2>" in detail
+            assert "seed-2" in detail and "seed-0" not in detail and "seed-2.pt" not in detail
+            for tab in ("console", "curves", "config", "checkpoints"):
+                assert f'href="{base}?run=base@2&amp;tab={tab}#run-detail"' in detail
+        checkpoints = _get(view, base + "/status?run=base@0&tab=checkpoints")
+        assert "seed-0.pt" in checkpoints and "seed-2.pt" not in checkpoints
+        console = _get(view, base + "/status?run=base@2&tab=console")
+        assert "Console was not recorded." in console
+        curves = _get(view, base + "/status?run=base@2&tab=curves")
+        token = curves.split('data-generation="')[1].split('"')[0]
+        assert '"mean": [6.0, 4.0]' in curves and '"mean": [8.0, 6.0]' not in curves
+        unchanged = _get(view, base + f"/status?run=base@2&tab=curves&curves={token}")
+        assert f'data-generation="{token}"></div>' in unchanged and '"mean"' not in unchanged
+        missing = _get(view, base + "/status?run=absent&tab=config")
+        assert "selected run is unavailable" in missing and "seed-0" not in missing
+        assert (measured.listings, measured.requests, measured.bytes) == reads
+    backend.store.close()
+
+
 def test_experiment_cards_follow_the_first_indexed_ml_panel_without_source_reads(
     tmp_path: Path,
 ) -> None:
@@ -1172,6 +1245,10 @@ def report() -> Report:
         assert "no files yet" in waiting and "$0.00" in waiting and "card-charts" not in waiting
         assert "$" not in archived
 
+        route = "/experiments/lab/status?run=b&tab=curves"
+        initial = _get(view, route)
+        token = initial.split('data-generation="')[1].split('"')[0]
+        assert initial.count(">loss 7</td>") == 2
         builder = Builder(["steps"])
         builder.add(1002, {"steps": 2}, {"reward": 11, "loss": 4})
         write_block(
@@ -1196,6 +1273,11 @@ def report() -> Report:
         assert (reward.owner, reward.x, reward.mean) == ("b", [2], [11])
         assert "2 running" in changed and "Loss" not in changed
         assert curves(still_archived) == curves(archived)
+        before = measured.listings, measured.requests, measured.bytes
+        updated = _get(view, route + "&curves=" + token)
+        assert ">reward 11 points</td>" in updated and ">loss 7</td>" not in updated
+        assert f'data-generation="{token}"' not in updated and '"mean": [11.0]' in updated
+        assert (measured.listings, measured.requests, measured.bytes) == before
     backend.store.close()
 
 
@@ -1354,9 +1436,11 @@ def test_machines_link_allocated_runs_and_refresh_their_sealed_clocks(tmp_path: 
         line = header.split("<p>", 1)[1].split("</p>", 1)[0]
         assert line.count("running") == line.count("steps") == 1
         assert "steps 1 / 40" in line and machine in line
-        for path in ("/", "/experiments/lab"):
-            page = server.page(path) or ""
-            assert line in page and "last loop" not in page and "launcher observed" not in page
+        card = server.page("/status") or ""
+        assert f"{first} · running · steps 1 / 40 · {machine}" in card
+        detail = server.page("/experiments/lab?run=learn@0&tab=console") or ""
+        assert line in detail
+        assert all("last loop" not in p and "launcher observed" not in p for p in (card, detail))
         assert "steps 2 / 40" in (server.page("/runs/" + second) or "")
         assert 'data-refresh="5000"' in html
         assert (measured.listings, measured.requests, measured.bytes) == reads
@@ -1389,10 +1473,13 @@ def test_run_console_opens_on_the_last_500_lines_of_retained_output(tmp_path: Pa
     source.put(f"{run}/run.json", RunRecord(id=run, experiment="lab").model_dump_json().encode())
     with Server(source, None, ("127.0.0.1", 0)) as server:
         _ingest(server)
-        assert "Waiting for retained console" in (server.page("/runs/" + run) or "")
+        detail = f"/experiments/lab/status?run={run}&tab=console"
+        assert "Waiting for retained console" in _get(server, detail)
         _ingest(server)
         page = server.page("/runs/" + run) or ""
+        pane = _get(server, detail)
         console = page.split('aria-label="Retained console">', 1)[1].split("</pre>", 1)[0]
+        assert console in pane and f"etude logs --run {run}" in pane
         lines = unescape(console).splitlines()
         assert len(lines) == 500
         assert lines[0] == "line <102>" and lines[-2] == "line <600>"
@@ -1537,8 +1624,12 @@ def test_failed_listing_shows_fresh_queue_and_machines(
             graph = _get(server, "/runs/" + alias)
             if warm:
                 assert ">finished<" in graph and "steps 1" in graph and _loss(graph) == [7]
-                status = server.page("/experiments/lab/status") or ""
-                assert status.count("/runs/lab/compact") == 1 and f"/runs/{alias}" not in status
+                status = _get(server, f"/experiments/lab/status?run={alias}&tab=console")
+                assert 'href="/runs/lab/compact"' in status
+                assert (
+                    'href="/experiments/lab?run=compact&amp;tab=console#run-detail"' in status
+                    and f'title="{alias}"' not in status
+                )
             else:
                 assert ">queued<" in graph and "File observation unavailable" in graph
                 for detail in ("Config details", "Curves", "Checkpoints"):
@@ -1787,7 +1878,7 @@ def test_outstanding_ssh_keeps_files_moving_and_never_crosses_endpoints(
                 graph = view.page("/runs/local") or ""
                 assert _loss(graph) == [7, 3] and "steps 2" in graph
                 assert "Launcher observation unavailable" in graph and "files observed " in graph
-                assert 'src="/experiments/local/report?embed=1"' in (
+                assert 'data-src="/experiments/local/report?embed=1"' in (
                     view.page("/experiments/local") or ""
                 )
                 status = view.page("/experiments/local/status") or ""

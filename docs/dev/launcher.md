@@ -243,6 +243,12 @@ token covers the sealed inputs and report panels, displayed run facts, retained
 console and errors. The check skips the chart table. When only source ages
 advance, the browser updates their labels in place.
 
+The experiment table reads the latest labelled values indexed with each
+run’s headline panel. Only the selected Curves pane reads a full run chart.
+Its poll sends the mounted file generation so an unchanged chart stays in
+the browser. The Console pane requests its selected run’s retained tail
+through the same launcher poll as the standalone run page.
+
 The first indexed training or evaluation run makes its experiment report
 ready to build. Concurrent requests share one build. During an explicit
 refresh, readers can still open the previous report until the new HTML is ready.

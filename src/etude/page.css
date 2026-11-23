@@ -161,3 +161,23 @@ body:has(> #view-rail) { display: grid; grid-template-columns: 12rem minmax(0, 1
 .state-dot[data-state="finished"] { color: var(--good); background: currentColor; }
 .state-dot[data-state="stopped"], .state-dot[data-state="no end recorded"] { color: var(--muted); background: var(--axis); }
 .state-dot[data-state="setting up"], .state-dot[data-state="renting"], .state-dot[data-state="stopping"] { color: var(--warn); background: currentColor; }
+
+#experiment-status:has(~ #report:not([hidden])) > :not(.command-bar) { display: none; }
+#report { width: 100%; height: 80vh; border: 0; }
+#experiment-tabs a[aria-current], .run-detail nav [aria-current] { border-bottom: 2px solid var(--ink); color: var(--ink); }
+.experiment-split { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 20px; align-items: start; margin: 18px 0; }
+.experiment-split > .sec { padding: 0; }
+.experiment-split td small { display: block; color: var(--ink-2); }
+.experiment-split tr:has(a[aria-current]) { background: var(--wash); }
+.experiment-split th { white-space: nowrap; }
+.experiment-split td { overflow-wrap: anywhere; }
+.run-detail { scroll-margin-top: 4rem; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; }
+.run-detail h2 { margin: 0; font-size: 16px; overflow-wrap: anywhere; }
+.run-detail nav, .command-bar { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+.run-detail nav a { color: var(--ink-2); text-decoration: none; padding-bottom: 4px; }
+.run-detail .sec { padding-top: 12px; }
+.run-detail figure { margin: 12px 0 0; }
+.run-detail figcaption small { display: block; color: var(--ink-2); }
+.command-bar:not(:empty) { margin-top: 14px; }
+.command-bar button { cursor: copy; text-align: left; overflow-wrap: anywhere; color: var(--ink); background: var(--wash); border: 1px solid var(--line); border-radius: 5px; padding: 5px 8px; }
+@media (max-width: 940px) { .experiment-split { grid-template-columns: minmax(0, 1fr); } }

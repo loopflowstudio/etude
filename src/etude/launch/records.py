@@ -543,6 +543,10 @@ class Status(Record):
         at = f", {clock} {number(self.clocks[clock])}" if clock in self.clocks else ""
         return head + at
 
+    @property
+    def formatted_spend(self) -> str:
+        return f"{'~' if self.estimated else ''}${self.usd:.2f}"
+
     def facts(self) -> list[str]:
         """Counted work, shared placement, spend and delivery evidence."""
         facts = []
@@ -552,7 +556,7 @@ class Status(Record):
             facts.append(str(shown))
         if self.shared > 1:
             facts.append(f"shared by {self.shared} runs")
-        facts.append(f"{'~' if self.estimated else ''}${self.usd:.2f}")
+        facts.append(self.formatted_spend)
         if self.delivery_age_seconds is not None:
             facts.append(
                 f"no delivery confirmed for {self.delivery_age_seconds / 60:.1f} minutes"
