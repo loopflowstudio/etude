@@ -72,6 +72,7 @@ from etude.eval.result import EvalResult, Result, Tables
 from etude.eval.run import (
     EvalRun,
     Playing,
+    _group_progress,
     _terminable,
     play_together,
 )
@@ -80,7 +81,7 @@ from etude.identity import run_address, stored_owner
 from etude.launch.records import Status
 from etude.out import MEMBERSHIP, OutFile, OutFiles, OutMember
 from etude.records import ArtifactRef, Record, RunRecord, SourceKey
-from etude.run import as_storage, located_runs
+from etude.run import as_storage, declare, destinations, located_runs
 from etude.spec import (
     Input,
     Job,
@@ -222,6 +223,15 @@ class EvalRunSummary:
     status: Status | None = field(default=None, hash=False)
     last_write: datetime | None = None
     allocation_phase: AllocationPhase | None = None
+    file_state: RunState | None = None
+    _data: RunData | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def address(self) -> str:
+        """The submitted address, or the file declaration's address for a standalone run."""
+        if self.status:
+            return self.status.run
+        return self._data.address if self._data else self.name
 
 
 @dataclass(frozen=True)
@@ -516,6 +526,15 @@ class Evaluation(Record):
     def definition(self) -> Benchmark | RoundRobin:
         return self.tournament.tournament
 
+    @property
+    def address(self) -> str:
+        if self.experiment is None:
+            raise EtudeError("evaluation_names_no_experiment", 422)
+        if self.run:
+            return run_address(self.run, self.experiment)
+        identity = digest(sorted(match.key for match in self.matches))
+        return f"{self.experiment}/{folder_name(self.definition.name)}-{identity[:12]}"
+
     def relocate(self, files: Mapping[str, str]) -> Evaluation:
         """Locate checkpoint leaves without changing scientific match identity."""
         return self.model_copy(
@@ -790,48 +809,64 @@ def hold_group(
 ) -> tuple[EvalResult, ...]:
     """Start agents once, play every tournament, then raise any match failure.
 
-    Each member owns its stored run and failure outcome. The outer SIGTERM
-    scope includes agent startup and shutdown as well as games.
+    A launch owns the aggregate tally and closes its root after every tournament
+    and shared resource closes. Each tournament keeps its scientific result files.
     """
     results: list[EvalResult] = []
     failures: list[EtudeError | RetryRequested] = []
     # A launched attempt's courier collects only below its assigned track folder.
     launched = os.environ.get("ETUDE_RUN_ADDRESS") or os.environ.get("ETUDE_RUN")
     base = Path(directory) if directory is not None else default_root()
-    if launched is not None:
-        base = base / launched
-    artifacts = (
-        base / "artifacts" / "agents"
-        if launched
-        else base / (group.evaluations[0].experiment or "eval") / "artifacts" / "agents"
-        if group.evaluations
-        else base / "artifacts" / "agents"
-    )
-    with _terminable(), resources(artifacts) as owned, ExitStack() as lifetime:
+    with _terminable(), ExitStack() as lifetime:
+        progress = None
+        if not group.evaluations:
+            return ()
+        experiment = group.evaluations[0].experiment
+        if experiment is None:
+            raise EtudeError("evaluation_names_no_experiment", 422)
+        if launched:
+            declared = declare(
+                experiment=experiment,
+                run=launched,
+                directory=base,
+                kind="evaluation",
+                clocks=(),
+                members=tuple(spec.address for spec in group.evaluations),
+                resume=True,
+            )
+            progress = lifetime.enter_context(
+                _group_progress(
+                    declared,
+                    destinations(base, storages),
+                    total=sum(len(spec.matches) for spec in group.evaluations),
+                )
+            )
+            base = declared.root
+        artifacts = (base if launched else base / experiment) / "artifacts" / "agents"
+        owned = lifetime.enter_context(resources(artifacts))
         opened: list[tuple[Evaluation, EvalRun, ExitStack]] = []
         for spec in group.evaluations:
             if spec.experiment is None:
                 raise EtudeError("evaluation_names_no_experiment", 422)
             member = lifetime.enter_context(ExitStack())
-            identity = digest(sorted(match.key for match in spec.matches))
             active = member.enter_context(
                 _evaluating_tournament(
                     spec.tournament,
                     experiment=spec.experiment,
                     matches=spec.matches,
-                    run=spec.run
-                    or f"{spec.experiment}/{folder_name(spec.definition.name)}-{identity[:12]}",
+                    run=spec.address,
                     directory=base,
-                    storages=storages,
+                    storages=() if launched else storages,
+                    progress=progress,
                     resume=True,
                 )
             )
             opened.append((spec, active, member))
-        if not opened:
-            return ()
-        report = opened[0][1]._report
+        report = progress or opened[0][1]._report
         report.total = sum(len(active.matches) for _, active, _ in opened)
-        report.done = sum(active._report.done for _, active, _ in opened)
+        report.done = sum(
+            sum(m.key in active.done for m in active.matches) for _, active, _ in opened
+        )
         for _, active, _ in opened:
             active._report = report
         report.write()

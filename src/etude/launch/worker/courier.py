@@ -36,6 +36,7 @@ from etude.carriage import (
     purpose,
     reconcile_out,
     recorded_files,
+    replace_on_restore,
     resume_file,
     retired,
     save_pointer,
@@ -347,7 +348,8 @@ class Courier:
         keys = {key: listed[key] for key in found.keys}
         reconcile_out(folder, keys)
         recorded: dict[str, RecordedFile] | None = None
-        for key, link in sorted(keys.items()):
+        for key in sorted(keys, key=lambda key: (key == "outcome.json", key)):
+            link = keys[key]
             if not within(key):
                 raise StorageUnavailable("restore path is outside the run")
             target = folder / key
@@ -355,7 +357,7 @@ class Courier:
                 key == MEMBERSHIP
                 or checkpoint_file(key)
                 or target.exists()
-                and not key.startswith("out/")
+                and not replace_on_restore(key)
             ):
                 continue
             if recorded is None and key.startswith("out/"):
@@ -376,6 +378,8 @@ class Courier:
             partial.replace(target)
             if digest is not None:
                 self._sent[run, key] = pointers[key].decode() if key in pointers else digest
+            elif key == "outcome.json":
+                self._sent[run, key] = hashlib.sha256(body).hexdigest()
             else:
                 self._restored(run, key, target)
         if membership is not None:
@@ -591,7 +595,12 @@ class Courier:
             # skipped; what replaced it is seen on the next pass.
             try:
                 with attribute(purpose=purpose(key, recorded)):
-                    if key.startswith("out/"):
+                    if key == "outcome.json" and snapshot.outcome is not None:
+                        digest = hashlib.sha256(snapshot.outcome).hexdigest()
+                        if self._sent.get((run, key)) != digest:
+                            self._runs[run].write_bytes(key, snapshot.outcome)
+                            self._sent[run, key] = digest
+                    elif key.startswith("out/"):
                         if key in snapshot.pointers:
                             pointer_body = snapshot.pointers[key]
                             digest = hashlib.sha256(pointer_body).hexdigest()
@@ -606,7 +615,7 @@ class Courier:
                     else:
                         self._put(folder / key, run, key)
             except FileNotFoundError:
-                if save_pointer(key) is not None:
+                if save_pointer(key) is not None or snapshot.outcome is not None:
                     raise  # never publish a pointer after skipping one of its files
                 continue
         if (folder / "out").is_dir() or (folder / OUT_PRESENT).is_file():

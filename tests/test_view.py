@@ -25,12 +25,13 @@ from etude.checkpoints import CheckpointRecord
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.home import home
+from etude.jobs import ExperimentState, group_evaluations
 from etude.launch.database import Database
 from etude.launch.logs import snapshot_stream
 from etude.launch.records import GPU
 from etude.launch.server import LauncherObservation, PythonClient
 from etude.page import Page, Pages, _run_file
-from etude.records import ArtifactRef, Clock, RunCounters, RunOutcome, RunRecord, RunWriter
+from etude.records import ArtifactRef, Clock, RunCounters, RunOutcome, RunRecord, RunWriter, Tally
 from etude.spec import RunRequest, Until
 from etude.storage import DirectoryStorage, S3Storage
 from etude.train.block import Builder
@@ -44,6 +45,8 @@ from tests.launch.test_scheduler import _reporting, job
 from tests.launch.test_source import git
 from tests.launch.test_source import repository as repository
 from tests.run.storage import CountedClient, MeasuredStorage
+from tests.test_eval_groups import group as eval_group
+from tests.test_eval_groups import job as eval_job
 from tests.test_page import REPORTED, trained
 from tests.train.tracking import open_run
 
@@ -1697,4 +1700,125 @@ def test_run_page_serves_the_selected_launchers_retained_console_and_stored_deta
         assert ">finished<" in finished and "snapshot complete" in finished
         assert _version(_get(server, route + "?observe=1")) == _version(finished) and exchanges == 3
     assert "local" in {pool.name for pool in backend.scheduler.pools()}
+    backend.store.close()
+
+
+def test_evaluation_link_survives_partial_delivery_failed_read_and_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs = [eval_job(name, None) for name in ("ladder", "gauntlet")]
+    group = eval_group(*jobs)
+    request = group_evaluations(
+        [job.lower(ExperimentState(experiment="grouped")) for job in jobs], group.evaluations
+    ).model_copy(update={"max_attempts": 2})
+    backend = bench(home())
+    (address,) = backend.scheduler.queue(
+        RunRequest(id="grouped/evals-test", job=request), rent="l4"
+    )
+    source = DirectoryStorage(tmp_path / "archive")
+    storage = MeasuredStorage(source)
+    root = "copy/" + address + "/"
+    members = tuple(spec.address for spec in group.evaluations)
+    end = RunOutcome(state="finished", counters=RunCounters())
+    page = "/runs/" + address
+
+    def check(view: Server, phase: str) -> str:
+        before = storage.listings, storage.requests
+        html = _get(view, page)
+        status = _get(view, "/experiments/grouped/status")
+        assert f">{phase}<" in html and f">{phase}<" in status
+        assert status.count('href="/runs/') == 1 and f'href="{page}"' in status
+        assert all(member not in status for member in members)
+        assert (storage.listings, storage.requests) == before
+        return html
+
+    def publish_writer(name: str, attempt: str, start: int) -> None:
+        writer = RunWriter(
+            writer=name, run=address, attempt=attempt, host="fixture", started_ms=start
+        )
+        source.put(root + "metrics/" + name + ".json", writer.model_dump_json().encode())
+
+    with Server(storage, None, ("127.0.0.1", 0)) as view:
+        _ingest(view)
+        check(view, "queued")
+        backend.scheduler.tick()
+        (first,) = backend.scheduler.attempts(address)
+        view.refresh_launcher()
+        assert _get(view, "/machines/status").count(f'href="{page}"') == 1
+        source.put(
+            root + "run.json",
+            RunRecord(id=address, experiment="grouped", kind="evaluation", members=members)
+            .model_dump_json()
+            .encode(),
+        )
+        publish_writer("111111111111", first.id, 100)
+        source.put(
+            root + members[0] + "/run.json",
+            RunRecord(id=members[0], experiment="grouped", kind="evaluation")
+            .model_dump_json()
+            .encode(),
+        )
+        source.put(root + members[0] + "/outcome.json", end.model_dump_json().encode())
+        source.put(root + members[0] + "/blocks/example/scores.parquet", b"unread")
+        listings = storage.listings
+        view.refresh_files()
+        assert storage.listings == listings + 1 and not any("/blocks/" in k for k in storage.got)
+        assert "last file write unknown" not in check(view, "running")
+        assert "1 running" in _get(view, "/status")
+        source.put(
+            root + "outcome.json",
+            end.model_copy(update={"writer": "111111111111", "state": "failed"})
+            .model_dump_json()
+            .encode(),
+        )
+        view.refresh_files()
+        check(view, "failed")
+        backend.run(1)
+        backend.service.kill(first.session)
+        backend.run(1)
+        second = backend.scheduler.attempts(address)[1]
+        view.refresh_launcher()
+        check(view, "setting up")
+
+        # The new allocation and a later member arrive together. A listed member
+        # outcome vanishes, so none of this generation can advance the file facts.
+        _advance_view_clock(monkeypatch, minutes=2)
+        publish_writer("222222222222", second.id, 200)
+        source.put(
+            root + members[1] + "/run.json",
+            RunRecord(id=members[1], experiment="grouped", kind="evaluation")
+            .model_dump_json()
+            .encode(),
+        )
+        missing = root + members[1] + "/outcome.json"
+        source.put(missing, end.model_dump_json().encode())
+        get = source.get
+
+        def interrupted(key: str) -> bytes:
+            if key == missing:
+                raise FileNotFoundError(key)
+            return get(key)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(source, "get", interrupted)
+            view.refresh_files()
+        assert "files observed 2 min ago" in check(view, "setting up")
+
+    with Server(storage, None, ("127.0.0.1", 0)) as restarted:
+        assert "files observed 2 min ago" in check(restarted, "setting up")
+        _reporting(backend, tally=Tally(unit="matches", done=2, total=2))
+        backend.run(1)
+        backend.store.retain_log(
+            snapshot_stream(second.session, second.id, "job", b"both scores delivered\n", True)
+        )
+        restarted.refresh_launcher()
+        assert "2/2 matches" in check(restarted, "running")
+        source.put(
+            root + "outcome.json",
+            end.model_copy(update={"writer": "222222222222"}).model_dump_json().encode(),
+        )
+        restarted.refresh_files()
+        assert "both scores delivered" in check(restarted, "finished")
+        assert "1 finished" in _get(restarted, "/status")
+        assert restarted.index.report_ready("grouped", declared=False)
     backend.store.close()

@@ -37,7 +37,7 @@ from pydantic import TypeAdapter
 
 from etude.cache import Cache
 from etude.errors import explain
-from etude.experiment import state_of
+from etude.experiment import find_eval_groups, locate_evaluation_members, state_of
 from etude.home import home
 from etude.identity import run_address
 from etude.jobs import EvalRunSummary, TrainingRunSummary
@@ -80,7 +80,7 @@ _CLOCKS = TypeAdapter(dict[str, float])
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     address TEXT PRIMARY KEY, experiment TEXT NOT NULL, kind TEXT NOT NULL,
-    file_job TEXT, file_state TEXT, file_position TEXT, file_config TEXT, checkpoints TEXT,
+    eval_last_write TEXT, file_job TEXT, file_state TEXT, file_position TEXT, file_config TEXT, checkpoints TEXT,
     launched_as TEXT, launcher_job TEXT, launcher_state TEXT, launcher_position TEXT,
     launcher_config TEXT, source TEXT, status TEXT, max_attempts INTEGER
 );
@@ -120,7 +120,7 @@ WITH observed AS (
 )
 """
 _VISIBLE = f"""{_OBSERVED}, visible AS (
-    SELECT runs.address, runs.experiment, kind, files.last_write, files.inputs,
+    SELECT runs.address, runs.experiment, kind, coalesce(eval_last_write,files.last_write) AS last_write, files.inputs,
            CASE WHEN held_files.address IS NULL THEN at ELSE held_files.observed_at END AS at,
            file_error, launcher_at, last_loop, checkpoints,
            coalesce(CASE WHEN matches THEN launcher_job END, file_job) AS job,
@@ -381,13 +381,23 @@ class ChartIndex:
         observed_at = datetime.now(UTC)
         objects = self.source.versions("")
         storage = ListedStorage(self.source, objects, self._cache)
-        listing = RunListing.read(storage, objects=objects)
+        vanished: dict[str, str] = {}
+
+        def missing_declaration(folder: str, error: FileNotFoundError) -> RunRecord | None:
+            vanished[folder] = explain(error)
+            row = db.execute("SELECT metadata FROM files WHERE address=?", (folder,)).fetchone()
+            return RunData.model_validate_json(row[0]).file if row else None
+
+        listing = RunListing.read(storage, objects=objects, missing=missing_declaration)
         previous = dict(db.execute("SELECT address,inputs FROM files"))
         reports: dict[str, Report] = {}
-        vanished: dict[str, str] = {}
         for run in listing.declarations:
             experiment = run.file.experiment
-            address = run_address(run.file.id, experiment)
+            address = (
+                run.folders[0]
+                if run.file.kind == "evaluation"
+                else run_address(run.file.id, experiment)
+            )
             report = None
             if run.file.kind != "evaluation":
                 if experiment not in reports:
@@ -402,13 +412,8 @@ class ChartIndex:
                 # A live writer replaced a listed block after this listing began.
                 # The run keeps its published facts; its other runs still advance.
                 vanished[address] = explain(missing)
-                db.execute(
-                    """INSERT INTO next_files(address,experiment,inputs,last_write)
-                       SELECT address,experiment,inputs,last_write FROM files WHERE address=?""",
-                    (address,),
-                )
 
-        return observed_at, vanished
+        return observed_at, _hold_files(db, listing, vanished) if vanished else {}
 
     def _publish_files(
         self,
@@ -422,7 +427,7 @@ class ChartIndex:
         held = {row[0] for row in db.execute("SELECT address FROM held_files")}
         db.executemany(
             """INSERT INTO held_files(address,observed_at) VALUES(:address,
-               (SELECT at FROM observation, files WHERE observation.id=1 AND files.address=:address))""",
+               (SELECT at FROM observation, runs WHERE observation.id=1 AND runs.address=:address AND file_state IS NOT NULL))""",
             ({"address": address} for address in vanished.keys() - held),
         )
         db.executemany(
@@ -441,16 +446,17 @@ class ChartIndex:
                RETURNING experiment"""
         ).fetchall()
         # An open block can advance the last write without changing a sealed curve.
-        db.execute(
+        redated = db.execute(
             """UPDATE files SET last_write=n.last_write FROM next_files n
-               WHERE n.address=files.address AND n.metadata IS NULL AND files.last_write IS NOT n.last_write"""
-        )
+               WHERE n.address=files.address AND n.metadata IS NULL AND files.last_write IS NOT n.last_write RETURNING address,experiment"""
+        ).fetchall()
         rebuilt = db.execute(
             """INSERT OR REPLACE INTO files(address,experiment,inputs,reached,preferred,last_write,metadata)
                SELECT address,experiment,inputs,reached,preferred,last_write,metadata
                FROM next_files WHERE metadata IS NOT NULL RETURNING experiment"""
         ).fetchall()
         changed = {row[0] for row in (*removed, *rebuilt)}
+        changed.update(row["experiment"] for row in redated if row["address"].endswith("/"))
         if rebuilt:
             # Replacing a file row retires its old chart through the foreign key.
             db.execute(
@@ -483,13 +489,21 @@ class ChartIndex:
             standing[held.record.experiment][held.record.id] = held
         for experiment in experiments:
             rows = db.execute(
-                """SELECT address, metadata, reached, preferred
+                """SELECT address, metadata, reached, preferred, last_write
                    FROM files WHERE experiment=? ORDER BY address""",
                 (experiment,),
             )
             files = {row["address"]: row for row in rows}
-            metadata = [RunData.model_validate_json(row["metadata"]) for row in files.values()]
-            stored = {data.name: data for data in metadata}
+            metadata = [
+                RunData.model_validate_json(row["metadata"]).model_copy(
+                    update={
+                        "last_write": datetime.fromisoformat(row["last_write"])
+                        if row["last_write"]
+                        else None
+                    }
+                )
+                for row in files.values()
+            ]
             removed = {
                 row[0]
                 for row in db.execute("SELECT address FROM runs WHERE experiment=?", (experiment,))
@@ -498,9 +512,11 @@ class ChartIndex:
             state = state_of(metadata, experiment, retained=tuple(retained.values()))
             runs: tuple[TrainingRunSummary | EvalRunSummary, ...] = (*state.runs, *state.eval_runs)
             for run in runs:
-                data = stored.get(run.name)
+                data = run._data
                 record = retained[run.status.run].record if run.status else None
-                if data:
+                if isinstance(run, EvalRunSummary):
+                    address = run.address
+                elif data:
                     address = data.address
                 else:
                     assert record is not None  # Every summary has files or a launcher record.
@@ -784,6 +800,54 @@ class ChartIndex:
         )
 
 
+def _hold_files(
+    db: sqlite3.Connection, listing: RunListing, vanished: dict[str, str]
+) -> dict[str, str]:
+    # A group is observed as one run. Keep its previous generation in full
+    # if a member or its root changed again during the read.
+    folders = {
+        run.folders[0]: run.file for run in listing.declarations if run.file.kind == "evaluation"
+    }
+    if any(key.endswith("/") for key in vanished):
+        # Only removed or missed copies lack a staged row. Each contains metadata
+        # for one physical folder, independent of how many matches it delivered.
+        old = db.execute("""SELECT address,metadata FROM files
+                WHERE address LIKE '%/' AND NOT EXISTS
+                    (SELECT 1 FROM next_files n WHERE n.address=files.address)""")
+        for row in old:
+            if row["address"] not in folders:
+                data = RunData.model_validate_json(row["metadata"])
+                if data.file:
+                    folders[row["address"]] = data.file
+        previous_launcher = db.execute("SELECT standing FROM observation WHERE id=1").fetchone()
+        standing = (
+            LauncherObservation.model_validate_json(previous_launcher[0]).runs
+            if previous_launcher and previous_launcher[0]
+            else ()
+        )
+        owners = locate_evaluation_members(folders, find_eval_groups(standing))
+        addresses = {
+            key: run_address(file.id, file.experiment) for key, file in folders.items()
+        } | owners
+    else:
+        addresses = {}
+    for key, reason in vanished.items():
+        if key.endswith("/") and key not in addresses:
+            # The discovery itself is incomplete. Until its declaration can
+            # be read, there is no experiment to which we can assign this loss.
+            raise FileNotFoundError(reason)
+    held = {addresses.get(key, key): reason for key, reason in vanished.items()}
+    keep = vanished.keys() | {key for key, address in addresses.items() if address in held}
+    for key in keep:
+        db.execute("DELETE FROM next_files WHERE address=?", (key,))
+        db.execute(
+            """INSERT INTO next_files(address,experiment,inputs,last_write)
+               SELECT address,experiment,inputs,last_write FROM files WHERE address=?""",
+            (key,),
+        )
+    return held
+
+
 def _stage_run(
     db: sqlite3.Connection,
     storage: ListedStorage,
@@ -850,12 +914,22 @@ def _store_run(
     if stored and preferred not in clocks:
         preferred = next((c.name for c in stored.clocks if c.name in clocks), None)
     file_config = file.config_json if file else None
+    file_state = (
+        run.file_state
+        if isinstance(run, EvalRunSummary)
+        else stored.stored_state
+        if stored
+        else None
+    )
     fields = {
         "address": address,
         "experiment": experiment,
         "kind": "training" if training else "evaluation",
-        "file_job": file_job,
-        "file_state": stored.stored_state if stored else None,
+        "eval_last_write": run.last_write.isoformat()
+        if isinstance(run, EvalRunSummary) and run.last_write
+        else None,
+        "file_job": file_job or ("Evaluation" if file_state else None),
+        "file_state": file_state,
         "file_position": _position(clocks, preferred) if stored else None,
         "file_config": file_config,
         "checkpoints": _checkpoints(stored) if stored and training else None,

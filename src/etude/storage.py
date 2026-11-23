@@ -456,10 +456,16 @@ def run_directory(directory: Path | str | None, experiment: str, run: str) -> tu
             raise EtudeError("unsafe_run_or_experiment_name", 422)
     base = Path(directory) if directory else default_root()
     handed = os.environ.get("ETUDE_RUN")
-    address = os.environ.get("ETUDE_RUN_ADDRESS") if handed == run else None
-    root = base / run_address(address or run, experiment)
-    if os.environ.get("ETUDE_ATTEMPT") and handed == local and (out := os.environ.get("ETUDE_OUT")):
-        root = Path(out).parent
+    out = os.environ.get("ETUDE_OUT")
+    assigned = Path(out).parent if out and os.environ.get("ETUDE_ATTEMPT") else None
+    # The assigned folder holds the launch. A tournament declared inside it
+    # retains its own address even if its local name matches the launch.
+    address = os.environ.get("ETUDE_RUN_ADDRESS") if handed == run and base != assigned else None
+    root = (
+        assigned
+        if assigned and base != assigned and handed == local
+        else base / run_address(address or run, experiment)
+    )
     if not (root / "run.json").is_file():
         # Runs stored before compact addresses: EXPERIMENT/RUN folders, then flat ones.
         for stored in (base / experiment / local, base / run):

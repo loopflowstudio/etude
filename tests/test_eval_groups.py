@@ -21,6 +21,7 @@ import pytest
 from pydantic import ValidationError
 
 from etude.call import Function
+from etude.carriage import put_back, restore_set
 from etude.checkpoints import CheckpointRef
 from etude.controller.advance import advance
 from etude.controller.declarations import Experiment, read_experiment
@@ -44,13 +45,23 @@ from etude.eval.resources import (
 from etude.eval.result import Tables
 from etude.eval.run import Terminated
 from etude.eval.tournament import evaluating, played
-from etude.experiment import state_of
+from etude.experiment import observe, state_of
 from etude.jobs import Agents, EvalGroup, EvalJob, ExperimentState, evaluation_group, hold_group
 from etude.launch import client
 from etude.launch.records import Pool, Standing, Status
-from etude.records import ArtifactRef, RunRecord, RunSubmission
+from etude.page import build as build_page
+from etude.records import (
+    ArtifactRef,
+    RunCounters,
+    RunOutcome,
+    RunProgress,
+    RunRecord,
+    RunSubmission,
+)
+from etude.run import sync
 from etude.spec import Job, RunRequest
 from etude.storage import DirectoryStorage, default_root
+from etude.train.read import read_all
 from tests.eval.arithmetic import checkpoint, load, play
 from tests.eval.thread_budget import load_checkpoint
 from tests.launch.counting import Counting, job_text
@@ -1502,3 +1513,125 @@ def test_standalone_play_retains_intervals_without_a_group(tmp_path: Path) -> No
     assert report.game_seconds == report.finished_monotonic - report.started_monotonic
     assert bucket.uploads == 7
     assert len([key for key in bucket.keys("") if "/protocol-" in key]) == 1
+
+
+def test_launched_group_recovers_both_tournaments_with_their_scores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = job("ladder", None)
+    second = job("gauntlet", None)
+    ladder, gauntlet = group(first, second).evaluations
+    # An explicit member name can even match the assigned launch name.
+    address = "grouped/evals-test"
+    selected = EvalGroup(evaluations=(ladder.model_copy(update={"run": address}), gauntlet))
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
+    monkeypatch.setenv("ETUDE_RUN_ADDRESS", address)
+    monkeypatch.setenv("ETUDE_RUN", "evals-test")
+    monkeypatch.setenv("ETUDE_ATTEMPT", "first")
+    source = tmp_path / "first"
+    root = source / address
+    monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
+    broken = gauntlet.model_copy(
+        update={"play": Function(module=__name__, name=fails_game.__name__)}
+    )
+    with pytest.raises(EtudeError, match="match_failed"):
+        hold_group(EvalGroup(evaluations=(selected.evaluations[0], broken)), directory=source)
+    (failed,) = observe(source, "grouped").eval_runs
+    assert (failed.address, failed.state) == (address, "failed")
+    next_host = tmp_path / "replacement"
+    put_back(next_host / address, restore_set(root))
+    source, root = next_host, next_host / address
+    monkeypatch.setenv("ETUDE_OUT", str(root / "out"))
+    monkeypatch.setenv("ETUDE_ATTEMPT", "replacement")
+    outputs = tmp_path / "replacement-outputs"
+    outputs.mkdir()
+    monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
+    assert [r.played for r in hold_group(selected, directory=source)] == [0, 1]
+    declaration = RunRecord.model_validate_json((root / "run.json").read_bytes())
+    assert declaration.members == (address, gauntlet.address)
+    progress = RunProgress.model_validate_json((outputs / "etude-result.json").read_bytes())
+    assert progress.tally and progress.tally.done == progress.tally.total == 2
+    (writer,) = progress.writers
+    assert (writer.run, writer.attempt) == (address, "replacement")
+    assert (
+        RunOutcome.model_validate_json((root / "outcome.json").read_bytes()).writer == writer.writer
+    )
+
+    copied = DirectoryStorage(tmp_path / "archive" / "copy")
+    assert sync(source, storages=[copied]) == {}
+    assert all(key.startswith(address + "/") for key in copied.keys(""))
+    (recovered,) = observe(tmp_path / "archive", "grouped").eval_runs
+    assert (recovered.address, recovered.state, recovered.status) == (address, "finished", None)
+    report = build_page(tmp_path / "archive", None, experiment="grouped")
+    assert {name for selection in report.drawn for name in selection.tournaments} == {
+        "ladder",
+        "gauntlet",
+    }
+    db = statsdb("grouped", tmp_path / "archive")
+    try:
+        assert db.sql("select run, score from scores order by run").fetchall() == [
+            (run, 7) for run in sorted(("evals-test", gauntlet.address.split("/")[-1]))
+        ]
+    finally:
+        db.close()
+    next_host = tmp_path / "next"
+    restored = next_host / address
+    put_back(restored, restore_set(copied.root / address))
+    monkeypatch.setenv("ETUDE_ATTEMPT", "second")
+    monkeypatch.setenv("ETUDE_OUT", str(restored / "out"))
+    assert [r.skipped for r in hold_group(selected, directory=next_host)] == [1, 1]
+
+
+def test_legacy_group_ownership_requires_the_retained_address_and_member_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    definition = job("ladder", None)
+    selected = group(definition)
+    (spec,) = selected.evaluations
+    spec = spec.model_copy(update={"run": "original"})
+    source = DirectoryStorage(tmp_path / "source")
+    addresses = ("grouped/first", "grouped/retry")
+    member = RunRecord(id=spec.address, experiment="grouped", kind="evaluation")
+    for prefix in ("", *(f"copy/{address}/" for address in addresses)):
+        source.put(prefix + spec.address + "/run.json", member.model_dump_json().encode())
+        source.put(
+            prefix + spec.address + "/outcome.json",
+            RunOutcome(state="finished", counters=RunCounters()).model_dump_json().encode(),
+        )
+    submitted = definition.lower(ExperimentState(experiment="grouped")).model_copy(
+        update={"config": EvalGroup(evaluations=(spec,)).model_dump_json()}
+    )
+    backend = bench(tmp_path / "launcher")
+    backend.scheduler.queue(
+        [RunRequest(id=address, job=submitted) for address in addresses], rent="l4"
+    )
+    monkeypatch.setattr(client, "standing", backend.scheduler.standing)
+    copied = DirectoryStorage(tmp_path / "copy")
+    assert sync(source.root, storages=[copied]) == {}
+    rows = {s.address: s for s in observe(copied, "grouped").eval_runs}
+    assert set(rows) == {*addresses, spec.address}
+    for address in addresses:
+        row = rows[address]
+        assert row.state == "queued" and row.last_write and row.status
+        assert row.matches == tuple(match.key for match in spec.matches)
+    assert rows[spec.address].state == "finished" and rows[spec.address].status is None
+    detached = state_of(read_all(copied), "grouped", retained=())
+    assert [(r.address, r.state) for r in detached.eval_runs] == [(spec.address, "finished")]
+    # A declaration is authoritative even if old launcher evidence names a
+    # different tournament at the same physical location.
+    parent = "copy/" + addresses[0] + "/run.json"
+    copied.put(
+        parent,
+        RunRecord(
+            id=addresses[0], experiment="grouped", kind="evaluation", members=("grouped/different",)
+        )
+        .model_dump_json()
+        .encode(),
+    )
+    os.utime(copied.root / parent, (1000, 1000))
+    updated = {s.address: s for s in observe(copied, "grouped").eval_runs}
+    written = updated[addresses[0]].last_write
+    assert written and written.timestamp() == 1000
+    backend.store.close()

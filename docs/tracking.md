@@ -193,8 +193,12 @@ advance. Its experiment row shows the older observation beside the last write.
 A recorded scheduler heartbeat appears as `last loop`. When the file and
 launcher observations differ by more than 5 seconds, `launcher observed` dates the launcher facts.
 
-An evaluation run links to its experiment report for scores. A launched
-evaluation also shows its retained console and match count when available.
+Open the evaluation link printed by the launcher to see its match count and
+retained console. A launch that plays several tournaments occupies one row
+on the experiment page. Its last file write includes all its tournaments.
+The experiment report shows their scores separately. After copying a new
+launch with `etude sync`, the same run path shows its recorded outcome from
+the copied files alone.
 
 Opening a launched run requests the same retained console you can read with
 `etude logs --run RUN`. The first visit can show **Waiting for retained console**

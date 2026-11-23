@@ -124,10 +124,14 @@ def _run_files(storage: Storage, run: str, experiment: str | None) -> dict[str, 
         experiment = label
     keys = storage.keys("")
     identities = located_runs(storage, keys, run=run)
-    selected = [item for item in identities if experiment in (None, item.file.experiment)]
-    if len(selected) > 1:
+    selected = [
+        item
+        for item in identities
+        if experiment in (None, item.file.experiment) and item.file.members is None
+    ]
+    if len({item.file.experiment for item in selected}) > 1:
         raise EtudeError("run_experiment_ambiguous", 409, detail="supply --experiment")
-    folders = selected[0].folders if selected else ()
+    folders = tuple(folder for item in selected for folder in item.folders)
     if not identities and experiment is None:
         # Pre-declaration historical folders have no experiment to select.
         folders = tuple(run_folders(keys).get(run, []))

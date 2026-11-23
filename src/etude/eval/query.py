@@ -348,7 +348,7 @@ def _ours(
     folder: str,
     listed: Container[str],
     experiment: str,
-    declarations: Mapping[str, str],
+    declarations: Mapping[str, str | None],
 ) -> bool:
     """Select a folder by its own declaration; retain each declaration once."""
     if folder in declarations:
@@ -356,8 +356,10 @@ def _ours(
     declaration = declared(storage, folder, listed)
     if declaration is None:
         return False
-    db.execute("insert into kept.declarations values (?, ?)", [folder, declaration.experiment])
-    if declaration.experiment != experiment:
+    # A group is an operational run. Only its tournaments supply scientific rows.
+    owner = declaration.experiment if declaration.members is None else None
+    db.execute("insert into kept.declarations values (?, ?)", [folder, owner])
+    if owner != experiment:
         return False
     db.execute(
         "insert into kept.runs values (?, ?, ?, null) on conflict do nothing",

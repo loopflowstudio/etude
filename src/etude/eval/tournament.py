@@ -70,7 +70,7 @@ from etude.eval.records import (
     resolve_player,
     validate_checkpoints,
 )
-from etude.eval.run import ETUDE_TABLES, EvalRun, _evaluating_matches
+from etude.eval.run import ETUDE_TABLES, EvalRun, _evaluating_matches, _Report
 from etude.eval.schedule import ordered
 from etude.records import Digest, Record
 from etude.run import RunListing, declare, declared, run_folders, under
@@ -201,6 +201,7 @@ def _evaluating_tournament(
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
     resume: bool = False,
+    progress: _Report | None = None,
 ) -> Iterator[EvalRun]:
     _record(recorded, experiment, run, directory, resume=resume)
     with _evaluating_matches(
@@ -212,6 +213,7 @@ def _evaluating_tournament(
         storages=storages,
         rollups=recorded.tournament.rollups,
         resume=True,
+        progress=progress,
     ) as active:
         yield active
 
@@ -313,15 +315,13 @@ class StoredRuns:
         """Read one source, optionally using the caller's existing listing."""
         keys = listing.keys if listing is not None else sorted(place.keys(""))
         listed = set(keys)
-        by_run = (
-            {
-                run.name: run.folders
-                for run in listing.declarations
-                if run.file.experiment == experiment
-            }
-            if listing is not None
-            else run_folders(keys)
-        )
+        if listing is None:
+            by_run = run_folders(keys)
+        else:
+            by_run = {}
+            for located in listing.declarations:
+                if located.file.experiment == experiment and located.file.members is None:
+                    by_run.setdefault(located.name, []).extend(located.folders)
         folders: list[_Folder] = []
         for run, held_in in sorted(by_run.items()):
             for folder in held_in:

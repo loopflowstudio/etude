@@ -7,6 +7,7 @@ Author-facing types are defined in `etude.jobs`.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from decimal import Decimal
@@ -17,8 +18,10 @@ import etude.jobs as jobs
 from etude.checkpoints import PolicyKey
 from etude.errors import EtudeError
 from etude.eval.records import Benchmark, Line, Match, TournamentRun
+from etude.identity import run_address
 from etude.launch import client
 from etude.launch.records import Standing
+from etude.records import RunRecord
 from etude.run import LocatedRun, RunListing
 from etude.storage import Storage
 from etude.train.read import RunData, lines, read_all
@@ -150,63 +153,128 @@ def state_of(
             _data=data,
             last_write=data.last_write,
         )
-    evaluations = {
-        d.name: d
-        for d in every
-        if d.file and d.experiment == experiment and d.file.kind == "evaluation"
-    }
-    launched_evals: list[jobs.EvalRunSummary] = []
+    launches = find_eval_groups(retained)
+    evals = _evaluations(every, experiment, launches)
     committed = Decimal(0)
     for item in retained:
         record = item.record
         committed += item.committed_usd
         name = record.id.removeprefix(experiment + "/")
-        # Evaluation matches are part of the executable job's public config.
-        try:
-            group = jobs.evaluation_group(record.launch.spec)
-        except EtudeError as error:
-            if error.code != "not_an_evaluation_job":
-                raise
-            group = None
-        if group is not None:
+        if (group := launches.get(record.id)) is not None:
             matches = tuple(
                 Match.model_validate(m.model_dump(), context={"experiment": experiment}).key
                 for spec in group.evaluations
                 for m in spec.matches
             )
-            stored_eval = evaluations.pop(name, None)
-            summary = jobs.EvalRunSummary(
-                name=name,
-                state="queued",
-                matches=matches,
-                last_write=stored_eval.last_write if stored_eval else None,
+            summary = evals.get(record.id) or jobs.EvalRunSummary(name=name, state="queued")
+            evals[record.id] = _join_allocation(
+                replace(summary, matches=matches), summary._data, item
             )
-            launched_evals.append(_join_allocation(summary, stored_eval, item))
-        else:
-            launch = record.launch.spec.name
-            training = find_training_run(runs.values(), record.id, launch, record.seed)
-            if training is None:
-                training = jobs.TrainingRunSummary(
-                    name=name,
-                    experiment=experiment,
-                    job=launch,
-                    launch=launch,
-                    line=name,
-                    seed=record.seed,
-                    state="queued",
-                    checkpoints=jobs.Checkpoints(),
-                )
-            runs[training.name] = _join_allocation(training, training._data, item)
-    file_evals = (
-        jobs.EvalRunSummary(name=d.name, state=d.stored_state, last_write=d.last_write)
-        for d in evaluations.values()
-    )
+            continue
+        launch = record.launch.spec.name
+        training = find_training_run(runs.values(), record.id, launch, record.seed)
+        if training is None:
+            training = jobs.TrainingRunSummary(
+                name=name,
+                experiment=experiment,
+                job=launch,
+                launch=launch,
+                line=name,
+                seed=record.seed,
+                state="queued",
+                checkpoints=jobs.Checkpoints(),
+            )
+        runs[training.name] = _join_allocation(training, training._data, item)
     return jobs.ExperimentState(
         experiment=experiment,
         runs=tuple(runs.values()),
-        eval_runs=(*file_evals, *launched_evals),
+        eval_runs=tuple(evals.values()),
         committed_usd=committed,
     )
+
+
+def find_eval_groups(retained: Sequence[Standing]) -> dict[str, jobs.EvalGroup]:
+    launches = {}
+    for item in retained:
+        try:
+            launches[item.record.id] = jobs.evaluation_group(item.record.launch.spec)
+        except EtudeError as error:
+            if error.code != "not_an_evaluation_job":
+                raise
+    return launches
+
+
+def locate_evaluation_members(
+    folders: dict[str, RunRecord], launches: dict[str, jobs.EvalGroup]
+) -> dict[str, str]:
+    """Map physical tournament folders to the launch that owns their results."""
+    owners = {
+        folder + member + "/": record.id
+        for folder, record in folders.items()
+        for member in record.members or ()
+    }
+    legacy = {
+        (address, spec.address)
+        for address, group in launches.items()
+        for spec in group.evaluations
+        if spec.experiment is not None
+    }
+    for folder, record in folders.items():
+        if folder in owners or record.members is not None:
+            continue
+        # A retained launch alone cannot claim a standalone tournament of the same name.
+        member = run_address(record.id, record.experiment)
+        parent, sep, rest = folder.rstrip("/").rpartition("/" + member)
+        if sep and not rest:
+            parent_record = folders.get(parent + "/")
+            if parent_record and parent_record.members is not None:
+                continue  # A portable group declares its entire membership.
+            parts = parent.split("/")
+            for candidate in ("/".join(parts[-2:]), parts[-1]):
+                if (candidate, member) in legacy:
+                    owners[folder] = candidate
+                    break
+    return owners
+
+
+def _evaluations(
+    every: Sequence[RunData], experiment: str, launches: dict[str, jobs.EvalGroup]
+) -> dict[str, jobs.EvalRunSummary]:
+    copies = [
+        d for d in every if d.file and d.file.kind == "evaluation" and d.experiment == experiment
+    ]
+    owners = locate_evaluation_members(
+        {d.eval_folder: d.file for d in copies if d.eval_folder and d.file}, launches
+    )
+    inputs: dict[str, list[RunData]] = defaultdict(list)
+    roots: dict[str, list[RunData]] = defaultdict(list)
+    for data in copies:
+        owner = owners.get(data.eval_folder or "")
+        inputs[owner or data.address].append(data)
+        if owner is None:
+            roots[data.address].append(data)
+
+    summaries: dict[str, jobs.EvalRunSummary] = {}
+    for address, files in inputs.items():
+        # A copied launch may have a newer writer or a later delivery of that writer's end.
+        candidates = roots[address]
+        root = max(
+            candidates,
+            key=lambda d: (
+                d.writers[-1].started_ms if d.writers else -1,
+                d.outcome is not None,
+                d.last_write.timestamp() if d.last_write else 0,
+            ),
+            default=None,
+        )
+        summaries[address] = jobs.EvalRunSummary(
+            name=address.removeprefix(experiment + "/"),
+            state=root.stored_state if root else "running",
+            last_write=max((d.last_write for d in files if d.last_write), default=None),
+            _data=root,
+            file_state=root.stored_state if root else "running",
+        )
+    return summaries
 
 
 def _join_allocation[Run: (jobs.TrainingRunSummary, jobs.EvalRunSummary)](
@@ -224,6 +292,9 @@ def _join_allocation[Run: (jobs.TrainingRunSummary, jobs.EvalRunSummary)](
         if latest.attempt == status.attempt:
             ended_here = outcome.writer == latest.writer
         elif latest.attempt and status.attempt:
+            outcome = None
+    if data and data.file and data.file.members is not None:
+        if status.phase == "queued" or (status.attempt is not None and not ended_here):
             outcome = None
     if item.record.launch.resume_after and not ended_here:
         outcome = None

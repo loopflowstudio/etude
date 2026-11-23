@@ -101,6 +101,8 @@ class RunData(Arrays):
     name: str
     file: RunRecord | None
     outcome: RunOutcome | None
+    # A tournament folder identifies the launch that delivered this copy.
+    eval_folder: str | None = None
     # In ordinal order, one per ordinal: a later attempt continues its run's ordinals.
     checkpoints: tuple[CheckpointRecord, ...]
     # Every process that wrote to this run, in start order.
@@ -787,9 +789,23 @@ def read(source: Storage | Path | str, experiment: str, run: str) -> RunData:
     storage = as_storage(source)
     run = run.removeprefix(experiment + "/")
     listing = RunListing.read(storage, run=run)
-    for located in listing.declarations:
-        if located.file.experiment == experiment:
-            return read_located(storage, located, listing.keys)
+    copies = [located for located in listing.declarations if located.file.experiment == experiment]
+    if copies:
+        # A group and one of its tournaments may share a name. The printed
+        # address opens the group. Its other copies can supply later writers.
+        groups = [located for located in copies if located.file.members is not None]
+        copies = groups or copies
+        located = copies[0]
+        if len(copies) > 1:
+            located = located.model_copy(
+                update={
+                    "folders": tuple(folder for copy in copies for folder in copy.folders),
+                    "last_write": max(
+                        (copy.last_write for copy in copies if copy.last_write), default=None
+                    ),
+                }
+            )
+        return read_located(storage, located, listing.keys)
     # Only a name nobody declared can hold historical rows without a declaration.
     folders = [] if listing.declarations else listing.folders.get(run, [run_prefix(run)])
     return _read(storage, experiment, run, folders, listing.keys, declaration=None)
@@ -920,17 +936,19 @@ def _read(
     outcome = (
         RunOutcome.model_validate_json(storage.get(folder + ended[folder])) if folder else None
     )
-    if outcome is not None and writers:
+    group = run_file is not None and run_file.members is not None
+    if outcome is not None and (writers or group):
         # A completion belongs to one writer, not every later resume. Older
         # evidence without attribution is conclusive only for a single attempt.
-        current = outcome.writer == writers[-1].writer
-        unattributed = outcome.writer is None and len(writers) == 1
+        current = bool(writers) and outcome.writer == writers[-1].writer
+        unattributed = not group and outcome.writer is None and len(writers) == 1
         if not current and not unattributed:
             outcome = None
     data = RunData(
         experiment=experiment,
         name=run,
         file=run_file,
+        eval_folder=folders[0] if run_file and run_file.kind == "evaluation" else None,
         last_write=declaration.last_write if declaration else None,
         outcome=outcome,
         # A later attempt continues its run's ordinals; each is kept once.
