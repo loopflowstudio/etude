@@ -3,11 +3,11 @@
 from collections import Counter, defaultdict
 from collections.abc import Collection, Iterator, Mapping
 from datetime import datetime, timedelta
-from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from decimal import ROUND_CEILING, Decimal
 
 from pydantic import Field
 
-from etude.launch.records import Machine, Rental, RunAttempt, Session
+from etude.launch.records import Machine, Rental, RunAttempt, Session, Spend
 from etude.spec import Record
 
 
@@ -92,15 +92,15 @@ def _occupied_intervals(
             counts.update(place.run for place in arriving)
 
 
-def run_share(run: str, places: Collection[Place], rental: Rental, machine: Machine) -> Decimal:
-    return sum(
-        (
-            cost_between(rental, machine, start, end) / len(counts)
-            for start, end, counts in _occupied_intervals(places)
-            if run in counts
-        ),
-        Decimal(0),
-    )
+def run_share(run: str, places: Collection[Place], rental: Rental, machine: Machine) -> Spend:
+    rate = rental.units_per_hour if rental.unit != "usd" else None
+    dollars = units = Decimal(0)
+    for start, end, counts in _occupied_intervals(places):
+        if run in counts:
+            dollars += cost_between(rental, machine, start, end) / len(counts)
+            if rate is not None:
+                units += _metered(rate, start, end) / len(counts)
+    return Spend(usd=dollars, unit=rental.unit, units=units if rate is not None else None)
 
 
 def group_shares(
@@ -146,18 +146,6 @@ def rental_cost(price: Decimal, seconds: float | Decimal, reservation_hours: int
     return price * hours
 
 
-def affordable_seconds(price: Decimal, cap: Decimal, reservation_hours: int) -> float:
-    if not price or cap.is_infinite():
-        return float("inf")
-    if reservation_hours:
-        increments = cap // (price * reservation_hours)
-        return float(increments * reservation_hours * 3600)
-    # A rental deadline has microsecond precision. Round down so its last
-    # fraction of a second cannot exceed the dollars that fund the window.
-    micros = (cap * 3_600_000_000 / price).to_integral_value(rounding=ROUND_FLOOR)
-    return float(micros / 1_000_000)
-
-
 def rental_usd(rental: Rental, machine: Machine, now: datetime) -> Decimal:
     """Estimate an unconfirmed machine through its paid deadline."""
     if machine.claimed_at is None or machine.refused_at is not None:
@@ -166,19 +154,32 @@ def rental_usd(rental: Rental, machine: Machine, now: datetime) -> Decimal:
     return cost_between(rental, machine, machine.claimed_at, end)
 
 
+def rental_units(rental: Rental, machine: Machine, now: datetime) -> Decimal | None:
+    """Estimate native units consumed for a non-USD rental with a known hourly burn rate."""
+    if (
+        rental.unit == "usd"
+        or rental.units_per_hour is None
+        or machine.claimed_at is None
+        or machine.refused_at is not None
+    ):
+        return None
+    end = machine.deleted_at or min(now, rental.deadline)
+    return _metered(rental.units_per_hour, machine.claimed_at, end)
+
+
 def cost_between(r: Rental, machine: Machine, start: datetime, end: datetime) -> Decimal:
     """Allocate billed coverage by occupied time; estimate uncovered seconds."""
     origin = machine.claimed_at or start
     through = r.billed_through
     if through is None:
-        return usd(r.usd_per_hour, start, end)
+        return _metered(r.usd_per_hour, start, end)
     covered_end = min(through, machine.deleted_at or through)
     seconds = max(0.0, (covered_end - origin).total_seconds())
     overlap = max(0.0, (min(end, covered_end) - max(start, origin)).total_seconds())
     paid = r.billed_usd * Decimal(overlap) / Decimal(seconds) if seconds else Decimal(0)
-    return paid + usd(r.usd_per_hour, max(start, through), end)
+    return paid + _metered(r.usd_per_hour, max(start, through), end)
 
 
-def usd(usd_per_hour: Decimal, start: datetime, end: datetime) -> Decimal:
+def _metered(rate: Decimal, start: datetime, end: datetime) -> Decimal:
     seconds = Decimal(max((end - start).total_seconds(), 0))
-    return usd_per_hour * seconds / 3600
+    return rate * seconds / 3600

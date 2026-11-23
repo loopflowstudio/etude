@@ -48,10 +48,13 @@ class Safeguards(Record):
 class Allocation(Record):
     id: str
     address: str | None
-    usd_per_hour: Decimal
+    usd_per_hour: Decimal | None = None
     created_at: datetime
     cleanup: tuple[str, ...] = ()
     hardware: Hardware | None = None  # what the provider was asked for; None for owned
+    unit: str = "usd"
+    units_per_hour: Decimal | None = None
+    deadline: datetime | None = None
 
 
 class Bill(Record):
@@ -65,6 +68,8 @@ class MachineRequest(Record):
     session: str
     deadline: datetime | None
     cap_usd: Decimal
+    cap_units: Decimal | None = None
+    max_units_per_hour: Decimal | None = None
     bootstrap: BootstrapLinks | None = None
 
 

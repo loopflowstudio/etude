@@ -344,7 +344,11 @@ def machines(
 def providers() -> None:
     """List the accounts that supply machines."""
     for known in default().providers():
-        print(known.name, known.kind, f"storage {known.storage}", sep="  ")
+        parts = [known.name, known.kind, f"storage {known.storage}"]
+        if known.unit != "usd":
+            rate = Decimal(0) if known.usd_per_unit is None else known.usd_per_unit
+            parts.append(f"${rate}/{known.unit.upper()}")
+        print(*parts, sep="  ")
 
 
 @provider_app.command("set")
@@ -356,11 +360,31 @@ def provider_set(
     registry: Annotated[
         str, typer.Option(help="the provider's id for the credential that pulls private images")
     ] = "",
+    usd_per_unit: Annotated[
+        str | None,
+        typer.Option(
+            help="USD per provider billing unit (for credit-metered providers like colab)"
+        ),
+    ] = None,
 ) -> None:
     """Record or replace an account that supplies machines. No secret is stored."""
+    from pydantic import ValidationError
+
     from etude.launch.records import Provider
 
-    default().set_provider(Provider(name=name, kind=kind, registry=registry, storage=storage))
+    try:
+        account = Provider.model_validate(
+            {
+                "name": name,
+                "kind": kind,
+                "registry": registry,
+                "storage": storage,
+                "usd_per_unit": usd_per_unit,
+            }
+        )
+    except ValidationError as error:
+        raise typer.BadParameter(error.errors()[0]["msg"].removeprefix("Value error, ")) from None
+    default().set_provider(account)
     providers()
 
 

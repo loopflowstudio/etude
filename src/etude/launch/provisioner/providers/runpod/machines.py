@@ -181,7 +181,10 @@ class RunPodMachines:
 
 def _disk_gb(hardware: Hardware) -> int:
     # RunPod caps a CPU pod's container disk at 10 GB per vCPU on its smallest flavors.
-    return 40 if isinstance(hardware, GPU) else min(40, 10 * hardware.vcpus)
+    if isinstance(hardware, GPU):
+        return 40
+    assert hardware.vcpus is not None
+    return min(40, 10 * hardware.vcpus)
 
 
 # Published import retained; the domain record owns the default and its provenance.
