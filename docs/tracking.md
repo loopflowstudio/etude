@@ -144,12 +144,14 @@ Bucket sources need read credentials. Viewing requires no machine-provider key.
 The view listens on `127.0.0.1:8765` by default and prints its address.
 
 While the view advertises its address in `ETUDE_HOME/view`, `train`, `launch`,
-`queue` and `status RUN` print a `view:` link for each run. A declared run
-uses `EXPERIMENT/JOB@SEED`, such as `prototype/coin@0`. For a file defining
+`queue`, `continue` and `status RUN` print a `view:` link for each run (when the
+launcher has `ETUDE_VIEW_URL` set, `launch`, `queue`, `continue` and
+`status RUN` print that [hosted view](#hosted-view) address instead). A declared
+run uses `EXPERIMENT/JOB@SEED`, such as `prototype/coin@0`. For a file defining
 only `train(config)`, the address is the experiment name. `train --json`
-prints the link on stderr. Starting a second view redirects links to it. When
-it closes, a surviving view advertises again at its next index pass. A link
-opened before the run appears names the source the view is watching.
+prints the link on stderr. Starting a second local view redirects links to it.
+When it closes, a surviving local view advertises again at its next index pass.
+A link opened before the run appears names the source the view is watching.
 
 | Path | What you see |
 | --- | --- |
@@ -179,8 +181,8 @@ external line’s latest evaluated checkpoint. Before there is a score it uses
 the first drawable ML series, including ungrouped metrics. Different latest
 values appear as a low–high range. These build details stay with the
 served report until a successful refresh. If a run file listing or launcher
-read fails, Reports shows the error above the last known rows. Restarting
-the view clears the build details.
+read fails, Reports shows the error above the last known rows. In local mode,
+restarting the view clears the build details.
 
 The breadcrumb above an experiment, run or report links back to Experiments.
 Use the side rail to switch pages, open an active experiment or jump to a
@@ -335,3 +337,82 @@ queued jobs and console. It keeps showing your files while it waits for the
 selected launcher.
 Use `--source` to select the matching run files. The Machines page names the
 selected server and directs you to `etude machines`.
+
+### Hosted view
+
+Run `etude view --push` backed by Postgres so launched jobs publish sealed
+curves, attempt status and console output to a shared URL as they run. The
+hosted view receives all run data over HTTP and never reads back from a bucket
+or launcher database.
+
+```text
+# On the view host (install etude-sdk[hosted], plus eval for evaluation reports)
+$ export ETUDE_VIEW_DATABASE_URL=postgresql://user@host/etude_view
+$ export ETUDE_VIEW_SECRET=...
+$ uv run --extra hosted etude view-upgrade
+$ uv run --extra hosted etude view examples/prototype.py --push --host 127.0.0.1 --port 8765
+http://127.0.0.1:8765/
+
+# In the submitting terminal or SSH `etude server` environment
+$ export ETUDE_VIEW_URL=http://127.0.0.1:8765
+$ export ETUDE_VIEW_SECRET=...
+$ uv run etude launch examples/prototype.py --pool lab --job coin --seed 0
+...
+view: http://127.0.0.1:8765/runs/prototype/coin@0
+```
+
+Loopback works when the worker runs on the same host; for remote or rented
+workers, set `ETUDE_VIEW_URL` to the view's reachable HTTPS origin. Open the
+printed link to watch the run's curves, console and experiment report update on
+the same 5-second refresh cadence.
+
+**Mode and upgrades.** Plain `etude view [PATH] [--source SOURCE]` stays in local
+pull mode even if `ETUDE_VIEW_DATABASE_URL` is set. `--push` explicitly enables
+HTTP ingest and Postgres storage: it reads `ETUDE_VIEW_DATABASE_URL` (or
+`--database-url URL`) and requires `ETUDE_VIEW_SECRET`, failing at startup if
+either is missing. Passing `--push` with `--source`, or `--database-url` without
+`--push`, is an error.
+
+Run `etude view-upgrade [--database-url URL]` (reading
+`ETUDE_VIEW_DATABASE_URL` when omitted) before starting a release against
+Postgres. Ordinary `etude view --push` checks the schema revision at startup and
+prints the `etude view-upgrade` command on mismatch. Push mode also serves
+`GET /healthz` for deployment checks and does not overwrite `ETUDE_HOME/view`.
+Only the view host needs `etude-sdk[hosted]` (and `etude-sdk[eval]` when
+building reports for experiments with evaluations); submitting terminals and
+workers need no Postgres driver.
+
+**Publishing from launchers.** Inject `ETUDE_VIEW_URL` and `ETUDE_VIEW_SECRET`
+together into the launcher's environment (your shell or SSH `etude server`) from
+your secret store. Setting only one fails submission immediately. For each
+attempt (initial launch, queued placement, retry or continuation), the launcher
+signs an attempt-scoped token bound to that run and attempt and hands it
+privately to the worker—never the shared secret, provider keys or signed bucket
+links. `launch`, `queue`, `continue` and `status RUN` read the launcher's
+configured `ETUDE_VIEW_URL` (locally or over SSH from the selected
+`etude server`) and print `view: <origin>/runs/<address>`, falling back to
+`ETUDE_HOME/view` when no hosted view is configured. `quote` publishes nothing
+and prints no links. Plain `etude train` does not push to a hosted view.
+
+**What is pushed and persisted.** Workers push attempt status, machine and
+hardware display details, config, an incremental tail of the last 500 console
+lines and portable evidence files: sealed metric blocks, run/outcome/checkpoint/artifact
+records and evaluation Parquet tables with `block.json` (up to 32 MiB per file).
+Weights, `out/` and `blobs.zip` are never pushed. Runs, charts, console tails
+and built experiment reports persist in Postgres across web restarts. Experiment
+reports build on demand—and update with **Refresh report**—from data pushed to
+Postgres, using the optional local `PATH` declaration on the view host or the
+default report.
+
+| Situation | What appears |
+| --- | --- |
+| Link opened before first push | Waiting run page naming the hosted push feed |
+| View unreachable during training | Job, canonical bucket delivery and cleanup continue unaffected; a live or resumed worker catches up (including folded blocks). A lost machine can leave a permanent gap on the site; the bucket remains the portable scientific record. |
+| Worker silent with no outcome or retry | Last push time and **no end recorded** after 10 minutes without a push; stops holding the experiment **Open** |
+| No launcher inventory | `/machines` and the side rail say machine inventory is unavailable here; Dollars show `—`; the local copy-command bar is omitted |
+| Projection or declaration error | Previous complete chart or report stays visible with the sanitized error shown |
+
+The hosted view UI has no login; place authentication or a private network in
+front of it when exposing it beyond `127.0.0.1`. HTTP ingest endpoints require
+the attempt-scoped token, and workers refuse HTTP redirects so tokens are not
+forwarded elsewhere.
