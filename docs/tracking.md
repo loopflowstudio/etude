@@ -340,6 +340,12 @@ selected server and directs you to `etude machines`.
 
 ### Hosted view
 
+The first hosted milestone serves the Overview and Charts tabs from pushed
+training files. Run `uv run --extra hosted pytest -q tests/test_hosted_view.py`
+to exercise a directory worker publishing to a disposable Postgres view. The fixture
+supplies the private attempt grant. Automatic launcher handoff, console tails,
+experiment pages and reports below are planned for the following slices.
+
 Run `etude view --push` backed by Postgres so launched jobs publish sealed
 curves, attempt status and console output to a shared URL as they run. The
 hosted view receives all run data over HTTP and never reads back from a bucket

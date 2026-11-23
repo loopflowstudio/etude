@@ -62,6 +62,7 @@ from etude.launch.schemas import Finished, Packet, Work
 from etude.launch.storage.files import RESULT, append_usage, digest, read_result, write
 from etude.launch.storage.transport import attribute, emit, observe
 from etude.launch.worker.prepared import key, prepare
+from etude.launch.worker.publisher import publish_attempt
 from etude.spec import Input, Record, Runtime, number
 
 # Set when the worker is told to end: running phases stop as they would at SIGTERM.
@@ -586,6 +587,11 @@ def _attempt(session: Path, packet: Packet, work: Work) -> None:
     if packet.deadline is not None and _now() >= packet.deadline:
         return  # no time left: the launcher decides what that means
     home.mkdir(parents=True, exist_ok=True)
+    with publish_attempt(session, work.attempt, work.run, _halt, packet.deadline):
+        _run_attempt(session, home, stop, packet, work)
+
+
+def _run_attempt(session: Path, home: Path, stop: Path, packet: Packet, work: Work) -> None:
     if stop.exists():
         return _finish(home, "cancelled")
     try:

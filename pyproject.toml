@@ -24,6 +24,7 @@ Repository = "https://github.com/loopflowstudio/etude"
 # Local cooperative-game example only; never installed by the offline test workflow.
 hanabi = ["open-spiel==2.0.2"]
 s3 = ["boto3>=1.35,<2"]
+hosted = ["psycopg[binary,pool]>=3.2,<4", "alembic>=1.14,<2", "sqlalchemy>=2,<3"]
 # Tournaments: Parquet tables written and queried with DuckDB.
 eval = ["duckdb>=1.1,<2"]
 train = [
@@ -37,7 +38,14 @@ etude = "etude.cli:main"
 packages = ["src/etude"]
 
 [dependency-groups]
-dev = ["pytest>=8,<10", "mypy>=1.15,<3", "ruff>=0.11,<1", "moto[s3]>=5,<6", "etude-sdk[eval]"]
+dev = [
+    "pytest>=8,<10",
+    "mypy>=1.15,<3",
+    "ruff>=0.11,<1",
+    "moto[s3]>=5,<6",
+    "etude-sdk[eval,hosted]",
+    "pgserver>=0.1.4,<0.2",
+]
 
 [tool.mypy]
 python_version = "3.12"

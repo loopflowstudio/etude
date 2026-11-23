@@ -34,13 +34,13 @@ from itertools import groupby
 from operator import itemgetter
 from pathlib import Path
 from types import FrameType
-from typing import Literal
+from typing import Literal, Protocol
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from pydantic import TypeAdapter
 
 from etude.cache import Cache
-from etude.errors import explain
+from etude.errors import EtudeError, explain
 from etude.experiment import find_eval_groups, locate_evaluation_members, state_of
 from etude.home import home
 from etude.identity import SAFE_NAME, run_address
@@ -50,6 +50,7 @@ from etude.launch.logs import ConsoleTail
 from etude.launch.records import MachineStatus, Standing, Status
 from etude.launch.server import LauncherObservation, PythonClient, selected
 from etude.launch.source import line
+from etude.observations import MAX_FILE_BYTES, ViewGrant, training_file
 from etude.page import (
     DEFAULT_REPORT,
     Pages,
@@ -703,26 +704,20 @@ class _ViewSnapshot:
             return _document(
                 address, heading + observation + (_console(row, collected) if status else "")
             )
-        tabs = "".join(
-            f'<a href="?tab={name}"'
-            + (' aria-current="page"' if name == tab else "")
-            + f">{name.title()}</a>"
-            for name in _RUN_TABS
-        )
-        heading += f'<nav class="tabs" aria-label="Run tabs">{tabs}</nav>'
+        heading += _run_tabs(tab, _RUN_TABS)
         if tab == "overview":
             heading += _run_numbers(row, status, state, written)
         heading += observation
         if tab not in ("overview", "charts"):
             return _document(address, heading + self._section(tab, row, collected))
         side = _console(row, collected) + _checkpoint_section(row) if tab == "overview" else ""
-        if row["payload"] is not None:
-            return render_run(address, row["payload"], heading, side)
-        curves = _empty_section(row, "Curves", "No metric curves recorded.")
-        body = f'<section class="sec" id="charts"><h2>Charts</h2>{curves}</section>'
-        if overview:
-            body = render_overview(body, side)
-        return _document(address, heading + body)
+        return _chart_page(
+            address,
+            row["payload"],
+            heading,
+            side,
+            _empty_section(row, "Curves", "No metric curves recorded."),
+        )
 
     def _observe_console(self, row: sqlite3.Row, status: Status | None, now: datetime) -> str:
         # Session shutdown can still retain final logs after the run itself ended.
@@ -1686,6 +1681,23 @@ def _shell(html: str, rail: str, breadcrumbs: str = "") -> str:
     return html.replace("<body>", opening, 1).replace("</body>", closing, 1)
 
 
+def _run_tabs(tab: str, names: tuple[str, ...]) -> str:
+    links = "".join(
+        f'<a href="?tab={name}"'
+        + (' aria-current="page"' if name == tab else "")
+        + f">{name.title()}</a>"
+        for name in names
+    )
+    return f'<nav class="tabs" aria-label="Run tabs">{links}</nav>'
+
+
+def _chart_page(address: str, payload: str | None, heading: str, side: str, empty: str) -> str:
+    if payload is not None:
+        return render_run(address, payload, heading, side)
+    body = f'<section class="sec" id="charts"><h2>Charts</h2>{empty}</section>'
+    return _document(address, heading + (render_overview(body, side) if side else body))
+
+
 def _document(title: str, body: str) -> str:
     css = read_asset("page.css")
     return (
@@ -1958,7 +1970,21 @@ class Server(ThreadingHTTPServer):
         )
 
 
-class _Handler(BaseHTTPRequestHandler):
+class _ViewHandler(BaseHTTPRequestHandler):
+    def _reply(self, status: int, body: str | bytes = "", media: str = "text/plain") -> None:
+        data = body.encode() if isinstance(body, str) else body
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Type", media + "; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+
+class _Handler(_ViewHandler):
     server: Server
 
     def do_GET(self) -> None:  # noqa: N802
@@ -2010,28 +2036,136 @@ class _Handler(BaseHTTPRequestHandler):
                 body, status = html.encode(), 500
             else:
                 body, status = reason.encode(), 404 if isinstance(error, ValueError) else 500
-        self.send_response(status)
-        self.send_header("Content-Type", f"text/{'html' if html else 'plain'}; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, format: str, *args: object) -> None:
-        pass
+        self._reply(status, body, "text/html" if html else "text/plain")
 
 
 def serve(source: Storage, path: Path | None, address: tuple[str, int]) -> None:
     with Server(source, path, address) as server:
+        run_view(server, server.origin)
 
-        def stop_view(signum: int, frame: FrameType | None) -> None:
-            raise KeyboardInterrupt
 
-        previous = signal.signal(signal.SIGTERM, stop_view)
+def run_view(server: ThreadingHTTPServer, origin: str) -> None:
+    def stop_view(signum: int, frame: FrameType | None) -> None:
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGTERM, stop_view)
+    try:
+        print(origin + "/", flush=True)
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+@dataclass(frozen=True)
+class RunChart:
+    revision: int
+    received: datetime
+    error: str | None
+    payload: str | None
+
+
+class ViewReader(Protocol):
+    def run_chart(self, address: str, *, overview: bool, observe: bool) -> RunChart | None: ...
+
+
+class ObservationWriter(Protocol):
+    def accept_file(
+        self, grant: ViewGrant, key: str, digest: str, modified: datetime, body: bytes
+    ) -> None: ...
+
+
+class PushServer(ThreadingHTTPServer):
+    def __init__(
+        self,
+        address: tuple[str, int],
+        reader: ViewReader,
+        writer: ObservationWriter,
+        secret: bytes,
+        origin: str | None,
+    ) -> None:
+        self.reader, self.writer = reader, writer
+        self.secret, self.audience = secret, origin
+        super().__init__(address, _PushHandler)
+
+
+class _PushHandler(_ViewHandler):
+    server: PushServer
+
+    def do_GET(self) -> None:  # noqa: N802
+        url = urlsplit(self.path)
+        if url.path == "/healthz":
+            return self._reply(200, "ok")
+        if not url.path.startswith("/runs/"):
+            return self._reply(404)
+        address = unquote(url.path.removeprefix("/runs/"))
+        query = parse_qs(url.query)
+        observe = query.get("observe") == ["1"]
+        overview = query.get("tab") != ["charts"]
         try:
-            print(server.origin + "/", flush=True)
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            signal.signal(signal.SIGTERM, previous)
+            chart = self.server.reader.run_chart(address, overview=overview, observe=observe)
+        except Exception as error:
+            print(explain(error), file=sys.stderr, flush=True)
+            return self._reply(503, "Hosted view unavailable.")
+        if chart is None:
+            notice = _observation(
+                "run", "waiting", "Waiting for the run to appear in the hosted push feed."
+            )
+        else:
+            age = _age(chart.received.isoformat(), datetime.now(UTC))
+            message = "Last push " + age + (f" · {chart.error}" if chart.error else "")
+            token = f"{chart.revision}-{sha256((chart.error or '').encode()).hexdigest()[:12]}"
+            notice = _observation("run", token, message)
+        if observe:
+            return self._reply(200, notice, "text/html")
+        tabs = _run_tabs("overview" if overview else "charts", ("overview", "charts"))
+        heading = f'<header class="head"><h1>{escape(address)}</h1></header>' + tabs + notice
+        html = _chart_page(
+            address,
+            chart.payload if chart else None,
+            heading,
+            "",
+            "<p>Waiting for sealed metrics.</p>",
+        )
+        self._reply(200 if chart else 404, _shell(html, ""), "text/html")
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/api/observations/file":
+            return self._reply(404)
+        try:
+            scheme, _, token = self.headers.get("Authorization", "").partition(" ")
+            if scheme.lower() != "bearer":
+                raise EtudeError("missing_view_grant", 401)
+            grant = ViewGrant.verify(token, self.server.secret, self.server.audience)
+            sizes = self.headers.get_all("Content-Length")
+            if (
+                not sizes
+                or len(sizes) != 1
+                or not sizes[0].isascii()
+                or not sizes[0].isdecimal()
+                or "Transfer-Encoding" in self.headers
+            ):
+                raise EtudeError("content_length_required", 411)
+            size = int(sizes[0])
+            if size > MAX_FILE_BYTES:
+                raise EtudeError("view_file_too_large", 413)
+            if self.headers.get_content_type() != "application/octet-stream":
+                raise EtudeError("expected_binary_file", 415)
+            key = self.headers.get("X-Etude-Key", "")
+            digest = self.headers.get("X-Etude-Sha256", "")
+            modified = datetime.fromisoformat(self.headers.get("X-Etude-Modified-At", ""))
+            if not training_file(key) or modified.utcoffset() is None:
+                raise EtudeError("invalid_view_file", 422)
+            body = self.rfile.read(size)
+            if len(body) != size or sha256(body).hexdigest() != digest:
+                raise EtudeError("view_file_digest_mismatch", 422)
+            self.server.writer.accept_file(grant, key, digest, modified, body)
+        except EtudeError as error:
+            return self._reply(error.status, error.code)
+        except ValueError:
+            return self._reply(422, "invalid_view_file")
+        except Exception as error:
+            print(explain(error), file=sys.stderr, flush=True)
+            return self._reply(503, "Hosted view unavailable.")
+        self._reply(200)
