@@ -1,9 +1,8 @@
 """Live run and experiment pages backed by a shared, rebuildable chart index.
 
-File and launcher observations publish independently. Discovery publishes run metadata first. Chart readers
-stage open, requested and local runs one experiment at a time. Each publisher joins its observation
-to the latest committed facts from the other source through state_of. Reports
-build on demand in separate request threads.
+ChartIndex joins discovered metadata and launcher standing through state_of.
+Chart readers publish sealed measurements independently, one experiment at a
+time. Pages read both from a single SQLite snapshot. Reports build on demand.
 """
 
 from __future__ import annotations
@@ -25,7 +24,7 @@ from contextlib import AbstractContextManager, ExitStack, closing, contextmanage
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from functools import cached_property
+from functools import cached_property, partial
 from hashlib import sha256
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -86,6 +85,7 @@ _REMOTE_STANDING = 30
 _SILENT = timedelta(minutes=10)
 _CLOCKS = TypeAdapter(dict[str, float])
 _METRICS = TypeAdapter(list[str])
+_MACHINES = TypeAdapter(tuple[MachineStatus, ...])
 
 # Bump when stored projections change independently of their SQL schema.
 _INDEX_VERSION = 3
@@ -93,8 +93,8 @@ _MAY_BE_OPEN = "file_state IN ('running','queued') OR phase != 'done'"
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS runs (
     address TEXT PRIMARY KEY, experiment TEXT NOT NULL, kind TEXT NOT NULL,
-    eval_last_write TEXT, file_job TEXT, file_state TEXT, file_position TEXT, file_config TEXT, file_continues TEXT,
-    launched_as TEXT, launcher_job TEXT, launcher_state TEXT, launcher_position TEXT,
+    eval_last_write TEXT, file_job TEXT, file_state TEXT, recorded INTEGER NOT NULL, file_config TEXT, file_continues TEXT,
+    launched_as TEXT, launcher_job TEXT, launcher_state TEXT,
     launcher_config TEXT, launcher_continues TEXT, source TEXT, status TEXT, max_attempts INTEGER, machine_rate TEXT,
     phase TEXT GENERATED ALWAYS AS (json_extract(status,'$.phase')) VIRTUAL
 );
@@ -103,8 +103,8 @@ CREATE INDEX IF NOT EXISTS experiment_runs ON runs(experiment, address);
 CREATE INDEX IF NOT EXISTS open_runs ON runs(experiment) WHERE {_MAY_BE_OPEN};
 CREATE TABLE IF NOT EXISTS files (
     address TEXT PRIMARY KEY, experiment TEXT NOT NULL, meta_inputs TEXT NOT NULL,
-    folders TEXT NOT NULL, clock TEXT, target TEXT NOT NULL, inputs TEXT, chart_error TEXT, chart_observed_at TEXT, checkpoints TEXT, reached TEXT,
-    preferred TEXT, last_write TEXT, metadata TEXT NOT NULL, names TEXT, names_version TEXT, pace TEXT, sample_ms INTEGER
+    folders TEXT NOT NULL, clock TEXT, target TEXT NOT NULL, chart_error TEXT, chart_observed_at TEXT,
+    last_write TEXT, metadata TEXT NOT NULL, names TEXT, names_version TEXT
 );
 CREATE INDEX IF NOT EXISTS experiment_files ON files(experiment,address);
 CREATE TABLE IF NOT EXISTS viewed (
@@ -116,13 +116,16 @@ CREATE TABLE IF NOT EXISTS held_files (
 CREATE TABLE IF NOT EXISTS charts (
     address TEXT PRIMARY KEY REFERENCES files(address) ON DELETE CASCADE,
     panel_order INTEGER GENERATED ALWAYS AS (json_extract(headline,'$.order')) STORED,
+    inputs TEXT NOT NULL, reached TEXT NOT NULL, preferred TEXT, pace TEXT NOT NULL, sample_ms INTEGER, checkpoints TEXT,
     definition TEXT NOT NULL, latest TEXT, headline TEXT, overview TEXT NOT NULL, payload TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS consoles (
     run TEXT PRIMARY KEY, body TEXT NOT NULL, collected TEXT, gaps INTEGER NOT NULL, final_attempt INTEGER
 );
 CREATE TABLE IF NOT EXISTS observation (
-    id INTEGER PRIMARY KEY, at TEXT, file_error TEXT, launcher_at TEXT, last_loop TEXT, server TEXT, machines TEXT, machine_rail TEXT, standing TEXT
+    id INTEGER PRIMARY KEY, at TEXT, file_error TEXT, launcher_at TEXT, server TEXT, machine_rail TEXT, standing TEXT,
+    last_loop TEXT GENERATED ALWAYS AS (json_extract(standing,'$.last_loop')) STORED,
+    machines TEXT GENERATED ALWAYS AS (json_extract(standing,'$.machines')) STORED
 );
 CREATE TABLE IF NOT EXISTS declarations (
     experiment TEXT PRIMARY KEY, file TEXT NOT NULL, accepted TEXT, error TEXT
@@ -143,15 +146,14 @@ WITH observed AS (
 """
 _VISIBLE = f"""{_OBSERVED}, visible AS (
     SELECT runs.address, runs.experiment, kind, ({_MAY_BE_OPEN}) AS may_be_open,
-           CASE WHEN matches THEN phase END AS phase, coalesce(eval_last_write,files.last_write) AS last_write, files.inputs,
+           CASE WHEN matches THEN phase END AS phase, coalesce(eval_last_write,files.last_write) AS last_write, recorded,
            held_files.address IS NULL AS discovered,
            held_files.address IS NULL AND files.chart_observed_at IS NULL AS listed,
            CASE WHEN held_files.address IS NULL THEN coalesce(files.chart_observed_at,at) ELSE held_files.observed_at END AS at,
-           launcher_at, last_loop, checkpoints, files.reached, files.preferred, files.pace, files.sample_ms, files.names_version, files.target, files.chart_error,
+           launcher_at, last_loop, files.names_version, files.target, files.chart_error,
            CASE WHEN matches THEN machine_rate END AS machine_rate,
            coalesce(CASE WHEN matches THEN launcher_job END, file_job) AS job,
            coalesce(CASE WHEN matches THEN launcher_state END, file_state) AS state,
-           coalesce(CASE WHEN matches THEN launcher_position END, file_position) AS position,
            coalesce(file_config, CASE WHEN matches THEN launcher_config END) AS config,
            coalesce(CASE WHEN matches THEN launcher_continues END, file_continues) AS continues,
            CASE WHEN matches THEN source END AS source,
@@ -314,13 +316,12 @@ class ChartIndex:
             return  # Another view has already published a newer answer.
 
         db.execute(
-            """INSERT INTO observation(id,server,launcher_at,last_loop,machine_rail,standing) VALUES(1,?,?,?,?,?)
+            """INSERT INTO observation(id,server,launcher_at,machine_rail,standing) VALUES(1,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET server=excluded.server,launcher_at=excluded.launcher_at,
-                   last_loop=excluded.last_loop,machine_rail=excluded.machine_rail,standing=excluded.standing""",
+                   machine_rail=excluded.machine_rail,standing=excluded.standing""",
             (
                 remote,
                 stamp,
-                launcher.last_loop.isoformat() if launcher.last_loop else None,
                 _held_machines(launcher.machines) if launcher.machines is not None else None,
                 launcher.model_dump_json(exclude={"consoles"}, round_trip=True),
             ),
@@ -443,7 +444,7 @@ class ChartIndex:
             listing = RunListing(
                 storage, objects, missing=missing_declaration, known=self._known, executor=pool
             )
-            reads: list[_MetadataRead] = []
+            reads: dict[str, Callable[[], RunData]] = {}
             for experiment, members in groupby(listing.declarations, lambda r: r.file.experiment):
                 runs = list(members)
                 training = [r.file for r in runs if r.file.kind != "evaluation"]
@@ -473,22 +474,21 @@ class ChartIndex:
                         previous.get(address),
                     )
                     if read:
-                        reads.append(read)
+                        reads[address] = pool.submit(read).result if pool else read
 
-            # Workers read objects. Only the observing thread writes the staged generation.
-            tasks = [pool.submit(item.read, storage) for item in reads] if pool else []
-            for index, item in enumerate(reads):
+            # Bucket reads can overlap. SQLite stays on the observing thread.
+            for address, finish in reads.items():
                 try:
-                    data = tasks[index].result() if pool else item.read(storage)
+                    data = finish()
                     db.execute(
                         "UPDATE next_files SET metadata=? WHERE address=?",
                         (
                             data.model_dump_json(exclude={"last_write"}, round_trip=True),
-                            item.address,
+                            address,
                         ),
                     )
                 except FileNotFoundError as missing:
-                    vanished[item.address] = explain(missing)
+                    vanished[address] = explain(missing)
 
         return observed_at, _hold_files(db, listing, vanished) if vanished else {}
 
@@ -530,13 +530,15 @@ class ChartIndex:
         db.execute(
             """UPDATE files SET folders=n.folders, clock=n.clock,target=n.target,
                       last_write=n.last_write,names=n.names,names_version=n.names_version,
-                      metadata=coalesce(n.metadata,files.metadata),meta_inputs=n.meta_inputs,
-                      chart_error=CASE WHEN n.target IS NOT files.inputs THEN files.chart_error END,
-                      chart_observed_at=CASE WHEN n.target IS NOT files.inputs THEN files.chart_observed_at END
+                      metadata=coalesce(n.metadata,files.metadata),meta_inputs=n.meta_inputs
                FROM next_files n WHERE n.address=files.address AND n.meta_inputs IS NOT NULL
                AND (n.target != files.target OR n.meta_inputs != files.meta_inputs OR
                     n.last_write IS NOT files.last_write OR n.names_version IS NOT files.names_version)"""
         )
+        # A listing can return to the last charted generation after a missed block.
+        db.execute("""UPDATE files SET chart_error=NULL,chart_observed_at=NULL FROM charts
+                      WHERE files.chart_error IS NOT NULL AND files.address=charts.address
+                      AND files.target=charts.inputs""")
         db.executemany(
             "DELETE FROM held_files WHERE address=?",
             ((address,) for address in held - vanished.keys()),
@@ -557,49 +559,42 @@ class ChartIndex:
                ON CONFLICT(id) DO UPDATE SET at=excluded.at,file_error=excluded.file_error""",
             (observed_at.isoformat(), error),
         )
-        self._join_files(db, changed)
-
-    def _join_files(self, db: sqlite3.Connection, experiments: set[str]) -> None:
-        if experiments:
-            retained = db.execute("SELECT standing FROM observation WHERE id=1").fetchone()[0]
+        if changed:
+            (standing,) = db.execute("SELECT standing FROM observation WHERE id=1").fetchone()
             launcher = (
-                LauncherObservation.model_validate_json(retained)
-                if retained
+                LauncherObservation.model_validate_json(standing)
+                if standing
                 else LauncherObservation()
             )
-            self._publish_runs(db, launcher, experiments)
+            self._publish_runs(db, launcher, changed)
 
     def _charts_to_read(self, db: sqlite3.Connection) -> list[tuple[str, list[str]]]:
+        local = not isinstance(self.source, S3Storage)
         rows = db.execute(
             _VISIBLE
             + """
             SELECT experiment,address,state,phase,last_write,at,inputs,viewed.address IS NOT NULL AS viewed
-            FROM visible LEFT JOIN viewed USING(address)
+            FROM visible LEFT JOIN viewed USING(address) LEFT JOIN charts USING(address)
             WHERE kind='training' AND target IS NOT inputs AND target IS NOT NULL
             AND discovered AND (:local OR may_be_open OR viewed.address IS NOT NULL OR inputs IS NOT NULL)
             ORDER BY experiment,address
             """,
-            {"remote": selected(), "local": not isinstance(self.source, S3Storage)},
+            {"remote": selected(), "local": local},
         )
         groups: dict[tuple[bool, str], list[str]] = defaultdict(list)
-        retired: dict[str, str] = {}
+        retired: list[tuple[str]] = []
         for row in rows:
             priority = bool(row["viewed"]) or _is_open(row, _display_state(row))
-            if priority or not isinstance(self.source, S3Storage):
+            if priority or local:
                 groups[not priority, row["experiment"]].append(row["address"])
             elif row["inputs"]:
                 # A formerly open run closed with new inputs. Its old chart can no
                 # longer describe it; opening it will fetch the final generation.
-                retired[row["address"]] = row["experiment"]
-        if retired:
-            keys = [(key,) for key in retired]
-            db.executemany("DELETE FROM charts WHERE address=?", keys)
-            db.executemany(
-                """UPDATE files SET inputs=NULL,reached=NULL,preferred=NULL,pace=NULL,
-                           sample_ms=NULL,checkpoints=NULL,chart_error=NULL,chart_observed_at=NULL WHERE address=?""",
-                keys,
-            )
-            self._join_files(db, set(retired.values()))
+                retired.append((row["address"],))
+        db.executemany("DELETE FROM charts WHERE address=?", retired)
+        db.executemany(
+            "UPDATE files SET chart_error=NULL,chart_observed_at=NULL WHERE address=?", retired
+        )
         return [(experiment, addresses) for (_, experiment), addresses in sorted(groups.items())]
 
     def request_chart(self, experiment: str, address: str) -> None:
@@ -631,15 +626,13 @@ class ChartIndex:
             db.execute("""CREATE TEMP TABLE built(address TEXT PRIMARY KEY,target TEXT,
                        reached TEXT, preferred TEXT, checkpoints TEXT, pace TEXT, sample_ms INTEGER,
                        definition TEXT,headline TEXT,latest TEXT,overview TEXT,payload TEXT,error TEXT)""")
-            for address in addresses:
-                row = db.execute(
-                    """SELECT f.address,f.inputs,f.target,f.metadata,f.clock,f.folders,f.names,d.accepted
-                       FROM files f LEFT JOIN declarations d USING(experiment)
-                       WHERE f.address=? AND f.experiment=? AND inputs IS NOT target""",
-                    (address, experiment),
-                ).fetchone()
-                if row is None:
-                    continue
+            rows = db.execute(
+                """SELECT f.address,inputs,target,metadata,clock,folders,names,accepted
+                   FROM files f LEFT JOIN declarations USING(experiment) LEFT JOIN charts USING(address)
+                   WHERE f.address IN (SELECT value FROM json_each(?)) AND f.experiment=? AND inputs IS NOT target""",
+                (json.dumps(addresses), experiment),
+            )
+            for row in rows:
                 try:
                     self._stage_chart(db, row)
                 except Exception as failure:
@@ -647,7 +640,7 @@ class ChartIndex:
                         raise
                     db.execute(
                         "INSERT INTO built(address,target,error) VALUES(?,?,?)",
-                        (address, row["target"], explain(failure)),
+                        (row["address"], row["target"], explain(failure)),
                     )
             db.commit()
             db.execute("BEGIN IMMEDIATE")
@@ -663,9 +656,10 @@ class ChartIndex:
             ]
             db.execute(
                 """UPDATE files SET chart_error=b.error,
-                          chart_observed_at=CASE WHEN inputs IS NOT NULL THEN coalesce(
-                              files.chart_observed_at,?,(SELECT at FROM observation WHERE id=1)) END
-                          FROM built b WHERE files.address=b.address AND b.error IS NOT NULL""",
+                          chart_observed_at=CASE WHEN b.error IS NOT NULL AND charts.address IS NOT NULL
+                              THEN coalesce(files.chart_observed_at,?,(SELECT at FROM observation WHERE id=1)) END
+                          FROM built b LEFT JOIN charts USING(address) WHERE files.address=b.address
+                          AND (b.error IS NOT NULL OR files.chart_error IS NOT NULL)""",
                 (previous_at,),
             )
             if gaps:
@@ -674,13 +668,10 @@ class ChartIndex:
                            WHERE id=1""",
                     ("\n".join(gaps),),
                 )
-            changed = db.execute("""UPDATE files SET inputs=b.target,reached=b.reached,
-                       preferred=b.preferred,pace=b.pace,sample_ms=b.sample_ms,checkpoints=b.checkpoints,chart_error=NULL,chart_observed_at=NULL
-                       FROM built b WHERE files.address=b.address AND b.error IS NULL""").rowcount
-            if changed:
-                db.execute("""INSERT OR REPLACE INTO charts(address,definition,headline,latest,overview,payload)
-                           SELECT address,definition,headline,latest,overview,payload FROM built WHERE error IS NULL""")
-                self._join_files(db, {experiment})
+            db.execute("""INSERT OR REPLACE INTO charts(address,inputs,reached,preferred,pace,sample_ms,
+                           checkpoints,definition,headline,latest,overview,payload)
+                       SELECT address,target,reached,preferred,pace,sample_ms,
+                           checkpoints,definition,headline,latest,overview,payload FROM built WHERE error IS NULL""")
 
     def _stage_chart(self, db: sqlite3.Connection, row: sqlite3.Row) -> None:
         metadata = RunData.model_validate_json(row["metadata"])
@@ -740,11 +731,10 @@ class ChartIndex:
         }
         for experiment in experiments:
             rows = db.execute(
-                """SELECT address, metadata, reached, preferred, last_write
+                """SELECT metadata, last_write
                    FROM files WHERE experiment=? ORDER BY address""",
                 (experiment,),
             )
-            files = {row["address"]: row for row in rows}
             metadata = [
                 RunData.model_validate_json(row["metadata"]).model_copy(
                     update={
@@ -753,7 +743,7 @@ class ChartIndex:
                         else None
                     }
                 )
-                for row in files.values()
+                for row in rows
             ]
             removed = {
                 row[0]
@@ -765,28 +755,23 @@ class ChartIndex:
                 if data.file and data.file.kind != "evaluation"
             )
             state = state_of(metadata, experiment, retained=tuple(standing[experiment]))
-            runs: tuple[TrainingRunSummary | EvalRunSummary, ...] = (*state.runs, *state.eval_runs)
-            for run in runs:
+            summaries: tuple[TrainingRunSummary | EvalRunSummary, ...] = (
+                *state.runs,
+                *state.eval_runs,
+            )
+            for run in summaries:
                 # Stored charts keep their compact address through a launcher alias.
                 address = run.stored_address or run.address
-                chart = files.get(address)
                 _store_run(
                     db,
                     address,
                     experiment,
                     run,
-                    _CLOCKS.validate_json(chart["reached"]) if chart and chart["reached"] else {},
-                    chart["preferred"] if chart else None,
                     file_sources,
                     rates.get(run.status.run) if run.status else None,
                 )
                 removed.discard(address)
             db.executemany("DELETE FROM runs WHERE address=?", ((a,) for a in removed))
-        machines = launcher.machines
-        db.execute(
-            "UPDATE observation SET machines=? WHERE id=1",
-            (_machines_table(db, machines) if machines is not None else None,),
-        )
         db.execute(
             "DELETE FROM consoles WHERE NOT EXISTS (SELECT 1 FROM runs WHERE launched_as=consoles.run)"
         )
@@ -831,18 +816,20 @@ class _ViewSnapshot:
         mounted: str | None = None,
         standalone: bool = False,
     ) -> sqlite3.Row | None:
-        # A NULL join key skips the payload lookup on polls and unrelated tabs.
+        # Fetch only the requested payload, and leave a mounted chart in the browser.
         row: sqlite3.Row | None = self.db.execute(
             _VISIBLE
             + """
-            SELECT visible.*, viewed.address IS NOT NULL AS viewed,
-                   CASE :chart WHEN 'overview' THEN charts.overview ELSE charts.payload END AS payload,
+            SELECT visible.*, viewed.address IS NOT NULL AS viewed, inputs, reached, preferred,
+                   pace, sample_ms, checkpoints,
+                   CASE WHEN inputs IS :mounted THEN NULL
+                        WHEN :chart='overview' THEN charts.overview
+                        WHEN :chart IS NOT NULL THEN charts.payload END AS payload,
                    json_extract(charts.latest,'$[0]') AS metric, declarations.error AS report_error,
                    consoles.body, consoles.collected, consoles.gaps, consoles.final_attempt AS console_attempt
             FROM visible
             LEFT JOIN viewed USING(address)
-            LEFT JOIN charts ON charts.address=CASE
-                WHEN :chart IS NOT NULL AND visible.inputs IS NOT :mounted THEN visible.address END
+            LEFT JOIN charts USING(address)
             LEFT JOIN consoles ON consoles.run=CASE
                 WHEN :console OR (:standalone AND visible.kind='evaluation') THEN visible.launched_as END
             LEFT JOIN declarations USING(experiment)
@@ -896,7 +883,7 @@ class _ViewSnapshot:
             row["inputs"],
             row["names_version"] if tab == "files" else None,
             run_line,
-            row["position"],
+            _position(row, status),
             status.formatted_spend if status else None,
             row["machine_rate"] if overview else None,
             row["continues"],
@@ -1000,7 +987,7 @@ class _ViewSnapshot:
         return self.db.execute(
             _VISIBLE
             + f"""
-            SELECT experiment,address,job,state,phase,position,status,last_write,at,
+            SELECT experiment,address,job,state,phase,recorded,preferred,reached,status,last_write,at,
                    continues,listed,definition,panel_order,{projection}
             FROM visible LEFT JOIN charts USING(address) {selection}
             """,
@@ -1034,7 +1021,9 @@ class _ViewSnapshot:
                     costs.append(status)
                 address = run["address"]
                 dots.append(
-                    _run_dot(address, state, run["position"], status.machine if status else None)
+                    _run_dot(
+                        address, state, _position(run, status), status.machine if status else None
+                    )
                 )
                 if (run["definition"], run["panel_order"]) == panel and run["headline"]:
                     panels.append(run["headline"])
@@ -1084,7 +1073,10 @@ class _ViewSnapshot:
                 body = "<p>No launcher is used here.</p>"
             else:
                 ages = " · ".join(_observation_ages(row, datetime.now(UTC), launcher=True))
-                body = machines + f'<p class="context">{escape(ages)}</p>'
+                body = (
+                    _machines_table(self.db, _MACHINES.validate_json(machines))
+                    + f'<p class="context">{escape(ages)}</p>'
+                )
         return _live_status(body, error=error)
 
     def reports(self, declared: dict[str, Path], served: dict[str, ServedReport]) -> str:
@@ -1229,7 +1221,7 @@ class _ViewSnapshot:
                 f'<tr><td><a title="{escape(address)}" href="{pick}{tab}#run-detail"{current}>{escape(short)}</a>'
                 f"<small>{escape(row['job'])}</small>{row['continues'] or ''}</td>"
                 f'<td><span class="pill">{escape(state)}</span><small>{escape(reason)}</small></td>'
-                f"<td>{escape(row['position'] or '—')}<small>{last_write}</small></td>"
+                f"<td>{escape(_position(row, status) or '—')}<small>{last_write}</small></td>"
                 f"<td>{escape(metric or '—')}</td><td>{machine}</td>"
                 f"<td>{escape(status.formatted_spend) if status else '—'}</td></tr>"
             )
@@ -1478,17 +1470,6 @@ def _hold_files(
     return held
 
 
-@dataclass(frozen=True)
-class _MetadataRead:
-    address: str
-    run: LocatedRun
-    keys: list[str]
-    writers: bool
-
-    def read(self, storage: Storage) -> RunData:
-        return read_run_metadata(storage, self.run, self.keys, require_writers=self.writers)
-
-
 def _stage_discovery(
     db: sqlite3.Connection,
     listing: RunListing,
@@ -1499,7 +1480,7 @@ def _stage_discovery(
     definition: str | None,
     writers: bool,
     previous: str | None,
-) -> _MetadataRead | None:
+) -> Callable[[], RunData] | None:
     """Keep each owned key and its freshness evidence for a later single-run read."""
     remote = isinstance(storage.storage, S3Storage)
     inventory: dict[str, str] = {}
@@ -1539,7 +1520,7 @@ def _stage_discovery(
         ),
     )
     if meta_inputs != previous:
-        return _MetadataRead(address, run, sorted(meta), writers)
+        return partial(read_run_metadata, storage, run, sorted(meta), require_writers=writers)
     return None
 
 
@@ -1574,8 +1555,6 @@ def _store_run(
     address: str,
     experiment: str,
     run: TrainingRunSummary | EvalRunSummary,
-    reached: dict[str, float],
-    preferred: str | None,
     file_sources: RunSources,
     machine_rate: Decimal | None,
 ) -> None:
@@ -1602,9 +1581,6 @@ def _store_run(
         if file_state and not file_job:
             file_job = "Evaluation"
 
-    # Once files exist, even an empty sealed clock belongs to them. The
-    # launcher can still supply a target on a different clock.
-    clocks = status.clocks if stored is None and status else reached
     file_config = file.config_json if file else None
     fields = {
         "address": address,
@@ -1617,12 +1593,11 @@ def _store_run(
         else None,
         "file_job": file_job,
         "file_state": file_state,
-        "file_position": format_position(clocks, preferred) if stored else None,
+        "recorded": stored is not None,
         "file_config": file_config,
         "launched_as": status.run if status else None,
         "launcher_job": (job.name or "Evaluation") if job and not (file and training) else None,
         "launcher_state": (run.allocation_phase or run.state).replace("_", " ") if status else None,
-        "launcher_position": format_position(clocks, preferred, status.until) if status else None,
         "launcher_config": record.config_json if record and file_config is None else None,
         "source": _source(record) if record and training else None,
         "status": status.model_dump_json() if status else None,
@@ -1668,9 +1643,9 @@ def _machines_table(db: sqlite3.Connection, machines: tuple[MachineStatus, ...])
     placements = {}
     if occupied:
         allocated = db.execute(
-            """SELECT launched_as,address,launcher_state AS state,launcher_position AS position,
+            """SELECT launched_as,address,launcher_state AS state,recorded,reached,preferred,
                       status,max_attempts
-               FROM runs WHERE launched_as IN (SELECT value FROM json_each(?))""",
+               FROM runs LEFT JOIN charts USING(address) WHERE launched_as IN (SELECT value FROM json_each(?))""",
             (json.dumps(occupied),),
         )
         placements = {row["launched_as"]: row for row in allocated}
@@ -1725,7 +1700,7 @@ def _run_line(
     overview: bool = False,
 ) -> str:
     parts = [f'<span class="pill">{escape(state)}</span>']
-    facts = [] if overview else [row["position"]]
+    facts = [] if overview else [_position(row, status)]
     if status:
         facts.append(_state_reason(state, status))
         facts.extend(
@@ -1743,7 +1718,7 @@ def _run_numbers(row: sqlite3.Row, status: Status | None, state: str, written: s
     rates = _CLOCKS.validate_json(row["pace"]) if row["pace"] else {}
     rate = rates.get(clock) if clock else None
     values = [
-        ("Clock", row["position"]),
+        ("Clock", _position(row, status)),
         ("Latest metric", row["metric"]),
         ("Mean pace", f"{rate:.4g} {clock}/s" if rate is not None else None),
     ]
@@ -1875,6 +1850,15 @@ def _observation_ages(
         ) > timedelta(seconds=_REFRESH):
             ages.append(f"launcher observed {_age(row['launcher_at'], now)}")
     return ages
+
+
+def _position(row: sqlite3.Row, status: Status | None) -> str:
+    # Once a run has a record, its sealed clocks own the position. The
+    # launcher can still supply a target before any rows arrive.
+    clocks = _CLOCKS.validate_json(row["reached"]) if row["reached"] else {}
+    if status and not row["recorded"]:
+        clocks = status.clocks
+    return format_position(clocks, row["preferred"], status.until if status else None)
 
 
 def format_position(

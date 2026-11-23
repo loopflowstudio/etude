@@ -218,8 +218,10 @@ allocations use writer records to attribute the outcome.
 The index retains each run’s folders, keys and listed versions. A chart
 reader uses them to fetch one run without listing the bucket again. Each
 file poll charts Open and previously viewed runs first, then the other
-runs in a local directory. It commits each experiment’s changed curves and
-checkpoint records together. Opening a cold bucket run schedules its first
+runs in a local directory. A chart generation contains the run’s curves,
+sealed clock positions, pace and checkpoints. Publishing it updates just
+the charted runs. The Machines page reads the same sealed clocks for its
+occupied slots. Opening a cold bucket run schedules its first
 chart on a separate thread and records the visit in SQLite. A failed read
 leaves its metadata visible and the run page shows the error. Open blocks can
 change the Files tab and last write between sealed chart generations.
