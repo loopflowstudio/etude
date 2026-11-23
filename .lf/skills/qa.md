@@ -356,6 +356,17 @@ kill the view and restart it on the same port at once: the run must read
 `hosted view:` diagnostic. `psql` from the same `$BIN` inspects `runs`,
 `run_files`, `attempts` and `reports`.
 
+A continuation gets its own address, not attempt 2. To make a second attempt of
+one run, have the job `raise SystemExit(75)` once at an update (guard it with a
+marker file in the lab): exit 75 is a planned stop and retries on the local pool.
+To check a replayed or conflicting push, read the attempt's grant from
+`home/sessions/*/.view/<attempt>.json` without printing its `token`, read the
+stored `observation` from `attempts`, and POST it to `/api/observations` with
+`Authorization: Bearer TOKEN`. An identical replay returns 200, and a changed body
+or an older `producer_seq` returns 409. Reports render in JavaScript, so read them
+in the browser, not with curl. Stop the view by its port:
+`kill $(lsof -tiTCP:PORT -sTCP:LISTEN)`.
+
 Claude in Chrome may be disconnected in headless runs; a Node script using an
 installed `playwright-core` (`find ~/src -name playwright-core -path '*node_modules*'`)
 with `chromium.launch({headless: true})` screenshots pages and polls one open page
