@@ -299,8 +299,10 @@ def test_permanent_and_recent_duplicate_is_read_once(tmp_path: Path) -> None:
     builder.add(1000, {"step": 1}, {"value": 7})
     table = builder.columns(writer, 0)
     write_block(tmp_path / prefix, block_key(1, 0, 0, writer), table)
-    write_block(tmp_path / prefix, block_key(2, 0, 0, writer), table)
+    permanent = block_key(2, 0, 0, writer)
+    write_block(tmp_path / prefix, permanent, table)
     data = read(tmp_path, "e", "r")
+    assert [block.key for block in data.blocks] == [prefix + permanent]
     assert data.rows == 1
     np.testing.assert_array_equal(data.points("value", "step").y, [7])
 
@@ -447,24 +449,22 @@ def test_reader_refreshes_vanished_tails_and_sequence_gaps(
     write_block(root, block_key(1, 0, 0, writer), builder.columns(writer, 0))
     (root / tail_key(0, writer)).unlink()
     assert snapshot.chart("value", "step").last.tolist() == [1]
-    write_block(root, block_key(1, 0, 0, writer), builder.columns(writer, 0))
     builder = Builder(["step"])
     builder.add(2000, {"step": 2}, {"value": 2})
     write_block(root, block_key(1, 1, 1, writer), builder.columns(writer, 1))
     storage = DirectoryStorage(tmp_path)
-    keys = storage.keys
-    stale = True
+    versions = storage.versions
 
-    def counted_keys(prefix: str) -> list[str]:
-        nonlocal stale
-        result = keys(prefix)
-        if stale:
-            stale = False
-            return [key for key in result if "/metrics/1-00000000-" not in key]
+    def omit_first_block(prefix: str) -> dict[str, str]:
+        result = versions(prefix)
+        if not prefix:  # The initial discovery saw only sequence 1.
+            del result[run_prefix("r") + block_key(1, 0, 0, writer)]
         return result
 
-    monkeypatch.setattr(storage, "keys", counted_keys)
-    assert read(storage, "e", "r").chart("value", "step").last.tolist() == [1, 2]
+    monkeypatch.setattr(storage, "versions", omit_first_block)
+    measured = MeasuredStorage(storage)
+    assert read(measured, "e", "r").chart("value", "step").last.tolist() == [1, 2]
+    assert measured.listings == 2
 
 
 def test_range_read_refuses_a_damaged_permanent_array(tmp_path: Path) -> None:

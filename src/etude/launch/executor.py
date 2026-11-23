@@ -6,6 +6,8 @@ The launcher depends on its public execution protocol, never on SSH or a provide
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -17,9 +19,17 @@ from etude.launch.provisioner.machines import (
     Machines,
     OwnedMachine,
     Refused,
+    Safeguards,
     check_creation,
 )
-from etude.launch.records import BootstrapLinks, LogStream, Offer
+from etude.launch.records import (
+    BootstrapLinks,
+    LogStream,
+    Machine,
+    MachineTemplate,
+    Offer,
+    OnDemand,
+)
 from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
@@ -169,6 +179,8 @@ class Executor:
                 startup_deadline=packet.startup_deadline,
                 deadline=deadline,
                 cap_usd=packet.cap_usd,
+                cap_units=packet.cap_units,
+                max_units_per_hour=packet.max_units_per_hour,
                 log_seconds=packet.log_seconds,
                 bootstrap=bootstrap,
             )
@@ -234,3 +246,16 @@ class Executor:
 
 def local(root: Path) -> Executor:
     return Executor(OwnedMachine(), ProcessStart(root), DirectoryJournal(root))
+
+
+@dataclass(frozen=True)
+class ProviderService:
+    """Connect to a provider and check its template before opening any connection."""
+
+    connect: Callable[[Machine | OnDemand], Execution]
+    safeguards: Safeguards = Safeguards()
+    stock_image: bool = True
+    validate: Callable[[MachineTemplate], str | None] | None = None
+
+    def __call__(self, held: Machine | OnDemand) -> Execution:
+        return self.connect(held)

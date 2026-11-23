@@ -384,6 +384,60 @@ launch call has no idempotency token: a lost reply is looked up by name and
 never sent twice. Lambda reports no per-machine bill, so cost stays the
 estimate at the listed price.
 
+### Google Colab
+
+```sh
+# Authenticate once (writes ~/.config/gcloud/application_default_credentials.json):
+gcloud auth application-default login \
+    --scopes=openid,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/colaboratory
+
+etude provider set colab --kind colab --storage r2 --usd-per-unit 0.10
+etude ondemand add colab-l4 --provider colab --gpu L4 --max 1 --max-usd-per-hour 0.30
+etude availability colab-l4 --timeout 30
+etude launch job.py --rent colab-l4 --quote
+etude launch job.py --rent colab-l4
+etude wait
+```
+
+The launcher looks for Google OAuth2 credentials in this order:
+
+1. A bearer token in `COLAB_ACCESS_TOKEN`.
+2. Authorized-user JSON in `COLAB_OAUTH_TOKEN`, then the file named by `COLAB_OAUTH_TOKEN_FILE`.
+3. `$ETUDE_HOME/colab-token.json` (normally `~/.etude/colab-token.json`), then
+   `~/.config/colab-cli/token.json`, then `~/.config/gcloud/application_default_credentials.json`.
+
+On macOS, you can export an existing `colab-cli` Keychain token once:
+
+```sh
+umask 077 && security find-generic-password -s google-colab-cli -a oauth_token -w > ~/.etude/colab-token.json
+```
+
+The launcher keeps the OAuth credentials. The runtime receives signed storage
+links for bootstrap. Configuring the account and its on-demands works offline.
+
+Omit `--gpu` for a CPU runtime, or choose one `T4`, `L4`, `G4`, `A100` or
+`H100`. A request above 16 GB selects High-RAM where available. Colab chooses
+the image, region, vCPUs and disk. Etude rejects custom values, spot requests
+and unsupported GPUs when you configure the on-demand.
+
+Colab meters Compute Units (CU). With the default conversion of $0/CU, a
+subscription allotment adds $0 to a job's budget. Set `--usd-per-unit` to
+value the units in dollars. Availability shows the balance and active
+assignment count. At a positive conversion, quotes leave the dollar cost
+unknown until assignment.
+
+Etude estimates CU/hour from the change in account consumption when the
+assignment count increases by one. Concurrent assignments can leave the rate
+unknown. With an observed rate, Etude checks the hourly ceiling before
+bootstrap and unassigns a runtime that exceeds it. A dollar budget bounds
+the rental and its watchdog. Status and machine listings show the estimated
+CU alongside the converted dollars.
+
+A stable notebook hash lets Etude recover a lost assignment reply by session
+ID. A Jupyter cell starts the worker and watchdog in a child process group and
+stays busy while they run. To end the rental, the scheduler unassigns the
+endpoint and confirms it has disappeared from the account's assignments.
+
 ### Spot
 
 ```sh

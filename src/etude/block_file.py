@@ -61,12 +61,11 @@ def parse(key: str) -> BlockFile | None:
 
 def select(files: Iterable[BlockFile]) -> list[BlockFile]:
     """Keep the widest coverage, preferring higher-level permanent copies."""
-    ordered = sorted(files, key=lambda f: (f.writer, f.first - f.last, -f.level))
+    # A covering block sorts before every block it contains. Within a writer,
+    # the last block kept therefore has the furthest end seen so far.
+    ordered = sorted(files, key=lambda f: (f.writer, f.first, -f.last, -f.level))
     kept: list[BlockFile] = []
     for file in ordered:
-        if not any(
-            other.writer == file.writer and other.first <= file.first and file.last <= other.last
-            for other in kept
-        ):
+        if not kept or file.writer != kept[-1].writer or file.last > kept[-1].last:
             kept.append(file)
-    return sorted(kept, key=lambda f: (f.writer, f.first))
+    return kept

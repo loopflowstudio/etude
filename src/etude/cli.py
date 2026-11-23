@@ -321,7 +321,10 @@ def view(
     path: Annotated[
         Path | None, typer.Argument(exists=True, readable=True, help="an experiment file or folder")
     ] = None,
-    source: Annotated[str | None, typer.Option(help="a runs directory or bucket URI")] = None,
+    source: Annotated[
+        str | None,
+        typer.Option(help="read every experiment in this runs directory or small bucket prefix"),
+    ] = None,
     push: Annotated[
         bool, typer.Option("--push", help="receive training evidence over HTTP")
     ] = False,

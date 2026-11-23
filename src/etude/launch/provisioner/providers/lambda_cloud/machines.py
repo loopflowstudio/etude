@@ -109,7 +109,13 @@ class LambdaMachines:
         quote = self._quote or self.api.offer(self.template)
         self._quote = None
         gpu = quote.hardware
-        if not quote.available or not isinstance(gpu, GPU) or not gpu.flavor or not quote.region:
+        if (
+            not quote.available
+            or not isinstance(gpu, GPU)
+            or not gpu.flavor
+            or not quote.region
+            or quote.usd_per_hour is None
+        ):
             raise Refused(quote.reason or "Lambda has no matching GPU")
         now = datetime.now(UTC)
         if (
