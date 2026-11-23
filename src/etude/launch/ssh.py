@@ -27,6 +27,7 @@ from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import BootstrapLinks, LogProducer, LogStream
 from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.source import source_archive
+from etude.observations import ViewGrantTarget
 from etude.spec import Record
 from etude.storage_timeout import storage_environment
 
@@ -35,6 +36,7 @@ from etude.storage_timeout import storage_environment
 
 
 class StartRequest(Record):
+    view_grants: dict[str, ViewGrantTarget] = Field(default_factory=dict, repr=False)
     action: Literal["start"] = "start"
     session: str
     packet: Packet
@@ -44,6 +46,7 @@ class StartRequest(Record):
 
 
 class AddRequest(Record):
+    view_grant: ViewGrantTarget | None = Field(default=None, repr=False)
     action: Literal["add"] = "add"
     session: str
     work: Work
@@ -343,7 +346,13 @@ class SSHStart:
     def __init__(self, ssh: SSH) -> None:
         self.ssh = ssh
 
-    def start(self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None) -> None:
+    def start(
+        self,
+        machine: Allocation,
+        packet: Packet,
+        bootstrap: BootstrapLinks | None,
+        view_grants: dict[str, ViewGrantTarget] | None = None,
+    ) -> None:
         ssh = self.ssh
         files = {path: body for work in packet.work for path, body in ssh.files(work).items()}
         ssh.call(
@@ -351,6 +360,7 @@ class SSHStart:
                 session=packet.session,
                 packet=packet,
                 files=files,
+                view_grants=view_grants or {},
                 bootstrap=bootstrap,
                 cleanup=machine.cleanup,
             )
@@ -362,7 +372,11 @@ class SSHJournal:
         self.ssh = ssh
 
     def prepare(
-        self, packet: Packet, *, expires_at: datetime | None = None
+        self,
+        packet: Packet,
+        *,
+        expires_at: datetime | None = None,
+        view_grants: dict[str, ViewGrantTarget] | None = None,
     ) -> BootstrapLinks | None:
         return None
 
@@ -381,8 +395,12 @@ class SSHJournal:
     def finish(self, session_id: str) -> datetime | None:
         return self.ssh.call(SessionRequest(action="finish", session=session_id)).ended_at
 
-    def add(self, session_id: str, work: Work) -> None:
-        self.ssh.call(AddRequest(session=session_id, work=work, files=self.ssh.files(work)))
+    def add(self, session_id: str, work: Work, view_grant: ViewGrantTarget | None = None) -> None:
+        self.ssh.call(
+            AddRequest(
+                session=session_id, work=work, view_grant=view_grant, files=self.ssh.files(work)
+            )
+        )
 
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
         reply = self.ssh.call(HeldRequest(run=run, key=key))

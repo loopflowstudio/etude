@@ -333,6 +333,47 @@ temporary trace in `tests/launch/counting.py` to record normalized statements
 in a file named by an environment variable, then remove the trace. Fenced
 writes add `BEGIN IMMEDIATE`, `PRAGMA user_version` and `COMMIT`.
 
+## Etude: the hosted push view
+
+A lab whose dependency is `etude-sdk[eval,hosted]` serves pushed runs from a
+disposable Postgres taken from the dev group's pgserver wheel (no Docker):
+`BIN=REPO/.venv/lib/python3.12/site-packages/pgserver/pginstall/bin`, then
+`$BIN/initdb -D LAB/pg -U etude -A trust --no-locale --encoding=UTF8` and
+`$BIN/pg_ctl -D LAB/pg -l LAB/sql.log -o "-k /tmp/SHORT -c listen_addresses=''" -w start`
+(a short socket folder fits Darwin's path limit). Set
+`ETUDE_VIEW_DATABASE_URL='postgresql://etude@/postgres?host=%2Ftmp%2FSHORT'` and a
+throwaway `ETUDE_VIEW_SECRET`, run `etude view-upgrade` (silent on success), then
+`etude view experiment.py --push --host 127.0.0.1 --port PORT` in the background.
+Pick a free port: 8765 is often held by another session's view.
+Launch with `ETUDE_VIEW_URL` and the same secret, `--pool local`, and drive with
+`etude wait`; `launch`/`continue` print the `view:` link.
+
+For a live curve add `time.sleep(0.5)` per update and more updates. `etude continue
+--run ADDRESS --until updates=N` gives a fresh running link off a finished run.
+To test an outage at the job's end, poll the attempt's `log` for the last update,
+kill the view and restart it on the same port at once: the run must read
+`succeeded` with its last point. The session's `session.log` holds the one
+`hosted view:` diagnostic. `psql` from the same `$BIN` inspects `runs`,
+`run_files`, `attempts` and `reports`.
+
+A continuation gets its own address, not attempt 2. To make a second attempt of
+one run, have the job `raise SystemExit(75)` once at an update (guard it with a
+marker file in the lab): exit 75 is a planned stop and retries on the local pool.
+To check a replayed or conflicting push, read the attempt's grant from
+`home/sessions/*/.view/<attempt>.json` without printing its `token`, read the
+stored `observation` from `attempts`, and POST it to `/api/observations` with
+`Authorization: Bearer TOKEN`. An identical replay returns 200, and a changed body
+or an older `producer_seq` returns 409. Reports render in JavaScript, so read them
+in the browser, not with curl. Stop the view by its port:
+`kill $(lsof -tiTCP:PORT -sTCP:LISTEN)`.
+
+Claude in Chrome may be disconnected in headless runs; a Node script using an
+installed `playwright-core` (`find ~/src -name playwright-core -path '*node_modules*'`)
+with `chromium.launch({headless: true})` screenshots pages and polls one open page
+every five seconds to watch live refresh. After clicking **Refresh report**, wait
+for the navigation before reading text. Stop the view's python child too: killing
+the `uv run` wrapper can leave it serving. Stop Postgres with `pg_ctl -m fast stop`.
+
 ## Etude: a live RunPod check, when a Task authorizes spend
 
 Clone the checkout into `scratch/qa/repo` (commit first; a clone misses

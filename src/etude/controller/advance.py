@@ -38,7 +38,7 @@ from etude.jobs import (
 )
 from etude.launch import client
 from etude.launch.listing import show_quote
-from etude.launch.server import selected
+from etude.launch.server import selected, view_url
 from etude.run import RunListing
 from etude.spec import Job, RunRequest, Smoke, Until
 from etude.storage import Storage, default_root
@@ -290,6 +290,7 @@ def advance(
         for each in group:
             each.decision.state, each.decision.reason = held_back, reason
             each.decision.launched = identity if held_back is None else None
+    origin = view_url() if mode != "local" and not quote else None
     quoted = None
     if planned:
         if quote:
@@ -316,14 +317,14 @@ def advance(
     for line, address in lines.values():
         print(line)
         if not quote and address is not None:
-            print_view(address)
+            print_view(address, origin=origin)
     if quoted is not None:
         show_quote(quoted)
     for decision in decisions:
         _show_tournament(decision)
     if not quote:
         for address in dict.fromkeys(d.launched for d in decisions if d.launched is not None):
-            print_view(address)
+            print_view(address, origin=origin)
     if stopped_runs and not quote:
         raise EtudeError("launched_pass_failed", 409, detail=", ".join(sorted(stopped_runs)))
     return decisions

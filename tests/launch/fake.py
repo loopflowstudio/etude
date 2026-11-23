@@ -34,6 +34,7 @@ from etude.launch.records import (
 )
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Observation, Packet, Progress, Work
+from etude.observations import ViewGrantTarget
 
 L4 = MachineTemplate(
     provider="fake",
@@ -116,7 +117,7 @@ class FakeService:
         hardware = GPU(id="NVIDIA L4", min_vcpus=6, min_memory_gb=48)
         return Offer(hardware=hardware, usd_per_hour=self.usd_per_hour, available=True)
 
-    def create(self, packet: Packet) -> str:
+    def create(self, packet: Packet, view_grants: dict[str, ViewGrantTarget] | None = None) -> str:
         self._call("provider")
         self.creates += 1
         if self.refuse:
@@ -133,7 +134,7 @@ class FakeService:
         self._call("bucket")
         self.staged.append((commit, self.creates))
 
-    def add(self, session_id: str, work: Work) -> None:
+    def add(self, session_id: str, work: Work, view_grant: ViewGrantTarget | None = None) -> None:
         self._call("bucket")
         held = self.sessions[session_id]
         if held.told_to_finish:

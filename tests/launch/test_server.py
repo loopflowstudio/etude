@@ -30,6 +30,7 @@ from etude.launch.database import launcher_file, upgrade
 from etude.launch.records import Pool
 from etude.launch.server import PythonClient, warning
 from etude.spec import Job, RunRequest, Runtime, Until
+from etude.view_link import advertise
 from tests.launch.counting import job_text
 from tests.launch.fake import bench
 from tests.launch.test_source import git
@@ -304,6 +305,7 @@ def test_fetch_checks_digest_before_replacing_client_file(
 def test_remote_queue_preserves_choice_without_local_database(
     server: tuple[Path, Path],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, remote = server
     assert command("pool", "add", "waiting").returncode == 0
@@ -322,6 +324,27 @@ def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, co
     scheduler = _open(remote)
     assert all(scheduler.record(id).launch.autorun for id in ids)
     assert all(scheduler.read(id).phase == "queued" for id in ids)
+    with advertise("http://localhost:1234"):
+        assert f"view: http://localhost:1234/runs/{ids[0]}" in command("status", ids[0]).stdout
+        # Only the server knows the destination. Submission and status never contact it.
+        shim = tmp_path / "bin/ssh"
+        shim.write_text(
+            shim.read_text().replace(
+                "import json, os, subprocess, sys",
+                "import json, os, subprocess, sys\nos.environ.update(ETUDE_VIEW_URL='https://view.example', ETUDE_VIEW_SECRET='fixture')",
+            )
+        )
+        monkeypatch.delenv("ETUDE_VIEW_URL", raising=False)
+        monkeypatch.delenv("ETUDE_VIEW_SECRET", raising=False)
+        queued = command("queue", str(path), "--pool", "waiting")
+        assert queued.returncode == 0, queued.stderr
+        assert all(f"view: https://view.example/runs/{name}" in queued.stdout for name in ids)
+        shown = command("status", ids[0])
+        assert shown.returncode == 0, shown.stderr
+        assert (
+            f"view: https://view.example/runs/{ids[0]}" in shown.stdout
+            and "localhost" not in shown.stdout
+        )
     assert not launcher_file(client).exists()
 
 

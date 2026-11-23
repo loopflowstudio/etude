@@ -18,6 +18,7 @@ from etude.launch.provisioner.machines import Refused
 from etude.launch.records import Offer, OnDemand, Pool, Stale
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet, Work
+from etude.observations import ViewGrantTarget
 from etude.records import Clock
 from etude.spec import Job, RunRequest, Until
 from etude.train.records import ParentRun
@@ -302,7 +303,7 @@ def test_partial_launch_cleans_up_without_executable_work(
     create = b.service.create
     calls = 0
 
-    def second_fails(packet: Packet) -> str:
+    def second_fails(packet: Packet, view_grants: dict[str, ViewGrantTarget] | None = None) -> str:
         nonlocal calls
         calls += 1
         assert packet.work == () and packet.kept
@@ -312,7 +313,7 @@ def test_partial_launch_cleans_up_without_executable_work(
                 b.service.lose_reply = 1
             else:
                 raise Refused("full")
-        return create(packet)
+        return create(packet, view_grants)
 
     b.service.create = second_fails  # type: ignore[method-assign]
     ids = b.scheduler.launch(job().runs(1, 2), rent="l4")
@@ -330,7 +331,7 @@ def test_launch_lock_fences_rivals_and_keeps_other_pools_working(tmp_path: Path)
     create = b.service.create
     queued: list[str] = []
 
-    def competing(packet: Packet) -> str:
+    def competing(packet: Packet, view_grants: dict[str, ViewGrantTarget] | None = None) -> str:
         with pytest.raises(LauncherError, match="it is busy"):
             other.launch(job(), rent="l4")
         with pytest.raises(LauncherError, match="busy"):
@@ -341,7 +342,7 @@ def test_launch_lock_fences_rivals_and_keeps_other_pools_working(tmp_path: Path)
         assert other.read(local).machine is not None
         assert other.read(queued[0]).machine is None
         assert packet.work == ()
-        return create(packet)
+        return create(packet, view_grants)
 
     b.service.create = competing  # type: ignore[method-assign]
     (run,) = b.scheduler.launch(job(), rent="l4")
@@ -355,8 +356,8 @@ def test_expired_launch_cannot_commit_and_orphan_is_cleaned(tmp_path: Path) -> N
     other = Scheduler(open_database(launcher_file(tmp_path)), b.scheduler._services, b.clock)
     create = b.service.create
 
-    def delayed(packet: Packet) -> str:
-        receipt = create(packet)
+    def delayed(packet: Packet, view_grants: dict[str, ViewGrantTarget] | None = None) -> str:
+        receipt = create(packet, view_grants)
         b.clock.advance(301)
         other.tick()  # expired owner cannot block recovery
         return receipt
@@ -392,12 +393,12 @@ def test_launch_confirms_first_wave_before_delivering_any_work(tmp_path: Path) -
     b = bench(tmp_path, max_machines=2)
     add = b.service.add
 
-    def delivered(session_id: str, work: Work) -> None:
+    def delivered(session_id: str, work: Work, view_grant: ViewGrantTarget | None = None) -> None:
         assert len(b.store.runs()) == 3
         assert b.service.creates == 2
         assert all(session.provider_id is not None for session in b.store.sessions())
         assert all(not held.packet.work for held in b.service.sessions.values())
-        add(session_id, work)
+        add(session_id, work, view_grant)
 
     b.service.add = delivered  # type: ignore[method-assign]
     first, second, later = b.scheduler.launch(

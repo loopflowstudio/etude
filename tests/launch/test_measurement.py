@@ -215,10 +215,10 @@ def test_several_run_git_and_database_counts(
         # signer, the request every provider shares, the storage socket policy
         # it forwards to workers, and shared run-identity validation.
         # The layout adds provisioner/scheduler packages and two scheduler leaves.
-        (["pools"], 73, ("numpy", "boto3", "etude.launch.worker")),
+        (["pools"], 76, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
-            36,  # includes the shared Etude home path and S3's AWS signer
+            40,  # includes attempt publication and its console reader
             (
                 "numpy",
                 "boto3",

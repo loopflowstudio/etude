@@ -18,6 +18,7 @@ from etude.launch.records import BootstrapLinks
 from etude.launch.schemas import Packet
 from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.files import write
+from etude.observations import ViewGrantTarget
 
 
 class ProcessStart:
@@ -25,12 +26,18 @@ class ProcessStart:
         self.root = root
         self._children: list[subprocess.Popen[bytes]] = []
 
-    def start(self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None) -> None:
+    def start(
+        self,
+        machine: Allocation,
+        packet: Packet,
+        bootstrap: BootstrapLinks | None,
+        view_grants: dict[str, ViewGrantTarget] | None = None,
+    ) -> None:
         home = self.root / packet.session
         home.mkdir(parents=True, mode=0o700)
         for work in packet.work:
             DirectoryJournal._place_source(home, work)
-        write(home / "packet.json", packet.model_dump_json())
+        packet.place(home, view_grants or {})
         with log_to(home / "bootstrap.log"):
             write_log("bootstrap", "local source preparation completed")
             write_log("bootstrap", CLOSED)
@@ -47,7 +54,10 @@ class ProcessStart:
             child = subprocess.Popen(
                 [sys.executable, "-m", "etude", "worker", str(home)],
                 cwd=home,
-                env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[2])},
+                env={
+                    **{k: v for k, v in os.environ.items() if not k.startswith("ETUDE_VIEW_")},
+                    "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+                },
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,

@@ -8,6 +8,7 @@ server, and turns expected failures into one line on stderr.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -324,15 +325,75 @@ def view(
         str | None,
         typer.Option(help="a runs directory or bucket URI"),
     ] = None,
+    push: Annotated[
+        bool, typer.Option("--push", help="receive training evidence over HTTP")
+    ] = False,
+    database_url: Annotated[str | None, typer.Option(help="hosted Postgres URL")] = None,
     host: Annotated[str, typer.Option(help="the address to bind")] = "127.0.0.1",
     port: Annotated[int, typer.Option(min=0, max=65535)] = 8765,
 ) -> None:
     """Serve live run charts and experiment reports from the selected source."""
+    if push:
+        if source is not None:
+            raise ValueError("--push cannot be combined with --source")
+        url = _view_database_url(database_url)
+        secret = os.environ.get("ETUDE_VIEW_SECRET")
+        if not secret:
+            raise ValueError("--push requires ETUDE_VIEW_SECRET")
+        # Only the push receiver needs the hosted dependencies.
+        from contextlib import closing
+
+        from etude.view import PushServer, run_view
+
+        try:
+            from etude.view_postgres import PostgresView
+        except ModuleNotFoundError as error:
+            raise ValueError("install etude-sdk[hosted] to serve a push view") from error
+
+        with (
+            closing(PostgresView(url, path)) as store,
+            PushServer(
+                (host, port),
+                store,
+                store,
+                secret.encode(),
+                os.environ.get("ETUDE_VIEW_URL") or None,
+            ) as server,
+        ):
+            run_view(server, f"http://{host}:{server.server_port}")
+        return
+    if database_url is not None:
+        raise ValueError("--database-url requires --push")
     # This command alone loads the live index and HTTP server.
     from etude.storage import default_root, storage_from_uri
     from etude.view import serve
 
     serve(storage_from_uri(source or default_root()), path, (host, port))
+
+
+def _view_database_url(value: str | None) -> str:
+    url = value or os.environ.get("ETUDE_VIEW_DATABASE_URL")
+    if not url:
+        raise ValueError("set ETUDE_VIEW_DATABASE_URL or pass --database-url")
+    if not url.startswith(("postgresql://", "postgres://")):
+        raise ValueError("the hosted view requires a PostgreSQL URL")
+    return url
+
+
+@app.command()
+@kind(Kind.wait)
+def view_upgrade(
+    database_url: Annotated[str | None, typer.Option(help="hosted Postgres URL")] = None,
+) -> None:
+    """Apply the hosted view's Postgres migrations."""
+    url = _view_database_url(database_url)
+    # Only the migration command needs Alembic.
+    try:
+        from etude.view_postgres import upgrade
+    except ModuleNotFoundError as error:
+        raise ValueError("install etude-sdk[hosted] to upgrade a hosted view") from error
+
+    upgrade(url)
 
 
 @app.command()
@@ -550,6 +611,7 @@ def continue_run(
     from etude.identity import run_address
     from etude.jobs import continue_from, continued_config
     from etude.launch.listing import show_runs
+    from etude.observations import launcher_origin
     from etude.run import RunListing
     from etude.storage import DirectoryStorage, default_root, storage_from_uri
     from etude.view_link import print_view
@@ -577,7 +639,7 @@ def continue_run(
         )
     (child,) = scheduler.queue(request, parent.launch.pool, rent=parent.launch.rent)
     show_runs(scheduler, [child])
-    print_view(child)
+    print_view(child, origin=launcher_origin())
 
 
 # Each may reach a bucket, so it is a wait rather than a read.
@@ -602,6 +664,7 @@ _HERE = (
     "report",
     "status",
     "view",
+    "view-upgrade",
     "checkpoints",
     "sync",
     "convert-eval",

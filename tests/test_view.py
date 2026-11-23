@@ -44,7 +44,7 @@ from etude.storage import DirectoryStorage, ListedStorage, S3Storage, storage_fr
 from etude.train.block import Builder
 from etude.train.tracking import write_block
 from etude.view import Server, _machines_table
-from etude.view_link import advertise, print_view
+from etude.view_link import print_view
 from tests.eval.games import play
 from tests.eval.playing import play_matches
 from tests.experiments import experiment_file
@@ -2626,25 +2626,6 @@ def test_silent_file_run_reopens_on_the_next_observation(tmp_path: Path) -> None
         assert _version(observed) != _version(html)
         current = _get(server, "/runs/lab/base@0")
         assert _version(current) == _version(observed) and ">running<" in current
-
-
-def test_selected_server_status_prints_the_view_running_here(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    (home() / "server").write_text("fixture-host")
-    monkeypatch.delenv("ETUDE_SERVER_LOCAL", raising=False)
-
-    def forward(address: str, argv: list[str]) -> int:
-        print("lab/base@0  base  running")
-        return 0
-
-    monkeypatch.setattr("etude.launch.server.forward", forward)
-    with advertise("http://localhost:1234"):
-        assert main(["status", "base@0", "--experiment", "lab"]) == 0
-    assert capsys.readouterr().out.splitlines() == [
-        "lab/base@0  base  running",
-        "view: http://localhost:1234/runs/lab/base@0",
-    ]
 
 
 def test_run_page_serves_the_selected_launchers_retained_console_and_stored_details(

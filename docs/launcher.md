@@ -216,7 +216,7 @@ window sizing, provider rounding and retries.
 | `status`, `machines`, `logs` | Reads retained evidence; prints freshness/incompleteness. |
 | `wait` | Advances work until the selected runs finish and the machines rented for them are deleted. |
 | `logs --run RUN --follow --timeout SECONDS` | Collects new logs and follows them. |
-| `view [PATH]` | Shows run progress and the machines holding each run. |
+| `view [PATH]` | Shows run progress and held machines locally, or serves a Postgres-backed hosted view with `--push`. |
 | `cancel RUN` | Requests cancellation and cleanup. |
 | `fetch RUN FILE DIRECTORY` | Copies one file the run wrote into `DIRECTORY` and verifies its fingerprint. |
 
@@ -276,6 +276,13 @@ run files. For a selected server, `/machines` names the host and points to
 costs and links each occupied slot to its run. See the [live view guide](tracking.md#live-view).
 
 The server holds the provider credentials. Jobs receive only scoped grants.
+Set `ETUDE_VIEW_URL` and `ETUDE_VIEW_SECRET` in the launcher or server
+environment to have launched workers push live curves, attempt status and
+console tails to a shared [hosted view](tracking.md#hosted-view). `launch`,
+`queue`, `continue` and `status RUN` print the run link. Follow its experiment
+breadcrumb to compare runs and open the report. Evaluation workers publish
+sealed matches to the same experiment. **Refresh report** includes newly
+received scores. Use `etude machines` on the launcher for inventory and billing.
 
 ## Upgrading Etude
 
@@ -285,6 +292,8 @@ upgrade on the computer holding that database, including a selected server.
 Ordinary reads never migrate your operational `launcher.sqlite` or silently
 select a backup. Mixed client/worker releases must meet the release's reader
 floor. Keep the running server's version aligned with its database.
+A hosted view's Postgres database is upgraded separately with
+`etude view-upgrade`.
 See [upgrade and migration rules](dev/launcher.md#upgrading-etude) for active
 runs and development databases.
 

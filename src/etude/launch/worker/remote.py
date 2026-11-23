@@ -25,7 +25,7 @@ from etude.launch.ssh import (
 )
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
-from etude.launch.storage.files import digest, write
+from etude.launch.storage.files import digest
 
 
 def invoke(call: RemoteCall) -> RemoteReply:
@@ -45,7 +45,7 @@ def invoke(call: RemoteCall) -> RemoteReply:
             added = root / request.session / "work"
             added.mkdir(exist_ok=True)
             if not (added / f"{request.work.attempt}.json").exists():
-                write(added / f"{request.work.attempt}.json", request.work.model_dump_json())
+                request.work.place(root / request.session, request.view_grant)
             return RemoteReply()
         case SessionRequest(action="started"):
             return RemoteReply(started=journal.started(request.session))
@@ -129,7 +129,7 @@ def _start(root: Path, request: StartRequest) -> RemoteReply:
             )
         return RemoteReply(pid=process.pid)
     # Sources were staged above; this start uses the same process implementation.
-    write(home / "packet.json", request.packet.model_dump_json())
+    request.packet.place(home, request.view_grants)
     return RemoteReply(pid=ProcessStart(root).spawn(request.packet))
 
 

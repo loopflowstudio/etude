@@ -17,10 +17,11 @@ from etude.carriage import put_back, recorded_file, restore_set
 from etude.errors import LauncherError
 from etude.launch.logs import snapshot_stream
 from etude.launch.records import BootstrapLinks, LogStream, Output
-from etude.launch.schemas import Finished, Observation, Packet, Progress, Work
+from etude.launch.schemas import Finished, Observation, Packet, Work, read_progress
 from etude.launch.source import source_archive
-from etude.launch.storage.files import digest, read_result, select_output, write
+from etude.launch.storage.files import digest, select_output, write
 from etude.launch.usage import Transfer
+from etude.observations import ViewGrantTarget
 from etude.out import MEMBERSHIP, OutFiles
 
 
@@ -29,7 +30,11 @@ class DirectoryJournal:
         self._root = root
 
     def prepare(
-        self, packet: Packet, *, expires_at: datetime | None = None
+        self,
+        packet: Packet,
+        *,
+        expires_at: datetime | None = None,
+        view_grants: dict[str, ViewGrantTarget] | None = None,
     ) -> BootstrapLinks | None:
         return None
 
@@ -43,12 +48,13 @@ class DirectoryJournal:
     def stage(self, repo: str, commit: str) -> None:
         """Nothing to do ahead: a session's source is written beside it when it starts."""
 
-    def add(self, session_id: str, work: Work) -> None:
-        added = self._root / session_id / "work"
+    def add(self, session_id: str, work: Work, view_grant: ViewGrantTarget | None = None) -> None:
+        session = self._root / session_id
+        added = session / "work"
         added.mkdir(exist_ok=True)
         if not (added / f"{work.attempt}.json").exists():
-            self._place_source(self._root / session_id, work)
-            write(added / f"{work.attempt}.json", work.model_dump_json())
+            self._place_source(session, work)
+            work.place(session, view_grant)
 
     @staticmethod
     def _place_source(home: Path, work: Work) -> None:
@@ -80,7 +86,7 @@ class DirectoryJournal:
         names = sorted(p.name for p in attempts.iterdir()) if attempts.is_dir() else []
         return Observation(
             alive=alive,
-            progress=tuple(self._progress(attempts / name) for name in names),
+            progress=tuple(read_progress(attempts / name) for name in names),
             transfers=self._transfers(home),
         )
 
@@ -178,24 +184,3 @@ class DirectoryJournal:
         except PermissionError:
             return True
         return True
-
-    @staticmethod
-    def _progress(home: Path) -> Progress:
-        claim, finished, log = home / "claim", home / "finished.json", home / "log"
-        started = datetime.fromisoformat(claim.read_text()) if claim.exists() else None
-        if not finished.exists():
-            result = read_result(home / "outputs")
-            return Progress(
-                attempt=home.name,
-                started_at=started,
-                finished_at=None,
-                outcome=None,
-                cause=None,
-                clocks=result.clocks,
-                outputs=(),
-                exit_code=None,
-                tally=result.tally,
-                writers=result.writers,
-                log_bytes=log.stat().st_size if log.exists() else 0,
-            )
-        return Finished.model_validate_json(finished.read_text()).progress(home.name, started)

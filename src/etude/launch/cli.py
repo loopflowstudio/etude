@@ -87,7 +87,6 @@ def status(
     job: Annotated[str | None, typer.Option(help="select a job")] = None,
 ) -> None:
     """Show where runs stand, as of the server loop's last pass."""
-    from etude.identity import run_address
     from etude.launch import server
     from etude.launch.listing import resolve_runs, show_runs
     from etude.view_link import print_view
@@ -98,17 +97,14 @@ def status(
             args += ["--experiment", experiment]
         if job is not None:
             args += ["--job", job]
-        result = server.forward(address, args)
-        if not result:
-            for name in runs or ():
-                print_view(run_address(name, experiment))
-        raise typer.Exit(result)
+        raise typer.Exit(server.forward(address, args))
     scheduler = default()
     selected = resolve_runs(scheduler, runs or [], experiment=experiment, job=job)
     show_runs(scheduler, selected)
     if runs:
+        origin = server.view_url()
         for name in selected:
-            print_view(name)
+            print_view(name, origin=origin)
     server.show_freshness(scheduler)
 
 

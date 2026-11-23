@@ -9,13 +9,16 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 
 from pydantic import Field
 
 from etude.launch.records import Cause, Limit, Outcome, Output, Prepared
 from etude.launch.storage.download import Download
+from etude.launch.storage.files import read_result, write
 from etude.launch.storage.s3 import Grant
 from etude.launch.usage import Transfer
+from etude.observations import ViewGrantTarget
 from etude.records import RunProgress, RunWriter, Tally
 from etude.spec import Input, Preparation, Record, Runtime, Until, Variable
 
@@ -51,6 +54,12 @@ class Work(Record):
     inputs: tuple[Input, ...] = ()  # delivered to SESSION/inputs/SHA256
     environment: tuple[Variable, ...] = ()
 
+    def place(self, session: Path, grant: ViewGrantTarget | None) -> None:
+        """Publish kept work only after its private grant is in place."""
+        if grant:
+            grant.place(session, self.attempt)
+        write(session / "work" / f"{self.attempt}.json", self.model_dump_json())
+
 
 class Packet(Record):
     delivery_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
@@ -65,6 +74,12 @@ class Packet(Record):
     cap_units: Decimal | None = None
     max_units_per_hour: Decimal | None = None
     slots: int = Field(default=1, ge=1)  # attempts the worker runs at once
+
+    def place(self, session: Path, grants: dict[str, ViewGrantTarget]) -> None:
+        """Make the packet executable after installing its grants outside the packet."""
+        for attempt, grant in grants.items():
+            grant.place(session, attempt)
+        write(session / "packet.json", self.model_dump_json())
 
 
 class Progress(Record):
@@ -137,6 +152,28 @@ class Finished(Record):
         )
 
 
+def read_progress(home: Path) -> Progress:
+    """Read the attempt journal, preferring the final result as soon as it exists."""
+    claim, finished, log = home / "claim", home / "finished.json", home / "log"
+    started = datetime.fromisoformat(claim.read_text()) if claim.exists() else None
+    if not finished.exists():
+        result = read_result(home / "outputs")
+        return Progress(
+            attempt=home.name,
+            started_at=started,
+            finished_at=None,
+            outcome=None,
+            cause=None,
+            clocks=result.clocks,
+            outputs=(),
+            exit_code=None,
+            tally=result.tally,
+            writers=result.writers,
+            log_bytes=log.stat().st_size if log.exists() else 0,
+        )
+    return Finished.model_validate_json(finished.read_text()).progress(home.name, started)
+
+
 class ReadLink(Record):
     """An object to restore, checked against the length storage listed."""
 
@@ -156,6 +193,7 @@ class Fetch(Record):
 # `bootstrap.json` and `inbox.json` are read only by the program version that
 # wrote them, so their shape may change with it.
 class Bootstrap(Record):
+    view_grants: dict[str, ViewGrantTarget] = Field(default_factory=dict, repr=False)
     packet: Packet
     out: Grant  # the session's own folder: its receipt, usage and end note
     runs: dict[str, Grant] = Field(default_factory=dict)  # each run's folder, for the packet's work
@@ -165,6 +203,7 @@ class Bootstrap(Record):
 
 
 class Delivery(Record):
+    view_grant: ViewGrantTarget | None = Field(default=None, repr=False)
     work: Work
     access: Grant  # the run's folder
     fetch: Fetch = Field(default_factory=Fetch)

@@ -32,13 +32,25 @@ failure recovery requires.
 - Logs, status and `etude view` show retained evidence, not live remote probes.
   Reads show freshness. Only explicit waits collect remote facts; expiry of a
   wait does not prove remote work was cancelled.
-- The live view has no login. Its default bind address is `127.0.0.1`. Run
-  consoles depend on launcher retention. Plain `etude train` writes output
-  only to the terminal. Machine CPU, GPU and memory samples are unavailable.
-  A file-only run with no outcome shows **no end recorded** once the view reads
-  its files from a listing started at least 10 minutes after its last write.
-  If a listed block disappears during the read, the view keeps that run’s
-  previous observation across restarts. A later write can reopen the experiment.
+- The live view has no login. Its default bind address is `127.0.0.1`; put
+  authentication or a private network in front of it when exposing it further.
+  In local mode, run consoles depend on launcher retention; plain `etude train`
+  writes output only to the terminal. Machine CPU, GPU and memory samples are
+  unavailable. A file-only run with no outcome shows **no end recorded** once
+  the view reads its files from a listing started at least 10 minutes after its
+  last write. If a listed block disappears during the read, the view keeps that
+  run’s previous observation across restarts. A later write can reopen the
+  experiment.
+- Hosted view (`etude view --push`) receives best-effort HTTP pushes from
+  launched workers only (not plain `etude train`), authenticated by
+  attempt-scoped tokens signed with `ETUDE_VIEW_SECRET`; workers refuse HTTP
+  redirects. Pushed files are capped at 32 MiB and exclude weights, `out/` and
+  `blobs.zip`. View outages never block training or bucket delivery, but a lost
+  machine can leave a permanent gap on the hosted view while the bucket remains
+  the portable scientific record. Because push mode reads neither buckets nor
+  `launcher.sqlite`, machine inventory and dollar totals are unavailable.
+  An unfinished attempt with no push for 10 minutes
+  shows **no end recorded**.
 - Time/dollar caps bound admitted rental allocations, not provider bills.
   Outages can delay deletion. External storage/transfer/API costs are excluded.
   An EC2 machine reading or writing a bucket outside its AWS region (any R2

@@ -1099,9 +1099,11 @@ def _read(
     }
     left = (records.folder_of[attempt.writer] for attempt in reversed(writers))
     latest = next((folder for folder in left if folder in ended), None)
-    folder = latest or (next(reversed(ended)) if ended else None)
+    folder = latest if latest is not None else next(reversed(ended), None)
     outcome = (
-        RunOutcome.model_validate_json(storage.get(folder + ended[folder])) if folder else None
+        RunOutcome.model_validate_json(storage.get(folder + ended[folder]))
+        if folder is not None
+        else None
     )
     group = run_file is not None and run_file.members is not None
     if outcome is not None and (writers or group):

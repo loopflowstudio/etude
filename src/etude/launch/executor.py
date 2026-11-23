@@ -33,6 +33,7 @@ from etude.launch.records import (
 from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
+from etude.observations import ViewGrantTarget
 from etude.storage_timeout import StorageUnavailable
 
 
@@ -51,14 +52,14 @@ class Execution(Protocol):
         """What a rented machine created now would be, its US dollars per hour, and whether one can be had."""
         ...
 
-    def create(self, packet: Packet) -> str:
+    def create(self, packet: Packet, view_grants: dict[str, ViewGrantTarget] | None = None) -> str:
         """Get the machine for this packet's working session and return the provider's name for it.
 
         Called at most once per packet. Raise Refused only when no machine was supplied.
         """
         ...
 
-    def add(self, session_id: str, work: Work) -> None:
+    def add(self, session_id: str, work: Work, view_grant: ViewGrantTarget | None = None) -> None:
         """Hand one more piece of work to a kept session. Safe to repeat."""
         ...
 
@@ -115,7 +116,9 @@ class Execution(Protocol):
 
 
 class Journal(Protocol):
-    def add(self, session_id: str, work: Work) -> None: ...
+    def add(
+        self, session_id: str, work: Work, view_grant: ViewGrantTarget | None = None
+    ) -> None: ...
     def stage(self, repo: str, commit: str) -> None: ...
     def observe(self, session_id: str) -> Observation: ...
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]: ...
@@ -128,7 +131,11 @@ class Journal(Protocol):
     def started(self, session_id: str) -> bool: ...
     def ended(self, session_id: str) -> datetime | None: ...
     def prepare(
-        self, packet: Packet, *, expires_at: datetime | None = None
+        self,
+        packet: Packet,
+        *,
+        expires_at: datetime | None = None,
+        view_grants: dict[str, ViewGrantTarget] | None = None,
     ) -> BootstrapLinks | None: ...
     def end(self, session_id: str) -> datetime | None: ...
     def finish(self, session_id: str) -> datetime | None: ...
@@ -136,7 +143,11 @@ class Journal(Protocol):
 
 class Starter(Protocol):
     def start(
-        self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None
+        self,
+        machine: Allocation,
+        packet: Packet,
+        bootstrap: BootstrapLinks | None,
+        view_grants: dict[str, ViewGrantTarget] | None = None,
     ) -> None: ...
 
 
@@ -155,7 +166,7 @@ class Executor:
     def offer(self) -> Offer:
         return self.machines.offer()
 
-    def create(self, packet: Packet) -> str:
+    def create(self, packet: Packet, view_grants: dict[str, ViewGrantTarget] | None = None) -> str:
         deadline = packet.deadline
         # Storage needs time to deliver its final evidence before the machine ends.
         if not self.machines.owned and packet.delivery_seconds is not None:
@@ -167,7 +178,7 @@ class Executor:
                 }
             )
         try:
-            bootstrap = self.journal.prepare(packet, expires_at=deadline)
+            bootstrap = self.journal.prepare(packet, expires_at=deadline, view_grants=view_grants)
         except StorageUnavailable as error:
             # Nothing has been asked of the provider: no machine can exist. An R2
             # storage whose keys cannot be granted fails here, before any rental.
@@ -187,7 +198,7 @@ class Executor:
         )
         if self.machines.owned:
             assert self.starter is not None
-            self.starter.start(machine, packet, bootstrap)
+            self.starter.start(machine, packet, bootstrap, None if bootstrap else view_grants)
 
         return machine.id
 
@@ -219,8 +230,8 @@ class Executor:
     def finish(self, session_id: str) -> datetime | None:
         return self.journal.finish(session_id)
 
-    def add(self, session_id: str, work: Work) -> None:
-        self.journal.add(session_id, work)
+    def add(self, session_id: str, work: Work, view_grant: ViewGrantTarget | None = None) -> None:
+        self.journal.add(session_id, work, view_grant)
 
     def stage(self, repo: str, commit: str) -> None:
         self.journal.stage(repo, commit)

@@ -161,13 +161,15 @@ they are retrying. The view remembers which runs you opened across restarts.
 Opening an experiment’s **Report**
 reads the data for that report separately. Passing an experiment file
 selects its report code and still discovers runs across the source.
+The [hosted view](#hosted-view) receives updates directly from launched workers.
 
-While the view advertises its address in `ETUDE_HOME/view`, `train`, `launch`,
-`queue` and `status RUN` print a `view:` link for each run. A declared run
-uses `EXPERIMENT/JOB@SEED`, such as `prototype/coin@0`. For a file defining
-only `train(config)`, the address is the experiment name. `train --json`
-prints the link on stderr. Starting a second view redirects links to it. When
-it closes, a surviving view advertises again at its next index pass. A link
+A local view advertises its address in `ETUDE_HOME/view`. While it runs,
+`train`, `launch`, `queue`, `continue` and `status RUN` print a `view:` link.
+Launchers configured for a hosted view print its address. A declared run uses
+`EXPERIMENT/JOB@SEED`, such as `prototype/coin@0`. For a file defining only
+`train(config)`, the address is the experiment name. `train --json` prints the
+link on stderr. Starting a second local view redirects links to it. When it
+closes, a surviving view advertises again at its next index pass. A link
 opened before the run appears names the source the view is watching.
 
 | Path | What you see |
@@ -198,8 +200,8 @@ external line’s latest evaluated checkpoint. Before there is a score it uses
 the first drawable ML series, including ungrouped metrics. Different latest
 values appear as a low–high range. These build details stay with the
 served report until a successful refresh. If a run file listing or launcher
-read fails, Reports shows the error above the last known rows. Restarting
-the view clears the build details.
+read fails, Reports shows the error above the last known rows. In local mode,
+restarting the view clears the build details.
 
 The breadcrumb above an experiment, run or report links back to Experiments.
 Use the side rail to switch pages, open an active experiment or jump to a
@@ -360,3 +362,67 @@ queued jobs and console. It keeps showing your files while it waits for the
 selected launcher.
 Use `--source` to select the matching run files. The Machines page names the
 selected server and directs you to `etude machines`.
+
+### Hosted view
+
+```text
+# On the view host (install etude-sdk[hosted], plus eval for evaluation results)
+$ export ETUDE_VIEW_DATABASE_URL=postgresql://user@host/etude_view
+$ export ETUDE_VIEW_SECRET=...
+$ uv run --extra hosted etude view-upgrade
+$ uv run --extra hosted etude view examples/prototype.py --push --host 127.0.0.1 --port 8765
+http://127.0.0.1:8765/
+
+# In the submitting terminal or SSH `etude server` environment
+$ export ETUDE_VIEW_URL=http://127.0.0.1:8765
+$ export ETUDE_VIEW_SECRET=...
+$ uv run etude launch examples/prototype.py --pool lab --job coin --seed 0
+...
+view: http://127.0.0.1:8765/runs/prototype/coin@0
+```
+
+This example uses a worker on the view host. For remote workers, set
+`ETUDE_VIEW_URL` to the reachable HTTPS origin. Supply the same
+`ETUDE_VIEW_SECRET` to the launcher and the view from your secret store.
+The launcher requires the URL and secret together. It gives each worker a
+private token scoped to its run and attempt. Workers refuse HTTP redirects.
+
+Run `etude view-upgrade` before starting a release. The server checks the
+schema revision at startup and serves health checks at `/healthz`. Both
+commands accept `--database-url` in place of `ETUDE_VIEW_DATABASE_URL`.
+Only the view host needs the hosted extra. Install the eval extra there
+to receive Parquet tables and build evaluation reports.
+
+Plain `etude view [PATH] [--source SOURCE]` reads its local index even with a
+database URL in the environment. Use `--push` to receive observations.
+The two modes have separate data sources. `--push` with `--source` and
+`--database-url` without `--push` are errors. A push view leaves the local
+address in `ETUDE_HOME/view` available.
+
+Open the link printed by `launch`, `queue`, `continue` or `status RUN`.
+The selected launcher supplies the hosted origin, including over SSH.
+Without a configured origin, the command uses the invoking computer’s local
+view. `quote` prints no link. Plain `etude train` publishes only to its
+configured tracking destinations.
+
+| Surface | Evidence at the shared URL |
+| --- | --- |
+| Run | Every tab shows the latest attempt’s state, machine and reported position. Training Overview shows sealed curves, config, checkpoints and the last 500 console lines. Evaluation runs link to their experiment report and show Console and Files. |
+| Experiments | Each card shows its first drawable metric panel. The table shows the latest values and the selected run’s details. Visible pages refresh every 5 seconds. |
+| Report | The first visit builds from Postgres. **Refresh report** picks up new results and edits to the declaration on the view host. The last successful build survives declaration errors and web restarts. |
+| Files | Run and outcome records, metric blocks, checkpoint records and JSON row tables. Eval groups include tournament and environment records. A sealed eval block appears once its index and every referenced Parquet table have arrived. |
+| Machines and Dollars | The launcher holds inventory and spending. The hosted view shows the assigned machine and reported hardware for each attempt. |
+
+The run page waits for the first push. The active attempt’s stored outcome
+can close the run if its final status update is lost. A replacement attempt
+reopens it. After 10 minutes of silence an unfinished attempt shows **no end recorded**.
+
+Each pushed file can be up to 32 MiB. Weights, job outputs and packed match
+blobs stay in canonical storage. During a view outage, training and bucket
+delivery continue. A live or resumed worker catches up from its local files,
+including compacted blocks. If the machine is lost, a gap can persist.
+Projection errors leave the last complete chart visible with the error.
+
+The view reads all run data from Postgres. Ingest requires an attempt token.
+The UI has no login. Use authentication or a private network when exposing it
+beyond loopback.
