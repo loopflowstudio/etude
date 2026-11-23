@@ -129,7 +129,7 @@ Python driver and send SIGINT, which is what Ctrl-C does. A launched run's conso
 its page only when the loop collects it, about every 30 s, so a page shows a stale tail
 between collections; check its "Last collected" age rather than expecting each refresh to move.
 `etude launch` refuses a plain `train(config)` file; declare `training_jobs()` for a
-launched run. `etude continue --run RUN --until updates=N` writes a child run named by
+launched run. Its `max_usd` must be above zero even on the free local pool. `etude continue --run RUN --until updates=N` writes a child run named by
 a digest (`continues.parent` in its `run.json`); require each row to carry its own
 launcher facts. A launched evaluation groups every tournament with new matches into one
 `EXPERIMENT/evals-DIGEST`: add a second `Benchmark` to `eval_jobs` and raise `games` on
@@ -326,6 +326,8 @@ CLI and library reads across experiments, and never rent as part of validation.
 Do not complete the Task on merge alone.
 
 Before QA, read the PR's CI (`gh pr checks N`, `gh run view RUN --log-failed`).
+An `unmerged or unproven migrations` failure in a fixture that upgrades a
+non-empty home means it patches `_merged` too late: patch it before the first upgrade.
 A `launcher.sqlite is not initialized` failure can mean a fixture sets its own
 `ETUDE_HOME` or calls `client._open(path)` without `upgrade(path,
 development=True)`. Conftest initializes only its autouse home. `etude smoke`
