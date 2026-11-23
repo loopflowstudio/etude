@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+import time
 import urllib.parse
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -30,6 +32,9 @@ AGENT = "colab-cli"
 XSSI_PREFIX = b")]}'\n"
 _REFRESH_MARGIN = timedelta(minutes=5)
 _MAX_WS_MESSAGES = 64
+_CHANNEL_PING_SECONDS = 30.0
+_CHANNEL_RECONNECT_SECONDS = 45 * 60.0
+_CHANNEL_RETRY_SECONDS = 5.0
 # Protocol debug logs contain proxy tokens and the signed links in execute_request.
 _WS_LOG = logging.Logger("colab.websocket", level=logging.CRITICAL + 1)
 
@@ -241,23 +246,104 @@ class ColabHTTP:
             raise ProviderUnavailable(f"Colab runtime POST /api/kernels: status {reply.status}")
         return reply.body
 
+    def list_kernels(self, base_url: str, token: str) -> bytes:
+        reply = self._request(
+            "GET",
+            f"{base_url.rstrip('/')}/api/kernels",
+            None,
+            {
+                "X-Colab-Runtime-Proxy-Token": token,
+                "X-Colab-Client-Agent": AGENT,
+                "Accept": "application/json",
+            },
+            "Colab runtime GET /api/kernels",
+        )
+        if not 200 <= reply.status < 300:
+            raise ProviderUnavailable(f"Colab runtime GET /api/kernels: status {reply.status}")
+        return reply.body
 
-def execute_in_kernel(base_url: str, proxy_token: str, kernel_id: str, code: str) -> None:
-    """Submit code to a Colab Jupyter kernel and wait until execution enters `busy`."""
+
+def _kernel_channel_url(base_url: str, proxy_token: str, kernel_id: str, ws_session: str) -> str:
     parsed = urllib.parse.urlparse(base_url)
     host = parsed.hostname
     if not host or parsed.scheme not in {"http", "https"}:
         raise ProviderUnavailable("Colab runtime proxy URL is invalid")
-    ws_session = uuid4().hex
     path = (
         f"{parsed.path.rstrip('/')}/api/kernels/{urllib.parse.quote(kernel_id, safe='')}/channels"
     )
     query = urllib.parse.urlencode(
         {"colab-runtime-proxy-token": proxy_token, "session_id": ws_session}
     )
-    url = urllib.parse.urlunsplit(
+    return urllib.parse.urlunsplit(
         ("wss" if parsed.scheme == "https" else "ws", parsed.netloc, path, query, "")
     )
+
+
+class KernelChannel:
+    """Background WebSocket attached to a Colab Jupyter kernel channel.
+
+    Colab reclaims runtimes without an active client WebSocket after ~20 minutes
+    even while a kernel cell is busy. Keeping a lightweight channel open and
+    rotating it before proxy-token expiry preserves the runtime for the full
+    session budget.
+    """
+
+    def __init__(self, base_url: str, proxy_token: str, kernel_id: str) -> None:
+        self._lock = threading.Lock()
+        self._base_url = base_url
+        self._token = proxy_token
+        self._kernel_id = kernel_id
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"colab-ws-{kernel_id[:8]}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def update(self, base_url: str, proxy_token: str) -> None:
+        with self._lock:
+            self._base_url = base_url
+            self._token = proxy_token
+
+    def close(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                base_url, token, kernel_id = self._base_url, self._token, self._kernel_id
+            ws_session = uuid4().hex
+            try:
+                url = _kernel_channel_url(base_url, token, kernel_id, ws_session)
+                with connect(
+                    url,
+                    additional_headers=_proxy_headers(token),
+                    open_timeout=20,
+                    close_timeout=2,
+                    max_size=MAX_REPLY_BYTES,
+                    compression=None,
+                    proxy=None,
+                    ping_interval=_CHANNEL_PING_SECONDS,
+                    ping_timeout=20,
+                    logger=_WS_LOG,
+                ) as channel:
+                    reconnect_at = time.monotonic() + _CHANNEL_RECONNECT_SECONDS
+                    while not self._stop.is_set() and time.monotonic() < reconnect_at:
+                        try:
+                            channel.recv(timeout=2.0)
+                        except TimeoutError:
+                            continue
+            except (OSError, WebSocketException, ValueError, ProviderUnavailable):
+                pass
+            if not self._stop.is_set():
+                self._stop.wait(_CHANNEL_RETRY_SECONDS)
+
+
+def execute_in_kernel(base_url: str, proxy_token: str, kernel_id: str, code: str) -> None:
+    """Submit code to a Colab Jupyter kernel and wait until execution enters `busy`."""
+    ws_session = uuid4().hex
+    url = _kernel_channel_url(base_url, proxy_token, kernel_id, ws_session)
     msg_id = uuid4().hex
     request = {
         "channel": "shell",
@@ -273,7 +359,7 @@ def execute_in_kernel(base_url: str, proxy_token: str, kernel_id: str, code: str
         "metadata": {},
         "content": {
             "code": code,
-            "silent": True,
+            "silent": False,
             "store_history": False,
             "user_expressions": {},
             "allow_stdin": False,

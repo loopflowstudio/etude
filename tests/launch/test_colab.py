@@ -33,6 +33,7 @@ from etude.launch.provisioner.providers.colab.api import (
 from etude.launch.provisioner.providers.colab.http import (
     XSSI_PREFIX,
     ColabCredentials,
+    KernelChannel,
     execute_in_kernel,
     load_credentials,
 )
@@ -86,6 +87,7 @@ class FakeColab:
         self.refuse_status: int | None = None
         self.delete_pending = False
         self.executed: list[str] = []
+        self.kernel_state = "busy"
         self.ccu_lag_polls = 0
         self._lag_remaining = 0
 
@@ -104,6 +106,13 @@ class FakeColab:
             )
         if path == "/api/kernels":
             assert headers.get("X-Colab-Runtime-Proxy-Token") == PROXY_TOKEN
+            if method == "GET":
+                return HTTPReply(
+                    status=200,
+                    body=json.dumps(
+                        [{"id": "fixture-kernel", "execution_state": self.kernel_state}]
+                    ).encode(),
+                )
             return HTTPReply(
                 status=201,
                 body=json.dumps({"id": "fixture-kernel", "execution_state": "starting"}).encode(),
@@ -529,7 +538,11 @@ def test_lost_assignment_reply_checks_recovered_rate_before_bootstrap() -> None:
 
 
 def test_create_refusal_412_and_400_record_no_machine() -> None:
-    for status, fragment in ((412, "too many active sessions"), (400, "entitlement")):
+    for status, fragment in (
+        (412, "too many active sessions"),
+        (400, "entitlement"),
+        (503, "no L4 capacity"),
+    ):
         bucket = _bucket(Storage())
         colab = FakeColab()
         colab.refuse_status = status
@@ -537,22 +550,51 @@ def test_create_refusal_412_and_400_record_no_machine() -> None:
             TEMPLATE, ColabAPI(_credentials(), send=colab, execute=colab.execute), bucket, "etude"
         )
         with pytest.raises(Refused, match=fragment):
-            machines.create(_request("s-refused"))
-        assert machines.find("s-refused") is None
+            machines.create(_request(f"s-refused-{status}"))
+        assert machines.find(f"s-refused-{status}") is None
 
 
 def test_end_confirms_absence_and_alive_tracks_assignments() -> None:
     bucket = _bucket(Storage())
     colab = FakeColab()
+    opened: list[tuple[str, str, str]] = []
+    closed: list[str] = []
+
+    class FakeChannel:
+        def __init__(self, url: str, token: str, kernel_id: str) -> None:
+            opened.append((url, token, kernel_id))
+            self.updates: list[tuple[str, str]] = []
+
+        def update(self, base_url: str, proxy_token: str) -> None:
+            self.updates.append((base_url, proxy_token))
+
+        def close(self) -> None:
+            closed.append(opened[-1][2])
+
     machines = ColabMachines(
-        TEMPLATE, ColabAPI(_credentials(), send=colab, execute=colab.execute), bucket, "etude"
+        TEMPLATE,
+        ColabAPI(_credentials(), send=colab, execute=colab.execute, watch=FakeChannel),
+        bucket,
+        "etude",
     )
     machines.create(_request("s1"))
+    assert opened == [(PROXY_URL, PROXY_TOKEN, "fixture-kernel")]
     assert machines.alive("s1") is True
+    assert colab.counts["GET /api/kernels"] == 1
+    # Throttled within the kernel refresh interval.
+    assert machines.alive("s1") is True
+    assert colab.counts["GET /api/kernels"] == 1
 
     colab.delete_pending = True
     assert machines.end("s1") is None
+    assert closed == ["fixture-kernel"]
     assert machines.alive("s1") is True
+
+    # An exited bootstrap cell returns the kernel to idle; alive() detects it immediately.
+    colab.kernel_state = "idle"
+    machines._checked_kernel.clear()
+    assert machines.alive("s1") is False
+    assert len(closed) == 2
 
     colab.delete_pending = False
     ended = machines.end("s1")
@@ -560,6 +602,41 @@ def test_end_confirms_absence_and_alive_tracks_assignments() -> None:
     assert machines.alive("s1") is False
     raw = bucket.get("etude/sessions/s1/receipt.json")
     assert raw is not None and Receipt.model_validate_json(raw).endpoint == ENDPOINT
+
+
+def test_websocket_kernel_channel_loopback() -> None:
+    connected = threading.Event()
+    received_path: list[str] = []
+
+    def kernel(channel: ServerConnection) -> None:
+        assert channel.request is not None
+        assert channel.request.headers["X-Colab-Runtime-Proxy-Token"] == PROXY_TOKEN
+        received_path.append(channel.request.path)
+        connected.set()
+        channel.send(json.dumps({"msg_type": "stream", "content": {"text": "."}}))
+        try:
+            channel.recv(timeout=5)
+        except Exception:
+            pass
+
+    with serve(kernel, "127.0.0.1", 0) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        channel: KernelChannel | None = None
+        try:
+            port = server.socket.getsockname()[1]
+            channel = KernelChannel(f"http://127.0.0.1:{port}", PROXY_TOKEN, "kid-1")
+            assert connected.wait(timeout=5)
+            channel.update(f"http://127.0.0.1:{port}", "rotated-token")
+            channel.close()
+            channel._thread.join(timeout=5)
+            assert not channel._thread.is_alive()
+        finally:
+            if channel is not None:
+                channel.close()
+            server.shutdown()
+            thread.join()
+    assert received_path and received_path[0].startswith("/api/kernels/kid-1/channels?")
 
 
 def test_websocket_execute_in_kernel_loopback() -> None:

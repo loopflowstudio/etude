@@ -10,7 +10,7 @@ import json
 import urllib.parse
 from collections.abc import Callable
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, Protocol
 from uuid import UUID
 
 from pydantic import Field
@@ -21,6 +21,7 @@ from etude.launch.provisioner.providers.colab.http import (
     XSSI_PREFIX,
     ColabCredentials,
     ColabHTTP,
+    KernelChannel,
     execute_in_kernel,
 )
 from etude.launch.provisioner.providers.http import send_to_provider
@@ -29,6 +30,14 @@ from etude.launch.storage.transport import Send
 from etude.spec import Record
 
 ExecuteKernel = Callable[[str, str, str, str], None]
+
+
+class ChannelHandle(Protocol):
+    def update(self, base_url: str, proxy_token: str) -> None: ...
+    def close(self) -> None: ...
+
+
+WatchKernel = Callable[[str, str, str], ChannelHandle]
 
 AcceleratorName = Literal["NONE", "T4", "L4", "G4", "A100", "H100"]
 VariantName = Literal["DEFAULT", "GPU"]
@@ -120,6 +129,7 @@ class ColabToken(Record):
 
 class Kernel(Record):
     id: str
+    execution_state: str | None = None
 
 
 def _read[T: Record](model: type[T], raw: bytes | None) -> T:
@@ -149,9 +159,15 @@ class ColabAPI(ColabHTTP):
         send: Send = send_to_provider,
         *,
         execute: ExecuteKernel = execute_in_kernel,
+        watch: WatchKernel | None = None,
     ) -> None:
         super().__init__(credentials, send)
         self._execute = execute
+        self._watch: WatchKernel | None = (
+            watch
+            if watch is not None
+            else (KernelChannel if execute is execute_in_kernel else None)
+        )
 
     def ccu_info(self) -> CcuInfo:
         return _read(CcuInfo, self.ask("GET", "/tun/m/ccu-info"))
@@ -187,6 +203,12 @@ class ColabAPI(ColabHTTP):
             raise Refused(
                 f"Colab rejected accelerator {spec.accelerator!r}; check account entitlement"
             )
+        if reply.status == 503:
+            # Confirm via deterministic nbh lookup that no runtime was assigned behind the 503.
+            checked = self.lookup(nbh, spec)
+            if isinstance(checked, Assigned):
+                return checked
+            raise Refused(f"Colab has no {spec.accelerator} capacity right now (HTTP 503)")
         if not 200 <= reply.status < 300:
             raise ProviderUnavailable(f"Colab POST /tun/m/assign: status {reply.status}")
         return _read(Assigned, reply.body.removeprefix(XSSI_PREFIX))
@@ -199,6 +221,25 @@ class ColabAPI(ColabHTTP):
         token = _read(ColabToken, raw).token
         self.ask("POST", path, headers={"X-Goog-Colab-Token": token}, absent_ok=True)
 
-    def execute(self, proxy: RuntimeProxyInfo, code: str) -> None:
+    def kernels(self, proxy: RuntimeProxyInfo) -> tuple[Kernel, ...]:
+        raw = self.list_kernels(proxy.url, proxy.token)
+        try:
+            items = json.loads(raw)
+            if not isinstance(items, list):
+                raise ValueError
+            return tuple(Kernel.model_validate(item) for item in items)
+        except ValueError:
+            raise ProviderUnavailable(
+                "Colab runtime GET /api/kernels returned invalid JSON"
+            ) from None
+
+    def watch_kernel(self, proxy: RuntimeProxyInfo, kernel_id: str) -> ChannelHandle | None:
+        if self._watch is None:
+            return None
+        return self._watch(proxy.url, proxy.token, kernel_id)
+
+    def execute(self, proxy: RuntimeProxyInfo, code: str) -> str:
         raw = self.start_kernel(proxy.url, proxy.token)
-        self._execute(proxy.url, proxy.token, _read(Kernel, raw).id, code)
+        kernel_id = _read(Kernel, raw).id
+        self._execute(proxy.url, proxy.token, kernel_id, code)
+        return kernel_id

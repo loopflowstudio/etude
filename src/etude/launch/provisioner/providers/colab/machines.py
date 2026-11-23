@@ -27,6 +27,7 @@ from etude.launch.provisioner.machines import (
 from etude.launch.provisioner.providers.colab.api import (
     Assigned,
     CcuInfo,
+    ChannelHandle,
     ColabAPI,
     ColabSpec,
     RuntimeProxyInfo,
@@ -40,6 +41,7 @@ from etude.spec import Record
 UNIT = provider_unit("colab")
 _CCU_POLL_ATTEMPTS = 3
 _CCU_POLL_INTERVAL = 0.1
+_KEEP_ALIVE_INTERVAL = 60.0
 
 
 class Intent(Record):
@@ -74,7 +76,8 @@ def _cap_deadline(
 
 # A retried bootstrap never starts a second worker: the atomic claim lives on
 # the VM. Waiting on the child subprocess keeps the Colab Jupyter kernel `busy`
-# for the life of the worker, while `start_new_session=True` isolates the
+# for the life of the worker and emits a periodic heartbeat so Jupyter's
+# `last_activity` advances, while `start_new_session=True` isolates the
 # watchdog's `killpg` from the Jupyter server.
 def _kernel_bootstrap_code(env: dict[str, str], code: str) -> str:
     return f"""import os, pathlib, shutil, subprocess, sys
@@ -86,7 +89,7 @@ except FileExistsError:
     raise SystemExit(0)
 env = {env!r}
 python = shutil.which('python3.12') or sys.executable
-subprocess.run(
+proc = subprocess.Popen(
     [python, '-c', {code!r}],
     env={{**os.environ, **env}},
     stdin=subprocess.DEVNULL,
@@ -94,6 +97,13 @@ subprocess.run(
     stderr=subprocess.DEVNULL,
     start_new_session=True,
 )
+while True:
+    try:
+        proc.wait(timeout=30)
+        break
+    except subprocess.TimeoutExpired:
+        sys.stdout.write('.')
+        sys.stdout.flush()
 """
 
 
@@ -111,6 +121,9 @@ class ColabMachines:
         self._spec = resolve_template(template)
         self._api, self._bucket, self._prefix = api, bucket, prefix
         self._program = Program(bucket, prefix)
+        self._checked_kernel: dict[str, float] = {}
+        self._channels: dict[str, ChannelHandle] = {}
+        self._booted: set[str] = set()
 
     def _key(self, session: str, name: str) -> str:
         return f"{self._prefix}/sessions/{session}/{name}.json"
@@ -228,8 +241,10 @@ class ColabMachines:
                     env, boot_source("etude.launch.provisioner.providers.watchdog")
                 )
                 with limit_time((cutoff - datetime.now(UTC)).total_seconds()):
-                    self._api.execute(proxy, code)
+                    kernel_id = self._api.execute(proxy, code)
                 self._bucket.put(self._key(request.session, "booted"), b"true")
+                self._booted.add(request.session)
+                self._ensure_channel(receipt.endpoint, proxy, kernel_id)
         return Allocation(
             id=receipt.endpoint,
             address=None,
@@ -299,17 +314,62 @@ class ColabMachines:
             limit = f"{ceiling.quantize(Decimal('0.0001')).normalize():f}"
             raise Refused(f"Colab observed rate {rate} CU/hour exceeds ceiling {limit} CU/hour")
 
+    def _is_booted(self, session_id: str) -> bool:
+        if session_id in self._booted:
+            return True
+        if self._bucket.get(self._key(session_id, "booted")) is not None:
+            self._booted.add(session_id)
+            return True
+        return False
+
+    def _ensure_channel(self, endpoint: str, proxy: RuntimeProxyInfo, kernel_id: str) -> None:
+        channel = self._channels.get(endpoint)
+        if channel is not None:
+            channel.update(proxy.url, proxy.token)
+            return
+        handle = self._api.watch_kernel(proxy, kernel_id)
+        if handle is not None:
+            self._channels[endpoint] = handle
+
+    def _close_channel(self, endpoint: str) -> None:
+        self._checked_kernel.pop(endpoint, None)
+        channel = self._channels.pop(endpoint, None)
+        if channel is not None:
+            channel.close()
+
     def alive(self, session_id: str) -> bool:
         receipt = self._read(session_id, "receipt", Receipt)
         if receipt is None:
             return True
         try:
-            return self._proxy_for(receipt.endpoint) is not None
+            proxy = self._proxy_for(receipt.endpoint)
+            if proxy is None:
+                self._close_channel(receipt.endpoint)
+                return False
+            if not self._refresh_kernel(session_id, receipt.endpoint, proxy):
+                self._close_channel(receipt.endpoint)
+                return False
+            return True
         except ProviderUnavailable:
             return True
 
+    def _refresh_kernel(self, session_id: str, endpoint: str, proxy: RuntimeProxyInfo) -> bool:
+        """Keep the kernel WebSocket attached with fresh tokens and detect exited bootstraps."""
+        now = time.monotonic()
+        if now - self._checked_kernel.get(endpoint, float("-inf")) < _KEEP_ALIVE_INTERVAL:
+            return True
+        kernels = self._api.kernels(proxy)
+        self._checked_kernel[endpoint] = now
+        active = [k for k in kernels if k.execution_state != "idle"]
+        if not active:
+            return not self._is_booted(session_id)
+        self._ensure_channel(endpoint, proxy, active[0].id)
+        return True
+
     def end(self, session_id: str) -> datetime | None:
         endpoint = self.find(session_id)
+        if endpoint is not None:
+            self._close_channel(endpoint)
         return datetime.now(UTC) if endpoint is not None and self._unassign(endpoint) else None
 
     def _unassign(self, endpoint: str) -> bool:
