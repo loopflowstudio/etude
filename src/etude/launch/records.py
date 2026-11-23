@@ -97,6 +97,11 @@ class Stale(LauncherError):
     """A record changed after it was read; the write did not happen."""
 
 
+def provider_unit(kind: ProviderKind) -> str:
+    """Native billing unit for one provider kind (`cu` for Colab, `usd` otherwise)."""
+    return "cu" if kind == "colab" else "usd"
+
+
 class Provider(Record):
     """An account that supplies machines on demand. It is set once and can be changed.
 
@@ -108,6 +113,13 @@ class Provider(Record):
     kind: ProviderKind
     registry: str  # the provider's id for the credential that pulls private images
     storage: str  # the storage a new pool uses unless it names another
+    # Conversion from the provider's native billing unit to USD; None for USD providers.
+    usd_per_unit: Decimal | None = Field(default=None, ge=0, allow_inf_nan=False)
+
+    @property
+    def unit(self) -> str:
+        """This provider's native billing unit."""
+        return provider_unit(self.kind)
 
     @model_validator(mode="after")
     def _registry_supported(self) -> Provider:
@@ -115,6 +127,8 @@ class Provider(Record):
             raise ValueError(
                 f"{self.kind.title()} supports public images; registry credentials are not stored"
             )
+        if self.unit == "usd" and self.usd_per_unit is not None:
+            raise ValueError(f"{self.kind} bills directly in USD; --usd-per-unit does not apply")
         return self
 
 
@@ -177,13 +191,13 @@ class MachineTemplate(Record):
 
 
 class GPU(Record):
-    """An allocation of GPUs with at least this much CPU, memory and known disk."""
+    """An allocation of GPUs, with CPU/memory floors and disk when the provider quotes them."""
 
     flavor: str | None = None
     id: str  # the provider's GPU type id, such as "NVIDIA L4"
     count: int = Field(default=1, ge=1)
-    min_vcpus: int
-    min_memory_gb: int
+    min_vcpus: int | None = None
+    min_memory_gb: int | None = None
     disk_gb: int | None = None
 
     def __str__(self) -> str:
@@ -191,17 +205,23 @@ class GPU(Record):
         name = self.id if self.count == 1 else f"{self.count} × {self.id}"
         if self.flavor:
             name = f"{self.flavor}: {name}"
-        return f"{name} with at least {self.min_vcpus} vCPUs, {self.min_memory_gb} GB"
+        if self.min_vcpus is not None and self.min_memory_gb is not None:
+            return f"{name} with at least {self.min_vcpus} vCPUs, {self.min_memory_gb} GB"
+        if self.min_vcpus is not None:
+            return f"{name} with at least {self.min_vcpus} vCPUs"
+        if self.min_memory_gb is not None:
+            return f"{name} with at least {self.min_memory_gb} GB"
+        return name
 
 
 class CPU(Record):
-    """A CPU machine of one flavor, sized by vCPU count; memory follows from the flavor."""
+    """A CPU machine of one flavor, sized by vCPU count when the provider quotes it."""
 
     flavor: str  # the provider's CPU flavor id, such as "cpu3c"
-    vcpus: int
+    vcpus: int | None = None
 
     def __str__(self) -> str:
-        return f"{self.flavor} {self.vcpus} vCPUs"
+        return f"{self.flavor} {self.vcpus} vCPUs" if self.vcpus is not None else self.flavor
 
 
 # What a provider was asked to rent, which may be larger than the template asked for.
@@ -212,9 +232,14 @@ class Offer(Record):
     """What a provider would rent for a template now, at what price, and whether it has one."""
 
     hardware: Hardware | None  # None for a machine you own
-    usd_per_hour: Decimal
+    usd_per_hour: Decimal | None  # None: provider reveals rate only after assignment (and rate > 0)
     reason: str | None = None
     available: bool  # False only when the provider positively reports none
+    unit: str = "usd"
+    units_per_hour: Decimal | None = None  # None: provider reveals rate only after assignment
+    usd_per_unit: Decimal = Decimal(1)
+    balance: Decimal | None = None  # account balance in `unit`, when the provider reports one
+    active: int | None = None  # active assignments on the provider account, when reported
 
     @classmethod
     def unavailable(cls, reason: str) -> Self:
@@ -305,7 +330,7 @@ def refusal(
     if not offer.available:
         return offer.reason or "provider reports no available machines"
     ceiling = ondemand.max_usd_per_hour
-    if ceiling is not None and offer.usd_per_hour > ceiling:
+    if ceiling is not None and offer.usd_per_hour is not None and offer.usd_per_hour > ceiling:
         return "price is above its ceiling"
     return None
 
@@ -396,6 +421,19 @@ class Rental(Record):
     billed_usd: Decimal = Decimal(0)
     billed_through: datetime | None = None
     kept: bool = False  # stays when idle until its deadline or explicit termination
+    unit: str = "usd"
+    units_per_hour: Decimal | None = None
+    usd_per_unit: Decimal = Decimal(1)
+
+    @field_validator("unit", mode="before")
+    @classmethod
+    def _default_unit(cls, value: object) -> object:
+        return "usd" if value is None or value == "" else value
+
+    @field_validator("usd_per_unit", mode="before")
+    @classmethod
+    def _default_usd_per_unit(cls, value: object) -> object:
+        return Decimal(1) if value is None or value == "" else value
 
 
 class RentalCost(Record):
@@ -406,6 +444,7 @@ class RentalCost(Record):
     estimated: bool  # part of `usd` is an estimate
     unbilled_usd: Decimal  # the estimated part: `usd` beyond its retained bills
     over_cap: bool  # its bills exceed its cap
+    units: Decimal | None = None  # estimated native units consumed when rental.unit != "usd"
 
 
 class Session(Record):
@@ -501,6 +540,8 @@ class Status(Record):
     machine: str | None = None
     hardware: Hardware | None = None
     estimated: bool = False
+    unit: str = "usd"
+    units: Decimal | None = None
     shared: int = 1  # most runs on the latest attempt's machine at once during it
     tally: Tally | None = None
 
@@ -532,7 +573,12 @@ class Status(Record):
                 f", no delivery confirmed for {self.delivery_age_seconds / 60:.1f} minutes"
                 " (retained evidence; collection may be stale)"
             )
-        return f"{head}{at}{shared}, {'~' if self.estimated else ''}${self.usd:.2f}{delivery}"
+        if self.unit != "usd" and self.units is not None:
+            dollars = f"{'~' if self.estimated and self.usd > 0 else ''}${self.usd:.2f}"
+            cost = f"~{self.units:.2f} {self.unit.upper()} ({dollars})"
+        else:
+            cost = f"{'~' if self.estimated else ''}${self.usd:.2f}"
+        return f"{head}{at}{shared}, {cost}{delivery}"
 
 
 class QuotedMachine(Record):
@@ -546,9 +592,12 @@ class QuotedMachine(Record):
     run: str  # the run's name
     machine: str | None  # an existing machine; None means one would be rented
     hardware: Hardware | None  # for a rental, what the provider would be asked for
-    usd_per_hour: Decimal
-    # This run's share over its planned time on the machine.
-    max_usd: Decimal
+    usd_per_hour: Decimal | None
+    unit: str = "usd"
+    units_per_hour: Decimal | None = None
+    usd_per_unit: Decimal = Decimal(1)
+    # This run's share over its planned time on the machine; None when rate is observed on assign.
+    max_usd: Decimal | None
     slots: int = 1  # runs the machine takes at once
     alongside: tuple[str, ...] = ()  # the other first-wave runs placed on the same machine
 
@@ -562,9 +611,14 @@ class Quote(Record):
     waiting_usd: Decimal = Decimal(0)  # extra window reserved for runs waiting after the wave
 
     @property
-    def max_usd(self) -> Decimal:
-        """Maximum admitted first-wave rental allocation, not a provider-enforced bill cap."""
-        return sum((machine.max_usd for machine in self.machines), self.waiting_usd)
+    def max_usd(self) -> Decimal | None:
+        """Maximum admitted first-wave rental allocation, or None when any rate is observed on assign."""
+        if any(machine.max_usd is None for machine in self.machines):
+            return None
+        return sum(
+            (machine.max_usd for machine in self.machines if machine.max_usd is not None),
+            self.waiting_usd,
+        )
 
 
 class LaunchRequest(Record):

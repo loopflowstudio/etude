@@ -27,8 +27,16 @@ from pathlib import Path
 from etude.errors import LauncherError
 from etude.launch.aws import Keys
 from etude.launch.database import launcher_file, open_home
-from etude.launch.executor import Execution, Executor, local
-from etude.launch.provisioner.machines import Machines, OwnedMachine, Safeguards
+from etude.launch.executor import Execution, Executor, ProviderService, local
+from etude.launch.provisioner.machines import Machines, OwnedMachine, ProviderProfile, Safeguards
+from etude.launch.provisioner.providers.colab.api import (
+    ColabAPI,
+)
+from etude.launch.provisioner.providers.colab.api import (
+    validate_template as validate_colab,
+)
+from etude.launch.provisioner.providers.colab.http import load_credentials as colab_credentials
+from etude.launch.provisioner.providers.colab.machines import ColabMachines
 from etude.launch.provisioner.providers.ec2.api import EC2API, location
 from etude.launch.provisioner.providers.ec2.machines import EC2Machines
 from etude.launch.provisioner.providers.lambda_cloud.api import LambdaAPI
@@ -98,7 +106,10 @@ def _open(home: Path) -> Scheduler:
         credentials: Callable[[], K],
         make: Callable[[K, Provider, MachineTemplate, Bucket, Storage], Machines],
         safeguards: Safeguards,
-    ) -> Callable[[Machine | OnDemand], Execution]:
+        *,
+        profile: ProviderProfile | None = None,
+        validate: Callable[[MachineTemplate], str | None] | None = None,
+    ) -> ProviderService:
         def rented(held: Machine | OnDemand) -> Execution:
             if not isinstance(held, OnDemand) or held.storage is None:
                 raise LauncherError("rentals need an on-demand with storage")
@@ -112,8 +123,11 @@ def _open(home: Path) -> Scheduler:
                 BucketJournal(storage, bucket),
             )
 
-        rented.safeguards = safeguards  # type: ignore[attr-defined]
-        return rented
+        return ProviderService(
+            rented,
+            profile or ProviderProfile(safeguards=safeguards),
+            validate=validate,
+        )
 
     def ec2(
         keys: Keys, account: Provider, template: MachineTemplate, bucket: Bucket, storage: Storage
@@ -185,6 +199,15 @@ def _open(home: Path) -> Scheduler:
                 LambdaMachines.safeguards,
             ),
             "ec2": provider(lambda: Keys.from_environment("s3"), ec2, EC2Machines.safeguards),
+            "colab": provider(
+                colab_credentials,
+                lambda creds, _, template, bucket, storage: ColabMachines(
+                    template, ColabAPI(creds), bucket, storage.prefix
+                ),
+                ColabMachines.safeguards,
+                profile=ColabMachines.profile,
+                validate=validate_colab,
+            ),
         },
     )
     if os.environ.get("ETUDE_SERVER_LOCAL"):

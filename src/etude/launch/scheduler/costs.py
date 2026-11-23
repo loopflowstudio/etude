@@ -166,6 +166,35 @@ def rental_usd(rental: Rental, machine: Machine, now: datetime) -> Decimal:
     return cost_between(rental, machine, machine.claimed_at, end)
 
 
+def rental_units(rental: Rental, machine: Machine, now: datetime) -> Decimal | None:
+    """Estimate native units consumed for a non-USD rental with a known hourly burn rate."""
+    if (
+        rental.unit == "usd"
+        or rental.units_per_hour is None
+        or machine.claimed_at is None
+        or machine.refused_at is not None
+    ):
+        return None
+    end = machine.deleted_at or min(now, rental.deadline)
+    return usd(rental.units_per_hour, machine.claimed_at, end)
+
+
+def run_unit_share(
+    run: str, places: Collection[Place], rental: Rental, machine: Machine
+) -> Decimal | None:
+    """Native unit share of a run on a non-USD rental with a known hourly burn rate."""
+    if rental.unit == "usd" or rental.units_per_hour is None:
+        return None
+    return sum(
+        (
+            usd(rental.units_per_hour, start, end) / len(counts)
+            for start, end, counts in _occupied_intervals(places)
+            if run in counts
+        ),
+        Decimal(0),
+    )
+
+
 def cost_between(r: Rental, machine: Machine, start: datetime, end: datetime) -> Decimal:
     """Allocate billed coverage by occupied time; estimate uncovered seconds."""
     origin = machine.claimed_at or start

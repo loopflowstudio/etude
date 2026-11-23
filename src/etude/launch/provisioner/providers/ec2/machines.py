@@ -78,6 +78,7 @@ class EC2Machines:
         gpu = quote.hardware
         if not quote.available or not isinstance(gpu, GPU) or not gpu.flavor:
             raise Refused(quote.reason or "EC2 has no matching GPU")
+        assert quote.usd_per_hour is not None
         now = datetime.now(UTC)
         seconds = (request.deadline - now).total_seconds()
         cutoff = min(request.deadline, request.startup_deadline or request.deadline)

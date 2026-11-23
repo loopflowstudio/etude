@@ -45,13 +45,24 @@ class Safeguards(Record):
     machine_timer: bool = False
 
 
+class ProviderProfile(Record):
+    """Static capabilities declared by one provider implementation."""
+
+    unit: str = "usd"
+    safeguards: Safeguards = Safeguards()
+    stock_image: bool = True
+
+
 class Allocation(Record):
     id: str
     address: str | None
-    usd_per_hour: Decimal
+    usd_per_hour: Decimal | None = None
     created_at: datetime
     cleanup: tuple[str, ...] = ()
     hardware: Hardware | None = None  # what the provider was asked for; None for owned
+    unit: str = "usd"
+    units_per_hour: Decimal | None = None
+    deadline: datetime | None = None
 
 
 class Bill(Record):
@@ -65,6 +76,8 @@ class MachineRequest(Record):
     session: str
     deadline: datetime | None
     cap_usd: Decimal
+    cap_units: Decimal | None = None
+    max_units_per_hour: Decimal | None = None
     bootstrap: BootstrapLinks | None = None
 
 

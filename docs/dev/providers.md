@@ -384,6 +384,64 @@ launch call has no idempotency token: a lost reply is looked up by name and
 never sent twice. Lambda reports no per-machine bill, so cost stays the
 estimate at the listed price.
 
+### Google Colab
+
+```sh
+# Authenticate once (writes ~/.config/gcloud/application_default_credentials.json):
+gcloud auth application-default login \
+    --scopes=openid,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/colaboratory
+
+etude provider set colab --kind colab --storage r2 --usd-per-unit 0.10
+etude ondemand add colab-l4 --provider colab --gpu L4 --max 1 --max-usd-per-hour 0.30
+etude availability colab-l4 --timeout 30
+etude launch job.py --rent colab-l4 --quote
+etude launch job.py --rent colab-l4
+etude wait
+```
+
+Colab uses Google OAuth2 credentials on the launcher, checked in order:
+`COLAB_ACCESS_TOKEN`, `COLAB_OAUTH_TOKEN`, `COLAB_OAUTH_TOKEN_FILE`,
+`ETUDE_HOME/colab-token.json`, `~/.config/colab-cli/token.json`, and
+`~/.config/gcloud/application_default_credentials.json`. Existing macOS
+`colab-cli` users can export their Keychain token once into
+`~/.etude/colab-token.json` with:
+
+```sh
+umask 077 && security find-generic-password -s google-colab-cli -a oauth_token -w > ~/.etude/colab-token.json
+```
+
+Etude never prompts an interactive OS keychain dialog and never sends OAuth
+credentials to the runtime; the VM receives only signed storage bootstrap links.
+
+Supported `--gpu` values are `T4`, `L4`, `G4`, `A100` and `H100` (one GPU per
+runtime); omitting `--gpu` requests a CPU runtime. Requesting `--memory-gb`
+above 16 GB selects Colab's High-RAM shape where offered. Colab supplies its own
+runtime environment, chooses its region and machine CPU/disk sizes, and has no
+spot market, so `--image`, `--data-center`, `--vcpus`, `--disk-gb`, `--spot` and
+unsupported GPU names are rejected immediately at `ondemand add` and
+`ondemand image`.
+
+Colab meters in Compute Units (`cu`) rather than USD. Set `--usd-per-unit` on
+`provider set` (default `0`, treating a monthly Google AI subscription allotment
+as sunk cost; `0.10` values units at Pay-As-You-Go replacement cost). Colab does
+not publish a GPU's hourly burn rate before assignment: at `$0/CU`, `availability`
+and `--quote` report `$0.00/hour`; at a positive `--usd-per-unit`, they report
+the CU balance and conversion and note that cost and any `--max-usd-per-hour`
+ceiling are checked on assign. After assignment and before booting the kernel,
+Etude observes the live `consumptionRateHourly` delta from `/tun/m/ccu-info`
+(when no concurrent assignment changed), immediately unassigns and refuses if
+the rate exceeds `--max-usd-per-hour`, trims the rental deadline, VM watchdog,
+and attempt limit against `--max-usd`, and records native `CU` alongside
+converted USD.
+
+Creation hashes each session id into a deterministic `nbh` UUID so
+`GET /tun/m/assign` recovers lost create replies without assigning a second
+runtime. Etude starts a Jupyter kernel on the assigned runtime and submits its
+bootstrap over the kernel's WebSocket, running the worker and local deadline
+watchdog in a child process group while the cell waits so Colab sees an active
+busy kernel. On completion, cancellation or deadline expiry, the scheduler
+unassigns the endpoint and confirms its absence from `GET /tun/m/assignments`.
+
 ### Spot
 
 ```sh

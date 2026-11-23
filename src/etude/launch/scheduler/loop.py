@@ -41,9 +41,14 @@ from etude.launch import source
 from etude.launch.commands import ProviderKind
 from etude.launch.database import Database
 from etude.launch.errors import LaunchError, ProviderUnavailable
-from etude.launch.executor import Execution
+from etude.launch.executor import Execution, ProviderService
 from etude.launch.logging import bounded
-from etude.launch.provisioner.machines import Refused, Safeguards, creation_guard
+from etude.launch.provisioner.machines import (
+    ProviderProfile,
+    Refused,
+    Safeguards,
+    creation_guard,
+)
 from etude.launch.records import (
     CAPACITY_REFUSED,
     RETRYABLE,
@@ -61,6 +66,7 @@ from etude.launch.records import (
     LogSnapshot,
     LogStream,
     Machine,
+    MachineTemplate,
     Offer,
     OnDemand,
     Pool,
@@ -84,8 +90,10 @@ from etude.launch.scheduler.costs import (
     Place,
     affordable_seconds,
     rental_cost,
+    rental_units,
     rental_usd,
     run_share,
+    run_unit_share,
 )
 from etude.launch.scheduler.placement import Placement, PlannedRun, funded_group
 from etude.launch.schemas import (
@@ -242,9 +250,17 @@ class Scheduler:
         """Make a pool of machines you own available to launch on."""
         self._store.add_pool(pool)
 
+    def _validate_template(self, template: MachineTemplate) -> None:
+        service_name = self._provider_service(template.provider)
+        service = self._services[service_name]
+        if isinstance(service, ProviderService) and service.validate is not None:
+            problem = service.validate(template)
+            if problem is not None:
+                raise LauncherError(problem)
+
     def add_ondemand(self, ondemand: OnDemand) -> None:
         """Make an on-demand available to rent from. Its provider's service must be held here."""
-        self._provider_service(ondemand.template.provider)  # raises if it cannot be reached
+        self._validate_template(ondemand.template)
         known = {each.name: each.storage for each in self._store.providers()}
         # Fixed here, so changing the provider later cannot move a live rental's records.
         named = ondemand.storage or known.get(ondemand.template.provider)
@@ -277,6 +293,7 @@ class Scheduler:
         """Change the image an on-demand's next machines boot. Running ones are untouched."""
         ondemand = self._store.ondemand(name)
         template = ondemand.template.model_copy(update={"image": image})
+        self._validate_template(template)
         self._store.change_ondemand(ondemand.model_copy(update={"template": template}))
 
     def set_default(self, pool: str | None = None, *, rent: str | None = None) -> None:
@@ -363,7 +380,7 @@ class Scheduler:
                 )
             price = offer.usd_per_hour
             life = hours * 3600
-            if price > 0 and max_usd is not None:
+            if price is not None and price > 0 and max_usd is not None:
                 life = min(life, self._affordable_seconds(supply, price, max_usd))
             if life < 1:
                 raise LauncherError("a rental needs hours, and dollars for at least a second")
@@ -373,7 +390,17 @@ class Scheduler:
                     f"on-demand {ondemand!r} keeps records in a storage whose grants last at "
                     f"most {longest / 3600:g} hours"
                 )
-            session, rented, rental = self._make_rental(supply, price, life, now, kept=True)
+            session, rented, rental = self._make_rental(
+                supply,
+                price,
+                life,
+                now,
+                kept=True,
+                cap_usd=max_usd,
+                unit=offer.unit,
+                units_per_hour=offer.units_per_hour,
+                usd_per_unit=offer.usd_per_unit,
+            )
             self._store.plan(session, (), rented, rental)
             self._tick_supply(supply, self._clock())
             return session.machine
@@ -417,7 +444,8 @@ class Scheduler:
         now = self._clock()
         costs = []
         for rental in self._store.rentals():
-            usd = rental_usd(rental, self._store.machine(rental.machine), now)
+            machine = self._store.machine(rental.machine)
+            usd = rental_usd(rental, machine, now)
             costs.append(
                 RentalCost(
                     rental=rental,
@@ -425,6 +453,7 @@ class Scheduler:
                     estimated=self._estimated(rental, now),
                     unbilled_usd=usd - rental.billed_usd,
                     over_cap=rental.billed_usd > rental.cap_usd,
+                    units=rental_units(rental, machine, now),
                 )
             )
         return tuple(costs)
@@ -460,7 +489,7 @@ class Scheduler:
         """
         ondemand = self._store.ondemand(rent)
         with limit_time(timeout):
-            offer = self._reach(ondemand).offer()
+            offer = self._price_offer(ondemand, self._reach(ondemand).offer())
         in_use = self._in_use(ondemand)
         return Availability(
             ondemand=rent,
@@ -558,7 +587,10 @@ class Scheduler:
                         machine=placement.machine.name if placement.machine else None,
                         hardware=placement.hardware,
                         usd_per_hour=placement.price,
-                        max_usd=planned.usd,
+                        unit=placement.unit,
+                        units_per_hour=placement.units_per_hour,
+                        usd_per_unit=placement.usd_per_unit,
+                        max_usd=None if placement.price is None else planned.usd,
                         slots=supply.slots,
                         spot=isinstance(supply, OnDemand) and supply.template.spot,
                         alongside=tuple(
@@ -816,11 +848,23 @@ class Scheduler:
                         supply = self._store.supply(placement.supply)
                         rented: Machine | None = None
                         rental: Rental | None = None
+                        wave_cap = sum(
+                            (_limit_usd(planned.run.launch.spec) for planned in placement.runs),
+                            Decimal(0),
+                        )
                         if machine is None:
                             assert isinstance(supply, OnDemand)  # only an on-demand rents
                             assert placement.seconds is not None
                             session, rented, rental = self._make_rental(
-                                supply, price, placement.seconds, now, kept=False
+                                supply,
+                                price,
+                                placement.seconds,
+                                now,
+                                kept=False,
+                                cap_usd=wave_cap if wave_cap.is_finite() else None,
+                                unit=placement.unit,
+                                units_per_hour=placement.units_per_hour,
+                                usd_per_unit=placement.usd_per_unit,
                             )
                         else:
                             session = _new_session(_id(), supply, machine, now)
@@ -829,7 +873,7 @@ class Scheduler:
                         if rented is not None:
                             # Boot an empty inbox. No executable work leaves before
                             # the entire first wave has confirmed capacity.
-                            self._create(session, now, idle=True)
+                            self._create(session, now, idle=True, budget_cap=wave_cap)
                             session = self._store.session(session.id)
                             if session.provider_id is None:
                                 if attempts:
@@ -849,7 +893,30 @@ class Scheduler:
                             )
                     self._store.link_launch(launch, session.id)
                     held = len(self._store.attempts(session=session.id))
+                    observed = self._store.rental_for(session) if price is None else None
+                    share_price = (
+                        observed.usd_per_hour / len(placement.runs)
+                        if observed is not None and observed.usd_per_hour > 0
+                        else None
+                    )
                     for index, planned in enumerate(placement.runs):
+                        if share_price is not None:
+                            limit = self._limit(
+                                planned.seconds,
+                                _limit_usd(planned.run.launch.spec),
+                                share_price,
+                            )
+                            if limit is None:
+                                raise LauncherError(
+                                    "job dollars do not cover a second at the observed rental rate"
+                                )
+                            planned = planned.model_copy(
+                                update={
+                                    "seconds": limit[0],
+                                    "limit": limit[1],
+                                    "usd": share_price * limit[0] / 3600,
+                                }
+                            )
                         attempts.append(
                             self._make_attempt(
                                 planned,
@@ -928,9 +995,13 @@ class Scheduler:
             free: int,
             machine: Machine | None,
             session: Session | None,
-            price: Decimal,
+            price: Decimal | None,
             hardware: Hardware | None = None,
             rental: Rental | None = None,
+            *,
+            unit: str = "usd",
+            units_per_hour: Decimal | None = None,
+            usd_per_unit: Decimal = Decimal(1),
         ) -> bool:
             nonlocal reason, underfunded
             available = budgets
@@ -955,7 +1026,7 @@ class Scheduler:
                 chain([first], eligible),
                 free,
                 available,
-                price,
+                Decimal(0) if price is None else price,
                 now,
                 peers,
                 setup_seconds=setup,
@@ -972,6 +1043,9 @@ class Scheduler:
                     session=session,
                     machine=machine,
                     price=price,
+                    unit=rental.unit if rental is not None else unit,
+                    units_per_hour=rental.units_per_hour if rental is not None else units_per_hour,
+                    usd_per_unit=rental.usd_per_unit if rental is not None else usd_per_unit,
                     hardware=hardware,
                 )
             )
@@ -1013,7 +1087,15 @@ class Scheduler:
                     reason = self._trouble.get(ondemand.name, reason)
                     break
                 if not place(
-                    ondemand, ondemand.slots, None, None, offer.usd_per_hour, offer.hardware
+                    ondemand,
+                    ondemand.slots,
+                    None,
+                    None,
+                    offer.usd_per_hour,
+                    offer.hardware,
+                    unit=offer.unit,
+                    units_per_hour=offer.units_per_hour,
+                    usd_per_unit=offer.usd_per_unit,
                 ):
                     break
             if pending and len(placements) > first:
@@ -1296,6 +1378,7 @@ class Scheduler:
                 delivered = self._store.last_delivery(last.id)
                 since = delivered or last.planned_at or session.planned_at
                 delivery_age = max(0.0, (now - since).total_seconds())
+        dollars, unit, units = self._run_spend(run, paid, now)
         seen = Status(
             run=run,
             delivery_age_seconds=delivery_age,
@@ -1306,7 +1389,7 @@ class Scheduler:
             until=record.launch.spec.until,
             clocks={} if last is None else last.clocks,
             tally=None if last is None else last.tally,
-            usd=self._run_usd(run, paid, now),
+            usd=dollars,
             attempts=_tries(attempts),
             machine=None if last is None or refused else last.machine,
             hardware=None if session is None or refused else session.hardware,
@@ -1314,6 +1397,8 @@ class Scheduler:
             if rental is None
             else self._store.machine(rental.machine).deleted_at is not None,
             estimated=any(self._estimated(self._store.session(a.session), now) for a in paid),
+            unit=unit,
+            units=units,
             shared=1
             if last is None or session is None
             else self._shared(last, session, rental, now),
@@ -1463,7 +1548,10 @@ class Scheduler:
             return False
         machine = self._store.machine(rental.machine)
         return (
-            rental.usd_per_hour > 0
+            (
+                rental.usd_per_hour > 0
+                or (rental.unit != "usd" and rental.units_per_hour is not None)
+            )
             and machine.claimed_at is not None
             and machine.refused_at is None
             and (
@@ -1538,8 +1626,9 @@ class Scheduler:
                 offer = self._rentable(supply)
                 if offer is None:
                     return
-                price = offer.usd_per_hour
-                batch = self._batch(waiting, price, now, supply.slots)
+                offer_price = offer.usd_per_hour
+                plan_price = Decimal(0) if offer_price is None else offer_price
+                batch = self._batch(waiting, plan_price, now, supply.slots)
                 if not batch:
                     return
                 try:
@@ -1550,11 +1639,26 @@ class Scheduler:
                     return
                 now = self._clock()  # the rental's window starts after the upload
                 self._store.check_lock(supply.name)
-                life = self._life(supply, [planned.run for planned in batch], waiting, price)
+                life = self._life(supply, [planned.run for planned in batch], waiting, plan_price)
                 if life < 1:
                     self._trouble[supply.name] = "budget cannot cover the provider fallback timer"
                     return
-                session, rented, rental = self._make_rental(supply, price, life, now, kept=False)
+                batch_cap = (
+                    sum((self._remaining(planned.run, now).usd for planned in batch), Decimal(0))
+                    if offer_price is None
+                    else Decimal(0)
+                )
+                session, rented, rental = self._make_rental(
+                    supply,
+                    offer_price,
+                    life,
+                    now,
+                    kept=False,
+                    cap_usd=batch_cap if (offer_price is None and batch_cap.is_finite()) else None,
+                    unit=offer.unit,
+                    units_per_hour=offer.units_per_hour,
+                    usd_per_unit=offer.usd_per_unit,
+                )
             attempts = tuple(
                 self._make_attempt(planned, session, position, now)
                 for position, planned in enumerate(batch)
@@ -1600,6 +1704,25 @@ class Scheduler:
         self._trouble[pool.name] = "no free machine"
         return None
 
+    def _usd_per_unit(self, ondemand: OnDemand) -> Decimal:
+        """Read a non-USD provider's current unit-to-USD conversion from the database."""
+        known = {each.name: each.usd_per_unit for each in self._store.providers()}
+        rate = known.get(ondemand.template.provider)
+        return Decimal(0) if rate is None else rate
+
+    def _price_offer(self, ondemand: OnDemand, offer: Offer) -> Offer:
+        """Apply the scheduler's stored unit conversion to a non-USD provider's offer."""
+        if not offer.available or offer.unit == "usd":
+            return offer
+        usd_per_unit = self._usd_per_unit(ondemand)
+        if offer.units_per_hour is not None:
+            usd_per_hour: Decimal | None = offer.units_per_hour * usd_per_unit
+        elif usd_per_unit == 0:
+            usd_per_hour = Decimal(0)
+        else:
+            usd_per_hour = None
+        return offer.model_copy(update={"usd_per_hour": usd_per_hour, "usd_per_unit": usd_per_unit})
+
     def _rentable(
         self, ondemand: OnDemand, *, manual: bool = False, additional: int = 0
     ) -> Offer | None:
@@ -1612,7 +1735,7 @@ class Scheduler:
         problem = refusal(ondemand, in_use, None, manual=manual)
         if problem is None:
             try:
-                offer = self._reach(ondemand).offer()
+                offer = self._price_offer(ondemand, self._reach(ondemand).offer())
             except Exception as trouble:  # noqa: BLE001
                 # No price, no rental: the runs stay queued, and status says why.
                 self._trouble[ondemand.name] = str(trouble) or type(trouble).__name__
@@ -1632,42 +1755,64 @@ class Scheduler:
         """The on-demand's machines renting or rented now."""
         return sum(s.supply == ondemand.name for s in self._store.unsettled_sessions())
 
-    def _safeguards(self, supply: OnDemand) -> Safeguards:
-        declared: Safeguards = getattr(
-            self._services[self._provider_service(supply.template.provider)],
-            "safeguards",
-            Safeguards(),
+    def _profile(self, supply: OnDemand) -> ProviderProfile:
+        service_name = self._provider_service(supply.template.provider)
+        service = self._services[service_name]
+        if isinstance(service, ProviderService):
+            return service.profile
+        return ProviderProfile(
+            safeguards=getattr(service, "safeguards", Safeguards()),
+            stock_image=getattr(service, "stock_image", service_name in get_args(ProviderKind)),
         )
-        return declared
+
+    def _safeguards(self, supply: OnDemand) -> Safeguards:
+        return self._profile(supply).safeguards
 
     def _affordable_seconds(self, supply: OnDemand, price: Decimal, cap: Decimal) -> float:
         return affordable_seconds(price, cap, self._safeguards(supply).reservation_hours)
 
     def _make_rental(
-        self, ondemand: OnDemand, price: Decimal, life: float, now: datetime, *, kept: bool
+        self,
+        ondemand: OnDemand,
+        price: Decimal | None,
+        life: float,
+        now: datetime,
+        *,
+        kept: bool,
+        cap_usd: Decimal | None = None,
+        unit: str = "usd",
+        units_per_hour: Decimal | None = None,
+        usd_per_unit: Decimal = Decimal(1),
     ) -> tuple[Session, Machine, Rental]:
         """A new rented machine's one session, the machine and its paid window of `life` seconds."""
         id = _id()
         template = ondemand.template
         life = min(life, self._longest_rental(ondemand))
+        image = template.image
+        if image is None and self._profile(ondemand).stock_image:
+            image = STOCK_IMAGE
         machine = Machine(
             name=f"{ondemand.name}-{id}",
             ondemand=ondemand.name,
             kind="rented",
             provider=template.provider,
-            image=template.image
-            or (
-                STOCK_IMAGE
-                if self._provider_service(template.provider) in get_args(ProviderKind)
-                else None
-            ),
+            image=image,
+        )
+        stored_price = Decimal(0) if price is None else price
+        stored_cap = (
+            cap_usd
+            if price is None and cap_usd is not None
+            else rental_cost(stored_price, life, self._safeguards(ondemand).reservation_hours)
         )
         rental = Rental(
             machine=machine.name,
-            usd_per_hour=price,
-            cap_usd=rental_cost(price, life, self._safeguards(ondemand).reservation_hours),
+            usd_per_hour=stored_price,
+            cap_usd=stored_cap,
             deadline=now + timedelta(seconds=life),
             kept=kept,
+            unit=unit,
+            units_per_hour=units_per_hour,
+            usd_per_unit=usd_per_unit,
         )
         return _new_session(id, ondemand, machine, now), machine, rental
 
@@ -1765,7 +1910,14 @@ class Scheduler:
             return None
         return (paid, "over_budget") if paid < seconds else (seconds, "out_of_time")
 
-    def _create(self, session: Session, now: datetime, *, idle: bool = False) -> None:
+    def _create(
+        self,
+        session: Session,
+        now: datetime,
+        *,
+        idle: bool = False,
+        budget_cap: Decimal | None = None,
+    ) -> None:
         self._store.check_lock(session.supply)
         try:
             packet = self._packet(session)
@@ -1821,11 +1973,17 @@ class Scheduler:
         try:
             self._store.record_provider_id(session, provider_id)
             self._diagnose("machine create", "machine confirmed", session=session.id)
-            self._creation_facts(self._store.session(session.id), now)
+            self._creation_facts(self._store.session(session.id), now, budget_cap=budget_cap)
         except Stale:
             pass  # another process already found the rental by its identity
 
-    def _creation_facts(self, session: Session, now: datetime) -> Session:
+    def _creation_facts(
+        self,
+        session: Session,
+        now: datetime,
+        *,
+        budget_cap: Decimal | None = None,
+    ) -> Session:
         service = self._service(session)
         try:
             allocation = service.allocation(session.id)
@@ -1834,9 +1992,83 @@ class Scheduler:
                 "machine readiness", "machine is not ready yet", error, session=session.id
             )
             allocation = None
-        if allocation is not None and allocation.usd_per_hour != self._usd_per_hour(session):
-            self._store.record_price(session, allocation.usd_per_hour)
-            session = self._store.session(session.id)
+        if allocation is not None:
+            rental = self._store.rental_for(session)
+            if rental is not None:
+                if allocation.unit != "usd":
+                    observed_price = (
+                        allocation.units_per_hour * rental.usd_per_unit
+                        if allocation.units_per_hour is not None
+                        else Decimal(0)
+                    )
+                else:
+                    observed_price = (
+                        allocation.usd_per_hour
+                        if allocation.usd_per_hour is not None
+                        else rental.usd_per_hour
+                    )
+                deadline_trimmed = (
+                    allocation.deadline is not None and allocation.deadline < rental.deadline
+                )
+                if (
+                    observed_price != rental.usd_per_hour
+                    or allocation.units_per_hour != rental.units_per_hour
+                    or deadline_trimmed
+                ):
+                    new_cap: Decimal | None = None
+                    new_deadline: datetime | None = (
+                        allocation.deadline if deadline_trimmed else None
+                    )
+                    if rental.usd_per_hour == 0 and observed_price > 0:
+                        # Rental started unquoted: derive its dollar cap and trim its
+                        # deadline against its preserved cap or placed runs' dollar budgets.
+                        origin = session.claimed_at or now
+                        effective_end = new_deadline or rental.deadline
+                        window = max(0.0, (effective_end - origin).total_seconds())
+                        ondemand = self._store.ondemand(session.supply)
+                        reservation = self._safeguards(ondemand).reservation_hours
+                        planned_cap = rental_cost(observed_price, window, reservation)
+                        cap_limit = budget_cap
+                        if cap_limit is None and rental.cap_usd > 0:
+                            cap_limit = rental.cap_usd
+                        if cap_limit is None:
+                            placed = self._store.attempts(session=session.id)
+                            if placed:
+                                cap_limit = sum(
+                                    (
+                                        _limit_usd(self._store.run(attempt.run).launch.spec)
+                                        for attempt in placed
+                                    ),
+                                    Decimal(0),
+                                )
+                        if (
+                            cap_limit is not None
+                            and cap_limit.is_finite()
+                            and cap_limit < planned_cap
+                        ):
+                            funded = affordable_seconds(observed_price, cap_limit, reservation)
+                            trimmed = min(
+                                effective_end, origin + timedelta(seconds=max(1.0, funded))
+                            )
+                            if trimmed < rental.deadline:
+                                new_deadline = trimmed
+                            planned_cap = cap_limit
+                        elif (
+                            cap_limit is not None
+                            and cap_limit.is_finite()
+                            and deadline_trimmed
+                            and planned_cap > cap_limit
+                        ):
+                            planned_cap = cap_limit
+                        new_cap = planned_cap
+                    self._store.record_price(
+                        session,
+                        observed_price,
+                        units_per_hour=allocation.units_per_hour,
+                        cap_usd=new_cap,
+                        deadline=new_deadline,
+                    )
+                    session = self._store.session(session.id)
         hardware = None if allocation is None else allocation.hardware
         if hardware is not None and hardware != session.hardware:
             self._store.record_hardware(session, hardware)
@@ -2000,6 +2232,13 @@ class Scheduler:
         first = [a for a in attempts if not a.added and a.outcome is None]
         work = tuple(w for w in map(self._work, first) if w is not None)
         supply = self._store.supply(session.supply)
+        cap_units: Decimal | None = None
+        max_units_per_hour: Decimal | None = None
+        if rental is not None and rental.unit != "usd" and rental.usd_per_unit > 0:
+            if rental.cap_usd > 0:
+                cap_units = rental.cap_usd / rental.usd_per_unit
+            if isinstance(supply, OnDemand) and supply.max_usd_per_hour is not None:
+                max_units_per_hour = supply.max_usd_per_hour / rental.usd_per_unit
         return Packet(
             delivery_seconds=supply.delivery_seconds,
             log_seconds=supply.log_seconds,
@@ -2009,6 +2248,8 @@ class Scheduler:
             # A machine with slots takes work as they free, so its session is kept.
             kept=rental is not None or supply.slots > 1 or any(a.added for a in attempts),
             cap_usd=Decimal(0) if rental is None else rental.cap_usd,
+            cap_units=cap_units,
+            max_units_per_hour=max_units_per_hour,
             autorun=session.autorun,
             slots=supply.slots,
         )
@@ -2424,6 +2665,44 @@ class Scheduler:
             for attempt in self._store.attempts(session=session.id)
         }
 
+    def _run_spend(
+        self,
+        run: str,
+        attempts: Sequence[RunAttempt],
+        now: datetime,
+        *,
+        committed: bool = False,
+        joining: str | None = None,
+    ) -> tuple[Decimal, str, Decimal | None]:
+        dollars = Decimal(0)
+        units_by_kind: dict[str, list[Decimal | None]] = {}
+        for session_id in {a.session for a in attempts}:
+            session = self._store.session(session_id)
+            rental = self._store.rental_for(session)
+            if rental is None:
+                continue
+            if rental.unit == "usd":
+                units_by_kind.setdefault("usd", [])
+            else:
+                units_by_kind.setdefault(rental.unit, [])
+            if session.claimed_at is not None and session.refused_at is None:
+                places = self._places(
+                    session, rental, now, project=committed and session.id != joining
+                )
+                machine = self._store.machine(session.machine)
+                dollars += run_share(run, places.values(), rental, machine)
+                if rental.unit != "usd":
+                    units_by_kind[rental.unit].append(
+                        run_unit_share(run, places.values(), rental, machine)
+                    )
+        if len(units_by_kind) != 1:
+            return dollars, "usd", None
+        unit, shares = next(iter(units_by_kind.items()))
+        if unit == "usd":
+            return dollars, "usd", None
+        known = [share for share in shares if share is not None]
+        return dollars, unit, sum(known, Decimal(0)) if known else None
+
     def _run_usd(
         self,
         run: str,
@@ -2433,18 +2712,7 @@ class Scheduler:
         committed: bool = False,
         joining: str | None = None,
     ) -> Decimal:
-        dollars = Decimal(0)
-        for session_id in {a.session for a in attempts}:
-            session = self._store.session(session_id)
-            rental = self._store.rental_for(session)
-            if rental is not None and session.claimed_at is not None and session.refused_at is None:
-                places = self._places(
-                    session, rental, now, project=committed and session.id != joining
-                )
-                dollars += run_share(
-                    run, places.values(), rental, self._store.machine(session.machine)
-                )
-        return dollars
+        return self._run_spend(run, attempts, now, committed=committed, joining=joining)[0]
 
     def _shared(
         self, attempt: RunAttempt, session: Session, rental: Rental | None, now: datetime

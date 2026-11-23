@@ -71,6 +71,7 @@ as described in [tracking](tracking.md#storage). R2 uses `--provider r2`.
 | Lium | `lium` | `LIUM_API_KEY`, `LIUM_SSH_PUBLIC_KEY` | `"RTX 5090"` | yes |
 | AWS EC2 | `ec2` | the `AWS_*` keys your S3 storage uses | `L4` | yes |
 | Lambda Cloud | `lambda` | `LAMBDA_API_KEY`, `LAMBDA_TERMINATE_KEY` | `"A10 (24 GB PCIe)"` | no |
+| Google Colab | `colab` | `gcloud` ADC (`colaboratory` scope), `COLAB_OAUTH_TOKEN`, `COLAB_OAUTH_TOKEN_FILE`, `COLAB_ACCESS_TOKEN`, or `~/.etude/colab-token.json` | `L4` | no |
 
 Each provider spells GPU names its own way, and its account needs some setup
 before the first rental; the [provider reference](dev/providers.md) has both.

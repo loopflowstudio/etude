@@ -11,7 +11,7 @@ from typing import Literal, TypeVar
 F = TypeVar("F", bound=Callable[..., object])
 
 
-ProviderKind = Literal["runpod", "vast", "lium", "ec2", "lambda"]
+ProviderKind = Literal["runpod", "vast", "lium", "ec2", "lambda", "colab"]
 
 
 class Kind(StrEnum):

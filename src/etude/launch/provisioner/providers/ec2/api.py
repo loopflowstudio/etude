@@ -376,6 +376,7 @@ class EC2API:
             {"ServiceCode": "ec2", "QuotaCode": quota_code},
             Quota,
         )
+        assert hardware.min_vcpus is not None
         if quota.vcpus < hardware.min_vcpus:
             return EC2Offer.unavailable(
                 f"AWS quota {quota.name!r} is {quota.vcpus:g} vCPUs; {hardware.flavor} needs {hardware.min_vcpus}"

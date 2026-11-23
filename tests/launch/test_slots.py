@@ -133,8 +133,9 @@ def test_quote_shows_runs_sharing_one_rental(tmp_path: Path) -> None:
         ("trial/baseline@3", ()),
     ]
     assert {q.slots for q in quote.machines} == {2}
-    assert quote.machines[0].max_usd == quote.machines[1].max_usd
-    assert quote.machines[0].max_usd + quote.machines[1].max_usd == quote.machines[2].max_usd
+    first, second, third = (q.max_usd for q in quote.machines)
+    assert first is not None and second is not None and first == second
+    assert first + second == third
 
 
 def test_launch_places_a_cohort_on_one_machine_when_its_slots_hold_it(tmp_path: Path) -> None:
@@ -267,7 +268,7 @@ def test_waiting_run_funds_only_the_extension(tmp_path: Path, rate: str, window:
     requests = [*JOB.runs(1), *waiting.runs(2)]
     quote = b.scheduler.quote(requests, rent="l4")
     assert [q.max_usd for q in quote.machines] == [Decimal(rate)]
-    assert quote.max_usd <= Decimal(rate) + Decimal("0.10")
+    assert quote.max_usd is not None and quote.max_usd <= Decimal(rate) + Decimal("0.10")
     b.scheduler.launch(requests, rent="l4")
     (rental,) = b.store.rentals()
     assert (rental.deadline - b.clock()).total_seconds() == window
@@ -312,7 +313,11 @@ def test_resume_reserves_its_unfinished_share_only_on_other_machines(tmp_path: P
     # one-second gap between stopping and rejoining by shortening the target.
     same = RunRequest(id="s1", seed=1, job=job.model_copy(update={"max_hours": 0.999}), resume=True)
     (q,) = b.scheduler.quote([same], rent="l4").machines
-    assert q.machine == machine and Decimal("0.27") < q.max_usd < Decimal("0.28")
+    assert (
+        q.machine == machine
+        and q.max_usd is not None
+        and Decimal("0.27") < q.max_usd < Decimal("0.28")
+    )
     b.scheduler.launch(same, rent="l4")
     assert b.scheduler.attempts(run)[-1].machine == machine
     assert b.service.creates == 1

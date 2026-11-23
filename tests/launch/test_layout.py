@@ -12,7 +12,7 @@ def test_folder_rules() -> None:
         for path in root.rglob("*.py")
     }
     edges: dict[str, set[str]] = {}
-    providers = {"runpod", "vast", "lium", "ec2", "lambda_cloud"}
+    providers = {"runpod", "vast", "lium", "ec2", "lambda_cloud", "colab"}
     for module, path in modules.items():
         tree = ast.parse(path.read_text())
         imports: set[str] = set()
@@ -63,11 +63,14 @@ def test_folder_rules() -> None:
                         "LIUM_API_KEY",
                         "LAMBDA_TERMINATE_KEY",
                         "LAMBDA_API_KEY",
+                        "COLAB_OAUTH_TOKEN",
+                        "COLAB_ACCESS_TOKEN",
                         "etude.launch.provisioner.providers.runpod",
                         "etude.launch.provisioner.providers.vast",
                         "etude.launch.provisioner.providers.lium",
                         "etude.launch.provisioner.providers.ec2",
                         "etude.launch.provisioner.providers.lambda_cloud",
+                        "etude.launch.provisioner.providers.colab",
                     )
                 )
                 for node in ast.walk(tree)

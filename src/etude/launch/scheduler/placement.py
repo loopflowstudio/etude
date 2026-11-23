@@ -37,7 +37,10 @@ class Placement(Record):
     supply: str  # the pool or on-demand the machine belongs to, or would be rented from
     session: Session | None
     machine: Machine | None
-    price: Decimal
+    price: Decimal | None
+    unit: str = "usd"
+    units_per_hour: Decimal | None = None
+    usd_per_unit: Decimal = Decimal(1)
     waiting_usd: Decimal = Decimal(0)  # extension funded by waiting runs
     hardware: Hardware | None = None  # what a new rental would ask for
 
@@ -46,6 +49,8 @@ class Placement(Record):
     ) -> "Placement":
         """Reserve extra rental time only as far as the waiting runs pay for it."""
         assert self.seconds is not None
+        if self.price is None:
+            return self.model_copy(update={"seconds": max(self.seconds, target_seconds)})
         base = rental_cost(self.price, self.seconds, reservation_hours)
         affordable = affordable_seconds(self.price, base + waiting_usd, reservation_hours)
         seconds = max(self.seconds, min(target_seconds, affordable))

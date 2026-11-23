@@ -6,6 +6,7 @@ The launcher depends on its public execution protocol, never on SSH or a provide
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -16,10 +17,18 @@ from etude.launch.provisioner.machines import (
     MachineRequest,
     Machines,
     OwnedMachine,
+    ProviderProfile,
     Refused,
     check_creation,
 )
-from etude.launch.records import BootstrapLinks, LogStream, Offer
+from etude.launch.records import (
+    BootstrapLinks,
+    LogStream,
+    Machine,
+    MachineTemplate,
+    Offer,
+    OnDemand,
+)
 from etude.launch.schemas import Observation, Packet, Work
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
@@ -169,6 +178,8 @@ class Executor:
                 startup_deadline=packet.startup_deadline,
                 deadline=deadline,
                 cap_usd=packet.cap_usd,
+                cap_units=packet.cap_units,
+                max_units_per_hour=packet.max_units_per_hour,
                 log_seconds=packet.log_seconds,
                 bootstrap=bootstrap,
             )
@@ -234,3 +245,21 @@ class Executor:
 
 def local(root: Path) -> Executor:
     return Executor(OwnedMachine(), ProcessStart(root), DirectoryJournal(root))
+
+
+class ProviderService:
+    """Typed provider registration pairing a connection factory with static capabilities."""
+
+    def __init__(
+        self,
+        connect: Callable[[Machine | OnDemand], Execution],
+        profile: ProviderProfile = ProviderProfile(),
+        *,
+        validate: Callable[[MachineTemplate], str | None] | None = None,
+    ) -> None:
+        self._connect = connect
+        self.profile = profile
+        self.validate = validate
+
+    def __call__(self, held: Machine | OnDemand) -> Execution:
+        return self._connect(held)
