@@ -362,6 +362,16 @@ def test_default_rl_panels_use_logged_keys_but_explicit_panels_keep_missing_keys
     assert page.headline() == "rl/loss 0.5"
 
 
+def test_report_headline_keeps_the_logged_endpoint_of_a_reduced_curve(tmp_path: Path) -> None:
+    with open_run(experiment="lab", run="a", clocks=["updates"], directory=tmp_path) as run:
+        for updates in range(1, 601):
+            run.log({"rl/loss": updates / 2}, updates=updates)
+    page = build(tmp_path, experiment_file(tmp_path, "lab", "def train(config): pass"))
+    trace = page.training.series["updates"]["rl/loss"][0]
+    assert (len(trace.mean), trace.mean[-1], trace.last) == (120, 299, 300)
+    assert page.headline() == "rl/loss 300"
+
+
 def test_selective_report_finds_the_first_ungrouped_metric_drawable_across_runs(
     tmp_path: Path,
 ) -> None:

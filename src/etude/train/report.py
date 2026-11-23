@@ -94,6 +94,7 @@ class Trace(Record):
     owner: str  # a run's or a job's name
     x: list[float | None]
     mean: list[float | None]
+    last: float | None = None
     low: list[float | None] | None = None
     high: list[float | None] | None = None
     nonfinite: int = 0
@@ -101,15 +102,33 @@ class Trace(Record):
 
     @classmethod
     def from_buckets(cls, owner: str, reduced: Buckets) -> Trace:
+        last = None
+        for endpoint, mean in zip(reversed(reduced.last), reversed(reduced.mean), strict=True):
+            if math.isfinite(endpoint):
+                last = float(endpoint)
+                break
+            if math.isfinite(mean):
+                # A folded bucket retains its finite mean even when it ends in a gap.
+                last = float(mean)
+                break
         return cls(
             owner=owner,
+            last=last,
             x=_rounded((reduced.x_first + reduced.x_last) / 2, 7),
             mean=_rounded(reduced.mean),
             nonfinite=int(reduced.nonfinite.sum()),
         )
 
+    def drawable(self, *, log: bool) -> bool:
+        return any(
+            x is not None and y is not None and (not log or y > 0)
+            for x, y in zip(self.x, self.mean, strict=True)
+        )
+
     def latest(self, *, log: bool) -> float | None:
-        """Last drawable bucket on this trace's axis."""
+        """Latest logged endpoint on this axis, or the last drawable summary."""
+        if self.last is not None and (not log or self.last > 0):
+            return self.last
         for x, y in zip(reversed(self.x), reversed(self.mean), strict=True):
             if x is not None and y is not None and (not log or y > 0):
                 return y
