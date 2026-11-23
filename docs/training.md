@@ -105,28 +105,28 @@ def train(config: Config) -> None:
             run.save(name="learner")
 ```
 
-Both callbacks take a `Path` and return `None`. `export(folder)` writes regular
-files (including nested relative paths) into an empty staging directory;
-`restore(folder)` reads from the selected committed save folder and applies them
-to live state. On a fresh run, `restore` is skipped and `counts` starts as the
-supplied `Counts()` instance. On a resumed run (`etude train train.py --resume`),
-Etude checks the seed, manifest and exported files, restores any registered
-`**objects`, populates `extra` in place, calls `restore(folder)` and returns
-that same `extra` instance. Omitting `extra` returns the restored save `Path`,
-or `None` on first use.
+Both callbacks take a `Path` and return `None`. `export(folder)` writes files
+into an empty staging directory. On a fresh run, Etude skips `restore` and
+returns the supplied `Counts()` instance. On resume, Etude checks the seed and
+the presence of every file listed in the manifest, loads any registered objects,
+and fills in the counters. Then `restore(folder)` reads the committed files
+into your learner. If it raises, the previous registration stays in effect.
+Live objects and counters may already have changed. With `extra`, you always
+receive the same instance on success. Without it, you receive the selected
+folder or `None` on first use.
 
 Use `name=` to isolate independent state namespaces, matched by
 `run.save(name=...)`. `export`, `restore`, `extra` and `name` are reserved
-keyword arguments and cannot name `**objects`. Calling `run.save(export=fn, name=...)`
-updates a namespace's exporter before checking whether a save is due;
-registering `restore=` without any `export=` raises `ValueError` on save so
-`current.json` is never overwritten without your files. Exported files are
-recorded in the save manifest. Use visible paths for finished files and
-avoid symlinks and `.open`/`.partial` suffixes. Etude reserves the root
-`state.json`, each registered object's name as a manifest key, and its
-`<object>.pt` path. If `restore` raises, registration does not complete,
-though objects or `extra` restored before it may already be updated. The
-[persistence reference](dev/training.md) describes the stored layout.
+keyword arguments. Register both callbacks up front so a planned stop can
+save the namespace before the loop reaches its next `run.save()`. You can
+replace the exporter by calling `run.save(export=fn, name=...)`, even between
+saves. A namespace with a restore callback needs an exporter when a save is
+due. Otherwise the write raises `ValueError` and preserves the committed save.
+
+Export regular files under visible names, including nested paths. Symlinks
+and names ending in `.open` or `.partial` are rejected. Etude reserves the
+root `state.json`, each registered object's manifest key and its
+`<object>.pt` path. See the [persistence reference](dev/training.md).
 
 A save is a whole snapshot, selected by a pointer written last. A crash while
 saving leaves the previous complete save. A second attempt reloads that save;
@@ -134,8 +134,9 @@ rows past its continuation coordinate are superseded. Scientific coordinates
 remain steps, transitions or optimizer updates, not rental time.
 
 Ctrl-C once requests a saved stop at the next safe boundary; a second interrupt
-is immediate. Stopping before any declared clock moves writes no step-0 save;
-stopping after progress saves every registered namespace whose clocks moved.
+is immediate. At the start of each step, a pending stop saves each namespace
+whose declared clocks have moved since its last save. A newly declared clock
+starts at zero, so entering a new phase alone does not trigger a save.
 Respect `run.should_stop` in loops that do not use `run.steps`. A stopped attempt
 exits with code 75 and can continue elsewhere. Never launch a new process that
 deletes saves: delivery owns acknowledgment and retention.
