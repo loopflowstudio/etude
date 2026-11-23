@@ -203,6 +203,54 @@ def train(config: Config) -> None:
 """
 
 
+def test_custom_state_resumes_with_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    file = tmp_path / "custom.py"
+    file.write_text("""
+from pathlib import Path
+from pydantic import BaseModel
+from etude.stopping import Stopped
+from etude.train.tracking import track
+
+class Config(BaseModel):
+    updates: int = 4
+
+class Counts(BaseModel):
+    games: int = 0
+
+def train(config: Config) -> None:
+    value = 0
+
+    def export(folder: Path) -> None:
+        (folder / "value").write_text(str(value))
+
+    def restore(folder: Path) -> None:
+        nonlocal value
+        value = int((folder / "value").read_text())
+
+    with track(config=config) as run:
+        counts = run.resume(export=export, restore=restore, extra=Counts(), name="learner")
+        for update in run.steps("updates", to=config.updates, save_every=2):
+            value += 1
+            counts.games += 3
+            run.log({"value": value, "games": counts.games})
+            run.save(name="learner")
+            if update == 2:
+                raise Stopped()
+""")
+    args = ["train", str(file)]
+    assert main(args) == 75
+    track = tmp_path / "home/track"
+    stopped = read(track, "custom", "custom")
+    assert stopped.points("value", "updates").x.tolist() == [1, 2]
+    assert main([*args, "--resume"]) == 0
+    finished = read(track, "custom", "custom")
+    values = finished.points("value", "updates")
+    assert values.x.tolist() == [1, 2, 3, 4]
+    assert values.y.tolist() == [1, 2, 3, 4]
+    assert finished.points("games", "updates").y.tolist() == [3, 6, 9, 12]
+
+
 def test_local_stop_resume_and_finished_refusals_preserve_one_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

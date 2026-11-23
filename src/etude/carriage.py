@@ -31,7 +31,7 @@ from collections.abc import Collection, Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from errno import EEXIST, ENOTEMPTY
 from hashlib import sha256
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
 from stat import S_ISREG
 from typing import Literal
 
@@ -132,21 +132,30 @@ def _rank(key: str) -> int:
     return 3
 
 
+def publishable_name(path: PurePath) -> bool:
+    """Whether a relative path names finished, visible output."""
+    return not any(part.startswith(".") for part in path.parts) and path.suffix not in (
+        ".open",
+        ".partial",
+    )
+
+
 def _listing(root: Path, *, tail_seconds: float) -> list[str]:
     """Ready files as slash-separated keys.
 
     A file still being written (`.open`, `.partial`) waits until it is whole,
     and anything under a folder starting with `.` (a carrier's own markers)
-    never leaves. A tail is ready once it is `tail_seconds` old: 0 once its
-    writer has ended, `math.inf` while it runs and owns it.
+    never leaves. Outside numbered saves, tails wait until they are
+    `tail_seconds` old: 0 once the writer ends, `math.inf` while it runs.
+    Every file in a committed save is ready together.
     """
     keys: list[str] = []
     if not root.is_dir():
         return keys
     now = time.time()
     for path in root.rglob("*"):
-        name = PurePosixPath(path.relative_to(root).as_posix())
-        if any(part.startswith(".") for part in name.parts) or path.suffix in (".open", ".partial"):
+        name = path.relative_to(root)
+        if not publishable_name(name):
             continue
         try:
             stat = path.lstat()  # a link is never followed out of the folder
@@ -154,15 +163,21 @@ def _listing(root: Path, *, tail_seconds: float) -> list[str]:
             continue  # retired since the listing; what replaced it is seen next pass
         if not S_ISREG(stat.st_mode):
             continue
-        if path.suffix == ".tail" and tail_seconds > 0 and now - stat.st_mtime < tail_seconds:
+        key = name.as_posix()
+        if (
+            path.suffix == ".tail"
+            and tail_seconds > 0
+            and now - stat.st_mtime < tail_seconds
+            and save_pointer(key) is None
+        ):
             continue
-        keys.append(name.as_posix())
+        keys.append(key)
     return keys
 
 
 POINTER = "current.json"
-# A numbered save file: its state folder (default or named), save folder and path within.
-_SAVE_FILE = re.compile(r"(out/state/(?:[^/]+/)?)(save-[0-9]+)/.+")
+# The first numbered folder owns the file. Deeper save-N names belong to the recipe.
+_SAVE_FILE = re.compile(r"(out/state/(?:[^/]+/)??)(save-[0-9]+)/.+", re.DOTALL)
 
 
 def save_number(name: str) -> int | None:

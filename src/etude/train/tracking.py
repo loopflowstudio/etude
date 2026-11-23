@@ -60,7 +60,7 @@ from pydantic import BaseModel, ValidationError
 
 from etude.block_file import block_key, log_key, sealed_as, tail_key
 from etude.cache import Content
-from etude.carriage import OUT_PRESENT, checkpoint_key, note_retired, taken
+from etude.carriage import OUT_PRESENT, checkpoint_key, note_retired, publishable_name, taken
 from etude.checkpoints import CheckpointRecord
 from etude.deadline import limit_time
 from etude.errors import EtudeError
@@ -92,7 +92,7 @@ from etude.train.block import Builder, Columns, Json, LoggedRow, concat
 from etude.train.block import encode as encode_block
 from etude.train.manifest import Index, metric_names
 from etude.train.records import ParentRun, RowTable, checkpoint_name
-from etude.train.state import State, saved_states, state_folder, write_objects
+from etude.train.state import State, register_objects, saved_states, write_objects
 
 __all__ = ("EtudeWarning", "TrainingRun", "seal_runs", "track")
 
@@ -178,10 +178,7 @@ def _folder_artifact(folder: Path) -> ArtifactRef:
             raise ValueError("a checkpoint must be self-contained, without symbolic links")
         if path.is_file():
             key = path.relative_to(folder)
-            if any(part.startswith(".") for part in key.parts) or path.suffix in (
-                ".open",
-                ".partial",
-            ):
+            if not publishable_name(key):
                 raise ValueError(
                     "checkpoint files must use portable published names, without private or unfinished files"
                 )
@@ -411,8 +408,8 @@ class TrainingRun(Run):
         for value in range(int(position) + 1, int(target) + 1):
             if self.should_stop:
                 for state in self._states.values():
-                    if state.last_at is None or any(
-                        state.last_at.get(name) != self.at(name) for name in self._clock_names
+                    if any(
+                        state.last_at.get(name, 0.0) != self.at(name) for name in self._clock_names
                     ):
                         self._save_state(state)
                 raise Stopped()
@@ -429,19 +426,42 @@ class TrainingRun(Run):
 
     @overload
     def resume[T: BaseModel](
-        self, *, extra: T, name: str | None = None, **objects: object
+        self,
+        *,
+        extra: T,
+        export: Callable[[Path], None] | None = None,
+        restore: Callable[[Path], None] | None = None,
+        name: str | None = None,
+        **objects: object,
     ) -> T: ...
 
     @overload
     def resume(
-        self, *, extra: None = None, name: str | None = None, **objects: object
+        self,
+        *,
+        extra: None = None,
+        export: Callable[[Path], None] | None = None,
+        restore: Callable[[Path], None] | None = None,
+        name: str | None = None,
+        **objects: object,
     ) -> Path | None: ...
 
     def resume(
-        self, *, extra: BaseModel | None = None, name: str | None = None, **objects: object
+        self,
+        *,
+        extra: BaseModel | None = None,
+        export: Callable[[Path], None] | None = None,
+        restore: Callable[[Path], None] | None = None,
+        name: str | None = None,
+        **objects: object,
     ) -> BaseModel | Path | None:
-        """Register objects and restore only those objects from the last whole save."""
-        state = State(state_folder(self.out, name), objects, extra)
+        """Register a namespace and restore objects, extra, then custom files.
+
+        Register export and restore together for custom files.
+        Return the supplied extra instance, or the selected folder (None on first use).
+        A failing restore leaves registration unchanged but may have mutated live state.
+        """
+        state = State(self.out, objects, extra, name=name, export=export, restore=restore)
         found = state.restore(seed=self.seed)
         self._states[name] = state
         return extra if extra is not None else found
@@ -449,35 +469,41 @@ class TrainingRun(Run):
     def save(
         self, export: Callable[[Path], None] | None = None, *, name: str | None = None
     ) -> None:
-        """Write registered state when due, at the target, or before a planned stop."""
+        """Save when due, at the target, or on stop. A failed save keeps the prior exporter."""
         if name not in self._states:
             raise ValueError("register state with run.resume() before saving")
         state = self._states[name]
         if export is not None:
+            state.validate_export(export)
+        if self._save_due(state) or self.should_stop:
+            self._save_state(state, export=export)
+        elif export is not None:
             state.export = export
-        clock = self._step_clock
-        due = (
+
+    def _save_due(self, state: State) -> bool:
+        if (
             self._save_every_seconds is not None
             and time.monotonic() - state.saved_at >= self._save_every_seconds
-        ) or (
-            self._save_every is not None
-            and clock is not None
-            and self.at(clock) - state.saved_step >= self._save_every
+        ):
+            return True
+        clock = self._step_clock
+        if clock is None:
+            return False
+        step = self.at(clock)
+        return (self._save_every is not None and step - state.saved_step >= self._save_every) or (
+            self._step_target is not None and step >= self._step_target
         )
-        final = (
-            clock is not None
-            and self._step_target is not None
-            and self.at(clock) >= self._step_target
-        )
-        if due or final or self.should_stop:
-            self._save_state(state)
 
-    def _save_state(self, state: State) -> None:
+    def _save_state(self, state: State, *, export: Callable[[Path], None] | None = None) -> None:
         wall_ms, hours = self._now()
         at = {**{clock: self.at(clock) for clock in self._clock_names}, **hours}
         with self.files.lock:
             state.write(
-                at=at, wall_ms=wall_ms, seed=self.seed, commit=os.environ.get("ETUDE_COMMIT")
+                at=at,
+                wall_ms=wall_ms,
+                seed=self.seed,
+                commit=os.environ.get("ETUDE_COMMIT"),
+                export=export,
             )
         if self._step_clock is not None:
             state.saved_step = self.at(self._step_clock)
@@ -808,12 +834,13 @@ class TrainingRun(Run):
         try:
             if export is not None:
                 export(staged)
-            files = {
-                path.relative_to(staged).as_posix(): path.relative_to(staged).as_posix()
-                for path in staged.rglob("*")
-                if path.is_file() and path.name != "checkpoint.json"
-            }
-            files.update(write_objects(staged, objects))
+                files = {}
+                for path in staged.rglob("*"):
+                    if path.is_file() and path.name != "checkpoint.json":
+                        key = path.relative_to(staged).as_posix()
+                        files[key] = key
+            else:
+                files = write_objects(staged, register_objects(objects))
             (staged / "checkpoint.json").write_text(
                 json.dumps({"at": at, "files": files}, sort_keys=True)
             )

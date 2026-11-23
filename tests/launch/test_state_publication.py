@@ -96,6 +96,9 @@ def test_only_the_selected_save_travels_and_its_pointer_is_last(
     courier, _, root = machine(tmp_path, storage)
     first = _save(root, 1, name=name)
     second = _save(root, 2, name=name)
+    (second / "weights.tail").write_bytes(b"committed")
+    (second / "save-7").mkdir()
+    (second / "save-7/weights").write_bytes(b"framework checkpoint")
     unfinished = second.parent / "save-00000003"
     unfinished.mkdir()
     (unfinished / "model").write_bytes(b"partial")
@@ -103,10 +106,9 @@ def test_only_the_selected_save_travels_and_its_pointer_is_last(
     sent = [key for key in storage.writes if "/out/state/" in key]
     prefix = "etude/run1/" + second.relative_to(root).as_posix()
     pointer = "etude/run1/" + (second.parent / "current.json").relative_to(root).as_posix()
-    assert set(sent) == {prefix + "/model", prefix + "/optimizer", prefix + "/state.json", pointer}
-    assert sent.index(pointer) > max(
-        sent.index(prefix + "/" + file) for file in ("model", "optimizer", "state.json")
-    )
+    members = {"model", "optimizer", "state.json", "weights.tail", "save-7/weights"}
+    assert set(sent[:-1]) == {f"{prefix}/{member}" for member in members}
+    assert sent[-1] == pointer
     assert first.exists()  # one delivery pass of grace after acknowledgement
     assert unfinished.exists()
     courier._track("run1", done=False)

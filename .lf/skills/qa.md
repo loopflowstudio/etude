@@ -198,16 +198,23 @@ driver its own background run. Start long drivers with the shell tool's backgrou
 option, not `nohup … &`: a shell `&` job ignores SIGINT and every child it spawns
 inherits that, so `etude view` then looks hung on SIGINT. SIGTERM stops it either way.
 
-For interruption, make a separate lab copy with an author-controlled pause
-(`time.sleep(0.1)` per update) and more updates. Drive `uv run etude train
-experiment.py` with a Python subprocess driver: `etude train` prints no progress
-lines, so sleep a few seconds, then send SIGINT to that process (a driver that
-blocks on `readline` never sends it). Require exit 75. The next plain
-`etude train experiment.py` prints `stopped; --job coin --seed 0 --resume`;
-follow it, then read `etude.train.read.read(etude.storage.default_root(), "experiment",
-"coin@0").points("heads", "updates")` and require each update once, in order,
-across two metric writers. Use `uv run python` for the driver. To check block selection, copy the run folder on every poll while it writes: the copies hold level-1 recent blocks and tails that the final fold later replaces with a level-2 block. Put those back beside the finished files in a copy and read it with `--source`; each update must still read once. A long run's `Latest metric` is the latest bucket mean, not its last row. A background
-shell job may ignore SIGINT; do not signal processes by a broad name pattern.
+For interruption, make a separate lab copy with more updates and a four-second
+pause per update so the driver can stop training between saves. Use
+`uv run python` to start `uv run etude train experiment.py` as a subprocess.
+Send SIGINT to that process four seconds after launch. Training prints no
+progress lines, so waiting on `readline` can block the driver. A background
+shell job may ignore SIGINT. Require exit 75, then follow the resume command
+printed by the next plain `etude train experiment.py`. Read
+`etude.train.read.read(etude.storage.default_root(), "experiment",
+"coin@0").points("heads", "updates")`. Check the update numbers in `.x` and
+the metric values in `.y`. Each update must appear once, in order, across
+both metric writers.
+
+To check block selection, copy the run folder on every poll while it writes.
+The copies hold level-1 blocks and tails that the final fold replaces with a
+level-2 block. Put the older files beside the finished files in a copy and
+read it with `--source`. Each update must still appear once. On a long run,
+`Latest metric` shows the latest bucket mean.
 
 Training code calls `track(config=config)` only inside Etude's assigned run.
 Saves (`run.resume` / `run.save`) restore learning; `run.checkpoint(path)`
@@ -258,12 +265,16 @@ In a fresh lab home, run `uv run etude database upgrade --development` before
 launcher commands for unmerged SQL. Reads never initialize the database.
 `uv run etude launch experiment.py --pool local` submits pending work;
 `uv run etude wait --experiment experiment` drives it. Launch again to discover
-evals after training, then wait again. Read printed outcomes, logs and cleanup
+evals after training, then wait again. Read printed outcomes, logs (`etude logs --run RUN --job-only`) and cleanup
 receipts: exit 0 from wait alone does not establish success. `wait` takes no
 time limit and macOS has no `timeout`; bound it with the shell tool's own timeout. Each job uses an
 environment separate from the client. Keep `max_hours` and `max_usd` bounded.
 
 Check a continuation with `uv run etude continue --run ADDRESS --until updates=N`.
+The parent must have logged at least one metric row: `continue` refuses a
+clock that was only stepped (`a continuation needs a target on a clock its
+parent recorded`). A continuation keeps the parent's config, so a recipe that
+asserts its final count against `config.updates` fails past the old target.
 For the SSH scheduler path, submit frozen source once, make the client's
 checkout unavailable, and continue the retained run. The server must reuse its
 source archive without requiring another client checkout or transferring the

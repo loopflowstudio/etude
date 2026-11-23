@@ -69,9 +69,55 @@ registered state when due: by default every five minutes, or at `save_every`
 steps / `save_every_seconds` seconds. Call save each iteration; completion and
 planned stop save too. Register everything required to continue learning.
 
-For counters and other JSON state, pass `extra=YourPydanticModel()` to resume;
-the returned instance contains restored fields. The prototype uses this without
-PyTorch. The [persistence reference](dev/training.md) describes the stored layout.
+For custom framework files, pass `export` and `restore` together to
+`run.resume`. You can include JSON counters in the same save. This example
+runs without PyTorch.
+
+```python
+from pathlib import Path
+
+from pydantic import BaseModel
+
+from etude.train.tracking import track
+
+
+class Counts(BaseModel):
+    games: int = 0
+
+
+def train(config: Config) -> None:
+    with track(config=config) as run:
+        learner = build_learner(config, seed=run.seed)
+
+        def export(folder: Path) -> None:
+            learner.write(folder / "weights.bin")
+
+        def restore(folder: Path) -> None:
+            learner.read(folder / "weights.bin")
+
+        counts = run.resume(export=export, restore=restore, extra=Counts(), name="learner")
+        for update in run.steps("updates", to=config.updates, save_every=25):
+            counts.games += learner.step()
+            run.save(name="learner")
+```
+
+Each `name` has its own save. On a fresh run, Etude skips `restore`. On
+resume, it checks the seed and listed files, loads registered objects, fills
+in the supplied `extra` instance, then calls `restore(folder)`. With `extra`,
+`resume` returns that instance. Combining counters with custom files requires
+both callbacks. If restoration fails, live objects may already have changed
+and the previous registration still handles saves.
+
+`export(folder)` receives an empty directory. Write regular files at visible
+paths. Reserve the root `state.json`, each object name and its `<name>.pt`
+file for Etude. Symlinks and names ending in `.open` or `.partial` are rejected.
+The keywords `export`, `restore`, `extra` and `name` are reserved.
+
+For manual loading, omit `extra`. `path = run.resume()` returns the committed
+folder, or `None` on a fresh run. Call `run.save(export=fn)` in the loop.
+Between saves Etude remembers `fn` for the next save or planned stop. During
+a save, `fn` replaces the previous exporter only once the save commits.
+See the [persistence reference](dev/training.md).
 
 A save is a whole snapshot, selected by a pointer written last. A crash while
 saving leaves the previous complete save. A second attempt reloads that save;
@@ -79,9 +125,12 @@ rows past its continuation coordinate are superseded. Scientific coordinates
 remain steps, transitions or optimizer updates, not rental time.
 
 Ctrl-C once requests a saved stop at the next safe boundary; a second interrupt
-is immediate. Respect `run.should_stop` in loops that do not use `run.steps`.
-A stopped attempt exits with code 75 and can continue elsewhere. Never launch
-a new process that deletes saves: delivery owns acknowledgment and retention.
+is immediate. At the start of each step, a pending stop saves each namespace
+whose declared clocks have moved since its last save. A newly declared clock
+starts at zero, so entering a new phase alone does not trigger a save.
+Respect `run.should_stop` in loops that do not use `run.steps`. A stopped attempt
+exits with code 75 and can continue elsewhere. Never launch a new process that
+deletes saves: delivery owns acknowledgment and retention.
 
 ## Checkpoints
 
