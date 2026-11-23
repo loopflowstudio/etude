@@ -164,6 +164,10 @@ time limit and macOS has no `timeout`; bound it with the shell tool's own timeou
 environment separate from the client. Keep `max_hours` and `max_usd` bounded.
 
 Check a continuation with `uv run etude continue --run ADDRESS --until updates=N`.
+The parent must have logged at least one metric row: `continue` refuses a
+clock that was only stepped (`a continuation needs a target on a clock its
+parent recorded`). A continuation keeps the parent's config, so a recipe that
+asserts its final count against `config.updates` fails past the old target.
 For the SSH scheduler path, submit frozen source once, make the client's
 checkout unavailable, and continue the retained run. The server must reuse its
 source archive without requiring another client checkout or transferring the
