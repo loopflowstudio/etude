@@ -69,8 +69,8 @@ registered state when due: by default every five minutes, or at `save_every`
 steps / `save_every_seconds` seconds. Call save each iteration; completion and
 planned stop save too. Register everything required to continue learning.
 
-For frameworks without `state_dict`, or custom files beside JSON counters,
-register `export` and `restore` callbacks in `run.resume(...)` without PyTorch:
+For custom framework files and JSON counters, register both callbacks before
+entering the loop. This example runs without PyTorch.
 
 ```python
 from pathlib import Path
@@ -88,45 +88,35 @@ def train(config: Config) -> None:
     with track(config=config) as run:
         learner = build_learner(config, seed=run.seed)
 
-        def export_weights(folder: Path) -> None:
+        def export(folder: Path) -> None:
             learner.write(folder / "weights.bin")
 
-        def restore_weights(folder: Path) -> None:
+        def restore(folder: Path) -> None:
             learner.read(folder / "weights.bin")
 
-        counts = run.resume(
-            export=export_weights,
-            restore=restore_weights,
-            extra=Counts(),
-            name="learner",
-        )
+        counts = run.resume(export=export, restore=restore, extra=Counts(), name="learner")
         for update in run.steps("updates", to=config.updates, save_every=25):
             counts.games += learner.step()
             run.save(name="learner")
 ```
 
-Both callbacks take a `Path` and return `None`. `export(folder)` writes files
-into an empty staging directory. On a fresh run, Etude skips `restore` and
-returns the supplied `Counts()` instance. On resume, Etude checks the seed and
-the presence of every file listed in the manifest, loads any registered objects,
-and fills in the counters. Then `restore(folder)` reads the committed files
-into your learner. If it raises, the previous registration stays in effect.
-Live objects and counters may already have changed. With `extra`, you always
-receive the same instance on success. Without it, you receive the selected
-folder or `None` on first use.
+On a fresh run, `resume` skips `restore`. When a save exists, Etude checks the
+seed and listed files, loads registered objects, fills in `extra`, then calls
+`restore(folder)`. If restore fails, the previous registration stays in effect.
+Live objects and counters may already have changed. With `extra`, `resume`
+returns that same instance. Otherwise it returns the committed folder or
+`None` on a fresh run.
 
-Use `name=` to isolate independent state namespaces, matched by
-`run.save(name=...)`. `export`, `restore`, `extra` and `name` are reserved
-keyword arguments. Register both callbacks up front so a planned stop can
-save the namespace before the loop reaches its next `run.save()`. You can
-replace the exporter by calling `run.save(export=fn, name=...)`, even between
-saves. A namespace with a restore callback needs an exporter when a save is
-due. Otherwise the write raises `ValueError` and preserves the committed save.
+Each `name` has its own save. Etude passes `export` an empty folder. Write
+regular files with visible names, including nested paths. Etude rejects
+symlinks, names ending in `.open` or `.partial`, and collisions with the root
+`state.json`, an object key or its `<object>.pt` file. The keywords `export`,
+`restore`, `extra` and `name` are reserved.
 
-Export regular files under visible names, including nested paths. Symlinks
-and names ending in `.open` or `.partial` are rejected. Etude reserves the
-root `state.json`, each registered object's manifest key and its
-`<object>.pt` path. See the [persistence reference](dev/training.md).
+`run.save(export=fn, name=...)` replaces that namespace's exporter immediately,
+even between saves. Registering it in `resume` also covers stops before the
+first call to `save`. Saving a namespace that has a restore callback and lacks
+an exporter raises `ValueError`. See the [persistence reference](dev/training.md).
 
 A save is a whole snapshot, selected by a pointer written last. A crash while
 saving leaves the previous complete save. A second attempt reloads that save;

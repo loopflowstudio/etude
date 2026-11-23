@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
@@ -22,14 +23,23 @@ class Counts(BaseModel):
     games: int = 0
 
 
+@dataclass
+class Weights:
+    value: int = 0
+
+    def export(self, folder: Path) -> None:
+        (folder / "weights").write_text(str(self.value))
+
+    def restore(self, folder: Path) -> None:
+        self.value = int((folder / "weights").read_text())
+
+
 def test_custom_state_and_counts_resume_together_after_relay_without_torch(tmp_path: Path) -> None:
     # The child starts here, so even an optional import that catches ImportError is counted.
     attempts = tmp_path / "torch-imports"
-    attempts.touch()
     (tmp_path / "torch.py").write_text(
         "from pathlib import Path\n"
-        "with Path('torch-imports').open('a') as log:\n"
-        "    log.write('torch\\n')\n"
+        "Path('torch-imports').touch()\n"
         "raise ImportError('PyTorch unavailable')\n"
     )
     subprocess.run(
@@ -43,7 +53,7 @@ def test_custom_state_and_counts_resume_together_after_relay_without_torch(tmp_p
         cwd=tmp_path,
         check=True,
     )
-    assert attempts.read_text().splitlines() == []
+    assert not attempts.exists()
 
 
 def _round_trip_after_relay(tmp_path: Path) -> None:
@@ -85,22 +95,14 @@ def _round_trip_after_relay(tmp_path: Path) -> None:
 def test_per_step_export_and_legacy_unlisted_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    value = 0
-
-    def export(folder: Path) -> None:
-        (folder / "value").write_text(str(value))
-
-    def restore(folder: Path) -> None:
-        nonlocal value
-        value = int((folder / "value").read_text())
-
+    weights = Weights()
     with open_run(directory=tmp_path, experiment="e", run="r") as run:
-        counts = run.resume(restore=restore, extra=Counts())
+        counts = run.resume(restore=weights.restore, extra=Counts())
         for step in run.steps("updates", to=2, save_every=2):
-            value += 5
+            weights.value += 5
             counts.games += 3
             if step == 1:
-                run.save(export=export)
+                run.save(export=weights.export)
             else:
                 run.save()
         saved = read_state(run.out / "state")
@@ -109,10 +111,10 @@ def test_per_step_export_and_legacy_unlisted_files(
         (saved.path / "state.json").write_text(
             saved.record.model_copy(update={"files": {}}).model_dump_json()
         )
-    value = 0
+    weights = Weights()
     with open_run(directory=tmp_path, experiment="e", run="r", resume=True) as resumed:
-        assert resumed.resume(restore=restore, extra=Counts()).games == 6
-        assert value == 10
+        assert resumed.resume(restore=weights.restore, extra=Counts()).games == 6
+        assert weights.value == 10
         stop = tmp_path / "stop"
         monkeypatch.setenv("ETUDE_STOP_FILE", str(stop))
         steps = resumed.steps("updates", to=4, save_every=1)
@@ -122,7 +124,7 @@ def test_per_step_export_and_legacy_unlisted_files(
         stop.touch()
         with pytest.raises(ValueError, match="requires an export"):
             next(steps)
-        assert resumed.resume(restore=restore) == saved.path
+        assert resumed.resume(restore=weights.restore) == saved.path
 
 
 @pytest.mark.parametrize(
@@ -149,128 +151,99 @@ def test_unpublishable_export_preserves_the_committed_save(tmp_path: Path, name:
         assert saved is not None and saved.record.at["updates"] == 1
 
 
-def test_stop_saves_custom_state_only_after_progress(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("prior_phase", [False, True], ids=["fresh", "new-clock"])
+def test_stop_saves_files_and_counts_only_after_a_clock_advances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prior_phase: bool
 ) -> None:
     stop = tmp_path / "stop"
     monkeypatch.setenv("ETUDE_STOP_FILE", str(stop))
+    weights = Weights()
+    original = None
+    if prior_phase:
+        with open_run(directory=tmp_path, run="r") as run:
+            counts = run.resume(export=weights.export, extra=Counts())
+            for update in run.steps("updates", to=1):
+                weights.value = update
+                counts.games += 3
+                run.save()
+            original = read_state(run.out / "state")
+            assert original is not None
+
     stop.touch()
-    value = 0
-
-    def export(folder: Path) -> None:
-        (folder / "value").write_text(str(value))
-
-    with open_run(directory=tmp_path, experiment="e", run="r") as run:
-        run.resume(export=export)
-        with pytest.raises(Stopped):
-            list(run.steps("updates", to=2))
-        assert read_state(run.out / "state") is None
-    stop.unlink()
-    with open_run(directory=tmp_path, experiment="e", run="r", resume=True) as run:
-        assert run.resume(export=export) is None
-        with pytest.raises(Stopped):
-            for value in run.steps("updates", to=2):
-                stop.touch()
-        saved = read_state(run.out / "state")
-        assert saved is not None and (saved.path / "value").read_text() == "1"
-        assert saved.record.at["updates"] == 1
-
-
-def test_stop_in_a_new_clock_saves_files_and_counts_only_after_progress(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    stop = tmp_path / "stop"
-    monkeypatch.setenv("ETUDE_STOP_FILE", str(stop))
-    value = 10
-
-    def export(folder: Path) -> None:
-        (folder / "weights").write_text(str(value))
-
-    def restore(folder: Path) -> None:
-        nonlocal value
-        value = int((folder / "weights").read_text())
-
-    with open_run(directory=tmp_path, run="r") as run:
-        run.resume(export=export, extra=Counts(games=3))
-        for _ in run.steps("updates", to=1):
-            run.save()
-
-    with open_run(directory=tmp_path, run="r", resume=True) as run:
-        original = run.resume(export=export, restore=restore)
-        stop.touch()
+    with open_run(directory=tmp_path, run="r", resume=prior_phase) as run:
+        run.resume(export=weights.export, restore=weights.restore, extra=Counts())
         with pytest.raises(Stopped):
             list(run.steps("fits", to=2))
-        assert original is not None and run.resume() == original
+        assert read_state(run.out / "state") == original
 
     stop.unlink()
-    value = 0
+    weights = Weights()
     with open_run(directory=tmp_path, run="r", resume=True) as run:
-        counts = run.resume(export=export, restore=restore, extra=Counts())
+        counts = run.resume(export=weights.export, restore=weights.restore, extra=Counts())
         with pytest.raises(Stopped):
             for fit in run.steps("fits", to=2):
-                value += fit
+                weights.value += fit
                 counts.games += 3
                 stop.touch()
 
     stop.unlink()
-    value = 0
+    weights = Weights()
     with open_run(directory=tmp_path, run="r", resume=True) as run:
-        assert run.resume(restore=restore, extra=Counts()).games == 6
-        assert value == 11
-        assert run.at("updates") == 1 and list(run.steps("fits", to=2)) == [2]
+        counts = run.resume(restore=weights.restore, extra=Counts())
+        assert weights.value == (2 if prior_phase else 1)
+        assert counts.games == weights.value * 3
+        if prior_phase:
+            assert run.at("updates") == 1
+        assert list(run.steps("fits", to=2)) == [2]
 
 
 @pytest.mark.parametrize(
-    ("failure", "message"),
+    ("invalid_callback", "manifest_fields", "message"),
     [
-        ("export", "export must be callable"),
-        ("restore", "restore must be callable"),
-        ("seed", "saved seed"),
-        ("manifest", "files"),
-        ("missing file", "missing or nonportable file"),
-        ("extra", "games"),
+        ("export", {}, "export must be callable"),
+        ("restore", {}, "restore must be callable"),
+        (None, {"seed": -1}, "saved seed"),
+        (None, {"files": None}, "files"),
+        (None, {"files": {"weights": "missing"}}, "missing or nonportable file"),
+        (None, {"extra": {"games": "invalid"}}, "games"),
     ],
 )
 def test_failed_registration_preserves_live_state(
-    tmp_path: Path, failure: str, message: str
+    tmp_path: Path, invalid_callback: str | None, manifest_fields: dict[str, object], message: str
 ) -> None:
-    def export(folder: Path) -> None:
-        (folder / "weights").write_bytes(b"original")
+    weights = Weights(42)
 
     def restore(folder: Path) -> None:
         pytest.fail("restore ran before registration was validated")
 
     with open_run(directory=tmp_path) as run:
-        counts = run.resume(export=export, extra=Counts(), name="learner")
-        for step in run.steps("updates", to=2, save_every=1):
-            counts.games += 3
-            if step == 2:
-                saved = read_state(run.out / "state/learner")
-                assert saved is not None
-                manifest = saved.path / "state.json"
-                data = json.loads(manifest.read_bytes())
-                if failure == "seed":
-                    data["seed"] = run.seed + 1
-                elif failure == "extra":
-                    data["extra"]["games"] = "invalid"
-                elif failure == "manifest":
-                    del data["files"]
-                elif failure == "missing file":
-                    (saved.path / "weights").unlink()
-                manifest.write_text(json.dumps(data))
-                # Exercise runtime validation for an untyped recipe.
-                invalid = cast(Callable[[Path], None], 1)
-                with pytest.raises((TypeError, ValueError), match=message):
-                    run.resume(
-                        name="learner",
-                        extra=Counts(),
-                        restore=invalid if failure == "restore" else restore,
-                        export=invalid if failure == "export" else None,
-                    )
-            run.save(name="learner")
-        latest = read_state(run.out / "state/learner")
-        assert latest is not None and latest.record.extra == {"games": 6}
-        assert (latest.path / "weights").read_bytes() == b"original"
+        counts = run.resume(export=weights.export, extra=Counts(), name="learner")
+        steps = run.steps("updates", to=2, save_every=1)
+        counts.games = next(steps)
+        run.save(name="learner")
+        folder = run.out / "state/learner"
+        saved = read_state(folder)
+        assert saved is not None
+        if manifest_fields:
+            manifest = saved.path / "state.json"
+            manifest.write_text(json.dumps(saved.record.model_dump() | manifest_fields))
+
+        # Untyped recipes can pass a non-callable in either callback slot.
+        invalid = cast(Callable[[Path], None], 1)
+        with pytest.raises((TypeError, ValueError), match=message):
+            run.resume(
+                name="learner",
+                extra=Counts(),
+                restore=invalid if invalid_callback == "restore" else restore,
+                export=invalid if invalid_callback == "export" else None,
+            )
+
+        counts.games = next(steps)
+        weights.value += 1
+        run.save(name="learner")
+        latest = read_state(folder)
+        assert latest is not None and latest.record.extra == {"games": 2}
+        assert (latest.path / "weights").read_text() == "43"
 
 
 def test_raising_restore_leaves_first_registration_unavailable(tmp_path: Path) -> None:

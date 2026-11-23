@@ -60,15 +60,6 @@ def _torch() -> _Torch:
     return cast(_Torch, module)
 
 
-def _object(value: object) -> StateObject:
-    if not callable(getattr(value, "state_dict", None)) or not callable(
-        getattr(value, "load_state_dict", None)
-    ):
-        raise TypeError("registered state needs state_dict() and load_state_dict()")
-    # The two callable methods are checked once at registration, before training.
-    return cast(StateObject, value)
-
-
 def state_folder(out: Path, name: str | None) -> Path:
     if name is not None and not valid_state_name(name):
         raise ValueError("state name must be one portable name, outside numbered saves")
@@ -112,20 +103,25 @@ class State:
         export: Callable[[Path], None] | None = None,
         restore: Callable[[Path], None] | None = None,
     ) -> None:
-        if export is not None and not callable(export):
-            raise TypeError("export must be callable")
         if restore is not None and not callable(restore):
             raise TypeError("restore must be callable")
         self.folder = folder
-        self.objects = _objects(objects)
+        self.objects = register_objects(objects)
         self.extra = extra
-        self.export = export
+        self._export: Callable[[Path], None] | None = None
+        self.set_export(export)
         self._restore = restore
         self.saved_at = time.monotonic()
         self.saved_step = 0.0
         self.last_at: dict[str, float] = {}
         if self.objects:
             _torch()  # refuse an unavailable serializer at registration
+
+    def set_export(self, export: Callable[[Path], None] | None) -> None:
+        if export is not None:
+            if not callable(export):
+                raise TypeError("export must be callable")
+            self._export = export
 
     def restore(self, *, seed: int) -> Path | None:
         found = read_state(self.folder)
@@ -152,7 +148,7 @@ class State:
         return path
 
     def write(self, *, at: dict[str, float], wall_ms: int, seed: int, commit: str | None) -> None:
-        if self._restore is not None and self.export is None:
+        if self._restore is not None and self._export is None:
             raise ValueError("saving state registered with restore requires an export callback")
         self.folder.mkdir(parents=True, exist_ok=True)
         number = 1 + max(
@@ -162,8 +158,8 @@ class State:
         with TemporaryDirectory(prefix=".save-", dir=self.folder) as temporary:
             staged = Path(temporary)
             files: dict[str, str] = {}
-            if self.export is not None:
-                self.export(staged)
+            if self._export is not None:
+                self._export(staged)
                 files = _exported_files(staged, self.objects)
             files.update(write_objects(staged, self.objects))
             saved = SavedState(
@@ -193,6 +189,7 @@ def _exported_files(folder: Path, objects: Mapping[str, StateObject]) -> dict[st
     """Inventory the callback's files before Etude writes its own."""
     if folder.is_symlink() or not folder.is_dir():
         raise ValueError("export must write into its staging directory")
+    # Check reserved paths on disk so collisions follow the staging filesystem's case rules.
     for reserved in ("state.json", *(f"{name}.pt" for name in objects)):
         if (folder / reserved).exists():
             raise ValueError(f"export collides with reserved state path {reserved!r}")
@@ -212,17 +209,25 @@ def _exported_files(folder: Path, objects: Mapping[str, StateObject]) -> dict[st
     return files
 
 
-def _objects(objects: Mapping[str, object]) -> dict[str, StateObject]:
-    for name in objects:
+def register_objects(objects: Mapping[str, object]) -> dict[str, StateObject]:
+    registered = {}
+    for name, value in objects.items():
         if re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*", name) is None:
             raise ValueError("object name must be one portable name")
-    return {name: _object(value) for name, value in objects.items()}
+        if not callable(getattr(value, "state_dict", None)) or not callable(
+            getattr(value, "load_state_dict", None)
+        ):
+            raise TypeError("registered state needs state_dict() and load_state_dict()")
+        # The recipe supplies arbitrary objects. Both required methods are callable.
+        registered[name] = cast(StateObject, value)
+    return registered
 
 
-def write_objects(folder: Path, objects: Mapping[str, object]) -> dict[str, str]:
+def write_objects(folder: Path, objects: Mapping[str, StateObject]) -> dict[str, str]:
     """Serialize named state objects in the framework's own format."""
     files: dict[str, str] = {}
-    for name, value in _objects(objects).items():
-        files[name] = name + ".pt"
-        _torch().save(value.state_dict(), folder / files[name])
+    for name, value in objects.items():
+        path = folder / f"{name}.pt"
+        _torch().save(value.state_dict(), path)
+        files[name] = path.name
     return files

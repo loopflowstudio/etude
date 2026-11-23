@@ -55,16 +55,14 @@ files = json.loads((save / "state.json").read_text())["files"]
 weights = torch.load(save / files["model"])
 ```
 
-Always go through `current.json`. A save folder it does not name is one
-being written or one waiting to be removed, and may be incomplete. Each entry
-of `files` names a file in its own save's folder; no save reads another's.
-Registered objects map `<name>` to `<name>.pt`. Each exported file maps its
-relative path to itself, for example `{"model/weights.bin": "model/weights.bin"}`.
-`State.write` inventories the export before writing objects. It rejects symlinks,
-hidden or unfinished names, and collisions with object keys, object files or
-the root manifest. Older saves listed only registered objects. Their custom
-files remain available to `restore(path)` through the selected folder. Named
-state is in `out/state/NAME/`, with its own `current.json`.
+Read the folder selected by `current.json`. Other folders may still be in
+progress or awaiting deletion. Named state has its own pointer under
+`out/state/NAME/`.
+
+All paths in `files` are relative to the selected folder. Registered objects
+map their name to `<name>.pt`. Custom files map their path to itself, for
+example `{"model/weights.bin": "model/weights.bin"}`. Older manifests list
+only objects. Their unlisted custom files remain available to `restore(folder)`.
 
 On this computer runs are under `~/.etude/track` (moved by `ETUDE_HOME`);
 under a launch the same folder is in your bucket. Using Etude to write a loop
@@ -102,14 +100,11 @@ def train(config: SearchConfig) -> None:
 | `run.should_stop` | true once a stop was asked for, or once the deadline is nearer than the slowest pass so far; ask once per pass |
 | `Stopped` | raised after saving, short of the target: the attempt is recorded `stopped`; the launcher retries inside the run's limits, while `etude train` exits 75 and needs `--resume` |
 
-Returning normally short of the target would read as finished. Files you
-write in `run.out` yourself are carried one at a time, so write each
-atomically and keep what one resume needs in one file: a machine lost between
-two of them leaves one new and one old. Registering `export=` and `restore=`
-on `run.resume(...)` (or updating `export=` via `run.save(export=fn)`) is the
-way to keep several files together in one committed save. On a planned stop,
-`run.steps` compares each declared clock with its coordinate in the namespace's
-last save. A clock absent from that save counts as zero. It writes the
-namespace only if a coordinate has changed. A name
-ending `.partial` is never sent, and anything under a folder whose name starts
-with `.` stays on the machine.
+Returning normally short of the target marks the run finished. Delivery carries
+files written directly under `run.out` one at a time. Write each atomically.
+Use `run.resume(export=..., restore=...)` and `run.save()` for files that must
+travel together. Delivery skips hidden paths and unfinished files ending in
+`.open` or `.partial`.
+
+At a planned stop, `run.steps` saves a namespace if any declared clock differs
+from its last saved coordinate. Missing coordinates start at zero.

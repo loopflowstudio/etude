@@ -92,7 +92,7 @@ from etude.train.block import Builder, Columns, Json, LoggedRow, concat
 from etude.train.block import encode as encode_block
 from etude.train.manifest import Index, metric_names
 from etude.train.records import ParentRun, RowTable, checkpoint_name
-from etude.train.state import State, saved_states, state_folder, write_objects
+from etude.train.state import State, register_objects, saved_states, state_folder, write_objects
 
 __all__ = ("EtudeWarning", "TrainingRun", "seal_runs", "track")
 
@@ -472,10 +472,7 @@ class TrainingRun(Run):
         if name not in self._states:
             raise ValueError("register state with run.resume() before saving")
         state = self._states[name]
-        if export is not None:
-            if not callable(export):
-                raise TypeError("export must be callable")
-            state.export = export
+        state.set_export(export)
         clock = self._step_clock
         due = (
             self._save_every_seconds is not None
@@ -829,12 +826,13 @@ class TrainingRun(Run):
         try:
             if export is not None:
                 export(staged)
-            files = {
-                path.relative_to(staged).as_posix(): path.relative_to(staged).as_posix()
-                for path in staged.rglob("*")
-                if path.is_file() and path.name != "checkpoint.json"
-            }
-            files.update(write_objects(staged, objects))
+                files = {}
+                for path in staged.rglob("*"):
+                    if path.is_file() and path.name != "checkpoint.json":
+                        key = path.relative_to(staged).as_posix()
+                        files[key] = key
+            else:
+                files = write_objects(staged, register_objects(objects))
             (staged / "checkpoint.json").write_text(
                 json.dumps({"at": at, "files": files}, sort_keys=True)
             )
