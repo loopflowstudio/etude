@@ -218,8 +218,12 @@ At commit, either publisher joins its new facts with the other source's last
 observation through `state_of`. Stored declarations, outcomes and checkpoints
 preserve compact addresses and terminal states. A failed file pass records its
 error and keeps the previous file generation and date. A directory traversal error
-invalidates the listing for both the index and report refresh. The silence check
-uses the start of the last successful listing. A failed launcher poll
+invalidates the listing for both the index and report refresh. When a listed
+block disappears during its read, that run keeps its file facts and the start
+date of its last accepted listing. The index records an individual date only
+while a run is held. A second consecutive miss reports the affected address,
+including across a restart. Other runs take the new listing date. The silence
+check uses each run's accepted date. A failed launcher poll
 keeps that endpoint's last successful standing, inventory and console tails.
 A successful empty reply releases previously held runs.
 

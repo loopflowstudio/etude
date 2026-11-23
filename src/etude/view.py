@@ -91,6 +91,9 @@ CREATE TABLE IF NOT EXISTS files (
     preferred TEXT, last_write TEXT, metadata TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS experiment_files ON files(experiment,address);
+CREATE TABLE IF NOT EXISTS held_files (
+    address TEXT PRIMARY KEY, observed_at TEXT
+);
 CREATE TABLE IF NOT EXISTS charts (
     address TEXT PRIMARY KEY, payload TEXT NOT NULL
 );
@@ -117,7 +120,9 @@ WITH observed AS (
 )
 """
 _VISIBLE = f"""{_OBSERVED}, visible AS (
-    SELECT address, experiment, kind, last_write, at, file_error, launcher_at, last_loop, checkpoints,
+    SELECT runs.address, experiment, kind, last_write,
+           CASE WHEN held_files.address IS NULL THEN at ELSE held_files.observed_at END AS at,
+           file_error, launcher_at, last_loop, checkpoints,
            coalesce(CASE WHEN matches THEN launcher_job END, file_job) AS job,
            coalesce(CASE WHEN matches THEN launcher_state END, file_state) AS state,
            coalesce(CASE WHEN matches THEN launcher_position END, file_position) AS position,
@@ -126,7 +131,8 @@ _VISIBLE = f"""{_OBSERVED}, visible AS (
            CASE WHEN matches THEN launched_as END AS launched_as,
            CASE WHEN matches THEN status END AS status,
            CASE WHEN matches THEN max_attempts END AS max_attempts
-    FROM observed CROSS JOIN runs WHERE file_state IS NOT NULL OR matches
+    FROM observed CROSS JOIN runs LEFT JOIN held_files USING(address)
+    WHERE file_state IS NOT NULL OR matches
 )
 """
 
@@ -181,8 +187,6 @@ class ChartIndex:
         self._server = selected()
         self._next_standing = 0.0
         self._launcher_error: tuple[str | None, str] | None = None
-        # Runs whose listed blocks were gone when read, by address, from the last pass.
-        self._vanished: dict[str, str] = {}
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -316,16 +320,7 @@ class ChartIndex:
                     # Release the preparation snapshot before reading the latest launcher.
                     db.commit()
                     db.execute("BEGIN IMMEDIATE")
-                    # A writer folding its tails explains one miss; the next listing
-                    # names the replacement. A miss on consecutive passes is a gap.
-                    persistent = [
-                        f"Run files: {address}: {reason}"
-                        for address, reason in vanished.items()
-                        if address in self._vanished
-                    ]
-                    error = "\n".join(filter(None, (discovery_error, *persistent))) or None
-                    self._publish_files(db, observed_at, error)
-                    self._vanished = vanished
+                    self._publish_files(db, observed_at, vanished, discovery_error)
             except Exception as failure:
                 with self._connect() as db:
                     db.execute(
@@ -415,8 +410,30 @@ class ChartIndex:
         return observed_at, vanished
 
     def _publish_files(
-        self, db: sqlite3.Connection, observed_at: datetime, discovery_error: str | None
+        self,
+        db: sqlite3.Connection,
+        observed_at: datetime,
+        vanished: dict[str, str],
+        discovery_error: str | None,
     ) -> None:
+        # Only missed runs need a date of their own. Freeze the old listing date
+        # on the first miss, or NULL if this run has never supplied file facts.
+        held = {row[0] for row in db.execute("SELECT address FROM held_files")}
+        db.executemany(
+            """INSERT INTO held_files(address,observed_at) VALUES(:address,
+               (SELECT at FROM observation, files WHERE observation.id=1 AND files.address=:address))""",
+            ({"address": address} for address in vanished.keys() - held),
+        )
+        db.executemany(
+            "DELETE FROM held_files WHERE address=?",
+            ((address,) for address in held - vanished.keys()),
+        )
+        gaps = (
+            f"Run files: {address}: {reason}"
+            for address, reason in vanished.items()
+            if address in held
+        )
+        error = "\n".join(filter(None, (discovery_error, *gaps))) or None
         removed = db.execute(
             """DELETE FROM files WHERE NOT EXISTS
                (SELECT 1 FROM next_files n WHERE n.address=files.address AND n.experiment=files.experiment)
@@ -452,7 +469,7 @@ class ChartIndex:
             """INSERT INTO observation(id,at,file_error) VALUES(1,?,?)
                ON CONFLICT(id) DO UPDATE SET at=excluded.at,file_error=excluded.file_error
                RETURNING standing""",
-            (observed_at.isoformat(), discovery_error),
+            (observed_at.isoformat(), error),
         ).fetchone()
         if changed:
             launcher = (
@@ -567,7 +584,9 @@ class ChartIndex:
         )
         token = sha256(json.dumps(facts, ensure_ascii=False).encode()).hexdigest()
         ages = [f"last file write {_age(row['last_write'], now)}"]
-        ages.extend(_observation_ages(row, now, launcher=status is not None))
+        ages.extend(
+            _observation_ages(row, now, launcher=status is not None, files="files observed")
+        )
         collected = f"Last collected {_age(row['collected'], now)}" if row["collected"] else ""
         observation = _observation("run", token, " · ".join(ages), collected)
         if observe:
@@ -730,10 +749,13 @@ class ChartIndex:
             stale |= state == "no end recorded"
             status = _status(row)
             address = row["address"]
+            last_write = _age(row["last_write"], now)
+            if observation and row["at"] != observation["at"]:
+                last_write += f"<div>{_file_age(row['at'], now, 'files observed')}</div>"
             body.append(
                 f"<tr><td>{escape(row['job'])}</td>"
                 f"<td>{_run_link(address)}</td>"
-                f"<td>{_run_line(row, state, status)}</td><td>{_age(row['last_write'], now)}</td></tr>"
+                f"<td>{_run_line(row, state, status)}</td><td>{last_write}</td></tr>"
             )
         if body:
             table = _table(("Job", "Run", "Status", "Last file write"), body)
@@ -952,10 +974,14 @@ def _display_state(row: sqlite3.Row) -> str:
     return state
 
 
-def _observation_ages(row: sqlite3.Row, now: datetime, *, launcher: bool) -> list[str]:
-    ages = [
-        f"files observed {_age(row['at'], now)}" if row["at"] else "File observation unavailable"
-    ]
+def _file_age(at: str | None, now: datetime, label: str) -> str:
+    return f"{label} {_age(at, now)}" if at else "File observation unavailable"
+
+
+def _observation_ages(
+    row: sqlite3.Row, now: datetime, *, launcher: bool, files: str = "Run files listed"
+) -> list[str]:
+    ages = [_file_age(row["at"], now, files)]
     if row["launcher_at"] is None:
         ages.append("Launcher observation unavailable")
     elif launcher:

@@ -20,7 +20,7 @@ import boto3  # type: ignore[import-untyped]
 import pytest
 from moto import mock_aws
 
-from etude.block_file import tail_key
+from etude.block_file import block_key, tail_key
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.home import home
@@ -540,39 +540,117 @@ def test_an_interrupted_writer_never_exposes_half_a_generation(
         assert _loss(writer.page("/runs/lab/b") or "") == [5, 3]
 
 
-def test_a_block_folded_after_the_listing_holds_only_its_run_for_one_pass(
+def test_a_folded_block_keeps_its_runs_observation_while_other_runs_advance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = DirectoryStorage(tmp_path / "runs")
-    for name in ("a", "b"):
-        _start_run(source, "lab/" + name, 5)
-    with Server(source, None, ("127.0.0.1", 0)) as server:
+    _start_run(source, "lab/a", 7)
+    _start_run(source, "other/b", 5)
+    measured = MeasuredStorage(source)
+    now = datetime.now(UTC)
+
+    class ViewClock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> Self:
+            return cls.fromtimestamp(now.timestamp(), tz)
+
+    monkeypatch.setattr("etude.view.datetime", ViewClock)
+    tail = "lab/a/" + tail_key(1, "123456abcdef")
+    recent = "lab/a/" + block_key(1, 1, 1, "123456abcdef")
+    permanent = "lab/a/" + block_key(2, 1, 1, "123456abcdef")
+    replacements = {tail: recent, recent: permanent}
+    get = source.get
+
+    def fold_before_read(key: str) -> bytes:
+        if replacement := replacements.get(key):
+            source.put(replacement, get(key))
+            os.utime(source.root / replacement, (now.timestamp(), now.timestamp()))
+            source.delete(key)
+        return get(key)
+
+    def check_held(view: Server, age: str) -> None:
+        reads = measured.listings, measured.requests
+        graph = _get(view, "/runs/lab/a")
+        status = _get(view, "/experiments/lab/status")
+        check = _get(view, "/runs/lab/a?observe=1")
+        assert _version(check) == _version(graph) and _loss(graph) == [7]
+        for page in (graph, status):
+            assert ">running<" in page and ">steps 1<" in page
+        for page in (graph, check, status):
+            assert f"files observed {age}" in page
+        overview = _get(view, "/status")
+        assert "Run files listed 0 s ago" in status and "Run files listed 0 s ago" in overview
+        assert "/experiments/lab" in overview.split("<h2>Completed</h2>")[0]
+        sibling = _get(view, "/runs/other/b")
+        assert _loss(sibling) == [5, 4] and "files observed 0 s ago" in sibling
+        assert (measured.listings, measured.requests) == reads
+
+    with Server(measured, None, ("127.0.0.1", 0)) as server:
         _ingest(server)
-        _seal(source.root / "lab/a", 1, 4)
-        tail = "lab/b/" + _seal(source.root / "lab/b", 1, 3)
+        now += timedelta(minutes=11)
+        _seal(source.root / "lab/a", 1, 3)
+        sibling_tail = _seal(source.root / "other/b", 1, 4)
+        os.utime(source.root / "other/b" / sibling_tail, (now.timestamp(), now.timestamp()))
+        monkeypatch.setattr(source, "get", fold_before_read)
+        server.refresh_files()
+        assert server.index.error is None
+        check_held(server, "11 min ago")
+
+    with Server(measured, None, ("127.0.0.1", 0)) as reopened:
+        check_held(reopened, "11 min ago")
+        now += timedelta(minutes=1)
+        reopened.refresh_files()
+        assert reopened.index.error and "lab/a" in reopened.index.error
+        check_held(reopened, "12 min ago")
+
+        reopened.refresh_files()
+        assert reopened.index.error is None
+        graph = _get(reopened, "/runs/lab/a")
+        assert ">running<" in graph and ">steps 2<" in graph and _loss(graph) == [7, 3]
+        assert "files observed 0 s ago" in graph
+        assert "files observed" not in _get(reopened, "/experiments/lab/status")
+
+        now += timedelta(minutes=10)
+        reopened.refresh_files()
+        assert ">no end recorded<" in _get(reopened, "/runs/lab/a")
+        assert "/experiments/lab" in _get(reopened, "/status").split("<h2>Completed</h2>")[1]
+
+
+@pytest.mark.parametrize("previously_read", [False, True], ids=["first-read", "unchanged-inputs"])
+def test_a_run_accepts_the_next_listing_after_a_missing_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, previously_read: bool
+) -> None:
+    source = DirectoryStorage(tmp_path / "runs")
+    backend = bench(home())
+    (address,) = backend.scheduler.queue(job(name="learn", experiment="lab"), rent="l4")
+    backend.store.close()
+    _start_run(source, address, 7)
+    with Server(source, None, ("127.0.0.1", 0)) as view:
+        view.refresh_launcher()
+        if previously_read:
+            view.refresh_files()
+        extra = address + "/" + _seal(source.root / address, 1, 3)
         get = source.get
 
-        def folded(key: str) -> bytes:
-            # The writer folds this tail into a block between the listing and the read.
-            if key == tail:
-                (source.root / tail).unlink(missing_ok=True)
+        def disappear(key: str) -> bytes:
+            if key == extra:
+                source.delete(key)
             return get(key)
 
-        monkeypatch.setattr(source, "get", folded)
-        _ingest(server)
-        assert server.index.error is None
-        assert _loss(server.page("/runs/lab/a") or "") == [5, 4]
-        assert _loss(server.page("/runs/lab/b") or "") == [5]
-        # A listed block missing again on the next pass is a gap, and the page says so.
-        _seal(source.root / "lab/b", 1, 3)
-        _ingest(server)
-        assert server.index.error and "lab/b" in server.index.error
-        assert _loss(server.page("/runs/lab/a") or "") == [5, 4]
-        monkeypatch.setattr(source, "get", get)
-        _seal(source.root / "lab/b", 1, 3)
-        _ingest(server)
-        assert server.index.error is None
-        assert _loss(server.page("/runs/lab/b") or "") == [5, 3]
+        monkeypatch.setattr(source, "get", disappear)
+        _advance_view_clock(monkeypatch, minutes=11)
+        view.refresh_files()
+        graph = _get(view, "/runs/" + address)
+        if previously_read:
+            assert _loss(graph) == [7] and "files observed 11 min ago" in graph
+        else:
+            assert ">queued<" in graph and "File observation unavailable" in graph
+            assert "Curves appear once the view has read the run files." in graph
+            assert "Waiting for run files" in _get(view, "/experiments/lab/report")
+        view.refresh_files()
+        graph = _get(view, "/runs/" + address)
+        assert _loss(graph) == [7] and "files observed 11 min ago" not in graph
+        assert "files observed " in graph and "File observation unavailable" not in graph
 
 
 def test_view_links_follow_only_the_live_owner(
@@ -861,11 +939,11 @@ def test_incomplete_directory_listing_keeps_file_facts_until_recovery(
         overview = _get(server, "/status")
         opened, _ = overview.split("<h2>Completed</h2>")
         assert address in opened and queued in opened
+        assert "files observed 11 min ago" in graph
+        for page in (status, overview):
+            assert "Run files listed 11 min ago" in page
         for page in (graph, status, overview):
-            assert (
-                "files observed 11 min ago" in page
-                and "Run files: PermissionError: cannot traverse lab" in page
-            )
+            assert "Run files: PermissionError: cannot traverse lab" in page
         assert (measured.listings, measured.requests, measured.bytes) == reads
 
     with Server(measured, None, ("127.0.0.1", 0)) as server:
@@ -963,7 +1041,7 @@ def test_failed_listing_shows_fresh_queue_and_machines(
                 page = _get(server, path)
                 assert queued in page and "fixture listing unavailable" in page
                 assert (
-                    "files observed 2 min ago" if warm else "File observation unavailable"
+                    "Run files listed 2 min ago" if warm else "File observation unavailable"
                 ) in page
             assert ">studio</th>" in (server.page("/machines") or "")
             graph = _get(server, "/runs/" + alias)

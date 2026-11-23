@@ -163,18 +163,24 @@ view indexes its first training or evaluation run, the visible tab builds the
 report. If the build fails, the pane shows the reason and offers **Retry report**.
 After a successful build, use **Refresh report** to see newer data. Status
 refreshes keep your place in the report. An experiment stays open
-while it has unfinished launcher work or an active file-only run. When a
-complete file listing starts at least 10 minutes after a file-only run’s
-last write and finds no outcome, the run reads **no end recorded** and
-stops keeping the experiment open. During a storage outage, the run keeps
-its last observed state.
+while it has unfinished launcher work or an active file-only run. A file-only
+run reads **no end recorded** and stops keeping its experiment open when the
+view confirms 10 minutes without a write and finds no outcome. It measures
+that interval from the last write to the start of the listing that supplied
+the run’s file facts. During a storage outage, the run keeps its last
+observed file state.
 
 **Runs.** A training run draws its `report()` `perf` and `ml` panels, followed by the
 remaining metrics in first-logged order. Checkpoints show the clock positions
 at which they were saved. For a launched run, the page also shows placement,
 hardware, cost, attempts and source revision when available. All four pages
 show the launcher’s clock until run files appear, then the sealed file position.
-`last file write` dates the run files and `files observed` dates the start of the last successful listing.
+`last file write` dates the run files. On a run page, `files observed` dates
+the listing that supplied that run’s file facts. On the overview, experiment
+and machine pages, `Run files listed` dates the most recent successful listing.
+If a writer replaces a listed metric block before the view reads it, that
+run keeps its previous chart, file state and observation date while other runs
+advance. Its experiment row shows the older observation beside the last write.
 A recorded scheduler heartbeat appears as `last loop`. When the file and
 launcher observations differ by more than 5 seconds, `launcher observed` dates the launcher facts.
 
