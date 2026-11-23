@@ -593,6 +593,7 @@ def test_a_folded_block_keeps_its_runs_observation_while_other_runs_advance(
         os.utime(source.root / "other/b" / sibling_tail, (now.timestamp(), now.timestamp()))
         monkeypatch.setattr(source, "get", fold_before_read)
         server.refresh_files()
+        assert measured.got.count(tail) == 1
         assert server.index.error is None
         check_held(server, "11 min ago")
 
@@ -600,6 +601,7 @@ def test_a_folded_block_keeps_its_runs_observation_while_other_runs_advance(
         check_held(reopened, "11 min ago")
         now += timedelta(minutes=1)
         reopened.refresh_files()
+        assert measured.got.count(recent) == 1
         assert reopened.index.error and "lab/a" in reopened.index.error
         check_held(reopened, "12 min ago")
 
@@ -651,6 +653,11 @@ def test_a_run_accepts_the_next_listing_after_a_missing_input(
         graph = _get(view, "/runs/" + address)
         assert _loss(graph) == [7] and "files observed 11 min ago" not in graph
         assert "files observed " in graph and "File observation unavailable" not in graph
+        for key in source.keys(""):
+            source.delete(key)
+        view.refresh_files()
+        graph = _get(view, "/runs/" + address)
+        assert ">queued<" in graph and "No metric curves recorded." in graph
 
 
 def test_view_links_follow_only_the_live_owner(

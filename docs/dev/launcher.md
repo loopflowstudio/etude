@@ -210,9 +210,10 @@ The view indexes files and launcher standing independently under
 `ETUDE_HOME/views`. Each file pass compares the listed object versions and
 accepted report panels with the previous pass, including after a restart. One
 reader per index stages updated run metadata and charts in a private SQLite
-table. A write to an open block advances the run's last write while the chart
-keeps its sealed position. Local report declarations run separately. Each
-experiment keeps its last accepted panels through an incomplete edit.
+table. An open block updates the run's file timestamp. A change to sealed
+inputs replaces the file record and its chart together. Local report declarations
+run separately. Each experiment keeps its last accepted panels through an
+incomplete edit.
 
 At commit, either publisher joins its new facts with the other source's last
 observation through `state_of`. Stored declarations, outcomes and checkpoints
@@ -220,7 +221,8 @@ preserve compact addresses and terminal states. A failed file pass records its
 error and keeps the previous file generation and date. A directory traversal error
 invalidates the listing for both the index and report refresh. When a listed
 block disappears during its read, that run keeps its file facts and the start
-date of its last accepted listing. The index records an individual date only
+date of its last accepted listing. The reader retries it on the next listing.
+The index records an individual date only
 while a run is held. A second consecutive miss reports the affected address,
 including across a restart. Other runs take the new listing date. The silence
 check uses each run's accepted date. A failed launcher poll

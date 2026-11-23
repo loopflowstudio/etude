@@ -47,7 +47,7 @@ from etude.records import (
     RunWriter,
 )
 from etude.run import LocatedRun, RunListing, as_storage, located_runs, under
-from etude.storage import Storage, run_prefix
+from etude.storage import ListedStorage, Storage, run_prefix
 from etude.train.block import (
     COUNT,
     DTYPES,
@@ -1001,7 +1001,9 @@ def _blocks(
                 blocks.append(StoredBlock(storage, folder + file.key, description))
             break
         except FileNotFoundError:
-            if retry == 2:
+            # A fixed listing cannot discover the replacement. Its owner retries
+            # the run with the next observation, keeping the last accepted chart.
+            if isinstance(storage, ListedStorage) or retry == 2:
                 raise
             keys = _listing(storage, folders)
     starts = _writer_starts(writers, ((b.header.writer, b.header.wall_first) for b in blocks))

@@ -79,7 +79,7 @@ _CLOCKS = TypeAdapter(dict[str, float])
 # A changed schema starts a fresh rebuildable index.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
-    address TEXT PRIMARY KEY, experiment TEXT NOT NULL, kind TEXT NOT NULL, last_write TEXT,
+    address TEXT PRIMARY KEY, experiment TEXT NOT NULL, kind TEXT NOT NULL,
     file_job TEXT, file_state TEXT, file_position TEXT, file_config TEXT, checkpoints TEXT,
     launched_as TEXT, launcher_job TEXT, launcher_state TEXT, launcher_position TEXT,
     launcher_config TEXT, source TEXT, status TEXT, max_attempts INTEGER
@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS held_files (
     address TEXT PRIMARY KEY, observed_at TEXT
 );
 CREATE TABLE IF NOT EXISTS charts (
-    address TEXT PRIMARY KEY, payload TEXT NOT NULL
+    address TEXT PRIMARY KEY REFERENCES files(address) ON DELETE CASCADE, payload TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS consoles (
     run TEXT PRIMARY KEY, body TEXT NOT NULL, collected TEXT, gaps INTEGER NOT NULL, final_attempt INTEGER
@@ -120,7 +120,7 @@ WITH observed AS (
 )
 """
 _VISIBLE = f"""{_OBSERVED}, visible AS (
-    SELECT runs.address, experiment, kind, last_write,
+    SELECT runs.address, runs.experiment, kind, files.last_write, files.inputs,
            CASE WHEN held_files.address IS NULL THEN at ELSE held_files.observed_at END AS at,
            file_error, launcher_at, last_loop, checkpoints,
            coalesce(CASE WHEN matches THEN launcher_job END, file_job) AS job,
@@ -131,7 +131,7 @@ _VISIBLE = f"""{_OBSERVED}, visible AS (
            CASE WHEN matches THEN launched_as END AS launched_as,
            CASE WHEN matches THEN status END AS status,
            CASE WHEN matches THEN max_attempts END AS max_attempts
-    FROM observed CROSS JOIN runs LEFT JOIN held_files USING(address)
+    FROM observed CROSS JOIN runs LEFT JOIN files USING(address) LEFT JOIN held_files USING(address)
     WHERE file_state IS NOT NULL OR matches
 )
 """
@@ -192,6 +192,7 @@ class ChartIndex:
     def _connect(self) -> Iterator[sqlite3.Connection]:
         with closing(sqlite3.connect(self.database)) as db, db:
             db.row_factory = sqlite3.Row
+            db.execute("PRAGMA foreign_keys=ON")
             yield db
 
     def close(self) -> None:
@@ -386,6 +387,7 @@ class ChartIndex:
         vanished: dict[str, str] = {}
         for run in listing.declarations:
             experiment = run.file.experiment
+            address = run_address(run.file.id, experiment)
             report = None
             if run.file.kind != "evaluation":
                 if experiment not in reports:
@@ -395,11 +397,10 @@ class ChartIndex:
                 key for key in listing.keys_in(run.folders) if not key.endswith(".open")
             )
             try:
-                _stage_run(db, storage, run, sealed, report, previous)
+                _stage_run(db, storage, run, address, sealed, report, previous.get(address))
             except FileNotFoundError as missing:
                 # A live writer replaced a listed block after this listing began.
                 # The run keeps its published facts; its other runs still advance.
-                address = run_address(run.file.id, run.file.experiment)
                 vanished[address] = explain(missing)
                 db.execute(
                     """INSERT INTO next_files(address,experiment,inputs,last_write)
@@ -440,23 +441,20 @@ class ChartIndex:
                RETURNING experiment"""
         ).fetchall()
         # An open block can advance the last write without changing a sealed curve.
-        redated = db.execute(
+        db.execute(
             """UPDATE files SET last_write=n.last_write FROM next_files n
-               WHERE n.address=files.address AND n.metadata IS NULL AND files.last_write IS NOT n.last_write
-               RETURNING experiment"""
-        ).fetchall()
+               WHERE n.address=files.address AND n.metadata IS NULL AND files.last_write IS NOT n.last_write"""
+        )
         rebuilt = db.execute(
             """INSERT OR REPLACE INTO files(address,experiment,inputs,reached,preferred,last_write,metadata)
                SELECT address,experiment,inputs,reached,preferred,last_write,metadata
                FROM next_files WHERE metadata IS NOT NULL RETURNING experiment"""
         ).fetchall()
-        changed = {row[0] for rows in (removed, redated, rebuilt) for row in rows}
-        if removed or rebuilt:
+        changed = {row[0] for row in (*removed, *rebuilt)}
+        if rebuilt:
+            # Replacing a file row retires its old chart through the foreign key.
             db.execute(
-                "DELETE FROM charts WHERE address NOT IN (SELECT address FROM files WHERE reached IS NOT NULL)"
-            )
-            db.execute(
-                """INSERT OR REPLACE INTO charts(address,payload)
+                """INSERT INTO charts(address,payload)
                    SELECT address,payload FROM next_files WHERE payload IS NOT NULL"""
             )
         db.execute(
@@ -485,8 +483,8 @@ class ChartIndex:
             standing[held.record.experiment][held.record.id] = held
         for experiment in experiments:
             rows = db.execute(
-                """SELECT address, json_set(metadata, '$.last_write', last_write) AS metadata,
-                          reached, preferred FROM files WHERE experiment=? ORDER BY address""",
+                """SELECT address, metadata, reached, preferred
+                   FROM files WHERE experiment=? ORDER BY address""",
                 (experiment,),
             )
             files = {row["address"]: row for row in rows}
@@ -539,12 +537,11 @@ class ChartIndex:
             row = db.execute(
                 _VISIBLE
                 + f"""
-                SELECT visible.*, {payload} AS payload, files.inputs, declarations.error AS report_error,
+                SELECT visible.*, {payload} AS payload, declarations.error AS report_error,
                        consoles.body, consoles.collected, consoles.gaps, consoles.final_attempt AS console_attempt
                 FROM visible
                 LEFT JOIN consoles ON consoles.run=visible.launched_as
                 LEFT JOIN declarations USING(experiment)
-                LEFT JOIN files USING(address)
                 WHERE address=coalesce(
                     (SELECT address FROM runs WHERE address=:address),
                     (SELECT address FROM runs WHERE launched_as=:address AND (SELECT matches FROM observed))
@@ -784,11 +781,11 @@ def _stage_run(
     db: sqlite3.Connection,
     storage: ListedStorage,
     run: LocatedRun,
+    address: str,
     sealed: list[str],
     report: Report | None,
-    previous: dict[str, str],
+    previous: str | None,
 ) -> None:
-    address = run_address(run.file.id, run.file.experiment)
     digest = sha256()
     for key in sealed:
         digest.update(f"{key}\0{storage.objects[key]}\0".encode())
@@ -796,7 +793,7 @@ def _stage_run(
         digest.update(report.model_dump_json(include=report.model_fields_set).encode())
     inputs = digest.hexdigest()
     metadata = reached = payload = None
-    if previous.get(address) != inputs:
+    if previous != inputs:
         data = read_located(storage, run, sealed, whole_blocks=True)
         metadata = data.model_dump_json(exclude={"last_write"}, round_trip=True)
         if report is not None:
@@ -850,7 +847,6 @@ def _store_run(
         "address": address,
         "experiment": experiment,
         "kind": "training" if training else "evaluation",
-        "last_write": run.last_write.isoformat() if run.last_write else None,
         "file_job": file_job,
         "file_state": stored.stored_state if stored else None,
         "file_position": _position(clocks, preferred) if stored else None,
