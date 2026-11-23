@@ -179,6 +179,14 @@ before any successful file pass. Do not name a driver after a standard module
 while the one local slot is busy; use `etude queue` for a queued entry. `etude wait`
 returns once the runs it started with end, so drive a later queue entry with another wait.
 
+To count what the view reads from that bucket, have the forwarder log each request line
+(`GET /BUCKET/KEY`); discovery should show listings plus `run.json`/`outcome.json` only.
+For the real Manabot history, run the branch from `~/src/manabot` with `uv run --no-sync
+--with-editable 'REPO[s3]' etude view experiments/ --source r2://manabot/jobs`. That
+overlay leaves manabot's environment untouched. Use a private `ETUDE_HOME` and the
+Doppler R2 keys from `manabot/prd`. Watch `du -sm` of that home, cap it, and delete it
+afterwards. Its many legacy `run.json` files make a cold first pass large.
+
 A directory source with an incomplete listing needs no bucket: under the view's
 `home/track`, `mkdir -p locked/inner && chmod 000 locked` beside the runs (never the
 run's own folder, which its writer needs), and `chmod 755` to recover; restore it in a
