@@ -586,7 +586,9 @@ class ChartIndex:
             error,
         )
         token = sha256(json.dumps(facts, ensure_ascii=False).encode()).hexdigest()
-        ages = [f"last file write {_age(row['last_write'], now)}"]
+        ages = [
+            "no files yet" if _no_files(row) else f"last file write {_age(row['last_write'], now)}"
+        ]
         ages.extend(
             _observation_ages(row, now, launcher=status is not None, files="files observed")
         )
@@ -759,7 +761,7 @@ class ChartIndex:
             stale |= state == "no end recorded"
             status = _status(row)
             address = row["address"]
-            last_write = _age(row["last_write"], now)
+            last_write = "no files yet" if _no_files(row) else _age(row["last_write"], now)
             if observation and row["at"] != observation["at"]:
                 last_write += f"<div>{_file_age(row['at'], now, 'files observed')}</div>"
             body.append(
@@ -1045,6 +1047,11 @@ def _display_state(row: sqlite3.Row) -> str:
         if datetime.fromisoformat(row["at"]) - datetime.fromisoformat(row["last_write"]) >= _SILENT:
             return "no end recorded"
     return state
+
+
+def _no_files(row: sqlite3.Row) -> bool:
+    """An accepted listing found no file for the run; without one, its last write is unknown."""
+    return row["last_write"] is None and bool(row["at"])
 
 
 def _file_age(at: str | None, now: datetime, label: str) -> str:

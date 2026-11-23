@@ -990,7 +990,6 @@ def test_continuation_link_from_queue_to_delivery_survives_view_restart(
         assert f">{phase}<" in child_graph
         if phase in ("queued", "setting up"):
             assert "Target updates 200" in child_graph and 'id="data"' not in child_graph
-            assert "last file write unknown" in child_graph
             assert child_page in _get(view, "/status").split("<h2>Completed")[0]
         if phase == "setting up":
             slots = _get(view, "/machines/status")
@@ -1003,11 +1002,11 @@ def test_continuation_link_from_queue_to_delivery_survives_view_restart(
         _ingest(view)
         assert main(["status", child]) == 0
         assert f"view: {view.origin}{child_page}" in capsys.readouterr().out.splitlines()
-        check(view, "queued")
+        assert "no files yet" in check(view, "queued")
         backend.scheduler.tick()
         (attempt,) = backend.scheduler.attempts(child)
         view.refresh_launcher()
-        check(view, "setting up")
+        assert "no files yet" in check(view, "setting up")
         with monkeypatch.context() as patch:
             patch.setenv("ETUDE_ATTEMPT", attempt.id)
             for variable in request.job.environment:
