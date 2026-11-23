@@ -34,6 +34,10 @@ class Weights:
         self.value = int((folder / "weights").read_text())
 
 
+# Untyped recipes can pass an invalid value in any callback slot.
+_INVALID_CALLBACK = cast(Callable[[Path], None], 1)
+
+
 def test_custom_state_and_counts_resume_together_after_relay_without_torch(tmp_path: Path) -> None:
     # The child starts here, so even an optional import that catches ImportError is counted.
     attempts = tmp_path / "torch-imports"
@@ -143,12 +147,12 @@ def test_unpublishable_export_preserves_the_committed_save(tmp_path: Path, name:
 
     with open_run(directory=tmp_path) as run:
         run.resume()
-        for step in run.steps("updates", to=2, save_every=1):
-            if step == 1:
-                run.save()
-            else:
-                with pytest.raises(ValueError, match="export"):
-                    run.save(export=export)
+        steps = run.steps("updates", to=2, save_every=1)
+        next(steps)
+        run.save()
+        next(steps)
+        with pytest.raises(ValueError, match="export"):
+            run.save(export=export)
         saved = read_state(run.out / "state")
         assert saved is not None and saved.record.at["updates"] == 1
 
@@ -200,20 +204,44 @@ def test_stop_saves_files_and_counts_only_after_a_clock_advances(
 
 
 @pytest.mark.parametrize(
-    ("invalid_callback", "manifest_fields", "message"),
+    ("export", "restore", "error", "message"),
     [
-        ("export", {}, "export must be callable"),
-        ("missing_export", {}, "register export and restore together"),
-        ("missing_restore", {}, "register export and restore together"),
-        ("restore", {}, "restore must be callable"),
-        (None, {"seed": -1}, "saved seed"),
-        (None, {"files": None}, "files"),
-        (None, {"files": {"weights": "missing"}}, "missing or nonportable file"),
-        (None, {"extra": {"games": "invalid"}}, "games"),
+        (_INVALID_CALLBACK, Weights().restore, TypeError, "export must be callable"),
+        (Weights().export, _INVALID_CALLBACK, TypeError, "restore must be callable"),
+        (None, Weights().restore, ValueError, "register export and restore together"),
+        (Weights().export, None, ValueError, "register export and restore together"),
     ],
 )
-def test_failed_registration_preserves_live_state(
-    tmp_path: Path, invalid_callback: str | None, manifest_fields: dict[str, object], message: str
+def test_invalid_callbacks_fail_at_registration(
+    tmp_path: Path,
+    export: Callable[[Path], None] | None,
+    restore: Callable[[Path], None] | None,
+    error: type[Exception],
+    message: str,
+) -> None:
+    with open_run(directory=tmp_path) as run:
+        weights = Weights(42)
+        run.resume(export=weights.export, restore=weights.restore, extra=Counts(games=3))
+        with pytest.raises(error, match=message):
+            run.resume(export=export, restore=restore)
+        for _ in run.steps("updates", to=1):
+            run.save()
+        saved = read_state(run.out / "state")
+        assert saved is not None and saved.record.extra == {"games": 3}
+        assert (saved.path / "weights").read_text() == "42"
+
+
+@pytest.mark.parametrize(
+    ("manifest_fields", "message"),
+    [
+        ({"seed": -1}, "saved seed"),
+        ({"files": None}, "files"),
+        ({"files": {"weights": "missing"}}, "missing or nonportable file"),
+        ({"extra": {"games": "invalid"}}, "games"),
+    ],
+)
+def test_invalid_manifest_preserves_previous_registration(
+    tmp_path: Path, manifest_fields: dict[str, object], message: str
 ) -> None:
     weights = Weights(42)
 
@@ -230,22 +258,10 @@ def test_failed_registration_preserves_live_state(
         folder = run.out / "state/learner"
         saved = read_state(folder)
         assert saved is not None
-        if manifest_fields:
-            manifest = saved.path / "state.json"
-            manifest.write_text(json.dumps(saved.record.model_dump() | manifest_fields))
-
-        # Untyped recipes can pass a non-callable in either callback slot.
-        invalid = cast(Callable[[Path], None], 1)
-        export_callback = invalid if invalid_callback == "export" else weights.export
-        restore_callback = invalid if invalid_callback == "restore" else restore
-        error = TypeError if invalid_callback in ("export", "restore") else ValueError
-        with pytest.raises(error, match=message):
-            run.resume(
-                name="learner",
-                extra=Counts(),
-                restore=None if invalid_callback == "missing_restore" else restore_callback,
-                export=None if invalid_callback == "missing_export" else export_callback,
-            )
+        manifest = saved.path / "state.json"
+        manifest.write_text(json.dumps(saved.record.model_dump() | manifest_fields))
+        with pytest.raises(ValueError, match=message):
+            run.resume(name="learner", extra=Counts(), export=weights.export, restore=restore)
 
         counts.games = next(steps)
         weights.value += 1
@@ -280,12 +296,12 @@ def test_export_collision_preserves_registered_object(tmp_path: Path, collision:
 
     with open_run(directory=tmp_path) as run:
         run.resume(model=model)
-        for step in run.steps("updates", to=2, save_every=1):
-            if step == 1:
-                run.save()
-            else:
-                with pytest.raises(ValueError, match="export"):
-                    run.save(export=export)
+        steps = run.steps("updates", to=2, save_every=1)
+        next(steps)
+        run.save()
+        next(steps)
+        with pytest.raises(ValueError, match="export"):
+            run.save(export=export)
         restored = torch.nn.Linear(1, 1)
         path = run.resume(model=restored)
         assert path is not None and torch.equal(model.weight, restored.weight)
@@ -433,7 +449,7 @@ def test_deferred_export_is_available_on_stop(
         run.save(export=weights.export)
         # An untyped recipe gets immediate feedback even between saves.
         with pytest.raises(TypeError, match="export must be callable"):
-            run.save(export=cast(Callable[[Path], None], 1))
+            run.save(export=_INVALID_CALLBACK)
         assert read_state(run.out / "state") is None
         stop.touch()
         with pytest.raises(Stopped):

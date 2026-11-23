@@ -63,13 +63,10 @@ All paths in `files` are relative to the selected folder. Registered objects
 map their name to `<name>.pt`. Custom files map their path to itself, for
 example `{"model/weights.bin": "model/weights.bin"}`. Older manifests list
 only objects. Their unlisted custom files remain available to `restore(folder)`.
-Object restore looks up object entries by name and can load a subset. When
-`extra` is registered, a custom entry requires the registered callback pair
-because the caller receives the counters and needs `restore` to read the files.
-
-`run.resume()` returns the selected folder for manual loading. Its matching
-`run.save(export=fn)` remembers the exporter between saves. During a write,
-the previous exporter stays registered until `current.json` selects the new save.
+Object restore looks up only the requested object names. A custom entry
+requires a restore callback when the caller receives `extra` in place of the
+folder. Once `current.json` selects the new save, the live namespace remembers
+its exporter for later saves.
 
 On this computer runs are under `~/.etude/track` (moved by `ETUDE_HOME`);
 under a launch the same folder is in your bucket. Using Etude to write a loop

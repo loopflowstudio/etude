@@ -101,25 +101,23 @@ def train(config: Config) -> None:
             run.save(name="learner")
 ```
 
-On a fresh run, `resume` skips `restore`. When a save exists, Etude checks the
-seed and listed files, loads registered objects, fills in `extra`, then calls
-`restore(folder)`. If restore fails, the previous registration stays in effect.
-Live objects and counters may already have changed. With `extra`, `resume`
-returns that same instance. Otherwise it returns the committed folder or
-`None` on a fresh run.
+Each `name` has its own save. On a fresh run, Etude skips `restore`. On
+resume, it checks the seed and listed files, loads registered objects, fills
+in the supplied `extra` instance, then calls `restore(folder)`. With `extra`,
+`resume` returns that instance. Combining counters with custom files requires
+both callbacks. If restoration fails, live objects may already have changed
+and the previous registration still handles saves.
 
-Each `name` has its own save. Etude passes `export` an empty folder. Write
-regular files with visible names, including nested paths. Etude rejects
-symlinks, names ending in `.open` or `.partial`, and collisions with the root
-`state.json`, an object key or its `<object>.pt` file. The keywords `export`,
-`restore`, `extra` and `name` are reserved.
+`export(folder)` receives an empty directory. Write regular files at visible
+paths. Reserve the root `state.json`, each object name and its `<name>.pt`
+file for Etude. Symlinks and names ending in `.open` or `.partial` are rejected.
+The keywords `export`, `restore`, `extra` and `name` are reserved.
 
-With `extra`, Etude requires the callback pair to save custom files or to
-resume a save that lists them. For manual loading, use `path = run.resume()`,
-read your files when `path` is present, and call `run.save(export=fn)` in the
-loop. Between saves, Etude remembers `fn` for the next save or planned stop.
-When a save is due, the new exporter takes effect once the save commits. A
-failed save keeps the previous exporter. See the [persistence reference](dev/training.md).
+For manual loading, omit `extra`. `path = run.resume()` returns the committed
+folder, or `None` on a fresh run. Call `run.save(export=fn)` in the loop.
+Between saves Etude remembers `fn` for the next save or planned stop. During
+a save, `fn` replaces the previous exporter only once the save commits.
+See the [persistence reference](dev/training.md).
 
 A save is a whole snapshot, selected by a pointer written last. A crash while
 saving leaves the previous complete save. A second attempt reloads that save;

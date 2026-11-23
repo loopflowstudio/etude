@@ -29,6 +29,7 @@ class SavedState(BaseModel):
     seed: int
     commit: str | None
     extra: dict[str, JsonValue] | None
+    # Object names map to their .pt file. A custom file maps its relative path to itself.
     files: dict[str, str]
 
 
@@ -58,12 +59,6 @@ def _torch() -> _Torch:
         raise ImportError("registered objects require etude-sdk[train]") from error
     # PyTorch's untyped serialization boundary stays here, outside Run's API.
     return cast(_Torch, module)
-
-
-def state_folder(out: Path, name: str | None) -> Path:
-    if name is not None and not valid_state_name(name):
-        raise ValueError("state name must be one portable name, outside numbered saves")
-    return out / "state" if name is None else out / "state" / name
 
 
 @dataclass(frozen=True)
@@ -96,29 +91,41 @@ class State:
 
     def __init__(
         self,
-        folder: Path,
+        out: Path,
         objects: Mapping[str, object],
         extra: BaseModel | None,
         *,
-        export: Callable[[Path], None] | None = None,
-        restore: Callable[[Path], None] | None = None,
+        name: str | None,
+        export: Callable[[Path], None] | None,
+        restore: Callable[[Path], None] | None,
     ) -> None:
+        if name is not None and not valid_state_name(name):
+            raise ValueError("state name must be one portable name, outside numbered saves")
         if export is not None and not callable(export):
             raise TypeError("export must be callable")
         if restore is not None and not callable(restore):
             raise TypeError("restore must be callable")
         if (export is None) != (restore is None):
             raise ValueError("register export and restore together in run.resume()")
-        self.folder = folder
+        self.folder = out / "state" if name is None else out / "state" / name
         self.objects = register_objects(objects)
         self.extra = extra
         self.export = export
-        self.restore_files = restore
+        self._restore = restore
         self.saved_at = time.monotonic()
         self.saved_step = 0.0
         self.last_at: dict[str, float] = {}
         if self.objects:
             _torch()  # refuse an unavailable serializer at registration
+
+    def validate_export(self, export: Callable[[Path], None]) -> None:
+        """Check a replacement even between saves, when a planned stop could use it."""
+        if not callable(export):
+            raise TypeError("export must be callable")
+        if self.extra is not None and self._restore is None:
+            raise ValueError(
+                "register export and restore in run.resume() when combining custom files with extra"
+            )
 
     def restore(self, *, seed: int) -> Path | None:
         found = read_state(self.folder)
@@ -129,7 +136,7 @@ class State:
             raise ValueError(f"saved seed was {saved.seed}, is {seed}")
         if (
             self.extra is not None
-            and self.restore_files is None
+            and self._restore is None
             and any(name == file for name, file in saved.files.items())
         ):
             raise ValueError(
@@ -146,8 +153,8 @@ class State:
             loaded = type(self.extra).model_validate(saved.extra)
             for name in type(self.extra).model_fields:
                 setattr(self.extra, name, getattr(loaded, name))
-        if self.restore_files is not None:
-            self.restore_files(path)
+        if self._restore is not None:
+            self._restore(path)
         self.last_at = saved.at
         return path
 

@@ -92,7 +92,7 @@ from etude.train.block import Builder, Columns, Json, LoggedRow, concat
 from etude.train.block import encode as encode_block
 from etude.train.manifest import Index, metric_names
 from etude.train.records import ParentRun, RowTable, checkpoint_name
-from etude.train.state import State, register_objects, saved_states, state_folder, write_objects
+from etude.train.state import State, register_objects, saved_states, write_objects
 
 __all__ = ("EtudeWarning", "TrainingRun", "seal_runs", "track")
 
@@ -461,7 +461,7 @@ class TrainingRun(Run):
         Return the supplied extra instance, or the selected folder (None on first use).
         A failing restore leaves registration unchanged but may have mutated live state.
         """
-        state = State(state_folder(self.out, name), objects, extra, export=export, restore=restore)
+        state = State(self.out, objects, extra, name=name, export=export, restore=restore)
         found = state.restore(seed=self.seed)
         self._states[name] = state
         return extra if extra is not None else found
@@ -474,30 +474,25 @@ class TrainingRun(Run):
             raise ValueError("register state with run.resume() before saving")
         state = self._states[name]
         if export is not None:
-            if not callable(export):
-                raise TypeError("export must be callable")
-            if state.extra is not None and state.restore_files is None:
-                raise ValueError(
-                    "register export and restore in run.resume() when combining custom files with extra"
-                )
-        clock = self._step_clock
-        due = (
-            self._save_every_seconds is not None
-            and time.monotonic() - state.saved_at >= self._save_every_seconds
-        ) or (
-            self._save_every is not None
-            and clock is not None
-            and self.at(clock) - state.saved_step >= self._save_every
-        )
-        final = (
-            clock is not None
-            and self._step_target is not None
-            and self.at(clock) >= self._step_target
-        )
-        if due or final or self.should_stop:
+            state.validate_export(export)
+        if self._save_due(state) or self.should_stop:
             self._save_state(state, export=export)
         elif export is not None:
             state.export = export
+
+    def _save_due(self, state: State) -> bool:
+        if (
+            self._save_every_seconds is not None
+            and time.monotonic() - state.saved_at >= self._save_every_seconds
+        ):
+            return True
+        clock = self._step_clock
+        if clock is None:
+            return False
+        step = self.at(clock)
+        return (self._save_every is not None and step - state.saved_step >= self._save_every) or (
+            self._step_target is not None and step >= self._step_target
+        )
 
     def _save_state(self, state: State, *, export: Callable[[Path], None] | None = None) -> None:
         wall_ms, hours = self._now()
