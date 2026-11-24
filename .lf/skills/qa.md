@@ -297,12 +297,50 @@ rewrites `out/coin.json` on every attempt, so evals of a pre-resume checkpoint
 fail as `input_undelivered`; that is the example breaking the "keep it
 unchanged" contract, not the launcher.
 
-No SSH host is reachable on this Mac (sshd off, Docker daemon stopped): owned
-SSH start recovery and out restoration run only through `tests/launch/test_ssh.py`
-and `tests/launch/test_out.py`. For `etude view` disconnects, open 30 raw
+For `etude view` disconnects, open 30 raw
 sockets that send a GET and close with `SO_LINGER (1, 0)` (RST), then require
 a 200 afterwards and no traceback in the server output; the merge base prints
 `BrokenPipeError` for the same driver.
+
+## Etude: an owned SSH host on this Mac
+
+Remote Login is off and Docker is stopped, but an unprivileged sshd works.
+In the lab, generate `host_key` and `client_key` (`ssh-keygen -t ed25519 -N ''`),
+and run `/usr/sbin/sshd -f CONFIG -E LOG` with `Port 2222`, `ListenAddress
+127.0.0.1`, `HostKey`, `PidFile`, `AuthorizedKeysFile` (the client key),
+`UsePAM no`, `StrictModes no`, `PasswordAuthentication no` and `ForceCommand
+LAB/force.sh`. `force.sh` exports `HOME=LAB/remote/home`, `ETUDE_HOME` below it,
+`SHELL=/bin/sh` and a PATH with `~/.local/bin`, then `exec /bin/sh -c
+"$SSH_ORIGINAL_COMMAND"`: sessions and programs stay in the lab. Put an `ssh`
+shim first on the client PATH that runs `/usr/bin/ssh -F LAB/ssh_config "$@"`
+(a `qa-host` alias with port, key, `StrictHostKeyChecking no`), then `etude
+pool add lab` and `etude machine add qa qa-host --pool lab`. Stop sshd by its
+PidFile before finishing.
+
+The login shell runs `/etc/profile` (path_helper puts `/opt/homebrew/bin` first);
+to shadow a remote tool, prepend its folder in `LAB/remote/home/.profile`.
+Controlled faults, all on the real path:
+
+- Lost start reply / lost request: the client `ssh` shim reads stdin, and on a
+  `"action": "start"` payload with a one-shot `LAB/drop` file either sends it
+  and discards the reply, or never sends it; exit 255.
+- Paused install: delete `remote/home/.etude/programs` and shadow `uv` with a
+  script that sleeps 60 s on `--no-editable` while `LAB/remote/slow-sync` exists.
+  `boot-claim` holds the boot PID; kill its process group to simulate death.
+- Bucket-backed host: `machine add qa-r2 qa-host --storage r2` with the R2
+  storage of the RunPod section (lab needs `etude-sdk[eval,s3]`). Freeze the
+  courier with SIGSTOP from a driver polling `SESSION/courier-pid`, but only
+  after its ppid is 1: stopping it while its parent lives makes the parent's
+  exit SIGHUP the orphaned group. Edit stored objects with boto3 against
+  `https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com`; purge the prefix after.
+- Late flush: give the lab an append-only out file (a `flush` job appending a
+  line per update), delete the host's `track/experiment/RUN` folder, freeze the
+  resume's courier, append to the stored object, continue. Do not append to
+  `out/coin.json`: it is a by-reference checkpoint, so restore refuses it and
+  the retry's final delivery then fails forever, leaving the run `stopping`.
+
+A run stuck in delivery keeps `etude wait` waiting: bound waits with a Python
+driver that sends SIGINT. Read an SSH run's metrics from the host's track root.
 
 ## Etude: explicit launcher upgrades
 
