@@ -31,9 +31,16 @@ from tests.launch.fake import open_database
 from tests.launch.test_runpod_machines import Storage
 from tests.train.tracking import open_run
 
+# The `ssh` stand-in runs the remote command here; `UNREACHABLE` replaces it.
+RELAY = '#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n'
+UNREACHABLE = "#!/bin/sh\nexit 255\n"
+
 
 @pytest.fixture(autouse=True)
 def ssh_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    executable = tmp_path / "ssh"
+    executable.write_text(RELAY)
+    executable.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("ETUDE_REMOTE_PYTHON", sys.executable)
 
@@ -43,9 +50,6 @@ def test_remote_host_runs_kept_work_logs_outputs_and_stops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ETUDE_STORAGE_TIMEOUT_SECONDS", "120")
-    executable = tmp_path / "ssh"
-    executable.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
-    executable.chmod(0o755)
     ssh = SSH("bench", str(tmp_path / "remote"))
     journal = SSHJournal(ssh)
     service = Executor(OwnedMachine("bench"), SSHStart(ssh), journal)
@@ -76,23 +80,18 @@ def test_remote_host_runs_kept_work_logs_outputs_and_stops(
     )
     scheduler.tick()
     held = scheduler.attempts(pending)[0].session
-    executable.write_text("#!/bin/sh\nexit 255\n")
+    executable = tmp_path / "ssh"
+    executable.write_text(UNREACHABLE)
     scheduler.tick()
     assert scheduler._store.session(held).ended_at is None
-    executable.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
+    executable.write_text(RELAY)
     scheduler.cancel(pending)
     assert scheduler.wait(pending, every=0.1, timeout=20)[0].outcome == "cancelled"
-
-
-RELAY = '#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n'
-UNREACHABLE = "#!/bin/sh\nexit 255\n"
 
 
 def _owned_host(tmp_path: Path) -> tuple[Scheduler, Path]:
     """A scheduler with one owned SSH host, and the SSH stand-in that reaches it."""
     executable = tmp_path / "ssh"
-    executable.write_text(RELAY)
-    executable.chmod(0o755)
     ssh = SSH("bench", str(tmp_path / "remote"))
     service = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
     scheduler = Scheduler(open_database(tmp_path / "state.db"), {"ssh": lambda held: service})
@@ -173,9 +172,6 @@ def test_a_setup_process_that_died_frees_its_owned_host(tmp_path: Path) -> None:
 def test_a_bucket_backed_host_is_free_once_setup_before_any_receipt_fails_or_is_stopped(
     tmp_path: Path,
 ) -> None:
-    executable = tmp_path / "ssh"
-    executable.write_text(RELAY)
-    executable.chmod(0o755)
     ssh = SSH("bench", str(tmp_path / "remote"))
     place = Place(name="east", bucket="b", prefix="etude", provider="s3", region="us-east-1")
     bucket = Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), Storage())
@@ -202,9 +198,6 @@ def test_a_bucket_backed_host_is_free_once_setup_before_any_receipt_fails_or_is_
 
 
 def test_runs_move_between_local_and_remote_disk_including_kept_work(tmp_path: Path) -> None:
-    executable = tmp_path / "ssh"
-    executable.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
-    executable.chmod(0o755)
     ssh = SSH("bench", str(tmp_path / "remote"))
     remote = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
     here = local(tmp_path / "local")
@@ -268,9 +261,6 @@ run.finish()
 def test_continuation_moves_between_local_and_remote_disk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    executable = tmp_path / "ssh"
-    executable.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
-    executable.chmod(0o755)
     ssh = CountedSSH("bench", str(tmp_path / "bench/sessions"))
     ssh.asks = Counter()
     remote = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
@@ -344,9 +334,6 @@ def test_continuation_moves_between_local_and_remote_disk(
 
 
 def test_a_runs_folder_relays_between_hosts_over_ssh(tmp_path: Path) -> None:
-    executable = tmp_path / "ssh"
-    executable.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
-    executable.chmod(0o755)
     run = open_run(
         experiment="lab",
         clocks=[Clock(name="steps", kind="step", meaning="training steps")],

@@ -909,7 +909,10 @@ def _abort_setup(signum: int, frame: FrameType | None) -> None:
 
 
 def _hold_setup(signum: int, frame: FrameType | None) -> None:
-    """Ignore a stop while the worker is being started; `end` then finds its `pid`."""
+    """Ignore a stop while the worker is being started; `end` then finds its `pid`.
+
+    A handler rather than `SIG_IGN`, which the worker would inherit across exec.
+    """
 
 
 def _cache() -> Cache:
