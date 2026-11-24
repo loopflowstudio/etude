@@ -136,6 +136,7 @@ def _submit(
                 resume=resume,
                 until=None if until is None else Until.parse(until),
                 retry_failed=retry_failed,
+                scoped=source is None,
             )
             if watch is None:
                 break
@@ -484,6 +485,7 @@ def eval_experiment(
                 definition,
                 source=storage,
                 retry_failed=retry_failed,
+                scoped=source is None,
             )
             if watch is None:
                 break

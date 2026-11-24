@@ -20,7 +20,7 @@ from etude.controller.declarations import (
 )
 from etude.controller.smoke import smoke_file
 from etude.errors import EtudeError, LauncherError
-from etude.eval.records import digest
+from etude.eval.records import digest, find_line_experiments
 from etude.eval.result import EvalResult
 from etude.eval.tournament import StoredRuns, played
 from etude.experiment import TrainingRuns, observe, read_tournament_lines
@@ -117,11 +117,16 @@ def advance(
     seed: int | None = None,
     resume: bool = False,
     until: Until | None = None,
+    scoped: bool = False,
 ) -> list[TournamentDecision]:
-    """One pass. Existing addresses stay put; explicit retries preserve delivered matches."""
+    """One pass. Existing addresses stay put; explicit retries preserve delivered matches.
+
+    `scoped` lists only this experiment, and any other its tournament lines
+    name: only for a source in Etude's own layout, such as derived delivery storage.
+    """
     if max_usd is not None and (not max_usd.is_finite() or max_usd < 0):
         raise LauncherError("--max-usd must be a finite, nonnegative dollar limit")
-    listing = RunListing.read(source)
+    listing = RunListing.read(source, experiments=(experiment.name,) if scoped else None)
     state = observe(listing, experiment.name)
     committed = state.committed_usd
     print(
@@ -193,10 +198,12 @@ def advance(
             for line, _ in lines.values():
                 print(line)
             raise
+    tournaments = [job.recorded() for job in jobs]
+    others = find_line_experiments(tournaments) - {experiment.name}
     policy_lines = read_tournament_lines(
-        listing,
+        RunListing.read(source, experiments=others) if scoped and others else listing,
         state,
-        [job.recorded() for job in jobs],
+        tournaments,
     )
     smoke = Smoke()
     if smoke_file_first and not quote:

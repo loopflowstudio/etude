@@ -840,6 +840,52 @@ def training_jobs() -> list[TrainingJob]:
     assert run.state == "finished"
 
 
+RANKED = """
+from etude.eval.match import environment
+from etude.eval.records import Aligned, Benchmark, Seating
+from etude.jobs import EvalJob, ExperimentState
+from tests.eval.games import play
+from tests.eval.stored import stored_inference, stored_relative
+
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    direct = stored_inference(config={})
+    rival = stored_relative(Aligned(clock="updates", job="small", experiment="rival"), direct)
+    ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(
+        Seating(name="rival", players=(direct, rival), configs=({},), games=1),))
+    return [EvalJob(tournament=ladder, checkpoints=[r.final for r in state.runs if r.final],
+                    play=play, repo=None, max_hours=1)]
+"""
+
+
+def test_a_scoped_pass_lists_only_its_experiment_and_the_lines_it_names(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    for experiment, run in (("lab", "base@0"), ("lab", "lab@1"), ("rival", "small@0")):
+        job = run.partition("@")[0]
+        with open_run(
+            experiment=experiment, run=run, job=job, clocks=["updates"], directory=root
+        ) as tracked:
+            tracked.log({"value": 1}, updates=1)
+    with open_run(experiment="history", run="old@0", clocks=["updates"], directory=root):
+        pass
+    plain = tmp_path / "plain.py"
+    plain.write_text(RANKED.replace('experiment="rival"', 'experiment="lab"'))
+    ranked = tmp_path / "ranked.py"
+    ranked.write_text(RANKED)
+    for file, listed in ((plain, ["lab/", "lab@"]), (ranked, ["lab/", "lab@", "rival/", "rival@"])):
+        measured = MeasuredStorage(DirectoryStorage(root))
+        advance(read_experiment(file, experiment="lab"), source=measured, scoped=True)
+        assert measured.listed == listed
+        assert "lab: state from" in (out := capsys.readouterr().out)
+        assert "2 training runs" in out
+    # An explicit source may be an experiment's own folder: it is listed whole.
+    measured = MeasuredStorage(DirectoryStorage(root / "lab"))
+    advance(read_experiment(plain, experiment="lab"), source=measured)
+    assert measured.listed == [""]
+    assert "1 training run," in capsys.readouterr().out
+
+
 def test_queue_resumes_and_watches_on_a_busy_pool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

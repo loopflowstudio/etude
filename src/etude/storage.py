@@ -159,8 +159,15 @@ class DirectoryStorage:
         return sorted(self.versions(prefix))
 
     def versions(self, prefix: str) -> dict[str, str]:
-        """List file times and sizes. An unreadable subtree invalidates the listing."""
-        pending = [self._path(prefix) if prefix else self.root]
+        """List file times and sizes. An unreadable subtree invalidates the listing.
+
+        Like a bucket's, a prefix may end within a name (`exp@` lists `exp@0/`).
+        """
+        if prefix:
+            self._path(prefix)  # refuses keys outside the root
+        parent, _, start = prefix.rpartition("/")
+        top = self._path(parent) if parent else self.root
+        pending = [top]
         found: dict[str, str] = {}
         while pending:
             folder = pending.pop()
@@ -170,6 +177,8 @@ class DirectoryStorage:
                 continue  # Missing prefix or a directory removed during traversal.
             with entries:
                 for entry in entries:
+                    if folder == top and not entry.name.startswith(start):
+                        continue
                     try:
                         if entry.is_dir(follow_symlinks=False):
                             pending.append(folder / entry.name)
