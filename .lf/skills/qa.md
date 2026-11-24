@@ -230,7 +230,7 @@ artifact=ArtifactRef(uri=URI, sha256=..., size_bytes=...)))` with
 `git archive main src | tar -x -C DIR` and draw the same home with
 `PYTHONPATH=DIR/src uv run python -c 'from etude.cli import main; ...'
 report FILE --out OTHER`. The page's notes sit in its embedded JSON
-(`"notes": [...]`). Serve both pages with `python3 -m http.server --bind
+(`"notes": [...]`). Serve both pages with `uv run python -m http.server --bind
 127.0.0.1` to drive the toolbar, and stop that server afterwards. Separate
 tournaments (or environments) are separate selections, so a cross-environment
 overlap note needs tournaments merged from different experiments. Drawing a

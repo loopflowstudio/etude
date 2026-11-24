@@ -207,7 +207,7 @@ class Cell(Record):
 
     `subject` and `opponent` index `Page.players`, and `environment`
     `Page.environments`; an opponent of None is every opponent, kept only
-    where it does not repeat a single opponent or describes a fixed strength.
+    where it does not repeat a single opponent or describes an anchor strength.
     Page cells have a placed subject or describe an anchor strength or pair.
     `fixed` counts matches without a placed checkpoint. `split` holds exactly the columns it is split by.
     `commit` is None for each match's latest result, whichever version
@@ -1320,7 +1320,7 @@ def _read_evals(
     db = _open_statsdb(state.experiment, runs.source)
     try:
         saved = _saved_checkpoints(db)
-        players, placement, unplaced = _players(
+        players, placement, unplaced_checkpoints = _players(
             db, saved, {run.name: run.line for run in state.runs}
         )
         outside = _load(db, held, players)
@@ -1347,7 +1347,7 @@ def _read_evals(
             latest_result_ms=None if latest is None else latest[0],
             absent=absent,
         )
-        cell_notes = _cell_notes(evals, report, unplaced, hidden, seated_pairs)
+        cell_notes = _cell_notes(evals, report, unplaced_checkpoints, hidden, seated_pairs)
         return replace(evals, notes=(*refused, *placement, *notes, *cell_notes, *team_notes))
     finally:
         db.close()
@@ -1471,7 +1471,7 @@ def _players(
     ).fetchall()
     players: list[Placement] = []
     notes: list[str] = []
-    unplaced: list[int] = []
+    unplaced_checkpoints: list[int] = []
     for key, names, kind, config, checkpoint, given, named in found:
         name = "/".join(json.loads(names))
         bound = saved.get(checkpoint)
@@ -1503,7 +1503,7 @@ def _players(
             and bound is None
             and not seated
         ):
-            unplaced.append(len(players))
+            unplaced_checkpoints.append(len(players))
         at = recorded | seated
         players.append(
             Placement(
@@ -1518,7 +1518,7 @@ def _players(
                 placed=bound is not None or bool(at),
             )
         )
-    return players, tuple(notes), unplaced
+    return players, tuple(notes), unplaced_checkpoints
 
 
 def _merged(seated_at: list[dict[str, float]]) -> dict[str, float]:
@@ -2189,19 +2189,19 @@ def _panel_kinds(evals: _Evals, report: Report) -> dict[tuple[int, int], set[str
 def _cell_notes(
     evals: _Evals,
     report: Report,
-    unplaced: Sequence[int],
+    unplaced_checkpoints: Sequence[int],
     hidden: Sequence[Cell],
     seated_pairs: set[tuple[int, int, int]],
 ) -> tuple[str, ...]:
     """Explain missing anchor positions and environment choices for reachable panels."""
-    if not unplaced and not hidden:
+    if not unplaced_checkpoints and not hidden:
         return ()
     players = evals.players
     panels = _panel_kinds(evals, report)
     # The Opponent control offers named opponents and explicit aggregates. If it
     # has neither, it defaults to "all opponents", backed by sole-opponent cells.
     opponents: dict[tuple[int, str | None, int], set[int | None]] = defaultdict(set)
-    has_aggregate = set()
+    has_aggregate: set[tuple[int, str | None, int, int]] = set()
     for c in evals.cells:
         if c.fixed or not players[c.subject].placed:
             continue
@@ -2226,9 +2226,9 @@ def _cell_notes(
         return ()
 
     notes: list[str] = []
-    if unplaced:
+    if unplaced_checkpoints:
         anchors = {i for c in evals.cells for i in drawn_anchors(c)}
-        if names := [players[i].name for i in unplaced if i in anchors]:
+        if names := [players[i].name for i in unplaced_checkpoints if i in anchors]:
             notes.append(
                 "Drawn as anchors, seated without an `at` and saved by no training run of the"
                 f" experiment: {', '.join(names)}."

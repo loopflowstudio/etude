@@ -125,10 +125,10 @@ panel shows its strength or a matchup it played, or when a curve without
 `seating=` draws its score against the selected opponent as a reference line.
 For example, on a curve against a frozen checkpoint, a heuristic's score
 against that checkpoint can supply an anchor line. The `Anchor lines` control
-appears when a curve has a reference against its selected opponent.
-Top-of-page notes cover unplaced
-outside checkpoints drawn as anchors, and drawn values played in more than one
-environment (each shown from the environment whose latest match is newest).
+appears when a curve has a reference against its selected opponent. Top-of-page
+notes cover unplaced outside checkpoints drawn as anchors, and drawn values
+played in more than one environment (each shown from the environment whose
+latest match is newest).
 
 Use `perf` and `ml` to choose metric panels for your own learning system.
 `Report()` defaults assume RL metric names; absent data leaves gaps, not invented
