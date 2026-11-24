@@ -1,25 +1,35 @@
-# v0.4.5
+# v0.4.6
 
 <!-- loopflow:release-notes=narrative;gate=safe -->
 
-Etude v0.4.5 lets you train on Google Colab and track what a run consumes in Compute Units (CU). Following a run is faster, too. An unchanged S3 or R2 report can reuse its rendered page, and you can keep querying evaluation results while another process refreshes them.
+Etude v0.4.6 gives you one browser view of live experiments, from training curves and console output to the machines and rental windows behind each run. Training recipes can now resume with their own checkpoint files. The launcher keeps long Colab runs connected and can move on when an accelerator has no capacity.
 
-## Train on Colab and account for Compute Units
+## Follow runs and rentals in one place
 
-Add Colab with `etude provider set colab --kind colab --storage <storage>`. The launcher authenticates locally and starts the worker through a Jupyter kernel, so your account credentials stay on the launcher. ([#137](https://github.com/loopflowstudio/etude/pull/137))
+Run `etude view` to open a live dashboard at `http://127.0.0.1:8765`. It combines run files from a directory or S3/R2 bucket with launcher state from a local or SSH launcher. While a local view is running, `train`, `launch`, `queue`, `continue` and `status RUN` print clickable `view:` links. [#135](https://github.com/loopflowstudio/etude/pull/135)
 
-- Choose a CPU runtime or one T4, L4, G4, A100 or H100 GPU. Etude checks the template when you add it, before requesting a runtime.
-- Track estimated consumption in CU. The default dollar valuation is $0 per CU. Set `--usd-per-unit` on the provider to use your own valuation for dollar estimates and budgets.
-- Colab reveals the hourly CU rate after assignment. With a positive dollar valuation, `etude launch --quote` flags that timing. If the observed rate exceeds `--max-usd-per-hour`, Etude releases the runtime before starting the worker. If a dollar budget shortens the run, Etude reserves time to deliver checkpoints.
-- Concurrent assignments can make an individual runtime’s rate impossible to measure. In that case, `etude machines` and `etude status` show `CU rate unobserved`.
+- Open a run to see its charts, console, config, checkpoints and files. Browse experiment reports or check held machines, rental windows, costs and occupied slots. Open pages refresh in place every five seconds.
+- On large buckets, run metadata appears before historical charts, which are built when you open a run. The view keeps the last valid results visible through a storage outage, launcher disconnect or syntax error in an edited `report()`.
+- Use `etude view` in place of `etude report --serve`. For a self-contained, printable HTML report, use `etude report`. It still supports `--watch`.
 
-## Refresh reports while others read the results
+## Resume training with your framework’s files
 
-On an R2 experiment with about 92,000 keys and 42 panels, the median unchanged refresh fell from 369 seconds to 8 seconds. Each refresh made one live bucket listing and zero object GETs, with the same displayed scores. ([#136](https://github.com/loopflowstudio/etude/pull/136))
+Pass both `export(folder)` and `restore(folder)` to `run.resume()`. Each scheduled save, completion save or planned-stop save can include custom files alongside any PyTorch objects and typed JSON counters you supply. A fresh run skips the restore callback. [#141](https://github.com/loopflowstudio/etude/pull/141), [#143](https://github.com/loopflowstudio/etude/pull/143)
 
-- `etude report` runs the experiment file before checking the page cache. Edits to external inputs read by `report()` or `eval_jobs()` that change the report are picked up on the next refresh. A cold rebuild reads training blocks and evaluation tables in one pass.
-- `statsdb()` now returns a read-only connection. Readers can finish queries against their current snapshot while Etude publishes an updated one, avoiding the `statsdb_in_use` error during a concurrent refresh.
+- Exporters can create subdirectories. Delivery uploads the selected save’s files, including nested files and files ending in `.tail`, before publishing `current.json`. Follow that pointer to find the committed save. A failed export leaves the previous save selected.
+- Manual restore with `path = run.resume()` and explicit saves with `run.save(export=fn)` still work. `run.resume()` returns the supplied `extra` counters when present and a path or `None` otherwise. The names `export` and `restore` are now reserved on that method, and supplying just one callback raises `ValueError`.
+
+## Keep Colab training connected
+
+Colab reclaimed some busy runtimes after about 21 minutes without a connected client. Etude now keeps a Jupyter connection open, sends a heartbeat during training and renews the connection as proxy credentials rotate. An L4 training run passed 76 minutes during verification. [#142](https://github.com/loopflowstudio/etude/pull/142)
+
+- When Colab returns HTTP 503 during assignment, Etude checks whether a runtime was created. If none exists, it treats the response as a capacity refusal so scheduling can move on before the rental deadline.
+- If bootstrap exits early and leaves the kernel idle, Etude detects the loss before the startup allowance runs out.
 
 ## Operational notes
 
-Run `etude database upgrade` on an existing launcher database before using the upgraded launcher. The migration adds provider and rental billing fields. Existing records keep their USD valuation at one dollar per unit. ([#137](https://github.com/loopflowstudio/etude/pull/137))
+Run `etude database upgrade` on an existing launcher database before using the upgraded launcher. The migration adds indexes for reading machine inventory from one snapshot. The live view’s index under `ETUDE_HOME/views` can be rebuilt from its sources. [#135](https://github.com/loopflowstudio/etude/pull/135)
+
+## Small changes
+
+- Grouped evaluations keep their submitted run address through delivery and recovery. Continuations show their own launcher state and link to their parent from submission. [#135](https://github.com/loopflowstudio/etude/pull/135)
