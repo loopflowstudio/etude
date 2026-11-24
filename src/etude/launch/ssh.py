@@ -174,13 +174,31 @@ with contextlib.redirect_stdout(sys.stderr):
 """
 # It reads the RemoteCall as JSON: `request` is its request, and replies are RemoteReply.
 _BOOT = (
-    """import base64,json,os,sys
+    """import base64,json,os,signal,sys
 call=json.load(sys.stdin)
 os.environ.update(call.get('storage_environment', {}))
 code=base64.b64decode(call.pop("program"))
 request=call['request']
 import pathlib
 home=pathlib.Path(call['root']).expanduser()/request.get('session','')
+def recorded(name):
+    path=home/name
+    try: text=path.read_text().strip()
+    except FileNotFoundError: return None
+    return int(text) if text.isdigit() else 0
+def setting_up():
+    # Before `pid`, a claimed start is held by its boot process (`boot-claim`),
+    # then on a bucket-backed host by its courier (`courier-pid`). An empty claim
+    # is a moment old, or from an older release: count it as live.
+    for name in ('boot-claim','courier-pid'):
+        pid=recorded(name)
+        if pid==0: return True
+        if pid is None: continue
+        try: os.kill(pid,0)
+        except ProcessLookupError: continue
+        except PermissionError: pass
+        return True
+    return False
 if request['action']=='logs' and request['producer']=='bootstrap':
     path=home/'bootstrap.log'
     print(json.dumps({'log':path.read_text() if path.exists() else None})); sys.exit(0)
@@ -189,23 +207,29 @@ if request['action']=='started' and not (home/'pid').exists():
 if request['action']=='claimed':
     print(json.dumps({'claimed':(home/'boot-claim').exists() or (home/'pid').exists()})); sys.exit(0)
 if request['action']=='observe' and not (home/'pid').exists():
-    # Answer without installing. Bootstrap notes `ended` only before worker entry,
-    # so a session ended without a worker, or never claimed, started no job.
-    booting=(home/'boot-claim').exists() and not (home/'ended').exists()
-    print(json.dumps({'observation':{'alive':booting,'progress':[],'start_unknown':booting}})); sys.exit(0)
+    # Answer without installing. A session with no worker whose setup has ended,
+    # died or never claimed it started no job. Read `pid` again after the setup
+    # processes: a start writes it before its boot process exits.
+    booting=not (home/'ended').exists() and setting_up()
+    if booting or not (home/'pid').exists():
+        print(json.dumps({'observation':{'alive':booting,'progress':[],'start_unknown':booting}})); sys.exit(0)
 if request['action']=='ended':
     path=home/'ended'
     print(json.dumps({'ended_at':path.read_text() if path.exists() else None})); sys.exit(0)
 if request['action']=='end':
     home.mkdir(parents=True,exist_ok=True)
     (home/'cancel-start').touch()
-    if not (home/'pid').exists():
-        path=home/'ended'
-        if not (home/'boot-claim').exists() and not path.exists():
-            # Nothing started here, and the cancel fences any start still in flight.
+    path=home/'ended'
+    if not (home/'pid').exists() and not path.exists():
+        # The cancel stops an install; a courier still fetching stops at once.
+        if courier:=recorded('courier-pid'):
+            try: os.kill(courier,signal.SIGTERM)
+            except (ProcessLookupError,PermissionError): pass
+        if not setting_up() and not (home/'pid').exists():
+            # Nothing runs here, and the cancel fences any start still in flight.
             from datetime import datetime,UTC
             path.write_text(datetime.now(UTC).isoformat())
-        # A claimed install sees the cancel and writes `ended` when it has stopped.
+    if not (home/'pid').exists():
         print(json.dumps({'ended_at':path.read_text() if path.exists() else None})); sys.exit(0)
 if request['action']=='start':
     home.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -217,7 +241,9 @@ if request['action']=='start':
         print(json.dumps({})); sys.exit(0)
     pid=os.fork()
     if pid:
+        (home/'boot-claim').write_text(str(pid))
         print(json.dumps({}),flush=True); os._exit(0)
+    (home/'boot-claim').write_text(str(os.getpid()))  # either write names this process
     os.setsid()
     with open(os.devnull,'r+b') as sink:
         for fd in (0,1,2): os.dup2(sink.fileno(),fd)

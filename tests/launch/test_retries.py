@@ -1,5 +1,7 @@
 """Count physical storage reads and preserve permanent failures and caller deadlines."""
 
+import os
+import signal
 from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Self
@@ -123,6 +125,47 @@ def test_bootstrap_retries_cannot_renew_startup_allowance(
         )
     assert len(requests) == 2 and max(requests) <= 0.2
     assert not list(tmp_path.glob("*/pid"))
+
+
+def test_cancelling_an_owned_start_stops_a_courier_waiting_for_its_bootstrap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cancel = tmp_path / "cancel-start"
+    monkeypatch.setenv("ETUDE_STARTUP_CANCEL", str(cancel))
+    monkeypatch.delenv("ETUDE_STARTUP_DEADLINE", raising=False)
+    monkeypatch.delenv("ETUDE_DEADLINE", raising=False)
+    transport = Transport([(404, b"")] * 3)
+    with log_to(tmp_path / "log"), pytest.raises(InterruptedError, match="cancelled"):
+        _serve(
+            "https://storage.invalid/bootstrap",
+            tmp_path,
+            transport,
+            lambda seconds: cancel.touch(),
+            0.1,
+            tmp_path / "log",
+            "",
+        )
+    assert transport.requests == 1
+    assert not list(tmp_path.glob("*/pid"))
+
+
+def test_a_stop_during_courier_setup_ends_it_with_its_diagnostics(tmp_path: Path) -> None:
+    def send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
+        os.kill(os.getpid(), signal.SIGTERM)  # an owned host's `end`, while a read is held
+        return HTTPReply(status=404, body=b"")
+
+    with log_to(tmp_path / "log"), pytest.raises(SystemExit):
+        _serve(
+            "https://storage.invalid/bootstrap",
+            tmp_path,
+            send,
+            lambda seconds: None,
+            0.1,
+            tmp_path / "log",
+            "",
+        )
+    assert '"exception":"SystemExit"' in (tmp_path / "log").read_text()
+    assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
 
 
 @pytest.mark.parametrize("status", [403, 503])

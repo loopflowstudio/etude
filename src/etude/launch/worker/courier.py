@@ -11,6 +11,7 @@ import io
 import math
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -20,6 +21,7 @@ from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import FrameType
 from typing import IO
 
 from etude.cache import Cache
@@ -775,6 +777,9 @@ def _serve(
     deadline: float | None = None
     delivery_seconds: float | None = None
     rental_deadline: datetime | None = None
+    # Until start intent is published nothing has run, so an owned host's `end`
+    # may stop setup at once; its log is still published below.
+    signal.signal(signal.SIGTERM, _abort_setup)
     try:
         if until := os.environ.get("ETUDE_DEADLINE"):
             rental_deadline = datetime.fromisoformat(until)
@@ -829,6 +834,9 @@ def _serve(
         # Persist start intent before user code can run. A lost write reply must not
         # leave running code with no durable evidence that it might have started.
         startup_timeout()
+        # From start intent until `pid` names the worker, a stop must wait for
+        # that pid: ending here could leave a worker no journal can see.
+        signal.signal(signal.SIGTERM, _hold_setup)
         write_log("receipt upload", "publishing start intent")
         with limit_time(startup_timeout()):
             courier._out.write_bytes("receipt", str(os.getpid()).encode())
@@ -845,6 +853,7 @@ def _serve(
                 stderr=subprocess.STDOUT,
             )
         write(home / "pid", str(process.pid))
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
         while process.poll() is None:
             for step in (courier.bring_in, courier.carry_out):
                 try:
@@ -860,6 +869,7 @@ def _serve(
         _diagnose("worker", error)
         raise
     finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
         original_error = sys.exception()
         left = _allowance(deadline, delivery_seconds)
         collected, failure = False, None
@@ -892,6 +902,14 @@ def _serve(
             failure = failure or error
         if failure is not None and original_error is None:
             raise failure
+
+
+def _abort_setup(signum: int, frame: FrameType | None) -> None:
+    raise SystemExit(128 + signum)
+
+
+def _hold_setup(signum: int, frame: FrameType | None) -> None:
+    """Ignore a stop while the worker is being started; `end` then finds its `pid`."""
 
 
 def _cache() -> Cache:

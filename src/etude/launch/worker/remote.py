@@ -127,6 +127,8 @@ def _start(root: Path, request: StartRequest) -> RemoteReply:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+        # Until the courier writes `pid`, its own pid is the session's liveness.
+        write(home / "courier-pid", str(process.pid))
         return RemoteReply(pid=process.pid)
     # Sources were staged above; this start uses the same process implementation.
     write(home / "packet.json", request.packet.model_dump_json())

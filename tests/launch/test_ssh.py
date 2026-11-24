@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
 import sys
 from collections import Counter
 from datetime import UTC, datetime
@@ -147,7 +149,30 @@ def test_a_lost_start_reply_during_install_is_recovered_and_cancel_aborts_it(
     assert scheduler.read(installing).outcome == "cancelled"
 
 
-def test_a_failed_install_on_a_bucket_backed_host_ends_before_any_receipt(tmp_path: Path) -> None:
+def test_a_setup_process_that_died_frees_its_owned_host(tmp_path: Path) -> None:
+    scheduler, executable = _owned_host(tmp_path)
+    executable.write_text(UNREACHABLE)
+    (installing,) = scheduler.queue(_echo("installing"), "bench")
+    scheduler.tick()
+    home = tmp_path / "remote" / scheduler.attempts(installing)[0].session
+    # The start reached the host, then its boot process was killed (OOM, reboot).
+    home.mkdir(parents=True)
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    (home / "boot-claim").write_text(str(dead.pid))
+    executable.write_text(RELAY)
+    (queued,) = scheduler.queue(_echo("queued"), "bench")
+    (status,) = scheduler.wait(queued, every=0.1, timeout=20)
+    assert status.outcome == "succeeded"
+    first = scheduler.attempts(installing)[0]
+    assert first.outcome == "lost" and first.cause == "machine_lost_before_start"
+    assert (home / "ended").exists()
+    assert scheduler.read(installing).outcome == "succeeded"  # retried once the host was free
+
+
+def test_a_bucket_backed_host_is_free_once_setup_before_any_receipt_fails_or_is_stopped(
+    tmp_path: Path,
+) -> None:
     executable = tmp_path / "ssh"
     executable.write_text(RELAY)
     executable.chmod(0o755)
@@ -159,9 +184,20 @@ def test_a_failed_install_on_a_bucket_backed_host_ends_before_any_receipt(tmp_pa
     )
     home = tmp_path / "remote" / "s1"
     home.mkdir(parents=True)
-    (home / "boot-claim").touch()
+    (home / "boot-claim").write_text(str(os.getpid()))
     assert service.observe("s1").alive  # installing; storage has heard nothing yet
-    (home / "ended").write_text(datetime.now(UTC).isoformat())  # the install failed
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    (home / "boot-claim").write_text(str(dead.pid))
+    assert not service.observe("s1").alive  # the install died without a note
+
+    # Its courier fetches inputs after the boot process exits, then fails.
+    courier = subprocess.Popen(["sleep", "60"])
+    (home / "courier-pid").write_text(str(courier.pid))
+    assert service.observe("s1").alive
+    assert service.end("s1") is None  # the courier is told to stop
+    assert courier.wait(timeout=10) == -signal.SIGTERM
+    assert service.end("s1") is not None
     assert not service.observe("s1").alive
 
 

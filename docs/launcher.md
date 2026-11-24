@@ -60,8 +60,9 @@ If starting a session on an owned SSH host loses its reply, Etude checks the
 host directly: an install or worker already running there is recovered and
 tracked without starting a second copy, while an unclaimed session is fenced
 and freed at once so queued work can use the machine even with no startup
-cutoff. Cancelling a run while its owned host is still setting up aborts the
-install and frees the host once stopped. If the host is unreachable, Etude
+cutoff. Cancelling a run while its owned host is still setting up (installing,
+or fetching and restoring inputs from storage) stops that setup and frees the
+host once stopped; setup that fails or is killed frees it too. If the host is unreachable, Etude
 waits rather than freeing a machine it cannot check.
 
 ## Rented machines

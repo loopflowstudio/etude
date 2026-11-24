@@ -205,8 +205,9 @@ class Executor:
         seen = self.journal.observe(session_id)
         alive = seen.alive and self.machines.alive(session_id)
         if alive and self.control is not self.journal and not seen.start_unknown:
-            # Storage has no receipt yet, so only the host can say its install failed.
-            alive = self.control.ended(session_id) is None
+            # Storage has no receipt yet, so only the host can say its setup
+            # failed, was cancelled or died.
+            alive = self.control.observe(session_id).alive
         return seen.model_copy(update={"alive": alive})
 
     def started(self, session_id: str) -> bool:
