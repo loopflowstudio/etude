@@ -840,6 +840,52 @@ def training_jobs() -> list[TrainingJob]:
     assert run.state == "finished"
 
 
+def test_queue_resumes_and_watches_on_a_busy_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
+    b = bench(tmp_path)
+    b.scheduler.add_pool(Pool(name="busy"))  # no free machine: launch would refuse
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    recipe = """
+from pydantic import BaseModel
+from etude.jobs import TrainingJob
+from etude.train.tracking import track
+
+class Config(BaseModel):
+    pass
+
+def train(config: Config) -> None:
+    with track(config=config, clocks=['updates']) as run:
+        run.log({"value": 1}, updates=1)
+
+def training_jobs() -> list[TrainingJob]:
+    return [TrainingJob(name="base", train=train, config=Config(), max_hours=1)]
+"""
+    file = checkout(tmp_path / "repo", {"busy.py": recipe}) / "busy.py"
+    passes = iter((None,))
+
+    def sleep(seconds: float) -> None:
+        if next(passes, KeyboardInterrupt) is KeyboardInterrupt:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", sleep)
+    assert main(["queue", str(file), "--pool", "busy", "--watch", "60"]) == 0
+    watched = capsys.readouterr().out
+    assert "busy/base@0  new, queued" in watched and "busy/base@0  queued" in watched
+    (queued,) = b.scheduler.runs()
+    b.scheduler.cancel(queued.id)
+    assert b.scheduler.read(queued.id).outcome == "cancelled"
+    resume = ["--pool", "busy", "--job", "base", "--seed", "0", "--resume"]
+    for command in ("queue", "launch"):
+        assert main([command, str(file), *resume, "--watch", "60"]) == 1
+        assert "--resume cannot be combined with --watch" in capsys.readouterr().err
+    assert main(["queue", str(file), *resume]) == 0
+    assert b.scheduler.read(queued.id).phase == "queued"
+
+
 def test_policy_key_fresh_experiment_submits_training_then_evaluates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
