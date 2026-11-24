@@ -2204,48 +2204,49 @@ def _cell_notes(
     }
 
     def draws_anchor(c: Cell) -> bool:
-        kinds = panels[c.selection, c.score]
-        return c.is_anchor(players) and (
-            ("anchors" in kinds and c.subject != c.opponent)
-            or (
-                "curve" in kinds
-                and not evals.drawn[c.selection].seated
-                and not c.fixed
-                and c.subject != c.opponent
-                and (c.selection, c.commit, c.score, c.opponent) in opponents
-            )
+        if c.subject == c.opponent or not c.is_anchor(players):
+            return False
+        kinds = panels.get((c.selection, c.score), ())
+        return "anchors" in kinds or (
+            "curve" in kinds
+            and not evals.drawn[c.selection].seated
+            and not c.fixed
+            and (c.selection, c.commit, c.score, c.opponent) in opponents
         )
 
-    anchors = {i for c in evals.cells if draws_anchor(c) for i in (c.subject, c.opponent)}
-    names = [players[i].name for i in unplaced if i in anchors]
-    notes = []
-    if names:
-        notes.append(
-            "Drawn as anchors, seated without an `at` and saved by no training run of the"
-            f" experiment: {', '.join(names)}."
-        )
+    notes: list[str] = []
+    if unplaced:
+        anchors = {i for c in evals.cells if draws_anchor(c) for i in (c.subject, c.opponent)}
+        if names := [players[i].name for i in unplaced if i in anchors]:
+            notes.append(
+                "Drawn as anchors, seated without an `at` and saved by no training run of the"
+                f" experiment: {', '.join(names)}."
+            )
 
     def visible(c: Cell) -> bool:
-        kinds = panels[c.selection, c.score]
+        kinds = panels.get((c.selection, c.score))
+        if not kinds:
+            return False
         if draws_anchor(c):
             return True
         if "crosstable" in kinds and c.opponent is not None and c.subject != c.opponent:
             a, b = players[c.subject], players[c.opponent]
             if a.placed and b.placed and (a.line or "") == (b.line or ""):
                 return True
-        if not kinds.intersection(("curve", "matrix", "ranking")):
+        if kinds.isdisjoint(("curve", "matrix", "ranking")):
             return False
         if evals.drawn[c.selection].seated:
             return c.opponent is not None and (c.selection, c.subject, c.opponent) in seated_pairs
         return players[c.subject].placed
 
-    counts = Counter(c.environment for c in hidden if visible(c))
-    for number, count in sorted(counts.items()):
-        noun = "value was" if count == 1 else "values were"
-        notes.append(
-            f"{count} {noun} also played in {_environment_name(evals.environments[number])};"
-            " the page shows each from the environment whose latest match is newest."
-        )
+    if hidden:
+        counts = Counter(c.environment for c in hidden if visible(c))
+        for number, count in sorted(counts.items()):
+            noun = "value was" if count == 1 else "values were"
+            notes.append(
+                f"{count} {noun} also played in {_environment_name(evals.environments[number])};"
+                " the page shows each from the environment whose latest match is newest."
+            )
     return tuple(notes)
 
 

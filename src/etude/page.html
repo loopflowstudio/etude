@@ -70,7 +70,7 @@ const oppFor = (E, sel) => { const o = opponents(E, sel); return (o.find(([v]) =
 const versusOf = (sel, opp) => M.seated(sel) ? "first seat against the second, as seated" : opp === "" ? "vs all opponents" : `vs ${D.players[+opp].name}`;
 let F = {}; try { F = JSON.parse(S.filter) || {}; } catch { F = {}; }
 const evalValue = (E, sel, extra, opponent) => M.evalValue(E.score, sel, {...F, ...extra}, opponent);
-// The other anchors' scores against the curve's anchor, as reference lines.
+// Other unplaced players' scores against the curve's opponent, as reference lines.
 function anchorLines(E, sel, opp, extra = {}) {
   if (opp === "" || sel == null || M.seated(sel)) return [];
   return fixedPlayers.filter(b => b !== +opp).map(b => cellOf(sel, E.score, b, +opp, false, {...F, ...extra})).filter(Boolean).map(c => ({y: c.value, label: D.players[c.subject].name}));
