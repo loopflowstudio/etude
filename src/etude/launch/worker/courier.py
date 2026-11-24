@@ -54,7 +54,6 @@ from etude.launch.schemas import (
     Fetch,
     Finished,
     Inbox,
-    ReadLink,
     Work,
     WorkerLog,
     attempt_log,
@@ -309,10 +308,12 @@ class Courier:
             finally:
                 self._carry_usage()
 
-    def restore(self, links: dict[str, ReadLink], works: Sequence[Work]) -> None:
+    def restore(self, links: dict[str, str], works: Sequence[Work]) -> None:
         """Put back what storage holds of a resumed run's folder, before its job starts.
 
-        `links` name objects and lengths by RUN/KEY. Keep existing immutable
+        `links` are read links by RUN/KEY. A mutable out file may be newer
+        than its listing, as when a replaced machine flushed it on its way
+        out; its current bytes are restored. Keep existing immutable
         records, replace out files, and verify the latest copied checkpoint.
         A run whose latest attempt ran here keeps its folder, which is newer
         than storage, unless the folder is gone. What is restored counts as
@@ -320,7 +321,7 @@ class Courier:
         taken (`etude.carriage.taken`).
         """
         held = {w.run for w in works if w.here and (self._track_root / w.run).is_dir()}
-        by_run: dict[str, dict[str, ReadLink]] = {}
+        by_run: dict[str, dict[str, str]] = {}
         # Run addresses may themselves contain slashes; the assigned work owns
         # the boundary, including when compact and nested runs share a prefix.
         runs = sorted({work.run for work in works}, key=len, reverse=True)
@@ -339,17 +340,16 @@ class Courier:
             finally:
                 self._carry_usage()
 
-    def _restore(self, run: str, listed: dict[str, ReadLink]) -> None:
+    def _restore(self, run: str, listed: dict[str, str]) -> None:
         folder = self._track_root / run
         # Every checkpoint name storage holds stays taken, restored or not.
         note_stored(folder, [checkpoint_file_name(key) for key in listed if checkpoint_file(key)])
-        found = recovery(listed, lambda key: read(listed[key].url, self._send))
+        found = recovery(listed, lambda key: read(listed[key], self._send))
         membership, pointers = found.membership, found.pointers
         keys = {key: listed[key] for key in found.keys}
         reconcile_out(folder, keys)
         recorded: dict[str, RecordedFile] | None = None
         for key in sorted(keys, key=lambda key: (key == "outcome.json", key)):
-            link = keys[key]
             if not within(key):
                 raise StorageUnavailable("restore path is outside the run")
             target = folder / key
@@ -364,9 +364,9 @@ class Courier:
                 recorded = recorded_files(folder)
             named = None if recorded is None else recorded.get(key)
             with attribute(run=run, purpose="checkpoint" if named is not None else "report"):
-                body = pointers[key] if key in pointers else read(link.url, self._send)
-            if body is None or len(body) != link.size_bytes:
-                raise StorageUnavailable(f"restored file {key} is missing or has changed length")
+                body = pointers[key] if key in pointers else read(keys[key], self._send)
+            if body is None:
+                raise StorageUnavailable(f"restored file {key} is missing")
             # Reuse the received bytes for verification and the sent marker;
             # restoring a large out file needs no second read from disk.
             digest = (
@@ -393,9 +393,7 @@ class Courier:
             return
         with attribute(run=run, purpose="checkpoint"):
             download(
-                Download(
-                    url=keys[wanted.key].url, sha256=wanted.sha256, size_bytes=wanted.size_bytes
-                ),
+                Download(url=keys[wanted.key], sha256=wanted.sha256, size_bytes=wanted.size_bytes),
                 folder / wanted.key,
                 send=self._send,
             )

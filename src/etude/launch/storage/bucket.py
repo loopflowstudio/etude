@@ -38,7 +38,6 @@ from etude.launch.schemas import (
     Observation,
     Packet,
     Progress,
-    ReadLink,
     Work,
     WorkerLog,
 )
@@ -232,15 +231,15 @@ class BucketJournal:
                 )
         return Fetch(sources=sources, inputs=tuple(inputs.values()))
 
-    def _restore(self, works: Sequence[Work]) -> dict[str, ReadLink]:
-        """One listing per resumed run: records, checkpoints and all out files."""
-        links: dict[str, ReadLink] = {}
+    def _restore(self, works: Sequence[Work]) -> dict[str, str]:
+        """One listing per resumed run: read links to records, checkpoints and all out files."""
+        links: dict[str, str] = {}
         for work in works:
             if not work.resumes:
                 continue
             folder = self._run_prefix(work.run)
             with attribute(run=work.run, attempt=work.attempt, purpose="control"):
-                kept = self._bucket.objects(folder)
+                kept = self._bucket.list(folder)
                 listed = [key[len(folder) :] for key in kept]
                 # A group can stop before opening its first tournament. Only
                 # training writes checkpoint records at the allocation root.
@@ -254,16 +253,14 @@ class BucketJournal:
                             "listed run declaration disappeared during restore"
                         )
                     evaluation = evaluation_files(listed, declaration)
-            for key, size in kept.items():
+            for key in kept:
                 relative = key[len(folder) :]
                 if (
                     relative in evaluation
                     or relative in ("run.json", MEMBERSHIP)
                     or relative.startswith(("checkpoints/", "out/"))
                 ):
-                    links[f"{work.run}/{relative}"] = ReadLink(
-                        url=self._bucket.get_url(key, _GRANT_SECONDS), size_bytes=size
-                    )
+                    links[f"{work.run}/{relative}"] = self._bucket.get_url(key, _GRANT_SECONDS)
         return links
 
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
@@ -281,8 +278,7 @@ class BucketJournal:
         with TemporaryDirectory() as staging, attribute(run=run, purpose="control"):
             root = Path(staging)
             (root / CHECKPOINTS).mkdir()
-            objects = self._bucket.objects(folder)
-            listed = {name[len(folder) :]: size for name, size in objects.items()}
+            listed = [name[len(folder) :] for name in self._bucket.list(folder)]
             note_stored(
                 root, [checkpoint_file_name(name) for name in listed if checkpoint_file(name)]
             )
@@ -315,10 +311,8 @@ class BucketJournal:
                     continue
                 with attribute(purpose=purpose(name, recorded)):
                     raw = pointers[name] if name in pointers else self._bucket.get(folder + name)
-                if raw is None or len(raw) != listed.get(name):
-                    raise StorageUnavailable(
-                        f"restored file {name} is missing or has changed length"
-                    )
+                if raw is None:
+                    raise StorageUnavailable(f"restored file {name} is missing")
                 target = root / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(raw)
