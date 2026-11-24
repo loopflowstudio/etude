@@ -43,7 +43,7 @@ from etude.spec import RunRequest, Until
 from etude.storage import DirectoryStorage, ListedStorage, S3Storage, storage_from_uri
 from etude.train.block import Builder
 from etude.train.tracking import write_block
-from etude.view import Server, _machines_table
+from etude.view import Server, _Handler, _machines_table
 from etude.view_link import advertise, print_view
 from tests.eval.games import play
 from tests.eval.playing import play_matches
@@ -222,6 +222,39 @@ def test_http_refresh_reports_failures_without_replacing_the_cached_page(tmp_pat
             server.shutdown()
             worker.join(timeout=5)
             assert not worker.is_alive()
+
+
+def test_a_dropped_browser_connection_is_not_reported_and_the_view_keeps_serving(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runs = tmp_path / "runs"
+    trained(runs, "lab", "a")
+    send_response = _Handler.send_response
+    dropped = [ConnectionResetError, BrokenPipeError]
+
+    def drop(self: _Handler, code: int, message: str | None = None) -> None:
+        if dropped:
+            raise dropped.pop()  # the browser went away before the reply
+        send_response(self, code, message)
+
+    monkeypatch.setattr(_Handler, "send_response", drop)
+    with Server(runs, None, ("127.0.0.1", 0)) as server:
+        _ingest(server)
+        worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+        worker.start()
+        try:
+            for _ in range(2):
+                with (
+                    closing(HTTPConnection("127.0.0.1", server.server_port, timeout=5)) as client,
+                    pytest.raises((ConnectionError, OSError)),
+                ):
+                    client.request("GET", "/")
+                    client.getresponse()
+            assert "<html" in _request(server, "/").lower()
+        finally:
+            server.shutdown()
+            worker.join(timeout=5)
+    assert "Traceback" not in capsys.readouterr().err
 
 
 def test_a_shared_report_module_of_the_repository_is_reread_on_refresh(

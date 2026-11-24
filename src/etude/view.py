@@ -2013,6 +2013,15 @@ class Server(ThreadingHTTPServer):
             self.server_close()
             raise
 
+    def handle_error(self, request: object, client_address: object) -> None:
+        # A reload, closed tab or cancelled fetch drops its connection mid-reply.
+        # That is ordinary browsing, not a server failure; anything else is printed.
+        if isinstance(
+            sys.exc_info()[1], (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+        ):
+            return
+        super().handle_error(request, client_address)
+
     def server_close(self) -> None:
         try:
             self._address.close()
