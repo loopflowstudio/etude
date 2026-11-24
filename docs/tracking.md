@@ -123,8 +123,8 @@ checkpoint seated without `at` — appears as an **opponent** when placed
 checkpoints play it (in the Opponent control and seating tooltips) and as an
 **anchor** only when it plays another unplaced player or a match with no placed
 checkpoints. Anchors appear in `Anchors` and as reference lines on curves
-without `seating=`; the `Anchor lines` control appears only when such a curve
-has two unplaced players that played each other. Top-of-page notes report only
+without `seating=`. The `Anchor lines` control appears when a curve has a
+reference score against its selected opponent. Top-of-page notes report only
 caveats for values reachable panels draw: an outside checkpoint without `at` is
 noted only when a reachable panel draws it as an anchor, and an
 environment-overlap note counts only drawn values played in more than one

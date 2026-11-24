@@ -364,14 +364,14 @@ function model(D) {
     return p == null || p.control ? selected : p.selection;
   };
   const usesSelection = (D.panel_selections || []).some(p => p.control);
-  // Opponents are the anchors checkpoints met, by name; checkpoints met are head-to-head games.
+  // Offer the unplaced players checkpoints met, in name order.
   function opponents(score, sel) {
     const seen = new Set(D.cells.filter(c => c.selection === sel && c.score === score && !c.fixed && placed(c.subject)).map(c => c.opponent));
     // Use the same name order as the served headline, independent of browser locale.
     const names = i => D.players[i].name.toLowerCase();
-    const anchors = [...seen].filter(o => o != null && !placed(o)).sort((a, b) =>
+    const unplaced = [...seen].filter(o => o != null && !placed(o)).sort((a, b) =>
       names(a) < names(b) ? -1 : names(a) > names(b) ? 1 : a - b);
-    return [...anchors.map(o => [String(o), D.players[o].name]), ...(seen.has(null) || !anchors.length ? [["", "all opponents"]] : [])];
+    return [...unplaced.map(o => [String(o), D.players[o].name]), ...(seen.has(null) || !unplaced.length ? [["", "all opponents"]] : [])];
   }
   // Why a checkpoint has no value here. Failed and not yet played break a line; a checkpoint
   // nothing played, or played only outside this selection, is no point of it and is marked.
@@ -408,7 +408,7 @@ function model(D) {
     };
   }
   // Each checkpoint's value in the requested matches: as seated, for a selection of seatings;
-  // else against the opponent given, an anchor's index or "" for all. Scientific variants are
+  // else against the opponent given, an unplaced player's index or "" for all. Scientific variants are
   // selected by their results, never averaged together behind a curve.
   const evalValue = (score, sel, split, opponent) => {
     if (seated(sel)) return seatedValue(score, sel, split);

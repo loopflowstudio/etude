@@ -24,9 +24,9 @@ seat's (`players.lines`), else its training run's line: the first run of the
 chain of continuations that led to it (`etude.experiment.Checkpoint.line`).
 A bound model is drawn in its run's job; every other placed model is drawn in
 its line's curve, or in the one curve of checkpoints with no line. Two keys
-holding the same bytes are two models. Every unplaced player (code, a
-checkpoint seated with no `at` from outside the experiment, an etude-sdk
-0.2 digest) is fixed, and drawn once as an anchor.
+holding the same bytes are two models. An unplaced player can be a checkpoint's
+opponent. Its scores against other unplaced players and its strength in
+matches without placed checkpoints are drawn as anchors.
 
 What each tournament has played is `etude.eval.tournament.played`: for a
 tournament `eval_jobs(state)` returns, what it wants now; for any other the
@@ -42,7 +42,7 @@ over every tournament unless it names one, and panels' unions; and
 the columns panels name. So any panel, under any filter the page offers,
 shows a value `compare` computed, never one pooled in the browser. A value
 played in several environments shows the environment whose latest match is
-newest, and the page notes the rest.
+newest. Overlap notes count the values reachable eval panels can show.
 
 A curve of seatings draws points (`Point`): each checkpoint a seating was
 held for, where it stood, with the first seat's score against the second
@@ -79,7 +79,7 @@ import time
 from collections import Counter, defaultdict
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache, cached_property
 from html import escape
 from importlib.util import cache_from_source
@@ -132,8 +132,7 @@ type SourceVersions = tuple[tuple[str, int, int], ...]
 
 
 class Placement(Record):
-    """A player the eval runs seated, and where the page draws it: a placed checkpoint, or
-    else a fixed one.
+    """A seated player and its position, if any.
 
     `run` and `ordinal` name the training run's checkpoint its key binds it
     to, None for any other. `at` is where it is drawn, by clock: its seats'
@@ -141,7 +140,7 @@ class Placement(Record):
     the learner it belongs to: its latest seat's, else its training run's
     line; None for a fixed player or a checkpoint of no line. `placed`: it is
     drawn on a curve, a job's or one of checkpoints no run saved, so bound
-    to a run or given an `at`; else it is an anchor.
+    to a run or given an `at`. Unplaced players can be opponents or anchors.
     """
 
     key: str  # its key (`etude.eval.records.CheckpointPlayer.key` or `Code.key`), as the database holds it
@@ -208,8 +207,9 @@ class Cell(Record):
 
     `subject` and `opponent` index `Page.players`, and `environment`
     `Page.environments`; an opponent of None is every opponent, kept only
-    where a subject met several. `fixed` cells count only matches that seat
-    no placed checkpoint: an anchor's strength. `split` holds exactly the columns it is split by.
+    where it does not repeat a single opponent or describes a fixed strength.
+    Page cells have a placed subject or describe an anchor strength or pair.
+    `fixed` counts matches without a placed checkpoint. `split` holds exactly the columns it is split by.
     `commit` is None for each match's latest result, whichever version
     played it; a commit, for the matches as played at it (`Commit`).
     """
@@ -226,6 +226,13 @@ class Cell(Record):
     interval: tuple[float, float] | None
     rows: int
     matches: int
+
+    def is_anchor(self, players: Sequence[Placement]) -> bool:
+        return self.fixed or (
+            not players[self.subject].placed
+            and self.opponent is not None
+            and not players[self.opponent].placed
+        )
 
 
 class Point(Record):
@@ -345,16 +352,7 @@ class Page(Record):
             resolved = self.panel_selections[curve]
             selection = resolved.selection
             if resolved.control:
-                selection = next(
-                    (
-                        i
-                        for i, s in enumerate(self.selections)
-                        if isinstance(s, OutsideTournaments)
-                        or isinstance(s, Matches)
-                        and s.seating is None
-                    ),
-                    None,
-                )
+                selection = next(_selection_choices(self.selections), None)
             if selection is not None and (values := _latest_evaluated(self, score, selection)):
                 measure = self.scores[score]
                 return f"{measure.table}.{measure.value} {_value_range(values)}"
@@ -463,13 +461,13 @@ def _scored_marks(
         and not c.fixed
         and page.players[c.subject].placed
     ]
-    anchors = {
+    opponents = {
         c.opponent for c in cells if c.opponent is not None and not page.players[c.opponent].placed
     }
     # JavaScript compares strings as UTF-16 code units. Both indexes pick the
-    # same first anchor regardless of the host's or browser's locale.
+    # same first opponent regardless of the host's or browser's locale.
     opponent = min(
-        anchors,
+        opponents,
         key=lambda i: (page.players[i].name.lower().encode("utf-16-be"), i),
         default=None,
     )
@@ -700,7 +698,7 @@ def build(
 
 
 # Bump whenever derived Page fields change without changing inputs.
-_PAGE_CACHE_VERSION = 5
+_PAGE_CACHE_VERSION = 6
 
 
 def _page_cache_path(experiment: str, storage: Storage) -> Path:
@@ -1320,30 +1318,35 @@ def _read_evals(
     db = _open_statsdb(state.experiment, runs.source)
     try:
         saved = _saved_checkpoints(db)
-        players, placement = _players(db, saved, {run.name: run.line for run in state.runs})
+        players, placement, unplaced = _players(
+            db, saved, {run.name: run.line for run in state.runs}
+        )
         outside = _load(db, held, players)
         commits = _commits(db)
         selections, notes = _selections(held, report, outside=outside)
         environments = _environments(db)
-        scores, cells, absent, mixed = _cells(
+        scores, comparisons, absent, team_notes = _cells(
             db, selections, players, environments, commits, report
         )
+        cells, hidden = _newest_environment(comparisons)
+        points, seated_pairs = _points(held, selections, players, saved, cells)
         latest = db.sql("select max(wall_ms) from matches").fetchone()
-        return _Evals(
+        evals = _Evals(
             scores=scores,
             selections=tuple(selections),
             drawn=tuple(_drawn(selection, held) for selection in selections),
             players=tuple(players),
             environments=tuple(environments.values()),
             commits=commits,
-            cells=tuple(cells),
-            points=_points(held, selections, players, saved, cells),
+            cells=tuple(c for c in cells if players[c.subject].placed or c.is_anchor(players)),
+            points=points,
             coverage=_coverage(saved, held),
             failures=_failures(db, held, players),
             latest_result_ms=None if latest is None else latest[0],
             absent=absent,
-            notes=(*refused, *placement, *notes, *mixed),
         )
+        cell_notes = _cell_notes(evals, report, unplaced, hidden, seated_pairs)
+        return replace(evals, notes=(*refused, *placement, *notes, *cell_notes, *team_notes))
     finally:
         db.close()
 
@@ -1451,9 +1454,9 @@ def _wanted(want: Callable[..., object], state: ExperimentState) -> list[Tournam
 
 def _players(
     db: duckdb.DuckDBPyConnection, saved: dict[str, _Saved], lines: dict[str, str]
-) -> tuple[list[Placement], tuple[str, ...]]:
+) -> tuple[list[Placement], tuple[str, ...], list[int]]:
     """Every player seated, placed by its seat, else by the training run that saved it;
-    and notes on what could not be placed as recorded.
+    with placement notes and the indices of checkpoints lacking a position.
 
     `lines` gives each training run's line. Where seat and training record
     differ on a clock, the seat's value is drawn: it is what the evaluation
@@ -1466,7 +1469,7 @@ def _players(
     ).fetchall()
     players: list[Placement] = []
     notes: list[str] = []
-    unplaced: list[str] = []
+    unplaced: list[int] = []
     for key, names, kind, config, checkpoint, given, named in found:
         name = "/".join(json.loads(names))
         bound = saved.get(checkpoint)
@@ -1498,7 +1501,7 @@ def _players(
             and bound is None
             and not seated
         ):
-            unplaced.append(name)
+            unplaced.append(len(players))
         at = recorded | seated
         players.append(
             Placement(
@@ -1513,12 +1516,7 @@ def _players(
                 placed=bound is not None or bool(at),
             )
         )
-    if unplaced:
-        notes.append(
-            f"Drawn as anchors, seated without an `at` and saved by no training run of the"
-            f" experiment: {', '.join(unplaced)}."
-        )
-    return players, tuple(notes)
+    return players, tuple(notes), unplaced
 
 
 def _merged(seated_at: list[dict[str, float]]) -> dict[str, float]:
@@ -1582,7 +1580,7 @@ def _points(
     players: Sequence[Placement],
     saved: dict[str, _Saved],
     cells: Sequence[Cell],
-) -> tuple[Point, ...]:
+) -> tuple[tuple[Point, ...], set[tuple[int, int, int]]]:
     """Each selection of seatings' points: per checkpoint a seating was held for, its first
     seat's score over the matches held for it, or why its relative seat found no checkpoint.
     A fixed seating is held for its first seat's checkpoint, so a fixed pair is drawn once,
@@ -1637,6 +1635,7 @@ def _points(
     for key in pairs.keys() | gaps.keys():
         by_seating.setdefault(key.seating, []).append(key)
     points: list[Point] = []
+    seated_pairs: set[tuple[int, int, int]] = set()
     for number, selection in enumerate(selections):
         if not _seated(selection):
             continue
@@ -1664,7 +1663,10 @@ def _points(
             # By view, score and split: the cells of this checkpoint's pairs.
             met: dict[tuple[str | None, int, str], list[Cell]] = {}
             for subject, opponent in sorted({pair for key in here for pair in pairs.get(key, ())}):
-                for cell, split_key in scored.get((number, subject, opponent), ()):
+                pair = (number, subject, opponent)
+                if stood.at or stood.run is not None:
+                    seated_pairs.add(pair)
+                for cell, split_key in scored.get(pair, ()):
                     met.setdefault((cell.commit, cell.score, split_key), []).append(cell)
             for counted in met.values():
                 points.append(
@@ -1684,7 +1686,7 @@ def _points(
             gap = next((gaps[key] for key in here if key in gaps), None)
             if gap is not None:
                 points.append(stood.model_copy(update={"gap": gap}))
-    return tuple(points)
+    return tuple(points), seated_pairs
 
 
 def _parts(selection: Selection) -> tuple[Matches, ...]:
@@ -1719,6 +1721,15 @@ def _drawn(selection: Selection, held: Sequence[_HeldTournament]) -> Drawn:
         )
     ]
     return Drawn(seated=_seated(selection), tournaments=tuple(tournaments))
+
+
+def _selection_choices(selections: Sequence[Selection]) -> Iterator[int]:
+    """The tournament, tag and outside choices offered by the Matches control."""
+    return (
+        i
+        for i, s in enumerate(selections)
+        if isinstance(s, OutsideTournaments) or isinstance(s, Matches) and s.seating is None
+    )
 
 
 def _panel_selection(
@@ -2005,8 +2016,7 @@ def _cells(
     commits: Sequence[Commit],
     report: Report,
 ) -> tuple[tuple[Score, ...], list[Cell], tuple[Absent, ...], tuple[str, ...]]:
-    """Every value the eval panels may show, the scores offered, absent columns, and a note
-    for each environment whose values another, newer one hides.
+    """Compute comparisons for the page's cells and first-seat points.
 
     `environments` are by identity, the newest latest match first.
     """
@@ -2127,7 +2137,6 @@ def _cells(
                                     matches=found.matches,
                                 )
                             )
-    cells, mixed = _newest_environment(cells, list(environments.values()))
     # "Against all" repeats the only opponent a subject met.
     met: dict[tuple[int, str | None, int, int], set[int]] = {}
     for cell in cells:
@@ -2143,26 +2152,101 @@ def _cells(
         if teams
         else ()
     )
-    return scores, kept, tuple(dict.fromkeys(absent)), (*mixed, *notes)
+    return scores, kept, tuple(dict.fromkeys(absent)), notes
 
 
-def _newest_environment(
-    cells: Sequence[Cell], environments: Sequence[EnvironmentLabel]
-) -> tuple[list[Cell], tuple[str, ...]]:
-    """Of a value's cells in several environments, the newest environment's; and a
-    note per environment that loses any. Environments are never pooled."""
+def _newest_environment(cells: Sequence[Cell]) -> tuple[list[Cell], list[Cell]]:
+    """Separate each value's newest environment from the others, without pooling."""
     # A lower index is a newer environment.
     keyed = [(_without_environment(cell), cell) for cell in cells]
     newest: dict[tuple[object, ...], int] = {}
     for key, cell in keyed:
         newest[key] = min(cell.environment, newest.get(key, cell.environment))
     kept = [cell for key, cell in keyed if cell.environment == newest[key]]
-    hidden = Counter(cell.environment for key, cell in keyed if cell.environment != newest[key])
-    return kept, tuple(
-        f"{count} values were also played in {_environment_name(environments[number])};"
-        " the page shows each from the environment whose latest match is newest."
-        for number, count in sorted(hidden.items())
-    )
+    hidden = [cell for key, cell in keyed if cell.environment != newest[key]]
+    return kept, hidden
+
+
+def _panel_kinds(evals: _Evals, report: Report) -> dict[tuple[int, int], set[str]]:
+    """Which panels can display each (selection, score) through their pins or controls."""
+    kinds: dict[tuple[int, int], set[str]] = defaultdict(set)
+    choices = tuple(_selection_choices(evals.selections))
+    for panel in report.evals:
+        resolved = _panel_selection(panel.matches, evals.selections)
+        selected = choices if resolved.control else (resolved.selection,)
+        measure = panel.score if isinstance(panel, Curve) and panel.score else report.score
+        for i in selected:
+            if i is None:
+                continue
+            for number, score in enumerate(evals.scores):
+                if measure is None or measure == score:
+                    kinds[i, number].add(panel.kind)
+    return kinds
+
+
+def _cell_notes(
+    evals: _Evals,
+    report: Report,
+    unplaced: Sequence[int],
+    hidden: Sequence[Cell],
+    seated_pairs: set[tuple[int, int, int]],
+) -> tuple[str, ...]:
+    """Explain missing anchor positions and environment choices for reachable panels."""
+    if not unplaced and not hidden:
+        return ()
+    players = evals.players
+    panels = _panel_kinds(evals, report)
+    # A curve can draw a reference against an opponent its checkpoints actually met.
+    opponents = {
+        (c.selection, c.commit, c.score, c.opponent)
+        for c in evals.cells
+        if players[c.subject].placed and c.opponent is not None and not players[c.opponent].placed
+    }
+
+    def draws_anchor(c: Cell) -> bool:
+        kinds = panels[c.selection, c.score]
+        return c.is_anchor(players) and (
+            ("anchors" in kinds and c.subject != c.opponent)
+            or (
+                "curve" in kinds
+                and not evals.drawn[c.selection].seated
+                and not c.fixed
+                and c.subject != c.opponent
+                and (c.selection, c.commit, c.score, c.opponent) in opponents
+            )
+        )
+
+    anchors = {i for c in evals.cells if draws_anchor(c) for i in (c.subject, c.opponent)}
+    names = [players[i].name for i in unplaced if i in anchors]
+    notes = []
+    if names:
+        notes.append(
+            "Drawn as anchors, seated without an `at` and saved by no training run of the"
+            f" experiment: {', '.join(names)}."
+        )
+
+    def visible(c: Cell) -> bool:
+        kinds = panels[c.selection, c.score]
+        if draws_anchor(c):
+            return True
+        if "crosstable" in kinds and c.opponent is not None and c.subject != c.opponent:
+            a, b = players[c.subject], players[c.opponent]
+            if a.placed and b.placed and (a.line or "") == (b.line or ""):
+                return True
+        if not kinds.intersection(("curve", "matrix", "ranking")):
+            return False
+        if evals.drawn[c.selection].seated:
+            return c.opponent is not None and (c.selection, c.subject, c.opponent) in seated_pairs
+        return players[c.subject].placed
+
+    counts = Counter(c.environment for c in hidden if visible(c))
+    for number, count in sorted(counts.items()):
+        noun = "value was" if count == 1 else "values were"
+        notes.append(
+            f"{count} {noun} also played in {_environment_name(evals.environments[number])};"
+            " the page shows each from the environment whose latest match is newest."
+        )
+    return tuple(notes)
 
 
 def _without_environment(cell: Cell) -> tuple[object, ...]:

@@ -72,7 +72,7 @@ let F = {}; try { F = JSON.parse(S.filter) || {}; } catch { F = {}; }
 const evalValue = (E, sel, extra, opponent) => M.evalValue(E.score, sel, {...F, ...extra}, opponent);
 // The other anchors' scores against the curve's anchor, as reference lines.
 function anchorLines(E, sel, opp, extra = {}) {
-  if (S.lines !== "on" || opp === "" || sel == null || M.seated(sel)) return [];
+  if (opp === "" || sel == null || M.seated(sel)) return [];
   return fixedPlayers.filter(b => b !== +opp).map(b => cellOf(sel, E.score, b, +opp, false, {...F, ...extra})).filter(Boolean).map(c => ({y: c.value, label: D.players[c.subject].name}));
 }
 // The values of `column` among the cells split by it, the filters and `other`, under the
@@ -198,8 +198,7 @@ function renderReport(hidden, vis) {
   defaults.opp = opponents(section, section.sel)[0]?.[0] ?? "";
   S.opp = oppFor(section, section.sel);
   control(ec, "Opponent", opponents(section, section.sel), "opp");
-  control(ec, "Anchor lines", fixedPlayers.length > 1 ? [["on", "On"], ["off", "Off"]] : [], "lines");
-  control(ec, "X axis", CLOCKS, "eclock");
+  let hasAnchorLines = false;
   const body = document.getElementById("evals-body"); body.replaceChildren();
   const nameOf = info => info ? `${info.table}.${info.value}${info.per ? " per " + info.per : ""}` : "";
   document.getElementById("evals-sub").textContent = !M.usesSelection ? "" : section.sel == null ? "no eval run yet" : caption(selName(D.selections[section.sel]), nameOf(section.info));
@@ -218,18 +217,23 @@ function renderReport(hidden, vis) {
     const curveOf = (j, sel, extra = {}, opp = S.opp) => jobPoints(j, S.eclock, evalValue(E, sel, extra, opp));
     const sel = M.panelSelection(k, section.sel), opp = oppFor(E, sel), versus = versusOf(sel, opp), where = sel == null ? "" : selName(D.selections[sel]);
     const score = [scoreName, versus].filter(Boolean).join(" ");
+    function drawCurve(host, extra, options) {
+      const refs = anchorLines(E, sel, opp, extra);
+      if (refs.length) hasAnchorLines = true;
+      later(() => line(host, series(vis, j => curveOf(j, sel, extra, opp)), {...eOpts, ...options, refs: S.lines === "on" ? refs : []}));
+    }
     if (panel.kind === "curve" && !panel.split) {
       const c = card(body, panel.title, caption(where, score, BAND, GAPS), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const host = node("div"); c.appendChild(host);
-      later(() => line(host, series(vis, j => curveOf(j, sel, {}, opp)), {...eOpts, refs: anchorLines(E, sel, opp), height: 260}));
+      drawCurve(host, {}, {height: 260});
     } else if (panel.kind === "curve") {
       const c = card(body, panel.title, caption(where, `one chart per ${panel.split}`, score), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
       const vals = values(E, sel, panel.split);
       if (!vals.length) { c.appendChild(node("div", "na", absentNote(E, panel.split))); continue; }
       const grid = node("div", "grid multiples"); c.appendChild(grid);
-      for (const v of vals) { const m = node("div"), host = node("div"); m.append(node("div", "mini-title", `${panel.split} = ${show(v)}`), host); grid.appendChild(m); later(() => line(host, series(vis, j => curveOf(j, sel, {[panel.split]: v}, opp)), {...eOpts, refs: anchorLines(E, sel, opp, {[panel.split]: v}), compact: true, height: 140})); }
+      for (const v of vals) { const m = node("div"), host = node("div"); m.append(node("div", "mini-title", `${panel.split} = ${show(v)}`), host); grid.appendChild(m); drawCurve(host, {[panel.split]: v}, {compact: true, height: 140}); }
     } else if (panel.kind === "matrix") {
       const c = card(body, panel.title || `${panel.columns} × ${panel.rows}`, caption(where, `${panel.columns} across`, `${panel.rows} down`, score), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
@@ -360,6 +364,8 @@ function renderReport(hidden, vis) {
       rampLegend(c, ref, found, `· ${met.length} fixed player${met.length > 1 ? "s" : ""}: code, or checkpoints with no position`);
     } else card(body, `Unknown panel kind ${JSON.stringify(panel.kind)}`, "not drawn");
   }
+  if (hasAnchorLines) control(ec, "Anchor lines", [["on", "On"], ["off", "Off"]], "lines");
+  control(ec, "X axis", CLOCKS, "eclock");
   function absentNote(E, ...cols) {
     const gone = cols.filter(col => D.absent.some(a => a.table === E.info?.table && a.column === col));
     return gone.length ? `${gone.join(", ")} ${gone.length > 1 ? "are not columns" : "is not a column"} of ${E.info.table}` : "Nothing recorded for this selection";

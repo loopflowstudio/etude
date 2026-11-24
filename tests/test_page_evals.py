@@ -1195,3 +1195,125 @@ def report():
     assert '"range": [0.0, 1.0]' in json.dumps(page.model_dump(mode="json"))
     with pytest.raises(ValueError, match="low to high"):
         Score(table="plays", value="won", range=(1, 0))
+
+
+def test_opponents_are_named_as_anchors_only_after_they_meet(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path, "lab", EVALUATION_ONLY)
+    learner = outside("u100", {"updates": 100})
+    weak, strong = (outside(name, {}, strength=n) for name, n in (("weak", 1), ("strong", 8)))
+    play_matches(
+        experiment="lab",
+        environment=DUEL,
+        matches=[duel(learner, weak), duel(learner, strong)],
+        play=play,
+        run="opponents",
+        directory=runs,
+    )
+    page = build(runs, file)
+    assert not any("Drawn as anchors" in n for n in page.notes)
+    assert {page.players[c.subject].name for c in page.cells} == {"u100"}
+    assert {page.players[c.opponent].name for c in page.cells if c.opponent is not None} == {
+        "weak",
+        "strong",
+    }
+
+    play_matches(
+        experiment="lab",
+        environment=DUEL,
+        matches=[duel(weak, strong)],
+        play=play,
+        run="anchors",
+        directory=runs,
+    )
+    page = build(runs, file)
+    (note,) = [n for n in page.notes if "Drawn as anchors" in n]
+    assert "weak" in note and "strong" in note
+
+
+def test_environment_note_counts_only_the_overlapping_checkpoint_score(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path, "lab", EVALUATION_ONLY)
+    a, b = (outside(f"u{n}", {"updates": n}) for n in (100, 200))
+    for name, learner in (("first", a), ("second", b)):
+        play_matches(
+            experiment="lab",
+            environment=environment(name),
+            matches=[duel(learner, HEURISTIC)],
+            play=play,
+            run=name,
+            directory=runs,
+        )
+    page = build(runs, file)
+    assert not any("also played in" in n for n in page.notes)
+
+    play_matches(
+        experiment="lab",
+        environment=environment("second"),
+        matches=[duel(a, HEURISTIC)],
+        play=play,
+        run="overlap",
+        directory=runs,
+    )
+    page = build(runs, file)
+    (note,) = [n for n in page.notes if "also played in" in n]
+    assert note.startswith("1 value was also played in first")
+    assert {
+        (page.players[c.subject].name, page.environments[c.environment].name) for c in page.cells
+    } == {("u100", "second"), ("u200", "second")}
+
+
+def test_seated_notes_follow_the_pairs_plotted_at_each_held_checkpoint(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    file = experiment_file(
+        tmp_path,
+        "lab",
+        """
+from etude.report import Curve, Matches, Report, Score
+
+def report():
+    return Report(score=Score(table="plays", value="won"), evals=(
+        Curve(matches=(Matches(seating="first"), Matches(seating="second"))),
+        Curve(matches=Matches(seating="reversed")),
+    ))
+""",
+    )
+    checkpoint = outside("u100", {"updates": 100}).checkpoint
+    held = stored_inference(config={"strength": 0})
+    for name, rival in (("first", HEURISTIC), ("second", outside("baseline", {}, strength=8))):
+        env = environment(name)
+        play_tournament(
+            Benchmark(
+                name=name,
+                environment=env,
+                seatings=(
+                    Seating(name=name, players=(held, rival), games=1),
+                    Seating(name="reversed", players=(HEURISTIC, held), games=1),
+                ),
+            ),
+            experiment="lab",
+            play=play,
+            checkpoint=checkpoint,
+            directory=runs,
+        )
+        # Also overlap in a selection neither curve offers.
+        play_matches(
+            experiment="lab",
+            environment=env,
+            matches=[
+                duel(outside("baseline", {}, strength=8), HEURISTIC),
+                duel(outside("u300", {"updates": 300}), HEURISTIC),
+            ],
+            play=play,
+            run=f"outside-{name}",
+            directory=runs,
+        )
+    page = build(runs, file)
+    (note,) = [n for n in page.notes if "also played in" in n]
+    assert note.startswith("1 value was also played in ")
+    assert not any("Drawn as anchors" in n for n in page.notes)
+    union, reversed_seats = (p.selection for p in page.panel_selections)
+    assert [(p.at["updates"], p.matches) for p in page.points if p.selection == union] == [(100, 2)]
+    assert [
+        (p.at["updates"], p.value, p.matches) for p in page.points if p.selection == reversed_seats
+    ] == [(100, 1.0, 1)]

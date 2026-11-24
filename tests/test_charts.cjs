@@ -74,7 +74,7 @@ function renderPage(data, hash = "", overview = null) {
     const find = el => el.onclick && el.textContent === text ? el : el.children.filter(c => typeof c !== "string").map(find).find(Boolean);
     find(document.getElementById(section + "-controls")).onclick();
   }
-  return {location, click, text: document.getElementById("evals-body").textContent, plots, sectionText: id => document.getElementById(id + "-body").textContent, display: id => document.getElementById(id).style.display};
+  return {location, click, controls: id => document.getElementById(id + "-controls").textContent, text: document.getElementById("evals-body").textContent, plots, sectionText: id => document.getElementById(id + "-body").textContent, display: id => document.getElementById(id).style.display};
 }
 
 test("experiment card captions name the metric once and keep its clock, units and scale", () => {
@@ -121,6 +121,27 @@ test("a section the report gives no panel is hidden, header and controls with it
   assert.deepEqual([none.display("evals"), none.display("perf"), none.display("ml")], [undefined, "none", "none"]);
   const perf = renderPage({...data, report: {clock: "updates", perf: [{kind: "lines", title: "Speed", keys: ["sps"]}]}});
   assert.deepEqual([perf.display("perf"), perf.display("ml")], ["", "none"]);
+});
+
+test("Anchor lines is available only for a curve with a reference to toggle", () => {
+  const data = page([player("u100", "learner", 100), ...["alpha", "beta"].map(name =>
+    ({name, placed: false, config: "{}", at: {}}))], [[0, 1, 0.25], [0, 2, 0.75]]);
+  assert.doesNotMatch(renderPage(data).controls("evals"), /Anchor lines/);
+
+  data.cells.push({...data.cells[0], subject: 2, opponent: 1, value: 0.5});
+  const view = renderPage(data);
+  const hasReference = () => view.plots.at(-1).options.series.some(s => s.label === "beta");
+  assert.match(view.controls("evals"), /Anchor lines/);
+  assert.ok(hasReference());
+  view.click("evals", "Off");
+  assert.ok(!hasReference());
+  view.click("evals", "On");
+  assert.ok(hasReference());
+  view.click("evals", "beta");
+  assert.doesNotMatch(view.controls("evals"), /Anchor lines/);
+
+  data.drawn[0].seated = true;
+  assert.doesNotMatch(renderPage(data).controls("evals"), /Anchor lines/);
 });
 
 test("a curve whose checkpoints all play two variants says so once, naming the variants", () => {
