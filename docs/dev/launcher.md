@@ -471,13 +471,15 @@ target or branches from a completed run, making a new run with a parent.
 
 A run that ended unfinished, because it failed, was cancelled, or used up its
 hours, dollars or attempts, is given another attempt by name: `etude launch
-job.py --resume`. The file is given because the attempt runs its current
+job.py --resume`, or `etude queue job.py --resume` when it should wait for
+capacity. The file is given because the attempt runs its current
 commit, which is what a fixed bug needs; the attempt records that commit. The
 run keeps its id, seed, config, out and checkpoint ordinals, and the job's
 limits as the file now states them bound the whole run, earlier attempts
 included, so raise `max_hours`, `max_usd` or `max_attempts` there to give it
 more. `--resume --until updates=6400` gives the same run a later target,
-and is how a finished run goes further without becoming a new one. A resume
+and is how a finished run goes further without becoming a new one. `--resume`
+cannot be combined with `--watch` or `--quote`. A resume
 is refused before anything is rented when the run finished and no later
 target is given, when the file's config or the seed differs from the run's
 (the error names the fields), or while an attempt of the run is still
@@ -486,7 +488,7 @@ allocated. A refusal changes nothing recorded about the run.
 Run addresses print as `EXPERIMENT/JOB@SEED`, in full; a run stored under a shorter spelling keeps it. Commands accept that address;
 `etude status RUN --experiment EXPERIMENT` and `etude continue --run RUN --experiment
 EXPERIMENT --until clock=value` also accept the run id alone.
-`etude launch FILE --resume` resumes the selection from its `--experiment`,
+`etude launch FILE --resume` and `etude queue FILE --resume` resume the selection from their `--experiment`,
 `--job` and `--seed` flags. `--job` and `--seed` select declarations from the
 file; neither names a new job or seed. Use `--experiment` for a new variant.
 
@@ -498,10 +500,13 @@ has never seen the run.
 
 Delivery publishes changed `out.json` membership after its files succeed.
 Each entry names a key, SHA256 digest and byte length.
-Recovery uses membership to select files, checking current listing lengths
-and recorded checkpoint digests. A file the job rewrites in place can be
-newer than its membership if delivery stopped between the file and the
-index; recovery keeps that newer file. Continuation instead uses the
+Recovery uses membership to select files, verifying HTTP `Content-Length` on
+download and recorded checkpoint SHA-256 digests and lengths. A mutable file
+the job rewrites in place can be newer than `out.json` or its bootstrap
+listing (for example when delivery stopped between the file and the index, or a
+replaced runtime flushed an append during teardown); recovery restores those
+newer complete bytes rather than failing on a stale listing length.
+Continuation instead uses the
 published fingerprints and verifies them when delivering the child's inputs.
 A declaration sees the same membership as a run's `out` in the experiment's
 state: only keys `out.json` lists and the source still holds, never a file
@@ -865,8 +870,16 @@ original numbers, but do not count toward `max_attempts` or the status attempt
 count. Scheduling, status and explicit resume use that same budget rule.
 Timeouts, no reply, 408, 5xx and unreadable or mismatched replies stay unknown.
 A remote start has an exclusive claim; a lost SSH reply cannot start another
-process. An unreachable machine is unknown. A lost attempt requires evidence that its process or
-provider machine is gone. Infrastructure losses retry up to `max_attempts`,
+process. On an owned SSH host, the host itself (`control`) settles an
+unconfirmed start: if `boot-claim` or `pid` exists, the session is confirmed
+and tracked; if neither exists, it is fenced (`cancel-start` and `ended`) and
+settled at once as `machine_lost_before_start` even when `startup_seconds` is
+`None`; if the host is unreachable, it waits safely. Cancelling all open
+attempts or requesting finish while an owned host is still booting also writes
+`cancel-start` to abort installation and waits for `ended`, and pre-receipt
+observation on bucket-backed SSH hosts checks the host's `ended` marker so a
+crashed install settles immediately. A lost attempt requires evidence that its
+process or provider machine is gone. Infrastructure losses retry up to `max_attempts`,
 including confirmed loss after code started; a spot machine lost after start
 (`spot_machine_lost`) retries outside that count, as `capacity_refused` does. If startup intent reached storage
 but an attempt claim did not, its start is uncertain and it is not retried.
@@ -968,7 +981,12 @@ Server selection mutations are asks. `worker` and `server run` are waits
 because they deliberately execute long-lived loops; they retain their existing
 lifetime rules. An experiment file's `training_jobs()` and `eval_jobs(state)` are input
 functions, not launcher commands. `queue` stays an ask for a file that takes no state;
-for one whose declarations take `state` it reads the source once before recording. `eval`
+for one whose declarations take `state` it reads the source once before recording
+(and `queue --watch SECONDS` repeats passes until interrupted, refusing
+`--resume` combined with `--watch`). Omitting `--source` on `launch`, `queue` or
+`eval` derives the delivery storage and scopes listing to `EXPERIMENT/` and
+`EXPERIMENT@` (plus any extra experiment named by cross-experiment relative
+slots in `eval_jobs`), whereas an explicit `--source` lists its whole prefix. `eval`
 is a wait: it reads the source and plays on this computer, and needs no provider key or
 launcher database.
 `smoke` is a wait on this computer alone: it runs the file tiny in a temporary
