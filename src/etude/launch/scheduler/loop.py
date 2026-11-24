@@ -2350,6 +2350,10 @@ class Scheduler:
         service = self._service(session)
         gone = session.ended_at
         if gone is None:
+            if session.started_at is not None and session.finish_requested_at is None:
+                # An end can take another tick. Never place work on a retiring session.
+                self._store.record_finish(session, self._clock())
+                session = self._store.session(session.id)
             try:
                 gone = service.end(session.id)
             except Exception as error:

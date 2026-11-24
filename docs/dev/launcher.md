@@ -876,15 +876,24 @@ and tracked; if neither exists, it is fenced (`cancel-start` and `ended`) and
 settled at once as `machine_lost_before_start` even when `startup_seconds` is
 `None`; if the host is unreachable, it waits safely. Cancelling all open
 attempts or requesting finish while an owned host is still booting also writes
-`cancel-start`, which installation and every courier step before the receipt
-check (`startup_timeout`). Until `pid` exists, a claimed session is alive only
-while its setup process is: `boot-claim` holds the boot process's id and, on a
-bucket-backed host, `courier-pid` the courier's. `end` sends that courier
-`SIGTERM` (ignored from the receipt until `pid` is written) and writes `ended`
-once no setup process lives, so a failed, cancelled or killed setup frees the
-host instead of holding it. Pre-receipt observation on bucket-backed SSH hosts
-asks the host the same question. A lost attempt requires evidence that its
-process or provider machine is gone. Infrastructure losses retry up to `max_attempts`,
+`cancel-start`. Installation and courier setup check it via `startup_timeout`,
+including immediately after the start receipt upload and before spawning the
+worker. `boot-claim` names the boot process until it hands off to a worker
+(`pid`) or, on a bucket-backed host, a courier (`courier-pid`). Before `pid`
+exists, `end` signals the courier and records `ended` once setup has stopped.
+
+On a bucket-backed SSH host, storage supplies attempt progress and `out/receipt`
+records start intent. Until `out/ended` arrives, SSH checks `courier-pid`
+directly with the host's system Python. The courier stays alive through final
+delivery, which can continue after the worker writes its local `ended` file.
+A shutdown request waits for that upload or confirmed courier death. If the
+courier dies, host cleanup stops any remaining worker before releasing the
+machine. For sessions started by v0.4.6, `courier-claim` and `pid` identify
+a bucket session whose courier PID is unknown. Etude waits for its bucket end
+receipt.
+
+A lost attempt requires evidence that its process or provider machine is gone.
+Infrastructure losses retry up to `max_attempts`,
 including confirmed loss after code started; a spot machine lost after start
 (`spot_machine_lost`) retries outside that count, as `capacity_refused` does. If startup intent reached storage
 but an attempt claim did not, its start is uncertain and it is not retried.

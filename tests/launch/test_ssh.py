@@ -7,9 +7,11 @@ import signal
 import subprocess
 import sys
 from collections import Counter
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from threading import Thread
 
 import pytest
 
@@ -21,6 +23,7 @@ from etude.launch.provisioner.machines import OwnedMachine
 from etude.launch.records import Machine, Pool
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler.loop import Scheduler
+from etude.launch.schemas import AttemptRecord, Finished
 from etude.launch.ssh import SSH, RemoteReply, RemoteRequest, SSHJournal, SSHStart
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket
@@ -43,6 +46,22 @@ def ssh_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     executable.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
     monkeypatch.setenv("ETUDE_REMOTE_PYTHON", sys.executable)
+
+
+@pytest.fixture
+def exited_pid() -> int:
+    process = subprocess.Popen(["true"])
+    process.wait()
+    return process.pid
+
+
+@pytest.fixture
+def courier_pid() -> Iterator[int]:
+    with subprocess.Popen(["sleep", "60"]) as courier:
+        try:
+            yield courier.pid
+        finally:
+            courier.kill()
 
 
 def test_remote_host_runs_kept_work_logs_outputs_and_stops(
@@ -148,7 +167,7 @@ def test_a_lost_start_reply_during_install_is_recovered_and_cancel_aborts_it(
     assert scheduler.read(installing).outcome == "cancelled"
 
 
-def test_a_setup_process_that_died_frees_its_owned_host(tmp_path: Path) -> None:
+def test_a_setup_process_that_died_frees_its_owned_host(tmp_path: Path, exited_pid: int) -> None:
     scheduler, executable = _owned_host(tmp_path)
     executable.write_text(UNREACHABLE)
     (installing,) = scheduler.queue(_echo("installing"), "bench")
@@ -156,9 +175,7 @@ def test_a_setup_process_that_died_frees_its_owned_host(tmp_path: Path) -> None:
     home = tmp_path / "remote" / scheduler.attempts(installing)[0].session
     # The start reached the host, then its boot process was killed (OOM, reboot).
     home.mkdir(parents=True)
-    dead = subprocess.Popen(["true"])
-    dead.wait()
-    (home / "boot-claim").write_text(str(dead.pid))
+    (home / "boot-claim").write_text(str(exited_pid))
     executable.write_text(RELAY)
     (queued,) = scheduler.queue(_echo("queued"), "bench")
     (status,) = scheduler.wait(queued, every=0.1, timeout=20)
@@ -169,22 +186,36 @@ def test_a_setup_process_that_died_frees_its_owned_host(tmp_path: Path) -> None:
     assert scheduler.read(installing).outcome == "succeeded"  # retried once the host was free
 
 
-def test_a_bucket_backed_host_is_free_once_setup_before_any_receipt_fails_or_is_stopped(
-    tmp_path: Path,
-) -> None:
-    ssh = SSH("bench", str(tmp_path / "remote"))
+class CountedSSH(SSH):
+    """SSH that counts the remote actions asked of the host."""
+
+    def __init__(self, address: str, root: str) -> None:
+        super().__init__(address, root)
+        self.asks: Counter[str] = Counter()
+
+    def call(self, request: RemoteRequest) -> RemoteReply:
+        self.asks[request.action] += 1
+        return super().call(request)
+
+
+def _bucket_host(ssh: SSH, storage: Storage) -> Executor:
     place = Place(name="east", bucket="b", prefix="etude", provider="s3", region="us-east-1")
-    bucket = Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), Storage())
-    service = Executor(
+    bucket = Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), storage)
+    return Executor(
         OwnedMachine("bench"), SSHStart(ssh), BucketJournal(place, bucket), control=SSHJournal(ssh)
     )
+
+
+def test_a_bucket_backed_host_is_free_once_setup_before_any_receipt_fails_or_is_stopped(
+    tmp_path: Path,
+    exited_pid: int,
+) -> None:
+    service = _bucket_host(SSH("bench", str(tmp_path / "remote")), Storage())
     home = tmp_path / "remote" / "s1"
     home.mkdir(parents=True)
     (home / "boot-claim").write_text(str(os.getpid()))
     assert service.observe("s1").alive  # installing; storage has heard nothing yet
-    dead = subprocess.Popen(["true"])
-    dead.wait()
-    (home / "boot-claim").write_text(str(dead.pid))
+    (home / "boot-claim").write_text(str(exited_pid))
     assert not service.observe("s1").alive  # the install died without a note
 
     # Its courier fetches inputs after the boot process exits, then fails.
@@ -195,6 +226,122 @@ def test_a_bucket_backed_host_is_free_once_setup_before_any_receipt_fails_or_is_
     assert courier.wait(timeout=10) == -signal.SIGTERM
     assert service.end("s1") is not None
     assert not service.observe("s1").alive
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["courier-pid", "v0.4.6"])
+def test_bucket_host_stays_alive_through_final_delivery(
+    tmp_path: Path, legacy: bool, exited_pid: int, courier_pid: int
+) -> None:
+    ssh = CountedSSH("bench", str(tmp_path))
+    storage = Storage()
+    service = _bucket_host(ssh, storage)
+    home = tmp_path / "s1"
+    home.mkdir()
+    (home / "courier-claim").touch()
+    if not legacy:
+        (home / "courier-pid").write_text(str(courier_pid))
+    (home / "pid").write_text(str(exited_pid))
+    ended = datetime.now(UTC).isoformat()
+    (home / "ended").write_text(ended)
+    storage.objects["etude/sessions/s1/out/receipt"] = str(courier_pid).encode()
+
+    assert service.observe("s1").alive
+    assert ssh.asks == {"observe": 1}
+    assert not (Path(os.environ["ETUDE_HOME"]) / "programs").exists()
+    assert service.end("s1") is None  # all attempts delivered; the session log is still uploading
+    assert ssh.asks == {"observe": 2, "end": 1}
+    storage.objects["etude/sessions/s1/out/ended"] = ended.encode()
+    assert not service.observe("s1").alive
+    assert service.end("s1") == datetime.fromisoformat(ended)
+    assert ssh.asks["observe"] == 2
+
+
+def test_courier_lost_at_receipt_releases_the_owned_host(tmp_path: Path, exited_pid: int) -> None:
+    storage = Storage()
+    service = _bucket_host(SSH("bench", str(tmp_path / "remote")), storage)
+    scheduler = Scheduler(open_database(tmp_path / "state.db"), {"ssh": lambda held: service})
+    scheduler.add_machine("bench", "bench")
+    executable = tmp_path / "ssh"
+    executable.write_text(UNREACHABLE)
+    (run,) = scheduler.queue(_echo("lost"), "bench")
+    scheduler.tick()
+    session = scheduler.attempts(run)[0].session
+    home = tmp_path / "remote" / session
+    home.mkdir(parents=True)
+    (home / "boot-claim").write_text(str(exited_pid))
+    (home / "courier-pid").write_text(str(exited_pid))
+    storage.objects[f"etude/sessions/{session}/out/receipt"] = str(exited_pid).encode()
+    executable.write_text(RELAY)
+
+    scheduler.tick()  # recover the start whose SSH reply was lost
+    scheduler.tick()  # reconcile the bucket receipt with the dead courier
+    (attempt,) = scheduler.attempts(run)
+    assert attempt.cause == "create_unconfirmed"
+    assert scheduler.session(session).ended_at is not None
+    assert (home / "cancel-start").exists() and (home / "ended").exists()
+
+
+def test_queued_work_waits_for_the_bucket_hosts_last_upload(
+    tmp_path: Path, exited_pid: int, courier_pid: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = Storage()
+    service = _bucket_host(SSH("bench", str(tmp_path / "remote")), storage)
+    scheduler = Scheduler(open_database(tmp_path / "state.db"), {"ssh": lambda held: service})
+    scheduler.add_machine("bench", "bench")
+    # The controlled host accepts work; advance its last upload independently of the scheduler.
+    monkeypatch.setattr(SSHStart, "start", lambda *args: None)
+    (run,) = scheduler.queue(_echo("first"), "bench")
+    scheduler.tick()
+    (attempt,) = scheduler.attempts(run)
+    home = tmp_path / "remote" / attempt.session
+    home.mkdir(parents=True)
+    now = datetime.now(UTC)
+    (home / "courier-pid").write_text(str(courier_pid))
+    (home / "pid").write_text(str(exited_pid))
+    (home / "ended").write_text(now.isoformat())
+    out = f"etude/sessions/{attempt.session}/out"
+    storage.objects[f"{out}/receipt"] = str(courier_pid).encode()
+    record = AttemptRecord(
+        started_at=now,
+        exited=Finished(
+            finished_at=now, outcome="succeeded", cause=None, clocks={}, outputs=(), exit_code=0
+        ),
+        delivered=True,
+    )
+    storage.objects[f"etude/{run}/attempts/{attempt.id}.json"] = record.model_dump_json().encode()
+    (queued,) = scheduler.queue(_echo("next"), "bench")
+    scheduler.tick()
+    assert scheduler.read(run).outcome == "succeeded"
+    assert scheduler.read(queued).phase == "queued"
+    assert scheduler.session(attempt.session).ended_at is None
+
+    storage.objects[f"{out}/ended"] = now.isoformat().encode()
+    scheduler.tick()
+    (next_attempt,) = scheduler.attempts(queued)
+    assert next_attempt.machine == "bench" and next_attempt.session != attempt.session
+    assert scheduler.session(attempt.session).ended_at is not None
+
+
+def test_dead_courier_leaves_its_worker_to_host_cleanup(tmp_path: Path, exited_pid: int) -> None:
+    storage = Storage()
+    service = _bucket_host(SSH("bench", str(tmp_path)), storage)
+    home = tmp_path / "s1"
+    home.mkdir()
+    (home / "courier-pid").write_text(str(exited_pid))
+    storage.objects["etude/sessions/s1/out/receipt"] = str(exited_pid).encode()
+    with subprocess.Popen(["sleep", "60"]) as worker:
+        # Reap the fixture child when SSH signals it, as init would on the host.
+        reap = Thread(target=worker.wait)
+        reap.start()
+        try:
+            (home / "pid").write_text(str(worker.pid))
+            assert not service.observe("s1").alive
+            assert service.end("s1") is not None
+            assert worker.wait(timeout=5) == -signal.SIGTERM
+        finally:
+            worker.kill()
+            reap.join()
+    assert (home / "ended").exists()
 
 
 def test_runs_move_between_local_and_remote_disk_including_kept_work(tmp_path: Path) -> None:
@@ -226,16 +373,6 @@ def test_runs_move_between_local_and_remote_disk_including_kept_work(tmp_path: P
         assert scheduler.fetch(run, "weights", tmp_path / run).read_text() == target
 
 
-class CountedSSH(SSH):
-    """SSH that counts the remote actions asked of the host."""
-
-    asks: Counter[str]
-
-    def call(self, request: RemoteRequest) -> RemoteReply:
-        self.asks[request.action] += 1
-        return super().call(request)
-
-
 # Records a checkpoint midway and at the target; each holds the lineage of the
 # checkpoint it continued from.
 TRAIN = """
@@ -262,7 +399,6 @@ def test_continuation_moves_between_local_and_remote_disk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     ssh = CountedSSH("bench", str(tmp_path / "bench/sessions"))
-    ssh.asks = Counter()
     remote = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
     here = local(tmp_path / "here/sessions")
     store = open_database(tmp_path / "state.db")

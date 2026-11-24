@@ -181,24 +181,27 @@ code=base64.b64decode(call.pop("program"))
 request=call['request']
 import pathlib
 home=pathlib.Path(call['root']).expanduser()/request.get('session','')
-def recorded(name):
+def recorded(name: str) -> int | None:
     path=home/name
     try: text=path.read_text().strip()
     except FileNotFoundError: return None
     return int(text) if text.isdigit() else 0
-def setting_up():
-    # Before `pid`, a claimed start is held by its boot process (`boot-claim`),
-    # then on a bucket-backed host by its courier (`courier-pid`). An empty claim
-    # is a moment old, or from an older release: count it as live.
-    for name in ('boot-claim','courier-pid'):
-        pid=recorded(name)
-        if pid==0: return True
-        if pid is None: continue
-        try: os.kill(pid,0)
-        except ProcessLookupError: continue
-        except PermissionError: pass
-        return True
-    return False
+def _pid_alive(pid: int | None) -> bool:
+    if pid is None: return False
+    if pid==0: return True  # a fresh or older boot-claim can be empty
+    try: os.kill(pid,0)
+    except ProcessLookupError: return False
+    except PermissionError: pass
+    return True
+def _host_alive() -> bool | None:
+    # Check boot before reading the PID it hands off to, so its exit cannot hide the handoff.
+    booting=not (home/'ended').exists() and _pid_alive(recorded('boot-claim'))
+    worker=(home/'pid').exists()
+    courier=recorded('courier-pid')
+    if courier is not None: return _pid_alive(courier)  # owns final delivery
+    if not worker: return booting
+    if (home/'courier-claim').exists(): return True  # v0.4.6 recorded no courier PID
+    return None  # the disk journal owns a pure SSH worker's progress and liveness
 if request['action']=='logs' and request['producer']=='bootstrap':
     path=home/'bootstrap.log'
     print(json.dumps({'log':path.read_text() if path.exists() else None})); sys.exit(0)
@@ -206,13 +209,10 @@ if request['action']=='started' and not (home/'pid').exists():
     print(json.dumps({'started':False})); sys.exit(0)
 if request['action']=='claimed':
     print(json.dumps({'claimed':(home/'boot-claim').exists() or (home/'pid').exists()})); sys.exit(0)
-if request['action']=='observe' and not (home/'pid').exists():
-    # Answer without installing. A session with no worker whose setup has ended,
-    # died or never claimed it started no job. Read `pid` again after the setup
-    # processes: a start writes it before its boot process exits.
-    booting=not (home/'ended').exists() and setting_up()
-    if booting or not (home/'pid').exists():
-        print(json.dumps({'observation':{'alive':booting,'progress':[],'start_unknown':booting}})); sys.exit(0)
+if request['action']=='observe':
+    alive=_host_alive()
+    if alive is not None:
+        print(json.dumps({'observation':{'alive':alive,'progress':[],'start_unknown':alive}})); sys.exit(0)
 if request['action']=='ended':
     path=home/'ended'
     print(json.dumps({'ended_at':path.read_text() if path.exists() else None})); sys.exit(0)
@@ -225,11 +225,11 @@ if request['action']=='end':
         if courier:=recorded('courier-pid'):
             try: os.kill(courier,signal.SIGTERM)
             except (ProcessLookupError,PermissionError): pass
-        if not setting_up() and not (home/'pid').exists():
+        if _host_alive() is False and not (home/'pid').exists():
             # Nothing runs here, and the cancel fences any start still in flight.
             from datetime import datetime,UTC
             path.write_text(datetime.now(UTC).isoformat())
-    if not (home/'pid').exists():
+    if path.exists() or not (home/'pid').exists():
         print(json.dumps({'ended_at':path.read_text() if path.exists() else None})); sys.exit(0)
 if request['action']=='start':
     home.mkdir(parents=True,exist_ok=True,mode=0o700)

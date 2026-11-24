@@ -62,8 +62,14 @@ tracked without starting a second copy, while an unclaimed session is fenced
 and freed at once so queued work can use the machine even with no startup
 cutoff. Cancelling a run while its owned host is still setting up (installing,
 or fetching and restoring inputs from storage) stops that setup and frees the
-host once stopped; setup that fails or is killed frees it too. If the host is unreachable, Etude
-waits rather than freeing a machine it cannot check.
+host once stopped. A failed or killed install also frees the host. If the host
+is unreachable, Etude waits until it can check.
+
+On an SSH host with bucket storage, Etude tracks the courier from input fetch
+through final upload. The host stays occupied while the courier delivers the
+last files and logs, even after the job exits. If the courier dies, including
+during the start receipt upload or a host reboot, Etude checks the host, stops
+any remaining worker, and releases the machine for queued work.
 
 ## Rented machines
 

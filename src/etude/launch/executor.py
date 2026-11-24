@@ -204,9 +204,8 @@ class Executor:
     def observe(self, session_id: str) -> Observation:
         seen = self.journal.observe(session_id)
         alive = seen.alive and self.machines.alive(session_id)
-        if alive and self.control is not self.journal and not seen.start_unknown:
-            # Storage has no receipt yet, so only the host can say its setup
-            # failed, was cancelled or died.
+        if alive and self.control is not self.journal:
+            # Until storage confirms final delivery, check the process on the host.
             alive = self.control.observe(session_id).alive
         return seen.model_copy(update={"alive": alive})
 
@@ -221,7 +220,16 @@ class Executor:
 
     def end(self, session_id: str) -> datetime | None:
         if self.machines.owned:
-            return self.control.end(session_id)
+            ended = self.control.end(session_id)
+            # The worker can acknowledge shutdown while its courier is still uploading.
+            if (
+                ended is not None
+                and self.control is not self.journal
+                and self.journal.ended(session_id) is None
+                and self.control.observe(session_id).alive
+            ):
+                return None
+            return ended
         note = self.journal.ended(session_id)
         gone = self.machines.end(session_id)
         return (note or gone) if gone is not None else None
