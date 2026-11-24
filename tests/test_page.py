@@ -651,7 +651,9 @@ def report() -> Report:
     assert marks_by_run["warm@1"].align == 800.0
 
     traces = {t.owner: t for t in page.training.series["updates"]["loss"]}
-    assert traces["warm@1"].x[0] >= 400.0
-    assert traces["warm@1"].x[-1] >= 790.0
-    assert traces["baseline@1"].x[0] < 100.0
-    assert traces["baseline@1"].x[-1] >= 790.0
+    warm_x = [x for x in traces["warm@1"].x if x is not None]
+    base_x = [x for x in traces["baseline@1"].x if x is not None]
+    assert warm_x[0] >= 400.0
+    assert warm_x[-1] >= 790.0
+    assert base_x[0] < 100.0
+    assert base_x[-1] >= 790.0

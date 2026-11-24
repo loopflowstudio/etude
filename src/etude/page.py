@@ -777,7 +777,7 @@ def _included_training(
     includes: Sequence[Include],
     *,
     metrics: frozenset[str] | None,
-    prefixes: Sequence[str],
+    prefixes: tuple[str, ...],
 ) -> list[RunData]:
     """Read training runs named by `Report.include`."""
     extra: list[RunData] = []
@@ -812,7 +812,8 @@ def _start_offsets(
     for run in trained:
         exp = run.file.experiment if run.file is not None else experiment
         for cp in run.checkpoints:
-            checkpoints[(exp, run.name, cp.file)] = dict(cp.at)
+            if cp.file is not None:
+                checkpoints[(exp, run.name, cp.file)] = dict(cp.at)
     offsets: dict[str, dict[str, float]] = {}
     for run in trained:
         if run.file is None or not run.file.start:
@@ -836,7 +837,8 @@ def _start_offsets(
                         metrics=frozenset(),
                     )
                     for cp in loaded.checkpoints:
-                        checkpoints[(parent_exp, loaded.name, cp.file)] = dict(cp.at)
+                        if cp.file is not None:
+                            checkpoints[(parent_exp, loaded.name, cp.file)] = dict(cp.at)
             parent_at = checkpoints.get((parent_exp, parent_run, cp_file))
         if not parent_at:
             continue
