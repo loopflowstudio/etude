@@ -174,14 +174,13 @@ with contextlib.redirect_stdout(sys.stderr):
 """
 # It reads the RemoteCall as JSON: `request` is its request, and replies are RemoteReply.
 _BOOT = (
-    """import base64,json,os,signal,sys
+    """import base64,json,os,pathlib,signal,sys
 call=json.load(sys.stdin)
 os.environ.update(call.get('storage_environment', {}))
 code=base64.b64decode(call.pop("program"))
 request=call['request']
-import pathlib
 home=pathlib.Path(call['root']).expanduser()/request.get('session','')
-def recorded(name: str) -> int | None:
+def _recorded(name: str) -> int | None:
     path=home/name
     try: text=path.read_text().strip()
     except FileNotFoundError: return None
@@ -195,10 +194,9 @@ def _pid_alive(pid: int | None) -> bool:
     return True
 def _host_alive() -> bool | None:
     # Check boot before reading the PID it hands off to, so its exit cannot hide the handoff.
-    booting=not (home/'ended').exists() and _pid_alive(recorded('boot-claim'))
+    booting=not (home/'ended').exists() and _pid_alive(_recorded('boot-claim'))
     worker=(home/'pid').exists()
-    courier=recorded('courier-pid')
-    if courier is not None: return _pid_alive(courier)  # owns final delivery
+    if (courier:=_recorded('courier-pid')) is not None: return _pid_alive(courier)  # owns final delivery
     if not worker: return booting
     if (home/'courier-claim').exists(): return True  # v0.4.6 recorded no courier PID
     return None  # the disk journal owns a pure SSH worker's progress and liveness
@@ -210,8 +208,7 @@ if request['action']=='started' and not (home/'pid').exists():
 if request['action']=='claimed':
     print(json.dumps({'claimed':(home/'boot-claim').exists() or (home/'pid').exists()})); sys.exit(0)
 if request['action']=='observe':
-    alive=_host_alive()
-    if alive is not None:
+    if (alive:=_host_alive()) is not None:
         print(json.dumps({'observation':{'alive':alive,'progress':[],'start_unknown':alive}})); sys.exit(0)
 if request['action']=='ended':
     path=home/'ended'
@@ -222,7 +219,7 @@ if request['action']=='end':
     path=home/'ended'
     if not (home/'pid').exists() and not path.exists():
         # The cancel stops an install; a courier still fetching stops at once.
-        if courier:=recorded('courier-pid'):
+        if courier:=_recorded('courier-pid'):
             try: os.kill(courier,signal.SIGTERM)
             except (ProcessLookupError,PermissionError): pass
         if _host_alive() is False and not (home/'pid').exists():

@@ -64,16 +64,22 @@ def courier_pid() -> Iterator[int]:
             courier.kill()
 
 
+def _owned_host(tmp_path: Path, service: Executor | None = None) -> tuple[Scheduler, Path]:
+    """A scheduler with one owned SSH host, and the SSH stand-in that reaches it."""
+    if service is None:
+        ssh = SSH("bench", str(tmp_path / "remote"))
+        service = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
+    scheduler = Scheduler(open_database(tmp_path / "state.db"), {"ssh": lambda held: service})
+    scheduler.add_machine("bench", "bench")
+    return scheduler, tmp_path / "ssh"
+
+
 def test_remote_host_runs_kept_work_logs_outputs_and_stops(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ETUDE_STORAGE_TIMEOUT_SECONDS", "120")
-    ssh = SSH("bench", str(tmp_path / "remote"))
-    journal = SSHJournal(ssh)
-    service = Executor(OwnedMachine("bench"), SSHStart(ssh), journal)
-    scheduler = Scheduler(open_database(tmp_path / "state.db"), {"ssh": lambda held: service})
-    scheduler.add_machine("bench", "bench")
+    scheduler, executable = _owned_host(tmp_path)
     (run,) = scheduler.launch(
         Job(
             command='echo weights > "$ETUDE_OUTPUT_DIR/weights"; echo hello',
@@ -99,23 +105,12 @@ def test_remote_host_runs_kept_work_logs_outputs_and_stops(
     )
     scheduler.tick()
     held = scheduler.attempts(pending)[0].session
-    executable = tmp_path / "ssh"
     executable.write_text(UNREACHABLE)
     scheduler.tick()
     assert scheduler._store.session(held).ended_at is None
     executable.write_text(RELAY)
     scheduler.cancel(pending)
     assert scheduler.wait(pending, every=0.1, timeout=20)[0].outcome == "cancelled"
-
-
-def _owned_host(tmp_path: Path) -> tuple[Scheduler, Path]:
-    """A scheduler with one owned SSH host, and the SSH stand-in that reaches it."""
-    executable = tmp_path / "ssh"
-    ssh = SSH("bench", str(tmp_path / "remote"))
-    service = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
-    scheduler = Scheduler(open_database(tmp_path / "state.db"), {"ssh": lambda held: service})
-    scheduler.add_machine("bench", "bench")
-    return scheduler, executable
 
 
 def _echo(text: str) -> Job:
@@ -219,13 +214,16 @@ def test_a_bucket_backed_host_is_free_once_setup_before_any_receipt_fails_or_is_
     assert not service.observe("s1").alive  # the install died without a note
 
     # Its courier fetches inputs after the boot process exits, then fails.
-    courier = subprocess.Popen(["sleep", "60"])
-    (home / "courier-pid").write_text(str(courier.pid))
-    assert service.observe("s1").alive
-    assert service.end("s1") is None  # the courier is told to stop
-    assert courier.wait(timeout=10) == -signal.SIGTERM
-    assert service.end("s1") is not None
-    assert not service.observe("s1").alive
+    with subprocess.Popen(["sleep", "60"]) as courier:
+        try:
+            (home / "courier-pid").write_text(str(courier.pid))
+            assert service.observe("s1").alive
+            assert service.end("s1") is None  # the courier is told to stop
+            assert courier.wait(timeout=10) == -signal.SIGTERM
+            assert service.end("s1") is not None
+            assert not service.observe("s1").alive
+        finally:
+            courier.kill()
 
 
 @pytest.mark.parametrize("legacy", [False, True], ids=["courier-pid", "v0.4.6"])
@@ -259,9 +257,7 @@ def test_bucket_host_stays_alive_through_final_delivery(
 def test_courier_lost_at_receipt_releases_the_owned_host(tmp_path: Path, exited_pid: int) -> None:
     storage = Storage()
     service = _bucket_host(SSH("bench", str(tmp_path / "remote")), storage)
-    scheduler = Scheduler(open_database(tmp_path / "state.db"), {"ssh": lambda held: service})
-    scheduler.add_machine("bench", "bench")
-    executable = tmp_path / "ssh"
+    scheduler, executable = _owned_host(tmp_path, service)
     executable.write_text(UNREACHABLE)
     (run,) = scheduler.queue(_echo("lost"), "bench")
     scheduler.tick()
@@ -284,10 +280,9 @@ def test_courier_lost_at_receipt_releases_the_owned_host(tmp_path: Path, exited_
 def test_queued_work_waits_for_the_bucket_hosts_last_upload(
     tmp_path: Path, exited_pid: int, courier_pid: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    ssh = CountedSSH("bench", str(tmp_path / "remote"))
     storage = Storage()
-    service = _bucket_host(SSH("bench", str(tmp_path / "remote")), storage)
-    scheduler = Scheduler(open_database(tmp_path / "state.db"), {"ssh": lambda held: service})
-    scheduler.add_machine("bench", "bench")
+    scheduler, _ = _owned_host(tmp_path, _bucket_host(ssh, storage))
     # The controlled host accepts work; advance its last upload independently of the scheduler.
     monkeypatch.setattr(SSHStart, "start", lambda *args: None)
     (run,) = scheduler.queue(_echo("first"), "bench")
@@ -310,16 +305,20 @@ def test_queued_work_waits_for_the_bucket_hosts_last_upload(
     )
     storage.objects[f"etude/{run}/attempts/{attempt.id}.json"] = record.model_dump_json().encode()
     (queued,) = scheduler.queue(_echo("next"), "bench")
+    ssh.asks.clear()
     scheduler.tick()
     assert scheduler.read(run).outcome == "succeeded"
     assert scheduler.read(queued).phase == "queued"
     assert scheduler.session(attempt.session).ended_at is None
+    assert ssh.asks == {"observe": 2, "end": 1}
 
+    ssh.asks.clear()
     storage.objects[f"{out}/ended"] = now.isoformat().encode()
     scheduler.tick()
     (next_attempt,) = scheduler.attempts(queued)
     assert next_attempt.machine == "bench" and next_attempt.session != attempt.session
     assert scheduler.session(attempt.session).ended_at is not None
+    assert ssh.asks == {"end": 1}
 
 
 def test_dead_courier_leaves_its_worker_to_host_cleanup(tmp_path: Path, exited_pid: int) -> None:

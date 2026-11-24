@@ -875,8 +875,8 @@ unconfirmed start: if `boot-claim` or `pid` exists, the session is confirmed
 and tracked; if neither exists, it is fenced (`cancel-start` and `ended`) and
 settled at once as `machine_lost_before_start` even when `startup_seconds` is
 `None`; if the host is unreachable, it waits safely. Cancelling all open
-attempts or requesting finish while an owned host is still booting also writes
-`cancel-start`. Installation and courier setup check it via `startup_timeout`,
+attempts while an owned host is still booting also writes `cancel-start`.
+Installation and courier setup check it via `startup_timeout`,
 including immediately after the start receipt upload and before spawning the
 worker. `boot-claim` names the boot process until it hands off to a worker
 (`pid`) or, on a bucket-backed host, a courier (`courier-pid`). Before `pid`

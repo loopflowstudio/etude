@@ -239,8 +239,7 @@ class BucketJournal:
                 continue
             folder = self._run_prefix(work.run)
             with attribute(run=work.run, attempt=work.attempt, purpose="control"):
-                kept = self._bucket.list(folder)
-                listed = [key[len(folder) :] for key in kept]
+                listed = [key[len(folder) :] for key in self._bucket.list(folder)]
                 # A group can stop before opening its first tournament. Only
                 # training writes checkpoint records at the allocation root.
                 evaluation: set[str] = set()
@@ -253,14 +252,15 @@ class BucketJournal:
                             "listed run declaration disappeared during restore"
                         )
                     evaluation = evaluation_files(listed, declaration)
-            for key in kept:
-                relative = key[len(folder) :]
+            for relative in listed:
                 if (
                     relative in evaluation
                     or relative in ("run.json", MEMBERSHIP)
                     or relative.startswith(("checkpoints/", "out/"))
                 ):
-                    links[f"{work.run}/{relative}"] = self._bucket.get_url(key, _GRANT_SECONDS)
+                    links[f"{work.run}/{relative}"] = self._bucket.get_url(
+                        folder + relative, _GRANT_SECONDS
+                    )
         return links
 
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]:

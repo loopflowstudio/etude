@@ -458,9 +458,7 @@ def eval_experiment(
             "default: where runs are written on this computer"
         ),
     ] = None,
-    watch: Annotated[
-        float | None, typer.Option(min=1, help="pass again every SECONDS until Ctrl-C")
-    ] = None,
+    watch: WatchOption = None,
     retry_failed: Annotated[
         bool,
         typer.Option(
