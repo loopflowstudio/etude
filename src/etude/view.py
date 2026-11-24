@@ -12,6 +12,7 @@ import json
 import re
 import shlex
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -2013,7 +2014,9 @@ class Server(ThreadingHTTPServer):
             self.server_close()
             raise
 
-    def handle_error(self, request: object, client_address: object) -> None:
+    def handle_error(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: object
+    ) -> None:
         # A reload, closed tab or cancelled fetch drops its connection mid-reply.
         # That is ordinary browsing, not a server failure; anything else is printed.
         if isinstance(
