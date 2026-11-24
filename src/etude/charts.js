@@ -93,7 +93,7 @@ function line(host, series, o = {}) {
       return [...reasons].map(reason => `${s.label}: ${reason}`);
     });
     for (const text of notes.length ? notes : [o.empty || "Nothing recorded for this selection"]) host.appendChild(node("div", "na chart-empty", text));
-    return;
+    return false;
   }
   const positions = new Set(series.flatMap(s => s.points.filter(p => p.x != null).map(p => p.x)));
   if (o.checkpoint != null) positions.add(o.checkpoint);
@@ -194,6 +194,7 @@ function line(host, series, o = {}) {
   const u = new uPlot(opts, data, host);
   u.over.addEventListener("pointerleave", hideTip);
   charts.push(u);
+  return true;
 }
 
 // ---------------------------------------------------------------- an experiment's page data
