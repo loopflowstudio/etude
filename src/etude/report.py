@@ -39,6 +39,7 @@ from etude.records import Record
 
 __all__ = (
     "Report",
+    "Include",
     "Score",
     "Matches",
     "Curve",
@@ -54,6 +55,14 @@ __all__ = (
     "Elapsed",
     "Attempts",
 )
+
+
+class Include(Record):
+    """Training runs and eval tournaments from another experiment to draw alongside this one."""
+
+    experiment: str
+    jobs: tuple[str, ...] = ()
+    tournaments: tuple[str, ...] = ()
 
 
 class Score(Record):
@@ -268,6 +277,8 @@ class Report(Record):
     clock: str | None = None
     baseline: str | None = None
     labels: dict[str, str] = {}
+    include: tuple[Include, ...] = ()
+    displace_starts: bool = False
     other_metrics: bool = False
     perf: tuple[MetricPanel, ...] = PERF
     ml: tuple[MetricPanel, ...] = ML

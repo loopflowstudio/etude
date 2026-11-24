@@ -577,3 +577,82 @@ def report() -> Report:
     assert not any(
         key.endswith((".blk", ".tail", ".index.json", ".permanent.json")) for key in after_other.got
     )
+
+
+def test_report_include_and_displace_starts(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    clock = [Clock(name="updates", kind="step", meaning="updates")]
+    with open_run(
+        experiment="base_exp",
+        run="baseline@1",
+        job="baseline",
+        clocks=clock,
+        directory=runs,
+    ) as base:
+        base.log({"loss": 2.0}, updates=0)
+        base.log({"loss": 1.0}, updates=400)
+        weights = base.out / "00000400.pt"
+        weights.write_bytes(b"base-400")
+        base.checkpoint(weights, updates=400)
+        base.log({"loss": 0.5}, updates=800)
+
+    with open_run(
+        experiment="child_exp",
+        run="warm@1",
+        job="warm",
+        clocks=clock,
+        directory=runs,
+    ) as warm:
+        warm.log({"loss": 1.1}, updates=0)
+        warm.log({"loss": 0.6}, updates=400)
+        weights = warm.out / "00000400.pt"
+        weights.write_bytes(b"warm-400")
+        warm.checkpoint(weights, updates=400)
+
+    # Record job_name and start checkpoint pointer in run declarations (as TrainingJob(start=...) does).
+    base_json = runs / "base_exp" / "baseline@1" / "run.json"
+    base_data = json.loads(base_json.read_text())
+    base_data["job_name"] = "baseline"
+    base_json.write_text(json.dumps(base_data))
+
+    warm_json = runs / "child_exp" / "warm@1" / "run.json"
+    warm_data = json.loads(warm_json.read_text())
+    warm_data["job_name"] = "warm"
+    warm_data["start"] = "base_exp/baseline@1/out/00000400.pt"
+    warm_json.write_text(json.dumps(warm_data))
+
+    file = experiment_file(
+        tmp_path / "experiments",
+        "child_exp",
+        """
+from etude.report import Include, Report, Series
+
+def report() -> Report:
+    return Report(
+        clock="updates",
+        baseline="baseline",
+        displace_starts=True,
+        include=(Include(experiment="base_exp", jobs=("baseline",)),),
+        ml=(Series(title="Loss", keys=("loss",)),),
+    )
+""",
+    )
+    page = build(DirectoryStorage(runs), file)
+    assert page.report.baseline == "baseline"
+    assert page.report.displace_starts is True
+    assert {job.name for job in page.training.jobs} == {"baseline", "warm"}
+
+    runs_by_name = {r.name: r for r in page.training.runs}
+    assert runs_by_name["baseline@1"].at["updates"] == 800.0
+    assert runs_by_name["warm@1"].at["updates"] == 800.0
+
+    marks_by_run = {m.run: m for m in page.training.checkpoints}
+    assert marks_by_run["warm@1"].at["updates"] == 800.0
+    assert marks_by_run["warm@1"].align == 800.0
+
+    traces = {t.owner: t for t in page.training.series["updates"]["loss"]}
+    assert traces["warm@1"].x[0] >= 400.0
+    assert traces["warm@1"].x[-1] >= 790.0
+    assert traces["baseline@1"].x[0] < 100.0
+    assert traces["baseline@1"].x[-1] >= 790.0
+
