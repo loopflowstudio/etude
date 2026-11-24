@@ -116,11 +116,25 @@ matches; `tag=` selects tagged seatings. Omit seating to show scores for any
 player chosen in the report. A composed player remains a whole player, even if
 its leaves share models with another composition.
 
+Players in eval matches take three roles on the page. A **placed checkpoint**
+has a clock position (`at`, from its seat or a training run of the experiment)
+and draws on curves and crosstables. An unplaced player — code, or an outside
+checkpoint seated without `at` — appears as an **opponent** when placed
+checkpoints play it (in the Opponent control and seating tooltips) and as an
+**anchor** only when it plays another unplaced player or a match with no placed
+checkpoints. Anchors appear in `Anchors` and as reference lines on curves
+without `seating=`; the `Anchor lines` control appears only when such a curve
+has two unplaced players that played each other. Top-of-page notes report only
+caveats for values reachable panels draw: an outside checkpoint without `at` is
+noted only when a reachable panel draws it as an anchor, and an
+environment-overlap note counts only drawn values played in more than one
+environment (showing each from the environment whose latest match is newest).
+
 Use `perf` and `ml` to choose metric panels for your own learning system.
 `Report()` defaults assume RL metric names; absent data leaves gaps, not invented
-measurements. A checkpoint with no training record can still be an anchor.
-See the [report declarations](../src/etude/report.py) for the supported panel
-fields and [record semantics](dev/tracking.md) when developing Etude itself.
+measurements. See the [report declarations](../src/etude/report.py) for the
+supported panel fields and [record semantics](dev/tracking.md) when developing
+Etude itself.
 
 ## Live view
 
