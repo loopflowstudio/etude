@@ -184,8 +184,12 @@ def _band(
     if len(present) < 2:
         return None
     shifts = [offsets.get(run.name, {}).get(clock, 0.0) for run, _ in present]
-    low = min(float(chart.x_first[0]) + shift for (_, chart), shift in zip(present, shifts, strict=True))
-    high = max(float(chart.x_last[-1]) + shift for (_, chart), shift in zip(present, shifts, strict=True))
+    low = min(
+        float(chart.x_first[0]) + shift for (_, chart), shift in zip(present, shifts, strict=True)
+    )
+    high = max(
+        float(chart.x_last[-1]) + shift for (_, chart), shift in zip(present, shifts, strict=True)
+    )
     width = (high - low) / BUCKETS
     means = np.full((len(present), BUCKETS), np.nan)
     for row, ((run, _), shift) in enumerate(zip(present, shifts, strict=True)):

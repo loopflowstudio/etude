@@ -766,9 +766,7 @@ def _page_cache_key(
     ).hexdigest()
 
 
-def _shift_at(
-    at: Mapping[str, float], offset: Mapping[str, float] | None
-) -> dict[str, float]:
+def _shift_at(at: Mapping[str, float], offset: Mapping[str, float] | None) -> dict[str, float]:
     if not offset:
         return dict(at)
     return {clock: value + offset.get(clock, 0.0) for clock, value in at.items()}
@@ -854,6 +852,8 @@ def _eval_run_matches_tournaments(run_name: str, tournaments: Sequence[str]) -> 
         run_name == t or (run_name.startswith(f"{t}-") and len(run_name) == len(t) + 13)
         for t in tournaments
     )
+
+
 def _load_cached_page(path: Path, expected_key: str) -> Page | None:
     try:
         with path.open("rb") as stream:
@@ -923,9 +923,8 @@ def _build_page(
         state = state_of(data, experiment)
         wanted = loaded.tournaments(state)
     local_versions = runs.local_versions(experiment) if state is not None else None
-    referenced = (
-        {experiment, *(inc.experiment for inc in report.include)}
-        | find_line_experiments(wanted)
+    referenced = {experiment, *(inc.experiment for inc in report.include)} | find_line_experiments(
+        wanted
     )
     versions = source.versions_for(referenced)
     cache_key = _page_cache_key(
@@ -943,9 +942,7 @@ def _build_page(
     if (cached := _load_cached_page(cache_path, cache_key)) is not None:
         return _BuiltPage(cached, loaded.sources, referenced, versions, local_versions)
     evals = (
-        _read_evals(runs, state, report, wanted, offsets=offsets)
-        if state is not None
-        else _Evals()
+        _read_evals(runs, state, report, wanted, offsets=offsets) if state is not None else _Evals()
     )
     # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
     unended = [

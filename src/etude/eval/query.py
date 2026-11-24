@@ -496,13 +496,9 @@ def _catch_up(
                     ):
                         _ended(db, storage, run, located[outcome], outcome)
                         changed = True
-                    _sum_missing(
-                        db, storage, run, located, Path(copies), experiment=run_experiment
-                    )
+                    _sum_missing(db, storage, run, located, Path(copies), experiment=run_experiment)
                 elif new:
-                    changed |= _training_checkpoints(
-                        db, storage, run, run_experiment, located, new
-                    )
+                    changed |= _training_checkpoints(db, storage, run, run_experiment, located, new)
                 if new:
                     _put(db, "kept.seen", {"run": "VARCHAR", "name": "VARCHAR"},
                          [[run, name] for name in new])  # fmt: skip

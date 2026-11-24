@@ -655,4 +655,3 @@ def report() -> Report:
     assert traces["warm@1"].x[-1] >= 790.0
     assert traces["baseline@1"].x[0] < 100.0
     assert traces["baseline@1"].x[-1] >= 790.0
-
