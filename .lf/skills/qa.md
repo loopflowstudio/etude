@@ -317,8 +317,14 @@ shim first on the client PATH that runs `/usr/bin/ssh -F LAB/ssh_config "$@"`
 pool add lab` and `etude machine add qa qa-host --pool lab`. Stop sshd by its
 PidFile before finishing.
 
-The login shell runs `/etc/profile` (path_helper puts `/opt/homebrew/bin` first);
-to shadow a remote tool, prepend its folder in `LAB/remote/home/.profile`.
+The host needs `python3.12` on that PATH: link `$(uv python find 3.12)` into
+`remote/home/.local/bin`. Without it every probe exits 127 and the run only
+reads `renting`. The login shell runs `/etc/profile` (path_helper puts
+`/opt/homebrew/bin` first); to shadow a remote tool, prepend its folder in
+`LAB/remote/home/.profile`. The courier logs to `SESSION/worker.log`
+(`courier.log` stays empty): the post-receipt window is between its `receipt
+upload: confirmed` line and the `pid` file. Poll for that line every few ms,
+then SIGSTOP and SIGKILL the courier.
 Controlled faults, all on the real path:
 
 - Lost start reply / lost request: the client `ssh` shim reads stdin, and on a
