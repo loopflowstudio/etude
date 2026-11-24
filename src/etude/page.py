@@ -136,9 +136,9 @@ class Placement(Record):
 
     `run` and `ordinal` name the training run's checkpoint its key binds it
     to, None for any other. `at` is where it is drawn, by clock: its seats'
-    `at`, else its training record's; empty for a fixed player. `line` is
+    `at`, else its training record's; empty for an unplaced player. `line` is
     the learner it belongs to: its latest seat's, else its training run's
-    line; None for a fixed player or a checkpoint of no line. `placed`: it is
+    line; None for an unplaced player or a checkpoint of no line. `placed`: it is
     drawn on a curve, a job's or one of checkpoints no run saved, so bound
     to a run or given an `at`. Unplaced players can be opponents or anchors.
     """
@@ -228,6 +228,8 @@ class Cell(Record):
     matches: int
 
     def is_anchor(self, players: Sequence[Placement]) -> bool:
+        if self.subject == self.opponent:
+            return False
         return self.fixed or (
             not players[self.subject].placed
             and self.opponent is not None
@@ -698,7 +700,7 @@ def build(
 
 
 # Bump whenever derived Page fields change without changing inputs.
-_PAGE_CACHE_VERSION = 6
+_PAGE_CACHE_VERSION = 7
 
 
 def _page_cache_path(experiment: str, storage: Storage) -> Path:
@@ -2044,7 +2046,7 @@ def _cells(
         )
     )
     index = {each.key: number for number, each in enumerate(players)}
-    anchors = sum(not each.placed for each in players)
+    unplaced_count = sum(not each.placed for each in players)
     place = {identity: number for number, identity in enumerate(environments)}
     held_idx = _held_index(db)
     has_groups = db.sql('select 1 from "groups" limit 1').fetchone() is not None
@@ -2100,8 +2102,8 @@ def _cells(
                     active_matches = selection_sets[(view, chosen)]
                 if not active_matches:
                     continue
-                # An anchor's strength needs two anchors to have met.
-                for fixed in (False, True) if anchors > 1 else (False,):
+                # Only matches without a placed checkpoint contribute to anchor strength.
+                for fixed in (False, True) if unplaced_count > 1 else (False,):
                     pairs = (
                         {
                             pair
@@ -2196,27 +2198,36 @@ def _cell_notes(
         return ()
     players = evals.players
     panels = _panel_kinds(evals, report)
-    # A curve can draw a reference against an opponent its checkpoints actually met.
-    opponents = {
-        (c.selection, c.commit, c.score, c.opponent)
-        for c in evals.cells
-        if players[c.subject].placed and c.opponent is not None and not players[c.opponent].placed
-    }
+    # The Opponent control offers named opponents and explicit aggregates. If it
+    # has neither, it defaults to "all opponents", backed by sole-opponent cells.
+    opponents: dict[tuple[int, str | None, int], set[int | None]] = defaultdict(set)
+    has_aggregate = set()
+    for c in evals.cells:
+        if c.fixed or not players[c.subject].placed:
+            continue
+        if c.opponent is None or not players[c.opponent].placed:
+            opponents[c.selection, c.commit, c.score].add(c.opponent)
+        if c.opponent is None:
+            has_aggregate.add(_met(c))
 
-    def draws_anchor(c: Cell) -> bool:
-        if c.subject == c.opponent or not c.is_anchor(players):
-            return False
+    def drawn_anchors(c: Cell) -> tuple[int, ...]:
+        if not c.is_anchor(players):
+            return ()
         kinds = panels.get((c.selection, c.score), ())
-        return "anchors" in kinds or (
+        if "anchors" in kinds:
+            return (c.subject,) if c.opponent is None else (c.subject, c.opponent)
+        if (
             "curve" in kinds
             and not evals.drawn[c.selection].seated
             and not c.fixed
-            and (c.selection, c.commit, c.score, c.opponent) in opponents
-        )
+            and c.opponent in opponents.get((c.selection, c.commit, c.score), ())
+        ):
+            return (c.subject,)
+        return ()
 
     notes: list[str] = []
     if unplaced:
-        anchors = {i for c in evals.cells if draws_anchor(c) for i in (c.subject, c.opponent)}
+        anchors = {i for c in evals.cells for i in drawn_anchors(c)}
         if names := [players[i].name for i in unplaced if i in anchors]:
             notes.append(
                 "Drawn as anchors, seated without an `at` and saved by no training run of the"
@@ -2227,8 +2238,10 @@ def _cell_notes(
         kinds = panels.get((c.selection, c.score))
         if not kinds:
             return False
-        if draws_anchor(c):
+        if drawn_anchors(c):
             return True
+        if c.fixed:
+            return False
         if "crosstable" in kinds and c.opponent is not None and c.subject != c.opponent:
             a, b = players[c.subject], players[c.opponent]
             if a.placed and b.placed and (a.line or "") == (b.line or ""):
@@ -2237,7 +2250,12 @@ def _cell_notes(
             return False
         if evals.drawn[c.selection].seated:
             return c.opponent is not None and (c.selection, c.subject, c.opponent) in seated_pairs
-        return players[c.subject].placed
+        if not players[c.subject].placed:
+            return False
+        if c.opponent is None or not players[c.opponent].placed:
+            return True
+        choices = opponents.get((c.selection, c.commit, c.score), ())
+        return _met(c) not in has_aggregate and (not choices or None in choices)
 
     if hidden:
         counts = Counter(c.environment for c in hidden if visible(c))

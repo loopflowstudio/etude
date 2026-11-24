@@ -375,6 +375,7 @@ def report():
 
 DUEL = environment("duel")
 HEURISTIC = Code(name="heuristic", source=[__file__], config={"strength": 5})
+CURVE_ONLY = EVALUATION_ONLY.replace(" Crosstable()", "")
 
 
 def outside(
@@ -1261,6 +1262,73 @@ def test_environment_note_counts_only_the_overlapping_checkpoint_score(tmp_path:
     assert {
         (page.players[c.subject].name, page.environments[c.environment].name) for c in page.cells
     } == {("u100", "second"), ("u200", "second")}
+
+
+def test_curve_names_an_outside_checkpoint_only_when_it_draws_its_score(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    file = experiment_file(tmp_path, "lab", CURVE_ONLY)
+    learner = outside("u100", {"updates": 100})
+    baseline = outside("baseline", {}, strength=3)
+    play_matches(
+        experiment="lab",
+        environment=DUEL,
+        matches=[duel(learner, baseline), duel(HEURISTIC, baseline), duel(HEURISTIC, HEURISTIC)],
+        play=play,
+        run="vs-baseline",
+        directory=runs,
+    )
+    page = build(runs, file)
+    assert not any("Drawn as anchors" in n for n in page.notes)
+    assert not any(c.subject == c.opponent for c in page.cells)
+
+    play_matches(
+        experiment="lab",
+        environment=DUEL,
+        matches=[duel(learner, HEURISTIC)],
+        play=play,
+        run="vs-heuristic",
+        directory=runs,
+    )
+    (note,) = [n for n in build(runs, file).notes if "Drawn as anchors" in n]
+    assert note.endswith(": baseline.")
+
+
+@pytest.mark.parametrize(
+    ("other_opponents", "crosstable", "count"),
+    [
+        pytest.param((), False, 2, id="sole-opponent-backs-each-score"),
+        pytest.param(("c",), False, 0, id="only-named-opponent-selectable"),
+        pytest.param(("a", "b"), False, 2, id="only-aggregates-selectable"),
+        pytest.param(("a", "b"), True, 4, id="crosstable-also-draws-both-pairs"),
+    ],
+)
+def test_environment_notes_count_selectable_placed_pairs(
+    tmp_path: Path, other_opponents: tuple[str, ...], crosstable: bool, count: int
+) -> None:
+    runs = tmp_path / "runs"
+    report = EVALUATION_ONLY if crosstable else CURVE_ONLY
+    file = experiment_file(tmp_path, "lab", report)
+    checkpoints = {
+        name: outside(f"u{at}", {"updates": at}, line="learner" if crosstable else name)
+        for name, at in (("a", 100), ("b", 200), ("c", 300))
+    }
+    pair = duel(checkpoints["a"], checkpoints["b"])
+    for name, matches in (
+        ("first", [pair]),
+        ("second", [pair, *(duel(checkpoints[k], HEURISTIC) for k in other_opponents)]),
+    ):
+        play_matches(
+            experiment="lab",
+            environment=environment(name),
+            matches=matches,
+            play=play,
+            run=name,
+            directory=runs,
+        )
+    notes = [n for n in build(runs, file).notes if "also played in" in n]
+    assert [n.split(" also played in")[0] for n in notes] == (
+        [f"{count} values were"] if count else []
+    )
 
 
 def test_seated_notes_follow_the_pairs_plotted_at_each_held_checkpoint(tmp_path: Path) -> None:

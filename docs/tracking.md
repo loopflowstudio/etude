@@ -120,11 +120,13 @@ Players in eval matches take three roles. A **placed checkpoint** has a clock
 position (`at`, from its seat or a training run of the experiment) and draws on
 curves and crosstables. An unplaced player — code, or an outside checkpoint
 seated without `at` — is an **opponent** when placed checkpoints play it (in the
-Opponent control and seating tooltips) and an **anchor** when it plays another
-unplaced player or a match with no placed checkpoints. Anchors appear in
-`Anchors` and as reference lines on curves without `seating=`; the `Anchor
-lines` control appears when a curve has a reference against its selected
-opponent. Top-of-page notes cover only values reachable panels draw: unplaced
+Opponent control and seating tooltips). It is an **anchor** when the `Anchors`
+panel shows its strength or a matchup it played, or when a curve without
+`seating=` draws its score against the selected opponent as a reference line.
+For example, on a curve against a frozen checkpoint, a heuristic's score
+against that checkpoint can supply an anchor line. The `Anchor lines` control
+appears when a curve has a reference against its selected opponent.
+Top-of-page notes cover unplaced
 outside checkpoints drawn as anchors, and drawn values played in more than one
 environment (each shown from the environment whose latest match is newest).
 

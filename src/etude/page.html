@@ -35,7 +35,7 @@ const COMMIT = PAGE.commits.some(k => k.commit === asked) ? asked : "";
 const inView = c => (c.commit ?? "") === COMMIT;
 const D = {...PAGE, cells: PAGE.cells.filter(inView), points: PAGE.points.filter(p => p.value == null || inView(p))};
 const M = model(D);
-const {T, R, JOBS, marks, markOf, jobPoints, cellOf, placed, fixedPlayers, jobOfRun, playerName, selName, choices, evaluated} = M;
+const {T, R, JOBS, marks, markOf, jobPoints, cellOf, isAnchorCell, unplacedPlayers, jobOfRun, playerName, selName, choices, evaluated} = M;
 const TRAINED = T.runs.length > 0;
 
 // The view lives in the URL, so a reload or a rewritten page shows the same thing. The x axis
@@ -73,7 +73,10 @@ const evalValue = (E, sel, extra, opponent) => M.evalValue(E.score, sel, {...F, 
 // Other unplaced players' scores against the curve's opponent, as reference lines.
 function anchorLines(E, sel, opp, extra = {}) {
   if (opp === "" || sel == null || M.seated(sel)) return [];
-  return fixedPlayers.filter(b => b !== +opp).map(b => cellOf(sel, E.score, b, +opp, false, {...F, ...extra})).filter(Boolean).map(c => ({y: c.value, label: D.players[c.subject].name}));
+  const split = {...F, ...extra};
+  return unplacedPlayers.map(b => cellOf(sel, E.score, b, +opp, false, split))
+    .filter(c => c && isAnchorCell(c))
+    .map(c => ({y: c.value, label: D.players[c.subject].name}));
 }
 // The values of `column` among the cells split by it, the filters and `other`, under the
 // filters on every other column. Split values are scalars, so a Set keeps each once.
@@ -338,11 +341,15 @@ function renderReport(hidden, vis) {
       }
       if (found.length) rampLegend(c, ref, found, `· ${chosen.label} · · not played`);
     } else if (panel.kind === "anchors") {
-      // Fixed players are not a job's: drawn once, against each other.
       const c = card(body, panel.title, caption(where, scoreName, "row against column", "strength: over matches that seat no placed checkpoint"), "full");
       if (sel == null) { c.appendChild(unselected(panel)); continue; }
-      const met = fixedPlayers.filter(a => D.cells.some(x => x.selection === sel && x.score === E.score && (x.subject === a || x.opponent === a) && (x.fixed || (!placed(x.subject) && x.opponent != null && !placed(x.opponent)))));
-      if (!met.length) { c.appendChild(node("div", "na", "No two fixed players played each other in these matches")); continue; }
+      const anchors = new Set();
+      for (const x of D.cells) if (x.selection === sel && x.score === E.score && isAnchorCell(x)) {
+        anchors.add(x.subject);
+        if (x.opponent != null) anchors.add(x.opponent);
+      }
+      const met = unplacedPlayers.filter(a => anchors.has(a));
+      if (!met.length) { c.appendChild(node("div", "na", "No two unplaced players played each other in these matches")); continue; }
       const strength = a => cellOf(sel, E.score, a, null, true, F);
       const order = [...met].sort((a, b) => (strength(b)?.value ?? -Infinity) - (strength(a)?.value ?? -Infinity) || D.players[a].name.localeCompare(D.players[b].name));
       const grid = node("div", "matrix"); grid.style.gridTemplateColumns = `minmax(110px, auto) minmax(64px, 1fr) repeat(${order.length}, minmax(48px, 1fr))`;
@@ -361,7 +368,7 @@ function renderReport(hidden, vis) {
           cell.onpointerleave = hideTip; grid.appendChild(cell);
         }
       }
-      rampLegend(c, ref, found, `· ${met.length} fixed player${met.length > 1 ? "s" : ""}: code, or checkpoints with no position`);
+      rampLegend(c, ref, found, `· ${met.length} anchor${met.length > 1 ? "s" : ""}: code, or checkpoints with no position`);
     } else card(body, `Unknown panel kind ${JSON.stringify(panel.kind)}`, "not drawn");
   }
   if (hasAnchorLines) control(ec, "Anchor lines", [["on", "On"], ["off", "Off"]], "lines");

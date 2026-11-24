@@ -144,6 +144,23 @@ test("Anchor lines is available only for a curve with a reference to toggle", ()
   assert.doesNotMatch(renderPage(data).controls("evals"), /Anchor lines/);
 });
 
+test("the Anchors panel lists unplaced players who have a strength or played each other", () => {
+  const players = ["solo", "alpha", "beta"].map(name => ({name, placed: false, config: "{}", at: {}}));
+  const data = page(players, [[0, 0, 0.5]]);
+  data.report.evals = [{kind: "anchors", title: "Anchors"}];
+  assert.match(renderPage(data).text, /No two unplaced players played each other/);
+
+  data.cells.push({...data.cells[0], subject: 1, opponent: 2});
+  const view = renderPage(data);
+  assert.match(view.text, /2 anchors/);
+  assert.match(view.text, /alpha/);
+  assert.match(view.text, /beta/);
+  assert.doesNotMatch(view.text, /solo/);
+
+  data.cells.push({...data.cells[0], opponent: null, fixed: true});
+  assert.match(renderPage(data).text, /3 anchors/);
+});
+
 test("a curve whose checkpoints all play two variants says so once, naming the variants", () => {
   const training = {
     jobs: [{name: "a", launch: "a", label: "A", runs: ["a1"]}], runs: [{name: "a1"}], clocks: [{name: "updates"}],

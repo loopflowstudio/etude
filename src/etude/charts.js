@@ -307,7 +307,8 @@ function model(D) {
   }
   D.players.forEach((a, i) => { if (a.run != null) bind(runMark(a.run, a.ordinal), i); });
   for (const i of positioned) bind(lineMark(lineOf(i), D.players[i].at), i);
-  const fixedPlayers = indices.filter(i => !placed(i));
+  const unplacedPlayers = indices.filter(i => !placed(i));
+  const isAnchorCell = c => c.subject !== c.opponent && (c.fixed || (!placed(c.subject) && c.opponent != null && !placed(c.opponent)));
   const coverage = new Map(D.coverage.map(c => [`${c.run}|${c.ordinal}|${c.tournament}`, c]));
   const jobOfRun = run => JOBS.find(j => j.runs.includes(run));
   // The players a curve draws: its runs' checkpoints, or its line's.
@@ -424,7 +425,7 @@ function model(D) {
     };
   };
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, jobPoints, cellOf, subjectAt, placed, positioned, atClocks, alignClock, fixedPlayers, usesSelection, panelSelection, seated, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
+  return {T, R, JOBS, marks, markOf, jobPoints, cellOf, subjectAt, placed, positioned, atClocks, alignClock, unplacedPlayers, isAnchorCell, usesSelection, panelSelection, seated, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
 }
 
 function curveScore(D, panel, selected) {
