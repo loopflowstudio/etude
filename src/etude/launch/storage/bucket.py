@@ -156,6 +156,10 @@ class BucketJournal:
     def started(self, session_id: str) -> bool:
         return self._once(self._session_prefix(session_id) + "out/receipt") is not None
 
+    def claimed(self, session_id: str) -> bool:
+        # A bucket learns of a session only from its worker's receipt.
+        return self.started(session_id)
+
     @_attribute_session
     def ended(self, session_id: str) -> datetime | None:
         raw = self._current(session_id, self._session_prefix(session_id) + "out/ended")

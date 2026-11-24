@@ -2255,7 +2255,11 @@ class Scheduler:
                     "existing machine confirmed; no duplicate create",
                     session=session.id,
                 )
-            elif deadline is not None and now >= deadline:
+            elif rental is None:
+                # An owned host answered that no start reached it. Ending fences
+                # any start still in flight, so the machine is free at once.
+                self._end_session(session)
+            elif now >= rental.deadline:
                 # The provider confirmed no machine on every pass of the paid
                 # window: none was made, so none is paid for or holds the pool.
                 for attempt in attempts:
@@ -2268,6 +2272,17 @@ class Scheduler:
             return
         session = self._creation_facts(session, now)
         if session.started_at is None:
+            if rental is None and (
+                session.finish_requested_at is not None
+                or all(
+                    self._store.run(a.run).launch.cancel_requested_at is not None
+                    for a in attempts
+                    if a.outcome is None
+                )
+            ):
+                # Nothing on an owned host still wants this start: abort its install.
+                self._end_session(session)
+                return
             limits = [d for d in (deadline, session.startup_deadline) if d is not None]
             if limits and now >= min(limits):
                 self._diagnose(

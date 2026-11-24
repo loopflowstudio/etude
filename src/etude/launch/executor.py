@@ -126,6 +126,10 @@ class Journal(Protocol):
     ) -> LogStream: ...
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path: ...
     def started(self, session_id: str) -> bool: ...
+    def claimed(self, session_id: str) -> bool:
+        """Whether a start reached the machine, even if its worker is not running yet."""
+        ...
+
     def ended(self, session_id: str) -> datetime | None: ...
     def prepare(
         self, packet: Packet, *, expires_at: datetime | None = None
@@ -193,12 +197,17 @@ class Executor:
 
     def find(self, session_id: str) -> str | None:
         if self.machines.owned:
-            return session_id if self.journal.started(session_id) else None
+            # The host itself answers, even where storage is the journal.
+            return session_id if self.control.claimed(session_id) else None
         return self.machines.find(session_id)
 
     def observe(self, session_id: str) -> Observation:
         seen = self.journal.observe(session_id)
-        return seen.model_copy(update={"alive": seen.alive and self.machines.alive(session_id)})
+        alive = seen.alive and self.machines.alive(session_id)
+        if alive and self.control is not self.journal and not seen.start_unknown:
+            # Storage has no receipt yet, so only the host can say its install failed.
+            alive = self.control.ended(session_id) is None
+        return seen.model_copy(update={"alive": alive})
 
     def started(self, session_id: str) -> bool:
         return self.journal.started(session_id)

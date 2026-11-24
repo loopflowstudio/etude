@@ -51,7 +51,7 @@ class AddRequest(Record):
 
 
 class SessionRequest(Record):
-    action: Literal["started", "ended", "end", "finish", "observe"]
+    action: Literal["started", "claimed", "ended", "end", "finish", "observe"]
     session: str
 
 
@@ -124,6 +124,7 @@ class RemoteReply(Record):
     log: str | None = None  # logs of the bootstrap producer: its text, None while it has none
     stream: LogStream | None = None
     started: bool = False
+    claimed: bool = False  # claimed: a start reached the host (`boot-claim`) or is running
     observation: Observation | None = None
     output: EncodedOutput | None = None
     folder: dict[str, str] | None = None
@@ -185,8 +186,13 @@ if request['action']=='logs' and request['producer']=='bootstrap':
     print(json.dumps({'log':path.read_text() if path.exists() else None})); sys.exit(0)
 if request['action']=='started' and not (home/'pid').exists():
     print(json.dumps({'started':False})); sys.exit(0)
-if request['action']=='observe' and (home/'boot-claim').exists() and not (home/'pid').exists():
-    print(json.dumps({'observation':{'alive':not (home/'ended').exists(),'progress':[],'start_unknown':True}})); sys.exit(0)
+if request['action']=='claimed':
+    print(json.dumps({'claimed':(home/'boot-claim').exists() or (home/'pid').exists()})); sys.exit(0)
+if request['action']=='observe' and not (home/'pid').exists():
+    # Answer without installing. Bootstrap notes `ended` only before worker entry,
+    # so a session ended without a worker, or never claimed, started no job.
+    booting=(home/'boot-claim').exists() and not (home/'ended').exists()
+    print(json.dumps({'observation':{'alive':booting,'progress':[],'start_unknown':booting}})); sys.exit(0)
 if request['action']=='ended':
     path=home/'ended'
     print(json.dumps({'ended_at':path.read_text() if path.exists() else None})); sys.exit(0)
@@ -195,9 +201,16 @@ if request['action']=='end':
     (home/'cancel-start').touch()
     if not (home/'pid').exists():
         path=home/'ended'
+        if not (home/'boot-claim').exists() and not path.exists():
+            # Nothing started here, and the cancel fences any start still in flight.
+            from datetime import datetime,UTC
+            path.write_text(datetime.now(UTC).isoformat())
+        # A claimed install sees the cancel and writes `ended` when it has stopped.
         print(json.dumps({'ended_at':path.read_text() if path.exists() else None})); sys.exit(0)
 if request['action']=='start':
     home.mkdir(parents=True,exist_ok=True,mode=0o700)
+    if (home/'cancel-start').exists():
+        print(json.dumps({})); sys.exit(0)
     try:
         (home/'boot-claim').open('x').close()
     except FileExistsError:
@@ -371,6 +384,9 @@ class SSHJournal:
 
     def started(self, session_id: str) -> bool:
         return self.ssh.call(SessionRequest(action="started", session=session_id)).started
+
+    def claimed(self, session_id: str) -> bool:
+        return self.ssh.call(SessionRequest(action="claimed", session=session_id)).claimed
 
     def ended(self, session_id: str) -> datetime | None:
         return self.ssh.call(SessionRequest(action="ended", session=session_id)).ended_at

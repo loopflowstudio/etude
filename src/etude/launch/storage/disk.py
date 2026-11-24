@@ -36,6 +36,11 @@ class DirectoryJournal:
     def started(self, session_id: str) -> bool:
         return (self._root / session_id / "pid").exists()
 
+    def claimed(self, session_id: str) -> bool:
+        """Whether a start reached this host: a running worker, or a start that holds the session."""
+        home = self._root / session_id
+        return any((home / name).exists() for name in ("pid", "packet.json", "boot-claim"))
+
     def ended(self, session_id: str) -> datetime | None:
         note = self._root / session_id / "ended"
         return datetime.fromisoformat(note.read_text()) if note.exists() else None

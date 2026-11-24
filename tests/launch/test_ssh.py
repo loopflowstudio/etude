@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from collections import Counter
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -12,15 +13,20 @@ import pytest
 
 from etude.cli import main
 from etude.jobs import continue_from
+from etude.launch.aws import Keys
 from etude.launch.executor import Executor, local
 from etude.launch.provisioner.machines import OwnedMachine
 from etude.launch.records import Machine, Pool
+from etude.launch.records import Storage as Place
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.ssh import SSH, RemoteReply, RemoteRequest, SSHJournal, SSHStart
+from etude.launch.storage.bucket import BucketJournal
+from etude.launch.storage.s3 import Bucket
 from etude.records import Clock
 from etude.spec import Job, RunRequest, Until
 from tests.launch.counting import job_text
 from tests.launch.fake import open_database
+from tests.launch.test_runpod_machines import Storage
 from tests.train.tracking import open_run
 
 
@@ -74,6 +80,89 @@ def test_remote_host_runs_kept_work_logs_outputs_and_stops(
     executable.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
     scheduler.cancel(pending)
     assert scheduler.wait(pending, every=0.1, timeout=20)[0].outcome == "cancelled"
+
+
+RELAY = '#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n'
+UNREACHABLE = "#!/bin/sh\nexit 255\n"
+
+
+def _owned_host(tmp_path: Path) -> tuple[Scheduler, Path]:
+    """A scheduler with one owned SSH host, and the SSH stand-in that reaches it."""
+    executable = tmp_path / "ssh"
+    executable.write_text(RELAY)
+    executable.chmod(0o755)
+    ssh = SSH("bench", str(tmp_path / "remote"))
+    service = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
+    scheduler = Scheduler(open_database(tmp_path / "state.db"), {"ssh": lambda held: service})
+    scheduler.add_machine("bench", "bench")
+    return scheduler, executable
+
+
+def _echo(text: str) -> Job:
+    return Job(command=f"echo {text}", max_hours=0.01, max_usd=Decimal(1))
+
+
+def test_a_start_that_never_reached_an_owned_host_is_fenced_and_frees_it(tmp_path: Path) -> None:
+    scheduler, executable = _owned_host(tmp_path)
+    executable.write_text(UNREACHABLE)
+    (lost,) = scheduler.queue(_echo("lost"), "bench")
+    scheduler.tick()
+    assert scheduler.read(lost).phase == "renting"
+    session = scheduler.attempts(lost)[0].session
+    executable.write_text(RELAY)
+    scheduler.cancel(lost)
+    (queued,) = scheduler.queue(_echo("queued"), "bench")
+    (status,) = scheduler.wait(queued, every=0.1, timeout=20)
+    assert status.outcome == "succeeded"
+    assert scheduler.read(lost).outcome == "cancelled"
+    # The fence stops a start still in flight from claiming the session later.
+    home = tmp_path / "remote" / session
+    assert (home / "cancel-start").exists() and (home / "ended").exists()
+    assert not (home / "boot-claim").exists()
+
+
+def test_a_lost_start_reply_during_install_is_recovered_and_cancel_aborts_it(
+    tmp_path: Path,
+) -> None:
+    scheduler, executable = _owned_host(tmp_path)
+    executable.write_text(UNREACHABLE)
+    (installing,) = scheduler.queue(_echo("installing"), "bench")
+    scheduler.tick()
+    home = tmp_path / "remote" / scheduler.attempts(installing)[0].session
+    # The start reached the host before its reply was lost; its install holds the claim.
+    home.mkdir(parents=True)
+    (home / "boot-claim").touch()
+    executable.write_text(RELAY)
+    (waiting,) = scheduler.queue(_echo("waiting"), "bench")
+    scheduler.tick()
+    assert scheduler.read(installing).phase == "setting_up"
+    assert scheduler.read(waiting).phase == "queued"  # the host is not booked twice
+    scheduler.cancel(installing)
+    scheduler.tick()
+    assert (home / "cancel-start").exists()
+    assert scheduler.read(waiting).phase == "queued"  # held until the install stops
+    (home / "ended").write_text(datetime.now(UTC).isoformat())  # the aborted install's note
+    (status,) = scheduler.wait(waiting, every=0.1, timeout=20)
+    assert status.outcome == "succeeded"
+    assert scheduler.read(installing).outcome == "cancelled"
+
+
+def test_a_failed_install_on_a_bucket_backed_host_ends_before_any_receipt(tmp_path: Path) -> None:
+    executable = tmp_path / "ssh"
+    executable.write_text(RELAY)
+    executable.chmod(0o755)
+    ssh = SSH("bench", str(tmp_path / "remote"))
+    place = Place(name="east", bucket="b", prefix="etude", provider="s3", region="us-east-1")
+    bucket = Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), Storage())
+    service = Executor(
+        OwnedMachine("bench"), SSHStart(ssh), BucketJournal(place, bucket), control=SSHJournal(ssh)
+    )
+    home = tmp_path / "remote" / "s1"
+    home.mkdir(parents=True)
+    (home / "boot-claim").touch()
+    assert service.observe("s1").alive  # installing; storage has heard nothing yet
+    (home / "ended").write_text(datetime.now(UTC).isoformat())  # the install failed
+    assert not service.observe("s1").alive
 
 
 def test_runs_move_between_local_and_remote_disk_including_kept_work(tmp_path: Path) -> None:
