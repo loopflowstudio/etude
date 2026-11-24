@@ -93,7 +93,7 @@ function line(host, series, o = {}) {
       return [...reasons].map(reason => `${s.label}: ${reason}`);
     });
     for (const text of notes.length ? notes : [o.empty || "Nothing recorded for this selection"]) host.appendChild(node("div", "na chart-empty", text));
-    return;
+    return false;
   }
   const positions = new Set(series.flatMap(s => s.points.filter(p => p.x != null).map(p => p.x)));
   if (o.checkpoint != null) positions.add(o.checkpoint);
@@ -194,6 +194,7 @@ function line(host, series, o = {}) {
   const u = new uPlot(opts, data, host);
   u.over.addEventListener("pointerleave", hideTip);
   charts.push(u);
+  return true;
 }
 
 // ---------------------------------------------------------------- an experiment's page data
@@ -307,7 +308,8 @@ function model(D) {
   }
   D.players.forEach((a, i) => { if (a.run != null) bind(runMark(a.run, a.ordinal), i); });
   for (const i of positioned) bind(lineMark(lineOf(i), D.players[i].at), i);
-  const fixedPlayers = indices.filter(i => !placed(i));
+  const unplacedPlayers = indices.filter(i => !placed(i));
+  const isAnchorCell = c => c.subject !== c.opponent && (c.fixed || (!placed(c.subject) && c.opponent != null && !placed(c.opponent)));
   const coverage = new Map(D.coverage.map(c => [`${c.run}|${c.ordinal}|${c.tournament}`, c]));
   const jobOfRun = run => JOBS.find(j => j.runs.includes(run));
   // The players a curve draws: its runs' checkpoints, or its line's.
@@ -364,14 +366,14 @@ function model(D) {
     return p == null || p.control ? selected : p.selection;
   };
   const usesSelection = (D.panel_selections || []).some(p => p.control);
-  // Opponents are the anchors checkpoints met, by name; checkpoints met are head-to-head games.
+  // Offer the unplaced players checkpoints met, in name order.
   function opponents(score, sel) {
     const seen = new Set(D.cells.filter(c => c.selection === sel && c.score === score && !c.fixed && placed(c.subject)).map(c => c.opponent));
     // Use the same name order as the served headline, independent of browser locale.
     const names = i => D.players[i].name.toLowerCase();
-    const anchors = [...seen].filter(o => o != null && !placed(o)).sort((a, b) =>
+    const unplaced = [...seen].filter(o => o != null && !placed(o)).sort((a, b) =>
       names(a) < names(b) ? -1 : names(a) > names(b) ? 1 : a - b);
-    return [...anchors.map(o => [String(o), D.players[o].name]), ...(seen.has(null) || !anchors.length ? [["", "all opponents"]] : [])];
+    return [...unplaced.map(o => [String(o), D.players[o].name]), ...(seen.has(null) || !unplaced.length ? [["", "all opponents"]] : [])];
   }
   // Why a checkpoint has no value here. Failed and not yet played break a line; a checkpoint
   // nothing played, or played only outside this selection, is no point of it and is marked.
@@ -408,7 +410,7 @@ function model(D) {
     };
   }
   // Each checkpoint's value in the requested matches: as seated, for a selection of seatings;
-  // else against the opponent given, an anchor's index or "" for all. Scientific variants are
+  // else against the opponent given, an unplaced player's index or "" for all. Scientific variants are
   // selected by their results, never averaged together behind a curve.
   const evalValue = (score, sel, split, opponent) => {
     if (seated(sel)) return seatedValue(score, sel, split);
@@ -424,7 +426,7 @@ function model(D) {
     };
   };
   const evaluated = pts => pts.filter(p => !p.missing && !p.skip);
-  return {T, R, JOBS, marks, markOf, jobPoints, cellOf, subjectAt, placed, positioned, atClocks, alignClock, fixedPlayers, usesSelection, panelSelection, seated, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
+  return {T, R, JOBS, marks, markOf, jobPoints, cellOf, subjectAt, placed, positioned, atClocks, alignClock, unplacedPlayers, isAnchorCell, usesSelection, panelSelection, seated, coverage, jobOfRun, linesOf, lineMembers, playerName, selName, choices, opponents, evalValue, evaluated};
 }
 
 function curveScore(D, panel, selected) {
