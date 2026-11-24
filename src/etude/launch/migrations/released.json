@@ -4,5 +4,6 @@
   {"name": "run_names", "sha256": "09e8ac87244db5dde27262d4986179271687a508efd210c0484da2b734486088", "floor": "0.4.0"},
   {"name": "provider_refusal_lookup", "sha256": "ed356ec036fde970e8ecc68273e1d8e224fe2d6b39fca9aadd572ed4b8031a7e", "floor": "0.4.0"},
   {"name": "spot_rentals", "sha256": "ee513c2a474a8c6caff0eb5a519256731df0a1c2a7d10dae50392dba192cdf2c", "floor": "0.4.2"},
-  {"name": "provider_units", "sha256": "29b79ce5df90e1af583d341d9bbf18b11c81ba0e249d89a7b7d10efab5c63aa6", "floor": "0.4.2"}
+  {"name": "provider_units", "sha256": "29b79ce5df90e1af583d341d9bbf18b11c81ba0e249d89a7b7d10efab5c63aa6", "floor": "0.4.2"},
+  {"name": "live_machine_inventory", "sha256": "42ab2661091b6f76c5f6266ba86cc4cb9cfab51450b4b60eefa9aef70b27bc79", "floor": "0.4.2"}
 ]
