@@ -288,6 +288,22 @@ finishing. Credentials for explicitly authorized bucket/remote scenarios come
 from Doppler, injected into the command; never print them. Keep each scenario's
 home and storage prefix isolated and remove only its own resources.
 
+To hold the local pool busy, add a second `TrainingJob` (`slow`) whose config
+sleeps 1 s per update for 40 updates, and `launch --job slow` first: the local
+pool has one place, so `launch --resume --job coin …` fails with `no free
+machine; etude queue would wait`, while `queue` records it. Drive `queue
+--watch 5` with a Python subprocess driver and SIGINT (exit 0). The prototype
+rewrites `out/coin.json` on every attempt, so evals of a pre-resume checkpoint
+fail as `input_undelivered`; that is the example breaking the "keep it
+unchanged" contract, not the launcher.
+
+No SSH host is reachable on this Mac (sshd off, Docker daemon stopped): owned
+SSH start recovery and out restoration run only through `tests/launch/test_ssh.py`
+and `tests/launch/test_out.py`. For `etude view` disconnects, open 30 raw
+sockets that send a GET and close with `SO_LINGER (1, 0)` (RST), then require
+a 200 afterwards and no traceback in the server output; the merge base prints
+`BrokenPipeError` for the same driver.
+
 ## Etude: explicit launcher upgrades
 
 Use an empty lab `ETUDE_HOME` and explicitly run `etude database upgrade
