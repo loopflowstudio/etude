@@ -126,6 +126,10 @@ class Journal(Protocol):
     ) -> LogStream: ...
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path: ...
     def started(self, session_id: str) -> bool: ...
+    def claimed(self, session_id: str) -> bool:
+        """Whether a start reached the machine, even if its worker is not running yet."""
+        ...
+
     def ended(self, session_id: str) -> datetime | None: ...
     def prepare(
         self, packet: Packet, *, expires_at: datetime | None = None
@@ -193,12 +197,17 @@ class Executor:
 
     def find(self, session_id: str) -> str | None:
         if self.machines.owned:
-            return session_id if self.journal.started(session_id) else None
+            # The host itself answers, even where storage is the journal.
+            return session_id if self.control.claimed(session_id) else None
         return self.machines.find(session_id)
 
     def observe(self, session_id: str) -> Observation:
         seen = self.journal.observe(session_id)
-        return seen.model_copy(update={"alive": seen.alive and self.machines.alive(session_id)})
+        alive = seen.alive and self.machines.alive(session_id)
+        if alive and self.control is not self.journal:
+            # Until storage confirms final delivery, check the process on the host.
+            alive = self.control.observe(session_id).alive
+        return seen.model_copy(update={"alive": alive})
 
     def started(self, session_id: str) -> bool:
         return self.journal.started(session_id)
@@ -211,7 +220,16 @@ class Executor:
 
     def end(self, session_id: str) -> datetime | None:
         if self.machines.owned:
-            return self.control.end(session_id)
+            ended = self.control.end(session_id)
+            # The worker can acknowledge shutdown while its courier is still uploading.
+            if (
+                ended is not None
+                and self.control is not self.journal
+                and self.journal.ended(session_id) is None
+                and self.control.observe(session_id).alive
+            ):
+                return None
+            return ended
         note = self.journal.ended(session_id)
         gone = self.machines.end(session_id)
         return (note or gone) if gone is not None else None

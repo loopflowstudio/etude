@@ -25,7 +25,12 @@ from etude.launch.logging import Console, write_log
 
 
 def startup_timeout() -> float | None:
-    """Remaining startup/rental allowance from the launch, never a renewed duration."""
+    """Remaining startup/rental allowance from the launch, never a renewed duration.
+
+    Raises once the launch's allowance is spent, or once an owned host's start
+    is cancelled (`ETUDE_STARTUP_CANCEL` names its `cancel-start` file).
+    """
+    _check_cancel()
     limits = [
         datetime.fromisoformat(value)
         for name in ("ETUDE_STARTUP_DEADLINE", "ETUDE_DEADLINE")
@@ -39,9 +44,13 @@ def startup_timeout() -> float | None:
     return left
 
 
-def _remaining(deadline: float | None) -> float | None:
+def _check_cancel() -> None:
     if (cancel := os.environ.get("ETUDE_STARTUP_CANCEL")) and Path(cancel).exists():
         raise InterruptedError("startup cancelled")
+
+
+def _remaining(deadline: float | None) -> float | None:
+    _check_cancel()
     if deadline is None:
         return None
     left = deadline - time.monotonic()

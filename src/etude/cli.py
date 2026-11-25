@@ -112,6 +112,8 @@ def _submit(
         raise LauncherError("--until needs --resume")
     if resume and quote:
         raise LauncherError("--resume cannot be combined with --quote")
+    if resume and watch is not None:
+        raise LauncherError("--resume cannot be combined with --watch")
     try:
         budget = None if max_usd is None else Decimal(max_usd)
     except InvalidOperation:
@@ -134,6 +136,7 @@ def _submit(
                 resume=resume,
                 until=None if until is None else Until.parse(until),
                 retry_failed=retry_failed,
+                scoped=source is None,
             )
             if watch is None:
                 break
@@ -163,6 +166,17 @@ SmokeOption = Annotated[
 FileHelp = Annotated[
     bool, typer.Option("--help", "-h", help="show these options, then the file's own parameters")
 ]
+# `launch` and `queue` take the same experiment options.
+JobOption = Annotated[str | None, typer.Option(help="select a declared job")]
+SeedOption = Annotated[int | None, typer.Option(help="select a declared seed")]
+ResumeOption = Annotated[bool, typer.Option(help="resume the selected run on current source")]
+UntilOption = Annotated[str | None, typer.Option(help="absolute target for the resumed run")]
+MaxUsdOption = Annotated[str | None, typer.Option(help="experiment commitment limit in dollars")]
+SourceOption = Annotated[str | None, typer.Option(help="where experiment runs are delivered")]
+RetryFailedOption = Annotated[bool, typer.Option(help="retry failed eval matches")]
+WatchOption = Annotated[
+    float | None, typer.Option(min=1, help="pass again every SECONDS until Ctrl-C")
+]
 
 
 @app.command(
@@ -181,18 +195,14 @@ def launch(
     smoke: SmokeOption = False,
     help: FileHelp = False,
     experiment: ExperimentOption = None,
-    job: Annotated[str | None, typer.Option(help="select a declared job")] = None,
-    seed: Annotated[int | None, typer.Option(help="select a declared seed")] = None,
-    resume: Annotated[
-        bool, typer.Option(help="resume the selected runs on current source")
-    ] = False,
-    until: Annotated[str | None, typer.Option(help="absolute target for the resumed run")] = None,
-    max_usd: Annotated[
-        str | None, typer.Option(help="experiment commitment limit in dollars")
-    ] = None,
-    source: Annotated[str | None, typer.Option(help="where experiment runs are delivered")] = None,
-    retry_failed: Annotated[bool, typer.Option(help="retry failed eval matches")] = False,
-    watch: Annotated[float | None, typer.Option(min=1, help="pass again every SECONDS")] = None,
+    job: JobOption = None,
+    seed: SeedOption = None,
+    resume: ResumeOption = False,
+    until: UntilOption = None,
+    max_usd: MaxUsdOption = None,
+    source: SourceOption = None,
+    retry_failed: RetryFailedOption = False,
+    watch: WatchOption = None,
 ) -> None:
     """Queue a file's runs and get the machines to start them now, or fail and queue nothing."""
     _submit(
@@ -229,13 +239,14 @@ def queue(
     smoke: SmokeOption = False,
     help: FileHelp = False,
     experiment: ExperimentOption = None,
-    job: Annotated[str | None, typer.Option(help="select a declared job")] = None,
-    seed: Annotated[int | None, typer.Option(help="select a declared seed")] = None,
-    max_usd: Annotated[
-        str | None, typer.Option(help="experiment commitment limit in dollars")
-    ] = None,
-    source: Annotated[str | None, typer.Option(help="where experiment runs are delivered")] = None,
-    retry_failed: Annotated[bool, typer.Option(help="retry failed eval matches")] = False,
+    job: JobOption = None,
+    seed: SeedOption = None,
+    resume: ResumeOption = False,
+    until: UntilOption = None,
+    max_usd: MaxUsdOption = None,
+    source: SourceOption = None,
+    retry_failed: RetryFailedOption = False,
+    watch: WatchOption = None,
 ) -> None:
     """Add a file's runs to the queue. They start when a machine has room or can be rented."""
     _submit(
@@ -245,13 +256,16 @@ def queue(
         rent,
         max_usd,
         help,
+        queued=True,
+        smoke=smoke,
         experiment=experiment,
         job=job,
         seed=seed,
-        queued=True,
-        smoke=smoke,
+        resume=resume,
+        until=until,
         source=source,
         retry_failed=retry_failed,
+        watch=watch,
     )
 
 
@@ -444,9 +458,7 @@ def eval_experiment(
             "default: where runs are written on this computer"
         ),
     ] = None,
-    watch: Annotated[
-        float | None, typer.Option(min=1, help="pass again every SECONDS until Ctrl-C")
-    ] = None,
+    watch: WatchOption = None,
     retry_failed: Annotated[
         bool,
         typer.Option(
@@ -471,6 +483,7 @@ def eval_experiment(
                 definition,
                 source=storage,
                 retry_failed=retry_failed,
+                scoped=source is None,
             )
             if watch is None:
                 break

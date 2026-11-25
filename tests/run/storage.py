@@ -20,6 +20,7 @@ class MeasuredStorage:
         self.uploads = 0
         self.written = 0  # bytes uploaded, replaced objects included
         self.listings = 0
+        self.listed: list[str] = []  # prefixes listed, in order
         self.uploaded: list[str] = []
         self.got: list[str] = []  # keys asked for, a missing one included
 
@@ -55,10 +56,12 @@ class MeasuredStorage:
 
     def keys(self, prefix: str) -> list[str]:
         self.listings += 1
+        self.listed.append(prefix)
         return self.storage.keys(prefix)
 
     def versions(self, prefix: str) -> dict[str, str]:
         self.listings += 1
+        self.listed.append(prefix)
         return self.storage.versions(prefix)
 
     def uri(self, key: str) -> str:

@@ -127,6 +127,8 @@ def _start(root: Path, request: StartRequest) -> RemoteReply:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+        # The courier owns the session through final delivery, even after its worker exits.
+        write(home / "courier-pid", str(process.pid))
         return RemoteReply(pid=process.pid)
     # Sources were staged above; this start uses the same process implementation.
     write(home / "packet.json", request.packet.model_dump_json())

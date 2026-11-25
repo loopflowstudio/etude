@@ -840,6 +840,98 @@ def training_jobs() -> list[TrainingJob]:
     assert run.state == "finished"
 
 
+RANKED = """
+from etude.eval.match import environment
+from etude.eval.records import Aligned, Benchmark, Seating
+from etude.jobs import EvalJob, ExperimentState
+from tests.eval.games import play
+from tests.eval.stored import stored_inference, stored_relative
+
+def eval_jobs(state: ExperimentState) -> list[EvalJob]:
+    direct = stored_inference(config={})
+    rival = stored_relative(Aligned(clock="updates", job="small", experiment="rival"), direct)
+    ladder = Benchmark(name="ladder", environment=environment("duel"), seatings=(
+        Seating(name="rival", players=(direct, rival), configs=({},), games=1),))
+    return [EvalJob(tournament=ladder, checkpoints=[r.final for r in state.runs if r.final],
+                    play=play, repo=None, max_hours=1)]
+"""
+
+
+def test_a_scoped_pass_lists_only_its_experiment_and_the_lines_it_names(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "source"
+    for experiment, run in (("lab", "base@0"), ("lab", "lab@1"), ("rival", "small@0")):
+        job = run.partition("@")[0]
+        with open_run(
+            experiment=experiment, run=run, job=job, clocks=["updates"], directory=root
+        ) as tracked:
+            tracked.log({"value": 1}, updates=1)
+    with open_run(experiment="history", run="old@0", clocks=["updates"], directory=root):
+        pass
+    plain = tmp_path / "plain.py"
+    plain.write_text(RANKED.replace('experiment="rival"', 'experiment="lab"'))
+    ranked = tmp_path / "ranked.py"
+    ranked.write_text(RANKED)
+    for file, listed in ((plain, ["lab/", "lab@"]), (ranked, ["lab/", "lab@", "rival/", "rival@"])):
+        measured = MeasuredStorage(DirectoryStorage(root))
+        advance(read_experiment(file, experiment="lab"), source=measured, scoped=True)
+        assert measured.listed == listed
+        assert "lab: state from" in (out := capsys.readouterr().out)
+        assert "2 training runs" in out
+    # An explicit source may be an experiment's own folder: it is listed whole.
+    measured = MeasuredStorage(DirectoryStorage(root / "lab"))
+    advance(read_experiment(plain, experiment="lab"), source=measured)
+    assert measured.listed == [""]
+    assert "1 training run," in capsys.readouterr().out
+
+
+def test_queue_resumes_and_watches_on_a_busy_pool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    upgrade(tmp_path / "home", development=True)
+    b = bench(tmp_path)
+    b.scheduler.add_pool(Pool(name="busy"))  # no free machine: launch would refuse
+    monkeypatch.setattr(client, "_client", lambda: b.scheduler)
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    recipe = """
+from pydantic import BaseModel
+from etude.jobs import TrainingJob
+from etude.train.tracking import track
+
+class Config(BaseModel):
+    pass
+
+def train(config: Config) -> None:
+    with track(config=config, clocks=['updates']) as run:
+        run.log({"value": 1}, updates=1)
+
+def training_jobs() -> list[TrainingJob]:
+    return [TrainingJob(name="base", train=train, config=Config(), max_hours=1)]
+"""
+    file = checkout(tmp_path / "repo", {"busy.py": recipe}) / "busy.py"
+    passes = iter((None,))
+
+    def sleep(seconds: float) -> None:
+        if next(passes, KeyboardInterrupt) is KeyboardInterrupt:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("time.sleep", sleep)
+    assert main(["queue", str(file), "--pool", "busy", "--watch", "60"]) == 0
+    watched = capsys.readouterr().out
+    assert "busy/base@0  new, queued" in watched and "busy/base@0  queued" in watched
+    (queued,) = b.scheduler.runs()
+    b.scheduler.cancel(queued.id)
+    assert b.scheduler.read(queued.id).outcome == "cancelled"
+    resume = ["--pool", "busy", "--job", "base", "--seed", "0", "--resume"]
+    for command in ("queue", "launch"):
+        assert main([command, str(file), *resume, "--watch", "60"]) == 1
+        assert "--resume cannot be combined with --watch" in capsys.readouterr().err
+    assert main(["queue", str(file), *resume]) == 0
+    assert b.scheduler.read(queued.id).phase == "queued"
+
+
 def test_policy_key_fresh_experiment_submits_training_then_evaluates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

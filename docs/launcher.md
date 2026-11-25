@@ -56,6 +56,21 @@ Python environment from Etude's client. `--pool lab --rent gpu` uses available
 owned capacity first, then rents. Machine and rental facts are separate from
 scientific run identity.
 
+If starting a session on an owned SSH host loses its reply, Etude checks the
+host directly: an install or worker already running there is recovered and
+tracked without starting a second copy, while an unclaimed session is fenced
+and freed at once so queued work can use the machine even with no startup
+cutoff. Cancelling a run while its owned host is still setting up (installing,
+or fetching and restoring inputs from storage) stops that setup and frees the
+host once stopped. A failed or killed install also frees the host. If the host
+is unreachable, Etude waits until it can check.
+
+On an SSH host with bucket storage, Etude tracks the courier from input fetch
+through final upload. The host stays occupied while the courier delivers the
+last files and logs, even after the job exits. If the courier dies, including
+during the start receipt upload or a host reboot, Etude checks the host, stops
+any remaining worker, and releases the machine for queued work.
+
 ## Rented machines
 
 These commands configure one rental at a time. Substitute your bucket and
@@ -208,9 +223,37 @@ window sizing, provider rounding and retries.
 
 ## Queue, launch and wait
 
+```text
+$ uv run etude queue experiment.py --resume --job base --seed 0 --until updates=4000 --rent gpu
+experiment: state from s3://YOUR_BUCKET/etude/launch: 1 training run, 0 eval runs
+experiment/base@0  new, queued
+$ uv run etude queue experiment.py --watch 60 --rent gpu
+experiment: state from s3://YOUR_BUCKET/etude/launch: 1 training run, 0 eval runs
+experiment/base@0  running
+eval prediction: 100 new, 0 running, 0 failed, queued experiment/evals-a1b2c3d4e5f6
+```
+
+`launch` and `queue` accept the same experiment options (`--job`, `--seed`,
+`--resume`, `--until`, `--watch`, `--max-usd`, `--source`, `--retry-failed`).
+They differ only in whether capacity is required right away (`launch`, plus
+`--quote`) or may wait in the queue (`queue`).
+
+`--resume` gives one selected run another attempt on the current source; select
+`--job` and `--seed` when the file declares several. `--until` requires
+`--resume` and raises that run's absolute target. `--resume` cannot be combined
+with `--watch` or `--quote`. `--watch SECONDS` repeats passes until Ctrl-C so
+newly landed checkpoints queue or launch their eval matches automatically.
+
+When `--source` is omitted on `launch`, `queue` or `etude eval`, Etude derives
+the target's delivery storage and lists only this experiment's prefixes (plus
+any other experiment named by a cross-experiment relative slot), avoiding a
+full scan of historical experiments in a shared bucket. Passing `--source`
+explicitly lists that whole prefix so experiment-folder sources
+(`s3://YOUR_BUCKET/etude/launch/experiment`) and nested directories still work.
+
 | Command | What it does |
 | --- | --- |
-| `queue FILE.py` | Records intent and returns ids; waits for no provider. |
+| `queue FILE.py` | Records intent and returns ids; waits for no provider (`--watch SECONDS` loops passes). |
 | `launch FILE.py` | Acquires capacity, starts what fits and queues the rest; fails with no runs recorded if none fit. |
 | `launch FILE.py --quote` | Plans without submitting or renting. |
 | `status`, `machines`, `logs` | Reads retained evidence; prints freshness/incompleteness. |
