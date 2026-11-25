@@ -171,12 +171,11 @@ class Crosstable(Record):
 
 
 class Anchors(Record):
-    """Fixed players (code, or checkpoints with no `at`) against each other.
+    """Unplaced players (code, or checkpoints with no position) against each other.
 
-    Drawn once, not per job: each anchor's score against the others, and its
-    strength, the score over its matches that seat no placed checkpoint. A
-    curve against one anchor draws the others' scores against it as reference
-    lines.
+    The panel shows each anchor's score against the others and its strength
+    over matches that seat no placed checkpoint. A curve against one unplaced
+    opponent draws other unplaced players' scores against it as reference lines.
     """
 
     kind: Literal["anchors"] = "anchors"

@@ -141,11 +141,30 @@ def test_courier_hashes_mutable_out_and_restores_every_file_once(
     # Relaying from storage to an owned host carries the same complete directory.
     held = journal.held("run1")
     assert held["out/state"] == b"save two" and held["out/weights/model.json"] == b"weights"
-    storage.objects["etude/run1/out/state"] = b"truncated"
-    broken, _, broken_root = machine(tmp_path / "broken", storage)
-    with pytest.raises(StorageUnavailable, match="changed length"):
-        broken.restore(links, [work])
-    assert not (broken_root / "out/state").exists()
+    # A replaced machine's last flush after the listing is a newer whole file.
+    storage.objects["etude/run1/out/state"] = b"save three, flushed on teardown"
+    late, _, late_root = machine(tmp_path / "late", storage)
+    late.restore(links, [work])
+    assert (late_root / "out/state").read_bytes() == b"save three, flushed on teardown"
+    before = len(storage.asked)
+    late.carry_out()
+    assert not [
+        key
+        for method, key in storage.asked[before:]
+        if method in ("PUT", "POST") and key.startswith("etude/run1/out/state")
+    ]
+    weights = storage.objects["etude/run1/out/weights/model.json"]
+    storage.objects["etude/run1/out/weights/model.json"] = b"other weights"
+    changed, _, changed_root = machine(tmp_path / "changed", storage)
+    with pytest.raises(StorageUnavailable, match="differs from its checkpoint record"):
+        changed.restore(links, [work])
+    assert not (changed_root / "out/weights/model.json").exists()
+    storage.objects["etude/run1/out/weights/model.json"] = weights
+    del storage.objects["etude/run1/out/state"]
+    missing, _, missing_root = machine(tmp_path / "missing", storage)
+    with pytest.raises(StorageUnavailable, match="out/state is missing"):
+        missing.restore(links, [work])
+    assert not (missing_root / "out/state").exists()
 
 
 def test_a_retry_on_the_same_machine_restores_out_only_when_its_folder_is_gone(

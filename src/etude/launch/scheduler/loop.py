@@ -1535,7 +1535,7 @@ class Scheduler:
             try:
                 if self._store.rental_for(idle) is None:
                     self._end_session(idle)
-                elif idle.finish_requested_at is None:
+                else:
                     # A rented machine delivers its last files and end receipt before it
                     # is deleted: `_confirm_ends` ends it once its journal says so, or at
                     # its deadline. Recorded before it is sent: a session that may have
@@ -1552,6 +1552,8 @@ class Scheduler:
         """Settle only shutdowns already requested; never place work or decide to end a rental."""
         for session in self._store.finishing_sessions(supply=supply.name):
             self._store.check_lock(supply.name)
+            if isinstance(supply, Pool) and session.started_at is None:
+                continue  # _observe retries the host fence without loading its client.
             try:
                 if self._service(session).finish(session.id) is not None:
                     self._end_session(session)
@@ -1842,24 +1844,19 @@ class Scheduler:
         )
 
     def _idle_sessions(self, supply: Supply, now: datetime) -> list[Session]:
-        """Sessions of a pool or on-demand that are up and have nothing left to run."""
-        return [session for session, free in self._free_slots(supply, now) if free == supply.slots]
+        """Sessions of a pool or on-demand that are open and have nothing left to run."""
+        return [
+            session for session, free in self._open_sessions(supply, now) if free == supply.slots
+        ]
 
     def _open_sessions(self, supply: Supply, now: datetime) -> list[tuple[Session, int]]:
         """Sessions that may be given work, each with its free slots: up, and not told to finish."""
-        return [
-            (session, free)
-            for session, free in self._free_slots(supply, now)
-            if session.finish_requested_at is None
-        ]
-
-    def _free_slots(self, supply: Supply, now: datetime) -> list[tuple[Session, int]]:
-        """Sessions of a pool or on-demand that are up, each with its free slots."""
         opened = []
         for session in self._store.unsettled_sessions():
             if (
                 session.supply != supply.name
                 or session.provider_id is None
+                or session.finish_requested_at is not None
                 or not self._live(session, now)
             ):
                 continue
@@ -2246,6 +2243,9 @@ class Scheduler:
         attempts = self._store.attempts(session=session.id)
         rental = self._store.rental_for(session)
         deadline = None if rental is None else rental.deadline
+        if rental is None and session.finish_requested_at is not None:
+            self._end_session(session)
+            return
         if session.provider_id is None:
             provider_id = service.find(session.id)
             if provider_id is not None:
@@ -2255,7 +2255,11 @@ class Scheduler:
                     "existing machine confirmed; no duplicate create",
                     session=session.id,
                 )
-            elif deadline is not None and now >= deadline:
+            elif rental is None:
+                # An owned host answered that no start reached it. Ending fences
+                # any start still in flight, so the machine is free at once.
+                self._end_session(session)
+            elif now >= rental.deadline:
                 # The provider confirmed no machine on every pass of the paid
                 # window: none was made, so none is paid for or holds the pool.
                 for attempt in attempts:
@@ -2268,6 +2272,14 @@ class Scheduler:
             return
         session = self._creation_facts(session, now)
         if session.started_at is None:
+            if rental is None and all(
+                self._store.run(a.run).launch.cancel_requested_at is not None
+                for a in attempts
+                if a.outcome is None
+            ):
+                # Nothing on an owned host still wants this start: abort its install.
+                self._end_session(session)
+                return
             limits = [d for d in (deadline, session.startup_deadline) if d is not None]
             if limits and now >= min(limits):
                 self._diagnose(
@@ -2335,6 +2347,12 @@ class Scheduler:
         service = self._service(session)
         gone = session.ended_at
         if gone is None:
+            if session.finish_requested_at is None and (
+                session.started_at is not None or self._store.rental_for(session) is None
+            ):
+                # An end can take another tick. Never place work on a retiring session.
+                self._store.record_finish(session, self._clock())
+                session = self._store.session(session.id)
             try:
                 gone = service.end(session.id)
             except Exception as error:

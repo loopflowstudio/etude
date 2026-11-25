@@ -51,7 +51,7 @@ class AddRequest(Record):
 
 
 class SessionRequest(Record):
-    action: Literal["started", "ended", "end", "finish", "observe"]
+    action: Literal["started", "claimed", "ended", "end", "finish", "observe"]
     session: str
 
 
@@ -124,6 +124,7 @@ class RemoteReply(Record):
     log: str | None = None  # logs of the bootstrap producer: its text, None while it has none
     stream: LogStream | None = None
     started: bool = False
+    claimed: bool = False  # claimed: a start reached the host (`boot-claim`) or is running
     observation: Observation | None = None
     output: EncodedOutput | None = None
     folder: dict[str, str] | None = None
@@ -173,38 +174,73 @@ with contextlib.redirect_stdout(sys.stderr):
 """
 # It reads the RemoteCall as JSON: `request` is its request, and replies are RemoteReply.
 _BOOT = (
-    """import base64,json,os,sys
+    """import base64,json,os,pathlib,signal,sys
 call=json.load(sys.stdin)
 os.environ.update(call.get('storage_environment', {}))
 code=base64.b64decode(call.pop("program"))
 request=call['request']
-import pathlib
 home=pathlib.Path(call['root']).expanduser()/request.get('session','')
+def _recorded(name: str) -> int | None:
+    path=home/name
+    try: text=path.read_text().strip()
+    except FileNotFoundError: return None
+    return int(text) if text.isdigit() else 0
+def _pid_alive(pid: int | None) -> bool:
+    if pid is None: return False
+    if pid==0: return True  # a fresh or older boot-claim can be empty
+    try: os.kill(pid,0)
+    except ProcessLookupError: return False
+    except PermissionError: pass
+    return True
+def _host_alive() -> bool | None:
+    # Check boot before reading the PID it hands off to, so its exit cannot hide the handoff.
+    booting=not (home/'ended').exists() and _pid_alive(_recorded('boot-claim'))
+    worker=(home/'pid').exists()
+    if (courier:=_recorded('courier-pid')) is not None: return _pid_alive(courier)  # owns final delivery
+    if not worker: return booting
+    if (home/'courier-claim').exists(): return True  # v0.4.6 recorded no courier PID
+    return None  # the disk journal owns a pure SSH worker's progress and liveness
 if request['action']=='logs' and request['producer']=='bootstrap':
     path=home/'bootstrap.log'
     print(json.dumps({'log':path.read_text() if path.exists() else None})); sys.exit(0)
 if request['action']=='started' and not (home/'pid').exists():
     print(json.dumps({'started':False})); sys.exit(0)
-if request['action']=='observe' and (home/'boot-claim').exists() and not (home/'pid').exists():
-    print(json.dumps({'observation':{'alive':not (home/'ended').exists(),'progress':[],'start_unknown':True}})); sys.exit(0)
+if request['action']=='claimed':
+    print(json.dumps({'claimed':(home/'boot-claim').exists() or (home/'pid').exists()})); sys.exit(0)
+if request['action']=='observe':
+    if (alive:=_host_alive()) is not None:
+        print(json.dumps({'observation':{'alive':alive,'progress':[],'start_unknown':alive}})); sys.exit(0)
 if request['action']=='ended':
     path=home/'ended'
     print(json.dumps({'ended_at':path.read_text() if path.exists() else None})); sys.exit(0)
 if request['action']=='end':
     home.mkdir(parents=True,exist_ok=True)
     (home/'cancel-start').touch()
-    if not (home/'pid').exists():
-        path=home/'ended'
+    path=home/'ended'
+    if not (home/'pid').exists() and not path.exists():
+        # The cancel stops an install; a courier still fetching stops at once.
+        if courier:=_recorded('courier-pid'):
+            try: os.kill(courier,signal.SIGTERM)
+            except (ProcessLookupError,PermissionError): pass
+        if _host_alive() is False and not (home/'pid').exists():
+            # Nothing runs here, and the cancel fences any start still in flight.
+            from datetime import datetime,UTC
+            path.write_text(datetime.now(UTC).isoformat())
+    if path.exists() or not (home/'pid').exists():
         print(json.dumps({'ended_at':path.read_text() if path.exists() else None})); sys.exit(0)
 if request['action']=='start':
     home.mkdir(parents=True,exist_ok=True,mode=0o700)
+    if (home/'cancel-start').exists():
+        print(json.dumps({})); sys.exit(0)
     try:
         (home/'boot-claim').open('x').close()
     except FileExistsError:
         print(json.dumps({})); sys.exit(0)
     pid=os.fork()
     if pid:
+        (home/'boot-claim').write_text(str(pid))
         print(json.dumps({}),flush=True); os._exit(0)
+    (home/'boot-claim').write_text(str(os.getpid()))  # either write names this process
     os.setsid()
     with open(os.devnull,'r+b') as sink:
         for fd in (0,1,2): os.dup2(sink.fileno(),fd)
@@ -371,6 +407,9 @@ class SSHJournal:
 
     def started(self, session_id: str) -> bool:
         return self.ssh.call(SessionRequest(action="started", session=session_id)).started
+
+    def claimed(self, session_id: str) -> bool:
+        return self.ssh.call(SessionRequest(action="claimed", session=session_id)).claimed
 
     def ended(self, session_id: str) -> datetime | None:
         return self.ssh.call(SessionRequest(action="ended", session=session_id)).ended_at

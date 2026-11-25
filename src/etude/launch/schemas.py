@@ -137,13 +137,6 @@ class Finished(Record):
         )
 
 
-class ReadLink(Record):
-    """An object to restore, checked against the length storage listed."""
-
-    url: str = Field(repr=False)
-    size_bytes: int = Field(ge=0)
-
-
 class Fetch(Record):
     """Read links to the files a session's work needs before it runs, each verified by digest."""
 
@@ -161,7 +154,7 @@ class Bootstrap(Record):
     runs: dict[str, Grant] = Field(default_factory=dict)  # each run's folder, for the packet's work
     inbox_url: str
     fetch: Fetch = Field(default_factory=Fetch)
-    restore: dict[str, ReadLink] = Field(default_factory=dict)  # see Delivery
+    restore: dict[str, str] = Field(default_factory=dict, repr=False)  # see Delivery
 
 
 class Delivery(Record):
@@ -169,7 +162,9 @@ class Delivery(Record):
     access: Grant  # the run's folder
     fetch: Fetch = Field(default_factory=Fetch)
     # Read links to what storage holds of a resumed run's folder, by RUN/KEY.
-    restore: dict[str, ReadLink] = Field(default_factory=dict)
+    # Objects are written whole, so a mutable file longer than when it was
+    # listed is a newer version; HTTP lengths and checkpoint records verify reads.
+    restore: dict[str, str] = Field(default_factory=dict, repr=False)
 
 
 class AttemptRecord(Record):

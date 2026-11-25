@@ -11,8 +11,10 @@ import io
 import math
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -20,6 +22,7 @@ from contextvars import copy_context
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import FrameType
 from typing import IO
 
 from etude.cache import Cache
@@ -54,7 +57,6 @@ from etude.launch.schemas import (
     Fetch,
     Finished,
     Inbox,
-    ReadLink,
     Work,
     WorkerLog,
     attempt_log,
@@ -309,10 +311,12 @@ class Courier:
             finally:
                 self._carry_usage()
 
-    def restore(self, links: dict[str, ReadLink], works: Sequence[Work]) -> None:
+    def restore(self, links: dict[str, str], works: Sequence[Work]) -> None:
         """Put back what storage holds of a resumed run's folder, before its job starts.
 
-        `links` name objects and lengths by RUN/KEY. Keep existing immutable
+        `links` are read links by RUN/KEY. A mutable out file may be newer
+        than its listing, as when a replaced machine flushed it on its way
+        out; its current bytes are restored. Keep existing immutable
         records, replace out files, and verify the latest copied checkpoint.
         A run whose latest attempt ran here keeps its folder, which is newer
         than storage, unless the folder is gone. What is restored counts as
@@ -320,7 +324,7 @@ class Courier:
         taken (`etude.carriage.taken`).
         """
         held = {w.run for w in works if w.here and (self._track_root / w.run).is_dir()}
-        by_run: dict[str, dict[str, ReadLink]] = {}
+        by_run: dict[str, dict[str, str]] = {}
         # Run addresses may themselves contain slashes; the assigned work owns
         # the boundary, including when compact and nested runs share a prefix.
         runs = sorted({work.run for work in works}, key=len, reverse=True)
@@ -339,17 +343,16 @@ class Courier:
             finally:
                 self._carry_usage()
 
-    def _restore(self, run: str, listed: dict[str, ReadLink]) -> None:
+    def _restore(self, run: str, listed: dict[str, str]) -> None:
         folder = self._track_root / run
         # Every checkpoint name storage holds stays taken, restored or not.
         note_stored(folder, [checkpoint_file_name(key) for key in listed if checkpoint_file(key)])
-        found = recovery(listed, lambda key: read(listed[key].url, self._send))
+        found = recovery(listed, lambda key: read(listed[key], self._send))
         membership, pointers = found.membership, found.pointers
         keys = {key: listed[key] for key in found.keys}
         reconcile_out(folder, keys)
         recorded: dict[str, RecordedFile] | None = None
         for key in sorted(keys, key=lambda key: (key == "outcome.json", key)):
-            link = keys[key]
             if not within(key):
                 raise StorageUnavailable("restore path is outside the run")
             target = folder / key
@@ -364,9 +367,9 @@ class Courier:
                 recorded = recorded_files(folder)
             named = None if recorded is None else recorded.get(key)
             with attribute(run=run, purpose="checkpoint" if named is not None else "report"):
-                body = pointers[key] if key in pointers else read(link.url, self._send)
-            if body is None or len(body) != link.size_bytes:
-                raise StorageUnavailable(f"restored file {key} is missing or has changed length")
+                body = pointers[key] if key in pointers else read(keys[key], self._send)
+            if body is None:
+                raise StorageUnavailable(f"restored file {key} is missing")
             # Reuse the received bytes for verification and the sent marker;
             # restoring a large out file needs no second read from disk.
             digest = (
@@ -393,9 +396,7 @@ class Courier:
             return
         with attribute(run=run, purpose="checkpoint"):
             download(
-                Download(
-                    url=keys[wanted.key].url, sha256=wanted.sha256, size_bytes=wanted.size_bytes
-                ),
+                Download(url=keys[wanted.key], sha256=wanted.sha256, size_bytes=wanted.size_bytes),
                 folder / wanted.key,
                 send=self._send,
             )
@@ -777,7 +778,15 @@ def _serve(
     deadline: float | None = None
     delivery_seconds: float | None = None
     rental_deadline: datetime | None = None
+    # Until start intent is published nothing has run, so an owned host's `end`
+    # may stop setup at once; its log is still published below. Only the main
+    # thread can install process signal handlers.
+    owned_setup = bool(os.environ.get("ETUDE_STARTUP_CANCEL")) and (
+        threading.current_thread() is threading.main_thread()
+    )
     try:
+        if owned_setup:
+            signal.signal(signal.SIGTERM, _abort_setup)
         if until := os.environ.get("ETUDE_DEADLINE"):
             rental_deadline = datetime.fromisoformat(until)
             deadline = time.monotonic() + (rental_deadline - _now()).total_seconds()
@@ -831,6 +840,10 @@ def _serve(
         # Persist start intent before user code can run. A lost write reply must not
         # leave running code with no durable evidence that it might have started.
         startup_timeout()
+        # From start intent until `pid` names the worker, a stop must wait for
+        # that pid: ending here could leave a worker no journal can see.
+        if owned_setup:
+            signal.signal(signal.SIGTERM, _hold_setup)
         write_log("receipt upload", "publishing start intent")
         with limit_time(startup_timeout()):
             courier._out.write_bytes("receipt", str(os.getpid()).encode())
@@ -847,6 +860,8 @@ def _serve(
                 stderr=subprocess.STDOUT,
             )
         write(home / "pid", str(process.pid))
+        if owned_setup:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
         while process.poll() is None:
             for step in (courier.bring_in, courier.carry_out):
                 try:
@@ -862,6 +877,8 @@ def _serve(
         _diagnose("worker", error)
         raise
     finally:
+        if owned_setup and process is None:
+            signal.signal(signal.SIGTERM, _hold_setup)
         original_error = sys.exception()
         left = _allowance(deadline, delivery_seconds)
         collected, failure = False, None
@@ -892,8 +909,23 @@ def _serve(
         except Exception as error:
             _diagnose("final delivery", error)
             failure = failure or error
+        finally:
+            if owned_setup:
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
         if failure is not None and original_error is None:
             raise failure
+
+
+def _abort_setup(signum: int, frame: FrameType | None) -> None:
+    signal.signal(signal.SIGTERM, _hold_setup)  # end may signal again during final delivery
+    raise SystemExit(128 + signum)
+
+
+def _hold_setup(signum: int, frame: FrameType | None) -> None:
+    """Defer stops while assigning a worker PID or delivering setup diagnostics.
+
+    A handler rather than `SIG_IGN`, which the worker would inherit across exec.
+    """
 
 
 def _cache() -> Cache:

@@ -200,7 +200,9 @@ with evaluating(
   caught and returned as empty tables is
   still refused (`match_has_no_rows`), never stored as a result.
 - **Environments are never pooled.** An eval run has one environment;
-  resuming with another is refused, and a report shows each value from one environment.
+  resuming with another is refused, and a report shows each drawn value from the
+  environment whose latest match is newest, noting only overlaps on values
+  reachable panels draw.
 - **Resume.** Outside a launch, reopen the same eval run with
   `evaluating(..., resume=True)` and call `run.play(play)` to carry on.
   A launched retry resumes automatically. Matches already delivered to any

@@ -62,7 +62,7 @@ function chartBrowser(hash = "", overview = null) {
 function renderPage(data, hash = "", overview = null) {
   const {browser, document, location, plots} = chartBrowser(hash, overview);
   const full = {
-    experiment: "test", notes: [], environments: [], commits: [], failures: [], generated_ms: 0,
+    experiment: "test", notes: [], environments: [], commits: [], failures: [], absent: [], generated_ms: 0,
     scores: [{table: "games", value: "win", unit: "games"}], ...data,
     report: {evals: [{kind: "curve", title: "Score"}], perf: [], ml: [], ...data.report},
     training: {metrics: [], series: {}, bands: {}, timers: [], ...data.training, runs: data.training.runs.map(r => ({rows: 0, writers: [], ...r}))},
@@ -74,7 +74,7 @@ function renderPage(data, hash = "", overview = null) {
     const find = el => el.onclick && el.textContent === text ? el : el.children.filter(c => typeof c !== "string").map(find).find(Boolean);
     find(document.getElementById(section + "-controls")).onclick();
   }
-  return {location, click, text: document.getElementById("evals-body").textContent, plots, sectionText: id => document.getElementById(id + "-body").textContent, display: id => document.getElementById(id).style.display};
+  return {location, click, controls: id => document.getElementById(id + "-controls").textContent, text: document.getElementById("evals-body").textContent, plots, sectionText: id => document.getElementById(id + "-body").textContent, display: id => document.getElementById(id).style.display};
 }
 
 test("experiment card captions name the metric once and keep its clock, units and scale", () => {
@@ -121,6 +121,60 @@ test("a section the report gives no panel is hidden, header and controls with it
   assert.deepEqual([none.display("evals"), none.display("perf"), none.display("ml")], [undefined, "none", "none"]);
   const perf = renderPage({...data, report: {clock: "updates", perf: [{kind: "lines", title: "Speed", keys: ["sps"]}]}});
   assert.deepEqual([perf.display("perf"), perf.display("ml")], ["", "none"]);
+});
+
+test("Anchor lines is available only for a curve with a reference to toggle", () => {
+  const data = page([player("u100", "learner", 100), ...["alpha", "beta"].map(name =>
+    ({name, placed: false, config: "{}", at: {}}))], [[0, 1, 0.25], [0, 2, 0.75]]);
+  assert.doesNotMatch(renderPage(data).controls("evals"), /Anchor lines/);
+
+  data.cells.push({...data.cells[0], subject: 2, opponent: 1, value: 0.5});
+  const view = renderPage(data);
+  const hasReference = () => view.plots.at(-1).options.series.some(s => s.label === "beta");
+  assert.match(view.controls("evals"), /Anchor lines/);
+  assert.ok(hasReference());
+  view.click("evals", "Off");
+  assert.ok(!hasReference());
+  view.click("evals", "On");
+  assert.ok(hasReference());
+  view.click("evals", "beta");
+  assert.doesNotMatch(view.controls("evals"), /Anchor lines/);
+
+  data.drawn[0].seated = true;
+  assert.doesNotMatch(renderPage(data).controls("evals"), /Anchor lines/);
+});
+
+test("an empty curve split cannot toggle anchor lines", () => {
+  const players = [player("u100", "learner", 100), ...["alpha", "beta"].map(name =>
+    ({name, placed: false, config: "{}", at: {}}))];
+  const data = page(players, [[0, 1, 0.25], [2, 1, 0.5]]);
+  data.report.evals = [{kind: "curve", title: "Score", split: "side"}];
+  data.cells[1].split = {side: "first"};
+  const empty = renderPage(data);
+  assert.equal(empty.plots.length, 0);
+  assert.doesNotMatch(empty.controls("evals"), /Anchor lines/);
+
+  data.cells.push({...data.cells[0], split: {side: "first"}});
+  const view = renderPage(data);
+  assert.match(view.controls("evals"), /Anchor lines/);
+  assert.ok(view.plots.at(-1).options.series.some(s => s.label === "beta"));
+});
+
+test("the Anchors panel lists unplaced players who have a strength or played each other", () => {
+  const players = ["solo", "alpha", "beta"].map(name => ({name, placed: false, config: "{}", at: {}}));
+  const data = page(players, [[0, 0, 0.5]]);
+  data.report.evals = [{kind: "anchors", title: "Anchors"}];
+  assert.match(renderPage(data).text, /No two unplaced players played each other/);
+
+  data.cells.push({...data.cells[0], subject: 1, opponent: 2});
+  const view = renderPage(data);
+  assert.match(view.text, /2 anchors/);
+  assert.match(view.text, /alpha/);
+  assert.match(view.text, /beta/);
+  assert.doesNotMatch(view.text, /solo/);
+
+  data.cells.push({...data.cells[0], opponent: null, fixed: true});
+  assert.match(renderPage(data).text, /3 anchors/);
 });
 
 test("a curve whose checkpoints all play two variants says so once, naming the variants", () => {
@@ -391,6 +445,12 @@ test("a point is its own view's: another score or split of the same checkpoint i
   const whole = m.jobPoints(m.JOBS[0], "updates", m.evalValue(0, 0, {}, "")).find(p => p.x === 400);
   const split = m.jobPoints(m.JOBS[0], "updates", m.evalValue(0, 0, {on_play: true}, "")).find(p => p.x === 400);
   assert.deepEqual([whole.y, split.y], [0.6, 0.9]);
+
+  data.report.evals = [{kind: "curve", title: "Half", split: "on_play", matches: {seating: "half"}}];
+  data.panel_selections = [{selection: 0, control: false}];
+  const view = renderPage(data);
+  assert.match(view.text, /on_play = yes/);
+  assert.equal(view.plots[0].values[1].at(-1), 0.9);
 });
 
 test("ticks a narrow range would label alike are written with the decimals their step needs", () => {

@@ -711,9 +711,24 @@ class RunListing:
 
     @classmethod
     def read(
-        cls, storage: Storage, *, run: str | None = None, known: DeclarationCache | None = None
+        cls,
+        storage: Storage,
+        *,
+        run: str | None = None,
+        experiments: Collection[str] | None = None,
+        known: DeclarationCache | None = None,
     ) -> RunListing:
-        versions = storage.versions("")
+        """List the whole source, or only these experiments' runs.
+
+        Scoping relies on Etude's own layout, where an experiment's runs are
+        stored at `EXPERIMENT/...` or compactly at `EXPERIMENT@SEED/`.
+        """
+        if experiments is None:
+            versions = storage.versions("")
+        else:
+            versions = {}
+            for name in sorted(set(experiments)):
+                versions |= storage.versions(f"{name}/") | storage.versions(f"{name}@")
         return cls(with_versions(storage, versions), versions, run=run, known=known)
 
     def versions_for(self, experiments: Collection[str]) -> dict[str, str]:
