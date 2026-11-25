@@ -14,6 +14,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -778,8 +779,11 @@ def _serve(
     delivery_seconds: float | None = None
     rental_deadline: datetime | None = None
     # Until start intent is published nothing has run, so an owned host's `end`
-    # may stop setup at once; its log is still published below.
-    signal.signal(signal.SIGTERM, _abort_setup)
+    # may stop setup at once; its log is still published below. Only the main
+    # thread can install process signal handlers.
+    on_main = threading.current_thread() is threading.main_thread()
+    if on_main:
+        signal.signal(signal.SIGTERM, _abort_setup)
     try:
         if until := os.environ.get("ETUDE_DEADLINE"):
             rental_deadline = datetime.fromisoformat(until)
@@ -836,7 +840,8 @@ def _serve(
         startup_timeout()
         # From start intent until `pid` names the worker, a stop must wait for
         # that pid: ending here could leave a worker no journal can see.
-        signal.signal(signal.SIGTERM, _hold_setup)
+        if on_main:
+            signal.signal(signal.SIGTERM, _hold_setup)
         write_log("receipt upload", "publishing start intent")
         with limit_time(startup_timeout()):
             courier._out.write_bytes("receipt", str(os.getpid()).encode())
@@ -853,7 +858,8 @@ def _serve(
                 stderr=subprocess.STDOUT,
             )
         write(home / "pid", str(process.pid))
-        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        if on_main:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
         while process.poll() is None:
             for step in (courier.bring_in, courier.carry_out):
                 try:
@@ -869,7 +875,8 @@ def _serve(
         _diagnose("worker", error)
         raise
     finally:
-        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        if on_main:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
         original_error = sys.exception()
         left = _allowance(deadline, delivery_seconds)
         collected, failure = False, None
