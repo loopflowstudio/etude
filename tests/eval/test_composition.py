@@ -31,7 +31,7 @@ from etude.eval.records import (
 )
 from etude.eval.tournament import evaluating, played, scores
 from etude.jobs import Agents, EvalJob, ExperimentState, checkpoint_inputs, hold_group
-from etude.page import _players
+from etude.page import build as build_page
 from etude.records import ArtifactRef
 from tests.eval.arithmetic import Shift, build, checkpoint, load
 from tests.eval.trees import Ensemble, Tagged
@@ -226,14 +226,15 @@ def test_group_builds_nested_players_and_loads_the_shared_leaf_once(
             "tests.eval.arithmetic:Shift(over=small, amount=1)",
             "small",
         }
-        placements, notes = _players(db, {}, {})
-        assert {p.key for p in placements} == {small.key, shifted.key, deeper.key}
-        assert all(any(p.name in note for note in notes) for p in placements)
         assert db.sql(
             "select score, count(*) from scores group by score order by score"
         ).fetchall() == [(2, 4), (3, 4), (5, 4)]
     finally:
         db.close()
+    page = build_page(tmp_path, None, experiment="grouped")
+    assert {p.key for p in page.players} == {small.key, shifted.key, deeper.key}
+    note = next(n for n in page.notes if n.startswith("Drawn as anchors"))
+    assert all(p.name in note for p in page.players)
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [0, 0]
     assert "agents: started" not in capfd.readouterr().err
 

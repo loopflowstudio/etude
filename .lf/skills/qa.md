@@ -221,6 +221,27 @@ Saves (`run.resume` / `run.save`) restore learning; `run.checkpoint(path)`
 publishes evaluation inputs. Do not simulate worker identity in a standalone
 tracking script or tune internal queue/block settings.
 
+## Etude: report notes and anchors
+
+To seat an outside checkpoint, commit a small file in the lab and declare
+`CheckpointPlayer(name=..., checkpoint=CheckpointRef(address=URI,
+artifact=ArtifactRef(uri=URI, sha256=..., size_bytes=...)))` with
+`URI = path.resolve().as_uri()` and no `at`. To compare against main, run
+`git archive main src | tar -x -C DIR` and draw the same home with
+`PYTHONPATH=DIR/src uv run python -c 'from etude.cli import main; ...'
+report FILE --out OTHER`. The page's notes sit in its embedded JSON
+(`"notes": [...]`). Serve both pages with `uv run python -m http.server --bind
+127.0.0.1` to drive the toolbar, and stop that server afterwards. Separate
+tournaments are separate selections, so a benchmark cannot reach the
+cross-environment overlap note. Explicit matches can: a committed `manual.py`
+with module-level `load`/`build`/`play`, imported back by module name under
+`if __name__ == "__main__"`, plays `evaluating(environment(ENV),
+experiment="overlap", matches=..., run=f"{ENV}-N", resume=True)` once per
+environment, with outside checkpoints given `at` and `line`. A report-only
+`overlap.py` then draws them with `etude report overlap.py --out DIR`. Drawing a
+Manabot report from `r2://manabot/jobs` with a cold `ETUDE_HOME` took over 30
+minutes, so prefer a lab.
+
 ## Etude: evaluation recovery and placement
 
 Copy `examples/{agents.py,agent_game.py,agent_models.py,agent.txt}` into another
