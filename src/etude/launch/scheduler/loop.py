@@ -1552,6 +1552,8 @@ class Scheduler:
         """Settle only shutdowns already requested; never place work or decide to end a rental."""
         for session in self._store.finishing_sessions(supply=supply.name):
             self._store.check_lock(supply.name)
+            if isinstance(supply, Pool) and session.started_at is None:
+                continue  # _observe retries the host fence without loading its client.
             try:
                 if self._service(session).finish(session.id) is not None:
                     self._end_session(session)
@@ -2241,6 +2243,9 @@ class Scheduler:
         attempts = self._store.attempts(session=session.id)
         rental = self._store.rental_for(session)
         deadline = None if rental is None else rental.deadline
+        if rental is None and session.finish_requested_at is not None:
+            self._end_session(session)
+            return
         if session.provider_id is None:
             provider_id = service.find(session.id)
             if provider_id is not None:
@@ -2342,7 +2347,9 @@ class Scheduler:
         service = self._service(session)
         gone = session.ended_at
         if gone is None:
-            if session.started_at is not None and session.finish_requested_at is None:
+            if session.finish_requested_at is None and (
+                session.started_at is not None or self._store.rental_for(session) is None
+            ):
                 # An end can take another tick. Never place work on a retiring session.
                 self._store.record_finish(session, self._clock())
                 session = self._store.session(session.id)

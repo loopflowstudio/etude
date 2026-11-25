@@ -881,6 +881,8 @@ including immediately after the start receipt upload and before spawning the
 worker. `boot-claim` names the boot process until it hands off to a worker
 (`pid`) or, on a bucket-backed host, a courier (`courier-pid`). Before `pid`
 exists, `end` signals the courier and records `ended` once setup has stopped.
+It closes every slot in the session as soon as shutdown is requested. A setup
+that was stopped still publishes its diagnostics if storage is available.
 
 On a bucket-backed SSH host, storage supplies attempt progress and `out/receipt`
 records start intent. Until `out/ended` arrives, SSH checks `courier-pid`

@@ -781,10 +781,12 @@ def _serve(
     # Until start intent is published nothing has run, so an owned host's `end`
     # may stop setup at once; its log is still published below. Only the main
     # thread can install process signal handlers.
-    on_main = threading.current_thread() is threading.main_thread()
-    if on_main:
-        signal.signal(signal.SIGTERM, _abort_setup)
+    owned_setup = bool(os.environ.get("ETUDE_STARTUP_CANCEL")) and (
+        threading.current_thread() is threading.main_thread()
+    )
     try:
+        if owned_setup:
+            signal.signal(signal.SIGTERM, _abort_setup)
         if until := os.environ.get("ETUDE_DEADLINE"):
             rental_deadline = datetime.fromisoformat(until)
             deadline = time.monotonic() + (rental_deadline - _now()).total_seconds()
@@ -840,7 +842,7 @@ def _serve(
         startup_timeout()
         # From start intent until `pid` names the worker, a stop must wait for
         # that pid: ending here could leave a worker no journal can see.
-        if on_main:
+        if owned_setup:
             signal.signal(signal.SIGTERM, _hold_setup)
         write_log("receipt upload", "publishing start intent")
         with limit_time(startup_timeout()):
@@ -858,7 +860,7 @@ def _serve(
                 stderr=subprocess.STDOUT,
             )
         write(home / "pid", str(process.pid))
-        if on_main:
+        if owned_setup:
             signal.signal(signal.SIGTERM, signal.SIG_DFL)
         while process.poll() is None:
             for step in (courier.bring_in, courier.carry_out):
@@ -875,8 +877,8 @@ def _serve(
         _diagnose("worker", error)
         raise
     finally:
-        if on_main:
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        if owned_setup and process is None:
+            signal.signal(signal.SIGTERM, _hold_setup)
         original_error = sys.exception()
         left = _allowance(deadline, delivery_seconds)
         collected, failure = False, None
@@ -907,16 +909,20 @@ def _serve(
         except Exception as error:
             _diagnose("final delivery", error)
             failure = failure or error
+        finally:
+            if owned_setup:
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
         if failure is not None and original_error is None:
             raise failure
 
 
 def _abort_setup(signum: int, frame: FrameType | None) -> None:
+    signal.signal(signal.SIGTERM, _hold_setup)  # end may signal again during final delivery
     raise SystemExit(128 + signum)
 
 
 def _hold_setup(signum: int, frame: FrameType | None) -> None:
-    """Ignore a stop while the worker is being started; `end` then finds its `pid`.
+    """Defer stops while assigning a worker PID or delivering setup diagnostics.
 
     A handler rather than `SIG_IGN`, which the worker would inherit across exec.
     """

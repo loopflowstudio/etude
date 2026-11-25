@@ -64,13 +64,16 @@ def courier_pid() -> Iterator[int]:
             courier.kill()
 
 
-def _owned_host(tmp_path: Path, service: Executor | None = None) -> tuple[Scheduler, Path]:
+def _owned_host(
+    tmp_path: Path, service: Executor | None = None, *, slots: int = 1
+) -> tuple[Scheduler, Path]:
     """A scheduler with one owned SSH host, and the SSH stand-in that reaches it."""
     if service is None:
         ssh = SSH("bench", str(tmp_path / "remote"))
         service = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
     scheduler = Scheduler(open_database(tmp_path / "state.db"), {"ssh": lambda held: service})
-    scheduler.add_machine("bench", "bench")
+    scheduler.add_pool(Pool(name="bench", slots=slots))
+    scheduler.add_machine("bench", "bench", pool="bench")
     return scheduler, tmp_path / "ssh"
 
 
@@ -139,7 +142,7 @@ def test_a_start_that_never_reached_an_owned_host_is_fenced_and_frees_it(tmp_pat
 def test_a_lost_start_reply_during_install_is_recovered_and_cancel_aborts_it(
     tmp_path: Path,
 ) -> None:
-    scheduler, executable = _owned_host(tmp_path)
+    scheduler, executable = _owned_host(tmp_path, slots=2)
     executable.write_text(UNREACHABLE)
     (installing,) = scheduler.queue(_echo("installing"), "bench")
     scheduler.tick()
@@ -148,17 +151,18 @@ def test_a_lost_start_reply_during_install_is_recovered_and_cancel_aborts_it(
     home.mkdir(parents=True)
     (home / "boot-claim").touch()
     executable.write_text(RELAY)
-    (waiting,) = scheduler.queue(_echo("waiting"), "bench")
     scheduler.tick()
     assert scheduler.read(installing).phase == "setting_up"
-    assert scheduler.read(waiting).phase == "queued"  # the host is not booked twice
     scheduler.cancel(installing)
+    (waiting,) = scheduler.queue(_echo("waiting"), "bench")
     scheduler.tick()
     assert (home / "cancel-start").exists()
-    assert scheduler.read(waiting).phase == "queued"  # held until the install stops
+    assert scheduler.read(waiting).phase == "queued"
+    assert not scheduler.attempts(waiting)  # even the empty slot is closed until setup stops
     (home / "ended").write_text(datetime.now(UTC).isoformat())  # the aborted install's note
     (status,) = scheduler.wait(waiting, every=0.1, timeout=20)
     assert status.outcome == "succeeded"
+    assert scheduler.attempts(waiting)[0].session != home.name
     assert scheduler.read(installing).outcome == "cancelled"
 
 
