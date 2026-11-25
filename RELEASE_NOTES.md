@@ -1,35 +1,48 @@
-# v0.4.6
+# v0.4.7
 
 <!-- loopflow:release-notes=narrative;gate=safe -->
 
-Etude v0.4.6 gives you one browser view of live experiments, from training curves and console output to the machines and rental windows behind each run. Training recipes can now resume with their own checkpoint files. The launcher keeps long Colab runs connected and can move on when an accelerator has no capacity.
+Etude v0.4.7 makes owned SSH hosts more dependable during long training. A host can now recover from a lost start reply, release a failed or cancelled setup, and stay occupied until its last upload has reached the bucket. Resumed experiments can now wait in the queue for capacity like any other work. Eval reports also have quieter, more accurate notes at the top of the page.
 
-## Follow runs and rentals in one place
+## Owned SSH hosts recover and release cleanly
 
-Run `etude view` to open a live dashboard at `http://127.0.0.1:8765`. It combines run files from a directory or S3/R2 bucket with launcher state from a local or SSH launcher. While a local view is running, `train`, `launch`, `queue`, `continue` and `status RUN` print clickable `view:` links. [#135](https://github.com/loopflowstudio/etude/pull/135)
+Before this release, a dropped start reply, a cancelled install or a courier still uploading could leave an owned host's slots wrong. A slot could be stuck as occupied, or freed while delivery was still running. Each session now records the processes that own it, and the host releases a slot only once that work has actually finished. [#146](https://github.com/loopflowstudio/etude/pull/146)
 
-- Open a run to see its charts, console, config, checkpoints and files. Browse experiment reports or check held machines, rental windows, costs and occupied slots. Open pages refresh in place every five seconds.
-- On large buckets, run metadata appears before historical charts, which are built when you open a run. The view keeps the last valid results visible through a storage outage, launcher disconnect or syntax error in an edited `report()`.
-- Use `etude view` in place of `etude report --serve`. For a self-contained, printable HTML report, use `etude report`. It still supports `--watch`.
+- A boot claim records the boot PID, so Etude can recover the session if the start reply is lost.
+- On a bucket-backed host, the courier PID tracks liveness through final delivery, and the bucket's end receipt confirms that delivery finished. If the courier dies, the host stops any remaining worker before releasing the session.
+- A shutdown request closes every slot immediately, including open slots on a host that is still installing. If you repeat a stop while courier setup is being cancelled, the diagnostics upload still finishes.
 
-## Resume training with your framework’s files
+## Queue resumed and watched experiments
 
-Pass both `export(folder)` and `restore(folder)` to `run.resume()`. Each scheduled save, completion save or planned-stop save can include custom files alongside any PyTorch objects and typed JSON counters you supply. A fresh run skips the restore callback. [#141](https://github.com/loopflowstudio/etude/pull/141), [#143](https://github.com/loopflowstudio/etude/pull/143)
+`etude queue` now accepts `--resume`, `--until` and `--watch`, so a resumed experiment can wait for pool capacity instead of needing a free machine at launch. [#146](https://github.com/loopflowstudio/etude/pull/146)
 
-- Exporters can create subdirectories. Delivery uploads the selected save’s files, including nested files and files ending in `.tail`, before publishing `current.json`. Follow that pointer to find the committed save. A failed export leaves the previous save selected.
-- Manual restore with `path = run.resume()` and explicit saves with `run.save(export=fn)` still work. `run.resume()` returns the supplied `extra` counters when present and a path or `None` otherwise. The names `export` and `restore` are now reserved on that method, and supplying just one callback raises `ValueError`.
+```sh
+uv run etude queue experiment.py --resume --job base --seed 0 --until updates=4000 --pool lab
+uv run etude queue experiment.py --watch 60 --pool lab
+```
 
-## Keep Colab training connected
+- `--watch` runs repeated passes and picks up newly delivered checkpoints. Use separate commands for `--resume` and `--watch`.
+- With a derived source, `launch`, `queue` and `eval` list only this experiment's storage prefixes, plus any cross-experiment tournament lines they need. An explicit source still lists its whole prefix.
 
-Colab reclaimed some busy runtimes after about 21 minutes without a connected client. Etude now keeps a Jupyter connection open, sends a heartbeat during training and renews the connection as proxy credentials rotate. An L4 training run passed 76 minutes during verification. [#142](https://github.com/loopflowstudio/etude/pull/142)
+## Clearer eval report notes
 
-- When Colab returns HTTP 503 during assignment, Etude checks whether a runtime was created. If none exists, it treats the response as a capacity refusal so scheduling can move on before the rental deadline.
-- If bootstrap exits early and leaves the kernel idle, Etude detects the loss before the startup allowance runs out.
+The notes above an eval report now describe what the page actually draws. [#147](https://github.com/loopflowstudio/etude/pull/147)
+
+- Outside checkpoints seated without `at` can be named opponents. The anchor note names them when an Anchors panel includes them or when a curve uses their score as a reference.
+- Environment overlap notes count overlapping scores with the page's own panel, selection and opponent rules. Each value comes from the environment whose latest match is newest.
+- The Evals toolbar offers **Anchor lines** only when a plotted curve has a reference line to toggle. It stays hidden for empty splits and remains available after you switch it off.
+- Seated panels find split values from their first-seat points, including scores whose first seat was unplaced.
+- Limitation: overlap counting uses each panel's opponent choices, so a pinned curve whose choices differ from the section toolbar can still add a value you cannot reach from the toolbar. Not included: split-level reachability in notes.
 
 ## Operational notes
 
-Run `etude database upgrade` on an existing launcher database before using the upgraded launcher. The migration adds indexes for reading machine inventory from one snapshot. The live view’s index under `ETUDE_HOME/views` can be rebuilt from its sources. [#135](https://github.com/loopflowstudio/etude/pull/135)
+- No database migration is needed.
+- Sessions still in flight from v0.4.6 have no recorded courier PID. They keep waiting for the bucket end receipt before releasing their slot.
+- Host liveness and cleanup rely on numeric PIDs. If a PID is reused, a dead process can look alive, or a cleanup signal can reach an unrelated process.
+- Cached report pages are rebuilt so they show the new notes.
 
 ## Small changes
 
-- Grouped evaluations keep their submitted run address through delivery and recovery. Continuations show their own launcher state and link to their parent from submission. [#135](https://github.com/loopflowstudio/etude/pull/135)
+- Restore now accepts a mutable out file that grew after it was listed. HTTP transfer lengths and recorded checkpoint digests and lengths still verify each read. [#146](https://github.com/loopflowstudio/etude/pull/146)
+- `etude view` keeps serving, without logging an error, when a browser disconnects. [#146](https://github.com/loopflowstudio/etude/pull/146)
+- The tracking guide describes where report notes appear. The QA recipe shows how to reproduce an environment overlap with explicit matches. [#147](https://github.com/loopflowstudio/etude/pull/147)
