@@ -36,7 +36,7 @@ SURFACE: dict[str, tuple[str, ...]] = {
     "etude.eval.tournament": tuple("evaluating scores ScorePoint Scores".split()),
     "etude.eval.query": tuple("statsdb read_blobs estimate compare Estimate Comparison".split()),
     "etude.report": tuple(
-        "Report Score Matches Curve Matrix Ranking Anchors ML Crosstable "
+        "Report Include Score Matches Curve Matrix Ranking Anchors ML Crosstable "
         "Series Counters Flame Pace Elapsed Attempts".split()
     ),
     "etude.spec": tuple(

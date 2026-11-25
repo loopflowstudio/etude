@@ -100,6 +100,7 @@ from etude.report import (
     Curve,
     Elapsed,
     Flame,
+    Include,
     Matches,
     MetricPanel,
     Pace,
@@ -107,7 +108,7 @@ from etude.report import (
     Score,
     Series,
 )
-from etude.run import DeclarationCache, RunListing, as_storage
+from etude.run import DeclarationCache, RunListing, as_storage, under
 from etude.storage import (
     DirectoryStorage,
     S3Storage,
@@ -765,6 +766,96 @@ def _page_cache_key(
     ).hexdigest()
 
 
+def _shift_at(at: Mapping[str, float], offset: Mapping[str, float] | None) -> dict[str, float]:
+    if not offset:
+        return dict(at)
+    return {clock: value + offset.get(clock, 0.0) for clock, value in at.items()}
+
+
+def _included_training(
+    source: RunListing,
+    includes: Sequence[Include],
+    *,
+    metrics: frozenset[str] | None,
+    prefixes: tuple[str, ...],
+) -> list[RunData]:
+    """Read training runs named by `Report.include`."""
+    extra: list[RunData] = []
+    seen: set[str] = set()
+    for inc in includes:
+        for d in source.declarations:
+            if (
+                d.file.experiment != inc.experiment
+                or d.file.kind == "evaluation"
+                or (inc.jobs and d.file.job_name not in inc.jobs)
+                or d.name in seen
+            ):
+                continue
+            seen.add(d.name)
+            extra.append(
+                read_located(
+                    source.storage,
+                    d,
+                    source.keys,
+                    metrics=metrics,
+                    prefixes=prefixes,
+                )
+            )
+    return extra
+
+
+def _start_offsets(
+    source: RunListing, trained: Sequence[RunData], experiment: str
+) -> dict[str, dict[str, float]]:
+    """Resolve each warm-started run's clock offsets from its `start` checkpoint."""
+    checkpoints: dict[tuple[str, str, str], dict[str, float]] = {}
+    for run in trained:
+        exp = run.file.experiment if run.file is not None else experiment
+        for cp in run.checkpoints:
+            if cp.file is not None:
+                checkpoints[(exp, run.name, cp.file)] = dict(cp.at)
+    offsets: dict[str, dict[str, float]] = {}
+    for run in trained:
+        if run.file is None or not run.file.start:
+            continue
+        parts = run.file.start.split("/", 2)
+        if len(parts) != 3:
+            continue
+        parent_exp, parent_run, cp_file = parts
+        parent_at = checkpoints.get((parent_exp, parent_run, cp_file))
+        if parent_at is None:
+            for d in source.declarations:
+                if (
+                    d.file.experiment == parent_exp
+                    and d.name == parent_run
+                    and d.file.kind != "evaluation"
+                ):
+                    loaded = read_located(
+                        source.storage,
+                        d,
+                        source.keys,
+                        metrics=frozenset(),
+                    )
+                    for cp in loaded.checkpoints:
+                        if cp.file is not None:
+                            checkpoints[(parent_exp, loaded.name, cp.file)] = dict(cp.at)
+            parent_at = checkpoints.get((parent_exp, parent_run, cp_file))
+        if not parent_at:
+            continue
+        clocks = {c.name for c in run.clocks} | {"running_hours"}
+        shift = {clock: float(value) for clock, value in parent_at.items() if clock in clocks}
+        if shift:
+            offsets[run.name] = shift
+    return offsets
+
+
+def _eval_run_matches_tournaments(run_name: str, tournaments: Sequence[str]) -> bool:
+    return any(
+        run_name == t or (run_name.startswith(f"{t}-") and len(run_name) == len(t) + 13)
+        for t in tournaments
+    )
+
+
 def _load_cached_page(path: Path, expected_key: str) -> Page | None:
     try:
         with path.open("rb") as stream:
@@ -798,11 +889,13 @@ def _build_page(
     storage = source.storage
     report = loaded.report
     cache_path = _page_cache_path(experiment, storage)
+    metrics_filter = None if report.other_metrics else frozenset(report.keys())
+    flames = _flames(report)
     data = read_all(
         source,
         experiment,
-        metrics=None if report.other_metrics else frozenset(report.keys()),
-        prefixes=_flames(report),
+        metrics=metrics_filter,
+        prefixes=flames,
     )
     if not data:
         held = sorted({run.file.experiment for run in source.declarations})
@@ -811,16 +904,30 @@ def _build_page(
             + (f"; it holds {', '.join(held)}" if held else "; it holds no runs")
         )
     trained = [run for run in data if run.file is None or run.file.kind != "evaluation"]
+    included_trained = _included_training(
+        source, report.include, metrics=metrics_filter, prefixes=flames
+    )
+    if included_trained:
+        existing_names = {run.name for run in trained}
+        trained = [*trained, *(run for run in included_trained if run.name not in existing_names)]
+    offsets = _start_offsets(source, trained, experiment) if report.displace_starts else {}
     state = None
     wanted: list[Tournament] = []
-    if loaded.eval_jobs is not None or len(trained) < len(data):
+    has_included_evals = any(inc.tournaments for inc in report.include)
+    if (
+        loaded.eval_jobs is not None
+        or len(trained) < len(data) + len(included_trained)
+        or has_included_evals
+    ):
         # Only reports with evaluations need the optional eval dependency.
         from etude.experiment import state_of  # noqa: PLC0415
 
         state = state_of(data, experiment)
         wanted = loaded.tournaments(state)
     local_versions = runs.local_versions(experiment) if state is not None else None
-    referenced = {experiment} | find_line_experiments(wanted)
+    referenced = {experiment, *(inc.experiment for inc in report.include)} | find_line_experiments(
+        wanted
+    )
     versions = source.versions_for(referenced)
     cache_key = _page_cache_key(
         experiment=experiment,
@@ -836,7 +943,9 @@ def _build_page(
     )
     if (cached := _load_cached_page(cache_path, cache_key)) is not None:
         return _BuiltPage(cached, loaded.sources, referenced, versions, local_versions)
-    evals = _read_evals(runs, state, report, wanted) if state is not None else _Evals()
+    evals = (
+        _read_evals(runs, state, report, wanted, offsets=offsets) if state is not None else _Evals()
+    )
     # Blocks arrive as they are sealed, so a run with no recorded end shows what it played so far.
     unended = [
         run.name
@@ -855,6 +964,7 @@ def _build_page(
         (*loaded.notes, *partial),
         trained,
         evals,
+        offsets=offsets,
     )
     if not report.other_metrics and any(run.rows for run in trained) and page.headline() is None:
         # Named reports discard ungrouped columns. Inspect the same listing on a
@@ -1122,8 +1232,10 @@ def _assemble(
     notes: tuple[str, ...],
     trained: Sequence[RunData],
     evals: _Evals,
+    *,
+    offsets: Mapping[str, Mapping[str, float]] = {},
 ) -> Page:
-    measured = training(trained, prefixes=_flames(report))
+    measured = training(trained, prefixes=_flames(report), offsets=offsets)
     if "ml" not in report.model_fields_set:
         # Defaults offer the RL metrics that exist; explicit panels still
         # diagnose missing keys, including a misspelt metric name.
@@ -1311,17 +1423,30 @@ def _read_evals(
     state: ExperimentState,
     report: Report,
     wanted: Sequence[Tournament],
+    *,
+    offsets: Mapping[str, Mapping[str, float]] = {},
 ) -> _Evals:
     # The optional `eval` extra (DuckDB, and the etude.eval modules over it), imported where
     # it is used: only an experiment with evaluations reads it, so a report without loads none.
     from etude.eval.query import _open_statsdb  # noqa: PLC0415
 
-    held, refused = _held_tournaments(wanted, state, runs)
-    db = _open_statsdb(state.experiment, runs.source)
+    held, refused = _held_tournaments(wanted, state, runs, includes=report.include)
+    if any(inc.tournaments or inc.jobs for inc in report.include):
+        scoped_listing, extra_exps, cache_suffix = _included_statsdb_listing(
+            runs.source, state.experiment, report.include
+        )
+        db = _open_statsdb(
+            state.experiment,
+            scoped_listing,
+            extra_experiments=extra_exps,
+            cache_suffix=cache_suffix,
+        )
+    else:
+        db = _open_statsdb(state.experiment, runs.source)
     try:
-        saved = _saved_checkpoints(db)
+        saved = _saved_checkpoints(db, offsets=offsets)
         players, placement, unplaced_checkpoints = _players(
-            db, saved, {run.name: run.line for run in state.runs}
+            db, saved, {run.name: run.line for run in state.runs}, offsets=offsets
         )
         outside = _load(db, held, players)
         commits = _commits(db)
@@ -1331,7 +1456,7 @@ def _read_evals(
             db, selections, players, environments, commits, report
         )
         cells, hidden = _newest_environment(comparisons)
-        points, seated_pairs = _points(held, selections, players, saved, cells)
+        points, seated_pairs = _points(held, selections, players, saved, cells, offsets=offsets)
         latest = db.sql("select max(wall_ms) from matches").fetchone()
         evals = _Evals(
             scores=scores,
@@ -1353,6 +1478,45 @@ def _read_evals(
         db.close()
 
 
+def _included_statsdb_listing(
+    source: RunListing,
+    experiment: str,
+    includes: Sequence[Include],
+) -> tuple[RunListing, tuple[str, ...], str]:
+    """Select only `experiment`'s keys plus the included runs/tournaments for a scoped statsdb."""
+    selected: dict[str, str | None] = {}
+    for d in source.declarations:
+        if d.file.experiment == experiment:
+            for folder in d.folders:
+                for key in under(source.keys, folder):
+                    selected[key] = source.objects.get(key)
+    extra_exps: list[str] = []
+    for inc in includes:
+        if inc.experiment != experiment and inc.experiment not in extra_exps:
+            extra_exps.append(inc.experiment)
+        for d in source.declarations:
+            if d.file.experiment != inc.experiment:
+                continue
+            if d.file.kind != "evaluation":
+                if not inc.jobs or d.file.job_name in inc.jobs:
+                    for folder in d.folders:
+                        for key in under(source.keys, folder):
+                            rel = key[len(folder) :]
+                            if rel == "run.json" or (
+                                rel.startswith("checkpoints/") and rel.endswith(".json")
+                            ):
+                                selected[key] = source.objects.get(key)
+            elif inc.tournaments and _eval_run_matches_tournaments(d.name, inc.tournaments):
+                for folder in d.folders:
+                    for key in under(source.keys, folder):
+                        selected[key] = source.objects.get(key)
+    digest = hashlib.sha256(
+        json.dumps([inc.model_dump(mode="json") for inc in includes], sort_keys=True).encode()
+    ).hexdigest()[:12]
+    scoped = RunListing(source.storage, selected, known=dict(source._known))
+    return scoped, tuple(extra_exps), f"inc-{digest}"
+
+
 @dataclass(frozen=True)
 class _HeldTournament:
     """One tournament: every match it calls for, with seating and tags, the held checkpoints
@@ -1369,6 +1533,8 @@ def _held_tournaments(
     asked: Sequence[Tournament],
     state: ExperimentState,
     listings: _ReportRuns,
+    *,
+    includes: Sequence[Include] = (),
 ) -> tuple[list[_HeldTournament], tuple[str, ...]]:
     """Each tournament as held so far, and a note for each one drawn otherwise than asked.
 
@@ -1431,6 +1597,59 @@ def _held_tournaments(
         held_tournaments.append(
             _HeldTournament(name, tournament, tuple(tournament.schedule()), gaps, found)
         )
+    source = listings.source
+    for inc in includes:
+        if not inc.tournaments:
+            continue
+        inc_objects: dict[str, str | None] = {}
+        for d in source.declarations:
+            if (
+                d.file.experiment == inc.experiment
+                and d.file.kind == "evaluation"
+                and _eval_run_matches_tournaments(d.name, inc.tournaments)
+            ):
+                for folder in d.folders:
+                    for key in under(source.keys, folder):
+                        inc_objects[key] = source.objects.get(key)
+        if not inc_objects:
+            continue
+        inc_listing = RunListing(source.storage, inc_objects, known=dict(source._known))
+        inc_runs = StoredRuns.read(inc.experiment, inc_listing)
+        inc_wanted: dict[str, Tournament] = {}
+        for t_name in inc.tournaments:
+            held_runs = inc_runs.tournaments.get(t_name)
+            if not held_runs:
+                continue
+            try:
+                inc_wanted[t_name] = assemble(held_runs)
+            except EtudeError as error:
+                refused.append(
+                    f"Included tournament {t_name} ({inc.experiment}) is not shown:"
+                    f" its eval runs disagree ({error.code})."
+                )
+        inc_lines = read_tournament_lines(source, state, inc_wanted.values())
+        for t_name, given in sorted(inc_wanted.items()):
+            if any(h.name == t_name for h in held_tournaments):
+                continue
+            try:
+                found = played(
+                    given.definition,
+                    experiment=inc.experiment,
+                    checkpoints=given.checkpoints,
+                    enter=given.entrants,
+                    lines=inc_lines,
+                    runs=inc_runs,
+                )
+            except EtudeError as error:
+                refused.append(
+                    f"Included tournament {t_name} ({inc.experiment}) is not shown:"
+                    f" it is refused ({error.code})."
+                )
+                continue
+            tournament, gaps = given.resolve(inc_lines, experiment=inc.experiment)
+            held_tournaments.append(
+                _HeldTournament(t_name, tournament, tuple(tournament.schedule()), gaps, found)
+            )
     return held_tournaments, tuple(refused)
 
 
@@ -1455,7 +1674,11 @@ def _wanted(want: Callable[..., object], state: ExperimentState) -> list[Tournam
 
 
 def _players(
-    db: duckdb.DuckDBPyConnection, saved: dict[str, _Saved], lines: dict[str, str]
+    db: duckdb.DuckDBPyConnection,
+    saved: dict[str, _Saved],
+    lines: dict[str, str],
+    *,
+    offsets: Mapping[str, Mapping[str, float]] = {},
 ) -> tuple[list[Placement], tuple[str, ...], list[int]]:
     """Every player seated, placed by its seat, else by the training run that saved it;
     with placement notes and the indices of checkpoints lacking a position.
@@ -1475,9 +1698,10 @@ def _players(
     for key, names, kind, config, checkpoint, given, named in found:
         name = "/".join(json.loads(names))
         bound = saved.get(checkpoint)
+        offset = offsets.get(bound.run) if bound is not None else None
         recorded = {} if bound is None else bound.at
         seated_at: list[dict[str, float]] = json.loads(given)
-        seated = _merged(seated_at)
+        seated = _shift_at(_merged(seated_at), offset)
         if _disagree(seated_at):
             earlier = "; ".join(_described(each) for each in seated_at if each != seated)
             notes.append(
@@ -1554,7 +1778,11 @@ class _Saved:
     at: dict[str, float]
 
 
-def _saved_checkpoints(db: duckdb.DuckDBPyConnection) -> dict[str, _Saved]:
+def _saved_checkpoints(
+    db: duckdb.DuckDBPyConnection,
+    *,
+    offsets: Mapping[str, Mapping[str, float]] = {},
+) -> dict[str, _Saved]:
     """Each checkpoint key, encoded, to the training run's checkpoint that saved it.
 
     A run that saved two ordinals under one file name holds one key; it is
@@ -1564,7 +1792,10 @@ def _saved_checkpoints(db: duckdb.DuckDBPyConnection) -> dict[str, _Saved]:
         'select checkpoint, run, max(ordinal), arg_max("at", ordinal) from training_checkpoints'
         " group by checkpoint, run"
     ).fetchall()
-    return {key: _Saved(run, ordinal, json.loads(at)) for key, run, ordinal, at in found}
+    return {
+        key: _Saved(run, ordinal, _shift_at(json.loads(at), offsets.get(run)))
+        for key, run, ordinal, at in found
+    }
 
 
 @dataclass(frozen=True, order=True)
@@ -1582,6 +1813,8 @@ def _points(
     players: Sequence[Placement],
     saved: dict[str, _Saved],
     cells: Sequence[Cell],
+    *,
+    offsets: Mapping[str, Mapping[str, float]] = {},
 ) -> tuple[tuple[Point, ...], set[tuple[int, int, int]]]:
     """Each selection of seatings' points: per checkpoint a seating was held for, its first
     seat's score over the matches held for it, or why its relative seat found no checkpoint.
@@ -1654,12 +1887,14 @@ def _points(
             chosen.setdefault(key.checkpoint, []).append(key)
         for checkpoint, here in chosen.items():
             ref, place = refs[checkpoint], saved.get(checkpoint)
+            offset = offsets.get(place.run) if place is not None else None
+            at = _shift_at(ref.at, offset) if ref.at else ({} if place is None else place.at)
             stood = Point(
                 selection=number,
                 run=None if place is None else place.run,
                 ordinal=None if place is None else place.ordinal,
                 line=ref.line,
-                at=ref.at or ({} if place is None else place.at),
+                at=at,
                 whole=any((key.tournament, key.seating) in one_seed for key in here),
             )
             # By view, score and split: the cells of this checkpoint's pairs.

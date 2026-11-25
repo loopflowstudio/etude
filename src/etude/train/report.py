@@ -19,7 +19,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from typing import Literal
 
@@ -101,7 +101,7 @@ class Trace(Record):
     seeds: list[int] | None = None
 
     @classmethod
-    def from_buckets(cls, owner: str, reduced: Buckets) -> Trace:
+    def from_buckets(cls, owner: str, reduced: Buckets, *, offset: float = 0.0) -> Trace:
         last = None
         for endpoint, mean in zip(reversed(reduced.last), reversed(reduced.mean), strict=True):
             # A folded bucket retains its finite mean even when it ends in a gap.
@@ -112,7 +112,7 @@ class Trace(Record):
         return cls(
             owner=owner,
             last=last,
-            x=_rounded((reduced.x_first + reduced.x_last) / 2, 7),
+            x=_rounded((reduced.x_first + reduced.x_last) / 2 + offset, 7),
             mean=_rounded(reduced.mean),
             nonfinite=int(reduced.nonfinite.sum()),
         )
@@ -173,17 +173,27 @@ def _started(run: RunData) -> float:
 
 
 def _band(
-    job: str, present: Sequence[tuple[RunData, Buckets]], metric: str, clock: str
+    job: str,
+    present: Sequence[tuple[RunData, Buckets]],
+    metric: str,
+    clock: str,
+    *,
+    offsets: Mapping[str, Mapping[str, float]] = {},
 ) -> Trace | None:
     """The mean of the seeds' bucket means over a shared span, banded by their range."""
     if len(present) < 2:
         return None
-    low = min(float(chart.x_first[0]) for _, chart in present)
-    high = max(float(chart.x_last[-1]) for _, chart in present)
+    shifts = [offsets.get(run.name, {}).get(clock, 0.0) for run, _ in present]
+    low = min(
+        float(chart.x_first[0]) + shift for (_, chart), shift in zip(present, shifts, strict=True)
+    )
+    high = max(
+        float(chart.x_last[-1]) + shift for (_, chart), shift in zip(present, shifts, strict=True)
+    )
     width = (high - low) / BUCKETS
     means = np.full((len(present), BUCKETS), np.nan)
-    for row, (run, _) in enumerate(present):
-        reduced = run.chart(metric, clock, BUCKETS, span=(low, high))
+    for row, ((run, _), shift) in enumerate(zip(present, shifts, strict=True)):
+        reduced = run.chart(metric, clock, BUCKETS, span=(low - shift, high - shift))
         means[row, reduced.index] = reduced.mean
     count = (~np.isnan(means)).sum(axis=0)
     filled = np.flatnonzero(count)
@@ -255,7 +265,13 @@ def _jobs(data: Sequence[RunData]) -> tuple[JobGroup, ...]:
     return tuple(found)
 
 
-def _summary(run: RunData) -> RunSummary:
+def _shift_at(at: Mapping[str, float], offset: Mapping[str, float] | None) -> dict[str, float]:
+    if not offset:
+        return dict(at)
+    return {clock: value + offset.get(clock, 0.0) for clock, value in at.items()}
+
+
+def _summary(run: RunData, *, offset: Mapping[str, float] | None = None) -> RunSummary:
     start = _started(run)
     last: dict[str, int] = {}
     for block in run.blocks:
@@ -281,11 +297,11 @@ def _summary(run: RunData) -> RunSummary:
             )
             for writer in run.writers
         ),
-        at=run.reached,
+        at=_shift_at(run.reached, offset),
     )
 
 
-def _marks(run: RunData) -> list[Mark]:
+def _marks(run: RunData, *, offset: Mapping[str, float] | None = None) -> list[Mark]:
     start = _started(run)
     steps = [clock.name for clock in run.clocks if clock.kind == "step"]
     first = run.clocks[0].name if run.clocks else None
@@ -312,12 +328,13 @@ def _marks(run: RunData) -> list[Mark]:
                 if not restarted and here is not None and there is not None and seconds > 0
                 else None
             )
+        shifted = _shift_at(checkpoint.at, offset)
         marks.append(
             Mark(
                 run=run.name,
                 ordinal=checkpoint.ordinal,
-                at=checkpoint.at,
-                align=checkpoint.at.get(first, float(checkpoint.ordinal))
+                at=shifted,
+                align=shifted.get(first, float(checkpoint.ordinal))
                 if first
                 else float(checkpoint.ordinal),
                 elapsed=checkpoint.wall_ms / 1000 - start,
@@ -376,7 +393,12 @@ def _timers(run: RunData, prefix: str, metrics: Iterable[str]) -> Timers | None:
     return Timers(run=run.name, prefix=prefix, tree=tree)
 
 
-def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Training:
+def training(
+    data: Sequence[RunData],
+    *,
+    prefixes: Sequence[str] = (),
+    offsets: Mapping[str, Mapping[str, float]] = {},
+) -> Training:
     """What the page draws from these runs; `prefixes` name the timer trees to sum."""
     clocks: dict[str, Clock] = {}
     for run in data:
@@ -409,10 +431,13 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
                         if len(reduced):
                             present.append((run, reduced))
                             if clock in BUILT_IN_NAMES or clock in run_clocks[run.name]:
+                                shift = offsets.get(run.name, {}).get(clock, 0.0)
                                 traces_by_key.setdefault((clock, metric), {})[run.name] = (
-                                    Trace.from_buckets(run.name, reduced)
+                                    Trace.from_buckets(run.name, reduced, offset=shift)
                                 )
-                    if (band := _band(job.name, present, metric, clock)) is not None:
+                    if (
+                        band := _band(job.name, present, metric, clock, offsets=offsets)
+                    ) is not None:
                         bands_by_key.setdefault((clock, metric), []).append(band)
             for prefix in unique_prefixes:
                 for run in members:
@@ -431,8 +456,10 @@ def training(data: Sequence[RunData], *, prefixes: Sequence[str] = ()) -> Traini
     return Training(
         clocks=tuple(clocks.values()),
         jobs=jobs,
-        runs=tuple(_summary(run) for run in data),
-        checkpoints=tuple(mark for run in data for mark in _marks(run)),
+        runs=tuple(_summary(run, offset=offsets.get(run.name)) for run in data),
+        checkpoints=tuple(
+            mark for run in data for mark in _marks(run, offset=offsets.get(run.name))
+        ),
         metrics=metrics,
         series=series,
         bands=bands,
