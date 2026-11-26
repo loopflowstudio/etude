@@ -6,7 +6,7 @@ import hashlib
 import json
 import threading
 from contextlib import closing
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
@@ -14,14 +14,18 @@ from pathlib import Path
 import pytest
 
 from etude.deadline import limit_time, remaining
+from etude.launch.aws import Keys
 from etude.launch.records import Output
-from etude.launch.schemas import AttemptRecord, Finished
-from etude.launch.storage.s3 import Grant, PostForm
+from etude.launch.records import Storage as Place
+from etude.launch.schemas import AttemptRecord, Finished, Packet, Work
+from etude.launch.storage.bucket import BucketJournal
+from etude.launch.storage.s3 import Bucket, Grant, PostForm
 from etude.launch.storage.transport import HTTPReply, attribute, emit, observe
 from etude.launch.worker import courier as delivery
 from etude.launch.worker.courier import Courier
 from etude.storage_timeout import StorageUnavailable
 from tests.launch.fake import open_database
+from tests.launch.test_runpod_machines import Storage
 
 
 class _Files:
@@ -204,3 +208,110 @@ def test_delivery_retains_in_flight_outputs_when_the_caller_cannot_continue(
     courier.carry_out()
     assert all(f"runs/study/attempts/a1/{name}" in files.objects for name in "abcd")
     assert files.delivered()
+    assert not outputs.exists()
+
+
+def test_confirmed_final_delivery_cleans_session_while_failed_delivery_keeps_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "cache"))
+    files = _Files()
+    courier, outputs = _courier(tmp_path, files)
+    home = courier._home
+    (home / "sources").mkdir()
+    (home / "sources/commit.tar").write_bytes(b"source-tar")
+    (home / "inputs").mkdir()
+    (home / "inputs/deadbeef").write_bytes(b"input-bytes")
+    (home / "packet.json").write_text("{}")
+    (home / "ended").write_text(datetime.now(UTC).isoformat())
+
+    # Unconfirmed final delivery keeps outputs, sources, inputs, and attempts intact.
+    files.failed = "/b"
+    assert not delivery._deliver(
+        courier,
+        lambda _: None,
+        0.01,
+        lambda: 0.0,
+        closed=True,
+        ended=True,
+    )
+    assert outputs.is_dir()
+    assert (home / "sources/commit.tar").is_file()
+    assert (home / "inputs/deadbeef").is_file()
+    assert (home / "attempts/a1").is_dir()
+
+    # Confirmed final delivery removes outputs, sources, inputs, and attempts, keeping control files.
+    files.failed = ""
+    assert delivery._deliver(
+        courier,
+        lambda _: None,
+        0.01,
+        lambda: 60.0,
+        closed=True,
+        ended=True,
+    )
+    assert not outputs.exists()
+    courier.clean_session()
+    assert not (home / "sources").exists()
+    assert not (home / "inputs").exists()
+    assert not (home / "attempts").exists()
+    assert (home / "packet.json").is_file()
+    assert (home / "ended").is_file()
+
+
+@pytest.mark.parametrize("fail_final", [False, True])
+def test_serve_cleans_session_only_after_confirmed_final_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_final: bool
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "cache"))
+    storage = Storage()
+    place = Place(name="s", bucket="b", prefix="test", provider="s3", region="us-east-1")
+    bucket = Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), storage)
+    journal = BucketJournal(place, bucket)
+    work = Work(
+        attempt="a1",
+        run="exp/job@0",
+        command='echo hi > "$ETUDE_OUTPUT_DIR/model.pt"',
+        limit_seconds=60,
+        limit_kind="out_of_time",
+        seed=None,
+        until=None,
+        config=None,
+        repo=None,
+        commit=None,
+    )
+    packet = Packet(
+        session="s-clean",
+        deadline=datetime.now(UTC) + timedelta(minutes=2),
+        work=(work,),
+    )
+    bootstrap = journal.prepare(packet)
+
+    def transport(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> HTTPReply:
+        if fail_final and method in ("PUT", "POST") and "/out/ended" in url:
+            raise StorageUnavailable("final ended upload failed")
+        if fail_final and method == "POST" and body and b"out/ended" in body:
+            raise StorageUnavailable("final ended upload failed")
+        return storage(method, url, body, headers)
+
+    root = tmp_path / "sessions"
+    worker_log = root / "s-clean" / "worker.log"
+    delivery._serve(
+        bootstrap.url,
+        root,
+        transport,
+        lambda _: None,
+        0.01,
+        worker_log,
+        "",
+    )
+    session_dir = root / "s-clean"
+    if fail_final:
+        assert (session_dir / "attempts").is_dir()
+    else:
+        assert not (session_dir / "attempts").exists()
+        assert not (session_dir / "sources").exists()
+        assert not (session_dir / "inputs").exists()
+        assert (session_dir / "packet.json").is_file()
+        assert (session_dir / "ended").is_file()
+        assert (session_dir / "pid").is_file()

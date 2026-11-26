@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from collections import Counter
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -25,7 +26,7 @@ from etude.launch.provisioner.machines import OwnedMachine
 from etude.launch.records import Machine, Pool
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler.loop import Scheduler
-from etude.launch.schemas import AttemptRecord, Finished
+from etude.launch.schemas import AttemptRecord, Finished, Packet
 from etude.launch.ssh import (
     SSH,
     HeldRequest,
@@ -34,6 +35,8 @@ from etude.launch.ssh import (
     SessionRequest,
     SSHJournal,
     SSHStart,
+    StartRequest,
+    Unreachable,
 )
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket
@@ -632,7 +635,7 @@ def test_ssh_observe_and_steady_calls_omit_program_archive(
 
 
 def test_wait_backs_off_while_steady_and_resets_on_state_change(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, courier_pid: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ssh = CountedSSH("bench", str(tmp_path / "remote"))
     service = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
@@ -657,7 +660,7 @@ def test_wait_backs_off_while_steady_and_resets_on_state_change(
     session = scheduler.attempts(run)[0].session
     home = tmp_path / "remote" / session
     home.mkdir(parents=True)
-    (home / "boot-claim").write_text(str(os.getpid()))
+    (home / "boot-claim").write_text(str(courier_pid))
 
     ssh.asks.clear()
     with pytest.raises(TimeoutError):
@@ -682,3 +685,119 @@ def test_wait_backs_off_while_steady_and_resets_on_state_change(
     (done,) = scheduler.wait(run, timeout=60)
     assert done.outcome == "cancelled"
     assert sleeps[0] == 1.0
+
+
+def test_start_claim_write_failure_leaves_no_claim_and_reports_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wrapper = tmp_path / "enospc-python"
+    wrapper.write_text(
+        f"#!{sys.executable}\n"
+        "import errno, os, sys\n"
+        "real_open = os.open\n"
+        "real_write = os.write\n"
+        "claim_fds = set()\n"
+        "def failing_open(path, flags, *args, **kwargs):\n"
+        "    fd = real_open(path, flags, *args, **kwargs)\n"
+        "    if str(path).endswith('boot-claim'):\n"
+        "        claim_fds.add(fd)\n"
+        "    return fd\n"
+        "def failing_write(fd, data):\n"
+        "    if fd in claim_fds:\n"
+        "        raise OSError(errno.ENOSPC, 'No space left on device')\n"
+        "    return real_write(fd, data)\n"
+        "os.open = failing_open\n"
+        "os.write = failing_write\n"
+        "assert sys.argv[1] == '-c'\n"
+        "exec(compile(sys.argv[2], '<boot>', 'exec'), {'__name__': '__main__'})\n"
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("ETUDE_REMOTE_PYTHON", str(wrapper))
+    root = tmp_path / "remote"
+    ssh = SSH("bench", str(root))
+    packet = Packet(session="full", deadline=None, work=())
+    with pytest.raises(Unreachable, match="No space left on device"):
+        ssh.call(StartRequest(session="full", packet=packet))
+    assert not (root / "full" / "boot-claim").exists()
+    monkeypatch.setenv("ETUDE_REMOTE_PYTHON", sys.executable)
+    assert not ssh.call(SessionRequest(action="claimed", session="full")).claimed
+
+
+def test_failed_ssh_keeps_sanitized_last_stderr_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TEST_API_KEY", "supersecret999")
+    script = tmp_path / "ssh"
+    script.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "-G" ]; then printf "connecttimeout none\\nserveraliveinterval 0\\n"; exit 0; fi\n'
+        "echo 'first warning line' >&2\n"
+        "echo 'fatal: https://bucket.invalid/obj?sig=secret key=supersecret999' >&2\n"
+        "exit 255\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    ssh = SSH("bench", str(tmp_path / "remote"))
+    with pytest.raises(Unreachable) as raised:
+        ssh.call(SessionRequest(action="claimed", session="s1"))
+    message = str(raised.value)
+    assert "fatal:" in message
+    assert "[redacted URL]" in message
+    assert "supersecret999" not in message
+    assert "bucket.invalid" not in message
+
+
+def test_old_empty_boot_claim_observes_not_alive_and_ends_lost(tmp_path: Path) -> None:
+    scheduler, executable = _owned_host(tmp_path)
+    executable.write_text(UNREACHABLE)
+    (stuck,) = scheduler.queue(_echo("stuck"), "bench")
+    scheduler.tick()
+    session = scheduler.attempts(stuck)[0].session
+    home = tmp_path / "remote" / session
+    home.mkdir(parents=True)
+    claim = home / "boot-claim"
+    claim.touch()
+    executable.write_text(RELAY)
+    ssh = SSH("bench", str(tmp_path / "remote"))
+    # Fresh empty claim (as from an older worker mid-claim) still counts as booting.
+    assert ssh.call(SessionRequest(action="observe", session=session)).observation is not None
+    assert ssh.call(SessionRequest(action="observe", session=session)).observation.alive  # type: ignore[union-attr]
+    # Once older than 60 s, an empty claim is dead and the session settles as lost.
+    old = time.time() - 120
+    os.utime(claim, (old, old))
+    obs = ssh.call(SessionRequest(action="observe", session=session)).observation
+    assert obs is not None and not obs.alive
+    scheduler.tick()
+    scheduler.tick()
+    first = scheduler.attempts(stuck)[0]
+    assert first.outcome == "lost" and first.cause == "machine_lost_before_start"
+    assert scheduler.session(session).ended_at is not None
+
+
+def test_end_signals_boot_claim_pid_and_returns_ended_at_when_ended_unwritable(
+    tmp_path: Path, exited_pid: int
+) -> None:
+    root = tmp_path / "remote"
+    journal = SSHJournal(SSH("bench", str(root)))
+    # Live boot-claim PID is signalled with SIGTERM on end.
+    booting = root / "s_boot"
+    booting.mkdir(parents=True)
+    with subprocess.Popen(["sleep", "60"]) as boot_proc:
+        try:
+            (booting / "boot-claim").write_text(str(boot_proc.pid))
+            assert journal.end("s_boot") is None
+            assert boot_proc.wait(timeout=5) == -signal.SIGTERM
+        finally:
+            boot_proc.kill()
+    # When nothing runs and cancel-start is in place, unwritable `ended` still answers ended_at.
+    full = root / "s_full"
+    full.mkdir(parents=True)
+    (full / "boot-claim").write_text(str(exited_pid))
+    (full / "cancel-start").touch()
+    full.chmod(0o500)
+    try:
+        ended_at = journal.end("s_full")
+        assert ended_at is not None
+        assert not (full / "ended").exists()
+    finally:
+        full.chmod(0o700)

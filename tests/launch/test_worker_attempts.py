@@ -24,13 +24,15 @@ from etude.launch.records import Machine, Pool, Status
 from etude.launch.scheduler.loop import Scheduler
 from etude.records import Clock
 from etude.run import runs
-from etude.spec import Input, Job, RunRequest, Until, job_id
+from etude.spec import Input, Job, Preparation, RunRequest, Until, job_id
 from etude.storage import DirectoryStorage
 from etude.train.read import read
 from etude.train.report import training
 from tests.experiments import authored
 from tests.launch.counting import job_text
 from tests.launch.fake import open_database
+from tests.launch.test_source import git
+from tests.launch.test_source import repository as repository
 from tests.run.storage import MeasuredStorage
 from tests.train.tracking import open_run
 
@@ -331,7 +333,11 @@ def test_an_attempt_links_its_held_inputs_read_only_without_copying(tmp_path: Pa
     (one,) = scheduler.launch(
         Job(
             experiment="capacity",
-            command='cat "$ETUDE_INPUTS_DIR/weights" | wc -c',
+            command=(
+                f"{sys.executable} -c "
+                '\'import os, pathlib; p = pathlib.Path(os.environ["ETUDE_INPUTS_DIR"]) / "weights"; '
+                "st = p.stat(); print(len(p.read_bytes()), st.st_ino, oct(st.st_mode & 0o777))'"
+            ),
             inputs=(weights.input,),
             max_hours=0.1,
             max_usd=Decimal(1),
@@ -339,11 +345,14 @@ def test_an_attempt_links_its_held_inputs_read_only_without_copying(tmp_path: Pa
     )
     (status,) = scheduler.wait(one, every=0.05, timeout=30)
     assert status.outcome == "succeeded"
-    assert job_text(scheduler.logs(refresh=True, run=one)).split()[-1] == "8000"
+    size, inode, mode = job_text(scheduler.logs(refresh=True, run=one)).splitlines()[-1].split()
+    assert size == "8000"
+    assert int(inode) == held.stat().st_ino  # one copy on this machine
+    assert mode == oct(0o444)
     attempt = scheduler.attempts(one)[0]
-    given = tmp_path / "sessions" / attempt.session / "attempts" / attempt.id / "inputs/weights"
-    assert given.stat().st_ino == held.stat().st_ino  # one copy on this machine
-    assert given.stat().st_mode & 0o777 == 0o444
+    assert not (
+        tmp_path / "sessions" / attempt.session / "attempts" / attempt.id / "inputs"
+    ).exists()
 
 
 def test_a_corrupted_held_input_is_refused_before_the_job_starts(tmp_path: Path) -> None:
@@ -399,3 +408,48 @@ def test_a_folder_checkpoint_reaches_a_job_as_verified_nested_inputs(tmp_path: P
     (status,) = scheduler.wait(one, every=0.05, timeout=30)
     assert status.outcome == "succeeded"
     assert "policy weightsvalue weights" in job_text(scheduler.logs(refresh=True, run=one))
+
+
+def test_finished_attempt_deletes_working_trees_and_keeps_outputs_and_logs(
+    tmp_path: Path, repository: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    repo, _ = repository
+    (repo / "marker.txt").write_text("source\n")
+    git(repo, "add", "marker.txt")
+    git(repo, "commit", "-q", "-m", "add marker")
+    data = tmp_path / "input.bin"
+    data.write_bytes(b"payload")
+    given = Input(
+        name="data.bin",
+        key="data.bin",
+        sha256=hashlib.sha256(b"payload").hexdigest(),
+        size_bytes=7,
+        uri=data.as_uri(),
+    )
+    scheduler = local(tmp_path)
+    (one,) = scheduler.launch(
+        Job(
+            experiment="clean",
+            repo=str(repo),
+            inputs=(given,),
+            prepare=Preparation(
+                command='cp "$ETUDE_PREPARED_INPUTS/data.bin" "$ETUDE_PREPARED_DIR/ready"',
+                paths=("marker.txt",),
+                inputs=("data.bin",),
+            ),
+            command='cat "$ETUDE_INPUTS_DIR/data.bin" > "$ETUDE_OUTPUT_DIR/out.bin"; echo done',
+            max_hours=0.1,
+        )
+    )
+    (status,) = scheduler.wait(one, every=0.05, timeout=30)
+    assert status.outcome == "succeeded"
+    (attempt,) = scheduler.attempts(one)
+    attempt_dir = tmp_path / "sessions" / attempt.session / "attempts" / attempt.id
+    for scratch in ("src", "prepared-source", "prepared-inputs", "inputs"):
+        assert not (attempt_dir / scratch).exists()
+    assert (attempt_dir / "finished.json").is_file()
+    assert (attempt_dir / "log").is_file()
+    assert (attempt_dir / "outputs" / "out.bin").read_bytes() == b"payload"
+    assert scheduler.fetch(one, "out.bin", tmp_path / "fetched").read_bytes() == b"payload"
+    assert "done" in job_text(scheduler.logs(refresh=True, run=one))

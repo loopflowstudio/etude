@@ -21,7 +21,7 @@ from typing import Annotated, Literal, cast, get_args
 from pydantic import Field
 
 from etude.deadline import remaining
-from etude.errors import LauncherError
+from etude.errors import LauncherError, sanitize
 from etude.launch.logs import snapshot_stream
 from etude.launch.openssh import ssh_command
 from etude.launch.provisioner.machines import Allocation
@@ -166,7 +166,8 @@ with contextlib.redirect_stdout(sys.stderr):
         logging.write_log("client install", sys.modules["etude.errors"].explain(error))
         if globals().get('request',{}).get('action')=='start':
             from datetime import datetime,UTC
-            (home/'ended').write_text(datetime.now(UTC).isoformat())
+            try: (home/'ended').write_text(datetime.now(UTC).isoformat())
+            except OSError: pass
         raise
     finally:
         if os.environ.get("ETUDE_LOG_PATH") and (failed or globals().get("request",{}).get("action") != "start"):
@@ -177,7 +178,7 @@ with contextlib.redirect_stdout(sys.stderr):
 """
 # It reads the RemoteCall as JSON: `request` is its request, and replies are RemoteReply.
 _BOOT = (
-    """import base64,json,os,pathlib,signal,sys
+    """import base64,json,os,pathlib,signal,sys,time
 call=json.load(sys.stdin)
 os.environ.update(call.get('storage_environment', {}))
 request=call['request']
@@ -186,17 +187,26 @@ def _recorded(name: str) -> int | None:
     path=home/name
     try: text=path.read_text().strip()
     except FileNotFoundError: return None
-    return int(text) if text.isdigit() else 0
+    return int(text) if text.isdigit() else None
 def _pid_alive(pid: int | None) -> bool:
-    if pid is None: return False
-    if pid==0: return True  # a fresh or older boot-claim can be empty
+    if pid is None or pid<=0: return False
     try: os.kill(pid,0)
     except ProcessLookupError: return False
     except PermissionError: pass
     return True
+def _boot_alive() -> bool:
+    if (home/'ended').exists(): return False
+    path=home/'boot-claim'
+    try:
+        st=path.stat()
+        text=path.read_text().strip()
+    except FileNotFoundError: return False
+    if text.isdigit(): return _pid_alive(int(text))
+    # Empty claim written by a released worker counts as booting only while younger than 60 s.
+    return not text and (time.time()-st.st_mtime)<60
 def _host_alive() -> bool | None:
     # Check boot before reading the PID it hands off to, so its exit cannot hide the handoff.
-    booting=not (home/'ended').exists() and _pid_alive(_recorded('boot-claim'))
+    booting=_boot_alive()
     worker=(home/'pid').exists()
     if (courier:=_recorded('courier-pid')) is not None: return _pid_alive(courier)  # owns final delivery
     if not worker: return booting
@@ -214,38 +224,84 @@ if request['action']=='observe':
         print(json.dumps({'observation':{'alive':alive,'progress':[],'start_unknown':alive}})); sys.exit(0)
 if request['action']=='ended':
     path=home/'ended'
-    print(json.dumps({'ended_at':path.read_text() if path.exists() else None})); sys.exit(0)
+    text=path.read_text().strip() if path.exists() else ''
+    print(json.dumps({'ended_at':text or None})); sys.exit(0)
 if request['action']=='end':
     home.mkdir(parents=True,exist_ok=True)
     (home/'cancel-start').touch()
     path=home/'ended'
+    ended_at=None
     if not (home/'pid').exists() and not path.exists():
-        # The cancel stops an install; a courier still fetching stops at once.
-        if courier:=_recorded('courier-pid'):
-            try: os.kill(courier,signal.SIGTERM)
-            except (ProcessLookupError,PermissionError): pass
+        # The cancel stops an install; a live boot or courier stops at once.
+        for name in ('boot-claim','courier-pid'):
+            if proc:=_recorded(name):
+                try: os.kill(proc,signal.SIGTERM)
+                except (ProcessLookupError,PermissionError): pass
         if _host_alive() is False and not (home/'pid').exists():
             # Nothing runs here, and the cancel fences any start still in flight.
             from datetime import datetime,UTC
-            path.write_text(datetime.now(UTC).isoformat())
+            now=datetime.now(UTC).isoformat()
+            try: path.write_text(now)
+            except OSError:
+                try: path.unlink()
+                except OSError: pass
+                ended_at=now
     if path.exists() or not (home/'pid').exists():
-        print(json.dumps({'ended_at':path.read_text() if path.exists() else None})); sys.exit(0)
+        if path.exists():
+            try: ended_at=path.read_text().strip() or ended_at
+            except OSError: pass
+        print(json.dumps({'ended_at':ended_at})); sys.exit(0)
 if request['action']=='start':
     home.mkdir(parents=True,exist_ok=True,mode=0o700)
-    if (home/'cancel-start').exists():
+    if (home/'cancel-start').exists() or (home/'boot-claim').exists():
         print(json.dumps({})); sys.exit(0)
-    try:
-        (home/'boot-claim').open('x').close()
-    except FileExistsError:
-        print(json.dumps({})); sys.exit(0)
+    r_fd,w_fd=os.pipe()
     pid=os.fork()
     if pid:
-        (home/'boot-claim').write_text(str(pid))
-        print(json.dumps({}),flush=True); os._exit(0)
-    (home/'boot-claim').write_text(str(os.getpid()))  # either write names this process
+        os.close(w_fd)
+        chunks=[]
+        while chunk:=os.read(r_fd,4096): chunks.append(chunk)
+        os.close(r_fd)
+        status=b''.join(chunks).decode(errors='replace')
+        if status=='ok':
+            print(json.dumps({}),flush=True); os._exit(0)
+        os.waitpid(pid,0)
+        if status=='exists':
+            print(json.dumps({}),flush=True); os._exit(0)
+        sys.stderr.write((status or 'boot-claim failed')+'\\n')
+        sys.stderr.flush()
+        os._exit(1)
+    os.close(r_fd)
+    claim=home/'boot-claim'
+    created=False
+    try:
+        fd=os.open(str(claim),os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+        created=True
+        try:
+            data=str(os.getpid()).encode()
+            view=memoryview(data)
+            while view:
+                view=view[os.write(fd,view):]
+        finally:
+            os.close(fd)
+    except FileExistsError:
+        try: os.write(w_fd,b'exists')
+        except OSError: pass
+        os.close(w_fd); os._exit(0)
+    except BaseException as error:
+        if created:
+            try: claim.unlink()
+            except OSError: pass
+        try: os.write(w_fd,f'{type(error).__name__}: {error}'.encode())
+        except OSError: pass
+        os.close(w_fd); os._exit(1)
     os.setsid()
     with open(os.devnull,'r+b') as sink:
         for fd in (0,1,2): os.dup2(sink.fileno(),fd)
+    def _abort_boot(signum: int, frame: object) -> None:
+        raise InterruptedError('startup cancelled')
+    signal.signal(signal.SIGTERM,_abort_boot)
+    os.write(w_fd,b'ok'); os.close(w_fd)
     os.environ['ETUDE_STARTUP_DEADLINE']=call.get('startup_deadline') or ''
     os.environ['ETUDE_STARTUP_CANCEL']=str(home/'cancel-start')
     os.environ['ETUDE_LOG_PATH']=str(home/'bootstrap.log')
@@ -285,7 +341,8 @@ if request['action']=='start':
     except Exception as error:
         logging.write_log('worker entry',sys.modules["etude.errors"].explain(error))
         if not invoked:
-            (home/'ended').write_text(datetime.now(UTC).isoformat())
+            try: (home/'ended').write_text(datetime.now(UTC).isoformat())
+            except OSError: pass
         else:
             logging.write_log('worker entry','reply uncertain; retaining start claim')
     finally:
@@ -375,9 +432,17 @@ class SSH:
             sent["program"] = program
             result = self._run(argv, sent, retry_allowance)
         if result.returncode:
+            if b"uv is required" in result.stderr:
+                raise Unreachable("uv is required on the machine")
+            lines = [
+                line.strip()
+                for line in result.stderr.decode(errors="replace").splitlines()
+                if line.strip()
+            ]
+            detail = sanitize(lines[-1]) if lines else ""
             raise Unreachable(
-                "uv is required on the machine"
-                if b"uv is required" in result.stderr
+                f"SSH or the remote session command failed: {detail}"
+                if detail
                 else "SSH or the remote session command failed"
             )
         try:

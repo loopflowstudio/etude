@@ -43,7 +43,7 @@ import tarfile
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -70,6 +70,29 @@ _halt = threading.Event()
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def remove_tree(path: Path) -> None:
+    """Best-effort deletion of a scratch file or directory tree, including read-only entries."""
+    if not path.exists() and not path.is_symlink():
+        return
+    try:
+        if path.is_symlink() or not path.is_dir():
+            path.unlink(missing_ok=True)
+            return
+
+        def _writable(func: Callable[[str], object], target: str, exc: BaseException) -> None:
+            if isinstance(exc, PermissionError):
+                os.chmod(os.path.dirname(target), 0o700)
+                os.chmod(target, 0o700)
+                func(target)
+                return
+            if not isinstance(exc, FileNotFoundError):
+                raise exc
+
+        shutil.rmtree(path, onexc=_writable)
+    except OSError:
+        pass
 
 
 def _finish(
@@ -107,6 +130,9 @@ def _finish(
         ),
     )
     write(home / "finished.json", record.model_dump_json())
+    # Working trees and input links are no longer needed once finished.json is recorded.
+    for scratch in ("src", "prepared-source", "prepared-inputs", "inputs"):
+        remove_tree(home / scratch)
 
 
 def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dict[str, Path]]:

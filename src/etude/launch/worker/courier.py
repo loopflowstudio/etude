@@ -76,7 +76,7 @@ from etude.launch.storage.s3 import (
     read_version,
 )
 from etude.launch.storage.transport import Send, attribute, deliver, observe
-from etude.launch.worker.attempts import input_path, seed_out
+from etude.launch.worker.attempts import input_path, remove_tree, seed_out
 from etude.out import MEMBERSHIP, OutFile, OutFiles, recovery
 from etude.storage_timeout import StorageUnavailable
 
@@ -513,6 +513,8 @@ class Courier:
         return OutFile(key=key, sha256=digest, size_bytes=size)
 
     def _put_outputs(self, outputs: Path, run: str, attempt: str) -> None:
+        if not outputs.is_dir():
+            return
         paths = iter(
             sorted(
                 p
@@ -709,7 +711,10 @@ class Courier:
 
     def _carry_attempt(self, home: Path, final: bool) -> None:
         """Publish how an attempt ended, then its files, then its completion record."""
-        run, attempt = (home / "run").read_text(), home.name
+        attempt = home.name
+        if attempt in self._delivered:
+            return
+        run = (home / "run").read_text()
         done = (home / "finished.json").exists()
         claim, outputs = home / "claim", home / "outputs"
         entry = Finished.model_validate_json((home / "finished.json").read_text()) if done else None
@@ -720,7 +725,7 @@ class Courier:
             exited=entry,
             log_ends=None if carried is None else carried.ends,
         )
-        if done and attempt not in self._delivered:
+        if done:
             # Before any file: what fails below must not hide how the job ended.
             self._note(home, run, attempt, record)
         self._track(run, done or final)
@@ -735,6 +740,12 @@ class Courier:
         self._note(home, run, attempt, record)
         if done:
             self._delivered.add(attempt)
+            remove_tree(outputs)
+
+    def clean_session(self) -> None:
+        """Remove session payloads after confirmed final delivery, keeping small control files."""
+        for name in ("sources", "inputs", "attempts"):
+            remove_tree(self._home / name)
 
     def _note(self, home: Path, run: str, attempt: str, record: AttemptRecord) -> None:
         """Store the attempt's record, when it changed."""
@@ -903,7 +914,11 @@ def _serve(
         try:
             if courier is not None:
                 ended = collected and process is not None  # a session ran, and its output is in
-                _deliver(courier, sleep, every, left, closed=collected, ended=ended)
+                if (
+                    _deliver(courier, sleep, every, left, closed=collected, ended=ended)
+                    and collected
+                ):
+                    courier.clean_session()
             elif log_url:
                 publish(worker_log, log_url)  # no grant was read: the log goes whole, by its link
         except Exception as error:
@@ -977,7 +992,7 @@ def _deliver(
     *,
     closed: bool,
     ended: bool,
-) -> None:
+) -> bool:
     """Deliver the session's last files and the tail of its log, then its end receipt.
 
     A machine may be deleted as soon as its end receipt is seen, so the
@@ -985,6 +1000,8 @@ def _deliver(
     diagnosed in the log, which is closed again after it when its producer
     had closed it, and tried again within the allowance; an end receipt
     never sent leaves the end to the machine's cleanup or its deadline.
+    Returns True only when final delivery (and the end receipt when `ended`)
+    is confirmed.
     """
     note = courier._home / "ended"
     for _ in range(40):
@@ -998,7 +1015,7 @@ def _deliver(
                 if ended:
                     at = note.read_text() if note.exists() else _now().isoformat()
                     courier._out.write_bytes("ended", at.encode())
-            return
+            return True
         except (StorageUnavailable, OSError, ValueError) as error:
             _diagnose("final delivery", error)
             if closed:
@@ -1006,6 +1023,7 @@ def _deliver(
             pause = left()
             sleep(every if pause is None else min(every, pause))
     write_log("final delivery", "incomplete; final files or end receipt not confirmed")
+    return False
 
 
 def run(
