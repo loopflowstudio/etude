@@ -229,7 +229,9 @@ if request['action']=='ended':
     print(json.dumps({'ended_at':text or None})); sys.exit(0)
 if request['action']=='end':
     home.mkdir(parents=True,exist_ok=True)
-    (home/'cancel-start').touch()
+    try: (home/'cancel-start').touch()
+    except OSError:
+        if not ((home/'boot-claim').exists() or (home/'pid').exists()): raise
     path=home/'ended'
     ended_at=None
     if not (home/'pid').exists() and not path.exists():

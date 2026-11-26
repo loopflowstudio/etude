@@ -852,18 +852,28 @@ def test_end_signals_boot_claim_pid_and_returns_ended_at_when_ended_unwritable(
             assert boot_proc.wait(timeout=5) == -signal.SIGTERM
         finally:
             boot_proc.kill()
-    # When nothing runs and cancel-start is in place, unwritable `ended` still answers ended_at.
+    # When boot-claim exists (fencing duplicate starts) and the disk is unwritable,
+    # end tolerates unwritable cancel-start and ended files and still answers ended_at.
     full = root / "s_full"
     full.mkdir(parents=True)
     (full / "boot-claim").write_text(str(exited_pid))
-    (full / "cancel-start").touch()
     full.chmod(0o500)
     try:
         ended_at = journal.end("s_full")
         assert ended_at is not None
+        assert not (full / "cancel-start").exists()
         assert not (full / "ended").exists()
     finally:
         full.chmod(0o700)
+    # Without boot-claim or pid, cancel-start remains strict so an unconfirmed start stays fenced.
+    unclaimed = root / "s_unclaimed"
+    unclaimed.mkdir(parents=True)
+    unclaimed.chmod(0o500)
+    try:
+        with pytest.raises(Unreachable):
+            journal.end("s_unclaimed")
+    finally:
+        unclaimed.chmod(0o700)
 
 
 def test_ssh_command_reprobes_when_home_or_ssh_config_changes(

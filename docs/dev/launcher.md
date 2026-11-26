@@ -892,9 +892,11 @@ writes `cancel-start`. Installation and courier setup check it via
 before spawning the worker. `boot-claim` names the boot process until it hands
 off to a worker (`pid`) or, on a bucket-backed host, a courier (`courier-pid`).
 Before `pid` exists, `end` signals any live `boot-claim` or courier PID and
-records `ended` once setup has stopped; if nothing is running and the cancel
-fence is in place, a failed write of `ended` on a full disk still answers
-`ended_at` so the session settles as lost. It closes every slot in the session
+records `ended` once setup has stopped; if `boot-claim` or `pid` already exists
+(fencing any duplicate start) and the disk is full, `end` tolerates unwritable
+`cancel-start` and `ended` files and still answers `ended_at` once nothing is
+running so the session settles as lost, while staying strict when neither file
+exists. It closes every slot in the session
 as soon as shutdown is requested. A setup that was stopped still publishes its
 diagnostics if storage is available.
 
