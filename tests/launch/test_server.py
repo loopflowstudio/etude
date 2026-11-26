@@ -485,6 +485,7 @@ def test_server_loop_backs_off_while_steady_and_resets_on_change(
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
     b = bench(tmp_path)
+    assert not hasattr(b.scheduler, "pace_state")
     sleeps: list[float] = []
 
     class _Stop(BaseException):
@@ -495,14 +496,13 @@ def test_server_loop_backs_off_while_steady_and_resets_on_change(
         if len(sleeps) == 5:
             # Queue a new run so the next pass sees a state change.
             b.scheduler.queue(Job(command="true", max_hours=0.1, max_usd=Decimal(1)), rent="l4")
-        elif len(sleeps) >= 8:
+        elif len(sleeps) >= 10:
             raise _Stop
 
     monkeypatch.setattr("etude.launch.server.time.sleep", fake_sleep)
     with pytest.raises(_Stop):
         loop(b.scheduler)
-    # Idle steady passes back off 1 -> 2 -> 4 -> 8 -> 10; new work resets to 1, then backs off again.
-    assert sleeps[:5] == [1.0, 2.0, 4.0, 8.0, 10.0]
-    assert sleeps[5] == 1.0
-    assert sleeps[6] == 2.0
-    assert sleeps[7] == 4.0
+    # Idle steady passes cap at 4 s so newly queued runs start promptly.
+    assert sleeps[:5] == [1.0, 2.0, 4.0, 4.0, 4.0]
+    # Active steady passes reset to 1 s on change, then back off to 10 s.
+    assert sleeps[5:10] == [1.0, 2.0, 4.0, 8.0, 10.0]

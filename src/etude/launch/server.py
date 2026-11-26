@@ -42,7 +42,7 @@ from etude.launch.records import (
     Status,
     Target,
 )
-from etude.launch.scheduler.loop import Pacer, Scheduler
+from etude.launch.scheduler.loop import Scheduler, pace_ticks
 from etude.launch.source import freeze, retain, source_archive, stored
 from etude.launch.ssh import (
     _INSTALL_CODE,
@@ -610,20 +610,30 @@ def _answer(scheduler: Scheduler, request: Request) -> Response:
     return response
 
 
+_SERVER_IDLE_MAX = 4.0
+
+
 def loop(scheduler: Scheduler, every: float | None = None) -> None:
     """Keep matching even when the queue empties; heartbeat means a completed tick.
 
     When a newer etude migrates the database, this loop replaces itself with that
     program's loop, so running rentals keep a server through an upgrade.
     """
-    pacer = Pacer(every)
-    while True:
-        try:
-            scheduler.tick()
-        except SchemaAdvanced as advanced:
-            _hand_over(advanced.program)
-        write(home() / "server-heartbeat", datetime.now(UTC).isoformat())
-        time.sleep(pacer.delay(scheduler.pace_state() if every is None else None))
+
+    def handle_error(error: Exception) -> None:
+        if isinstance(error, SchemaAdvanced):
+            _hand_over(error.program)
+        raise error
+
+    pace_ticks(
+        scheduler,
+        every=every,
+        idle_max=_SERVER_IDLE_MAX,
+        stop_when_settled=False,
+        after_tick=lambda: write(home() / "server-heartbeat", datetime.now(UTC).isoformat()),
+        on_tick_error=handle_error,
+        sleep=time.sleep,
+    )
 
 
 def _hand_over(program: str | None) -> NoReturn:

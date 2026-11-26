@@ -304,8 +304,9 @@ between. A machine rented by hand with `etude rent` is kept and does not hold
 `wait`. A launch issued while a machine is still finishing says which one:
 `at its machine limit (finishing: gpu-41840a01c3b1)`; `etude wait` clears it.
 `etude wait` and the server loop check every second after a run or machine
-changes state, then back off to every 10 seconds while state is steady, so a
-finished or cancelled run can take up to 10 seconds to notice.
+changes state, then back off to every 10 seconds while active state is steady,
+so a finished or cancelled run can take up to 10 seconds to notice; an idle
+server loop caps its backoff at 4 seconds so newly queued runs start promptly.
 
 ## Fetching a run's files
 

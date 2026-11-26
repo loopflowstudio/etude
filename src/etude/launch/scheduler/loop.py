@@ -133,42 +133,110 @@ _PACE_MAX = 10.0
 
 
 @dataclass(frozen=True)
-class PaceState:
+class _PaceState:
     """Scheduler-acted state compared between wait passes: no clocks or spend."""
 
     runs: tuple[tuple[str, Phase, Outcome | None, str | None, str | None], ...]
     finishing: tuple[str, ...]
 
 
-class Pacer:
-    """Delay between wait passes: fixed `every`, or 1 s doubling to 10 s while state is steady."""
+class _Pacer:
+    """Delay between wait passes: fixed `every`, or 1 s doubling to cap while state is steady."""
 
-    def __init__(self, every: float | None = None) -> None:
+    def __init__(
+        self,
+        every: float | None = None,
+        *,
+        max_interval: float = _PACE_MAX,
+        idle_max: float | None = None,
+    ) -> None:
         if every is not None and (not math.isfinite(every) or every <= 0):
             raise ValueError("every must be positive and finite, or None")
         self._every = every
-        self._previous: PaceState | None = None
+        self._max = max_interval
+        self._idle_max = max_interval if idle_max is None else idle_max
+        self._previous: _PaceState | None = None
         self._interval = _PACE_MIN
 
-    def delay(self, state: PaceState | None) -> float:
+    def delay(self, state: _PaceState | None) -> float:
         if self._every is not None:
             return self._every
+        cap = (
+            self._idle_max
+            if state is not None and not state.runs and not state.finishing
+            else self._max
+        )
         if self._previous is None or state != self._previous:
             self._interval = _PACE_MIN
         else:
-            self._interval = min(self._interval * 2, _PACE_MAX)
+            self._interval = min(self._interval * 2, cap)
         self._previous = state
         return self._interval
 
 
-def _pace_state(statuses: Sequence[Status], ending: Sequence[Session]) -> PaceState:
-    return PaceState(
+def _pace_state(statuses: Sequence[Status], ending: Sequence[Session]) -> _PaceState:
+    return _PaceState(
         runs=tuple(
             (status.run, status.phase, status.outcome, status.attempt, status.machine)
             for status in statuses
         ),
         finishing=tuple(session.id for session in ending),
     )
+
+
+def pace_ticks(
+    scheduler: Scheduler,
+    *,
+    runs: Sequence[str] = (),
+    every: float | None = None,
+    timeout: float | None = None,
+    idle_max: float | None = None,
+    stop_when_settled: bool = True,
+    after_tick: Callable[[], None] | None = None,
+    on_tick_error: Callable[[Exception], None] | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> list[Status]:
+    """Advance `scheduler` in a paced loop until `runs` settle, or indefinitely for a server."""
+    pacer = _Pacer(every, idle_max=idle_max)
+    pause = scheduler._sleep if sleep is None else sleep
+    give_up = None if timeout is None else scheduler._clock() + timedelta(seconds=timeout)
+    while True:
+        try:
+            scheduler.tick()
+        except Exception as error:
+            if on_tick_error is None:
+                raise
+            on_tick_error(error)
+        if after_tick is not None:
+            after_tick()
+        if stop_when_settled or every is None:
+            statuses = [scheduler.read(run) for run in runs]
+            if runs:
+                active = statuses
+                unfinished = not all(status.done for status in statuses)
+            else:
+                active = [
+                    status
+                    for r in scheduler._store.runs()
+                    if not (status := scheduler.read(r.id)).done
+                ]
+                unfinished = bool(active)
+            ending = scheduler._store.finishing_sessions(runs)
+            if stop_when_settled and not unfinished and not ending:
+                return statuses
+            if give_up is not None and scheduler._clock() >= give_up:
+                if ending:
+                    raise TimeoutError(
+                        "machines still finishing: " + ", ".join(s.machine for s in ending)
+                    )
+                raise TimeoutError("runs still running: " + ", ".join(runs))
+            state = _pace_state(active, ending) if every is None else None
+        else:
+            state = None
+        delay = pacer.delay(state)
+        if give_up is not None:
+            delay = min(delay, max(0.0, (give_up - scheduler._clock()).total_seconds()))
+        pause(delay)
 
 
 def _limit_usd(job: Job) -> Decimal:
@@ -1208,15 +1276,6 @@ class Scheduler:
             if done or not self.read(r.id).done
         )
 
-    def pace_state(self, runs: Sequence[str] = ()) -> PaceState:
-        """Snapshot of scheduler-acted run and shutdown state for wait-loop backoff."""
-        statuses = (
-            [self.read(run) for run in runs]
-            if runs
-            else [status for r in self._store.runs() if not (status := self.read(r.id)).done]
-        )
-        return _pace_state(statuses, self._store.finishing_sessions(runs))
-
     def wait(
         self, *runs: str, every: float | None = None, timeout: float | None = None
     ) -> list[Status]:
@@ -1225,32 +1284,7 @@ class Scheduler:
         With no runs named, work until nothing launched is left unfinished. That
         is the loop to leave running so a queue keeps moving.
         """
-        pacer = Pacer(every)
-        give_up = None if timeout is None else self._clock() + timedelta(seconds=timeout)
-        while True:
-            self.tick()
-            statuses = [self.read(run) for run in runs]
-            if runs:
-                active = statuses
-                unfinished = not all(status.done for status in statuses)
-            else:
-                active = [
-                    status for r in self._store.runs() if not (status := self.read(r.id)).done
-                ]
-                unfinished = bool(active)
-            ending = self._store.finishing_sessions(runs)
-            if not unfinished and not ending:
-                return statuses
-            if give_up is not None and self._clock() >= give_up:
-                if ending:
-                    raise TimeoutError(
-                        "machines still finishing: " + ", ".join(s.machine for s in ending)
-                    )
-                raise TimeoutError("runs still running: " + ", ".join(runs))
-            delay = pacer.delay(_pace_state(active, ending) if every is None else None)
-            if give_up is not None:
-                delay = min(delay, max(0.0, (give_up - self._clock()).total_seconds()))
-            self._sleep(delay)
+        return pace_ticks(self, runs=runs, every=every, timeout=timeout)
 
     def cancel(self, run: str) -> Status:
         record = self._store.run(run)
