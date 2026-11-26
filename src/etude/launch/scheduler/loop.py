@@ -1153,7 +1153,7 @@ class Scheduler:
         if pool is not None:
             used: set[str] = set()
             while pending:
-                owned = self._free_owned(pool, now, excluded=used)
+                owned = self._free_owned(pool, now, excluded=used, allow_refused=True)
                 if owned is None:
                     reason = self._trouble.get(pool.name, reason)
                     break
@@ -1815,10 +1815,17 @@ class Scheduler:
         return batch
 
     def _free_owned(
-        self, pool: Pool, now: datetime, *, excluded: set[str] | None = None
+        self,
+        pool: Pool,
+        now: datetime,
+        *,
+        excluded: set[str] | None = None,
+        allow_refused: bool = False,
     ) -> Machine | None:
         """A machine of the pool with no session or unfinished run, not expired or recently refused.
 
+        With `allow_refused=True` (explicit `launch`/`quote`), prefers unrefused
+        machines and falls back to a recently refused one instead of pausing it.
         Its cost is already committed, so it never limits placement.
         """
         busy = {s.machine for s in self._store.unsettled_sessions() if s.supply == pool.name}
@@ -1827,6 +1834,7 @@ class Scheduler:
         for session in self._store.recent_refusals(pool.name, now - timedelta(seconds=60)):
             refused.setdefault(session.machine, session)
         blocked: Session | None = None
+        fallback: Machine | None = None
         for machine in self._store.machines(pool.name):
             if (
                 machine.name in busy
@@ -1838,9 +1846,14 @@ class Scheduler:
                 candidate = refused[machine.name]
                 if blocked is None or (candidate.refused_at or now) > (blocked.refused_at or now):
                     blocked = candidate
+                if fallback is None:
+                    fallback = machine
                 continue
             self._trouble.pop(pool.name, None)
             return machine
+        if allow_refused and fallback is not None:
+            self._trouble.pop(pool.name, None)
+            return fallback
         self._trouble[pool.name] = (
             _refused(blocked, owned=True) if blocked is not None else "no free machine"
         )

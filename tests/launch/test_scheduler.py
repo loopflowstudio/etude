@@ -1306,3 +1306,68 @@ def test_unfinished_runs_and_waiting_share_retryability_rules(tmp_path: Path) ->
     unfinished = {r.id for r in b.store.runs(unfinished=True)}
     assert waiting == {fresh, stopped_retry, lost_retry, exempt_retry, resumed}
     assert unfinished == waiting | {running_last, stopping}
+
+
+def test_explicit_launch_and_quote_fall_back_to_recently_refused_owned_host(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    store = open_database(tmp_path / "state.db")
+    m1 = FakeService(clock, seconds=10)
+    m2 = FakeService(clock, seconds=10)
+    rent = FakeService(clock, seconds=10)
+    owned = {"m1": m1, "m2": m2}
+    scheduler = Scheduler(
+        store,
+        {"ssh": lambda held: owned[held.name], "runpod": lambda held: rent},
+        clock=clock,
+    )
+    scheduler.add_storage(
+        Storage(name="west", bucket="b", prefix="p", provider="s3", region="us-west-2")
+    )
+    scheduler.set_provider(
+        Provider(name="fake", kind="runpod", registry="ghcr.io/test", storage="west")
+    )
+    scheduler.add_ondemand(OnDemand(name="l4", template=L4, max_machines=2, setup_seconds=0))
+    scheduler.add_pool(Pool(name="lab"))
+    scheduler.add_machine("m1", "m1.local", pool="lab")
+
+    # Solo pool host refuses queued work and enters the 60 s cooldown.
+    m1.refuse = 1
+    (queued,) = scheduler.queue(job(), pool="lab")
+    scheduler.tick()
+    assert m1.creates == 1
+    assert scheduler.read(queued).phase == "queued"
+
+    # 15 s later: queued retry still waits, while explicit quote and launch use m1 and rent nothing.
+    clock.advance(15)
+    scheduler.tick()
+    assert m1.creates == 1
+    assert scheduler.read(queued).phase == "queued"
+
+    quote = scheduler.quote([RunRequest(job=job())], pool="lab", rent="l4")
+    assert len(quote.machines) == 1
+    assert quote.machines[0].machine == "m1"
+    assert quote.machines[0].usd_per_hour == Decimal(0)
+    assert rent.offers == 0
+    assert rent.creates == 0
+
+    (launched,) = scheduler.launch(job(), pool="lab", rent="l4")
+    assert m1.creates == 2
+    assert rent.offers == 0
+    assert rent.creates == 0
+    assert scheduler.read(launched).machine == "m1"
+
+    # When an unrefused sibling exists, explicit quote and launch prefer it over a recently refused host.
+    scheduler.add_machine("m2", "m2.local", pool="lab")
+    clock.advance(10)  # `launched` finishes on m1; m1's earlier refusal is now 25 s old
+    scheduler.tick()  # `queued` runs on healthy m2
+    assert scheduler.read(queued).machine == "m2"
+    clock.advance(10)  # `queued` finishes on m2; m1's refusal is now 35 s old (< 60 s)
+    scheduler.tick()
+    prefer = scheduler.quote([RunRequest(job=job())], pool="lab", rent="l4")
+    assert prefer.machines[0].machine == "m2"
+    assert rent.offers == 0
+    (on_m2,) = scheduler.launch(job(), pool="lab", rent="l4")
+    assert scheduler.read(on_m2).machine == "m2"
+    assert rent.creates == 0

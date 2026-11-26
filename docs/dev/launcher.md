@@ -865,9 +865,11 @@ the reason from its latest attempt's session, never from diagnostics, so it
 survives scheduler restarts and the retry pause. Queued work does not ask that
 on-demand again within 60 seconds of a provider's refusal; an explicit `launch`
 is not paused, and releasing a claim that never reached the provider pauses
-nothing. An owned pool skips a machine for 60 seconds after it refuses a start,
-immediately re-planning onto healthy siblings in the same tick before any
-on-demand supply rents. Attempts ending as `capacity_refused` remain in the history, with their
+nothing. For queued work, an owned pool skips a machine for 60 seconds after it
+refuses a start, immediately re-planning onto healthy siblings in the same tick
+before any on-demand supply rents; an explicit `launch` or `quote` prefers
+unrefused machines and falls back to a recently refused one before rejecting or
+renting. Attempts ending as `capacity_refused` remain in the history, with their
 original numbers, but do not count toward `max_attempts` or the status attempt
 count. Scheduling, status and explicit resume use that same budget rule.
 Timeouts, no reply, 408, 5xx and unreadable or mismatched replies stay unknown.
@@ -893,9 +895,11 @@ writes `cancel-start`. Installation and courier setup check it via
 before spawning the worker. `boot-claim` names the boot process until it hands
 off to a worker (`pid`) or, on a bucket-backed host, a courier (`courier-pid`).
 Before `pid` exists, `end` signals any live `boot-claim` or courier PID and
-records `ended` once setup has stopped; once `pid` exists, `_BOOT` pipes the RPC
-in memory (no temp file) to `DirectoryJournal.end`, which signals and waits for
-the worker. If `boot-claim` or `pid` already exists
+records `ended` atomically (`ended.partial` + `os.replace`, unlinking the
+partial on error) once setup has stopped; once `pid` exists, `_BOOT` pipes the
+RPC in memory (no temp file) to `DirectoryJournal.end`, which signals and waits
+for the worker. Every reader treats an empty `ended` file as absent. If
+`boot-claim` or `pid` already exists
 (fencing any duplicate start) and the disk is full, both paths tolerate unwritable
 `cancel-start` and `ended` files and still answer `ended_at` once nothing is
 running so the session settles as lost (while `Executor.end` still waits for any
