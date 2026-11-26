@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import base64
 import errno
+import hashlib
+import io
 import json
 import os
 import signal
 import subprocess
 import sys
 import time
+import zipfile
 from collections import Counter
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -24,6 +28,7 @@ from etude.launch.aws import Keys
 from etude.launch.executor import Executor, local
 from etude.launch.openssh import ssh_command
 from etude.launch.provisioner.machines import Allocation, OwnedMachine, Refused
+from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import BootstrapLinks, Machine, Pool
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler.loop import Scheduler
@@ -1160,3 +1165,114 @@ def test_directory_journal_end_full_disk_and_courier_handoff(
         finally:
             courier_home.chmod(0o700)
             courier.kill()
+
+
+def test_install_enospc_leaves_no_ended_and_empty_ended_settles(
+    tmp_path: Path, exited_pid: int
+) -> None:
+    root = tmp_path / "remote"
+    ssh = SSH("bench", str(root))
+    journal = SSHJournal(ssh)
+
+    # Part 1: install ENOSPC that truncates/creates a 0-byte target leaves neither `ended` nor `ended.partial`.
+    buf = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(program_archive())) as src,
+        zipfile.ZipFile(buf, "w") as dst,
+    ):
+        for info in src.infolist():
+            if info.filename != "etude/launch/environment.py":
+                dst.writestr(info, src.read(info.filename))
+        dst.writestr(
+            "etude/launch/environment.py",
+            "import errno, pathlib\n"
+            "_orig = pathlib.Path.write_text\n"
+            "def _fail_ended(self, data, *a, **kw):\n"
+            "    if self.name.startswith('ended'):\n"
+            "        self.write_bytes(b'')\n"
+            "        raise OSError(errno.ENOSPC, 'No space left on device')\n"
+            "    return _orig(self, data, *a, **kw)\n"
+            "def install(code):\n"
+            "    pathlib.Path.write_text = _fail_ended\n"
+            "    raise OSError(errno.ENOSPC, 'No space left on device')\n",
+        )
+    archive = buf.getvalue()
+    ssh._archive = (hashlib.sha256(archive).hexdigest(), base64.b64encode(archive).decode())
+
+    packet = Packet(session="s_install_enospc", work=(), deadline=None)
+    SSHStart(ssh).start(
+        Allocation(id=packet.session, address="bench", created_at=datetime.now(UTC)),
+        packet,
+        None,
+    )
+    install_home = root / packet.session
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        obs = journal.observe(packet.session)
+        if not obs.alive:
+            break
+        time.sleep(0.05)
+    assert not journal.observe(packet.session).alive
+    assert "No space left on device" in (install_home / "bootstrap.log").read_text()
+    assert not (install_home / "ended").exists()
+    assert not (install_home / "ended.partial").exists()
+    assert journal.end(packet.session) is not None
+
+    # Part 2: pre-existing 0-byte `home/ended` is treated as absent across `_BOOT` and settles.
+    stale_boot = root / "s_empty_boot"
+    stale_boot.mkdir(parents=True)
+    (stale_boot / "boot-claim").write_text(str(exited_pid))
+    (stale_boot / "ended").write_bytes(b"")
+    assert journal.ended("s_empty_boot") is None
+    assert not journal.observe("s_empty_boot").alive
+    ended_at = journal.end("s_empty_boot")
+    assert ended_at is not None
+    assert datetime.fromisoformat((stale_boot / "ended").read_text().strip()) == ended_at
+
+    # Even when the session directory is still unwritable, a pre-existing 0-byte `ended` settles.
+    full_boot = root / "s_empty_full"
+    full_boot.mkdir(parents=True)
+    (full_boot / "boot-claim").write_text(str(exited_pid))
+    (full_boot / "ended").write_bytes(b"")
+    full_boot.chmod(0o500)
+    try:
+        assert journal.ended("s_empty_full") is None
+        assert journal.end("s_empty_full") is not None
+    finally:
+        full_boot.chmod(0o700)
+
+    # A live boot with a 0-byte `ended` still observes alive instead of falsely dead.
+    live_boot = root / "s_empty_live_boot"
+    live_boot.mkdir(parents=True)
+    (live_boot / "ended").write_bytes(b"")
+    with subprocess.Popen(["sleep", "60"]) as proc:
+        try:
+            (live_boot / "boot-claim").write_text(str(proc.pid))
+            assert journal.observe("s_empty_live_boot").alive is True
+        finally:
+            proc.kill()
+
+    # Part 3: DirectoryJournal treats a 0-byte `ended` as absent in ended/end/logs/_alive.
+    disk = DirectoryJournal(tmp_path / "disk")
+    dead_disk = tmp_path / "disk" / "s_dead"
+    dead_disk.mkdir(parents=True)
+    (dead_disk / "pid").write_text(str(exited_pid))
+    (dead_disk / "ended").write_bytes(b"")
+    assert disk.ended("s_dead") is None
+    assert disk.logs("s_dead", producer="worker").complete is False
+    settled = disk.end("s_dead")
+    assert settled is not None
+    assert datetime.fromisoformat((dead_disk / "ended").read_text().strip()) == settled
+
+    live_disk = tmp_path / "disk" / "s_live"
+    live_disk.mkdir(parents=True)
+    (live_disk / "ended").write_bytes(b"")
+    with subprocess.Popen(["sleep", "60"]) as worker:
+        try:
+            (live_disk / "pid").write_text(str(worker.pid))
+            assert disk.observe("s_live").alive is True
+            killed_at = disk.end("s_live")
+            assert killed_at is not None
+            assert datetime.fromisoformat((live_disk / "ended").read_text().strip()) == killed_at
+        finally:
+            worker.kill()

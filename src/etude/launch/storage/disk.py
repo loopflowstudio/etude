@@ -42,7 +42,11 @@ class DirectoryJournal:
 
     def ended(self, session_id: str) -> datetime | None:
         note = self._root / session_id / "ended"
-        return datetime.fromisoformat(note.read_text()) if note.exists() else None
+        try:
+            text = note.read_text().strip()
+        except FileNotFoundError:
+            return None
+        return datetime.fromisoformat(text) if text else None
 
     def stage(self, repo: str, commit: str) -> None:
         """Nothing to do ahead: a session's source is written beside it when it starts."""
@@ -125,17 +129,18 @@ class DirectoryJournal:
                     time.sleep(0.1)
                 else:
                     return None
-        if not ended.exists():
-            now = datetime.now(UTC)
+        if (recorded := self.ended(session_id)) is not None:
+            return recorded
+        now = datetime.now(UTC)
+        try:
+            write(ended, now.isoformat())  # the process is dead without a note
+        except OSError:
             try:
-                write(ended, now.isoformat())  # the process is dead without a note
+                ended.with_name(ended.name + ".partial").unlink(missing_ok=True)
             except OSError:
-                try:
-                    ended.with_name(ended.name + ".partial").unlink(missing_ok=True)
-                except OSError:
-                    pass
-                return now
-        return datetime.fromisoformat(ended.read_text())
+                pass
+            return now
+        return self.ended(session_id) or now
 
     def logs(
         self, session_id: str, attempt: str | None = None, *, producer: str = "job"
@@ -150,7 +155,7 @@ class DirectoryJournal:
         closed = (
             (home / "attempts" / attempt / "finished.json").exists()
             if attempt
-            else (home / "ended").exists()
+            else self.ended(session_id) is not None
         )
         raw = log.read_bytes() if log.exists() else None
         return snapshot_stream(session_id, attempt, producer, raw, closed)
@@ -180,7 +185,7 @@ class DirectoryJournal:
 
     def _alive(self, session_id: str) -> bool:
         home = self._root / session_id
-        if (home / "ended").exists() or not (home / "pid").exists():
+        if self.ended(session_id) is not None or not (home / "pid").exists():
             return False
         pid = int(self._pid(session_id))
         try:

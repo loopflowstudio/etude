@@ -20,8 +20,15 @@ RESULT = "etude-result.json"
 def write(path: Path, text: str) -> None:
     """Whole file or no file: readers never see half of it."""
     partial = path.with_name(path.name + ".partial")
-    partial.write_text(text)
-    partial.replace(path)
+    try:
+        partial.write_text(text)
+        partial.replace(path)
+    except OSError:
+        try:
+            partial.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def append_usage(session: Path, raw: str) -> None:

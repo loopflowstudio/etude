@@ -167,8 +167,7 @@ with contextlib.redirect_stdout(sys.stderr):
         logging.write_log("client install", sys.modules["etude.errors"].explain(error))
         if globals().get('request',{}).get('action')=='start':
             from datetime import datetime,UTC
-            try: (home/'ended').write_text(datetime.now(UTC).isoformat())
-            except OSError: pass
+            _write_ended(datetime.now(UTC).isoformat())
         raise
     finally:
         if os.environ.get("ETUDE_LOG_PATH") and (failed or globals().get("request",{}).get("action") != "start"):
@@ -184,6 +183,21 @@ call=json.load(sys.stdin)
 os.environ.update(call.get('storage_environment', {}))
 request=call['request']
 home=pathlib.Path(call['root']).expanduser()/request.get('session','')
+def _read_ended() -> str | None:
+    try: text=(home/'ended').read_text().strip()
+    except OSError: return None
+    return text or None
+def _write_ended(at: str) -> bool:
+    path=home/'ended'
+    partial=home/'ended.partial'
+    try:
+        partial.write_text(at)
+        os.replace(partial,path)
+        return True
+    except OSError:
+        try: partial.unlink()
+        except OSError: pass
+        return False
 def _recorded(name: str) -> int | None:
     path=home/name
     try: text=path.read_text().strip()
@@ -196,7 +210,7 @@ def _pid_alive(pid: int | None) -> bool:
     except PermissionError: pass
     return True
 def _boot_alive() -> bool:
-    if (home/'ended').exists(): return False
+    if _read_ended() is not None: return False
     path=home/'boot-claim'
     try:
         st=path.stat()
@@ -224,17 +238,14 @@ if request['action']=='observe':
     if (alive:=_host_alive()) is not None:
         print(json.dumps({'observation':{'alive':alive,'progress':[],'start_unknown':alive}})); sys.exit(0)
 if request['action']=='ended':
-    path=home/'ended'
-    text=path.read_text().strip() if path.exists() else ''
-    print(json.dumps({'ended_at':text or None})); sys.exit(0)
+    print(json.dumps({'ended_at':_read_ended()})); sys.exit(0)
 if request['action']=='end':
     if not home.is_dir(): home.mkdir(parents=True,exist_ok=True)
     try: (home/'cancel-start').touch()
     except OSError:
         if not ((home/'boot-claim').exists() or (home/'pid').exists()): raise
-    path=home/'ended'
-    ended_at=None
-    if not (home/'pid').exists() and not path.exists():
+    ended_at=_read_ended()
+    if not (home/'pid').exists() and ended_at is None:
         # The cancel stops an install; a live boot or courier stops at once.
         for name in ('boot-claim','courier-pid'):
             if proc:=_recorded(name):
@@ -244,15 +255,9 @@ if request['action']=='end':
             # Nothing runs here, and the cancel fences any start still in flight.
             from datetime import datetime,UTC
             now=datetime.now(UTC).isoformat()
-            try: path.write_text(now)
-            except OSError:
-                try: path.unlink()
-                except OSError: pass
-                ended_at=now
-    if path.exists() or not (home/'pid').exists():
-        if path.exists():
-            try: ended_at=path.read_text().strip() or ended_at
-            except OSError: pass
+            _write_ended(now)
+            ended_at=_read_ended() or now
+    if ended_at is not None or not (home/'pid').exists():
         print(json.dumps({'ended_at':ended_at})); sys.exit(0)
 if request['action']=='start':
     try:
@@ -354,8 +359,7 @@ if request['action']=='start':
     except Exception as error:
         logging.write_log('worker entry',sys.modules["etude.errors"].explain(error))
         if not invoked:
-            try: (home/'ended').write_text(datetime.now(UTC).isoformat())
-            except OSError: pass
+            _write_ended(datetime.now(UTC).isoformat())
         else:
             logging.write_log('worker entry','reply uncertain; retaining start claim')
     finally:

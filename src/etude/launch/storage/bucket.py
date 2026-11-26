@@ -162,7 +162,8 @@ class BucketJournal:
     @_attribute_session
     def ended(self, session_id: str) -> datetime | None:
         raw = self._current(session_id, self._session_prefix(session_id) + "out/ended")
-        return None if raw is None else datetime.fromisoformat(raw.decode().strip())
+        text = None if raw is None else raw.decode().strip()
+        return None if not text else datetime.fromisoformat(text)
 
     @_attribute_session
     def end(self, session_id: str) -> datetime | None:

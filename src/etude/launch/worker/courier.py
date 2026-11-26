@@ -1016,7 +1016,7 @@ def _deliver(
             with limit_time(allowance):
                 courier.carry_out(final=True)
                 if ended:
-                    at = note.read_text() if note.exists() else _now().isoformat()
+                    at = (note.read_text().strip() if note.exists() else "") or _now().isoformat()
                     courier._out.write_bytes("ended", at.encode())
             return True
         except (StorageUnavailable, OSError, ValueError) as error:
