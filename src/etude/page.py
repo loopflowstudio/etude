@@ -248,7 +248,8 @@ class Point(Record):
     second, in one view (`commit`), `score` and `split` as a `Cell` is: the
     mean over `opponents`, the players it met in the second seat, indexing
     `Page.players`, with `interval` where it met one. A point with no
-    `value` has `gap`, what its relative seat looked for, in every view. `whole` marks a `seeds="one"`
+    `value` has `gap` (what its relative seat looked for), `failed` or
+    `unplayed` match counts, in every view. `whole` marks a `seeds="one"`
     seating's point, which stands for its job though one seed's checkpoint
     was held for it.
     """
@@ -268,6 +269,8 @@ class Point(Record):
     matches: int = 0
     opponents: tuple[int, ...] = ()
     gap: Gap | None = None
+    failed: int = 0
+    unplayed: int = 0
 
 
 class Commit(Record):
@@ -1832,7 +1835,11 @@ def _points(
     index = {each.key: i for i, each in enumerate(players)}
     refs = {str(ref.key): ref for each in held for ref in each.tournament.checkpoints}
     pairs: dict[_HeldFor, set[tuple[int, int]]] = {}
+    failed_matches: dict[_HeldFor, set[str]] = {}
+    unplayed_matches: dict[_HeldFor, set[str]] = {}
     for each in held:
+        failed_keys = {match.key for match in each.played.failed}
+        new_keys = {match.key for match in each.played.new}
         for called in each.schedule:
             if called.seating is None:
                 continue
@@ -1843,7 +1850,12 @@ def _points(
                     continue
                 held_for = leaf.key
                 refs.setdefault(str(held_for), leaf)
-            seated = pairs.setdefault(_HeldFor(each.name, called.seating, str(held_for)), set())
+            key = _HeldFor(each.name, called.seating, str(held_for))
+            seated = pairs.setdefault(key, set())
+            if called.match.key in failed_keys:
+                failed_matches.setdefault(key, set()).add(called.match.key)
+            if called.match.key in new_keys:
+                unplayed_matches.setdefault(key, set()).add(called.match.key)
             # A player no eval run seated yet has played nothing to draw.
             first, second = (index.get(p.key) for p in called.match.players[:2])
             if first is not None and second is not None:
@@ -1921,8 +1933,18 @@ def _points(
                     )
                 )
             gap = next((gaps[key] for key in here if key in gaps), None)
-            if gap is not None:
-                points.append(stood.model_copy(update={"gap": gap}))
+            failed_count = len({match for key in here for match in failed_matches.get(key, ())})
+            unplayed_count = len({match for key in here for match in unplayed_matches.get(key, ())})
+            if gap is not None or (not met and (failed_count or unplayed_count)):
+                points.append(
+                    stood.model_copy(
+                        update={
+                            "gap": gap,
+                            "failed": failed_count,
+                            "unplayed": unplayed_count,
+                        }
+                    )
+                )
     return tuple(points), seated_pairs
 
 

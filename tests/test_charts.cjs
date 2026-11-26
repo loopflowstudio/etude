@@ -276,6 +276,10 @@ test("selections are named for what they count", () => {
   assert.equal(m.selName({tournament: "played", tag: "anchor"}), "played · tagged anchor");
   assert.equal(m.selName({kind: "outside"}), "matches outside a tournament");
   assert.equal(m.selName({tournament: null, seating: null, tag: "anchor"}), "tagged anchor");
+  const many = Array.from({length: 160}, (_, i) => ({tournament: "half", seating: `s-${i + 1}`}));
+  assert.equal(m.selName(many), "half · s-1 … half · s-160 (160 seatings)");
+  const mixed = [{seating: "s-1"}, {tag: "anchor"}, {seating: "s-3"}, {kind: "outside"}];
+  assert.equal(m.selName(mixed), "s-1 … matches outside a tournament (4 selections)");
 });
 
 test("a panel draws the selection the page resolved for it, or the control's", () => {
@@ -451,6 +455,65 @@ test("a point is its own view's: another score or split of the same checkpoint i
   const view = renderPage(data);
   assert.match(view.text, /on_play = yes/);
   assert.equal(view.plots[0].values[1].at(-1), 0.9);
+});
+
+test("a seated curve skips checkpoints only in the second seat and marks only held checkpoints pending or failed", () => {
+  const training = {
+    jobs: [{name: "a", launch: "a", label: "A", runs: ["a"]}],
+    runs: [{name: "a"}],
+    clocks: [{name: "updates", kind: "step"}],
+    checkpoints: [400, 500, 600, 1000].map((u, i) => ({
+      run: "a", ordinal: i + 1, align: u, at: {updates: u},
+    })),
+  };
+  const data = page(
+    [400, 500, 600, 1000].map((u, i) => player(`u${u}`, "a", u, "a", i + 1)),
+    [],
+    training,
+  );
+  data.selections = [{tournament: "half", seating: "vs half"}];
+  data.drawn = [{seated: true, tournaments: ["half"]}];
+  // Tournament coverage marks BOTH u500 (seat 2) and u1000 (seat 1) unplayed for u1000 vs u500.
+  data.coverage = [
+    {run: "a", ordinal: 1, tournament: "half", played: 1, failed: 0, unplayed: 0},
+    {run: "a", ordinal: 2, tournament: "half", played: 0, failed: 0, unplayed: 1},
+    {run: "a", ordinal: 3, tournament: "half", played: 1, failed: 0, unplayed: 0},
+    {run: "a", ordinal: 4, tournament: "half", played: 0, failed: 0, unplayed: 1},
+  ];
+  // Only held checkpoints (u400, u600, u1000) get Points; u500 has none.
+  data.points = [
+    {selection: 0, run: "a", ordinal: 1, line: "a", at: {updates: 400}, whole: false, commit: null, score: 0, split: {}, value: 0.6, interval: null, rows: 4, matches: 1, opponents: [0]},
+    {selection: 0, run: "a", ordinal: 3, line: "a", at: {updates: 600}, whole: false, commit: null, score: 0, split: {}, value: 0.7, interval: null, rows: 4, matches: 1, opponents: [0]},
+    {selection: 0, run: "a", ordinal: 4, line: "a", at: {updates: 1000}, whole: false, commit: null, score: null, split: {}, value: null, interval: null, rows: 0, matches: 0, opponents: [], gap: null, failed: 0, unplayed: 1},
+  ];
+  data.report = {clock: "updates", evals: [{kind: "curve", title: "Half", matches: {tournament: "half", seating: "vs half"}}]};
+  data.panel_selections = [{selection: 0, control: false}];
+
+  const m = context.model(data);
+  const at = Object.fromEntries(points(m, m.JOBS[0]).map(p => [p.x, p]));
+  assert.equal(at[400].y, 0.6);
+  assert.equal(at[500].skip, true);
+  assert.equal(at[500].gap, undefined);
+  assert.equal(at[600].y, 0.7);
+  assert.equal(at[1000].missing, true);
+  assert.equal(at[1000].gap, "pending");
+
+  // Plotted column: u400=0.6, u500=undefined (bridges unbroken!), u600=0.7, u1000=null (pending).
+  const rendered = renderPage(data);
+  assert.deepEqual([...rendered.plots[0].values[0]], [400, 500, 600, 1000]);
+  assert.deepEqual([...rendered.plots[0].values[1]], [0.6, undefined, 0.7, null]);
+
+  // If u1000 fails instead of pending, u1000 is failed and u500 is still skipped.
+  data.points[2].unplayed = 0;
+  data.points[2].failed = 1;
+  data.coverage[1].unplayed = 0;
+  data.coverage[1].failed = 1;
+  const m2 = context.model(data);
+  const at2 = Object.fromEntries(points(m2, m2.JOBS[0]).map(p => [p.x, p]));
+  assert.equal(at2[500].skip, true);
+  assert.equal(at2[500].gap, undefined);
+  assert.equal(at2[1000].missing, true);
+  assert.equal(at2[1000].gap, "failed");
 });
 
 test("ticks a narrow range would label alike are written with the decimals their step needs", () => {

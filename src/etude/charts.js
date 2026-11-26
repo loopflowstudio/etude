@@ -214,11 +214,12 @@ function model(D) {
   const placed = i => D.players[i].placed;
   const lineOf = i => D.players[i].line ?? "";
   const positioned = indices.filter(i => D.players[i].run == null && placed(i));
-  const atClocks = [...new Set(positioned.flatMap(i => Object.keys(D.players[i].at)))];
+  const extPoints = (D.points || []).filter(p => p.run == null && p.at && Object.keys(p.at).length);
+  const atClocks = [...new Set([...positioned.flatMap(i => Object.keys(D.players[i].at)), ...extPoints.flatMap(p => Object.keys(p.at))])];
   // The clock a line's checkpoints are keyed by: a job's first, else the one the report names.
   const alignClock = T.clocks.find(c => !BUILT_IN.includes(c.name))?.name ?? (atClocks.includes(R.clock) ? R.clock : atClocks[0]);
   // Named lines in order, then the checkpoints of no line. A colour follows the curve's position, never its rank.
-  const named = [...new Set(positioned.map(lineOf))].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b));
+  const named = [...new Set([...positioned.map(lineOf), ...extPoints.map(p => p.line ?? "")])].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b));
   // A curve's key identifies it on the page: a job's name, or its line. Only external
   // curves carry a line; the empty string is the unnamed learner.
   const curves = [...T.jobs.map(j => ({...j, key: j.name, members: j.runs.map(runMember)})), ...named.map(line => {
@@ -248,6 +249,13 @@ function model(D) {
     const key = lineMark(line, at);
     if (!lineMarks.has(member)) lineMarks.set(member, new Map());
     lineMarks.get(member).set(key, {key, line, at, align: at[alignClock], elapsed: null, pace: {}});
+  }
+  for (const p of extPoints) {
+    const at = p.at, line = p.line ?? "", member = lineMember(line).key;
+    if (at[alignClock] == null) continue;
+    const key = lineMark(line, at);
+    if (!lineMarks.has(member)) lineMarks.set(member, new Map());
+    if (!lineMarks.get(member).has(key)) lineMarks.get(member).set(key, {key, line, at, align: at[alignClock], elapsed: null, pace: {}});
   }
   for (const [member, got] of lineMarks) marks.set(member, [...got.values()].sort((a, b) => a.align - b.align));
   const markOf = (run, ordinal) => (marks.get(runMember(run).key) || []).find(m => m.ordinal === ordinal);
@@ -352,7 +360,13 @@ function model(D) {
     return {...subject, index: i};
   }
   function selName(s) {
-    if (Array.isArray(s)) return s.map(selName).join(" + ");
+    if (Array.isArray(s)) {
+      if (s.length > 3) {
+        const noun = s.every(p => p && !Array.isArray(p) && p.seating != null) ? "seatings" : "selections";
+        return `${selName(s[0])} … ${selName(s[s.length - 1])} (${s.length} ${noun})`;
+      }
+      return s.map(selName).join(" + ");
+    }
     const detail = s.seating ?? (s.tag != null ? `tagged ${s.tag}` : null);
     if (s.kind === "outside") return "matches outside a tournament";
     return s.tournament == null ? detail ?? "every tournament" : detail == null ? s.tournament : `${s.tournament} · ${detail}`;
@@ -398,6 +412,7 @@ function model(D) {
   }
   const seated = sel => sel != null && !!D.drawn[sel]?.seated;
   function seatedValue(score, sel, split) {
+    const s = n => n > 1 ? "es" : "";
     return m => {
       const p = scored.get(`${sel}|${score}|${splitKey(split)}|${m.key}`);
       if (p) {
@@ -405,8 +420,12 @@ function model(D) {
         return {y: p.value, lo: p.interval?.[0], hi: p.interval?.[1], at: p.at, whole: p.whole, meta: `${scoreCount(p, D.scores?.[score])} · ${several}vs ${p.opponents.map(playerName).join(", ")}`};
       }
       const u = unseated.get(`${sel}|${m.key}`);
-      if (u) return {missing: true, gap: u.gap.missing === "not_yet" ? "pending" : "none", at: u.at, meta: missingText(u.gap)};
-      return gapOf(sel, m);
+      if (u) {
+        if (u.gap) return {missing: true, gap: u.gap.missing === "not_yet" ? "pending" : "none", at: u.at, meta: missingText(u.gap)};
+        if (u.failed) return {missing: true, gap: "failed", at: u.at, meta: `${u.failed} match${s(u.failed)} failed`};
+        if (u.unplayed) return {missing: true, gap: "pending", at: u.at, meta: `not yet played: ${u.unplayed} match${s(u.unplayed)} eval_jobs(state) wants`};
+      }
+      return {skip: true, meta: "not in these matches"};
     };
   }
   // Each checkpoint's value in the requested matches: as seated, for a selection of seatings;
