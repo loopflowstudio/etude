@@ -914,10 +914,10 @@ machine. For sessions started by v0.4.6, `courier-claim` and `pid` identify
 a bucket session whose courier PID is unknown. Etude waits for its bucket end
 receipt.
 
-Disk cleanup on hosts has two owners. Immediately after writing `finished.json`
+Disk cleanup on hosts has two owners. Just before writing `finished.json`
 on every host, `attempts.py` deletes the attempt's working trees (`src/`,
-`prepared-source/`, `prepared-inputs/` and `inputs/`), keeping outputs, logs
-and journal files, and removes the session's `sources/` on pure-SSH hosts (no
+`prepared-source/`, `prepared-inputs/` and `inputs/`), so a full disk still
+leaves room for the outcome, keeping outputs, logs and journal files, and removes the session's `sources/` on pure-SSH hosts (no
 `courier-claim`) when the session's attempts finish. On bucket-backed hosts, `courier.py` removes an attempt's
 `outputs/` once its delivery is confirmed and removes the session's `sources/`,
 `inputs/` and remaining attempt directories after confirmed final delivery,

@@ -129,10 +129,11 @@ def _finish(
             if p != outputs / RESULT
         ),
     )
-    write(home / "finished.json", record.model_dump_json())
-    # Working trees and input links are no longer needed once finished.json is recorded.
+    # Nothing above reads the working trees or input links, and removing them first frees
+    # the space finished.json needs when the job or its layout filled the disk.
     for scratch in ("src", "prepared-source", "prepared-inputs", "inputs"):
         remove_tree(home / scratch)
+    write(home / "finished.json", record.model_dump_json())
 
 
 def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dict[str, Path]]:
