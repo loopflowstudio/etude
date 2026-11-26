@@ -631,8 +631,8 @@ log) and links it, read-only and without a copy, at `ETUDE_INPUTS_DIR/NAME`.
 Bytes that do not match the digest are refused: the
 job's command never runs and the attempt ends `lost (input_undelivered)` with the
 reason in its log, and is not retried, since a retry would be given the same bytes.
-A worker's cache may use what it holds plus half the disk
-free when its session began. Inputs are part of the job's identity. A machine with no
+A worker's cache may use half of what it holds plus the disk
+free when its session began, so the bound stays fixed across an owned host's sessions. Inputs are part of the job's identity. A machine with no
 storage can be given only a run's file (`Input.run`, as continuation does). Unless
 the machine keeps records in the same storage as the machine that ran that run,
 the launcher relays the file, verified, from that storage or that machine's disk.

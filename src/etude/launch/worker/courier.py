@@ -944,15 +944,18 @@ def _hold_setup(signum: int, frame: FrameType | None) -> None:
 
 
 def _cache() -> Cache:
-    """This machine's cache: what it holds plus half the disk free when the session began.
+    """This machine's cache: half of what it holds plus the disk free when the session began.
 
     A rental's disk, not a fixed size, decides what fits, so its weights are
-    held once rather than staged beside every session.
+    held once rather than staged beside every session. Halving the sum, not
+    only the free space, keeps the bound fixed across an owned host's sessions
+    instead of ratcheting toward the whole disk; `prepared.py` bounds its
+    directories the same way.
     """
     root = Cache().root
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     held = sum(p.stat().st_size for p in root.iterdir() if p.is_file())
-    return Cache(root, max_bytes=held + shutil.disk_usage(root).free // 2)
+    return Cache(root, max_bytes=(held + shutil.disk_usage(root).free) // 2)
 
 
 def _allowance(deadline: float | None, seconds: float | None) -> Callable[[], float | None]:
