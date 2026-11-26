@@ -391,12 +391,12 @@ def test_launch_confirms_first_wave_before_delivering_any_work(tmp_path: Path) -
     b = bench(tmp_path, max_machines=2)
     add = b.service.add
 
-    def delivered(session_id: str, work: Work) -> None:
+    def delivered(session_id: str, work: Work, *, finish: bool = False) -> None:
         assert len(b.store.runs()) == 3
         assert b.service.creates == 2
         assert all(session.provider_id is not None for session in b.store.sessions())
         assert all(not held.packet.work for held in b.service.sessions.values())
-        add(session_id, work)
+        add(session_id, work, finish=finish)
 
     b.service.add = delivered  # type: ignore[method-assign]
     first, second, later = b.scheduler.launch(

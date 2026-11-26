@@ -1,5 +1,6 @@
 """Startup policy persists once and does not turn slowness into duplicate work."""
 
+import base64
 import os
 import sys
 import time
@@ -147,9 +148,12 @@ def test_detached_ssh_install_is_readable_cancellable_and_not_replayed(
             time.sleep(0.01)
         assert calls.read_text().splitlines() == ["install"]
         bootstrap = LogsRequest(session=packet.session, producer="bootstrap")
-        assert "starting uv sync" in (ssh.call(bootstrap).log or "")
+        log = ssh.call(bootstrap).log
+        assert log is not None and log.body is not None
+        assert "starting uv sync" in base64.b64decode(log.body).decode()
         assert not ssh.call(SessionRequest(action="started", session=packet.session)).started
-        assert ssh.call(SessionRequest(action="end", session=packet.session)).ended_at is None
+        # One end stops the install and confirms it.
+        assert ssh.call(SessionRequest(action="end", session=packet.session)).ended_at is not None
     finally:
         gate.touch()
     latest = time.monotonic() + 5
