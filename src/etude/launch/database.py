@@ -313,6 +313,21 @@ def _iso(at: datetime | None) -> str | None:
 # SQLite scalars already match the model fields. Only JSON columns need
 # adapting; records own scalar validation.
 _RUNS = "SELECT r.* FROM runs r"
+_RETRYABLE_MARKS = ", ".join("?" for _ in RETRYABLE)
+_RETRYABLE_VALUES = tuple(sorted(RETRYABLE))
+_TRY_EXEMPT_MARKS = ", ".join("?" for _ in TRY_EXEMPT)
+_OPEN_ATTEMPT = "EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND a.outcome IS NULL)"
+_WAITING_RUN = (
+    "r.cancel_requested_at IS NULL "
+    "AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id "
+    "AND a.number > r.resume_after AND ("
+    "a.outcome IS NULL OR (a.outcome != 'stopped' AND "
+    f"(a.outcome != 'lost' OR a.cause NOT IN ({_RETRYABLE_MARKS})))))"
+)
+_RUN_TRIES = (
+    "(SELECT count(*) FROM attempts a WHERE a.run = r.id "
+    f"AND (a.cause IS NULL OR a.cause NOT IN ({_TRY_EXEMPT_MARKS})))"
+)
 
 
 def _run_from_row(row: sqlite3.Row) -> RunRecord:
@@ -958,27 +973,13 @@ class Database:
             where = " WHERE " + " AND ".join(clauses) if clauses else ""
             rows = self._db.execute(f"{_RUNS}{where} ORDER BY r.seq", values)
             return tuple(_run_from_row(row) for row in rows)
-        marks = ", ".join("?" for _ in RETRYABLE)
-        exempt = ", ".join("?" for _ in TRY_EXEMPT)
-        clauses.append(
-            f"""(EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND a.outcome IS NULL)
-                OR (r.cancel_requested_at IS NULL
-                    AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id
-                      AND a.number > r.resume_after AND (
-                        a.outcome IS NULL OR (a.outcome != 'stopped' AND
-                        (a.outcome != 'lost' OR a.cause NOT IN ({marks})))))))"""
-        )
+        clauses.append(f"({_OPEN_ATTEMPT} OR ({_WAITING_RUN}))")
         where = " WHERE " + " AND ".join(clauses)
         candidates = self._db.execute(
             f"""SELECT r.*,
-                  CASE WHEN EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND a.outcome IS NULL)
-                         OR NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND a.number > r.resume_after)
-                       THEN -1
-                       ELSE (SELECT count(*) FROM attempts a WHERE a.run = r.id
-                             AND (a.cause IS NULL OR a.cause NOT IN ({exempt})))
-                  END AS tries
+                  CASE WHEN {_OPEN_ATTEMPT} THEN -1 ELSE {_RUN_TRIES} END AS tries
                 FROM runs r{where} ORDER BY r.seq""",
-            (*TRY_EXEMPT, *values, *sorted(RETRYABLE)),
+            (*TRY_EXEMPT, *values, *_RETRYABLE_VALUES),
         ).fetchall()
         return tuple(
             run
@@ -993,20 +994,14 @@ class Database:
         confirmed infrastructure loss, with tries left. Capacity refusals and started
         attempts lost with spot machines spend no try. The launcher checks budgets.
         """
-        marks = ", ".join("?" for _ in RETRYABLE)
-        exempt = ", ".join("?" for _ in TRY_EXEMPT)
         rows = self._db.execute(
-            f"""SELECT r.*, (SELECT count(*) FROM attempts a WHERE a.run = r.id
-                  AND (a.cause IS NULL OR a.cause NOT IN ({exempt}))) AS tries
+            f"""SELECT r.*, {_RUN_TRIES} AS tries
                 FROM runs r
                 WHERE r.id IN (
                   SELECT id FROM runs WHERE pool = ? UNION SELECT id FROM runs WHERE rent = ?
-                ) AND r.cancel_requested_at IS NULL
-                AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND a.number > r.resume_after AND (
-                  a.outcome IS NULL OR (a.outcome != 'stopped' AND
-                  (a.outcome != 'lost' OR a.cause NOT IN ({marks})))))
+                ) AND {_WAITING_RUN}
                 ORDER BY r.seq""",
-            (*TRY_EXEMPT, supply, supply, *sorted(RETRYABLE)),
+            (*TRY_EXEMPT, supply, supply, *_RETRYABLE_VALUES),
         ).fetchall()
         return tuple(
             run

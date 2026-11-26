@@ -1648,9 +1648,21 @@ class Scheduler:
             except (OSError, LauncherError, StorageUnavailable):
                 continue  # cleanup retained its error and remains unconfirmed
         self._confirm_ends(supply)
-        for session in self._store.unsettled_sessions():
-            if session.supply == supply.name and session.claimed_at is None:
-                self._create(session, now)
+        attempted: set[str] = set()
+        while True:
+            refused = False
+            for session in self._store.unsettled_sessions():
+                if (
+                    session.supply == supply.name
+                    and session.claimed_at is None
+                    and session.id not in attempted
+                ):
+                    attempted.add(session.id)
+                    refused |= self._create(session, now)
+            if not (isinstance(supply, Pool) and refused):
+                break
+            self._store.check_lock(supply.name)
+            self._plan(supply, now)
 
     def _confirm_ends(self, supply: Supply) -> None:
         """Settle only shutdowns already requested; never place work or decide to end a rental."""
@@ -2028,20 +2040,21 @@ class Scheduler:
         *,
         idle: bool = False,
         budget_cap: Decimal | None = None,
-    ) -> None:
+    ) -> bool:
+        """Create a planned session; return whether the host or provider refused it."""
         self._store.check_lock(session.supply)
         try:
             packet = self._packet(session)
         except _RELAY_WAITS as error:
             self._await_relay(session, error)
-            return
+            return False
         if not packet.work and not packet.kept:
             self._store.confirm_ended(session, now)  # every attempt ended undelivered
-            return
+            return False
         try:
             self._store.claim(session, self._clock())
         except Stale:
-            return  # someone else holds the right to create it
+            return False  # someone else holds the right to create it
         session = self._store.session(session.id)
         packet = packet.model_copy(update={"startup_deadline": session.startup_deadline})
         service = self._service(session)
@@ -2076,7 +2089,7 @@ class Scheduler:
             self._store.record_refusal(session, now, sanitize(str(error)) or "no reason given")
             for attempt in self._store.attempts(session=session.id):
                 self._store.fail_before_start(attempt, CAPACITY_REFUSED, now)
-            return
+            return True
         except Exception as error:  # noqa: BLE001
             self._diagnose(
                 "machine create",
@@ -2086,13 +2099,14 @@ class Scheduler:
             )
             # No answer is not a refusal: a rental may exist. It is looked up by its
             # identity on later ticks and is never asked for a second time.
-            return
+            return False
         try:
             self._store.record_provider_id(session, provider_id)
             self._diagnose("machine create", "machine confirmed", session=session.id)
             self._creation_facts(self._store.session(session.id), now, budget_cap=budget_cap)
         except Stale:
             pass  # another process already found the rental by its identity
+        return False
 
     def _observed_rental(
         self,

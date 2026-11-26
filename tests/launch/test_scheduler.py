@@ -25,6 +25,7 @@ from etude.launch.records import (
     Offer,
     OnDemand,
     Pool,
+    Provider,
     Rental,
     Session,
     Stale,
@@ -1189,3 +1190,119 @@ def test_launch_names_the_machine_still_finishing_and_quote_settles_its_receipt(
     quote = b.scheduler.quote([RunRequest(job=job())], rent="l4")
     assert quote.machines and b.service.creates == 1
     assert b.scheduler.read(one).rental_ended
+
+
+def test_pool_refusal_tries_healthy_sibling_before_renting(tmp_path: Path) -> None:
+    def setup(
+        subdir: str, *, refuse_first: int, refuse_second: int
+    ) -> tuple[Scheduler, FakeService, FakeService, FakeService]:
+        clock = Clock()
+        store = open_database(tmp_path / subdir / "state.db")
+        first = FakeService(clock)
+        second = FakeService(clock)
+        rent = FakeService(clock)
+        first.refuse = refuse_first
+        second.refuse = refuse_second
+        owned = {"m1": first, "m2": second}
+        scheduler = Scheduler(
+            store,
+            {"ssh": lambda held: owned[held.name], "runpod": lambda held: rent},
+            clock=clock,
+        )
+        scheduler.add_storage(
+            Storage(name="west", bucket="b", prefix="p", provider="s3", region="us-west-2")
+        )
+        scheduler.set_provider(
+            Provider(name="fake", kind="runpod", registry="ghcr.io/test", storage="west")
+        )
+        scheduler.add_ondemand(OnDemand(name="l4", template=L4, max_machines=2, setup_seconds=0))
+        scheduler.add_pool(Pool(name="lab"))
+        scheduler.add_machine("m1", "m1.local", pool="lab")
+        scheduler.add_machine("m2", "m2.local", pool="lab")
+        return scheduler, first, second, rent
+
+    # Machine 1 refuses -> same tick places on healthy machine 2 with 0 provider rent calls.
+    scheduler, m1, m2, rent = setup("one_refuses", refuse_first=1, refuse_second=0)
+    (run,) = scheduler.queue(job(), pool="lab", rent="l4")
+    scheduler.tick()
+    assert m1.creates == 1
+    assert m2.creates == 1
+    assert rent.creates == 0
+    assert rent.offers == 0
+    assert scheduler.read(run).machine == "m2"
+
+    # Both pool machines refuse -> same tick spills over to 1 on-demand rental.
+    scheduler2, m1_b, m2_b, rent_b = setup("both_refuse", refuse_first=1, refuse_second=1)
+    (run2,) = scheduler2.queue(job(), pool="lab", rent="l4")
+    scheduler2.tick()
+    assert m1_b.creates == 1
+    assert m2_b.creates == 1
+    assert rent_b.creates == 1
+    machine2 = scheduler2.read(run2).machine
+    assert machine2 is not None and machine2.startswith("l4-")
+
+
+def test_unfinished_runs_and_waiting_share_retryability_rules(tmp_path: Path) -> None:
+    b = bench(tmp_path)
+    now = b.clock().isoformat()
+    b.store.add_pool(Pool(name="lab"))
+    b.store.add_machine(Machine(name="m1", kind="ssh", pool="lab", address="m1"))
+
+    def add_run(
+        name: str,
+        *,
+        max_attempts: int = 2,
+        cancelled: bool = False,
+        resume_after: int = 0,
+        attempts: tuple[tuple[str | None, str | None], ...] = (),
+    ) -> str:
+        spec = job(name=name, max_attempts=max_attempts).model_dump_json()
+        b.store._db.execute(
+            """INSERT INTO runs(id, job, spec, pool, created_at, cancel_requested_at, resume_after)
+               VALUES (?, ?, ?, 'lab', ?, ?, ?)""",
+            (name, name, spec, now, now if cancelled else None, resume_after),
+        )
+        for index, (outcome, cause) in enumerate(attempts, start=1):
+            session_id = f"sess-{name}-{index}"
+            b.store._db.execute(
+                "INSERT INTO sessions(id, machine, planned_at, ended_at) VALUES (?, 'm1', ?, ?)",
+                (session_id, now, None if outcome is None else now),
+            )
+            b.store._db.execute(
+                """INSERT INTO attempts(id, run, session, machine, number, position,
+                       limit_seconds, limit_kind, outcome, cause)
+                   VALUES (?, ?, ?, 'm1', ?, 0, 3600, 'out_of_time', ?, ?)""",
+                (f"att-{name}-{index}", name, session_id, index, outcome, cause),
+            )
+        return name
+
+    fresh = add_run("fresh")
+    running_last = add_run("running-last", max_attempts=1, attempts=((None, None),))
+    add_run("succeeded", attempts=(("succeeded", None),))
+    add_run("failed", attempts=(("failed", None),))
+    add_run("cancelled-idle", cancelled=True)
+    stopping = add_run("cancelled-open", cancelled=True, attempts=((None, None),))
+    stopped_retry = add_run("stopped-retry", max_attempts=2, attempts=(("stopped", None),))
+    lost_retry = add_run("lost-retry", max_attempts=2, attempts=(("lost", "machine_lost"),))
+    add_run(
+        "lost-exhausted",
+        max_attempts=1,
+        attempts=(("lost", "machine_lost"),),
+    )
+    exempt_retry = add_run(
+        "exempt-retry",
+        max_attempts=1,
+        attempts=(("lost", "capacity_refused"), ("lost", "spot_machine_lost")),
+    )
+    add_run("non-retryable", max_attempts=3, attempts=(("lost", "input_undelivered"),))
+    resumed = add_run(
+        "resumed",
+        max_attempts=2,
+        resume_after=1,
+        attempts=(("failed", None),),
+    )
+
+    waiting = {r.id for r in b.store.waiting("lab")}
+    unfinished = {r.id for r in b.store.runs(unfinished=True)}
+    assert waiting == {fresh, stopped_retry, lost_retry, exempt_retry, resumed}
+    assert unfinished == waiting | {running_last, stopping}
