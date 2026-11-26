@@ -983,7 +983,9 @@ def test_refusing_owned_host_cools_down_and_yields_to_healthy_sibling(
         assert full_ssh.asks == {"start": 1}
         status = scheduler.read(run)
         assert status.phase == "queued"
-        assert status.reason is not None and status.reason.startswith("machine refused (full-host):")
+        assert status.reason is not None and status.reason.startswith(
+            "machine refused (full-host):"
+        )
         assert any(
             d.operation == "machine create" and "machine refused" in d.message
             for d in scheduler.diagnostics(run=run)
@@ -993,7 +995,10 @@ def test_refusing_owned_host_cools_down_and_yields_to_healthy_sibling(
         scheduler.tick()
         assert full_ssh.asks == {"start": 1}
         waiting_status = scheduler.read(second)
-        assert waiting_status.reason is not None and "machine refused (full-host):" in waiting_status.reason
+        assert (
+            waiting_status.reason is not None
+            and "machine refused (full-host):" in waiting_status.reason
+        )
 
         # A steady wait over the remaining cooldown backs off instead of spinning at 1 s.
         clock.advance(1)  # 60 s elapsed: next tick retries once, then enters a fresh 60 s cooldown

@@ -173,8 +173,10 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
     assert b.scheduler.attempts(run)[-1].number == history + 1
     assert b.scheduler.read(run).attempts == 1
     since = b.clock() - timedelta(seconds=60)
-    for supply, limit in (("l4", 1), ("history", None)):
-        plan = query_plan(b.store, lambda s=supply, n=limit: b.store.recent_refusals(s, since, limit=n))
+    for plan in (
+        query_plan(b.store, lambda: b.store.recent_refusals("l4", since, limit=1)),
+        query_plan(b.store, lambda: b.store.recent_refusals("history", since)),
+    ):
         assert any("sessions_refused" in step for step in plan), plan
         assert not any("SCAN" in step for step in plan), plan
     plan = query_plan(b.store, lambda: b.store.waiting("l4"))

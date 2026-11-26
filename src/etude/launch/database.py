@@ -969,7 +969,7 @@ class Database:
                         (a.outcome != 'lost' OR a.cause NOT IN ({marks})))))))"""
         )
         where = " WHERE " + " AND ".join(clauses)
-        rows = self._db.execute(
+        candidates = self._db.execute(
             f"""SELECT r.*,
                   CASE WHEN EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND a.outcome IS NULL)
                          OR NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND a.number > r.resume_after)
@@ -982,7 +982,7 @@ class Database:
         ).fetchall()
         return tuple(
             run
-            for row in rows
+            for row in candidates
             if (run := _run_from_row(row)).launch.spec.max_attempts > row["tries"]
         )
 
