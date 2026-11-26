@@ -208,6 +208,9 @@ def _pid_alive(pid: int | None) -> bool:
     try: os.kill(pid,0)
     except ProcessLookupError: return False
     except PermissionError: pass
+    try:
+        if pathlib.Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()[0]=='Z': return False
+    except (OSError,IndexError): pass
     return True
 def _boot_alive() -> bool:
     if _read_ended() is not None: return False
@@ -245,20 +248,35 @@ if request['action']=='end':
     except OSError:
         if not ((home/'boot-claim').exists() or (home/'pid').exists()): raise
     ended_at=_read_ended()
-    if not (home/'pid').exists() and ended_at is None:
-        # The cancel stops an install; a live boot or courier stops at once.
-        for name in ('boot-claim','courier-pid'):
-            if proc:=_recorded(name):
-                try: os.kill(proc,signal.SIGTERM)
+    if ended_at is None:
+        if (home/'pid').exists():
+            worker=_recorded('pid')
+            if _pid_alive(worker):
+                try: os.kill(worker,signal.SIGTERM)
                 except (ProcessLookupError,PermissionError): pass
-        if _host_alive() is False and not (home/'pid').exists():
-            # Nothing runs here, and the cancel fences any start still in flight.
-            from datetime import datetime,UTC
-            now=datetime.now(UTC).isoformat()
-            _write_ended(now)
-            ended_at=_read_ended() or now
-    if ended_at is not None or not (home/'pid').exists():
-        print(json.dumps({'ended_at':ended_at})); sys.exit(0)
+                else:
+                    for _ in range(100):
+                        if _read_ended() is not None or not _pid_alive(worker): break
+                        time.sleep(0.1)
+            ended_at=_read_ended()
+            if ended_at is None and not _pid_alive(worker):
+                from datetime import datetime,UTC
+                now=datetime.now(UTC).isoformat()
+                _write_ended(now)
+                ended_at=_read_ended() or now
+        else:
+            # The cancel stops an install; a live boot or courier stops at once.
+            for name in ('boot-claim','courier-pid'):
+                if proc:=_recorded(name):
+                    try: os.kill(proc,signal.SIGTERM)
+                    except (ProcessLookupError,PermissionError): pass
+            if _host_alive() is False and not (home/'pid').exists():
+                # Nothing runs here, and the cancel fences any start still in flight.
+                from datetime import datetime,UTC
+                now=datetime.now(UTC).isoformat()
+                _write_ended(now)
+                ended_at=_read_ended() or now
+    print(json.dumps({'ended_at':ended_at})); sys.exit(0)
 if request['action']=='start':
     try:
         home.mkdir(parents=True,exist_ok=True,mode=0o700)

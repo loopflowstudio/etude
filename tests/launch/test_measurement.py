@@ -23,12 +23,13 @@ from etude.launch import cli, client, server
 from etude.launch.aws import Keys
 from etude.launch.commands import Kind
 from etude.launch.database import launcher_file, upgrade
-from etude.launch.executor import Execution
+from etude.launch.executor import Execution, Executor
+from etude.launch.provisioner.machines import OwnedMachine
 from etude.launch.provisioner.providers.runpod.http import PodHTTP
 from etude.launch.records import Machine, OnDemand, Pool
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet
-from etude.launch.ssh import SSH, SessionRequest
+from etude.launch.ssh import SSH, SessionRequest, SSHJournal, SSHStart
 from etude.launch.storage.s3 import Bucket
 from etude.launch.storage.transport import HTTPReply
 from etude.spec import Job
@@ -423,3 +424,66 @@ def test_idle_pace_query_count_ignores_finished_run_history(
     assert idle_tick == Counts(database=42), idle_tick.model_dump()
     plan = query_plan(b.store, lambda: b.store.runs(unfinished=True))
     assert not any("SCAN a" in step for step in plan), plan
+
+
+def test_pure_ssh_launch_rpc_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("etude.launch.provisioner.providers.package.frontier", lambda root: b"{}")
+    b = bench(tmp_path)
+    ssh = SSH("lab-host", str(tmp_path / "remote"))
+    service = Executor(OwnedMachine("lab-host"), SSHStart(ssh), SSHJournal(ssh))
+    scheduler = Scheduler(b.store, {"ssh": lambda held: service}, clock=b.clock)
+    scheduler.add_pool(Pool(name="lab"))
+    scheduler.add_machine("lab-host", "lab-host", pool="lab")
+
+    actions: list[str] = []
+    refuse_next = False
+
+    def fake_ssh(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        cmd = args[0] if args else kwargs.get("args", ())
+        if isinstance(cmd, list) and "-G" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=b"connecttimeout none\nserveraliveinterval 0\nserveralivecountmax 3\n",
+                stderr=b"",
+            )
+        payload = json.loads(kwargs["input"])
+        action = payload["request"]["action"]
+        actions.append(action)
+        reply: dict[str, object]
+        if action == "start":
+            reply = (
+                {"refused": "OSError: [Errno 28] No space left on device"} if refuse_next else {}
+            )
+        elif action == "started":
+            reply = {"started": False}
+        elif action == "observe":
+            reply = {"observation": {"alive": True, "progress": [], "start_unknown": True}}
+        else:
+            reply = {}
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout=json.dumps(reply).encode(), stderr=b""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_ssh)
+    counting = Counting(b.store)
+
+    # Refused solo SSH launch stops after the single pre-commit `start` RPC with zero runs recorded.
+    refuse_next = True
+    with counting.record():
+        with pytest.raises(LauncherError, match=r"machine refused \(lab-host\)"):
+            scheduler.launch(Job(command="true", max_hours=1), pool="lab")
+        refused_counts = counting.snapshot()
+    assert actions == ["start"]
+    assert refused_counts.ssh == 1
+    assert b.store.runs() == ()
+
+    # Confirmed SSH launch runs pre-commit `start` + `started`, then post-commit `started` + `observe` + `add`.
+    actions.clear()
+    refuse_next = False
+    b.clock.advance(61)
+    with counting.record():
+        scheduler.launch(Job(command="true", max_hours=1), pool="lab")
+        confirmed_counts = counting.snapshot()
+    assert actions == ["start", "started", "started", "observe", "add"]
+    assert confirmed_counts.ssh == 5

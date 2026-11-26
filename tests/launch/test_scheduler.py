@@ -1308,7 +1308,7 @@ def test_unfinished_runs_and_waiting_share_retryability_rules(tmp_path: Path) ->
     assert unfinished == waiting | {running_last, stopping}
 
 
-def test_explicit_launch_and_quote_fall_back_to_recently_refused_owned_host(
+def test_explicit_launch_and_quote_order_refused_owned_behind_ondemand(
     tmp_path: Path,
 ) -> None:
     clock = Clock()
@@ -1328,7 +1328,7 @@ def test_explicit_launch_and_quote_fall_back_to_recently_refused_owned_host(
     scheduler.set_provider(
         Provider(name="fake", kind="runpod", registry="ghcr.io/test", storage="west")
     )
-    scheduler.add_ondemand(OnDemand(name="l4", template=L4, max_machines=2, setup_seconds=0))
+    scheduler.add_ondemand(OnDemand(name="l4", template=L4, max_machines=1, setup_seconds=0))
     scheduler.add_pool(Pool(name="lab"))
     scheduler.add_machine("m1", "m1.local", pool="lab")
 
@@ -1339,35 +1339,123 @@ def test_explicit_launch_and_quote_fall_back_to_recently_refused_owned_host(
     assert m1.creates == 1
     assert scheduler.read(queued).phase == "queued"
 
-    # 15 s later: queued retry still waits, while explicit quote and launch use m1 and rent nothing.
-    clock.advance(15)
+    # 10 s later: queued retry still waits, while `--pool lab --rent l4` prefers on-demand over refused m1.
+    clock.advance(10)
     scheduler.tick()
     assert m1.creates == 1
     assert scheduler.read(queued).phase == "queued"
 
     quote = scheduler.quote([RunRequest(job=job())], pool="lab", rent="l4")
     assert len(quote.machines) == 1
-    assert quote.machines[0].machine == "m1"
-    assert quote.machines[0].usd_per_hour == Decimal(0)
-    assert rent.offers == 0
+    assert quote.machines[0].machine is None
+    assert quote.machines[0].usd_per_hour == Decimal("0.59")
+    assert rent.offers == 1
     assert rent.creates == 0
 
-    (launched,) = scheduler.launch(job(), pool="lab", rent="l4")
+    (rented,) = scheduler.launch(job(), pool="lab", rent="l4")
+    assert m1.creates == 1
+    assert rent.creates == 1
+    assert (scheduler.read(rented).machine or "").startswith("l4-")
+
+    # With l4 at its machine limit, explicit quote and launch fall back to recently refused m1.
+    fallback_quote = scheduler.quote([RunRequest(job=job())], pool="lab", rent="l4")
+    assert len(fallback_quote.machines) == 1
+    assert fallback_quote.machines[0].machine == "m1"
+    assert fallback_quote.machines[0].usd_per_hour == Decimal(0)
+
+    (fallback,) = scheduler.launch(job(), pool="lab", rent="l4")
     assert m1.creates == 2
-    assert rent.offers == 0
-    assert rent.creates == 0
-    assert scheduler.read(launched).machine == "m1"
+    assert rent.creates == 1
+    assert scheduler.read(fallback).machine == "m1"
 
-    # When an unrefused sibling exists, explicit quote and launch prefer it over a recently refused host.
+    # When an unrefused sibling exists, explicit quote and launch prefer it over both l4 and refused m1.
     scheduler.add_machine("m2", "m2.local", pool="lab")
-    clock.advance(10)  # `launched` finishes on m1; m1's earlier refusal is now 25 s old
+    clock.advance(10)  # `rented` and `fallback` finish; m1's earlier refusal is 20 s old (< 60 s)
     scheduler.tick()  # `queued` runs on healthy m2
     assert scheduler.read(queued).machine == "m2"
-    clock.advance(10)  # `queued` finishes on m2; m1's refusal is now 35 s old (< 60 s)
+    clock.advance(10)  # `queued` finishes on m2; m1's refusal is 30 s old (< 60 s)
     scheduler.tick()
+    offers_before = rent.offers
+    creates_before = rent.creates
     prefer = scheduler.quote([RunRequest(job=job())], pool="lab", rent="l4")
     assert prefer.machines[0].machine == "m2"
-    assert rent.offers == 0
+    assert rent.offers == offers_before
     (on_m2,) = scheduler.launch(job(), pool="lab", rent="l4")
     assert scheduler.read(on_m2).machine == "m2"
-    assert rent.creates == 0
+    assert rent.creates == creates_before
+
+
+def test_explicit_launch_on_owned_ssh_pool_confirms_pre_commit_and_replans_on_refusal(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    store = open_database(tmp_path / "state.db")
+    mini1 = FakeService(clock, seconds=10)
+    mini2 = FakeService(clock, seconds=10)
+    mini3 = FakeService(clock, seconds=10)
+    rent = FakeService(clock, seconds=10)
+    owned = {"mini-1": mini1, "mini-2": mini2, "mini-3": mini3}
+    scheduler = Scheduler(
+        store,
+        {"ssh": lambda held: owned[held.name], "runpod": lambda held: rent},
+        clock=clock,
+    )
+    scheduler.add_storage(
+        Storage(name="west", bucket="b", prefix="p", provider="s3", region="us-west-2")
+    )
+    scheduler.set_provider(
+        Provider(name="fake", kind="runpod", registry="ghcr.io/test", storage="west")
+    )
+    scheduler.add_ondemand(OnDemand(name="gpu", template=L4, max_machines=2, setup_seconds=0))
+    scheduler.add_pool(Pool(name="lab"))
+    scheduler.add_machine("mini-1", "mini-1.local", pool="lab")
+
+    # Solo refusing pool rejects before committing any run row.
+    mini1.refuse = 1
+    with pytest.raises(LauncherError, match=r"machine refused \(mini-1\)"):
+        scheduler.launch(job(), pool="lab")
+    assert store.runs() == ()
+    assert mini1.creates == 1
+
+    # Adding a healthy sibling lets launch fail over pre-commit from refusing mini-1 to mini-2.
+    clock.advance(61)  # mini-1 cooldown expired so it is tried first
+    scheduler.add_machine("mini-2", "mini-2.local", pool="lab")
+    mini1.refuse = 1
+    (run_a,) = scheduler.launch(job(), pool="lab")
+    assert scheduler.read(run_a).machine == "mini-2"
+    assert mini1.creates == 2
+    assert mini2.creates == 1
+    clock.advance(10)
+    scheduler.tick()
+    assert scheduler.read(run_a).outcome == "succeeded"
+
+    # When every owned host refuses, `--pool lab --rent gpu` re-plans onto gpu pre-commit.
+    clock.advance(61)
+    mini1.refuse = 1
+    mini2.refuse = 1
+    (run_b,) = scheduler.launch(job(), pool="lab", rent="gpu")
+    assert (scheduler.read(run_b).machine or "").startswith("gpu-")
+    assert rent.creates == 1
+    clock.advance(10)
+    scheduler.tick()
+    assert scheduler.read(run_b).outcome == "succeeded"
+
+    # Multi-run launch: confirmed mini-1 is not double-booked when mini-2 refuses; mini-3 takes run 2.
+    clock.advance(61)
+    scheduler.add_machine("mini-3", "mini-3.local", pool="lab")
+    mini2.refuse = 1
+    first, second = scheduler.launch(job().runs(1, 2), pool="lab")
+    assert scheduler.read(first).machine == "mini-1"
+    assert scheduler.read(second).machine == "mini-3"
+    clock.advance(10)
+    scheduler.tick()
+    assert scheduler.read(first).outcome == "succeeded"
+    assert scheduler.read(second).outcome == "succeeded"
+
+    # Multi-run launch with no sibling left after mini-2 refuses keeps mini-1 and queues run 2.
+    clock.advance(61)
+    mini2.refuse = 1
+    mini3.refuse = 1
+    kept, waiting = scheduler.launch(job().runs(3, 4), pool="lab")
+    assert scheduler.read(kept).machine == "mini-1"
+    assert scheduler.read(waiting).phase == "queued"

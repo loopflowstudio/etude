@@ -867,9 +867,13 @@ on-demand again within 60 seconds of a provider's refusal; an explicit `launch`
 is not paused, and releasing a claim that never reached the provider pauses
 nothing. For queued work, an owned pool skips a machine for 60 seconds after it
 refuses a start, immediately re-planning onto healthy siblings in the same tick
-before any on-demand supply rents; an explicit `launch` or `quote` prefers
-unrefused machines and falls back to a recently refused one before rejecting or
-renting. Attempts ending as `capacity_refused` remain in the history, with their
+before any on-demand supply rents. An explicit `launch` or `quote` places work
+in order: open sessions, then unrefused owned hosts, then on-demand rentals,
+then recently refused owned hosts only for work still unplaced. Explicit
+`launch` confirms owned SSH sessions before committing runs (as for rentals);
+on `Refused`, it re-plans onto remaining owned or on-demand capacity, or fails
+with `machine refused` and no run recorded. Local `ProcessStart` pools stay
+post-commit. Attempts ending as `capacity_refused` remain in the history, with their
 original numbers, but do not count toward `max_attempts` or the status attempt
 count. Scheduling, status and explicit resume use that same budget rule.
 Timeouts, no reply, 408, 5xx and unreadable or mismatched replies stay unknown.
@@ -894,17 +898,19 @@ writes `cancel-start`. Installation and courier setup check it via
 `startup_timeout`, including immediately after the start receipt upload and
 before spawning the worker. `boot-claim` names the boot process until it hands
 off to a worker (`pid`) or, on a bucket-backed host, a courier (`courier-pid`).
-Before `pid` exists, `end` signals any live `boot-claim` or courier PID and
-records `ended` atomically (`ended.partial` + `os.replace`, unlinking the
-partial on error) once setup has stopped; once `pid` exists, `_BOOT` pipes the
-RPC in memory (no temp file) to `DirectoryJournal.end`, which signals and waits
-for the worker. Every reader treats an empty `ended` file as absent. If
-`boot-claim` or `pid` already exists
-(fencing any duplicate start) and the disk is full, both paths tolerate unwritable
-`cancel-start` and `ended` files and still answer `ended_at` once nothing is
+SSH `end` runs wholly in the standard-library bootstrap without loading or
+installing the remote client environment. Before `pid` exists, it signals any
+live `boot-claim` or `courier-pid`; once `pid` exists, it sends `SIGTERM` to
+the worker `pid` and waits up to 10 seconds for exit or `ended`, leaving any
+live `courier-pid` to `Executor.end`'s observe wait (`DirectoryJournal.end`
+stays for local pools). Once stopped, it records `ended` atomically
+(`ended.partial` + `os.replace`, unlinking the partial on error); every reader
+treats an empty `ended` file as absent. If `boot-claim` or `pid` already exists
+(fencing any duplicate start) and the disk is full, `end` tolerates unwritable
+`cancel-start` and `ended` files and still answers `ended_at` once nothing is
 running so the session settles as lost (while `Executor.end` still waits for any
-live courier), staying strict when neither file
-exists. It closes every slot in the session
+live courier), staying strict when neither file exists. Other post-pid SSH RPCs
+pipe their JSON payload in memory (no temp file) to `remote.py`. It closes every slot in the session
 as soon as shutdown is requested. A setup that was stopped still publishes its
 diagnostics if storage is available.
 

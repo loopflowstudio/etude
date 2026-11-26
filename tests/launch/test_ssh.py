@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from threading import Thread
+from typing import Any
 
 import pytest
 
@@ -1276,3 +1277,171 @@ def test_install_enospc_leaves_no_ended_and_empty_ended_settles(
             assert datetime.fromisoformat((live_disk / "ended").read_text().strip()) == killed_at
         finally:
             worker.kill()
+
+
+def test_ssh_launch_full_disk_failover_and_solo_refusal_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    full_root = tmp_path / "mini-1"
+    full_root.mkdir()
+    full_root.chmod(0o500)
+    healthy_root = tmp_path / "mini-2"
+    mini1_ssh = CountedSSH("mini-1", str(full_root))
+    mini2_ssh = CountedSSH("mini-2", str(healthy_root))
+    services = {
+        "mini-1": Executor(OwnedMachine("mini-1"), SSHStart(mini1_ssh), SSHJournal(mini1_ssh)),
+        "mini-2": Executor(OwnedMachine("mini-2"), SSHStart(mini2_ssh), SSHJournal(mini2_ssh)),
+    }
+    store = open_database(tmp_path / "state.db")
+    scheduler = Scheduler(store, {"ssh": lambda held: services[held.name]})
+    scheduler.add_pool(Pool(name="lab"))
+    scheduler.add_machine("mini-1", "mini-1", pool="lab")
+
+    job_file = tmp_path / "pass9_ssh_refusal_cli.py"
+    job_file.write_text(
+        "from etude.jobs import TrainingJob\n"
+        "from tests.launch.tasks import RUNTIME, Command, train_command\n"
+        "def training_jobs():\n"
+        "    return TrainingJob(\n"
+        "        name='base', train=train_command, runtime=RUNTIME,\n"
+        "        config=Command(command='echo ok'), repo=None, max_hours=0.01,\n"
+        "    )\n"
+    )
+    monkeypatch.setattr("etude.launch.cli.default", lambda: scheduler)
+    monkeypatch.setattr("etude.launch.client.default", lambda: scheduler)
+    monkeypatch.setattr("etude.launch.client._client", lambda: scheduler)
+    monkeypatch.setattr(
+        "etude.launch.client.standing", lambda experiment: scheduler.standing(experiment)
+    )
+    monkeypatch.setattr(
+        "etude.controller.advance.source_for",
+        lambda pool, rent, source=None: source or str(tmp_path / "track"),
+    )
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    try:
+        # Solo full-disk pool exits non-zero with `machine refused` and records zero runs.
+        assert main(["launch", str(job_file), "--pool", "lab"]) != 0
+        captured = capsys.readouterr()
+        assert "machine refused (mini-1)" in captured.err
+        assert store.runs() == ()
+        assert mini1_ssh.asks == {"start": 1}
+
+        # With healthy mini-2 alongside full-disk mini-1, launch fails over and runs on mini-2.
+        scheduler.add_machine("mini-2", "mini-2", pool="lab")
+        (run,) = scheduler.launch(_echo("healthy"), pool="lab")
+        (status,) = scheduler.wait(run, every=0.1, timeout=20)
+        assert status.outcome == "succeeded"
+        assert status.machine == "mini-2"
+        assert job_text(scheduler.logs(refresh=True, run=run)) == "healthy\n"
+    finally:
+        full_root.chmod(0o700)
+
+
+def _spawn_detached_sleep() -> int:
+    """Spawn a sleep process reparented to PID 1 so SIGTERM reaps it like a detached worker."""
+    out = subprocess.check_output(
+        ["sh", "-c", "sleep 60 </dev/null >/dev/null 2>&1 & echo $!"],
+        text=True,
+    )
+    return int(out.strip())
+
+
+def test_ssh_end_live_pid_with_new_program_digest_settles_without_exit_97(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    etude_home = tmp_path / "fresh-home"
+    monkeypatch.setenv("ETUDE_HOME", str(etude_home))
+    root = tmp_path / "remote"
+    ssh = SSH("bench", str(root))
+    # Point at an uninstalled digest; any exit 97 / uv sync would try to populate programs/.
+    ssh._archive = ("new-digest-not-installed", base64.b64encode(b"not-a-zip").decode())
+    journal = SSHJournal(ssh)
+
+    real_run = subprocess.run
+    ssh_codes: list[int] = []
+
+    def counted_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        result: subprocess.CompletedProcess[Any] = real_run(*args, **kwargs)
+        cmd = args[0] if args else kwargs.get("args", ())
+        if isinstance(cmd, list) and cmd and cmd[0] == "ssh" and "-G" not in cmd:
+            ssh_codes.append(result.returncode)
+        return result
+
+    monkeypatch.setattr(subprocess, "run", counted_run)
+
+    # Part 1: live pid on writable dir terminates and writes `ended` in 1 SSH call (no exit 97).
+    writable = root / "s_writable"
+    writable.mkdir(parents=True)
+    worker_pid = _spawn_detached_sleep()
+    try:
+        (writable / "pid").write_text(str(worker_pid))
+        ended_at = journal.end("s_writable")
+        assert ended_at is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(worker_pid, 0)
+        assert datetime.fromisoformat((writable / "ended").read_text().strip()) == ended_at
+    finally:
+        try:
+            os.kill(worker_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    assert ssh_codes == [0]
+    assert not (etude_home / "programs").exists()
+
+    # Part 2: live pid on full-disk (unwritable) dir still settles in 1 SSH call without exit 97.
+    ssh_codes.clear()
+    full_dir = root / "s_full_disk"
+    full_dir.mkdir(parents=True)
+    worker_pid = _spawn_detached_sleep()
+    try:
+        (full_dir / "pid").write_text(str(worker_pid))
+        full_dir.chmod(0o500)
+        ended_at = journal.end("s_full_disk")
+        assert ended_at is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(worker_pid, 0)
+        assert not (full_dir / "ended").exists()
+        assert not (full_dir / "ended.partial").exists()
+    finally:
+        full_dir.chmod(0o700)
+        try:
+            os.kill(worker_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    assert ssh_codes == [0]
+    assert not (etude_home / "programs").exists()
+
+    # Part 3: bucket-backed host leaves live courier-pid to Executor.end's observe wait (no exit 97).
+    ssh_codes.clear()
+    executor = _bucket_host(ssh, Storage())
+    bucket_dir = root / "s_bucket"
+    bucket_dir.mkdir(parents=True)
+    worker_pid = _spawn_detached_sleep()
+    courier_pid = _spawn_detached_sleep()
+    try:
+        (bucket_dir / "pid").write_text(str(worker_pid))
+        (bucket_dir / "courier-pid").write_text(str(courier_pid))
+        bucket_dir.chmod(0o500)
+        assert executor.end("s_bucket") is None
+        with pytest.raises(ProcessLookupError):
+            os.kill(worker_pid, 0)
+        os.kill(courier_pid, 0)  # courier stayed alive for final delivery
+        assert ssh_codes == [0, 0]  # 1 end + 1 observe, no exit 97
+        os.kill(courier_pid, signal.SIGTERM)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(courier_pid, 0)
+                time.sleep(0.05)
+            except ProcessLookupError:
+                break
+        assert executor.end("s_bucket") is not None
+        assert ssh_codes == [0, 0, 0, 0]
+    finally:
+        bucket_dir.chmod(0o700)
+        for pid in (worker_pid, courier_pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    assert not (etude_home / "programs").exists()

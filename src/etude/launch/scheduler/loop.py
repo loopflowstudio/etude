@@ -927,11 +927,17 @@ class Scheduler:
                     )
             for name in names:
                 self._confirm_ends(self._store.supply(name))
-            placements = self._capacity(records)
+            remaining_records = list(records)
+            excluded_machines: set[str] = set()
+            excluded_sessions: set[str] = set()
+            placements = self._capacity(remaining_records)
             made: list[Session] = []
             attempts: list[RunAttempt] = []
             try:
-                for placement in placements:
+                placement_index = 0
+                while placement_index < len(placements):
+                    placement = placements[placement_index]
+                    placement_index += 1
                     existing = placement.session
                     machine, price = placement.machine, placement.rate.usd_per_hour
                     self._check_locks(names)
@@ -959,12 +965,35 @@ class Scheduler:
                             session = _new_session(_id(), supply, machine, now)
                         self._store.plan(session, (), rented, rental, launch=launch)
                         made.append(session)
-                        if rented is not None:
+                        if rented is not None or (machine is not None and machine.kind == "ssh"):
                             # Boot an empty inbox. No executable work leaves before
                             # the entire first wave has confirmed capacity.
-                            self._create(session, now, idle=True, budget_cap=wave_cap)
+                            self._create(
+                                session,
+                                now,
+                                idle=True,
+                                budget_cap=wave_cap if rented is not None else None,
+                            )
                             session = self._store.session(session.id)
                             if session.provider_id is None:
+                                if rented is None and session.refused_at is not None:
+                                    excluded_machines.add(session.machine)
+                                    try:
+                                        placements = self._capacity(
+                                            remaining_records,
+                                            excluded_machines=excluded_machines,
+                                            excluded_sessions=excluded_sessions,
+                                        )
+                                    except LauncherError:
+                                        if attempts:
+                                            break  # keep confirmed placements; later runs stay queued
+                                        reason = _refused(session, owned=True)
+                                        raise LauncherError(
+                                            f"cannot launch on {placement.supply!r}: {reason};"
+                                            " etude queue would wait"
+                                        ) from None
+                                    placement_index = 0
+                                    continue
                                 if attempts:
                                     break  # keep confirmed placements; later runs stay queued
                                 reason = "create reply unknown"
@@ -981,6 +1010,7 @@ class Scheduler:
                                 "rented machine expired during launch; etude queue would wait"
                             )
                     self._store.link_launch(launch, session.id)
+                    excluded_sessions.add(session.id)
                     held = len(self._store.attempts(session=session.id))
                     observed = self._store.rental_for(session) if price is None else None
                     share_price = (
@@ -1015,6 +1045,8 @@ class Scheduler:
                                 added=session.provider_id is not None,
                             )
                         )
+                    placed_ids = {planned.run.id for planned in placement.runs}
+                    remaining_records = [r for r in remaining_records if r.id not in placed_ids]
                 self._check_locks(names)
                 if any(
                     not self._live(self._store.session(a.session), self._clock()) for a in attempts
@@ -1057,12 +1089,16 @@ class Scheduler:
     def _capacity(
         self,
         records: Sequence[RunRecord],
+        *,
+        excluded_machines: Collection[str] = (),
+        excluded_sessions: Collection[str] = (),
     ) -> list[Placement]:
         """Choose the first wave, checking all limits before spending.
 
         A chosen machine's free slots fill before another is taken. Machines
-        with free slots come first, then the pool's free machines, then rentals
-        from the on-demand, up to its remaining machine capacity.
+        with free slots come first, then unrefused free machines of the pool,
+        then rentals from the on-demand up to its remaining machine capacity,
+        then recently refused free machines of the pool for work still unplaced.
         Runs left over wait in the queue. Nothing is claimed here.
         Both quote and admission pass records for one pool/on-demand target.
         """
@@ -1139,6 +1175,8 @@ class Scheduler:
             if supply is None:
                 continue
             for session, free in self._open_sessions(supply, now):
+                if session.id in excluded_sessions:
+                    continue
                 if not pending:
                     break
                 rental = self._store.rental_for(session)
@@ -1150,19 +1188,18 @@ class Scheduler:
                     rental or HourlyRate(usd_per_hour=Decimal(0)),
                     rental=rental,
                 )
-        if pool is not None:
-            used: set[str] = set()
+        used: set[str] = set(excluded_machines)
+        if pool is not None and pending:
             while pending:
-                owned = self._free_owned(pool, now, excluded=used, allow_refused=True)
+                owned = self._free_owned(pool, now, excluded=used, allow_refused=False)
                 if owned is None:
                     reason = self._trouble.get(pool.name, reason)
                     break
                 used.add(owned.name)
                 place(pool, pool.slots, owned, None, HourlyRate(usd_per_hour=Decimal(0)))
+        ondemand_slice: tuple[int, int] | None = None
         if ondemand is not None and pending:
             first = len(placements)
-            requested_machines = (len(pending) + ondemand.slots - 1) // ondemand.slots
-            work = sum(budgets[key].seconds for key in pending)
             while pending:
                 offer = self._rentable(ondemand, additional=len(placements) - first)
                 if offer is None:
@@ -1177,22 +1214,37 @@ class Scheduler:
                     offer.hardware,
                 ):
                     break
-            if pending and len(placements) > first:
-                # Only runs still waiting after the wave can fund extra machine time.
-                machines = max(
-                    len(placements) - first,
-                    min(requested_machines, ondemand.max_machines - self._in_use(ondemand)),
-                )
-                waiting_cap = sum((budgets[key].usd for key in pending), Decimal(0)) / machines
-                target_seconds = min(
-                    self._longest_rental(ondemand),
-                    ondemand.setup_seconds + work / (machines * ondemand.slots),
-                )
-                increment = self._safeguards(ondemand).reservation_hours
-                for index in range(first, len(placements)):
-                    placements[index] = placements[index].extend(
-                        target_seconds, waiting_cap, increment
-                    )
+            if len(placements) > first:
+                ondemand_slice = (first, len(placements))
+        if pool is not None and pending:
+            while pending:
+                owned = self._free_owned(pool, now, excluded=used, allow_refused=True)
+                if owned is None:
+                    break
+                used.add(owned.name)
+                place(pool, pool.slots, owned, None, HourlyRate(usd_per_hour=Decimal(0)))
+        if ondemand is not None and pending and ondemand_slice is not None:
+            first, last = ondemand_slice
+            # Only runs still waiting after the wave can fund extra machine time.
+            placed_runs = [p.run for placement in placements[first:last] for p in placement.runs]
+            requested_machines = (
+                len(placed_runs) + len(pending) + ondemand.slots - 1
+            ) // ondemand.slots
+            work = sum(budgets[r.id].seconds for r in placed_runs) + sum(
+                budgets[key].seconds for key in pending
+            )
+            machines = max(
+                last - first,
+                min(requested_machines, ondemand.max_machines - self._in_use(ondemand)),
+            )
+            waiting_cap = sum((budgets[key].usd for key in pending), Decimal(0)) / machines
+            target_seconds = min(
+                self._longest_rental(ondemand),
+                ondemand.setup_seconds + work / (machines * ondemand.slots),
+            )
+            increment = self._safeguards(ondemand).reservation_hours
+            for index in range(first, last):
+                placements[index] = placements[index].extend(target_seconds, waiting_cap, increment)
         if not placements:
             if underfunded:
                 reason = "job dollars do not cover the hours"
@@ -2061,6 +2113,8 @@ class Scheduler:
         except _RELAY_WAITS as error:
             self._await_relay(session, error)
             return False
+        if idle:
+            packet = packet.model_copy(update={"kept": True})
         if not packet.work and not packet.kept:
             self._store.confirm_ended(session, now)  # every attempt ended undelivered
             return False
@@ -2086,9 +2140,7 @@ class Scheduler:
             if seconds is not None and seconds <= 0:
                 raise Refused("startup or rental deadline reached before creation")
             with creation_guard(check), limit_time(seconds):
-                provider_id = service.create(
-                    packet.model_copy(update={"kept": True}) if idle else packet
-                )
+                provider_id = service.create(packet)
         except Refused as error:
             owned = self._store.rental_for(session) is None
             self._diagnose(
