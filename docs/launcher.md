@@ -82,7 +82,9 @@ Cancelling a run while its owned host is still setting up (installing,
 or fetching and restoring inputs from storage) stops that setup and frees the
 host once stopped, even if a full disk prevents writing the end marker. A
 failed or killed install also frees the host. If the host is unreachable, Etude
-waits until it can check.
+waits until it can check. A launch that cannot reach an owned host fails without
+recording the run; that host stays held until it answers, and the same run can
+be launched on another pool at once.
 
 On an SSH host with bucket storage, Etude tracks the courier from input fetch
 through final upload. The host stays occupied while the courier delivers the
