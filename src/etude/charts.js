@@ -443,10 +443,10 @@ function model(D) {
       if (u) {
         if (u.failed) {
           const tail = u.unplayed ? `, ${u.unplayed} not yet played` : "";
-          return {missing: true, gap: "failed", at: u.at, meta: `${u.failed} match${s(u.failed)} failed${tail}`};
+          return {missing: true, gap: "failed", at: u.at, whole: u.whole, meta: `${u.failed} match${s(u.failed)} failed${tail}`};
         }
-        if (u.gap) return {missing: true, gap: u.gap.missing === "not_yet" ? "pending" : "none", at: u.at, meta: missingText(u.gap)};
-        if (u.unplayed) return {missing: true, gap: "pending", at: u.at, meta: `not yet played: ${u.unplayed} match${s(u.unplayed)} eval_jobs(state) wants`};
+        if (u.gap) return {missing: true, gap: u.gap.missing === "not_yet" ? "pending" : "none", at: u.at, whole: u.whole, meta: missingText(u.gap)};
+        if (u.unplayed) return {missing: true, gap: "pending", at: u.at, whole: u.whole, meta: `not yet played: ${u.unplayed} match${s(u.unplayed)} eval_jobs(state) wants`};
       }
       return {skip: true, meta: "not in these matches"};
     };

@@ -629,6 +629,15 @@ test("a one-seed seating draws a job's point from the seed that played it, and w
   const every = points(context.model(data), context.model(data).JOBS[0])[0];
   assert.equal(every.missing, true);
   assert.match(every.meta, /1 of 2 seeds evaluated/);
+  // Still unplayed for its seed while seed a has no such checkpoint yet: the job's status,
+  // not a partial count of seeds.
+  data.training.checkpoints = data.training.checkpoints.filter(c => c.run === "b");
+  data.players = data.players.filter(p => p.run !== "a");
+  data.points[0] = {...data.points[0], whole: true, score: null, value: null, rows: 0, matches: 0, opponents: [], gap: null, failed: 0, unplayed: 1};
+  const pending = points(context.model(data), context.model(data).JOBS[0])[0];
+  assert.equal(pending.missing, true);
+  assert.equal(pending.gap, "pending");
+  assert.doesNotMatch(pending.meta, /seeds evaluated/);
 });
 
 
