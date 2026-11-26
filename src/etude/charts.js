@@ -81,6 +81,19 @@ function isolated(ys) {
   return found;
 }
 
+// uPlot joins over `undefined` but clears a `null` only back to the x values beside it, so a
+// joined run beside a break would draw a stub toward it: such a run joins the break instead.
+function breakBeside(ys) {
+  for (let i = 0; i < ys.length; i++) {
+    if (ys[i] !== undefined) continue;
+    let end = i;
+    while (end < ys.length && ys[end] === undefined) end++;
+    if (ys[i - 1] === null || ys[end] === null) ys.fill(null, i, end);
+    i = end;
+  }
+  return ys;
+}
+
 // series: [{label, color, dotted, opacity, width, faint, pointFill, points: [{x, y, lo, hi, missing, skip, gap, meta}]}]
 // A missing point is null to uPlot, so its line breaks: an evaluation that did not happen is
 // never bridged. A skipped point is no point of the line (undefined, which uPlot joins over).
@@ -106,7 +119,7 @@ function line(host, series, o = {}) {
   if (o.checkpoint != null) positions.add(o.checkpoint);
   const xs = [...positions].sort((a, b) => a - b);
   const maps = series.map(s => new Map(s.points.filter(p => p.x != null).map(p => [p.x, p])));
-  const column = (m, f) => xs.map(x => { const p = m.get(x); if (!p || p.skip) return undefined; return drawn(p) ? f(p) : null; });
+  const column = (m, f) => breakBeside(xs.map(x => { const p = m.get(x); if (!p || p.skip) return undefined; return drawn(p) ? f(p) : null; }));
   const muted = css("--muted"), grid = css("--grid"), ink2 = css("--ink-2");
   const data = [xs], spec = [{}], bands = [], whiskers = [];
   series.forEach((s, i) => {

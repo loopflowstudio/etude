@@ -483,11 +483,16 @@ class Database:
                         f"run {request.run!r} already admitted; choose --experiment NAME for a new run; "
                         "use --resume to carry on, or --resume --until CLOCK=TARGET to train further"
                     )
+                # An unsettled rental from a failed launch may be a paid machine; wait for its
+                # provider to settle it. An owned host's session never got the run's work and
+                # keeps the host busy itself, and settling it can wait on the host answering.
                 for previous in self.launches(request.run):
                     if previous.state in {"preparing", "admitting"} or (
                         previous.state != "admitted"
                         and any(
-                            session.refused_at is None and session.ended_at is None
+                            session.refused_at is None
+                            and session.ended_at is None
+                            and isinstance(self.supply(session.supply), OnDemand)
                             for session in self.launch_sessions(previous.id, acquired_only=True)
                         )
                     ):

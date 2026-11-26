@@ -514,6 +514,12 @@ test("a seated curve skips checkpoints only in the second seat and marks only he
   assert.equal(at2[500].gap, undefined);
   assert.equal(at2[1000].missing, true);
   assert.equal(at2[1000].gap, "failed");
+
+  // With u600 unheld too, nothing lies between u400 and the break at u1000: the line stops at
+  // u400 rather than joining toward u1000 and drawing a stub up to the column beside the break.
+  data.points.splice(1, 1);
+  data.coverage[2].played = 0;
+  assert.deepEqual([...renderPage(data).plots[0].values[1]], [0.6, null, null, null]);
 });
 
 test("partially scored seated points keep the line unbroken while surfacing failed and unplayed counts", () => {
