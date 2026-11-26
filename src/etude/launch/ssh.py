@@ -24,7 +24,7 @@ from etude.deadline import remaining
 from etude.errors import LauncherError, sanitize
 from etude.launch.logs import snapshot_stream
 from etude.launch.openssh import ssh_command
-from etude.launch.provisioner.machines import Allocation
+from etude.launch.provisioner.machines import Allocation, Refused
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import BootstrapLinks, LogProducer, LogStream
 from etude.launch.schemas import Observation, Packet, Work
@@ -131,6 +131,7 @@ class RemoteReply(Record):
     output: EncodedOutput | None = None
     folder: dict[str, str] | None = None
     missing: str | None = None  # why "held" found no such record or file on the host
+    refused: str | None = None  # start: pre-claim refusal on the host; no boot or worker started
 
 
 class Unreachable(LauncherError):
@@ -252,11 +253,14 @@ if request['action']=='end':
             except OSError: pass
         print(json.dumps({'ended_at':ended_at})); sys.exit(0)
 if request['action']=='start':
-    home.mkdir(parents=True,exist_ok=True,mode=0o700)
-    if (home/'cancel-start').exists() or (home/'boot-claim').exists():
-        print(json.dumps({})); sys.exit(0)
-    r_fd,w_fd=os.pipe()
-    pid=os.fork()
+    try:
+        home.mkdir(parents=True,exist_ok=True,mode=0o700)
+        if (home/'cancel-start').exists() or (home/'boot-claim').exists():
+            print(json.dumps({})); sys.exit(0)
+        r_fd,w_fd=os.pipe()
+        pid=os.fork()
+    except OSError as error:
+        print(json.dumps({'refused':f'{type(error).__name__}: {error}'}),flush=True); sys.exit(0)
     if pid:
         os.close(w_fd)
         chunks=[]
@@ -268,6 +272,8 @@ if request['action']=='start':
         os.waitpid(pid,0)
         if status=='exists':
             print(json.dumps({}),flush=True); os._exit(0)
+        if status.startswith('refused:'):
+            print(json.dumps({'refused':status[8:]}),flush=True); os._exit(0)
         sys.stderr.write((status or 'boot-claim failed')+'\\n')
         sys.stderr.flush()
         os._exit(1)
@@ -289,10 +295,15 @@ if request['action']=='start':
         except OSError: pass
         os.close(w_fd); os._exit(0)
     except BaseException as error:
+        unlinked=not created
         if created:
-            try: claim.unlink()
-            except OSError: pass
-        try: os.write(w_fd,f'{type(error).__name__}: {error}'.encode())
+            try:
+                claim.unlink()
+                unlinked=True
+            except OSError:
+                unlinked=not claim.exists()
+        prefix='refused:' if unlinked else ''
+        try: os.write(w_fd,f'{prefix}{type(error).__name__}: {error}'.encode())
         except OSError: pass
         os.close(w_fd); os._exit(1)
     os.setsid()
@@ -485,7 +496,7 @@ class SSHStart:
     def start(self, machine: Allocation, packet: Packet, bootstrap: BootstrapLinks | None) -> None:
         ssh = self.ssh
         files = {path: body for work in packet.work for path, body in ssh.files(work).items()}
-        ssh.call(
+        reply = ssh.call(
             StartRequest(
                 session=packet.session,
                 packet=packet,
@@ -494,6 +505,8 @@ class SSHStart:
                 cleanup=machine.cleanup,
             )
         )
+        if reply.refused is not None:
+            raise Refused(sanitize(reply.refused) or "host refused start")
 
 
 class SSHJournal:

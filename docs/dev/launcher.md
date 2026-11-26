@@ -871,8 +871,12 @@ count. Scheduling, status and explicit resume use that same budget rule.
 Timeouts, no reply, 408, 5xx and unreadable or mismatched replies stay unknown.
 A remote start has an exclusive claim; a lost SSH reply cannot start another
 process. Start forks first and the child writes its own PID into `boot-claim`
-exclusively in one write, unlinking the claim and failing with the host's error
-if the write fails (such as on a full disk). On an owned SSH host, the host
+exclusively in one write, unlinking the claim if the write fails. Any
+pre-claim failure (such as `mkdir` or `boot-claim` failing on a full disk)
+returns a structured `refused` reply, `SSHStart` raises `Refused` with the
+sanitized text, and `Scheduler._create` settles the session as refused in that
+single SSH call without sending `end`. The `cancel-start` fence remains strict
+for real transport drops. On an owned SSH host, the host
 itself (`control`) settles an unconfirmed start: if `boot-claim` or `pid`
 exists, the session is confirmed and tracked (an empty `boot-claim`, as from a
 prior release, counts as booting only while younger than 60 seconds); if
@@ -906,7 +910,8 @@ receipt.
 Disk cleanup on hosts has two owners. Immediately after writing `finished.json`
 on every host, `attempts.py` deletes the attempt's working trees (`src/`,
 `prepared-source/`, `prepared-inputs/` and `inputs/`), keeping outputs, logs
-and journal files. On bucket-backed hosts, `courier.py` removes an attempt's
+and journal files, and removes the session's `sources/` on pure-SSH hosts (no
+`courier-claim`) when the session's attempts finish. On bucket-backed hosts, `courier.py` removes an attempt's
 `outputs/` once its delivery is confirmed and removes the session's `sources/`,
 `inputs/` and remaining attempt directories after confirmed final delivery,
 keeping only the small control files; unconfirmed delivery keeps local files.

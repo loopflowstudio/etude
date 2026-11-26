@@ -22,7 +22,7 @@ from etude.jobs import continue_from
 from etude.launch.aws import Keys
 from etude.launch.executor import Executor, local
 from etude.launch.openssh import ssh_command
-from etude.launch.provisioner.machines import OwnedMachine
+from etude.launch.provisioner.machines import Allocation, OwnedMachine, Refused
 from etude.launch.records import Machine, Pool
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler.loop import Scheduler
@@ -716,11 +716,74 @@ def test_start_claim_write_failure_leaves_no_claim_and_reports_error(
     root = tmp_path / "remote"
     ssh = SSH("bench", str(root))
     packet = Packet(session="full", deadline=None, work=())
-    with pytest.raises(Unreachable, match="No space left on device"):
-        ssh.call(StartRequest(session="full", packet=packet))
+    reply = ssh.call(StartRequest(session="full", packet=packet))
+    assert reply.refused is not None and "No space left on device" in reply.refused
+    with pytest.raises(Refused, match="No space left on device"):
+        SSHStart(ssh).start(
+            Allocation(id="full", address="bench", created_at=datetime.now(UTC)), packet, None
+        )
     assert not (root / "full" / "boot-claim").exists()
     monkeypatch.setenv("ETUDE_REMOTE_PYTHON", sys.executable)
     assert not ssh.call(SessionRequest(action="claimed", session="full")).claimed
+
+
+@pytest.mark.parametrize("fail_at", ["mkdir", "claim_write"])
+def test_full_disk_start_settles_as_refused_in_one_ssh_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_at: str
+) -> None:
+    root = tmp_path / "remote"
+    if fail_at == "mkdir":
+        # A read-only parent makes `home.mkdir` fail with PermissionError/OSError before claim.
+        root.mkdir()
+        root.chmod(0o500)
+    else:
+        wrapper = tmp_path / "enospc-python"
+        wrapper.write_text(
+            f"#!{sys.executable}\n"
+            "import errno, os, sys\n"
+            "real_open = os.open\n"
+            "real_write = os.write\n"
+            "claim_fds = set()\n"
+            "def failing_open(path, flags, *args, **kwargs):\n"
+            "    fd = real_open(path, flags, *args, **kwargs)\n"
+            "    if str(path).endswith('boot-claim'):\n"
+            "        claim_fds.add(fd)\n"
+            "    return fd\n"
+            "def failing_write(fd, data):\n"
+            "    if fd in claim_fds:\n"
+            "        raise OSError(errno.ENOSPC, 'No space left on device')\n"
+            "    return real_write(fd, data)\n"
+            "os.open = failing_open\n"
+            "os.write = failing_write\n"
+            "assert sys.argv[1] == '-c'\n"
+            "exec(compile(sys.argv[2], '<boot>', 'exec'), {'__name__': '__main__'})\n"
+        )
+        wrapper.chmod(0o755)
+        monkeypatch.setenv("ETUDE_REMOTE_PYTHON", str(wrapper))
+
+    actions: list[str] = []
+    real_call = SSH.call
+
+    def tracked_call(self: SSH, request: RemoteRequest) -> RemoteReply:
+        actions.append(request.action)
+        return real_call(self, request)
+
+    monkeypatch.setattr(SSH, "call", tracked_call)
+    try:
+        scheduler, _ = _owned_host(tmp_path)
+        (run,) = scheduler.queue(_echo("full-disk"), "bench")
+        scheduler.tick()
+        assert actions == ["start"]
+        (attempt,) = scheduler.attempts(run)
+        assert attempt.outcome == "lost" and attempt.cause == "capacity_refused"
+        session = scheduler.session(attempt.session)
+        assert session.refused_at is not None
+        assert session.refusal is not None
+        assert session.finish_requested_at is None
+        assert session.ended_at is None
+    finally:
+        if root.exists():
+            root.chmod(0o700)
 
 
 def test_failed_ssh_keeps_sanitized_last_stderr_line(

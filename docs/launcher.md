@@ -74,7 +74,8 @@ host directly: an install or worker already running there is recovered and
 tracked without starting a second copy, while an unclaimed session is fenced
 and freed at once so queued work can use the machine even with no startup
 cutoff. If claiming the session fails on the host (for example, on a full
-disk), the start fails with the host's error and leaves the machine unclaimed.
+disk), the host replies with a refusal and Etude settles the session as refused
+immediately in that SSH call without leaving the machine `stopping`.
 Cancelling a run while its owned host is still setting up (installing,
 or fetching and restoring inputs from storage) stops that setup and frees the
 host once stopped, even if a full disk prevents writing the end marker. A
@@ -93,8 +94,9 @@ outputs, logs and session journal. With bucket storage, Etude also removes an
 attempt's local `outputs/` once delivery is confirmed and deletes the session's
 `sources/`, `inputs/` and remaining attempt directories after confirmed final
 delivery, keeping only small control files; unconfirmed delivery leaves local
-files in place. On an SSH host without bucket storage, outputs and logs stay on
-the host because its disk is the only copy.
+files in place. On an SSH host without bucket storage, Etude removes the
+session's staged `sources/` once its attempts finish, while keeping outputs and
+logs on the host because its disk is the only copy.
 
 ## Rented machines
 

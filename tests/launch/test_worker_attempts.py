@@ -448,6 +448,7 @@ def test_finished_attempt_deletes_working_trees_and_keeps_outputs_and_logs(
     attempt_dir = tmp_path / "sessions" / attempt.session / "attempts" / attempt.id
     for scratch in ("src", "prepared-source", "prepared-inputs", "inputs"):
         assert not (attempt_dir / scratch).exists()
+    assert not (tmp_path / "sessions" / attempt.session / "sources").exists()
     assert (attempt_dir / "finished.json").is_file()
     assert (attempt_dir / "log").is_file()
     assert (attempt_dir / "outputs" / "out.bin").read_bytes() == b"payload"

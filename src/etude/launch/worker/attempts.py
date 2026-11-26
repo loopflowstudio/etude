@@ -721,5 +721,7 @@ def run(directory: Path) -> int:
                 pool.shutdown(wait=False, cancel_futures=True)
                 raise
     finally:
+        if not (session / "courier-claim").exists():
+            remove_tree(session / "sources")
         write(session / "ended", _now().isoformat())
     return 0
