@@ -13,8 +13,8 @@ import json
 import os
 import shlex
 import subprocess
-import textwrap
 from datetime import UTC, datetime, timedelta
+from functools import cache
 from pathlib import Path
 from typing import Annotated, Literal, cast, get_args
 
@@ -27,8 +27,10 @@ from etude.launch.openssh import ssh_command
 from etude.launch.provisioner.machines import Allocation, Refused
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import BootstrapLinks, LogProducer, LogStream
-from etude.launch.schemas import Observation, Packet, Work
+from etude.launch.schemas import Finished, Observation, Packet, Progress, Work
 from etude.launch.source import source_archive
+from etude.launch.storage.files import parse_result
+from etude.launch.usage import Transfer
 from etude.spec import Record
 from etude.storage_timeout import storage_environment
 
@@ -119,20 +121,45 @@ class EncodedOutput(Record):
     sha256: str
 
 
+class RawAttempt(Record):
+    """Unvalidated attempt files read read-only by `ssh_boot.py` and validated on the client."""
+
+    attempt: str
+    claim: str | None = None
+    finished: str | None = None
+    result: str | None = None
+    log_bytes: int = 0
+
+
+class RawObservation(Record):
+    """Host-side session state returned by stdlib `ssh_boot.py` before client validation."""
+
+    alive: bool
+    attempts: tuple[RawAttempt, ...] = ()
+    usage: str | None = None
+    start_unknown: bool = False
+
+
+class RawLog(Record):
+    """Bounded log bytes read read-only by `ssh_boot.py`."""
+
+    body: str | None = None  # base64-encoded bytes; None when the log file does not exist
+    closed: bool = False
+
+
 class RemoteReply(Record):
     """What the host answered; each request fills the fields it has an answer for."""
 
     pid: int | None = None  # start: its worker process; None while another start holds it
     ended_at: datetime | None = None  # ended, end, finish: when the session ended, if it has
-    log: str | None = None  # logs of the bootstrap producer: its text, None while it has none
-    stream: LogStream | None = None
+    log: RawLog | None = None
     started: bool = False
     claimed: bool = False  # claimed: a start reached the host (`boot-claim`) or is running
-    observation: Observation | None = None
+    observation: RawObservation | None = None
     output: EncodedOutput | None = None
     folder: dict[str, str] | None = None
     missing: str | None = None  # why "held" found no such record or file on the host
-    refused: str | None = None  # start: pre-claim refusal on the host; no boot or worker started
+    refused: str | None = None  # start/stop: host refused request without starting/stopping
 
 
 class Unreachable(LauncherError):
@@ -143,279 +170,12 @@ class Unreachable(LauncherError):
 # change the modules of an already running session.
 # Bootstrap imports only the standard library before the environment is ready.
 _MISSING = 97  # the remote exit status meaning "that program is not here yet"
-_INSTALL_CODE = """import base64,io,json,os,pathlib,sys,zipfile
-with zipfile.ZipFile(io.BytesIO(code)) as archive:
-    import types
-    for name in ("etude", "etude.launch"):
-        sys.modules.setdefault(name, types.ModuleType(name))
-    for name in ("etude.errors", "etude.deadline", "etude.storage_timeout", "etude.launch.logging"):
-        module=types.ModuleType(name)
-        exec(compile(archive.read(name.replace('.', '/')+'.py'),name,'exec'),module.__dict__)
-        sys.modules[name]=module
-    logging=sys.modules["etude.launch.logging"]
-    source=archive.read("etude/launch/environment.py")
-namespace={"__name__":"etude_install"}
-exec(compile(source,"environment.py","exec"),namespace)
-import contextlib
-with contextlib.redirect_stdout(sys.stderr):
-    links=globals().get("request",{}).get("bootstrap")
-    publication=logging.start_publication(pathlib.Path(os.environ["ETUDE_LOG_PATH"]), links["log_url"]) if links else None
-    failed=False
-    try:
-        root=namespace["install"](code)
-    except Exception as error:
-        failed=True
-        logging.write_log("client install", sys.modules["etude.errors"].explain(error))
-        if globals().get('request',{}).get('action')=='start':
-            from datetime import datetime,UTC
-            _write_ended(datetime.now(UTC).isoformat())
-        raise
-    finally:
-        if os.environ.get("ETUDE_LOG_PATH") and (failed or globals().get("request",{}).get("action") != "start"):
-            logging.write_log("bootstrap", logging.CLOSED)
-        if links:
-            publication.set()
-            logging.publish(pathlib.Path(os.environ["ETUDE_LOG_PATH"]), links["log_url"])
-"""
-# It reads the RemoteCall as JSON: `request` is its request, and replies are RemoteReply.
-_BOOT = (
-    """import base64,json,os,pathlib,signal,sys,time
-call=json.load(sys.stdin)
-os.environ.update(call.get('storage_environment', {}))
-request=call['request']
-home=pathlib.Path(call['root']).expanduser()/request.get('session','')
-def _read_ended() -> str | None:
-    try: text=(home/'ended').read_text().strip()
-    except OSError: return None
-    return text or None
-def _write_bytes(path: pathlib.Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True,exist_ok=True)
-    partial=path.with_name(path.name+'.partial')
-    try:
-        partial.write_bytes(data)
-        os.replace(partial,path)
-    except BaseException:
-        try: partial.unlink()
-        except OSError: pass
-        raise
-def _write_ended(at: str) -> bool:
-    path=home/'ended'
-    partial=home/'ended.partial'
-    try:
-        partial.write_text(at)
-        os.replace(partial,path)
-        return True
-    except OSError:
-        try: partial.unlink()
-        except OSError: pass
-        return False
-def _recorded(name: str) -> int | None:
-    path=home/name
-    try: text=path.read_text().strip()
-    except FileNotFoundError: return None
-    return int(text) if text.isdigit() else None
-def _pid_alive(pid: int | None) -> bool:
-    if pid is None or pid<=0: return False
-    try: os.kill(pid,0)
-    except ProcessLookupError: return False
-    except PermissionError: pass
-    try:
-        if pathlib.Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()[0]=='Z': return False
-    except (OSError,IndexError): pass
-    return True
-def _boot_alive() -> bool:
-    if _read_ended() is not None: return False
-    path=home/'boot-claim'
-    try:
-        st=path.stat()
-        text=path.read_text().strip()
-    except FileNotFoundError: return False
-    if text.isdigit(): return _pid_alive(int(text))
-    # Empty claim written by a released worker counts as booting only while younger than 60 s.
-    return not text and (time.time()-st.st_mtime)<60
-def _host_alive() -> bool | None:
-    # Check boot before reading the PID it hands off to, so its exit cannot hide the handoff.
-    booting=_boot_alive()
-    worker=(home/'pid').exists()
-    if (courier:=_recorded('courier-pid')) is not None: return _pid_alive(courier)  # owns final delivery
-    if not worker: return booting
-    if (home/'courier-claim').exists(): return True  # v0.4.6 recorded no courier PID
-    return None  # the disk journal owns a pure SSH worker's progress and liveness
-if request['action']=='logs' and request['producer']=='bootstrap':
-    path=home/'bootstrap.log'
-    print(json.dumps({'log':path.read_text() if path.exists() else None})); sys.exit(0)
-if request['action']=='started':
-    print(json.dumps({'started':(home/'pid').exists()})); sys.exit(0)
-if request['action']=='claimed':
-    print(json.dumps({'claimed':(home/'boot-claim').exists() or (home/'pid').exists()})); sys.exit(0)
-if request['action']=='add':
-    added=home/'work'
-    work=request['work']
-    target=added/f"{work['attempt']}.json"
-    if not target.exists():
-        for name,body in request.get('files',{}).items():
-            dest=home/name
-            if not dest.exists():
-                _write_bytes(dest,base64.b64decode(body))
-        _write_bytes(target,json.dumps(work).encode())
-    if request.get('finish'):
-        (home/'finish').touch()
-    print(json.dumps({})); sys.exit(0)
-if request['action']=='observe':
-    if (alive:=_host_alive()) is not None:
-        print(json.dumps({'observation':{'alive':alive,'progress':[],'start_unknown':alive}})); sys.exit(0)
-if request['action']=='ended':
-    print(json.dumps({'ended_at':_read_ended()})); sys.exit(0)
-if request['action']=='end':
-    if not home.is_dir(): home.mkdir(parents=True,exist_ok=True)
-    try: (home/'cancel-start').touch()
-    except OSError:
-        if not ((home/'boot-claim').exists() or (home/'pid').exists()): raise
-    ended_at=_read_ended()
-    if ended_at is None:
-        if (home/'pid').exists():
-            worker=_recorded('pid')
-            if _pid_alive(worker):
-                try: os.kill(worker,signal.SIGTERM)
-                except (ProcessLookupError,PermissionError): pass
-                else:
-                    for _ in range(100):
-                        if _read_ended() is not None or not _pid_alive(worker): break
-                        time.sleep(0.1)
-            ended_at=_read_ended()
-            if ended_at is None and not _pid_alive(worker):
-                from datetime import datetime,UTC
-                now=datetime.now(UTC).isoformat()
-                _write_ended(now)
-                ended_at=_read_ended() or now
-        else:
-            # The cancel stops an install; a live boot or courier stops at once.
-            for name in ('boot-claim','courier-pid'):
-                if proc:=_recorded(name):
-                    try: os.kill(proc,signal.SIGTERM)
-                    except (ProcessLookupError,PermissionError): pass
-            if _host_alive() is False and not (home/'pid').exists():
-                # Nothing runs here, and the cancel fences any start still in flight.
-                from datetime import datetime,UTC
-                now=datetime.now(UTC).isoformat()
-                _write_ended(now)
-                ended_at=_read_ended() or now
-    print(json.dumps({'ended_at':ended_at})); sys.exit(0)
-if request['action']=='start':
-    try:
-        home.mkdir(parents=True,exist_ok=True,mode=0o700)
-        if (home/'cancel-start').exists() or (home/'boot-claim').exists():
-            print(json.dumps({})); sys.exit(0)
-        r_fd,w_fd=os.pipe()
-        pid=os.fork()
-    except OSError as error:
-        print(json.dumps({'refused':f'{type(error).__name__}: {error}'}),flush=True); sys.exit(0)
-    if pid:
-        os.close(w_fd)
-        chunks=[]
-        while chunk:=os.read(r_fd,4096): chunks.append(chunk)
-        os.close(r_fd)
-        status=b''.join(chunks).decode(errors='replace')
-        if status=='ok':
-            print(json.dumps({}),flush=True); os._exit(0)
-        os.waitpid(pid,0)
-        if status=='exists':
-            print(json.dumps({}),flush=True); os._exit(0)
-        if status.startswith('refused:'):
-            print(json.dumps({'refused':status[8:]}),flush=True); os._exit(0)
-        sys.stderr.write((status or 'boot-claim failed')+'\\n')
-        sys.stderr.flush()
-        os._exit(1)
-    os.close(r_fd)
-    claim=home/'boot-claim'
-    created=False
-    try:
-        fd=os.open(str(claim),os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
-        created=True
-        try:
-            data=str(os.getpid()).encode()
-            view=memoryview(data)
-            while view:
-                view=view[os.write(fd,view):]
-        finally:
-            os.close(fd)
-    except FileExistsError:
-        try: os.write(w_fd,b'exists')
-        except OSError: pass
-        os.close(w_fd); os._exit(0)
-    except BaseException as error:
-        unlinked=not created
-        if created:
-            try:
-                claim.unlink()
-                unlinked=True
-            except OSError:
-                unlinked=not claim.exists()
-        prefix='refused:' if unlinked else ''
-        try: os.write(w_fd,f'{prefix}{type(error).__name__}: {error}'.encode())
-        except OSError: pass
-        os.close(w_fd); os._exit(1)
-    os.setsid()
-    with open(os.devnull,'r+b') as sink:
-        for fd in (0,1,2): os.dup2(sink.fileno(),fd)
-    def _abort_boot(signum: int, frame: object) -> None:
-        raise InterruptedError('startup cancelled')
-    signal.signal(signal.SIGTERM,_abort_boot)
-    os.write(w_fd,b'ok'); os.close(w_fd)
-    os.environ['ETUDE_STARTUP_DEADLINE']=call.get('startup_deadline') or ''
-    os.environ['ETUDE_STARTUP_CANCEL']=str(home/'cancel-start')
-    os.environ['ETUDE_LOG_PATH']=str(home/'bootstrap.log')
-    call.pop('digest',None)
-    code=base64.b64decode(call.pop('program'))
-    _need_install=True
-else:
-    os.environ.pop('ETUDE_LOG_PATH',None)
-    os.environ['ETUDE_STARTUP_DEADLINE']=call.get('startup_deadline') or ''
-    _digest=call.pop('digest',None)
-    _base=pathlib.Path(os.environ.get('ETUDE_HOME') or pathlib.Path.home()/'.etude')/'programs'
-    root=_base/_digest if _digest else None
-    _need_install=root is None or not (root/'ready').exists()
-    if _need_install:
-        if 'program' not in call: sys.exit(97)
-        code=base64.b64decode(call.pop('program'))
-    else:
-        call.pop('program',None)
-if _need_install:
-"""
-    + textwrap.indent(_INSTALL_CODE, "    ")
-    + """
-if request['action']=='start':
-    import subprocess
-    from datetime import datetime,UTC
-    invoked=False
-    try:
-        if (home/'cancel-start').exists():
-            raise RuntimeError('startup cancelled before worker entry')
-        invoked=True
-        done=subprocess.run([str(root/'.venv/bin/python'),'-m','etude.launch.worker.remote'],
-            input=json.dumps(call).encode(),capture_output=True,timeout=namespace['startup_timeout']())
-        console=logging.Console('worker entry')
-        console.write(done.stderr,final=True)
-        if done.returncode:
-            raise RuntimeError(f'worker entry exited with status {done.returncode}')
-    except Exception as error:
-        logging.write_log('worker entry',sys.modules["etude.errors"].explain(error))
-        if not invoked:
-            _write_ended(datetime.now(UTC).isoformat())
-        else:
-            logging.write_log('worker entry','reply uncertain; retaining start claim')
-    finally:
-        logging.write_log('bootstrap',logging.CLOSED)
-        if links: logging.publish(home/'bootstrap.log',links['log_url'])
-    sys.exit(0)
-import subprocess
-done=subprocess.run(
-    [str(root/".venv/bin/python"),"-m","etude.launch.worker.remote"],
-    input=json.dumps(call).encode(),
-)
-sys.exit(done.returncode)
-"""
-)
+
+
+@cache
+def boot_script() -> str:
+    """Standard-library SSH bootstrap and session control source (`ssh_boot.py`)."""
+    return Path(__file__).with_name("ssh_boot.py").read_text()
 
 
 def remote_python() -> str:
@@ -480,7 +240,9 @@ class SSH:
                 raise Unreachable("startup deadline reached before SSH request")
             allowance = startup_left if allowance is None else min(startup_left, allowance)
         argv = ssh_command(
-            self.address, login_shell(shlex.join([remote_python(), "-c", _BOOT])), batch=True
+            self.address,
+            login_shell(shlex.join([remote_python(), "-c", boot_script()])),
+            batch=True,
         )
         result = self._run(argv, sent, allowance)
         if result.returncode == _MISSING and not start:
@@ -604,33 +366,25 @@ class SSHJournal:
         self.ssh.call(HoldRequest(run=run, folder=encoded))
 
     def observe(self, session_id: str) -> Observation:
-        observation = self.ssh.call(
-            SessionRequest(action="observe", session=session_id)
-        ).observation
-        if observation is None:
+        raw = self.ssh.call(SessionRequest(action="observe", session=session_id)).observation
+        if raw is None:
             raise Unreachable("SSH returned no observation")
-        return observation
+        return _decode_observation(raw)
 
     def stop(self, session_id: str, attempt: str) -> None:
-        self.ssh.call(StopRequest(session=session_id, attempt=attempt))
+        reply = self.ssh.call(StopRequest(session=session_id, attempt=attempt))
+        if reply.refused is not None:
+            raise Refused(sanitize(reply.refused) or "host refused stop")
 
     def logs(
         self, session_id: str, attempt: str | None = None, *, producer: str = "job"
     ) -> LogStream:
         named = _producer(producer)
         reply = self.ssh.call(LogsRequest(session=session_id, producer=named, attempt=attempt))
-        if named == "bootstrap":
-            return snapshot_stream(
-                session_id,
-                None,
-                named,
-                reply.log.encode() if reply.log is not None else None,
-                False,
-            )
-        stream = reply.stream
-        if stream is None:
+        if reply.log is None:
             raise Unreachable("SSH returned no log snapshot")
-        return stream
+        raw = base64.b64decode(reply.log.body) if reply.log.body is not None else None
+        return snapshot_stream(session_id, attempt, named, raw, reply.log.closed)
 
     def fetch(self, session_id: str, attempt: str, name: str, destination: Path) -> Path:
         raw = self.ssh.call(OutputRequest(session=session_id, attempt=attempt, output=name)).output
@@ -642,6 +396,50 @@ class SSHJournal:
         path = destination / Path(name).name
         path.write_bytes(body)
         return path
+
+
+def _decode_observation(raw: RawObservation) -> Observation:
+    progress: list[Progress] = []
+    for entry in raw.attempts:
+        started = (
+            datetime.fromisoformat(entry.claim.strip())
+            if entry.claim and entry.claim.strip()
+            else None
+        )
+        if entry.finished is None:
+            result = parse_result(entry.result)
+            progress.append(
+                Progress(
+                    attempt=entry.attempt,
+                    started_at=started,
+                    finished_at=None,
+                    outcome=None,
+                    cause=None,
+                    clocks=result.clocks,
+                    outputs=(),
+                    exit_code=None,
+                    tally=result.tally,
+                    writers=result.writers,
+                    log_bytes=entry.log_bytes,
+                )
+            )
+        else:
+            progress.append(
+                Finished.model_validate_json(entry.finished).progress(entry.attempt, started)
+            )
+    transfers: list[Transfer] = []
+    if raw.usage is not None:
+        for line in raw.usage.splitlines():
+            try:
+                transfers.append(Transfer.model_validate_json(line))
+            except ValueError:
+                continue  # a line still being written; read again next time
+    return Observation(
+        alive=raw.alive,
+        progress=tuple(progress),
+        transfers=tuple(transfers),
+        start_unknown=raw.start_unknown,
+    )
 
 
 def _producer(name: str) -> LogProducer:

@@ -27,6 +27,7 @@ FILES = {
     "launch/provisioner/providers/runpod/pod.py",
     "launch/environment.py",
     "launch/logging.py",
+    "launch/ssh_boot.py",
     "deadline.py",
     "storage_timeout.py",
     "launch/storage/__init__.py",

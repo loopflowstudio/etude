@@ -1489,3 +1489,100 @@ def test_explicit_launch_on_owned_ssh_pool_confirms_pre_commit_and_replans_on_re
     kept, waiting = scheduler.launch(job().runs(3, 4), pool="lab")
     assert scheduler.read(kept).machine == "mini-1"
     assert scheduler.read(waiting).phase == "queued"
+
+
+def test_cancelled_owned_session_observe_error_does_not_end_or_double_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock()
+    store = open_database(tmp_path / "state.db")
+    host = FakeService(clock, seconds=600)
+    scheduler = Scheduler(store, {"ssh": lambda held: host}, clock=clock)
+    scheduler.add_pool(Pool(name="lab", slots=2))
+    scheduler.add_machine("mini", "mini.local", pool="lab")
+
+    # Part 1: StorageUnavailable during observe on a cancelled owned session does not stamp
+    # finish_requested_at or end the session; recovery settles cleanly via graceful stop.
+    (run,) = scheduler.launch(job(max_attempts=1), pool="lab")
+    session_id = scheduler.attempts(run)[0].session
+    scheduler.tick()
+    assert store.session(session_id).started_at is not None
+
+    real_observe = host.observe
+    real_end = host.end
+    real_stop = host.stop
+    observe_calls = 0
+    end_calls = 0
+    fail_observe: Exception | None = StorageUnavailable("R2 503")
+    refuse_stop = False
+
+    def wrapped_observe(session_id: str) -> Observation:
+        nonlocal observe_calls
+        observe_calls += 1
+        if fail_observe is not None:
+            raise fail_observe
+        return real_observe(session_id)
+
+    def wrapped_end(session_id: str) -> object:
+        nonlocal end_calls
+        end_calls += 1
+        return real_end(session_id)
+
+    def wrapped_stop(session_id: str, attempt: str) -> None:
+        if refuse_stop:
+            raise Refused("OSError: [Errno 28] No space left on device")
+        real_stop(session_id, attempt)
+
+    monkeypatch.setattr(host, "observe", wrapped_observe)
+    monkeypatch.setattr(host, "end", wrapped_end)
+    monkeypatch.setattr(host, "stop", wrapped_stop)
+
+    status = scheduler.cancel(run)
+    assert status.phase == "stopping"
+    assert store.session(session_id).finish_requested_at is None
+    assert store.session(session_id).ended_at is None
+    assert end_calls == 0
+    assert observe_calls == 1
+
+    # Part 2: An asleep host (Unreachable on observe) costs exactly 1 observe call per tick,
+    # never calling end or stamping finish_requested_at.
+    observe_calls = 0
+    fail_observe = Unreachable("SSH wait exceeded 30 seconds")
+    scheduler.tick()
+    assert observe_calls == 1
+    assert end_calls == 0
+    assert store.session(session_id).finish_requested_at is None
+    assert store.session(session_id).ended_at is None
+
+    # Once the host answers again, graceful stop finishes and settles the cancelled run.
+    fail_observe = None
+    scheduler.tick()  # delivers graceful stop
+    assert scheduler.read(run).phase == "stopping"
+    scheduler.tick()  # observes graceful cancellation and settles
+    assert scheduler.read(run).outcome == "cancelled"
+    assert store.session(session_id).ended_at is not None
+
+    # Part 3: Refused from stop escalates to _end_session only when every open attempt is cancelled.
+    end_calls = 0
+    first, second = scheduler.launch(job(max_attempts=1).runs(1, 2), pool="lab")
+    shared = scheduler.attempts(first)[0].session
+    assert scheduler.attempts(second)[0].session == shared
+    clock.advance(1)
+    scheduler.tick()
+    assert scheduler.read(first).phase == "running"
+    assert scheduler.read(second).phase == "running"
+    refuse_stop = True
+
+    # Cancelling only one of two attempts does not kill the sibling.
+    scheduler.cancel(first)
+    assert end_calls == 0
+    assert store.session(shared).ended_at is None
+    assert scheduler.read(second).phase == "running"
+
+    # Cancelling the remaining attempt makes _all_cancelled True -> escalates to _end_session,
+    # settling both runs `cancelled` even with max_attempts=1.
+    scheduler.cancel(second)
+    assert end_calls == 1
+    assert store.session(shared).ended_at is not None
+    assert scheduler.read(first).outcome == "cancelled"
+    assert scheduler.read(second).outcome == "cancelled"

@@ -47,11 +47,21 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(file, "sha256").hexdigest()
 
 
+def parse_result(raw: bytes | str | None) -> RunProgress:
+    """Validate job-owned progress once; unreadable or partial reports mean no progress."""
+    if raw is None:
+        return RunProgress()
+    try:
+        return RunProgress.model_validate_json(raw, strict=True)
+    except ValueError:
+        return RunProgress()
+
+
 def read_result(outputs: Path) -> RunProgress:
     """Validate job-owned progress once; unreadable or partial reports mean no progress."""
     try:
-        return RunProgress.model_validate_json((outputs / RESULT).read_bytes(), strict=True)
-    except (OSError, ValueError):
+        return parse_result((outputs / RESULT).read_bytes())
+    except OSError:
         return RunProgress()
 
 

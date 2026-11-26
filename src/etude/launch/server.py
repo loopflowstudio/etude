@@ -42,12 +42,12 @@ from etude.launch.records import (
     Status,
     Target,
 )
-from etude.launch.scheduler.loop import Scheduler
+from etude.launch.scheduler.loop import Pacer, Scheduler
 from etude.launch.source import freeze, retain, source_archive, stored
 from etude.launch.ssh import (
-    _INSTALL_CODE,
     _MISSING,
     EncodedOutput,
+    boot_script,
     login_shell,
     remote_python,
 )
@@ -239,7 +239,6 @@ def unset() -> None:
 # The server runs the client's own code, sent over SSH and kept by digest
 # beside its database, installed with uv in its own environment. The two sides
 # always use the same source and dependency lock.
-_INSTALL = "import sys\ncode=sys.stdin.buffer.read()\n" + _INSTALL_CODE
 
 
 @cache
@@ -271,10 +270,14 @@ def install(address: str, *, startup_seconds: float | None = None) -> None:
         if allowance is not None
         else ""
     )
-    program = "import os\nos.environ['ETUDE_STARTUP_DEADLINE']=" + repr(deadline) + "\n" + _INSTALL
     try:
         done = subprocess.run(
-            ssh_command(address, login_shell(shlex.join([remote_python(), "-c", program]))),
+            ssh_command(
+                address,
+                login_shell(
+                    shlex.join([remote_python(), "-c", boot_script(), "--install", deadline])
+                ),
+            ),
             input=_program()[1],
             capture_output=True,
             timeout=allowance,
@@ -619,20 +622,14 @@ def loop(scheduler: Scheduler, every: float | None = None) -> None:
     When a newer etude migrates the database, this loop replaces itself with that
     program's loop, so running rentals keep a server through an upgrade.
     """
-
-    def handle_error(error: Exception) -> None:
-        if isinstance(error, SchemaAdvanced):
+    pacer = Pacer(every, idle_max=_SERVER_IDLE_MAX)
+    while True:
+        try:
+            scheduler.tick()
+        except SchemaAdvanced as error:
             _hand_over(error.program)
-        raise error
-
-    scheduler._pace(
-        every=every,
-        idle_max=_SERVER_IDLE_MAX,
-        stop_when_settled=False,
-        after_tick=lambda: write(home() / "server-heartbeat", datetime.now(UTC).isoformat()),
-        on_tick_error=handle_error,
-        sleep=time.sleep,
-    )
+        write(home() / "server-heartbeat", datetime.now(UTC).isoformat())
+        time.sleep(pacer.delay(scheduler._pace_snapshot() if every is None else None))
 
 
 def _hand_over(program: str | None) -> NoReturn:

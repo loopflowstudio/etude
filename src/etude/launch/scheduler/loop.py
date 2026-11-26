@@ -140,7 +140,7 @@ class _PaceState:
     finishing: tuple[str, ...]
 
 
-class _Pacer:
+class Pacer:
     """Delay between wait passes: fixed `every`, or 1 s doubling to cap while state is steady."""
 
     def __init__(
@@ -1278,59 +1278,16 @@ class Scheduler:
             if done or not self.read(r.id).done
         )
 
-    def _pace(
-        self,
-        *,
-        runs: Sequence[str] = (),
-        every: float | None = None,
-        timeout: float | None = None,
-        idle_max: float | None = None,
-        stop_when_settled: bool = True,
-        after_tick: Callable[[], None] | None = None,
-        on_tick_error: Callable[[Exception], None] | None = None,
-        sleep: Callable[[float], None] | None = None,
-    ) -> list[Status]:
-        """Advance this scheduler in a paced loop until `runs` settle, or indefinitely for a server."""
-        pacer = _Pacer(every, idle_max=idle_max)
-        pause = self._sleep if sleep is None else sleep
-        give_up = None if timeout is None else self._clock() + timedelta(seconds=timeout)
-        while True:
-            try:
-                self.tick()
-            except Exception as error:
-                if on_tick_error is None:
-                    raise
-                on_tick_error(error)
-            if after_tick is not None:
-                after_tick()
-            if stop_when_settled or every is None:
-                statuses = [self.read(run) for run in runs]
-                if runs:
-                    active = statuses
-                    unfinished = not all(status.done for status in statuses)
-                else:
-                    active = [
-                        status
-                        for r in self._store.runs(unfinished=True)
-                        if not (status := self.read(r.id)).done
-                    ]
-                    unfinished = bool(active)
-                ending = self._store.finishing_sessions(runs)
-                if stop_when_settled and not unfinished and not ending:
-                    return statuses
-                if give_up is not None and self._clock() >= give_up:
-                    if ending:
-                        raise TimeoutError(
-                            "machines still finishing: " + ", ".join(s.machine for s in ending)
-                        )
-                    raise TimeoutError("runs still running: " + ", ".join(runs))
-                state = _pace_state(active, ending) if every is None else None
-            else:
-                state = None
-            delay = pacer.delay(state)
-            if give_up is not None:
-                delay = min(delay, max(0.0, (give_up - self._clock()).total_seconds()))
-            pause(delay)
+    def _unfinished_statuses(self) -> list[Status]:
+        return [
+            status
+            for r in self._store.runs(unfinished=True)
+            if not (status := self.read(r.id)).done
+        ]
+
+    def _pace_snapshot(self, runs: Sequence[str] = ()) -> _PaceState:
+        active = [self.read(run) for run in runs] if runs else self._unfinished_statuses()
+        return _pace_state(active, self._store.finishing_sessions(runs))
 
     def wait(
         self, *runs: str, every: float | None = None, timeout: float | None = None
@@ -1340,7 +1297,26 @@ class Scheduler:
         With no runs named, work until nothing launched is left unfinished. That
         is the loop to leave running so a queue keeps moving.
         """
-        return self._pace(runs=runs, every=every, timeout=timeout)
+        pacer = Pacer(every)
+        give_up = None if timeout is None else self._clock() + timedelta(seconds=timeout)
+        while True:
+            self.tick()
+            statuses = [self.read(run) for run in runs]
+            active = statuses if runs else self._unfinished_statuses()
+            unfinished = not all(status.done for status in statuses) if runs else bool(active)
+            ending = self._store.finishing_sessions(runs)
+            if not unfinished and not ending:
+                return statuses
+            if give_up is not None and self._clock() >= give_up:
+                if ending:
+                    raise TimeoutError(
+                        "machines still finishing: " + ", ".join(s.machine for s in ending)
+                    )
+                raise TimeoutError("runs still running: " + ", ".join(runs))
+            delay = pacer.delay(_pace_state(active, ending) if every is None else None)
+            if give_up is not None:
+                delay = min(delay, max(0.0, (give_up - self._clock()).total_seconds()))
+            self._sleep(delay)
 
     def cancel(self, run: str) -> Status:
         record = self._store.run(run)
@@ -2507,13 +2483,7 @@ class Scheduler:
                 )
                 self._end_session(session)
                 return
-        try:
-            seen = self._read_journal(session, service)
-        except (OSError, LauncherError, StorageUnavailable):
-            if rental is None and self._all_cancelled(attempts):
-                self._end_session(session)
-                return
-            raise
+        seen = self._read_journal(session, service)
         if not seen.alive:
             # Progress and machine state are separate reads. Completion may land
             # between them; settle only from the final journal after shutdown.
@@ -2525,14 +2495,33 @@ class Scheduler:
                 if seen.alive and attempt.added and attempt.id not in progress:
                     self._store.check_lock(session.supply)
                     self._hand(session, attempt)
-                self._record(
-                    session,
-                    attempt,
-                    progress.get(attempt.id),
-                    seen.alive,
-                    now,
-                    unknown_start=seen.start_unknown,
-                )
+                try:
+                    self._record(
+                        session,
+                        attempt,
+                        progress.get(attempt.id),
+                        seen.alive,
+                        now,
+                        unknown_start=seen.start_unknown,
+                    )
+                except Refused as error:
+                    if rental is None and self._all_cancelled(attempts):
+                        self._diagnose(
+                            "cancellation",
+                            "host refused stop request; ending session",
+                            error,
+                            session=session.id,
+                            attempt=attempt.id,
+                        )
+                        self._end_session(session)
+                        return
+                    self._diagnose(
+                        "cancellation",
+                        "host refused stop request; leaving other attempts running",
+                        error,
+                        session=session.id,
+                        attempt=attempt.id,
+                    )
         for entry in seen.progress:
             self._retain_job_log(session, entry, now)
         open_attempts = any(a.outcome is None for a in self._store.attempts(session=session.id))
@@ -2589,21 +2578,7 @@ class Scheduler:
         # Nothing more will be written. Take what the journal holds now, and
         # count any attempt still open as lost with the machine.
         self._final_logs(session)
-        try:
-            final = self._read_journal(session, service)
-        except (OSError, LauncherError, StorageUnavailable) as error:
-            open_attempts = self._store.attempts(session=session.id)
-            if self._store.rental_for(session) is not None or not self._all_cancelled(
-                open_attempts
-            ):
-                raise
-            self._diagnose(
-                "observation",
-                "final observation unavailable after shutdown; settling cancelled attempts",
-                error,
-                session=session.id,
-            )
-            final = Observation(alive=False, progress=())
+        final = self._read_journal(session, service)
         progress = {entry.attempt: entry for entry in final.progress}
         for attempt in self._store.attempts(session=session.id):
             if attempt.outcome is None:
@@ -2664,6 +2639,25 @@ class Scheduler:
             )
         elif not alive:
             # Confirmed shutdown fences the old attempt before a replacement is allowed.
+            if run.launch.cancel_requested_at is not None:
+                self._store.finish(
+                    attempt,
+                    now,
+                    "cancelled",
+                    cause=None,
+                    clocks=seen.clocks if seen else attempt.clocks,
+                    outputs=seen.outputs if seen else attempt.outputs,
+                    prepared=seen.prepared if seen else None,
+                    tally=seen.tally if seen else attempt.tally,
+                    writers=seen.writers if seen else attempt.writers,
+                )
+                self._diagnose(
+                    "execution",
+                    "attempt cancelled; session ended without final receipt",
+                    session=session.id,
+                    attempt=attempt.id,
+                )
+                return
             cause: Cause = (
                 "machine_lost_before_start"
                 if attempt.started_at is None and not unknown_start

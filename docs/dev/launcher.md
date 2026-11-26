@@ -875,7 +875,7 @@ work. Explicit
 on `Refused`, it re-plans onto remaining owned or on-demand capacity, or fails
 with `machine refused` and no run recorded. After commit, `_admit` hands work
 directly via `add` (no extra `started`/`observe` probes): on SSH, stdlib
-`_BOOT` writes `sources/` and `work/<attempt>.json` without loading or
+`ssh_boot.py` writes `sources/` and `work/<attempt>.json` without loading or
 installing the remote environment (2 SSH RPCs total, with no exit-97 retry on
 fresh hosts) and sets `finish` on 1-slot owned hosts so the session exits,
 writes `ended`, and runs final disk cleanup without a later scheduler pass
@@ -905,23 +905,20 @@ writes `cancel-start`. Installation and courier setup check it via
 `startup_timeout`, including immediately after the start receipt upload and
 before spawning the worker. `boot-claim` names the boot process until it hands
 off to a worker (`pid`) or, on a bucket-backed host, a courier (`courier-pid`).
-SSH `started`, `add`, `ended` and `end` run wholly in the standard-library bootstrap without loading or
+SSH `started`, `claimed`, `add`, `observe`, `stop`, `finish`, `logs`, `ended` and `end` run wholly in the standard-library module `ssh_boot.py` without loading or
 installing the remote client environment (`worker/remote.py` dispatches none of
-them). Before `pid` exists, `end` signals any
+them). `observe` is read-only on every owned host, sending raw `attempts/*/claim`, `finished.json`, `etude-result.json` and `usage.jsonl` text back for client validation so a corrupt job file never turns into `Unreachable` and a finished job on a full-disk or upgraded pure-SSH host still settles `succeeded`. `stop` touches `stop/<attempt>` and replies with a structured `refused` error on local `OSError` (such as full disk), which `SSHJournal.stop` raises as `Refused`; `_observe` escalates to `_end_session` only on `Refused` from `stop` when all open attempts on an owned host are cancelled, while transport or storage errors during `observe` remain uncertain without touching `finish_requested_at` or signalling the host. Before `pid` exists, `end` signals any
 live `boot-claim` or `courier-pid`; once `pid` exists, it sends `SIGTERM` to
 the worker `pid` and waits up to 10 seconds for exit or `ended`, leaving any
 live `courier-pid` to `Executor.end`'s observe wait (`DirectoryJournal.end`
-stays for local pools, matching `_BOOT`'s PID parsing and Linux zombie check). Once stopped, it records `ended` atomically
+stays for local pools, matching `ssh_boot.py`'s PID parsing and Linux zombie check). Once stopped, it records `ended` atomically
 (`ended.partial` + `os.replace`, unlinking the partial on error); every reader
 treats an empty `ended` file as absent. If `boot-claim` or `pid` already exists
 (fencing any duplicate start) and the disk is full, `end` tolerates unwritable
 `cancel-start` and `ended` files and still answers `ended_at` once nothing is
-running so the session settles as lost (while `Executor.end` still waits for any
-live courier), staying strict when neither file exists. When `observe` fails on
-an owned session whose open attempts are all cancelled (such as a full-disk
-pure-SSH host after a client upgrade), `_observe` falls back to `_end_session`
-and settles the cancelled attempts without requiring `observe`. Other post-pid SSH RPCs
-pipe their JSON payload in memory (no temp file) to `remote.py`. It closes every slot in the session
+running so the session settles (as `cancelled` if cancel was requested, else `lost`, while `Executor.end` still waits for any
+live courier), staying strict when neither file exists. Other post-pid SSH RPCs
+(`held`, `hold`, `fetch`) pipe their JSON payload in memory (no temp file) to `remote.py`. It closes every slot in the session
 as soon as shutdown is requested. A setup that was stopped still publishes its
 diagnostics if storage is available.
 

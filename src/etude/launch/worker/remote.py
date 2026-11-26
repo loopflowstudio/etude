@@ -14,13 +14,10 @@ from etude.launch.ssh import (
     EncodedOutput,
     HeldRequest,
     HoldRequest,
-    LogsRequest,
     OutputRequest,
     RemoteCall,
     RemoteReply,
-    SessionRequest,
     StartRequest,
-    StopRequest,
 )
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
@@ -38,10 +35,6 @@ def invoke(call: RemoteCall) -> RemoteReply:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(base64.b64decode(body))
             return _start(root, request)
-        case SessionRequest(action="finish"):
-            return RemoteReply(ended_at=journal.finish(request.session))
-        case SessionRequest(action="observe"):
-            return RemoteReply(observation=journal.observe(request.session))
         case HeldRequest():
             try:
                 held = journal.held(request.run, request.key)
@@ -56,13 +49,6 @@ def invoke(call: RemoteCall) -> RemoteReply:
                 {key: base64.b64decode(body) for key, body in request.folder.items()},
             )
             return RemoteReply()
-        case StopRequest():
-            journal.stop(request.session, request.attempt)
-            return RemoteReply()
-        case LogsRequest():
-            return RemoteReply(
-                stream=journal.logs(request.session, request.attempt, producer=request.producer)
-            )
         case OutputRequest():
             with tempfile.TemporaryDirectory() as directory:
                 path = journal.fetch(

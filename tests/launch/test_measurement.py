@@ -461,7 +461,7 @@ def test_pure_ssh_launch_rpc_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         elif action == "started":
             reply = {"started": False}
         elif action == "observe":
-            reply = {"observation": {"alive": True, "progress": [], "start_unknown": True}}
+            reply = {"observation": {"alive": True, "start_unknown": True}}
         else:
             reply = {}
         return subprocess.CompletedProcess(

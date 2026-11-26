@@ -25,6 +25,7 @@ import pytest
 
 from etude.cli import main
 from etude.jobs import continue_from
+from etude.launch import ssh_boot
 from etude.launch.aws import Keys
 from etude.launch.executor import Executor, local
 from etude.launch.openssh import ssh_command
@@ -1545,8 +1546,66 @@ def test_ssh_1slot_launch_exits_and_cleans_up_without_tick_and_fresh_add_skips_e
     assert inbox.finish is True
 
 
-def test_cancel_pure_ssh_session_whose_observe_exits_97_ends_it_and_disk_journal_guards_pid(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_ssh_boot_module_handles_corrupt_job_files_and_refused_stop(
+    tmp_path: Path, exited_pid: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    etude_home = tmp_path / "upgraded-home"
+    monkeypatch.setenv("ETUDE_HOME", str(etude_home))
+    root = tmp_path / "remote"
+    home = root / "s_corrupt"
+    attempt_dir = home / "attempts" / "a1"
+    outputs = attempt_dir / "outputs"
+    outputs.mkdir(parents=True)
+    started = datetime.now(UTC)
+    (home / "pid").write_text(str(os.getpid()))
+    (attempt_dir / "claim").write_text(started.isoformat())
+    (attempt_dir / "log").write_text("line one\n")
+    # Invalid UTF-8 bytes in etude-result.json and a partial line in usage.jsonl.
+    (outputs / "etude-result.json").write_bytes(b"\xff\xfe{not-utf8")
+    (home / "usage.jsonl").write_text('{"incomplete": true\n')
+
+    # Direct unit test of ssh_boot.handle_observe + SSHJournal client validation.
+    raw = ssh_boot.handle_observe(home)
+    assert raw["observation"]["alive"] is True
+    assert raw["observation"]["attempts"][0]["result"] is None
+
+    ssh = SSH("bench", str(root))
+    ssh._archive = ("missing-digest", base64.b64encode(b"not-a-zip").decode())
+    journal = SSHJournal(ssh)
+    obs = journal.observe("s_corrupt")
+    assert obs.alive is True
+    assert len(obs.progress) == 1
+    assert obs.progress[0].clocks == {}
+    assert obs.progress[0].log_bytes == len("line one\n")
+    assert obs.transfers == ()
+
+    # Valid UTF-8 but invalid schema in etude-result.json still validates cleanly without Unreachable.
+    (outputs / "etude-result.json").write_text('{"clocks":{"steps":true}}')
+    obs = journal.observe("s_corrupt")
+    assert obs.alive is True and obs.progress[0].clocks == {}
+
+    # finish and stop run in stdlib without exit 97; unwritable stop returns structured Refused.
+    assert journal.finish("s_corrupt") is None
+    assert (home / "finish").exists()
+    journal.stop("s_corrupt", "a1")
+    assert (home / "stop" / "a1").exists()
+
+    ro_home = root / "s_ro_stop"
+    ro_home.mkdir(parents=True)
+    (ro_home / "pid").write_text(str(exited_pid))
+    ro_home.chmod(0o500)
+    try:
+        refused = ssh_boot.handle_stop(ro_home, "a1")
+        assert "refused" in refused
+        with pytest.raises(Refused):
+            journal.stop("s_ro_stop", "a1")
+    finally:
+        ro_home.chmod(0o700)
+    assert not (etude_home / "programs").exists()
+
+
+def test_stdlib_ssh_observe_stop_and_cancel_on_full_disk_upgraded_host(
+    tmp_path: Path, exited_pid: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Part 1: DirectoryJournal._alive/end guards invalid/non-positive pids and Linux zombie state.
     disk = DirectoryJournal(tmp_path / "disk")
@@ -1572,8 +1631,7 @@ def test_cancel_pure_ssh_session_whose_observe_exits_97_ends_it_and_disk_journal
         patch.setattr(Path, "read_text", fake_zombie_stat)
         assert disk._alive("s_zombie") is False
 
-    # Part 2: Cancelling a pure-SSH session with live pid + uninstalled digest (observe exits 97)
-    # still terminates the worker and settles the session.
+    # Track every SSH exit code to assert 0 exit-97 retries on missing program digest.
     etude_home = tmp_path / "upgraded-home"
     monkeypatch.setenv("ETUDE_HOME", str(etude_home))
     root = tmp_path / "remote"
@@ -1585,62 +1643,115 @@ def test_cancel_pure_ssh_session_whose_observe_exits_97_ends_it_and_disk_journal
     scheduler.add_pool(Pool(name="bench"))
     scheduler.add_machine("bench", "bench", pool="bench")
 
-    (run,) = scheduler.queue(Job(command="sleep 60", max_hours=1), "bench")
-    now = datetime.now(UTC)
-    session = Session(
-        id="s_live_97",
-        supply="bench",
-        machine="bench",
-        planned_at=now,
-        claimed_at=now,
-        provider_id="s_live_97",
-        started_at=now,
-        refused_at=None,
-        ended_at=None,
-        version=1,
-    )
-    attempt = RunAttempt(
-        id="a_live_97",
-        run=run,
-        session=session.id,
-        machine="bench",
-        number=1,
-        position=0,
-        limit_seconds=3600,
-        limit_kind="out_of_time",
-        started_at=now,
-        finished_at=None,
-        outcome=None,
-        cause=None,
-        clocks={},
-        outputs=(),
-        exit_code=None,
-        version=1,
-        planned_at=now,
-    )
-    with store.lock("bench", lambda: now):
-        store.plan(session, (attempt,))
-        store.claim(session, now)
-        session = store.session(session.id)
-        store.record_provider_id(session, session.id)
-        session = store.session(session.id)
-        store.record_started(session, now)
+    real_run = subprocess.run
+    ssh_codes: list[tuple[str, int]] = []
 
-    home = root / session.id
+    def tracked_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        result: subprocess.CompletedProcess[Any] = real_run(*args, **kwargs)
+        cmd = args[0] if args else kwargs.get("args", ())
+        if isinstance(cmd, list) and cmd and cmd[0] == "ssh" and "-G" not in cmd:
+            action = json.loads(kwargs["input"])["request"]["action"]
+            ssh_codes.append((action, result.returncode))
+        return result
+
+    monkeypatch.setattr(subprocess, "run", tracked_run)
+
+    def seed_session(run_id: str, session_id: str, attempt_id: str) -> datetime:
+        now = datetime.now(UTC)
+        session = Session(
+            id=session_id,
+            supply="bench",
+            machine="bench",
+            planned_at=now,
+            claimed_at=now,
+            provider_id=session_id,
+            started_at=now,
+            refused_at=None,
+            ended_at=None,
+            version=1,
+        )
+        attempt = RunAttempt(
+            id=attempt_id,
+            run=run_id,
+            session=session.id,
+            machine="bench",
+            number=1,
+            position=0,
+            limit_seconds=3600,
+            limit_kind="out_of_time",
+            started_at=now,
+            finished_at=None,
+            outcome=None,
+            cause=None,
+            clocks={},
+            outputs=(),
+            exit_code=None,
+            version=1,
+            planned_at=now,
+        )
+        with store.lock("bench", lambda: now):
+            store.plan(session, (attempt,))
+            store.claim(session, now)
+            session = store.session(session.id)
+            store.record_provider_id(session, session.id)
+            session = store.session(session.id)
+            store.record_started(session, now)
+        return now
+
+    # Part 2: Non-cancelled finished job on a full-disk, upgraded pure-SSH host settles
+    # `succeeded` (keeping finished.json and logs) with 0 exit-97 retries.
+    (done_run,) = scheduler.queue(Job(command="echo done", max_hours=1, max_attempts=1), "bench")
+    now = seed_session(done_run, "s_done_full", "a_done_full")
+    done_home = root / "s_done_full"
+    done_attempt = done_home / "attempts" / "a_done_full"
+    done_attempt.mkdir(parents=True)
+    (done_home / "pid").write_text(str(exited_pid))
+    (done_attempt / "claim").write_text(now.isoformat())
+    (done_attempt / "log").write_text("finished output\n")
+    (done_attempt / "finished.json").write_text(
+        Finished(
+            finished_at=now,
+            outcome="succeeded",
+            cause=None,
+            clocks={"steps": 100.0},
+            outputs=(),
+            exit_code=0,
+        ).model_dump_json()
+    )
+    done_home.chmod(0o500)
+    try:
+        scheduler.tick()
+        status = scheduler.read(done_run)
+        assert status.outcome == "succeeded"
+        assert status.clocks == {"steps": 100.0}
+        assert store.session("s_done_full").ended_at is not None
+        assert job_text(scheduler.logs(run=done_run)) == "finished output\n"
+    finally:
+        done_home.chmod(0o700)
+    assert ssh_codes and all(code == 0 for _, code in ssh_codes), ssh_codes
+    assert not (etude_home / "programs").exists()
+
+    # Part 3: Cancelled live job (`max_attempts=1`) on a full-disk, upgraded pure-SSH host:
+    # observe succeeds (0 exit-97), stop returns Refused -> escalates to end -> settles `cancelled`.
+    ssh_codes.clear()
+    (cancel_run,) = scheduler.queue(Job(command="sleep 60", max_hours=1, max_attempts=1), "bench")
+    seed_session(cancel_run, "s_cancel_full", "a_cancel_full")
+    home = root / "s_cancel_full"
     home.mkdir(parents=True)
     worker_pid = _spawn_detached_sleep()
     try:
         (home / "pid").write_text(str(worker_pid))
-        home.chmod(0o500)  # simulate full/unwritable disk too
-        # Before cancel, observe fails (exit 97 -> bad zip) and leaves the live session open.
+        home.chmod(0o500)
+        # Before cancel, read-only observe succeeds with 0 exit-97 retries and keeps session open.
         scheduler.tick()
-        assert store.session(session.id).ended_at is None
+        assert store.session("s_cancel_full").ended_at is None
         os.kill(worker_pid, 0)
+        assert ssh_codes == [("observe", 0)]
 
-        # After cancel, _observe falls back to stdlib `end` and settles the cancelled run.
-        status = scheduler.cancel(run)
+        # After cancel, stop returns structured Refused -> escalates to end -> settles `cancelled`.
+        status = scheduler.cancel(cancel_run)
         assert status.outcome == "cancelled"
-        assert store.session(session.id).ended_at is not None
+        assert store.session("s_cancel_full").ended_at is not None
         with pytest.raises(ProcessLookupError):
             os.kill(worker_pid, 0)
     finally:
@@ -1649,4 +1760,36 @@ def test_cancel_pure_ssh_session_whose_observe_exits_97_ends_it_and_disk_journal
             os.kill(worker_pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+    assert all(code == 0 for _, code in ssh_codes), ssh_codes
+    assert not (etude_home / "programs").exists()
+
+    # Part 4: Cancelled full-disk job that already wrote finished.json keeps finished.json facts.
+    ssh_codes.clear()
+    (kept_run,) = scheduler.queue(Job(command="sleep 60", max_hours=1, max_attempts=1), "bench")
+    now = seed_session(kept_run, "s_cancel_kept", "a_cancel_kept")
+    kept_home = root / "s_cancel_kept"
+    kept_attempt = kept_home / "attempts" / "a_cancel_kept"
+    kept_attempt.mkdir(parents=True)
+    (kept_home / "pid").write_text(str(exited_pid))
+    (kept_attempt / "claim").write_text(now.isoformat())
+    (kept_attempt / "finished.json").write_text(
+        Finished(
+            finished_at=now,
+            outcome="cancelled",
+            cause=None,
+            clocks={"steps": 42.0},
+            outputs=(),
+            exit_code=0,
+        ).model_dump_json()
+    )
+    kept_home.chmod(0o500)
+    try:
+        status = scheduler.cancel(kept_run)
+        assert status.outcome == "cancelled"
+        assert status.clocks == {"steps": 42.0}
+        assert scheduler.attempts(kept_run)[0].exit_code == 0
+        assert store.session("s_cancel_kept").ended_at is not None
+    finally:
+        kept_home.chmod(0o700)
+    assert all(code == 0 for _, code in ssh_codes), ssh_codes
     assert not (etude_home / "programs").exists()
