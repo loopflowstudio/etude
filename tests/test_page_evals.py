@@ -1506,3 +1506,104 @@ def report():
         by_updates_failed[1000].unplayed,
     ) == (None, 1, 0)
     assert 500 not in by_updates_failed
+
+
+def test_partially_scored_seated_point_keeps_failed_and_unplayed_counts(tmp_path: Path) -> None:
+    runs = tmp_path / "runs"
+    with open_run(
+        experiment="lab",
+        run="a",
+        clocks=[Clock(name="updates", meaning="optimizer updates", kind="step")],
+        directory=runs,
+    ) as run:
+        for updates in (200, 400):
+            weights = tmp_path / f"u{updates}.pt"
+            weights.write_bytes(f"u{updates}".encode())
+            run.checkpoint(weights, updates=updates)
+
+    file = experiment_file(
+        tmp_path,
+        "lab",
+        """
+from etude.eval.match import environment
+from etude.eval.records import Benchmark, CheckpointSlot, Fraction, Seating
+from etude.jobs import EvalJob
+from etude.report import Curve, Matches, Report, Score
+from tests.eval.games import play
+
+DUEL = environment("duel")
+
+
+def eval_jobs(state):
+    by_u = {int(c.at["updates"]): c for r in state.runs for c in r.checkpoints}
+    held = [by_u[400]] if 400 in by_u else []
+    played_half = Benchmark(
+        name="half-a",
+        environment=DUEL,
+        seatings=(
+            Seating(
+                name="vs half",
+                players=(CheckpointSlot(), Fraction(clock="updates", value=0.5)),
+                configs=({"deal": 1}, {"deal": 2}),
+                games=2,
+            ),
+        ),
+    )
+    pending_half = Benchmark(
+        name="half-b",
+        environment=DUEL,
+        seatings=(
+            Seating(
+                name="vs half",
+                players=(CheckpointSlot(), Fraction(clock="updates", value=0.5)),
+                configs=({"deal": 3},),
+                games=2,
+            ),
+        ),
+    )
+    return [
+        EvalJob(tournament=played_half, play=play, checkpoints=held, max_hours=0.1),
+        EvalJob(tournament=pending_half, play=play, checkpoints=held, max_hours=0.1),
+    ]
+
+
+def report():
+    return Report(
+        score=Score(table="plays", value="won"),
+        evals=(Curve(title="Half", matches=Matches(seating="vs half")),),
+    )
+""",
+    )
+
+    state = observe(runs, "lab")
+    by_u = {int(c.at["updates"]): c for r in state.runs for c in r.checkpoints}
+    # Deal 1 fails, deal 2 succeeds in half-a; deal 3 in half-b stays unplayed.
+    played_half = Benchmark(
+        name="half-a",
+        environment=DUEL,
+        seatings=(
+            Seating(
+                name="vs half",
+                players=(CheckpointSlot(), Fraction(clock="updates", value=0.5)),
+                configs=({"deal": 1}, {"deal": 2}),
+                games=2,
+            ),
+        ),
+    )
+    with pytest.raises(EtudeError):
+        play_tournament(
+            played_half,
+            experiment="lab",
+            play=play_failing_deal_one,
+            checkpoint=by_u[400].ref,
+            lines=state.lines,
+            directory=runs,
+        )
+
+    page = build(runs, file)
+    sel = page.panel_selections[0].selection
+    assert sel is not None
+    scored = [p for p in page.points if p.selection == sel and p.value is not None]
+    assert len(scored) == 1
+    assert scored[0].at["updates"] == 400.0
+    assert (scored[0].matches, scored[0].failed, scored[0].unplayed) == (1, 1, 1)

@@ -247,11 +247,12 @@ class Point(Record):
     `at` in `line`. A scored point is the first seat's score against the
     second, in one view (`commit`), `score` and `split` as a `Cell` is: the
     mean over `opponents`, the players it met in the second seat, indexing
-    `Page.players`, with `interval` where it met one. A point with no
-    `value` has `gap` (what its relative seat looked for), `failed` or
-    `unplayed` match counts, in every view. `whole` marks a `seeds="one"`
-    seating's point, which stands for its job though one seed's checkpoint
-    was held for it.
+    `Page.players`, with `interval` where it met one, and any `failed` or
+    `unplayed` matches still held for that checkpoint. A point with no `value`
+    has `gap` (what its relative seat looked for), `failed` or `unplayed`
+    match counts, in every view. `whole` marks a `seeds="one"` seating's
+    point, which stands for its job though one seed's checkpoint was held for
+    it.
     """
 
     selection: int
@@ -1917,6 +1918,8 @@ def _points(
                     seated_pairs.add(pair)
                 for cell, split_key in scored.get(pair, ()):
                     met.setdefault((cell.commit, cell.score, split_key), []).append(cell)
+            failed_count = len({match for key in here for match in failed_matches.get(key, ())})
+            unplayed_count = len({match for key in here for match in unplayed_matches.get(key, ())})
             for counted in met.values():
                 points.append(
                     stood.model_copy(
@@ -1929,12 +1932,12 @@ def _points(
                             "rows": sum(cell.rows for cell in counted),
                             "matches": sum(cell.matches for cell in counted),
                             "opponents": tuple(cell.opponent for cell in counted),
+                            "failed": failed_count,
+                            "unplayed": unplayed_count,
                         }
                     )
                 )
             gap = next((gaps[key] for key in here if key in gaps), None)
-            failed_count = len({match for key in here for match in failed_matches.get(key, ())})
-            unplayed_count = len({match for key in here for match in unplayed_matches.get(key, ())})
             if gap is not None or (not met and (failed_count or unplayed_count)):
                 points.append(
                     stood.model_copy(

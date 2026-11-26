@@ -516,6 +516,62 @@ test("a seated curve skips checkpoints only in the second seat and marks only he
   assert.equal(at2[1000].gap, "failed");
 });
 
+test("partially scored seated points keep the line unbroken while surfacing failed and unplayed counts", () => {
+  const data = seated([
+    {at: {updates: 200}, value: 0.5, opponents: [0], failed: 0, unplayed: 3},
+    {at: {updates: 400}, value: 0.7, opponents: [0], failed: 2, unplayed: 5},
+    {at: {updates: 600}, value: 0.8, opponents: [0], failed: 0, unplayed: 0},
+  ]);
+  const m = context.model(data);
+  const at = Object.fromEntries(points(m, m.JOBS[0]).map(p => [p.x, p]));
+  assert.equal(at[200].y, 0.5);
+  assert.equal(at[200].missing, undefined);
+  assert.equal(at[200].gap, undefined);
+  assert.match(at[200].meta, /3 not yet played/);
+  assert.equal(at[400].y, 0.7);
+  assert.equal(at[400].missing, undefined);
+  assert.equal(at[400].gap, "failed");
+  assert.match(at[400].meta, /2 matches failed, 5 not yet played/);
+
+  // Line stays unbroken across all three points, and u400 draws a red × failure marker.
+  const rendered = renderPage({...data, report: {clock: "updates", evals: [{kind: "curve", title: "Half", matches: {seating: "half"}}]}, panel_selections: [{selection: 0, control: false}]});
+  assert.deepEqual([...rendered.plots[0].values[1]], [undefined, 0.5, 0.7, 0.8]);
+  const strokes = [], ctx = {
+    save() {}, restore() {}, setLineDash() {}, beginPath() {},
+    arc() {}, moveTo() {}, lineTo() {},
+    stroke() { strokes.push(this.strokeStyle); },
+    measureText: () => ({width: 10}), fillRect() {}, fillText() {},
+  };
+  rendered.plots[0].options.hooks.draw[0]({ctx, bbox: {top: 0, left: 0, width: 700, height: 200}, valToPos: x => x});
+  assert.ok(strokes.length >= 1);
+
+  // Multi-seed job points aggregate failed/unplayed notes and keep gap="failed".
+  const twoSeed = page(
+    [player("a400", "a", 400, "a", 1), player("b400", "b", 400, "b", 1)],
+    [],
+    {
+      jobs: [{name: "j", launch: "j", label: "J", runs: ["a", "b"]}],
+      runs: [{name: "a"}, {name: "b"}],
+      clocks: [{name: "updates", kind: "step"}],
+      checkpoints: [
+        {run: "a", ordinal: 1, align: 400, at: {updates: 400}},
+        {run: "b", ordinal: 1, align: 400, at: {updates: 400}},
+      ],
+    },
+  );
+  twoSeed.selections = [{tournament: "half", seating: "half"}];
+  twoSeed.drawn = [{seated: true, tournaments: ["half"]}];
+  twoSeed.points = [
+    {selection: 0, run: "a", ordinal: 1, line: "a", at: {updates: 400}, whole: false, commit: null, score: 0, split: {}, value: 0.6, interval: null, rows: 2, matches: 1, opponents: [0], failed: 1, unplayed: 2},
+    {selection: 0, run: "b", ordinal: 1, line: "b", at: {updates: 400}, whole: false, commit: null, score: 0, split: {}, value: 0.8, interval: null, rows: 2, matches: 1, opponents: [1], failed: 0, unplayed: 3},
+  ];
+  const m2 = context.model(twoSeed);
+  const [combined] = points(m2, m2.JOBS[0]);
+  assert.equal(combined.y, 0.7);
+  assert.equal(combined.gap, "failed");
+  assert.match(context.pointMeta(combined), /mean of 2 seeds:.*1 match failed, 5 not yet played/);
+});
+
 test("ticks a narrow range would label alike are written with the decimals their step needs", () => {
   const two = v => v.toFixed(2);
   assert.deepEqual([...context.tickLabels([0.5, 0.55, 0.6], two, 0.05)], ["0.50", "0.55", "0.60"]);

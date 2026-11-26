@@ -14,7 +14,10 @@ const fmt = v => v == null ? "—" : v !== 0 && Math.abs(v) < 1e-3 ? v.toExponen
 const scoreFormat = v => v == null ? "—" : Math.abs(v) >= 0.01 && Math.abs(v) < 100 ? v.toFixed(2) : fmt(v);
 const scoreCount = (c, score) => `${c.rows} ${score?.unit || "rows"} · ${c.matches} matches`;
 // Keep partial-seed notices; format full seed means with the chart's precision.
-const pointMeta = (p, format = fmt) => p.meta ?? (p.seeds ? `mean of ${p.seeds.length} seeds: ${p.seeds.map(format).join(", ")}` : "");
+const pointMeta = (p, format = fmt) => {
+  const base = p.meta ?? (p.seeds ? `mean of ${p.seeds.length} seeds: ${p.seeds.map(format).join(", ")}` : "");
+  return p.note ? (base ? `${base} · ${p.note}` : p.note) : base;
+};
 const pointText = (p, format = fmt) => format(p.y) + (p.lo != null ? ` · ${p.intervalLabel || (p.seeds ? "seed range" : "95% interval")} ${format(p.lo)}–${format(p.hi)}` : "");
 const dur = s => s >= 3600 ? (s / 3600).toFixed(2) + " h" : s >= 60 ? (s / 60).toFixed(1) + " min" : s.toFixed(s < 1 ? 2 : 1) + " s";
 const when = ms => new Date(ms).toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
@@ -296,9 +299,15 @@ function model(D) {
     if (new Set(got.map(([, v]) => v.inference).filter(v => v != null)).size > 1)
       return {x, key, missing: true, gap: "none", meta: "seeds played different inference variants; choose a seating"};
     const ys = got.map(([, v]) => v.y), y = mean(ys);
-    return got.length > 1
-      ? {x, key, y, lo: Math.min(...ys), hi: Math.max(...ys), seeds: ys}
-      : {x, key, y, lo: got[0][1].lo, hi: got[0][1].hi, meta: got[0][1].meta};
+    const gap = got.some(([, v]) => v.gap === "failed") ? "failed" : undefined;
+    if (got.length > 1) {
+      const s = n => n > 1 ? "es" : "";
+      const failed = got.reduce((a, [, v]) => a + (v.failed || 0), 0);
+      const unplayed = got.reduce((a, [, v]) => a + (v.unplayed || 0), 0);
+      const note = [failed && `${failed} match${s(failed)} failed`, unplayed && `${unplayed} not yet played`].filter(Boolean).join(", ");
+      return {x, key, y, lo: Math.min(...ys), hi: Math.max(...ys), seeds: ys, ...(gap && {gap}), ...(note && {note})};
+    }
+    return {x, key, y, lo: got[0][1].lo, hi: got[0][1].hi, meta: got[0][1].meta, ...(gap && {gap})};
   }
 
   // ---- evals: what compare computed
@@ -417,12 +426,25 @@ function model(D) {
       const p = scored.get(`${sel}|${score}|${splitKey(split)}|${m.key}`);
       if (p) {
         const several = p.opponents.length > 1 ? `mean of ${p.opponents.length} · ` : "";
-        return {y: p.value, lo: p.interval?.[0], hi: p.interval?.[1], at: p.at, whole: p.whole, meta: `${scoreCount(p, D.scores?.[score])} · ${several}vs ${p.opponents.map(playerName).join(", ")}`};
+        const extra = [
+          p.failed && `${p.failed} match${s(p.failed)} failed`,
+          p.unplayed && `${p.unplayed} not yet played`,
+        ].filter(Boolean).join(", ");
+        const tail = extra ? ` · ${extra}` : "";
+        return {
+          y: p.value, lo: p.interval?.[0], hi: p.interval?.[1], at: p.at, whole: p.whole,
+          meta: `${scoreCount(p, D.scores?.[score])} · ${several}vs ${p.opponents.map(playerName).join(", ")}${tail}`,
+          ...(p.failed && {gap: "failed", failed: p.failed}),
+          ...(p.unplayed && {unplayed: p.unplayed}),
+        };
       }
       const u = unseated.get(`${sel}|${m.key}`);
       if (u) {
         if (u.gap) return {missing: true, gap: u.gap.missing === "not_yet" ? "pending" : "none", at: u.at, meta: missingText(u.gap)};
-        if (u.failed) return {missing: true, gap: "failed", at: u.at, meta: `${u.failed} match${s(u.failed)} failed`};
+        if (u.failed) {
+          const tail = u.unplayed ? `, ${u.unplayed} not yet played` : "";
+          return {missing: true, gap: "failed", at: u.at, meta: `${u.failed} match${s(u.failed)} failed${tail}`};
+        }
         if (u.unplayed) return {missing: true, gap: "pending", at: u.at, meta: `not yet played: ${u.unplayed} match${s(u.unplayed)} eval_jobs(state) wants`};
       }
       return {skip: true, meta: "not in these matches"};
