@@ -87,6 +87,30 @@ class Progress(Record):
     # Bytes of the job's log stored so far, so a reader fetches only when it grew.
     log_bytes: int = 0
 
+    @classmethod
+    def running(
+        cls,
+        attempt: str,
+        started_at: datetime | None,
+        result: RunProgress,
+        *,
+        log_bytes: int = 0,
+    ) -> Progress:
+        """An unfinished attempt's progress from its claim, job-owned result and log size."""
+        return cls(
+            attempt=attempt,
+            started_at=started_at,
+            finished_at=None,
+            outcome=None,
+            cause=None,
+            clocks=result.clocks,
+            outputs=(),
+            exit_code=None,
+            tally=result.tally,
+            writers=result.writers,
+            log_bytes=log_bytes,
+        )
+
 
 class Observation(Record):
     alive: bool  # False once the session can write nothing more

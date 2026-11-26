@@ -142,18 +142,11 @@ class _PaceState:
 class Pacer:
     """Delay between wait passes: fixed `every`, or 1 s doubling to cap while state is steady."""
 
-    def __init__(
-        self,
-        every: float | None = None,
-        *,
-        max_interval: float = _PACE_MAX,
-        idle_max: float | None = None,
-    ) -> None:
+    def __init__(self, every: float | None = None, *, idle_max: float | None = None) -> None:
         if every is not None and (not math.isfinite(every) or every <= 0):
             raise ValueError("every must be positive and finite, or None")
         self._every = every
-        self._max = max_interval
-        self._idle_max = max_interval if idle_max is None else idle_max
+        self._idle_max = _PACE_MAX if idle_max is None else idle_max
         self._previous: _PaceState | None = None
         self._interval = _PACE_MIN
 
@@ -163,7 +156,7 @@ class Pacer:
         cap = (
             self._idle_max
             if state is not None and not state.runs and not state.finishing
-            else self._max
+            else _PACE_MAX
         )
         if self._previous is None or state != self._previous:
             self._interval = _PACE_MIN
@@ -933,10 +926,8 @@ class Scheduler:
             made: list[Session] = []
             attempts: list[RunAttempt] = []
             try:
-                placement_index = 0
-                while placement_index < len(placements):
-                    placement = placements[placement_index]
-                    placement_index += 1
+                while placements:
+                    placement = placements.pop(0)
                     existing = placement.session
                     machine, price = placement.machine, placement.rate.usd_per_hour
                     self._check_locks(names)
@@ -983,25 +974,20 @@ class Scheduler:
                                             excluded_machines=excluded_machines,
                                             excluded_sessions=excluded_sessions,
                                         )
+                                        continue
                                     except LauncherError:
-                                        if attempts:
-                                            break  # keep confirmed placements; later runs stay queued
-                                        reason = _refused(session, owned=True)
-                                        raise LauncherError(
-                                            f"cannot launch on {placement.supply!r}: {reason};"
-                                            " etude queue would wait"
-                                        ) from None
-                                    placement_index = 0
-                                    continue
+                                        pass
                                 if attempts:
                                     break  # keep confirmed placements; later runs stay queued
-                                reason = "create reply unknown"
-                                if session.refused_at is not None:
-                                    reason = _refused(session, owned=rented is None)
+                                reason = (
+                                    _refused(session, owned=rented is None)
+                                    if session.refused_at is not None
+                                    else "create reply unknown"
+                                )
                                 raise LauncherError(
                                     f"cannot launch on {placement.supply!r}: {reason};"
                                     " etude queue would wait"
-                                )
+                                ) from None
                     else:
                         session = self._store.session(existing.id)
                         if not self._live(session, now):
@@ -2501,7 +2487,7 @@ class Scheduler:
         progress = {entry.attempt: entry for entry in seen.progress}
         for attempt in attempts:
             if attempt.outcome is None:
-                if seen.alive and attempt.added and attempt.id not in progress:
+                if attempt.added and attempt.id not in progress:
                     self._store.check_lock(session.supply)
                     try:
                         self._hand(session, attempt)
@@ -2672,40 +2658,28 @@ class Scheduler:
             )
         elif not alive:
             # Confirmed shutdown fences the old attempt before a replacement is allowed.
+            cause: Cause | None
             if run.launch.cancel_requested_at is not None:
-                self._store.finish(
-                    attempt,
-                    now,
-                    "cancelled",
-                    cause=None,
-                    clocks=seen.clocks if seen else attempt.clocks,
-                    outputs=seen.outputs if seen else attempt.outputs,
-                    prepared=seen.prepared if seen else None,
-                    tally=seen.tally if seen else attempt.tally,
-                    writers=seen.writers if seen else attempt.writers,
+                outcome, cause = "cancelled", None
+                message = "attempt cancelled; session ended without final receipt"
+            else:
+                outcome = "lost"
+                cause = (
+                    "machine_lost_before_start"
+                    if attempt.started_at is None and not unknown_start
+                    else "create_unconfirmed"
+                    if attempt.started_at is None
+                    else "machine_lost"
                 )
-                self._diagnose(
-                    "execution",
-                    "attempt cancelled; session ended without final receipt",
-                    session=session.id,
-                    attempt=attempt.id,
-                )
-                return
-            cause: Cause = (
-                "machine_lost_before_start"
-                if attempt.started_at is None and not unknown_start
-                else "create_unconfirmed"
-                if attempt.started_at is None
-                else "machine_lost"
-            )
-            if cause == "machine_lost":
-                supply = self._store.supply(session.supply)
-                if isinstance(supply, OnDemand) and supply.template.spot:
-                    cause = "spot_machine_lost"
+                if cause == "machine_lost":
+                    supply = self._store.supply(session.supply)
+                    if isinstance(supply, OnDemand) and supply.template.spot:
+                        cause = "spot_machine_lost"
+                message = f"attempt lost ({cause}); final exit status not received"
             self._store.finish(
                 attempt,
                 now,
-                "lost",
+                outcome,
                 cause=cause,
                 clocks=seen.clocks if seen else attempt.clocks,
                 outputs=seen.outputs if seen else attempt.outputs,
@@ -2713,12 +2687,7 @@ class Scheduler:
                 tally=seen.tally if seen else attempt.tally,
                 writers=seen.writers if seen else attempt.writers,
             )
-            self._diagnose(
-                "execution",
-                f"attempt lost ({cause}); final exit status not received",
-                session=session.id,
-                attempt=attempt.id,
-            )
+            self._diagnose("execution", message, session=session.id, attempt=attempt.id)
         else:
             if seen is not None:
                 self._store.record_progress(attempt, seen.clocks, seen.tally, seen.writers)

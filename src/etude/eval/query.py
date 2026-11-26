@@ -96,7 +96,6 @@ from etude.eval.block import (
     partial_totals,
     per_file,
     quote,
-    read,
     refuse_unconverted,
     stage,
 )
@@ -233,6 +232,23 @@ def _open_statsdb(
         return duckdb.connect(path.resolve(), read_only=True)
 
 
+def _publish_generation(path: Path, populate: Callable[[Path], None]) -> Path:
+    """Populate a fresh generation beside `path` and publish it atomically via symlink."""
+    generation = path.with_name(f"{path.stem}.g{time.time_ns()}.{os.getpid()}.duckdb")
+    link = path.with_suffix(".link")
+    try:
+        populate(generation)
+        link.unlink(missing_ok=True)
+        link.symlink_to(generation.name)
+        link.replace(path)
+    except BaseException:
+        link.unlink(missing_ok=True)
+        generation.unlink(missing_ok=True)
+        Path(f"{generation}.wal").unlink(missing_ok=True)
+        raise
+    return generation
+
+
 def _write_catch_up(
     path: Path,
     experiment: str,
@@ -250,20 +266,11 @@ def _write_catch_up(
     if not rebuild and current is None:
         # Cold start: publish an empty-schema generation under `.lock` so in-place
         # catch-up below preserves committed chunks across an interrupt.
-        empty = path.with_name(f"{path.stem}.g{time.time_ns()}.{os.getpid()}.duckdb")
-        link = path.with_suffix(".link")
-        try:
-            with closing(duckdb.connect(empty)) as writer:
+        def seed_empty(target: Path) -> None:
+            with closing(duckdb.connect(target)) as writer:
                 _ensure_schema(writer, experiment, listing.storage, rollups, summarize=True)
-            link.unlink(missing_ok=True)
-            link.symlink_to(empty.name)
-            link.replace(path)
-        except BaseException:
-            link.unlink(missing_ok=True)
-            empty.unlink(missing_ok=True)
-            Path(f"{empty}.wal").unlink(missing_ok=True)
-            raise
-        current = empty.resolve()
+
+        current = _publish_generation(path, seed_empty).resolve()
     if not rebuild and current is not None:
         try:
             db = duckdb.connect(current)
@@ -281,31 +288,24 @@ def _write_catch_up(
 
     # DuckDB shares connections by realpath in one process. A distinct file
     # lets old readers keep their snapshot while new readers open the new one.
-    generation = path.with_name(f"{path.stem}.g{time.time_ns()}.{os.getpid()}.duckdb")
-    link = path.with_suffix(".link")
     old_generation = current if path.is_symlink() else None
-    try:
+
+    def build_generation(target: Path) -> None:
         if current is not None and not rebuild:
             try:
                 with closing(duckdb.connect(current, read_only=True)) as reader:
                     if _schema(reader) == SCHEMA:
-                        shutil.copy2(current, generation)
+                        shutil.copy2(current, target)
                         wal = Path(f"{current}.wal")
                         if wal.exists():
-                            shutil.copy2(wal, Path(f"{generation}.wal"))
+                            shutil.copy2(wal, Path(f"{target}.wal"))
             except (duckdb.IOException, duckdb.ConnectionException) as locked:
                 raise EtudeError("statsdb_in_use", 409) from locked
-        with closing(duckdb.connect(generation)) as writer:
+        with closing(duckdb.connect(target)) as writer:
             _catch_up(writer, experiment, allowed, listing, rollups, per_chunk_summaries=False)
             writer.execute("checkpoint")
-        link.unlink(missing_ok=True)
-        link.symlink_to(generation.name)
-        link.replace(path)
-    except BaseException:
-        link.unlink(missing_ok=True)
-        generation.unlink(missing_ok=True)
-        Path(f"{generation}.wal").unlink(missing_ok=True)
-        raise
+
+    generation = _publish_generation(path, build_generation)
     if old_generation is not None:
         old_generation.unlink(missing_ok=True)
         Path(f"{old_generation}.wal").unlink(missing_ok=True)
@@ -552,6 +552,58 @@ def _fetch_files(
     _map_pool(pool, write, pending)
 
 
+@contextmanager
+def _transaction(db: duckdb.DuckDBPyConnection, *, checkpoint: bool = False) -> Iterator[None]:
+    """Run one DuckDB transaction with rollback on error and optional post-commit checkpoint."""
+    db.execute("begin")
+    try:
+        yield
+        db.execute("commit")
+    except BaseException:
+        db.execute("rollback")
+        raise
+    if checkpoint:
+        db.execute("checkpoint")
+
+
+def _located(listing: RunListing, folders: Sequence[str]) -> dict[str, str]:
+    """Map each file name in a run's folders to its first containing folder."""
+    located: dict[str, str] = {}
+    for place in folders:
+        for name in listing.names_in(place):
+            located.setdefault(name, place)
+    return located
+
+
+def _pack_chunks[T](
+    items: Sequence[T],
+    chunk: _Chunk,
+    flush: Callable[[_Chunk], None],
+    append: Callable[[_Chunk, list[T], bool, bool], None],
+) -> _Chunk:
+    """Slice `items` across `_CATCH_UP_CHUNK`-bounded chunks, emitting once when empty."""
+    if not items:
+        append(chunk, [], True, True)
+        chunk.weight += 1
+        if chunk.weight >= _CATCH_UP_CHUNK:
+            flush(chunk)
+            return _Chunk()
+        return chunk
+    cursor = 0
+    total = len(items)
+    while cursor < total:
+        room = max(1, _CATCH_UP_CHUNK - chunk.weight)
+        end = min(total, cursor + room)
+        piece = list(items[cursor:end])
+        append(chunk, piece, cursor == 0, end == total)
+        chunk.weight += len(piece)
+        cursor = end
+        if chunk.weight >= _CATCH_UP_CHUNK:
+            flush(chunk)
+            chunk = _Chunk()
+    return chunk
+
+
 def _ensure_schema(
     db: duckdb.DuckDBPyConnection,
     experiment: str,
@@ -562,30 +614,19 @@ def _ensure_schema(
 ) -> bool:
     """Create the database schema when absent and register requested rollups; return whether created."""
     if _schema(db) is None:
-        db.execute("begin")
-        try:
+        with _transaction(db, checkpoint=True):
             _create(db, experiment, storage)
             for rollup in rollups:
                 _hold(db, rollup)
             if summarize:
                 _summaries(db)
-            db.execute("commit")
-        except BaseException:
-            db.execute("rollback")
-            raise
-        db.execute("checkpoint")
         return True
     if rollups:
         held_rollups = dict(db.execute("select name, digest from kept.rollups").fetchall())
         if any(held_rollups.get(rollup.name) != rollup.digest for rollup in rollups):
-            db.execute("begin")
-            try:
+            with _transaction(db):
                 for rollup in rollups:
                     _hold(db, rollup)
-                db.execute("commit")
-            except BaseException:
-                db.execute("rollback")
-                raise
     return False
 
 
@@ -646,10 +687,7 @@ def _catch_up(
                 if eval_run and run not in kept.environments:
                     continue  # an eval run counts once its environment arrives
                 # One run may be copied to several places; a file's name is the same in each.
-                located: dict[str, str] = {}
-                for place in folders:
-                    for name in listing.names_in(place):
-                        located.setdefault(name, place)
+                located = _located(listing, folders)
                 new = sorted(located.keys() - kept.seen[run])
                 if not new:
                     continue
@@ -661,13 +699,8 @@ def _catch_up(
             flush(chunk)
         _backfill_rollups(db, storage, pool, listing, allowed, kept)
     if not per_chunk_summaries and (created or eval_changed):
-        db.execute("begin")
-        try:
+        with _transaction(db):
             _summaries(db)
-            db.execute("commit")
-        except BaseException:
-            db.execute("rollback")
-            raise
 
 
 @contextmanager
@@ -804,42 +837,14 @@ def _queue_eval(
     outcome = (located[outcome_name], outcome_name) if outcome_name is not None else None
     tournament_key = located[TOURNAMENT_FILE] + TOURNAMENT_FILE if has_tournament else None
 
-    if not blocks:
-        seen = ([TOURNAMENT_FILE] if has_tournament else []) + other + old
-        chunk.evals.append(
-            _EvalSlice(
-                run=run,
-                experiment=experiment,
-                located=located,
-                blocks=[],
-                seen=seen,
-                tournament_key=tournament_key,
-                outcome=outcome,
-                old=old,
-            )
-        )
-        chunk.weight += 1
-        if chunk.weight >= _CATCH_UP_CHUNK:
-            flush(chunk)
-            return _Chunk()
-        return chunk
-
-    cursor = 0
-    total = len(blocks)
-    while cursor < total:
-        room = max(1, _CATCH_UP_CHUNK - chunk.weight)
-        end = min(total, cursor + room)
-        piece = blocks[cursor:end]
-        first, last = cursor == 0, end == total
-        seen = []
-        if first and has_tournament:
-            seen.append(TOURNAMENT_FILE)
+    def append_eval(target: _Chunk, piece: list[tuple[str, str]], first: bool, last: bool) -> None:
+        seen = [TOURNAMENT_FILE] if first and has_tournament else []
         for _, block_name in piece:
             seen.extend(by_block[block_name])
         if last:
             seen.extend(other)
             seen.extend(old)
-        chunk.evals.append(
+        target.evals.append(
             _EvalSlice(
                 run=run,
                 experiment=experiment,
@@ -851,12 +856,8 @@ def _queue_eval(
                 old=old if last else [],
             )
         )
-        chunk.weight += len(piece)
-        cursor = end
-        if chunk.weight >= _CATCH_UP_CHUNK:
-            flush(chunk)
-            chunk = _Chunk()
-    return chunk
+
+    return _pack_chunks(blocks, chunk, flush, append_eval)
 
 
 def _queue_training(
@@ -879,35 +880,18 @@ def _queue_training(
     ]
     checkpoint_names = {name for name, _ in checkpoints}
     other = [name for name in new if name not in checkpoint_names]
-    if not checkpoints:
-        chunk.trainings.append(
-            _TrainingSlice(run=run, experiment=experiment, checkpoints=[], seen=list(new))
-        )
-        chunk.weight += 1
-        if chunk.weight >= _CATCH_UP_CHUNK:
-            flush(chunk)
-            return _Chunk()
-        return chunk
 
-    cursor = 0
-    total = len(checkpoints)
-    while cursor < total:
-        room = max(1, _CATCH_UP_CHUNK - chunk.weight)
-        end = min(total, cursor + room)
-        piece = checkpoints[cursor:end]
-        last = end == total
+    def append_training(
+        target: _Chunk, piece: list[tuple[str, str]], _first: bool, last: bool
+    ) -> None:
         seen = [name for name, _ in piece]
         if last:
             seen.extend(other)
-        chunk.trainings.append(
+        target.trainings.append(
             _TrainingSlice(run=run, experiment=experiment, checkpoints=piece, seen=seen)
         )
-        chunk.weight += len(piece)
-        cursor = end
-        if chunk.weight >= _CATCH_UP_CHUNK:
-            flush(chunk)
-            chunk = _Chunk()
-    return chunk
+
+    return _pack_chunks(checkpoints, chunk, flush, append_training)
 
 
 def _flush_chunk(
@@ -949,8 +933,7 @@ def _flush_chunk(
                     parquet_targets.append((place + file, copies / part.run / file))
         _fetch_files(pool, storage, parquet_targets)
 
-        db.execute("begin")
-        try:
+        with _transaction(db, checkpoint=True):
             for folder, owner in chunk.declarations:
                 db.execute(
                     "insert into kept.declarations values (?, ?) on conflict do nothing",
@@ -996,12 +979,12 @@ def _flush_chunk(
                         part.run,
                         part.located,
                         copies,
+                        block_names,
                         experiment=part.experiment,
-                        only_blocks=block_names,
                     )
                 if part.outcome is not None:
                     place, name = part.outcome
-                    _ended(db, storage, part.run, place, name, raw=fetched[place + name])
+                    _ended(db, part.run, fetched[place + name])
                     eval_changed = True
                 if part.old:
                     _refuse_unconverted(db, part.run, part.old)
@@ -1025,29 +1008,16 @@ def _flush_chunk(
                     )
             if summarize and eval_changed:
                 _summaries(db)
-            db.execute("commit")
-        except BaseException:
-            db.execute("rollback")
-            raise
-        db.execute("checkpoint")
         return eval_changed
 
 
-def _ended(
-    db: duckdb.DuckDBPyConnection,
-    storage: Storage,
-    run: str,
-    place: str,
-    name: str,
-    *,
-    raw: bytes | None = None,
-) -> None:
+def _ended(db: duckdb.DuckDBPyConnection, run: str, raw: bytes) -> None:
     """Record how the eval run last ended, from its `outcome.json`.
 
     Read when it first arrives and again whenever the run delivers new files:
     a resumed run seals new blocks before it writes its end again.
     """
-    ended = RunOutcome.model_validate_json(storage.get(place + name) if raw is None else raw)
+    ended = RunOutcome.model_validate_json(raw)
     db.execute("update kept.runs set state = ? where run = ?", [ended.state, run])
 
 
@@ -1066,8 +1036,8 @@ def _training_checkpoints(
     experiment: str,
     checkpoints: Sequence[tuple[str, str]],
     fetched: Mapping[str, bytes],
-) -> bool:
-    """Take in a training run's prefetched checkpoint files; whether any arrived."""
+) -> None:
+    """Take in a training run's prefetched checkpoint files."""
     rows: list[list[object]] = []
     for _, key in checkpoints:
         stored = CheckpointRecord.model_validate_json(fetched[key])
@@ -1077,7 +1047,7 @@ def _training_checkpoints(
              stored.artifact.sha256, stored.wall_ms, json.dumps(stored.at)]
         )  # fmt: skip
     if not rows:
-        return False
+        return
     stage(
         db,
         "_arrived_checkpoints",
@@ -1092,7 +1062,6 @@ def _training_checkpoints(
         " qualify row_number() over (partition by a.ordinal) = 1"
     )
     db.execute("drop table _arrived_checkpoints")
-    return True
 
 
 def _block(
@@ -1104,11 +1073,9 @@ def _block(
     copies: Path,
     *,
     experiment: str,
-    original: Block | None = None,
+    original: Block,
 ) -> None:
     """Take in block `name`: its match records, where its blobs lie, then its tables and rollups."""
-    if original is None:
-        original = read(storage, place, name)
     # Kept as stored: `_sum_missing` reads its tables' own match keys again.
     held = original.model_dump_json(
         exclude={"blobs": True, "replaces": True, "matches": {"__all__": {"blobs"}}}
@@ -1457,30 +1424,23 @@ def _sum_missing(
     run: str,
     located: Mapping[str, str],
     copies: Path,
+    blocks: Sequence[str],
     *,
     experiment: str,
-    only_blocks: Sequence[str] | None = None,
 ) -> None:
-    """Add each held rollup's partial totals of the run's blocks that lack them.
+    """Add each held rollup's partial totals of the run's newly ingested blocks that lack them.
 
     A block lacks a rollup it was sealed without. Its partials are summed
     from its tables here, once: they are kept in this database and never
     written to the store, and the block is not summed for that rollup again.
     """
-    if only_blocks is None:
-        missing = db.execute(
-            "select r.rollup, b.block, b.held from kept.rollups r cross join kept.blocks b"
-            " anti join kept.summed s on s.name = r.name and s.run = b.run and s.block = b.block"
-            f" where b.run = {quote(run)} order by b.block, r.name"
-        ).fetchall()
-    else:
-        wanted = ", ".join(quote(block_name) for block_name in only_blocks)
-        missing = db.execute(
-            "select r.rollup, b.block, b.held from kept.rollups r cross join kept.blocks b"
-            " anti join kept.summed s on s.name = r.name and s.run = b.run and s.block = b.block"
-            f" where b.run = {quote(run)} and b.block in ({wanted})"
-            " order by b.block, r.name"
-        ).fetchall()
+    wanted = ", ".join(quote(block_name) for block_name in blocks)
+    missing = db.execute(
+        "select r.rollup, b.block, b.held from kept.rollups r cross join kept.blocks b"
+        " anti join kept.summed s on s.name = r.name and s.run = b.run and s.block = b.block"
+        f" where b.run = {quote(run)} and b.block in ({wanted})"
+        " order by b.block, r.name"
+    ).fetchall()
     if not missing:
         return
     entries = [
@@ -1544,11 +1504,7 @@ def _backfill_rollups(
         ]
         if not matched:
             continue
-        located: dict[str, str] = {}
-        for folder, _ in matched:
-            for name in listing.names_in(folder):
-                located.setdefault(name, folder)
-        run_info[run] = (matched[0][1], located)
+        run_info[run] = (matched[0][1], _located(listing, [folder for folder, _ in matched]))
     grouped: list[tuple[str, str, list[tuple[str, Rollup, Block]]]] = []
     for (run, block_name), items in itertools.groupby(missing, key=lambda row: (row[0], row[1])):
         if run not in run_info:
@@ -1576,18 +1532,12 @@ def _backfill_rollups(
                         file = file_key(block_name, f"{table}.parquet")
                         parquet_targets.append((place + file, copies / run / file))
             _fetch_files(pool, storage, parquet_targets)
-            db.execute("begin")
-            try:
+            with _transaction(db, checkpoint=True):
                 for run, _, entries in batch:
                     run_experiment, located = run_info[run]
                     _sum_entries(
                         db, storage, run, located, copies, entries, experiment=run_experiment
                     )
-                db.execute("commit")
-            except BaseException:
-                db.execute("rollback")
-                raise
-            db.execute("checkpoint")
 
 
 def _exists(db: duckdb.DuckDBPyConnection, schema: str, table: str) -> bool:

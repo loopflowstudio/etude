@@ -20,7 +20,14 @@ from etude.launch.logs import snapshot_stream
 from etude.launch.records import BootstrapLinks, LogStream, Output
 from etude.launch.schemas import Finished, Observation, Packet, Progress, Work
 from etude.launch.source import source_archive
-from etude.launch.storage.files import digest, read_result, select_output, write
+from etude.launch.storage.files import (
+    digest,
+    parse_transfers,
+    read_result,
+    select_output,
+    write,
+    write_bytes,
+)
 from etude.launch.usage import Transfer
 from etude.out import MEMBERSHIP, OutFiles
 
@@ -74,16 +81,7 @@ class DirectoryJournal:
         archive = home / "sources" / f"{work.commit}.tar"
         if not archive.exists():
             archive.parent.mkdir(exist_ok=True)
-            partial = archive.with_name(archive.name + ".partial")
-            try:
-                partial.write_bytes(source_archive(work.repo, work.commit))
-                partial.replace(archive)
-            except OSError:
-                try:
-                    partial.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise
+            write_bytes(archive, source_archive(work.repo, work.commit))
 
     def _folder(self, run: str) -> Path:
         """The run's tracked folder on this host, shared by its sessions (`ETUDE_TRACK_DIR`)."""
@@ -112,13 +110,7 @@ class DirectoryJournal:
     def _transfers(home: Path) -> tuple[Transfer, ...]:
         """What the session's attempts recorded in its usage journal."""
         path = home / "usage.jsonl"
-        events = []
-        for line in path.read_text().splitlines() if path.exists() else []:
-            try:
-                events.append(Transfer.model_validate_json(line))
-            except ValueError:
-                continue  # a line still being written; read again next time
-        return tuple(events)
+        return parse_transfers(path.read_text() if path.exists() else None)
 
     def stop(self, session_id: str, attempt: str) -> None:
         stop = self._root / session_id / "stop"
@@ -239,18 +231,10 @@ class DirectoryJournal:
         claim, finished, log = home / "claim", home / "finished.json", home / "log"
         started = datetime.fromisoformat(claim.read_text()) if claim.exists() else None
         if not finished.exists():
-            result = read_result(home / "outputs")
-            return Progress(
-                attempt=home.name,
-                started_at=started,
-                finished_at=None,
-                outcome=None,
-                cause=None,
-                clocks=result.clocks,
-                outputs=(),
-                exit_code=None,
-                tally=result.tally,
-                writers=result.writers,
+            return Progress.running(
+                home.name,
+                started,
+                read_result(home / "outputs"),
                 log_bytes=log.stat().st_size if log.exists() else 0,
             )
         return Finished.model_validate_json(finished.read_text()).progress(home.name, started)

@@ -11,17 +11,18 @@ from pathlib import Path
 
 from etude.errors import LauncherError
 from etude.launch.records import Output
+from etude.launch.usage import Transfer
 from etude.out import OutFile, OutFiles
 from etude.records import RunProgress
 
 RESULT = "etude-result.json"
 
 
-def write(path: Path, text: str) -> None:
+def write_bytes(path: Path, data: bytes) -> None:
     """Whole file or no file: readers never see half of it."""
     partial = path.with_name(path.name + ".partial")
     try:
-        partial.write_text(text)
+        partial.write_bytes(data)
         partial.replace(path)
     except OSError:
         try:
@@ -29,6 +30,11 @@ def write(path: Path, text: str) -> None:
         except OSError:
             pass
         raise
+
+
+def write(path: Path, text: str) -> None:
+    """Whole file or no file: readers never see half of it."""
+    write_bytes(path, text.encode())
 
 
 def append_usage(session: Path, raw: str) -> None:
@@ -55,6 +61,19 @@ def parse_result(raw: bytes | str | None) -> RunProgress:
         return RunProgress.model_validate_json(raw, strict=True)
     except ValueError:
         return RunProgress()
+
+
+def parse_transfers(raw: str | None) -> tuple[Transfer, ...]:
+    """Decode complete lines of a session's `usage.jsonl`, skipping lines still being written."""
+    if raw is None:
+        return ()
+    events: list[Transfer] = []
+    for line in raw.splitlines():
+        try:
+            events.append(Transfer.model_validate_json(line))
+        except ValueError:
+            continue
+    return tuple(events)
 
 
 def read_result(outputs: Path) -> RunProgress:

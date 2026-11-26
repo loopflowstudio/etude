@@ -13,6 +13,10 @@ const num = v => v == null ? "—" : Math.abs(v) >= 1e9 ? (v / 1e9).toPrecision(
 const fmt = v => v == null ? "—" : v !== 0 && Math.abs(v) < 1e-3 ? v.toExponential(2) : num(v);
 const scoreFormat = v => v == null ? "—" : Math.abs(v) >= 0.01 && Math.abs(v) < 100 ? v.toFixed(2) : fmt(v);
 const scoreCount = (c, score) => `${c.rows} ${score?.unit || "rows"} · ${c.matches} matches`;
+const matchStatus = (failed, unplayed) => [
+  failed && `${failed} match${failed > 1 ? "es" : ""} failed`,
+  unplayed && `${unplayed} not yet played`,
+].filter(Boolean).join(", ");
 // Keep partial-seed notices; format full seed means with the chart's precision.
 const pointMeta = (p, format = fmt) => {
   const base = p.meta ?? (p.seeds ? `mean of ${p.seeds.length} seeds: ${p.seeds.map(format).join(", ")}` : "");
@@ -246,20 +250,14 @@ function model(D) {
     marks.get(member).push({...m, key: runMark(m.run, m.ordinal)});
   }
   const lineMarks = new Map();
-  for (const i of positioned) {
-    const at = D.players[i].at, line = lineOf(i), member = lineMember(line).key;
-    if (at[alignClock] == null) continue;
-    const key = lineMark(line, at);
-    if (!lineMarks.has(member)) lineMarks.set(member, new Map());
-    lineMarks.get(member).set(key, {key, line, at, align: at[alignClock], elapsed: null, pace: {}});
-  }
-  for (const p of extPoints) {
-    const at = p.at, line = p.line ?? "", member = lineMember(line).key;
-    if (at[alignClock] == null) continue;
-    const key = lineMark(line, at);
+  const addLineMark = (line, at) => {
+    if (at[alignClock] == null) return;
+    const member = lineMember(line).key, key = lineMark(line, at);
     if (!lineMarks.has(member)) lineMarks.set(member, new Map());
     if (!lineMarks.get(member).has(key)) lineMarks.get(member).set(key, {key, line, at, align: at[alignClock], elapsed: null, pace: {}});
-  }
+  };
+  for (const i of positioned) addLineMark(lineOf(i), D.players[i].at);
+  for (const p of extPoints) addLineMark(p.line ?? "", p.at);
   for (const [member, got] of lineMarks) marks.set(member, [...got.values()].sort((a, b) => a.align - b.align));
   const markOf = (run, ordinal) => (marks.get(runMember(run).key) || []).find(m => m.ordinal === ordinal);
   // A value's own position (`at`, from `Player.at`) wins over its mark's, so no point disagrees with the page.
@@ -302,10 +300,9 @@ function model(D) {
     const ys = got.map(([, v]) => v.y), y = mean(ys);
     const gap = got.some(([, v]) => v.gap === "failed") ? "failed" : undefined;
     if (got.length > 1) {
-      const s = n => n > 1 ? "es" : "";
       const failed = got.reduce((a, [, v]) => a + (v.failed || 0), 0);
       const unplayed = got.reduce((a, [, v]) => a + (v.unplayed || 0), 0);
-      const note = [failed && `${failed} match${s(failed)} failed`, unplayed && `${unplayed} not yet played`].filter(Boolean).join(", ");
+      const note = matchStatus(failed, unplayed);
       return {x, key, y, lo: Math.min(...ys), hi: Math.max(...ys), seeds: ys, ...(gap && {gap}), ...(note && {note})};
     }
     return {x, key, y, lo: got[0][1].lo, hi: got[0][1].hi, meta: got[0][1].meta, ...(gap && {gap})};
@@ -422,15 +419,11 @@ function model(D) {
   }
   const seated = sel => sel != null && !!D.drawn[sel]?.seated;
   function seatedValue(score, sel, split) {
-    const s = n => n > 1 ? "es" : "";
     return m => {
       const p = scored.get(`${sel}|${score}|${splitKey(split)}|${m.key}`);
       if (p) {
         const several = p.opponents.length > 1 ? `mean of ${p.opponents.length} · ` : "";
-        const extra = [
-          p.failed && `${p.failed} match${s(p.failed)} failed`,
-          p.unplayed && `${p.unplayed} not yet played`,
-        ].filter(Boolean).join(", ");
+        const extra = matchStatus(p.failed, p.unplayed);
         const tail = extra ? ` · ${extra}` : "";
         return {
           y: p.value, lo: p.interval?.[0], hi: p.interval?.[1], at: p.at, whole: p.whole,
@@ -441,12 +434,9 @@ function model(D) {
       }
       const u = unseated.get(`${sel}|${m.key}`);
       if (u) {
-        if (u.failed) {
-          const tail = u.unplayed ? `, ${u.unplayed} not yet played` : "";
-          return {missing: true, gap: "failed", at: u.at, whole: u.whole, meta: `${u.failed} match${s(u.failed)} failed${tail}`};
-        }
+        if (u.failed) return {missing: true, gap: "failed", at: u.at, whole: u.whole, meta: matchStatus(u.failed, u.unplayed)};
         if (u.gap) return {missing: true, gap: u.gap.missing === "not_yet" ? "pending" : "none", at: u.at, whole: u.whole, meta: missingText(u.gap)};
-        if (u.unplayed) return {missing: true, gap: "pending", at: u.at, whole: u.whole, meta: `not yet played: ${u.unplayed} match${s(u.unplayed)} eval_jobs(state) wants`};
+        if (u.unplayed) return {missing: true, gap: "pending", at: u.at, whole: u.whole, meta: `not yet played: ${u.unplayed} match${u.unplayed > 1 ? "es" : ""} eval_jobs(state) wants`};
       }
       return {skip: true, meta: "not in these matches"};
     };

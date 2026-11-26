@@ -30,8 +30,7 @@ from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import BootstrapLinks, LogProducer, LogStream
 from etude.launch.schemas import Finished, Observation, Packet, Progress, Work
 from etude.launch.source import source_archive
-from etude.launch.storage.files import parse_result
-from etude.launch.usage import Transfer
+from etude.launch.storage.files import parse_result, parse_transfers
 from etude.spec import Record
 from etude.storage_timeout import storage_environment
 
@@ -418,37 +417,19 @@ def _decode_observation(raw: RawObservation) -> Observation:
             else None
         )
         if entry.finished is None:
-            result = parse_result(entry.result)
             progress.append(
-                Progress(
-                    attempt=entry.attempt,
-                    started_at=started,
-                    finished_at=None,
-                    outcome=None,
-                    cause=None,
-                    clocks=result.clocks,
-                    outputs=(),
-                    exit_code=None,
-                    tally=result.tally,
-                    writers=result.writers,
-                    log_bytes=entry.log_bytes,
+                Progress.running(
+                    entry.attempt, started, parse_result(entry.result), log_bytes=entry.log_bytes
                 )
             )
         else:
             progress.append(
                 Finished.model_validate_json(entry.finished).progress(entry.attempt, started)
             )
-    transfers: list[Transfer] = []
-    if raw.usage is not None:
-        for line in raw.usage.splitlines():
-            try:
-                transfers.append(Transfer.model_validate_json(line))
-            except ValueError:
-                continue  # a line still being written; read again next time
     return Observation(
         alive=raw.alive,
         progress=tuple(progress),
-        transfers=tuple(transfers),
+        transfers=parse_transfers(raw.usage),
         start_unknown=raw.start_unknown,
     )
 

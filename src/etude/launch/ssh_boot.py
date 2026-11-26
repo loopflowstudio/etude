@@ -254,6 +254,31 @@ def handle_finish(home: Path) -> dict[str, Any]:
     return {"ended_at": _read_ended(home)}
 
 
+def _signal_and_wait(home: Path, pids: list[int]) -> None:
+    """Send SIGTERM to live `pids` and wait up to 10 s for exit or an `ended` note."""
+    signalled: list[int] = []
+    for pid in pids:
+        if not _pid_alive(pid):
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+            signalled.append(pid)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if not signalled:
+        return
+    for _ in range(100):
+        if _read_ended(home) is not None or not any(_pid_alive(pid) for pid in signalled):
+            return
+        time.sleep(0.1)
+
+
+def _record_ended(home: Path) -> str:
+    now = datetime.now(UTC).isoformat()
+    _write_ended(home, now)
+    return _read_ended(home) or now
+
+
 def handle_end(home: Path) -> dict[str, Any]:
     if not home.is_dir():
         home.mkdir(parents=True, exist_ok=True)
@@ -266,43 +291,23 @@ def handle_end(home: Path) -> dict[str, Any]:
     if ended_at is None:
         if (home / "pid").exists():
             worker = _recorded(home, "pid")
-            if _pid_alive(worker):
-                assert worker is not None
-                try:
-                    os.kill(worker, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                else:
-                    for _ in range(100):
-                        if _read_ended(home) is not None or not _pid_alive(worker):
-                            break
-                        time.sleep(0.1)
+            if worker is not None:
+                _signal_and_wait(home, [worker])
             ended_at = _read_ended(home)
             if ended_at is None and not _pid_alive(worker):
-                now = datetime.now(UTC).isoformat()
-                _write_ended(home, now)
-                ended_at = _read_ended(home) or now
+                ended_at = _record_ended(home)
         else:
             # The cancel stops an install; a live boot or courier stops at once.
-            signalled: list[int] = []
-            for name in ("boot-claim", "courier-pid"):
-                if (proc := _recorded(home, name)) is not None:
-                    try:
-                        os.kill(proc, signal.SIGTERM)
-                        signalled.append(proc)
-                    except (ProcessLookupError, PermissionError):
-                        pass
-            if signalled:
-                for _ in range(100):
-                    if _read_ended(home) is not None or not any(_pid_alive(p) for p in signalled):
-                        break
-                    time.sleep(0.1)
+            pids = [
+                proc
+                for name in ("boot-claim", "courier-pid")
+                if (proc := _recorded(home, name)) is not None
+            ]
+            _signal_and_wait(home, pids)
             ended_at = _read_ended(home)
             if ended_at is None and _host_alive(home) is False and not (home / "pid").exists():
                 # Nothing runs here, and the cancel fences any start still in flight.
-                now = datetime.now(UTC).isoformat()
-                _write_ended(home, now)
-                ended_at = _read_ended(home) or now
+                ended_at = _record_ended(home)
     return {"ended_at": ended_at}
 
 
@@ -469,35 +474,31 @@ def dispatch(call: dict[str, Any]) -> int:
     request = call["request"]
     home = Path(call["root"]).expanduser() / request.get("session", "")
     action = request["action"]
-    if action == "logs":
-        print(json.dumps(handle_logs(home, request["producer"], request.get("attempt"))))
-        return 0
-    if action == "started":
-        print(json.dumps({"started": (home / "pid").exists()}))
-        return 0
-    if action == "claimed":
-        print(json.dumps({"claimed": (home / "boot-claim").exists() or (home / "pid").exists()}))
-        return 0
-    if action == "add":
-        print(json.dumps(handle_add(home, request)))
-        return 0
-    if action == "observe":
-        print(json.dumps(handle_observe(home)))
-        return 0
-    if action == "stop":
-        print(json.dumps(handle_stop(home, request["attempt"])))
-        return 0
-    if action == "finish":
-        print(json.dumps(handle_finish(home)))
-        return 0
-    if action == "ended":
-        print(json.dumps({"ended_at": _read_ended(home)}))
-        return 0
-    if action == "end":
-        print(json.dumps(handle_end(home)))
-        return 0
     if action == "start":
         return _start(call, home)
+    reply: dict[str, Any] | None = None
+    match action:
+        case "logs":
+            reply = handle_logs(home, request["producer"], request.get("attempt"))
+        case "started":
+            reply = {"started": (home / "pid").exists()}
+        case "claimed":
+            reply = {"claimed": (home / "boot-claim").exists() or (home / "pid").exists()}
+        case "add":
+            reply = handle_add(home, request)
+        case "observe":
+            reply = handle_observe(home)
+        case "stop":
+            reply = handle_stop(home, request["attempt"])
+        case "finish":
+            reply = handle_finish(home)
+        case "ended":
+            reply = {"ended_at": _read_ended(home)}
+        case "end":
+            reply = handle_end(home)
+    if reply is not None:
+        print(json.dumps(reply))
+        return 0
     os.environ.pop("ETUDE_LOG_PATH", None)
     os.environ["ETUDE_STARTUP_DEADLINE"] = call.get("startup_deadline") or ""
     digest = call.pop("digest", None)
