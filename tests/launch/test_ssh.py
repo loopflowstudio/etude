@@ -23,7 +23,7 @@ from etude.launch.aws import Keys
 from etude.launch.executor import Executor, local
 from etude.launch.openssh import ssh_command
 from etude.launch.provisioner.machines import Allocation, OwnedMachine, Refused
-from etude.launch.records import Machine, Pool
+from etude.launch.records import BootstrapLinks, Machine, Pool
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import AttemptRecord, Finished, Packet
@@ -932,3 +932,91 @@ def test_ssh_command_reprobes_when_home_or_ssh_config_changes(
         "true",
     ]
     assert len(probes.read_text().splitlines()) == 3
+
+
+def test_refusing_owned_host_cools_down_and_yields_to_healthy_sibling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    full_root = tmp_path / "full"
+    full_root.mkdir()
+    full_root.chmod(0o500)
+    healthy_root = tmp_path / "healthy"
+    full_ssh = CountedSSH("full-host", str(full_root))
+    healthy_ssh = CountedSSH("healthy-host", str(healthy_root))
+    services = {
+        "full-host": Executor(OwnedMachine("full-host"), SSHStart(full_ssh), SSHJournal(full_ssh)),
+        "healthy-host": Executor(
+            OwnedMachine("healthy-host"), SSHStart(healthy_ssh), SSHJournal(healthy_ssh)
+        ),
+    }
+    clock = FakeClock()
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)
+
+    store = open_database(tmp_path / "state.db")
+    scheduler = Scheduler(
+        store,
+        {"ssh": lambda held: services[held.name]},
+        clock=clock,
+        sleep=sleep,
+    )
+    scheduler.add_pool(Pool(name="bench"))
+    scheduler.add_machine("full-host", "full-host", pool="bench")
+    try:
+        # Part 1: lone refusing owned host retries only after 60 s and lets wait back off.
+        (run,) = scheduler.queue(_echo("retry"), "bench")
+        (second,) = scheduler.queue(_echo("waiting"), "bench")
+        scheduler.tick()
+        assert full_ssh.asks == {"start": 1}
+        status = scheduler.read(run)
+        assert status.phase == "queued"
+        assert status.reason is not None and status.reason.startswith("machine refused (full-host):")
+        assert any(
+            d.operation == "machine create" and "machine refused" in d.message
+            for d in scheduler.diagnostics(run=run)
+        )
+        # During the 60 s cooldown, ticks do not start again and _trouble names the refused host.
+        clock.advance(59)
+        scheduler.tick()
+        assert full_ssh.asks == {"start": 1}
+        waiting_status = scheduler.read(second)
+        assert waiting_status.reason is not None and "machine refused (full-host):" in waiting_status.reason
+
+        # A steady wait over the remaining cooldown backs off instead of spinning at 1 s.
+        clock.advance(1)  # 60 s elapsed: next tick retries once, then enters a fresh 60 s cooldown
+        with pytest.raises(TimeoutError):
+            scheduler.wait(run, timeout=30)
+        assert full_ssh.asks == {"start": 2}
+        assert sleeps[:4] == [1.0, 2.0, 4.0, 8.0]
+
+        # Part 2: adding a healthy sibling lets the next tick place on it immediately.
+        scheduler.add_machine("healthy-host", "healthy-host", pool="bench")
+        # Stub healthy start so the test counts starts cleanly without running a full uv install.
+        started: list[str] = []
+
+        def fake_start(
+            self: SSHStart,
+            allocation: Allocation,
+            packet: Packet,
+            bootstrap: BootstrapLinks | None,
+        ) -> None:
+            if self.ssh is healthy_ssh:
+                started.append(allocation.id)
+                home = healthy_root / allocation.id
+                home.mkdir(parents=True, exist_ok=True)
+                (home / "boot-claim").write_text(str(os.getpid()))
+                return
+            real_start(self, allocation, packet, bootstrap)
+
+        real_start = SSHStart.start
+        monkeypatch.setattr(SSHStart, "start", fake_start)
+
+        scheduler.tick()
+        assert full_ssh.asks == {"start": 2}
+        assert len(started) == 1
+        assert scheduler.read(run).machine == "healthy-host"
+    finally:
+        full_root.chmod(0o700)

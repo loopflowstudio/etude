@@ -266,7 +266,13 @@ def _id() -> str:
     return uuid4().hex[:12]
 
 
-def _refused(session: Session) -> str:
+def _refused(session: Session, *, owned: bool = False) -> str:
+    if owned:
+        return (
+            f"machine refused ({session.machine}): {session.refusal}"
+            if session.refusal is not None
+            else f"machine refused ({session.machine})"
+        )
     return (
         f"provider refused: {session.refusal}"
         if session.refusal is not None
@@ -1018,7 +1024,7 @@ class Scheduler:
                                     break  # keep confirmed placements; later runs stay queued
                                 reason = "create reply unknown"
                                 if session.refused_at is not None:
-                                    reason = _refused(session)
+                                    reason = _refused(session, owned=rented is None)
                                 raise LauncherError(
                                     f"cannot launch on {placement.supply!r}: {reason};"
                                     " etude queue would wait"
@@ -1560,7 +1566,7 @@ class Scheduler:
             if superseded:
                 reason = "explicit resume"
             elif refused:
-                reason = _refused(session)
+                reason = _refused(session, owned=rental is None)
             else:
                 reason = f"retrying after {last.cause or last.outcome}"
             return seen.model_copy(update={"reason": reason})
@@ -1727,7 +1733,10 @@ class Scheduler:
                 session = _new_session(_id(), supply, owned, now)
                 rented, rental = None, None
             else:
-                refused = self._store.recent_refusal(supply.name, now - timedelta(minutes=15))
+                recent = self._store.recent_refusals(
+                    supply.name, now - timedelta(minutes=15), limit=1
+                )
+                refused = recent[0] if recent else None
                 if refused is not None and refused.refused_at is not None:
                     # Post-assign ceiling refusals allocate and tear down a real VM; back off longer.
                     pause = (
@@ -1797,21 +1806,33 @@ class Scheduler:
     def _free_owned(
         self, pool: Pool, now: datetime, *, excluded: set[str] | None = None
     ) -> Machine | None:
-        """A machine of the pool with no session or unfinished run, and not expired.
+        """A machine of the pool with no session or unfinished run, not expired or recently refused.
 
         Its cost is already committed, so it never limits placement.
         """
         busy = {s.machine for s in self._store.unsettled_sessions() if s.supply == pool.name}
         busy |= excluded or set()
+        refused: dict[str, Session] = {}
+        for session in self._store.recent_refusals(pool.name, now - timedelta(seconds=60)):
+            refused.setdefault(session.machine, session)
+        blocked: Session | None = None
         for machine in self._store.machines(pool.name):
             if (
-                machine.name not in busy
-                and not machine.expired(now)
-                and not self._store.machine_busy(machine.name)
+                machine.name in busy
+                or machine.expired(now)
+                or self._store.machine_busy(machine.name)
             ):
-                self._trouble.pop(pool.name, None)
-                return machine
-        self._trouble[pool.name] = "no free machine"
+                continue
+            if machine.name in refused:
+                candidate = refused[machine.name]
+                if blocked is None or (candidate.refused_at or now) > (blocked.refused_at or now):
+                    blocked = candidate
+                continue
+            self._trouble.pop(pool.name, None)
+            return machine
+        self._trouble[pool.name] = (
+            _refused(blocked, owned=True) if blocked is not None else "no free machine"
+        )
         return None
 
     def _offer(self, ondemand: OnDemand) -> Offer:
@@ -2044,8 +2065,14 @@ class Scheduler:
                     packet.model_copy(update={"kept": True}) if idle else packet
                 )
         except Refused as error:
+            owned = self._store.rental_for(session) is None
             self._diagnose(
-                "machine create", "provider refused; no machine acquired", error, session=session.id
+                "machine create",
+                "machine refused; no session started"
+                if owned
+                else "provider refused; no machine acquired",
+                error,
+                session=session.id,
             )
             self._store.record_refusal(session, now, sanitize(str(error)) or "no reason given")
             for attempt in self._store.attempts(session=session.id):

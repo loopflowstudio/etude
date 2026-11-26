@@ -865,7 +865,8 @@ the reason from its latest attempt's session, never from diagnostics, so it
 survives scheduler restarts and the retry pause. Queued work does not ask that
 on-demand again within 60 seconds of a provider's refusal; an explicit `launch`
 is not paused, and releasing a claim that never reached the provider pauses
-nothing. Attempts ending as `capacity_refused` remain in the history, with their
+nothing. An owned pool skips a machine for 60 seconds after it refuses a start,
+allowing healthy machines in the pool to take the work. Attempts ending as `capacity_refused` remain in the history, with their
 original numbers, but do not count toward `max_attempts` or the status attempt
 count. Scheduling, status and explicit resume use that same budget rule.
 Timeouts, no reply, 408, 5xx and unreadable or mismatched replies stay unknown.

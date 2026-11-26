@@ -1200,14 +1200,19 @@ class Database:
             )
         )
 
-    def recent_refusal(self, supply: str, since: datetime) -> Session | None:
-        """The newest refusal in this supply's retry pause, across scheduler starts."""
-        row = self._db.execute(
-            f"""{_SESSIONS} WHERE w.refusal IS NOT NULL AND w.refused_at > ? AND m.ondemand = ?
-                ORDER BY w.refused_at DESC LIMIT 1""",
-            (since.isoformat(), supply),
-        ).fetchone()
-        return None if row is None else _session_from_row(row)
+    def recent_refusals(
+        self, supply: str, since: datetime, *, limit: int | None = None
+    ) -> tuple[Session, ...]:
+        """Refusals of this pool or on-demand since `since`, newest first."""
+        sql = (
+            f"{_SESSIONS} WHERE w.refusal IS NOT NULL AND w.refused_at > ? "
+            "AND (m.pool = ? OR m.ondemand = ?) ORDER BY w.refused_at DESC"
+        )
+        params: tuple[Fact, ...] = (since.isoformat(), supply, supply)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params += (limit,)
+        return tuple(_session_from_row(row) for row in self._db.execute(sql, params))
 
     def record_refusal(self, session: Session, at: datetime, reason: str | None) -> None:
         self._change(

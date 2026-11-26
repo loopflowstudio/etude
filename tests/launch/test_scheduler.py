@@ -307,8 +307,8 @@ def test_empty_refusal_records_a_reason_for_status_and_admission(tmp_path: Path)
             b.scheduler.launch(job(), rent="l4")
     restarted = Scheduler(b.store, {}, clock=b.clock)
     assert str(restarted.read(one)) == "queued (provider refused: no reason given), $0.00"
-    refused = b.store.recent_refusal("l4", b.clock() - timedelta(seconds=60))
-    assert refused is not None and refused.refusal == "no reason given"
+    (refused,) = b.store.recent_refusals("l4", b.clock() - timedelta(seconds=60), limit=1)
+    assert refused.refusal == "no reason given"
 
 
 @pytest.mark.parametrize("spot", [True, False])

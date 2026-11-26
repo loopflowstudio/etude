@@ -524,5 +524,5 @@ def test_refusal_lookup_upgrade_from_the_preceding_schema_preserves_facts(
     assert store.finishing_sessions() == ()
     assert store.session("old-refusal").refusal is None
     assert store.session("old-refusal").refused_at is not None
-    assert store.recent_refusal("missing", datetime.now(UTC)) is None
+    assert store.recent_refusals("missing", datetime.now(UTC), limit=1) == ()
     store.close()

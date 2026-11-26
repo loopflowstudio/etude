@@ -151,12 +151,12 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
         assert str(restarted.read(run)) == "queued (provider refused: no capacity), $0.00"
         status = counting.snapshot()
     with counting.record():
-        refused = b.store.recent_refusal("l4", b.clock() - timedelta(seconds=60))
+        (refused,) = b.store.recent_refusals("l4", b.clock() - timedelta(seconds=60), limit=1)
         pause = counting.snapshot()
     with counting.record():
         assert [record.id for record in b.store.waiting("l4")] == [run]
         waiting = counting.snapshot()
-    assert refused is not None and refused.refusal == "no capacity"
+    assert refused.refusal == "no capacity"
     assert status == Counts(database=6)
     assert pause == Counts(database=1)
     assert waiting == Counts(database=1)
@@ -173,9 +173,10 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
     assert b.scheduler.attempts(run)[-1].number == history + 1
     assert b.scheduler.read(run).attempts == 1
     since = b.clock() - timedelta(seconds=60)
-    plan = query_plan(b.store, lambda: b.store.recent_refusal("l4", since))
-    assert any("sessions_refused" in step for step in plan), plan
-    assert not any("SCAN" in step for step in plan), plan
+    for supply, limit in (("l4", 1), ("history", None)):
+        plan = query_plan(b.store, lambda s=supply, n=limit: b.store.recent_refusals(s, since, limit=n))
+        assert any("sessions_refused" in step for step in plan), plan
+        assert not any("SCAN" in step for step in plan), plan
     plan = query_plan(b.store, lambda: b.store.waiting("l4"))
     assert sum("SEARCH a USING INDEX attempts_run" in step for step in plan) == 2, plan
     assert not any("SCAN a" in step or "SCAN r" in step for step in plan), plan

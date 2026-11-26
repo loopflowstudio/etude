@@ -74,8 +74,10 @@ host directly: an install or worker already running there is recovered and
 tracked without starting a second copy, while an unclaimed session is fenced
 and freed at once so queued work can use the machine even with no startup
 cutoff. If claiming the session fails on the host (for example, on a full
-disk), the host replies with a refusal and Etude settles the session as refused
-immediately in that SSH call without leaving the machine `stopping`.
+disk), the host replies with a refusal, Etude settles the session as refused
+immediately in that SSH call without leaving the machine `stopping`, and skips
+that machine for 60 seconds so healthy machines in the same pool can take the
+work.
 Cancelling a run while its owned host is still setting up (installing,
 or fetching and restoring inputs from storage) stops that setup and frees the
 host once stopped, even if a full disk prevents writing the end marker. A
