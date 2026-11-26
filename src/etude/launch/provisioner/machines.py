@@ -35,10 +35,6 @@ def check_creation() -> None:
         check()
 
 
-class Refused(Exception):
-    """The provider definitely supplied no machine; other errors mean unknown."""
-
-
 class Safeguards(Record):
     reservation_hours: int = 0  # round fallback-timer budget to this many hours
     lifetime: bool = False

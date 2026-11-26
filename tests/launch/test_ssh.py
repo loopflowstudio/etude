@@ -27,9 +27,10 @@ from etude.cli import main
 from etude.jobs import continue_from
 from etude.launch import ssh_boot
 from etude.launch.aws import Keys
+from etude.launch.errors import Refused
 from etude.launch.executor import Executor, local
 from etude.launch.openssh import ssh_command
-from etude.launch.provisioner.machines import Allocation, OwnedMachine, Refused
+from etude.launch.provisioner.machines import Allocation, OwnedMachine
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import BootstrapLinks, Machine, Pool, RunAttempt, Session
 from etude.launch.records import Storage as Place
@@ -1793,3 +1794,358 @@ def test_stdlib_ssh_observe_stop_and_cancel_on_full_disk_upgraded_host(
         kept_home.chmod(0o700)
     assert all(code == 0 for _, code in ssh_codes), ssh_codes
     assert not (etude_home / "programs").exists()
+
+
+def test_stdlib_ssh_calls_do_not_build_program_archive(
+    tmp_path: Path, exited_pid: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    builds = 0
+    real_archive = program_archive
+
+    def counted_archive() -> bytes:
+        nonlocal builds
+        builds += 1
+        return real_archive()
+
+    monkeypatch.setattr("etude.launch.ssh.program_archive", counted_archive)
+    root = tmp_path / "remote"
+    home = root / "s1"
+    home.mkdir(parents=True)
+    (home / "pid").write_text(str(exited_pid))
+    ssh = SSH("bench", str(root))
+    journal = SSHJournal(ssh)
+    work = Work(
+        attempt="a1",
+        run="r1",
+        command="true",
+        limit_seconds=60,
+        limit_kind="out_of_time",
+        seed=None,
+        until=None,
+        config=None,
+        repo=None,
+        commit=None,
+    )
+
+    assert journal.started("s1") is True
+    assert journal.claimed("s1") is True
+    assert journal.observe("s1").alive is False
+    journal.add("s1", work, finish=False)
+    journal.stop("s1", "a1")
+    assert journal.finish("s1") is None
+    assert journal.ended("s1") is None
+    assert journal.logs("s1", producer="worker").received is False
+    assert journal.end("s1") is not None
+    assert builds == 0
+    assert ssh._archive is None
+
+    # A `.venv` action builds the program archive lazily and caches it.
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "etude-home"))
+    assert ssh.call(HeldRequest(run="missing", key="checkpoints/missing.pt")).missing is not None
+    assert builds == 1
+
+
+def test_almost_full_disk_1slot_ssh_launch_settles_and_frees_machine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Part 1: ssh_boot.handle_add turns ENOSPC during `sources/` write into structured refusal
+    # and leaves no `.partial` file behind.
+    unit_home = tmp_path / "unit" / "s_enospc"
+    unit_home.mkdir(parents=True)
+    real_write_bytes = ssh_boot._write_bytes
+
+    def fail_sources_write(path: Path, data: bytes) -> None:
+        if "sources" in path.parts:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real_write_bytes(path, data)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ssh_boot, "_write_bytes", fail_sources_write)
+        reply = ssh_boot.handle_add(
+            unit_home,
+            {
+                "work": {"attempt": "a1", "run": "r1"},
+                "files": {"sources/abc.tar": base64.b64encode(b"tarbytes").decode()},
+                "finish": True,
+            },
+        )
+    assert "refused" in reply and "No space left on device" in reply["refused"]
+    assert not (unit_home / "work" / "a1.json").exists()
+    assert not list(unit_home.rglob("*.partial"))
+
+    # Part 2: End-to-end 1-slot SSH launch where `start` succeeds (`boot-claim` written)
+    # and `add` hits ENOSPC on `sources/` write -> `_observe` ends the unstarted session,
+    # settles the attempt, and frees the machine instead of retrying `_hand` forever.
+    root = tmp_path / "remote"
+    ssh = SSH("bench", str(root))
+    service = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
+    store = open_database(tmp_path / "state.db")
+    scheduler = Scheduler(store, {"ssh": lambda held: service})
+    scheduler.add_pool(Pool(name="bench"))
+    scheduler.add_machine("bench", "bench", pool="bench")
+
+    boot_pid = _spawn_detached_sleep()
+    actions: list[str] = []
+    real_run = subprocess.run
+
+    def fake_enospc_ssh(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        cmd = args[0] if args else kwargs.get("args", ())
+        if isinstance(cmd, list) and cmd and cmd[0] == "ssh" and "-G" not in cmd:
+            payload = json.loads(kwargs["input"])
+            request = payload["request"]
+            action = request["action"]
+            actions.append(action)
+            home = root / request.get("session", "")
+            if action == "start":
+                # Simulate almost-full disk: small 5-byte `boot-claim` succeeds, boot stays alive.
+                home.mkdir(parents=True, exist_ok=True)
+                (home / "boot-claim").write_text(str(boot_pid))
+                return subprocess.CompletedProcess(cmd, 0, b"{}", b"")
+            if action == "add":
+                # Simulate ENOSPC when writing `sources/` during `handle_add`.
+                with monkeypatch.context() as patch:
+                    patch.setattr(ssh_boot, "_write_bytes", fail_sources_write)
+                    res = ssh_boot.handle_add(
+                        home,
+                        {
+                            **request,
+                            "files": {"sources/commit.tar": base64.b64encode(b"payload").decode()},
+                        },
+                    )
+                return subprocess.CompletedProcess(cmd, 0, json.dumps(res).encode(), b"")
+        return real_run(*args, **kwargs)
+
+    try:
+        monkeypatch.setattr(subprocess, "run", fake_enospc_ssh)
+        (run,) = scheduler.launch(Job(command="true", max_hours=1, max_attempts=1), pool="bench")
+        session_id = scheduler.attempts(run)[0].session
+        assert actions == ["start", "add"]
+        assert store.session(session_id).ended_at is None
+
+        # Next tick observes the unstarted session, retries `add`, gets `Refused`, ends the session.
+        scheduler.tick()
+        status = scheduler.read(run)
+        assert status.done
+        assert status.outcome == "lost"
+        assert status.cause == "machine_lost_before_start"
+        assert store.session(session_id).ended_at is not None
+        assert store.finishing_sessions() == ()
+        with pytest.raises(ProcessLookupError):
+            os.kill(boot_pid, 0)
+    finally:
+        try:
+            os.kill(boot_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    # Part 3: On a 2-slot owned session where attempt 1 is already started, `Refused` on attempt 2's
+    # delivery leaves attempt 1 running; once attempt 1 finishes, the next tick ends the session.
+    store2 = open_database(tmp_path / "state2.db")
+    clock = FakeClock()
+    root2 = tmp_path / "remote2"
+    ssh2 = SSH("multi", str(root2))
+    worker_pid = _spawn_detached_sleep()
+    multi_home = root2 / "s_multi"
+    attempt1_dir = multi_home / "attempts" / "a1"
+    attempt1_dir.mkdir(parents=True)
+    (multi_home / "pid").write_text(str(worker_pid))
+    (attempt1_dir / "claim").write_text(clock().isoformat())
+
+    service2 = Executor(OwnedMachine("multi"), SSHStart(ssh2), SSHJournal(ssh2))
+    scheduler2 = Scheduler(store2, {"ssh": lambda held: service2}, clock=clock)
+    scheduler2.add_pool(Pool(name="lab", slots=2))
+    scheduler2.add_machine("multi", "multi", pool="lab")
+    r1, r2 = scheduler2.queue(Job(command="true", max_hours=1, max_attempts=1).runs(1, 2), "lab")
+    now = clock()
+    s_multi = Session(
+        id="s_multi",
+        supply="lab",
+        machine="multi",
+        planned_at=now,
+        claimed_at=now,
+        provider_id="s_multi",
+        started_at=now,
+        refused_at=None,
+        ended_at=None,
+        version=1,
+    )
+    a1 = RunAttempt(
+        id="a1",
+        run=r1,
+        session="s_multi",
+        machine="multi",
+        number=1,
+        position=0,
+        limit_seconds=3600,
+        limit_kind="out_of_time",
+        started_at=now,
+        finished_at=None,
+        outcome=None,
+        cause=None,
+        clocks={},
+        outputs=(),
+        exit_code=None,
+        version=1,
+        planned_at=now,
+    )
+    a2 = RunAttempt(
+        id="a2",
+        run=r2,
+        session="s_multi",
+        machine="multi",
+        number=1,
+        position=1,
+        limit_seconds=3600,
+        limit_kind="out_of_time",
+        started_at=None,
+        finished_at=None,
+        outcome=None,
+        cause=None,
+        clocks={},
+        outputs=(),
+        exit_code=None,
+        version=1,
+        planned_at=now,
+        added=True,
+    )
+    with store2.lock("lab", clock):
+        store2.plan(s_multi, (a1, a2))
+        store2.claim(s_multi, now)
+        s_multi = store2.session("s_multi")
+        store2.record_provider_id(s_multi, "s_multi")
+        s_multi = store2.session("s_multi")
+        store2.record_started(s_multi, now)
+
+    try:
+        monkeypatch.setattr(subprocess, "run", real_run)
+        multi_home.chmod(0o500)
+        scheduler2.tick()
+        # Attempt 1 stays running; session is NOT killed while attempt 1 is active.
+        assert store2.session("s_multi").ended_at is None
+        os.kill(worker_pid, 0)
+        assert scheduler2.read(r1).phase == "running"
+
+        # Once attempt 1 finishes, attempt 2's delivery refusal ends the session cleanly.
+        multi_home.chmod(0o700)
+        (attempt1_dir / "finished.json").write_text(
+            Finished(
+                finished_at=now,
+                outcome="succeeded",
+                cause=None,
+                clocks={},
+                outputs=(),
+                exit_code=0,
+            ).model_dump_json()
+        )
+        multi_home.chmod(0o500)
+        scheduler2.tick()  # records r1 succeeded
+        assert scheduler2.read(r1).outcome == "succeeded"
+        scheduler2.tick()  # only unstarted a2 remains open -> refusal ends session
+        assert store2.session("s_multi").ended_at is not None
+        assert scheduler2.read(r2).outcome == "lost"
+        assert scheduler2.read(r2).cause == "machine_lost_before_start"
+        with pytest.raises(ProcessLookupError):
+            os.kill(worker_pid, 0)
+    finally:
+        multi_home.chmod(0o700)
+        try:
+            os.kill(worker_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_local_full_disk_cancel_settles_via_directory_journal_refused(tmp_path: Path) -> None:
+    root = tmp_path / "sessions"
+    journal = DirectoryJournal(root)
+    ro_home = root / "s_ro"
+    ro_home.mkdir(parents=True)
+    ro_home.chmod(0o500)
+    work = Work(
+        attempt="a1",
+        run="r1",
+        command="sleep 60",
+        limit_seconds=60,
+        limit_kind="out_of_time",
+        seed=None,
+        until=None,
+        config=None,
+        repo=None,
+        commit=None,
+    )
+    try:
+        with pytest.raises(Refused):
+            journal.stop("s_ro", "a1")
+        with pytest.raises(Refused):
+            journal.add("s_ro", work)
+    finally:
+        ro_home.chmod(0o700)
+
+    # End-to-end local pool cancel on a read-only (full-disk) session settles `cancelled`
+    # instead of wedging in `stopping`.
+    store = open_database(tmp_path / "state.db")
+    clock = FakeClock()
+    scheduler = Scheduler(store, {"local": lambda held: local(root)}, clock=clock)
+    scheduler.add_pool(Pool(name="local"))
+    store.add_machine(Machine(name="local", pool="local", kind="local"))
+    (run,) = scheduler.queue(Job(command="sleep 60", max_hours=1, max_attempts=1), "local")
+    now = clock()
+    worker_pid = _spawn_detached_sleep()
+    home = root / "s_local_full"
+    attempt_dir = home / "attempts" / "a_local_full"
+    attempt_dir.mkdir(parents=True)
+    (home / "pid").write_text(str(worker_pid))
+    (attempt_dir / "claim").write_text(now.isoformat())
+
+    session = Session(
+        id="s_local_full",
+        supply="local",
+        machine="local",
+        planned_at=now,
+        claimed_at=now,
+        provider_id="s_local_full",
+        started_at=now,
+        refused_at=None,
+        ended_at=None,
+        version=1,
+    )
+    attempt = RunAttempt(
+        id="a_local_full",
+        run=run,
+        session=session.id,
+        machine="local",
+        number=1,
+        position=0,
+        limit_seconds=3600,
+        limit_kind="out_of_time",
+        started_at=now,
+        finished_at=None,
+        outcome=None,
+        cause=None,
+        clocks={},
+        outputs=(),
+        exit_code=None,
+        version=1,
+        planned_at=now,
+    )
+    with store.lock("local", clock):
+        store.plan(session, (attempt,))
+        store.claim(session, now)
+        session = store.session(session.id)
+        store.record_provider_id(session, session.id)
+        session = store.session(session.id)
+        store.record_started(session, now)
+
+    try:
+        home.chmod(0o500)
+        status = scheduler.cancel(run)
+        assert status.outcome == "cancelled"
+        assert store.session("s_local_full").ended_at is not None
+        assert store.finishing_sessions() == ()
+        with pytest.raises(ProcessLookupError):
+            os.kill(worker_pid, 0)
+    finally:
+        home.chmod(0o700)
+        try:
+            os.kill(worker_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

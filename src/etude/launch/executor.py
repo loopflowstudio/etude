@@ -12,13 +12,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
+from etude.launch.errors import Refused
 from etude.launch.provisioner.machines import (
     Allocation,
     Bill,
     MachineRequest,
     Machines,
     OwnedMachine,
-    Refused,
     Safeguards,
     check_creation,
 )

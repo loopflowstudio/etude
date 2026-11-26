@@ -16,13 +16,12 @@ from decimal import Decimal
 from uuid import UUID
 
 from etude.deadline import limit_time, remaining
-from etude.launch.errors import ProviderUnavailable
+from etude.launch.errors import ProviderUnavailable, Refused
 from etude.launch.openssh import ssh_command
 from etude.launch.provisioner.machines import (
     Allocation,
     Bill,
     MachineRequest,
-    Refused,
     Safeguards,
     check_creation,
 )

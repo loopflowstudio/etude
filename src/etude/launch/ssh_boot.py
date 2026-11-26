@@ -175,17 +175,20 @@ def handle_logs(home: Path, producer: str, attempt: str | None) -> dict[str, Any
 
 
 def handle_add(home: Path, request: dict[str, Any]) -> dict[str, Any]:
-    added = home / "work"
-    work = request["work"]
-    target = added / f"{work['attempt']}.json"
-    if not target.exists():
-        for name, body in request.get("files", {}).items():
-            dest = home / name
-            if not dest.exists():
-                _write_bytes(dest, base64.b64decode(body))
-        _write_bytes(target, json.dumps(work).encode())
-    if request.get("finish"):
-        (home / "finish").touch()
+    try:
+        added = home / "work"
+        work = request["work"]
+        target = added / f"{work['attempt']}.json"
+        if not target.exists():
+            for name, body in request.get("files", {}).items():
+                dest = home / name
+                if not dest.exists():
+                    _write_bytes(dest, base64.b64decode(body))
+            _write_bytes(target, json.dumps(work).encode())
+        if request.get("finish"):
+            (home / "finish").touch()
+    except OSError as error:
+        return {"refused": f"{type(error).__name__}: {error}"}
     return {}
 
 
@@ -281,13 +284,21 @@ def handle_end(home: Path) -> dict[str, Any]:
                 ended_at = _read_ended(home) or now
         else:
             # The cancel stops an install; a live boot or courier stops at once.
+            signalled: list[int] = []
             for name in ("boot-claim", "courier-pid"):
                 if (proc := _recorded(home, name)) is not None:
                     try:
                         os.kill(proc, signal.SIGTERM)
+                        signalled.append(proc)
                     except (ProcessLookupError, PermissionError):
                         pass
-            if _host_alive(home) is False and not (home / "pid").exists():
+            if signalled:
+                for _ in range(100):
+                    if _read_ended(home) is not None or not any(_pid_alive(p) for p in signalled):
+                        break
+                    time.sleep(0.1)
+            ended_at = _read_ended(home)
+            if ended_at is None and _host_alive(home) is False and not (home / "pid").exists():
                 # Nothing runs here, and the cancel fences any start still in flight.
                 now = datetime.now(UTC).isoformat()
                 _write_ended(home, now)

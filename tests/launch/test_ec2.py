@@ -16,7 +16,8 @@ import pytest
 from etude.cli import main
 from etude.launch.aws import Keys
 from etude.launch.database import upgrade
-from etude.launch.provisioner.machines import MachineRequest, Refused
+from etude.launch.errors import Refused
+from etude.launch.provisioner.machines import MachineRequest
 from etude.launch.provisioner.providers.ec2.api import EC2API
 from etude.launch.provisioner.providers.ec2.machines import EC2Machines
 from etude.launch.provisioner.providers.host import fetch_boot, user_data

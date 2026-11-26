@@ -15,8 +15,7 @@ from uuid import UUID
 
 from pydantic import Field
 
-from etude.launch.errors import ProviderUnavailable
-from etude.launch.provisioner.machines import Refused
+from etude.launch.errors import ProviderUnavailable, Refused
 from etude.launch.provisioner.providers.colab.http import (
     XSSI_PREFIX,
     ColabCredentials,

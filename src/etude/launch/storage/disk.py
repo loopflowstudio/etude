@@ -14,7 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from etude.carriage import put_back, recorded_file, restore_set
-from etude.errors import LauncherError
+from etude.errors import LauncherError, sanitize
+from etude.launch.errors import Refused
 from etude.launch.logs import snapshot_stream
 from etude.launch.records import BootstrapLinks, LogStream, Output
 from etude.launch.schemas import Finished, Observation, Packet, Progress, Work
@@ -54,12 +55,17 @@ class DirectoryJournal:
     def add(self, session_id: str, work: Work, *, finish: bool = False) -> None:
         home = self._root / session_id
         added = home / "work"
-        added.mkdir(exist_ok=True)
-        if not (added / f"{work.attempt}.json").exists():
-            self._place_source(home, work)
-            write(added / f"{work.attempt}.json", work.model_dump_json())
-        if finish and home.is_dir():
-            (home / "finish").touch()
+        try:
+            added.mkdir(exist_ok=True)
+            if not (added / f"{work.attempt}.json").exists():
+                self._place_source(home, work)
+                write(added / f"{work.attempt}.json", work.model_dump_json())
+            if finish and home.is_dir():
+                (home / "finish").touch()
+        except OSError as error:
+            raise Refused(
+                sanitize(f"{type(error).__name__}: {error}") or "host refused work delivery"
+            ) from error
 
     @staticmethod
     def _place_source(home: Path, work: Work) -> None:
@@ -69,8 +75,15 @@ class DirectoryJournal:
         if not archive.exists():
             archive.parent.mkdir(exist_ok=True)
             partial = archive.with_name(archive.name + ".partial")
-            partial.write_bytes(source_archive(work.repo, work.commit))
-            partial.replace(archive)
+            try:
+                partial.write_bytes(source_archive(work.repo, work.commit))
+                partial.replace(archive)
+            except OSError:
+                try:
+                    partial.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise
 
     def _folder(self, run: str) -> Path:
         """The run's tracked folder on this host, shared by its sessions (`ETUDE_TRACK_DIR`)."""
@@ -109,8 +122,13 @@ class DirectoryJournal:
 
     def stop(self, session_id: str, attempt: str) -> None:
         stop = self._root / session_id / "stop"
-        stop.mkdir(exist_ok=True)
-        (stop / attempt).touch()
+        try:
+            stop.mkdir(exist_ok=True)
+            (stop / attempt).touch()
+        except OSError as error:
+            raise Refused(
+                sanitize(f"{type(error).__name__}: {error}") or "host refused stop"
+            ) from error
 
     def finish(self, session_id: str) -> datetime | None:
         home = self._root / session_id

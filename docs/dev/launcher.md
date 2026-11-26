@@ -898,16 +898,17 @@ prior release, counts as booting only while younger than 60 seconds); if
 neither exists, it is fenced (`cancel-start` and `ended`) and settled at once
 as `machine_lost_before_start` even when `startup_seconds` is `None`; if the
 host is unreachable, it waits safely. Failed SSH calls retain the last line of
-remote stderr through `etude.errors`' sanitizer. `SSH.call` ships the program
-archive only on `start` and when the remote bootstrap reports it missing (exit
-97). Cancelling all open attempts while an owned host is still booting also
+remote stderr through `etude.errors`' sanitizer. `SSH.call` builds the program
+archive only for `.venv` actions (`start`, `fetch`, `held`, `hold`), never for
+stdlib actions, and ships it only on `start` or when the remote bootstrap
+reports it missing (exit 97). Cancelling all open attempts while an owned host is still booting also
 writes `cancel-start`. Installation and courier setup check it via
 `startup_timeout`, including immediately after the start receipt upload and
 before spawning the worker. `boot-claim` names the boot process until it hands
 off to a worker (`pid`) or, on a bucket-backed host, a courier (`courier-pid`).
 SSH `started`, `claimed`, `add`, `observe`, `stop`, `finish`, `logs`, `ended` and `end` run wholly in the standard-library module `ssh_boot.py` without loading or
 installing the remote client environment (`worker/remote.py` dispatches none of
-them). `observe` is read-only on every owned host, sending raw `attempts/*/claim`, `finished.json`, `etude-result.json` and `usage.jsonl` text back for client validation so a corrupt job file never turns into `Unreachable` and a finished job on a full-disk or upgraded pure-SSH host still settles `succeeded`. `stop` touches `stop/<attempt>` and replies with a structured `refused` error on local `OSError` (such as full disk), which `SSHJournal.stop` raises as `Refused`; `_observe` escalates to `_end_session` only on `Refused` from `stop` when all open attempts on an owned host are cancelled, while transport or storage errors during `observe` remain uncertain without touching `finish_requested_at` or signalling the host. Before `pid` exists, `end` signals any
+them). `observe` is read-only on every owned host, sending raw `attempts/*/claim`, `finished.json`, `etude-result.json` and `usage.jsonl` text back for client validation so a corrupt job file never turns into `Unreachable` and a finished job on a full-disk or upgraded pure-SSH host still settles `succeeded`. `add` and `stop` reply with a structured `refused` error on local `OSError` (such as full disk), which `SSHJournal.add`/`stop` (and local `DirectoryJournal.add`/`stop`) raise as `Refused`; `_observe` ends an owned session on `Refused` from `add` when no open attempt has started (so an almost-full-disk launch settles and frees the host) and on `Refused` from `stop` when all open attempts are cancelled, while transport or storage errors during `observe` remain uncertain without touching `finish_requested_at` or signalling the host. On pools, `_confirm_ends` retries `_end_session` directly without sending `finish` (including when `started_at` is `None`). Before `pid` exists, `end` signals any
 live `boot-claim` or `courier-pid`; once `pid` exists, it sends `SIGTERM` to
 the worker `pid` and waits up to 10 seconds for exit or `ended`, leaving any
 live `courier-pid` to `Executor.end`'s observe wait (`DirectoryJournal.end`

@@ -26,7 +26,7 @@ from etude.launch.database import launcher_file, upgrade
 from etude.launch.executor import Execution, Executor
 from etude.launch.provisioner.machines import OwnedMachine
 from etude.launch.provisioner.providers.runpod.http import PodHTTP
-from etude.launch.records import Machine, OnDemand, Pool
+from etude.launch.records import Machine, OnDemand, Pool, RunAttempt, Session
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet
 from etude.launch.ssh import SSH, SessionRequest, SSHJournal, SSHStart
@@ -48,7 +48,7 @@ def baseline(count: int) -> dict[str, Counts]:
     shared it (2026-11-06). Storage-backed active attempts read their storage
     selection and one indexed delivery timestamp (2026-11-11).
     """
-    # One indexed finishing-session read per supply settles already requested ends.
+    # One indexed finishing-session read per on-demand settles already requested ends.
     return {
         "status": Counts(database=49 * count + 1),
         "runs": Counts(database=17 * count + 1),
@@ -164,13 +164,13 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
     with counting.record():
         b.scheduler.tick()
         planning = counting.snapshot()
-    assert planning == Counts(database=48)
+    assert planning == Counts(database=47)
     assert b.service.creates == 1
     b.clock.advance(60)
     with counting.record():
         b.scheduler.tick()
         admission = counting.snapshot()
-    assert admission == Counts(provider=4, bucket=1, database=111), admission.model_dump()
+    assert admission == Counts(provider=4, bucket=1, database=110), admission.model_dump()
     assert b.scheduler.attempts(run)[-1].number == history + 1
     assert b.scheduler.read(run).attempts == 1
     since = b.clock() - timedelta(seconds=60)
@@ -421,7 +421,7 @@ def test_idle_pace_query_count_ignores_finished_run_history(
         with pytest.raises(_Stop):
             server.loop(b.scheduler)
         idle_tick = counting.snapshot()
-    assert idle_tick == Counts(database=42), idle_tick.model_dump()
+    assert idle_tick == Counts(database=41), idle_tick.model_dump()
     plan = query_plan(b.store, lambda: b.store.runs(unfinished=True))
     assert not any("SCAN a" in step for step in plan), plan
 
@@ -492,3 +492,127 @@ def test_pure_ssh_launch_rpc_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert actions == ["start", "add"]
     assert add_finishes == [True]
     assert confirmed_counts.ssh == 2
+
+
+def test_owned_pool_unconfirmed_end_retried_by_admit_without_finish_rpc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.launch.provisioner.providers.package.frontier", lambda root: b"{}")
+    b = bench(tmp_path)
+    ssh = SSH("lab-host", str(tmp_path / "remote"))
+    service = Executor(OwnedMachine("lab-host"), SSHStart(ssh), SSHJournal(ssh))
+    scheduler = Scheduler(b.store, {"ssh": lambda held: service}, clock=b.clock)
+    scheduler.add_pool(Pool(name="lab"))
+    scheduler.add_machine("lab-host", "lab-host", pool="lab")
+
+    actions: list[str] = []
+    fail_end = False
+
+    def fake_ssh(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        cmd = args[0] if args else kwargs.get("args", ())
+        if isinstance(cmd, list) and "-G" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout=b"connecttimeout none\nserveraliveinterval 0\nserveralivecountmax 3\n",
+                stderr=b"",
+            )
+        payload = json.loads(kwargs["input"])
+        action = payload["request"]["action"]
+        actions.append(action)
+        if action == "end":
+            if fail_end:
+                return subprocess.CompletedProcess(cmd, 255, b"", b"ssh: connect timed out\n")
+            reply: dict[str, object] = {"ended_at": b.clock().isoformat()}
+        elif action == "observe":
+            reply = {"observation": {"alive": False, "start_unknown": False}}
+        elif action == "logs":
+            reply = {"log": {"body": None, "closed": True}}
+        else:
+            reply = {}
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout=json.dumps(reply).encode(), stderr=b""
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_ssh)
+
+    def seed_finishing(session_id: str, attempt_id: str, *, started: bool) -> str:
+        (run_id,) = scheduler.queue(Job(command="true", max_hours=1, max_attempts=1), pool="lab")
+        now = b.clock()
+        session = Session(
+            id=session_id,
+            supply="lab",
+            machine="lab-host",
+            planned_at=now,
+            claimed_at=now,
+            provider_id=session_id,
+            started_at=now if started else None,
+            refused_at=None,
+            ended_at=None,
+            version=1,
+        )
+        attempt = RunAttempt(
+            id=attempt_id,
+            run=run_id,
+            session=session_id,
+            machine="lab-host",
+            number=1,
+            position=0,
+            limit_seconds=3600,
+            limit_kind="out_of_time",
+            started_at=now if started else None,
+            finished_at=None,
+            outcome=None,
+            cause=None,
+            clocks={},
+            outputs=(),
+            exit_code=None,
+            version=1,
+            planned_at=now,
+        )
+        with b.store.lock("lab", b.clock):
+            b.store.plan(session, (attempt,))
+            b.store.claim(session, now)
+            session = b.store.session(session_id)
+            b.store.record_provider_id(session, session_id)
+            session = b.store.session(session_id)
+            if started:
+                b.store.record_started(session, now)
+                session = b.store.session(session_id)
+            b.store.record_finish(session, now)
+        return run_id
+
+    # Case 1: unconfirmed end with started_at=None is retried directly by `_admit`
+    # (no `finish` RPC, no skip), freeing the host for the new launch.
+    old_unstarted = seed_finishing("s_unstarted", "a_unstarted", started=False)
+    actions.clear()
+    (launched,) = scheduler.launch(Job(command="true", max_hours=1, max_attempts=1), pool="lab")
+    assert "finish" not in actions
+    assert actions == ["end", "logs", "logs", "logs", "observe", "start", "add"]
+    assert b.store.session("s_unstarted").ended_at is not None
+    assert scheduler.read(old_unstarted).done
+    assert scheduler.read(launched).machine == "lab-host"
+
+    # End the launched session cleanly so Case 2 starts on a free host.
+    actions.clear()
+    b.store.confirm_ended(b.store.session(scheduler.attempts(launched)[0].session), b.clock())
+    b.store.finish(scheduler.attempts(launched)[0], b.clock(), "succeeded")
+
+    # Case 2: unconfirmed end with started_at!=None is also retried directly by `quote`
+    # without sending `finish`.
+    old_started = seed_finishing("s_started", "a_started", started=True)
+    actions.clear()
+    quoted = scheduler.quote(Job(command="true", max_hours=1, max_attempts=1).runs(1), pool="lab")
+    assert "finish" not in actions
+    assert actions == ["end", "logs", "logs", "logs", "observe"]
+    assert b.store.session("s_started").ended_at is not None
+    assert scheduler.read(old_started).done
+    assert quoted.machines[0].machine == "lab-host"
+
+    # Case 3: tick() on an unreachable finishing owned session attempts `end` once, not twice.
+    seed_finishing("s_unreach", "a_unreach", started=False)
+    actions.clear()
+    fail_end = True
+    scheduler.tick()
+    assert actions.count("end") == 1
+    assert "finish" not in actions

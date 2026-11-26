@@ -42,12 +42,11 @@ from etude.identity import resume_conflicts, run_address
 from etude.launch import source
 from etude.launch.commands import ProviderKind
 from etude.launch.database import Database
-from etude.launch.errors import LaunchError, ProviderUnavailable
+from etude.launch.errors import LaunchError, ProviderUnavailable, Refused
 from etude.launch.executor import Execution, ProviderService
 from etude.launch.logging import bounded
 from etude.launch.provisioner.machines import (
     Allocation,
-    Refused,
     Safeguards,
     creation_guard,
 )
@@ -1076,7 +1075,7 @@ class Scheduler:
                         self._create(session, self._clock())
                     elif attempt.added:
                         self._hand(session, attempt)
-                except (Stale, OSError, LauncherError, StorageUnavailable) as error:
+                except (Stale, OSError, LauncherError, StorageUnavailable, Refused) as error:
                     self._diagnose(
                         "work delivery",
                         "delivery pending",
@@ -1674,7 +1673,8 @@ class Scheduler:
                     self._store.record_finish(idle, now)
             except (OSError, LauncherError, StorageUnavailable):
                 continue  # cleanup retained its error and remains unconfirmed
-        self._confirm_ends(supply)
+        if isinstance(supply, OnDemand):
+            self._confirm_ends(supply)
         attempted: set[str] = set()
         while True:
             refused = False
@@ -1695,10 +1695,10 @@ class Scheduler:
         """Settle only shutdowns already requested; never place work or decide to end a rental."""
         for session in self._store.finishing_sessions(supply=supply.name):
             self._store.check_lock(supply.name)
-            if isinstance(supply, Pool) and session.started_at is None:
-                continue  # _observe retries the host fence without loading its client.
             try:
-                if self._service(session).finish(session.id) is not None:
+                if isinstance(supply, Pool):
+                    self._end_session(session)
+                elif self._service(session).finish(session.id) is not None:
                     self._end_session(session)
             except (OSError, LauncherError, StorageUnavailable):
                 continue  # the existing cleanup path retains uncertainty for a later pass
@@ -1759,7 +1759,16 @@ class Scheduler:
                 self._store.check_lock(supply.name)
                 waiting.remove(planned.run)
                 held = self._store.session(held.id)
-                self._hand(held, attempt)
+                try:
+                    self._hand(held, attempt)
+                except (OSError, LauncherError, StorageUnavailable, Refused) as error:
+                    self._diagnose(
+                        "work delivery",
+                        "delivery pending",
+                        error,
+                        session=held.id,
+                        attempt=attempt.id,
+                    )
         while waiting:
             if isinstance(supply, Pool):
                 owned = self._free_owned(supply, now)
@@ -2494,7 +2503,31 @@ class Scheduler:
             if attempt.outcome is None:
                 if seen.alive and attempt.added and attempt.id not in progress:
                     self._store.check_lock(session.supply)
-                    self._hand(session, attempt)
+                    try:
+                        self._hand(session, attempt)
+                    except Refused as error:
+                        if rental is None and not any(
+                            a.outcome is None and (a.started_at is not None or a.id in progress)
+                            for a in attempts
+                        ):
+                            self._diagnose(
+                                "work delivery",
+                                "host refused work delivery; ending session",
+                                error,
+                                session=session.id,
+                                attempt=attempt.id,
+                            )
+                            self._end_session(session)
+                            return
+                        self._diagnose(
+                            "work delivery",
+                            "host refused work delivery; leaving started attempts running"
+                            if rental is None
+                            else "host refused work delivery",
+                            error,
+                            session=session.id,
+                            attempt=attempt.id,
+                        )
                 try:
                     self._record(
                         session,

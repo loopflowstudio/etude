@@ -18,8 +18,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from etude.launch.database import Database, launcher_file, upgrade
+from etude.launch.errors import Refused
 from etude.launch.logs import snapshot_stream
-from etude.launch.provisioner.machines import Allocation, Bill, Refused
+from etude.launch.provisioner.machines import Allocation, Bill
 from etude.launch.records import (
     GPU,
     Image,

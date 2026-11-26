@@ -13,8 +13,7 @@ from etude.controller.declarations import read_training_jobs
 from etude.errors import LauncherError
 from etude.launch.client import launch, queue, wait
 from etude.launch.database import launcher_file, upgrade
-from etude.launch.errors import LaunchError
-from etude.launch.provisioner.machines import Refused
+from etude.launch.errors import LaunchError, Refused
 from etude.launch.records import Offer, OnDemand, Pool, Stale
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet, Work

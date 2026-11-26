@@ -22,9 +22,10 @@ from pydantic import Field
 
 from etude.deadline import remaining
 from etude.errors import LauncherError, sanitize
+from etude.launch.errors import Refused
 from etude.launch.logs import snapshot_stream
 from etude.launch.openssh import ssh_command
-from etude.launch.provisioner.machines import Allocation, Refused
+from etude.launch.provisioner.machines import Allocation
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import BootstrapLinks, LogProducer, LogStream
 from etude.launch.schemas import Finished, Observation, Packet, Progress, Work
@@ -159,7 +160,7 @@ class RemoteReply(Record):
     output: EncodedOutput | None = None
     folder: dict[str, str] | None = None
     missing: str | None = None  # why "held" found no such record or file on the host
-    refused: str | None = None  # start/stop: host refused request without starting/stopping
+    refused: str | None = None  # start/add/stop: host refused request without mutating state
 
 
 class Unreachable(LauncherError):
@@ -170,6 +171,8 @@ class Unreachable(LauncherError):
 # change the modules of an already running session.
 # Bootstrap imports only the standard library before the environment is ready.
 _MISSING = 97  # the remote exit status meaning "that program is not here yet"
+# Only these requests run in the remote `.venv` and need the program archive or digest.
+_PROGRAM_REQUESTS = (StartRequest, OutputRequest, HeldRequest, HoldRequest)
 
 
 @cache
@@ -229,10 +232,13 @@ class SSH:
             startup_deadline=startup_deadline,
             request=request,
         )
-        digest, program = self._program()
-        sent = {**call.model_dump(mode="json"), "digest": digest}
-        if start:
-            sent["program"] = program
+        sent: dict[str, object] = call.model_dump(mode="json")
+        program: str | None = None
+        if isinstance(request, _PROGRAM_REQUESTS):
+            digest, program = self._program()
+            sent["digest"] = digest
+            if start:
+                sent["program"] = program
         allowance = remaining()
         if start and startup_deadline is not None:
             startup_left = (startup_deadline - datetime.now(UTC)).total_seconds()
@@ -251,6 +257,9 @@ class SSH:
                 raise Unreachable(
                     f"SSH wait exceeded {allowance} seconds; remote outcome unconfirmed"
                 )
+            if program is None:
+                digest, program = self._program()
+                sent["digest"] = digest
             sent["program"] = program
             result = self._run(argv, sent, retry_allowance)
         if result.returncode:
@@ -348,9 +357,11 @@ class SSHJournal:
         return self.ssh.call(SessionRequest(action="finish", session=session_id)).ended_at
 
     def add(self, session_id: str, work: Work, *, finish: bool = False) -> None:
-        self.ssh.call(
+        reply = self.ssh.call(
             AddRequest(session=session_id, work=work, files=self.ssh.files(work), finish=finish)
         )
+        if reply.refused is not None:
+            raise Refused(sanitize(reply.refused) or "host refused work delivery")
 
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
         reply = self.ssh.call(HeldRequest(run=run, key=key))

@@ -15,8 +15,8 @@ import pytest
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch.database import launcher_file
+from etude.launch.errors import Refused
 from etude.launch.listing import show_machines, show_ondemands, show_runs
-from etude.launch.provisioner.machines import Refused
 from etude.launch.records import (
     GPU,
     LogStream,
