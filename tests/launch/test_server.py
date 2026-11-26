@@ -28,7 +28,7 @@ from etude.launch.client import (
 )
 from etude.launch.database import launcher_file, upgrade
 from etude.launch.records import Pool
-from etude.launch.server import PythonClient, warning
+from etude.launch.server import PythonClient, loop, warning
 from etude.spec import Job, RunRequest, Runtime, Until
 from tests.launch.counting import job_text
 from tests.launch.fake import bench
@@ -121,17 +121,24 @@ def server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]
     ssh.write_text(
         f"#!{sys.executable}\n"
         "import json, os, subprocess, sys\n"
-        "assert sys.argv[1:3] == ['--', 'server-alias']\n"
+        "args = sys.argv[1:]\n"
+        "if args and args[0] == '-G':\n"
+        "    print('connecttimeout none\\nserveraliveinterval 0\\nserveralivecountmax 3')\n"
+        "    raise SystemExit(0)\n"
+        "while len(args) >= 2 and args[0] == '-o':\n"
+        "    args = args[2:]\n"
+        "assert args[:2] == ['--', 'server-alias'], sys.argv\n"
+        "remote_cmd = args[2]\n"
         f"os.environ['ETUDE_HOME'] = {str(remote)!r}\n"
         f"os.chdir({str(remote)!r})\n"
-        "if '--server-request' in sys.argv[3]:\n"
+        "if '--server-request' in remote_cmd:\n"
         "    body = sys.stdin.buffer.read()\n"
         "    request = json.loads(body)\n"
         "    sources = request.get('submission', {}).get('sources', [])\n"
         f"    with open({str(remote / 'source-transfers')!r}, 'a') as log:\n"
         "        log.write(str(sum(len(s['body']) for s in sources)) + '\\n')\n"
-        "    raise SystemExit(subprocess.run(sys.argv[3], shell=True, input=body).returncode)\n"
-        "raise SystemExit(subprocess.call(sys.argv[3], shell=True))\n"
+        "    raise SystemExit(subprocess.run(remote_cmd, shell=True, input=body).returncode)\n"
+        "raise SystemExit(subprocess.call(remote_cmd, shell=True))\n"
     )
     ssh.chmod(0o700)
     # Nothing is installed on the stand-in server: the client sends its own code.
@@ -377,6 +384,10 @@ def test_log_deadline_includes_missing_server_installation(
         command: list[str], *, timeout: float, **options: object
     ) -> subprocess.CompletedProcess[bytes]:
         nonlocal elapsed, calls
+        if "-G" in command:
+            return subprocess.CompletedProcess(
+                command, 0, b"connecttimeout none\nserveraliveinterval 0\n", b""
+            )
         calls += 1
         duration = (1.0, install_seconds, 3.0)[calls - 1]
         elapsed += min(duration, timeout)
@@ -466,3 +477,32 @@ def test_remote_resume_keeps_one_run_and_its_previous_attempt(
     assert fetch(identity, "result", tmp_path / "resumed").read_text() == "20\n"
     assert not launcher_file(client).exists()
     assert len(_open(remote).runs(done=True)) == 1
+
+
+def test_server_loop_backs_off_while_steady_and_resets_on_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    b = bench(tmp_path)
+    sleeps: list[float] = []
+
+    class _Stop(BaseException):
+        pass
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 5:
+            # Queue a new run so the next pass sees a state change.
+            b.scheduler.queue(Job(command="true", max_hours=0.1, max_usd=Decimal(1)), rent="l4")
+        elif len(sleeps) >= 8:
+            raise _Stop
+
+    monkeypatch.setattr("etude.launch.server.time.sleep", fake_sleep)
+    with pytest.raises(_Stop):
+        loop(b.scheduler)
+    # Idle steady passes back off 1 -> 2 -> 4 -> 8 -> 10; new work resets to 1, then backs off again.
+    assert sleeps[:5] == [1.0, 2.0, 4.0, 8.0, 10.0]
+    assert sleeps[5] == 1.0
+    assert sleeps[6] == 2.0
+    assert sleeps[7] == 4.0

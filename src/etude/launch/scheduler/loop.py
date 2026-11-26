@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import subprocess
 import time
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import ExitStack
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import chain
@@ -71,6 +73,8 @@ from etude.launch.records import (
     MachineTemplate,
     Offer,
     OnDemand,
+    Outcome,
+    Phase,
     Pool,
     Provider,
     Quote,
@@ -124,6 +128,47 @@ _JOB_LOG_SECONDS = 30.0
 # A log read without a supply's `log_seconds`: one stalled bucket must not hold
 # the pass that ends every other machine at its deadline.
 _LOG_SECONDS = 30.0
+_PACE_MIN = 1.0
+_PACE_MAX = 10.0
+
+
+@dataclass(frozen=True)
+class PaceState:
+    """Scheduler-acted state compared between wait passes: no clocks or spend."""
+
+    runs: tuple[tuple[str, Phase, Outcome | None, str | None, str | None], ...]
+    finishing: tuple[str, ...]
+
+
+class Pacer:
+    """Delay between wait passes: fixed `every`, or 1 s doubling to 10 s while state is steady."""
+
+    def __init__(self, every: float | None = None) -> None:
+        if every is not None and (not math.isfinite(every) or every <= 0):
+            raise ValueError("every must be positive and finite, or None")
+        self._every = every
+        self._previous: PaceState | None = None
+        self._interval = _PACE_MIN
+
+    def delay(self, state: PaceState | None) -> float:
+        if self._every is not None:
+            return self._every
+        if self._previous is None or state != self._previous:
+            self._interval = _PACE_MIN
+        else:
+            self._interval = min(self._interval * 2, _PACE_MAX)
+        self._previous = state
+        return self._interval
+
+
+def _pace_state(statuses: Sequence[Status], ending: Sequence[Session]) -> PaceState:
+    return PaceState(
+        runs=tuple(
+            (status.run, status.phase, status.outcome, status.attempt, status.machine)
+            for status in statuses
+        ),
+        finishing=tuple(session.id for session in ending),
+    )
 
 
 def _limit_usd(job: Job) -> Decimal:
@@ -1163,19 +1208,36 @@ class Scheduler:
             if done or not self.read(r.id).done
         )
 
-    def wait(self, *runs: str, every: float = 1.0, timeout: float | None = None) -> list[Status]:
+    def pace_state(self, runs: Sequence[str] = ()) -> PaceState:
+        """Snapshot of scheduler-acted run and shutdown state for wait-loop backoff."""
+        statuses = (
+            [self.read(run) for run in runs]
+            if runs
+            else [status for r in self._store.runs() if not (status := self.read(r.id)).done]
+        )
+        return _pace_state(statuses, self._store.finishing_sessions(runs))
+
+    def wait(
+        self, *runs: str, every: float | None = None, timeout: float | None = None
+    ) -> list[Status]:
         """Work until the selected runs and their requested machine shutdowns settle.
 
         With no runs named, work until nothing launched is left unfinished. That
         is the loop to leave running so a queue keeps moving.
         """
+        pacer = Pacer(every)
         give_up = None if timeout is None else self._clock() + timedelta(seconds=timeout)
         while True:
             self.tick()
             statuses = [self.read(run) for run in runs]
-            unfinished = not all(status.done for status in statuses)
-            if not runs:
-                unfinished = bool(self.runs())
+            if runs:
+                active = statuses
+                unfinished = not all(status.done for status in statuses)
+            else:
+                active = [
+                    status for r in self._store.runs() if not (status := self.read(r.id)).done
+                ]
+                unfinished = bool(active)
             ending = self._store.finishing_sessions(runs)
             if not unfinished and not ending:
                 return statuses
@@ -1185,7 +1247,10 @@ class Scheduler:
                         "machines still finishing: " + ", ".join(s.machine for s in ending)
                     )
                 raise TimeoutError("runs still running: " + ", ".join(runs))
-            self._sleep(every)
+            delay = pacer.delay(_pace_state(active, ending) if every is None else None)
+            if give_up is not None:
+                delay = min(delay, max(0.0, (give_up - self._clock()).total_seconds()))
+            self._sleep(delay)
 
     def cancel(self, run: str) -> Status:
         record = self._store.run(run)

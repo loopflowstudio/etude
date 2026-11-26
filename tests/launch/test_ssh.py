@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -19,23 +20,46 @@ from etude.cli import main
 from etude.jobs import continue_from
 from etude.launch.aws import Keys
 from etude.launch.executor import Executor, local
+from etude.launch.openssh import ssh_command
 from etude.launch.provisioner.machines import OwnedMachine
 from etude.launch.records import Machine, Pool
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import AttemptRecord, Finished
-from etude.launch.ssh import SSH, RemoteReply, RemoteRequest, SSHJournal, SSHStart
+from etude.launch.ssh import (
+    SSH,
+    HeldRequest,
+    RemoteReply,
+    RemoteRequest,
+    SessionRequest,
+    SSHJournal,
+    SSHStart,
+)
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket
 from etude.records import Clock
 from etude.spec import Job, RunRequest, Until
 from tests.launch.counting import job_text
+from tests.launch.fake import Clock as FakeClock
 from tests.launch.fake import open_database
 from tests.launch.test_runpod_machines import Storage
 from tests.train.tracking import open_run
 
 # The `ssh` stand-in runs the remote command here; `UNREACHABLE` replaces it.
-RELAY = '#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n'
+RELAY = (
+    "#!/bin/sh\n"
+    'while [ "$#" -gt 0 ]; do\n'
+    '    case "$1" in\n'
+    "        -G) printf 'connecttimeout none\\nserveraliveinterval 0\\nserveralivecountmax 3\\n'; exit 0 ;;\n"
+    "        -o) shift 2 ;;\n"
+    "        --) shift; break ;;\n"
+    "        -*) shift ;;\n"
+    "        *) break ;;\n"
+    "    esac\n"
+    "done\n"
+    "shift\n"
+    'exec sh -c "$1"\n'
+)
 UNREACHABLE = "#!/bin/sh\nexit 255\n"
 
 
@@ -496,3 +520,165 @@ def test_a_runs_folder_relays_between_hosts_over_ssh(tmp_path: Path) -> None:
     # A file the host does not hold is absent, not unreachable.
     with pytest.raises(FileNotFoundError, match="steps-9.pt"):
         hosts[0].held("r", "checkpoints/steps-9.pt")
+
+
+def test_ssh_command_adds_liveness_defaults_only_where_unset_and_probes_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probes = tmp_path / "probes"
+    script = tmp_path / "ssh"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "if '-G' in sys.argv:\n"
+        f"    with open({str(probes)!r}, 'a') as f: f.write(sys.argv[-1] + '\\n')\n"
+        "    host = sys.argv[-1]\n"
+        "    if host == 'unset-host':\n"
+        "        print('connecttimeout none')\n"
+        "        print('serveraliveinterval 0')\n"
+        "        print('serveralivecountmax 3')\n"
+        "    elif host == 'custom-host':\n"
+        "        print('connecttimeout 15')\n"
+        "        print('serveraliveinterval 45')\n"
+        "        print('serveralivecountmax 3')\n"
+        "    elif host == 'partial-host':\n"
+        "        print('connecttimeout 12')\n"
+        "        print('serveraliveinterval 0')\n"
+        "    raise SystemExit(0)\n"
+        "raise SystemExit(0)\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+
+    assert ssh_command("unset-host", "true", batch=True) == [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=30",
+        "-o",
+        "ServerAliveInterval=20",
+        "--",
+        "unset-host",
+        "true",
+    ]
+    assert ssh_command("custom-host", "true", batch=False) == [
+        "ssh",
+        "--",
+        "custom-host",
+        "true",
+    ]
+    assert ssh_command("partial-host", "true", batch=True) == [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ServerAliveInterval=20",
+        "--",
+        "partial-host",
+        "true",
+    ]
+    # Repeated calls reuse the per-address probe without invoking `ssh -G` again.
+    ssh_command("unset-host", "true")
+    ssh_command("custom-host", "true", batch=True)
+    ssh_command("partial-host", "true")
+    assert probes.read_text().splitlines() == ["unset-host", "custom-host", "partial-host"]
+
+
+def test_ssh_observe_and_steady_calls_omit_program_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = tmp_path / "payloads.jsonl"
+    script = tmp_path / "ssh"
+    script.write_text(
+        f"#!{sys.executable}\n"
+        "import json, subprocess, sys\n"
+        "args = sys.argv[1:]\n"
+        "if args and args[0] == '-G':\n"
+        "    print('connecttimeout none\\nserveraliveinterval 0')\n"
+        "    raise SystemExit(0)\n"
+        "while len(args) >= 2 and args[0] == '-o':\n"
+        "    args = args[2:]\n"
+        "if args and args[0] == '--':\n"
+        "    args = args[1:]\n"
+        "body = sys.stdin.buffer.read()\n"
+        "parsed = json.loads(body)\n"
+        f"with open({str(log)!r}, 'a') as f:\n"
+        "    f.write(json.dumps({'action': parsed['request']['action'], 'has_program': 'program' in parsed}) + '\\n')\n"
+        "raise SystemExit(subprocess.run(args[1], shell=True, input=body).returncode)\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+
+    ssh = SSH("bench", str(tmp_path / "remote"))
+    home = tmp_path / "remote" / "s1"
+    home.mkdir(parents=True)
+    (home / "boot-claim").write_text(str(os.getpid()))
+    # Fast-path observe needs neither program nor installation.
+    assert ssh.call(SessionRequest(action="observe", session="s1")).observation is not None
+    # First non-fast-path call gets exit 97 without program, then retries with program.
+    assert ssh.call(HeldRequest(run="missing", key="checkpoints/missing.pt")).missing is not None
+    # Once installed, subsequent non-fast-path calls omit the program archive.
+    assert ssh.call(HeldRequest(run="missing", key="checkpoints/missing.pt")).missing is not None
+
+    recorded = [json.loads(line) for line in log.read_text().splitlines()]
+    assert recorded == [
+        {"action": "observe", "has_program": False},
+        {"action": "held", "has_program": False},
+        {"action": "held", "has_program": True},
+        {"action": "held", "has_program": False},
+    ]
+
+
+def test_wait_backs_off_while_steady_and_resets_on_state_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ssh = CountedSSH("bench", str(tmp_path / "remote"))
+    service = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
+    clock = FakeClock()
+    sleeps: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock.advance(seconds)
+
+    scheduler = Scheduler(
+        open_database(tmp_path / "state.db"),
+        {"ssh": lambda held: service},
+        clock=clock,
+        sleep=sleep,
+    )
+    scheduler.add_pool(Pool(name="bench"))
+    scheduler.add_machine("bench", "bench", pool="bench")
+    monkeypatch.setattr(SSHStart, "start", lambda *args: None)
+    (run,) = scheduler.queue(_echo("steady"), "bench")
+    scheduler.tick()
+    session = scheduler.attempts(run)[0].session
+    home = tmp_path / "remote" / session
+    home.mkdir(parents=True)
+    (home / "boot-claim").write_text(str(os.getpid()))
+
+    ssh.asks.clear()
+    with pytest.raises(TimeoutError):
+        scheduler.wait(run, timeout=120)
+    # 120 s steady wait: <= 16 passes and <= 16 SSH observe calls, backing off to 10 s.
+    assert len(sleeps) <= 15
+    assert ssh.asks["observe"] <= 16
+    assert sleeps[:5] == [1.0, 2.0, 4.0, 8.0, 10.0]
+
+    # A state change (cancel -> ended) returns backoff to 1 s.
+    sleeps.clear()
+    scheduler.cancel(run)
+    # After the second sleep, finish the session so wait returns cleanly.
+    real_sleep = sleep
+
+    def sleep_then_end(seconds: float) -> None:
+        real_sleep(seconds)
+        if len(sleeps) == 2:
+            (home / "ended").write_text(clock().isoformat())
+
+    scheduler._sleep = sleep_then_end
+    (done,) = scheduler.wait(run, timeout=60)
+    assert done.outcome == "cancelled"
+    assert sleeps[0] == 1.0

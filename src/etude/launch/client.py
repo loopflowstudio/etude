@@ -254,7 +254,7 @@ def status(run: str) -> Status:
     return _client().status(run)
 
 
-def wait(*runs: str, every: float = 1.0, timeout: float | None = None) -> list[Status]:
+def wait(*runs: str, every: float | None = None, timeout: float | None = None) -> list[Status]:
     return _client().wait(*runs, every=every, timeout=timeout)
 
 

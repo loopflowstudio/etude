@@ -68,7 +68,11 @@ class Counting:
 
         def run(*args: Any, **kwargs: Any) -> Any:
             command = args[0] if args else kwargs.get("args", ())
-            if command and command[0] in ("git", "ssh"):
+            if (
+                command
+                and command[0] in ("git", "ssh")
+                and not (command[0] == "ssh" and "-G" in command)
+            ):
                 self.calls[command[0]] += 1
             return original(*args, **kwargs)
 

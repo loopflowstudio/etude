@@ -214,8 +214,8 @@ def test_several_run_git_and_database_counts(
         # three each for EC2 and Lambda, the VM host script they share, the AWS
         # signer, the request every provider shares, the storage socket policy
         # it forwards to workers, and shared run-identity validation.
-        # The layout adds provisioner/scheduler packages and two scheduler leaves.
-        (["pools"], 73, ("numpy", "boto3", "etude.launch.worker")),
+        # The layout adds provisioner/scheduler packages, two scheduler leaves, and shared openssh argv.
+        (["pools"], 74, ("numpy", "boto3", "etude.launch.worker")),
         (
             ["worker", "{directory}"],
             36,  # includes the shared Etude home path and S3's AWS signer

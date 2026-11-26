@@ -113,7 +113,20 @@ def test_detached_ssh_install_is_readable_cancellable_and_not_replayed(
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
     ssh_script = tmp_path / "ssh"
     # Avoid a login shell resetting PATH in this executable stand-in.
-    ssh_script.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
+    ssh_script.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '    case "$1" in\n'
+        "        -G) printf 'connecttimeout none\\nserveraliveinterval 0\\n'; exit 0 ;;\n"
+        "        -o) shift 2 ;;\n"
+        "        --) shift; break ;;\n"
+        "        -*) shift ;;\n"
+        "        *) break ;;\n"
+        "    esac\n"
+        "done\n"
+        "shift\n"
+        'exec sh -c "$1"\n'
+    )
     ssh_script.chmod(0o700)
     monkeypatch.setattr("etude.launch.ssh.login_shell", lambda command: command)
     root = tmp_path / "remote"

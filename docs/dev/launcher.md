@@ -957,7 +957,7 @@ etude/
   launch/
     client.py  server.py  cli.py  commands.py
     records.py  schemas.py  database.py  executor.py  source.py
-    ssh.py  startup.py  environment.py  errors.py
+    openssh.py  ssh.py  startup.py  environment.py  errors.py
     scheduler/    loop.py  costs.py  placement.py
     provisioner/  machines.py  images.py  providers/
     worker/       main.py  attempts.py  courier.py  remote.py

@@ -17,6 +17,7 @@ from uuid import UUID
 
 from etude.deadline import limit_time, remaining
 from etude.launch.errors import ProviderUnavailable
+from etude.launch.openssh import ssh_command
 from etude.launch.provisioner.machines import (
     Allocation,
     Bill,
@@ -68,7 +69,7 @@ def _start(pod: Pod, env: dict[str, str]) -> None:
         raise ProviderUnavailable("running Lium pod has no SSH address")
     try:
         result = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", address, "python3.12 -c " + shlex.quote(_START)],
+            ssh_command(address, "python3.12 -c " + shlex.quote(_START), batch=True),
             input=json.dumps(
                 {"env": env, "code": boot_source("etude.launch.provisioner.providers.watchdog")}
             ).encode(),

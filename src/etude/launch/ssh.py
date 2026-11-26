@@ -13,6 +13,7 @@ import json
 import os
 import shlex
 import subprocess
+import textwrap
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Literal, cast, get_args
@@ -22,6 +23,7 @@ from pydantic import Field
 from etude.deadline import remaining
 from etude.errors import LauncherError
 from etude.launch.logs import snapshot_stream
+from etude.launch.openssh import ssh_command
 from etude.launch.provisioner.machines import Allocation
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import BootstrapLinks, LogProducer, LogStream
@@ -138,6 +140,7 @@ class Unreachable(LauncherError):
 # Every invocation selects an immutable program version, so an upgrade cannot
 # change the modules of an already running session.
 # Bootstrap imports only the standard library before the environment is ready.
+_MISSING = 97  # the remote exit status meaning "that program is not here yet"
 _INSTALL_CODE = """import base64,io,json,os,pathlib,sys,zipfile
 with zipfile.ZipFile(io.BytesIO(code)) as archive:
     import types
@@ -177,7 +180,6 @@ _BOOT = (
     """import base64,json,os,pathlib,signal,sys
 call=json.load(sys.stdin)
 os.environ.update(call.get('storage_environment', {}))
-code=base64.b64decode(call.pop("program"))
 request=call['request']
 home=pathlib.Path(call['root']).expanduser()/request.get('session','')
 def _recorded(name: str) -> int | None:
@@ -247,11 +249,24 @@ if request['action']=='start':
     os.environ['ETUDE_STARTUP_DEADLINE']=call.get('startup_deadline') or ''
     os.environ['ETUDE_STARTUP_CANCEL']=str(home/'cancel-start')
     os.environ['ETUDE_LOG_PATH']=str(home/'bootstrap.log')
+    call.pop('digest',None)
+    code=base64.b64decode(call.pop('program'))
+    _need_install=True
 else:
     os.environ.pop('ETUDE_LOG_PATH',None)
     os.environ['ETUDE_STARTUP_DEADLINE']=call.get('startup_deadline') or ''
+    _digest=call.pop('digest',None)
+    _base=pathlib.Path(os.environ.get('ETUDE_HOME') or pathlib.Path.home()/'.etude')/'programs'
+    root=_base/_digest if _digest else None
+    _need_install=root is None or not (root/'ready').exists()
+    if _need_install:
+        if 'program' not in call: sys.exit(97)
+        code=base64.b64decode(call.pop('program'))
+    else:
+        call.pop('program',None)
+if _need_install:
 """
-    + _INSTALL_CODE
+    + textwrap.indent(_INSTALL_CODE, "    ")
     + """
 if request['action']=='start':
     import subprocess
@@ -309,7 +324,16 @@ class SSH:
         if not address or address.startswith("-") or any(c.isspace() for c in address):
             raise LauncherError("use one SSH address, with options in ~/.ssh/config")
         self.address, self.root = address, root
-        self._program = base64.b64encode(program_archive()).decode()
+        self._archive: tuple[str, str] | None = None
+
+    def _program(self) -> tuple[str, str]:
+        if self._archive is None:
+            code = program_archive()
+            self._archive = (
+                hashlib.sha256(code).hexdigest(),
+                base64.b64encode(code).decode(),
+            )
+        return self._archive
 
     def call(self, request: RemoteRequest) -> RemoteReply:
         start = isinstance(request, StartRequest)
@@ -328,32 +352,28 @@ class SSH:
             startup_deadline=startup_deadline,
             request=request,
         )
-        sent = {**call.model_dump(mode="json"), "program": self._program}
+        digest, program = self._program()
+        sent = {**call.model_dump(mode="json"), "digest": digest}
+        if start:
+            sent["program"] = program
         allowance = remaining()
         if start and startup_deadline is not None:
             startup_left = (startup_deadline - datetime.now(UTC)).total_seconds()
             if startup_left <= 0:
                 raise Unreachable("startup deadline reached before SSH request")
             allowance = startup_left if allowance is None else min(startup_left, allowance)
-        try:
-            result = subprocess.run(
-                [
-                    "ssh",
-                    "-o",
-                    "BatchMode=yes",
-                    self.address,
-                    login_shell(shlex.join([remote_python(), "-c", _BOOT])),
-                ],
-                input=json.dumps(sent).encode(),
-                capture_output=True,
-                timeout=allowance,
-            )
-        except subprocess.TimeoutExpired:
-            raise Unreachable(
-                f"SSH wait exceeded {allowance} seconds; remote outcome unconfirmed"
-            ) from None
-        except OSError:
-            raise Unreachable("SSH transport failed; remote outcome unconfirmed") from None
+        argv = ssh_command(
+            self.address, login_shell(shlex.join([remote_python(), "-c", _BOOT])), batch=True
+        )
+        result = self._run(argv, sent, allowance)
+        if result.returncode == _MISSING and not start:
+            retry_allowance = remaining()
+            if retry_allowance is not None and retry_allowance <= 0:
+                raise Unreachable(
+                    f"SSH wait exceeded {allowance} seconds; remote outcome unconfirmed"
+                )
+            sent["program"] = program
+            result = self._run(argv, sent, retry_allowance)
         if result.returncode:
             raise Unreachable(
                 "uv is required on the machine"
@@ -364,6 +384,24 @@ class SSH:
             return RemoteReply.model_validate_json(result.stdout)
         except ValueError:
             raise Unreachable("SSH returned an unreadable reply") from None
+
+    @staticmethod
+    def _run(
+        argv: list[str], sent: dict[str, object], allowance: float | None
+    ) -> subprocess.CompletedProcess[bytes]:
+        try:
+            return subprocess.run(
+                argv,
+                input=json.dumps(sent).encode(),
+                capture_output=True,
+                timeout=allowance,
+            )
+        except subprocess.TimeoutExpired:
+            raise Unreachable(
+                f"SSH wait exceeded {allowance} seconds; remote outcome unconfirmed"
+            ) from None
+        except OSError:
+            raise Unreachable("SSH transport failed; remote outcome unconfirmed") from None
 
     def files(self, work: Work) -> dict[str, str]:
         if work.repo is None or work.commit is None:
