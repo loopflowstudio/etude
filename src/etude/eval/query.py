@@ -499,6 +499,25 @@ class _Chunk:
         )
 
 
+def _map_pool[T, R](
+    pool: ThreadPoolExecutor | None,
+    fn: Callable[[T], R],
+    items: Sequence[T],
+) -> list[R]:
+    """Apply `fn` to `items`, concurrently on `pool` with contextvars when more than one item."""
+    if not items:
+        return []
+    if pool is None or len(items) == 1:
+        return [fn(item) for item in items]
+    futures = [pool.submit(copy_context().run, fn, item) for item in items]
+    try:
+        return [future.result() for future in futures]
+    except BaseException:
+        for future in futures:
+            future.cancel()
+        raise
+
+
 def _fetch_all(
     pool: ThreadPoolExecutor | None,
     storage: Storage,
@@ -506,17 +525,7 @@ def _fetch_all(
 ) -> dict[str, bytes]:
     """Fetch distinct `keys` from `storage`, concurrently when `pool` is given."""
     unique = list(dict.fromkeys(keys))
-    if not unique:
-        return {}
-    if pool is None or len(unique) == 1:
-        return {key: storage.get(key) for key in unique}
-    futures = [pool.submit(copy_context().run, storage.get, key) for key in unique]
-    try:
-        return {key: future.result() for key, future in zip(unique, futures, strict=True)}
-    except BaseException:
-        for future in futures:
-            future.cancel()
-        raise
+    return dict(zip(unique, _map_pool(pool, storage.get, unique), strict=True))
 
 
 def _fetch_files(
@@ -534,25 +543,13 @@ def _fetch_files(
             continue
         seen.add(path)
         pending.append((key, path))
-    if not pending:
-        return
 
-    def write(key: str, path: Path) -> None:
+    def write(target: tuple[str, Path]) -> None:
+        key, path = target
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(storage.get(key))
 
-    if pool is None or len(pending) == 1:
-        for key, path in pending:
-            write(key, path)
-        return
-    futures = [pool.submit(copy_context().run, write, key, path) for key, path in pending]
-    try:
-        for future in futures:
-            future.result()
-    except BaseException:
-        for future in futures:
-            future.cancel()
-        raise
+    _map_pool(pool, write, pending)
 
 
 def _ensure_schema(
@@ -696,14 +693,7 @@ def _prefetch_declarations(
     ]
     if pool is None or len(unknown) <= 1:
         return
-    futures = [pool.submit(copy_context().run, listing.declaration, folder) for folder in unknown]
-    try:
-        for future in futures:
-            future.result()
-    except BaseException:
-        for future in futures:
-            future.cancel()
-        raise
+    _map_pool(pool, listing.declaration, unknown)
 
 
 def _resolve_folder(
@@ -744,8 +734,6 @@ def _fetch_environments(
         for place in folders
         if place + _ENVIRONMENT_FILE in listing.objects
     ]
-    if not keys:
-        return {}
     unique = list(dict.fromkeys(keys))
 
     def read_one(key: str) -> bytes | None:
@@ -754,19 +742,11 @@ def _fetch_environments(
         except FileNotFoundError:
             return None
 
-    if pool is None or len(unique) == 1:
-        return {key: body for key in unique if (body := read_one(key)) is not None}
-    futures = [pool.submit(copy_context().run, read_one, key) for key in unique]
-    try:
-        return {
-            key: body
-            for key, future in zip(unique, futures, strict=True)
-            if (body := future.result()) is not None
-        }
-    except BaseException:
-        for future in futures:
-            future.cancel()
-        raise
+    return {
+        key: body
+        for key, body in zip(unique, _map_pool(pool, read_one, unique), strict=True)
+        if body is not None
+    }
 
 
 def _pick_environment(folders: Sequence[str], bodies: Mapping[str, bytes]) -> str | None:
