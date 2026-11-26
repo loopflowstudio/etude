@@ -133,13 +133,15 @@ class FakeService:
         self._call("bucket")
         self.staged.append((commit, self.creates))
 
-    def add(self, session_id: str, work: Work) -> None:
+    def add(self, session_id: str, work: Work, *, finish: bool = False) -> None:
         self._call("bucket")
         held = self.sessions[session_id]
         if held.told_to_finish:
             return  # its worker has stopped taking work
         if all(work.attempt != known.attempt for known, _ in held.work()):
             held.added.append((work, self.clock()))
+        if finish:
+            held.told_to_finish = True
 
     def find(self, session_id: str) -> str | None:
         self._call("provider")
@@ -198,12 +200,13 @@ class FakeService:
     def _ended_at(self, session: FakeSession) -> datetime:
         """When the session stopped: killed, out of work, or at its deadline."""
         limit = self._limit(session)
-        if session.packet.kept:
+        if session.packet.kept and (not session.told_to_finish or session.killed_at is not None):
             return limit
         progress = self._progress(session, limit)
         done = [p.finished_at for p in progress if p.finished_at is not None]
         whole = len(done) == len(session.work())
-        return min(max(done) if whole and done else limit, limit)
+        finished = max(done) + timedelta(seconds=self.finish_seconds) if whole and done else limit
+        return min(finished, limit)
 
     def _limit(self, session: FakeSession) -> datetime:
         deadline = session.packet.deadline or datetime.max.replace(tzinfo=UTC)

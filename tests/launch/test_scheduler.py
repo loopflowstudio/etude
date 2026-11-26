@@ -1357,6 +1357,24 @@ def test_explicit_launch_and_quote_order_refused_owned_behind_ondemand(
     assert rent.creates == 1
     assert (scheduler.read(rented).machine or "").startswith("l4-")
 
+    # Multi-run quote/launch with a refused host and 1-machine on-demand places on l4 and queues
+    # overflow instead of promising refused m1 alongside a paid rental.
+    clock.advance(10)  # `rented` finishes on l4; m1's refusal is 20 s old (< 60 s)
+    scheduler.tick()
+    assert scheduler.read(rented).outcome == "succeeded"
+    overflow_quote = scheduler.quote(
+        [RunRequest(job=job()), RunRequest(job=job())], pool="lab", rent="l4"
+    )
+    assert len(overflow_quote.machines) == 1
+    assert overflow_quote.machines[0].machine is None
+    assert overflow_quote.machines[0].usd_per_hour == Decimal("0.59")
+
+    placed_on_l4, overflow_queued = scheduler.launch(job().runs(10, 11), pool="lab", rent="l4")
+    assert (scheduler.read(placed_on_l4).machine or "").startswith("l4-")
+    assert scheduler.read(overflow_queued).phase == "queued"
+    assert m1.creates == 1
+    assert rent.creates == 2
+
     # With l4 at its machine limit, explicit quote and launch fall back to recently refused m1.
     fallback_quote = scheduler.quote([RunRequest(job=job())], pool="lab", rent="l4")
     assert len(fallback_quote.machines) == 1
@@ -1365,15 +1383,27 @@ def test_explicit_launch_and_quote_order_refused_owned_behind_ondemand(
 
     (fallback,) = scheduler.launch(job(), pool="lab", rent="l4")
     assert m1.creates == 2
-    assert rent.creates == 1
+    assert rent.creates == 2
     assert scheduler.read(fallback).machine == "m1"
+
+    # Solo-pool explicit launch still retries a recently refused host immediately.
+    clock.advance(10)  # `placed_on_l4`, `overflow_queued`, `fallback` advance; refuse m1 again
+    scheduler.tick()
+    clock.advance(10)
+    scheduler.tick()
+    m1.refuse = 1
+    with pytest.raises(LauncherError, match=r"machine refused \(m1\)"):
+        scheduler.launch(job(), pool="lab")
+    clock.advance(5)  # still within 60 s cooldown
+    (solo_retry,) = scheduler.launch(job(), pool="lab")
+    assert scheduler.read(solo_retry).machine == "m1"
 
     # When an unrefused sibling exists, explicit quote and launch prefer it over both l4 and refused m1.
     scheduler.add_machine("m2", "m2.local", pool="lab")
-    clock.advance(10)  # `rented` and `fallback` finish; m1's earlier refusal is 20 s old (< 60 s)
+    clock.advance(10)  # `solo_retry` finishes; m1's refusal is 15 s old (< 60 s)
     scheduler.tick()  # `queued` runs on healthy m2
     assert scheduler.read(queued).machine == "m2"
-    clock.advance(10)  # `queued` finishes on m2; m1's refusal is 30 s old (< 60 s)
+    clock.advance(10)  # `queued` finishes on m2; m1's refusal is 25 s old (< 60 s)
     scheduler.tick()
     offers_before = rent.offers
     creates_before = rent.creates

@@ -436,6 +436,7 @@ def test_pure_ssh_launch_rpc_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     scheduler.add_machine("lab-host", "lab-host", pool="lab")
 
     actions: list[str] = []
+    add_finishes: list[bool] = []
     refuse_next = False
 
     def fake_ssh(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
@@ -450,6 +451,8 @@ def test_pure_ssh_launch_rpc_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         payload = json.loads(kwargs["input"])
         action = payload["request"]["action"]
         actions.append(action)
+        if action == "add":
+            add_finishes.append(bool(payload["request"].get("finish")))
         reply: dict[str, object]
         if action == "start":
             reply = (
@@ -478,12 +481,14 @@ def test_pure_ssh_launch_rpc_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert refused_counts.ssh == 1
     assert b.store.runs() == ()
 
-    # Confirmed SSH launch runs pre-commit `start` + `started`, then post-commit `started` + `observe` + `add`.
+    # Confirmed 1-slot SSH launch runs pre-commit `start`, then post-commit `add` with `finish=True`.
     actions.clear()
+    add_finishes.clear()
     refuse_next = False
     b.clock.advance(61)
     with counting.record():
         scheduler.launch(Job(command="true", max_hours=1), pool="lab")
         confirmed_counts = counting.snapshot()
-    assert actions == ["start", "started", "started", "observe", "add"]
-    assert confirmed_counts.ssh == 5
+    assert actions == ["start", "add"]
+    assert add_finishes == [True]
+    assert confirmed_counts.ssh == 2

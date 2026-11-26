@@ -30,10 +30,10 @@ from etude.launch.executor import Executor, local
 from etude.launch.openssh import ssh_command
 from etude.launch.provisioner.machines import Allocation, OwnedMachine, Refused
 from etude.launch.provisioner.providers.package import program_archive
-from etude.launch.records import BootstrapLinks, Machine, Pool
+from etude.launch.records import BootstrapLinks, Machine, Pool, RunAttempt, Session
 from etude.launch.records import Storage as Place
 from etude.launch.scheduler.loop import Scheduler
-from etude.launch.schemas import AttemptRecord, Finished, Packet
+from etude.launch.schemas import AttemptRecord, Finished, Inbox, Packet, Work
 from etude.launch.ssh import (
     SSH,
     HeldRequest,
@@ -1444,4 +1444,209 @@ def test_ssh_end_live_pid_with_new_program_digest_settles_without_exit_97(
                 os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+    assert not (etude_home / "programs").exists()
+
+
+def test_ssh_1slot_launch_exits_and_cleans_up_without_tick_and_fresh_add_skips_exit_97(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    etude_home = tmp_path / "fresh-home"
+    monkeypatch.setenv("ETUDE_HOME", str(etude_home))
+    root = tmp_path / "remote"
+    ssh = CountedSSH("bench", str(root))
+    service = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
+    store = open_database(tmp_path / "state.db")
+    scheduler = Scheduler(store, {"ssh": lambda held: service})
+    scheduler.add_pool(Pool(name="bench"))
+    scheduler.add_machine("bench", "bench", pool="bench")
+
+    real_run = subprocess.run
+    ssh_events: list[tuple[str, int]] = []
+
+    def tracked_run(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess[Any]:
+        result: subprocess.CompletedProcess[Any] = real_run(*args, **kwargs)
+        cmd = args[0] if args else kwargs.get("args", ())
+        if isinstance(cmd, list) and cmd and cmd[0] == "ssh" and "-G" not in cmd:
+            action = json.loads(kwargs["input"])["request"]["action"]
+            ssh_events.append((action, result.returncode))
+        return result
+
+    monkeypatch.setattr(subprocess, "run", tracked_run)
+
+    # Fresh host (no `programs/` installed yet): launch runs `start` + stdlib `add` (no exit 97).
+    (run,) = scheduler.launch(
+        Job(
+            command='echo done > "$ETUDE_OUTPUT_DIR/out.txt"',
+            max_hours=0.01,
+            max_usd=Decimal(1),
+        ),
+        "bench",
+    )
+    assert ssh_events == [("start", 0), ("add", 0)]
+    attempt = scheduler.attempts(run)[0]
+    home = root / attempt.session
+    assert (home / "finish").exists()
+    assert (home / "work" / f"{attempt.id}.json").exists()
+
+    # Without any further scheduler call (`tick`/`wait`), the worker runs, cleans up, writes `ended`, and exits.
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        if (home / "ended").exists() and (home / "ended").read_text().strip():
+            break
+        time.sleep(0.05)
+    assert (home / "ended").exists() and (home / "ended").read_text().strip()
+    attempt_dir = home / "attempts" / attempt.id
+    assert (attempt_dir / "finished.json").exists()
+    assert not (attempt_dir / "src").exists()
+    assert not (home / "sources").exists()
+    assert (attempt_dir / "outputs" / "out.txt").read_text() == "done\n"
+    worker_pid = int((home / "pid").read_text().strip())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(worker_pid, 0)
+            time.sleep(0.05)
+        except ProcessLookupError:
+            break
+    with pytest.raises(ProcessLookupError):
+        os.kill(worker_pid, 0)
+
+    # Bucket-backed owned host packs work + `finish=True` into one `inbox.json` PUT.
+    memory = Storage()
+    puts = 0
+
+    def counted_send(method: str, url: str, body: bytes | None, headers: dict[str, str]) -> Any:
+        nonlocal puts
+        if method == "PUT":
+            puts += 1
+        return memory(method, url, body, headers)
+
+    place = Place(name="east", bucket="b", prefix="etude", provider="s3", region="us-east-1")
+    bucket = Bucket("b", "us-east-1", Keys(access_key="AKIA", secret_key="secret"), counted_send)
+    bucket_journal = BucketJournal(place, bucket)
+    bucket_journal.prepare(Packet(session="s_bucket_add", work=(), deadline=None, kept=True))
+    puts_before = puts
+    work = Work(
+        attempt="a1",
+        run="r1",
+        command="echo ok",
+        limit_seconds=60,
+        limit_kind="out_of_time",
+        seed=None,
+        until=None,
+        config=None,
+        repo=None,
+        commit=None,
+    )
+    bucket_journal.add("s_bucket_add", work, finish=True)
+    assert puts == puts_before + 1
+    inbox = Inbox.model_validate_json(memory.objects["etude/sessions/s_bucket_add/inbox.json"])
+    assert len(inbox.work) == 1 and inbox.work[0].work.attempt == "a1"
+    assert inbox.finish is True
+
+
+def test_cancel_pure_ssh_session_whose_observe_exits_97_ends_it_and_disk_journal_guards_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Part 1: DirectoryJournal._alive/end guards invalid/non-positive pids and Linux zombie state.
+    disk = DirectoryJournal(tmp_path / "disk")
+    for name, content in (("s_empty_pid", ""), ("s_zero_pid", "0"), ("s_bad_pid", "abc")):
+        folder = tmp_path / "disk" / name
+        folder.mkdir(parents=True)
+        (folder / "pid").write_text(content)
+        assert disk._alive(name) is False
+        assert disk.end(name) is not None
+        assert (folder / "ended").exists()
+
+    zombie = tmp_path / "disk" / "s_zombie"
+    zombie.mkdir(parents=True)
+    (zombie / "pid").write_text(str(os.getpid()))
+    real_read_text = Path.read_text
+
+    def fake_zombie_stat(self: Path, *args: Any, **kwargs: Any) -> str:
+        if str(self) == f"/proc/{os.getpid()}/stat":
+            return f"{os.getpid()} (python3.12) Z 1 1 1 0 -1 0\n"
+        return real_read_text(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_text", fake_zombie_stat)
+        assert disk._alive("s_zombie") is False
+
+    # Part 2: Cancelling a pure-SSH session with live pid + uninstalled digest (observe exits 97)
+    # still terminates the worker and settles the session.
+    etude_home = tmp_path / "upgraded-home"
+    monkeypatch.setenv("ETUDE_HOME", str(etude_home))
+    root = tmp_path / "remote"
+    ssh = SSH("bench", str(root))
+    ssh._archive = ("upgraded-digest-uninstalled", base64.b64encode(b"not-a-zip").decode())
+    service = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
+    store = open_database(tmp_path / "state.db")
+    scheduler = Scheduler(store, {"ssh": lambda held: service})
+    scheduler.add_pool(Pool(name="bench"))
+    scheduler.add_machine("bench", "bench", pool="bench")
+
+    (run,) = scheduler.queue(Job(command="sleep 60", max_hours=1), "bench")
+    now = datetime.now(UTC)
+    session = Session(
+        id="s_live_97",
+        supply="bench",
+        machine="bench",
+        planned_at=now,
+        claimed_at=now,
+        provider_id="s_live_97",
+        started_at=now,
+        refused_at=None,
+        ended_at=None,
+        version=1,
+    )
+    attempt = RunAttempt(
+        id="a_live_97",
+        run=run,
+        session=session.id,
+        machine="bench",
+        number=1,
+        position=0,
+        limit_seconds=3600,
+        limit_kind="out_of_time",
+        started_at=now,
+        finished_at=None,
+        outcome=None,
+        cause=None,
+        clocks={},
+        outputs=(),
+        exit_code=None,
+        version=1,
+        planned_at=now,
+    )
+    with store.lock("bench", lambda: now):
+        store.plan(session, (attempt,))
+        store.claim(session, now)
+        session = store.session(session.id)
+        store.record_provider_id(session, session.id)
+        session = store.session(session.id)
+        store.record_started(session, now)
+
+    home = root / session.id
+    home.mkdir(parents=True)
+    worker_pid = _spawn_detached_sleep()
+    try:
+        (home / "pid").write_text(str(worker_pid))
+        home.chmod(0o500)  # simulate full/unwritable disk too
+        # Before cancel, observe fails (exit 97 -> bad zip) and leaves the live session open.
+        scheduler.tick()
+        assert store.session(session.id).ended_at is None
+        os.kill(worker_pid, 0)
+
+        # After cancel, _observe falls back to stdlib `end` and settles the cancelled run.
+        status = scheduler.cancel(run)
+        assert status.outcome == "cancelled"
+        assert store.session(session.id).ended_at is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(worker_pid, 0)
+    finally:
+        home.chmod(0o700)
+        try:
+            os.kill(worker_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     assert not (etude_home / "programs").exists()

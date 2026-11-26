@@ -50,6 +50,7 @@ class AddRequest(Record):
     session: str
     work: Work
     files: dict[str, str] = Field(default_factory=dict)  # base64 by path in the session's folder
+    finish: bool = False
 
 
 class SessionRequest(Record):
@@ -187,6 +188,16 @@ def _read_ended() -> str | None:
     try: text=(home/'ended').read_text().strip()
     except OSError: return None
     return text or None
+def _write_bytes(path: pathlib.Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True,exist_ok=True)
+    partial=path.with_name(path.name+'.partial')
+    try:
+        partial.write_bytes(data)
+        os.replace(partial,path)
+    except BaseException:
+        try: partial.unlink()
+        except OSError: pass
+        raise
 def _write_ended(at: str) -> bool:
     path=home/'ended'
     partial=home/'ended.partial'
@@ -233,10 +244,23 @@ def _host_alive() -> bool | None:
 if request['action']=='logs' and request['producer']=='bootstrap':
     path=home/'bootstrap.log'
     print(json.dumps({'log':path.read_text() if path.exists() else None})); sys.exit(0)
-if request['action']=='started' and not (home/'pid').exists():
-    print(json.dumps({'started':False})); sys.exit(0)
+if request['action']=='started':
+    print(json.dumps({'started':(home/'pid').exists()})); sys.exit(0)
 if request['action']=='claimed':
     print(json.dumps({'claimed':(home/'boot-claim').exists() or (home/'pid').exists()})); sys.exit(0)
+if request['action']=='add':
+    added=home/'work'
+    work=request['work']
+    target=added/f"{work['attempt']}.json"
+    if not target.exists():
+        for name,body in request.get('files',{}).items():
+            dest=home/name
+            if not dest.exists():
+                _write_bytes(dest,base64.b64decode(body))
+        _write_bytes(target,json.dumps(work).encode())
+    if request.get('finish'):
+        (home/'finish').touch()
+    print(json.dumps({})); sys.exit(0)
 if request['action']=='observe':
     if (alive:=_host_alive()) is not None:
         print(json.dumps({'observation':{'alive':alive,'progress':[],'start_unknown':alive}})); sys.exit(0)
@@ -561,8 +585,10 @@ class SSHJournal:
     def finish(self, session_id: str) -> datetime | None:
         return self.ssh.call(SessionRequest(action="finish", session=session_id)).ended_at
 
-    def add(self, session_id: str, work: Work) -> None:
-        self.ssh.call(AddRequest(session=session_id, work=work, files=self.ssh.files(work)))
+    def add(self, session_id: str, work: Work, *, finish: bool = False) -> None:
+        self.ssh.call(
+            AddRequest(session=session_id, work=work, files=self.ssh.files(work), finish=finish)
+        )
 
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]:
         reply = self.ssh.call(HeldRequest(run=run, key=key))

@@ -491,8 +491,9 @@ class BucketJournal:
             )
 
     @_attribute_session
-    def add(self, session_id: str, work: Work) -> None:
+    def add(self, session_id: str, work: Work, *, finish: bool = False) -> None:
         inbox = self._inbox(session_id)
+        updates: dict[str, object] = {}
         if all(entry.work.attempt != work.attempt for entry in inbox.work):
             raw = self._once(self._session_prefix(session_id) + "packet.json")
             packet = Packet.model_validate_json(raw) if raw else None
@@ -506,7 +507,11 @@ class BucketJournal:
                 fetch=self._fetch([work]),
                 restore=self._restore([work]),
             )
-            inbox = inbox.model_copy(update={"work": (*inbox.work, entry)})
+            updates["work"] = (*inbox.work, entry)
+        if finish and not inbox.finish:
+            updates["finish"] = True
+        if updates:
+            inbox = inbox.model_copy(update=updates)
             self._bucket.put(
                 self._session_prefix(session_id) + "inbox.json",
                 inbox.model_dump_json(round_trip=True).encode(),

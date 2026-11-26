@@ -11,7 +11,6 @@ import tempfile
 from pathlib import Path
 
 from etude.launch.ssh import (
-    AddRequest,
     EncodedOutput,
     HeldRequest,
     HoldRequest,
@@ -33,26 +32,12 @@ def invoke(call: RemoteCall) -> RemoteReply:
     journal = DirectoryJournal(root)
     request = call.request
     match request:
-        case StartRequest() | AddRequest():
+        case StartRequest():
             for name, body in request.files.items():
                 target = root / request.session / name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(base64.b64decode(body))
-    match request:
-        case StartRequest():
             return _start(root, request)
-        case AddRequest():
-            added = root / request.session / "work"
-            added.mkdir(exist_ok=True)
-            if not (added / f"{request.work.attempt}.json").exists():
-                write(added / f"{request.work.attempt}.json", request.work.model_dump_json())
-            return RemoteReply()
-        case SessionRequest(action="started"):
-            return RemoteReply(started=journal.started(request.session))
-        case SessionRequest(action="ended"):
-            return RemoteReply(ended_at=journal.ended(request.session))
-        case SessionRequest(action="end"):
-            return RemoteReply(ended_at=journal.end(request.session))
         case SessionRequest(action="finish"):
             return RemoteReply(ended_at=journal.finish(request.session))
         case SessionRequest(action="observe"):

@@ -1074,8 +1074,8 @@ class Scheduler:
                     self._check_locks(names)
                     if session.claimed_at is None:
                         self._create(session, self._clock())
-                    else:
-                        self._observe(session, self._clock())
+                    elif attempt.added:
+                        self._hand(session, attempt)
                 except (Stale, OSError, LauncherError, StorageUnavailable) as error:
                     self._diagnose(
                         "work delivery",
@@ -1098,9 +1098,10 @@ class Scheduler:
         A chosen machine's free slots fill before another is taken. Machines
         with free slots come first, then unrefused free machines of the pool,
         then rentals from the on-demand up to its remaining machine capacity,
-        then recently refused free machines of the pool for work still unplaced.
-        Runs left over wait in the queue. Nothing is claimed here.
-        Both quote and admission pass records for one pool/on-demand target.
+        then recently refused free machines of the pool only when nothing else
+        could place any work. Runs left over wait in the queue. Nothing is
+        claimed here. Both quote and admission pass records for one
+        pool/on-demand target.
         """
         placements: list[Placement] = []
         target = Target(pool=records[0].launch.pool, rent=records[0].launch.rent)
@@ -1197,7 +1198,6 @@ class Scheduler:
                     break
                 used.add(owned.name)
                 place(pool, pool.slots, owned, None, HourlyRate(usd_per_hour=Decimal(0)))
-        ondemand_slice: tuple[int, int] | None = None
         if ondemand is not None and pending:
             first = len(placements)
             while pending:
@@ -1214,37 +1214,36 @@ class Scheduler:
                     offer.hardware,
                 ):
                     break
-            if len(placements) > first:
-                ondemand_slice = (first, len(placements))
-        if pool is not None and pending:
+            if pending and len(placements) > first:
+                # Only runs still waiting after the wave can fund extra machine time.
+                placed_runs = [p.run for placement in placements[first:] for p in placement.runs]
+                requested_machines = (
+                    len(placed_runs) + len(pending) + ondemand.slots - 1
+                ) // ondemand.slots
+                work = sum(budgets[r.id].seconds for r in placed_runs) + sum(
+                    budgets[key].seconds for key in pending
+                )
+                machines = max(
+                    len(placements) - first,
+                    min(requested_machines, ondemand.max_machines - self._in_use(ondemand)),
+                )
+                waiting_cap = sum((budgets[key].usd for key in pending), Decimal(0)) / machines
+                target_seconds = min(
+                    self._longest_rental(ondemand),
+                    ondemand.setup_seconds + work / (machines * ondemand.slots),
+                )
+                increment = self._safeguards(ondemand).reservation_hours
+                for index in range(first, len(placements)):
+                    placements[index] = placements[index].extend(
+                        target_seconds, waiting_cap, increment
+                    )
+        if pool is not None and not placements:
             while pending:
                 owned = self._free_owned(pool, now, excluded=used, allow_refused=True)
                 if owned is None:
                     break
                 used.add(owned.name)
                 place(pool, pool.slots, owned, None, HourlyRate(usd_per_hour=Decimal(0)))
-        if ondemand is not None and pending and ondemand_slice is not None:
-            first, last = ondemand_slice
-            # Only runs still waiting after the wave can fund extra machine time.
-            placed_runs = [p.run for placement in placements[first:last] for p in placement.runs]
-            requested_machines = (
-                len(placed_runs) + len(pending) + ondemand.slots - 1
-            ) // ondemand.slots
-            work = sum(budgets[r.id].seconds for r in placed_runs) + sum(
-                budgets[key].seconds for key in pending
-            )
-            machines = max(
-                last - first,
-                min(requested_machines, ondemand.max_machines - self._in_use(ondemand)),
-            )
-            waiting_cap = sum((budgets[key].usd for key in pending), Decimal(0)) / machines
-            target_seconds = min(
-                self._longest_rental(ondemand),
-                ondemand.setup_seconds + work / (machines * ondemand.slots),
-            )
-            increment = self._safeguards(ondemand).reservation_hours
-            for index in range(first, last):
-                placements[index] = placements[index].extend(target_seconds, waiting_cap, increment)
         if not placements:
             if underfunded:
                 reason = "job dollars do not cover the hours"
@@ -2168,7 +2167,8 @@ class Scheduler:
         try:
             self._store.record_provider_id(session, provider_id)
             self._diagnose("machine create", "machine confirmed", session=session.id)
-            self._creation_facts(self._store.session(session.id), now, budget_cap=budget_cap)
+            if session.autorun or self._store.machine(session.machine).kind != "ssh":
+                self._creation_facts(self._store.session(session.id), now, budget_cap=budget_cap)
         except Stale:
             pass  # another process already found the rental by its identity
         return False
@@ -2376,7 +2376,9 @@ class Scheduler:
         """Add placed work to a kept session; while its run's folder cannot be relayed, it waits.
 
         A placed attempt not yet in the session's journal is handed again on
-        each pass, so the wait ends when the holding machine answers.
+        each pass, so the wait ends when the holding machine answers. A 1-slot
+        owned session receives `finish=True` with its work so it exits and
+        cleans up on its own without a later scheduler pass.
         """
         try:
             work = self._work(attempt)
@@ -2384,7 +2386,11 @@ class Scheduler:
             self._await_relay(session, error, attempt=attempt.id)
             return
         if work is not None:
-            self._service(session).add(session.id, work)
+            finish = (
+                self._store.rental_for(session) is None
+                and self._store.supply(session.supply).slots == 1
+            )
+            self._service(session).add(session.id, work, finish=finish)
 
     def _await_relay(
         self, session: Session, error: Exception, *, attempt: str | None = None
@@ -2438,6 +2444,12 @@ class Scheduler:
         for event in seen.transfers:
             self._store.retain_transfer(event.model_copy(update={"machine": session.machine}))
         return seen
+
+    def _all_cancelled(self, attempts: Sequence[RunAttempt]) -> bool:
+        open_attempts = [a for a in attempts if a.outcome is None]
+        return bool(open_attempts) and all(
+            self._store.run(a.run).launch.cancel_requested_at is not None for a in open_attempts
+        )
 
     def _observe(self, session: Session, now: datetime) -> None:
         if session.ended_at is not None:
@@ -2495,7 +2507,13 @@ class Scheduler:
                 )
                 self._end_session(session)
                 return
-        seen = self._read_journal(session, service)
+        try:
+            seen = self._read_journal(session, service)
+        except (OSError, LauncherError, StorageUnavailable):
+            if rental is None and self._all_cancelled(attempts):
+                self._end_session(session)
+                return
+            raise
         if not seen.alive:
             # Progress and machine state are separate reads. Completion may land
             # between them; settle only from the final journal after shutdown.
@@ -2571,7 +2589,21 @@ class Scheduler:
         # Nothing more will be written. Take what the journal holds now, and
         # count any attempt still open as lost with the machine.
         self._final_logs(session)
-        final = self._read_journal(session, service)
+        try:
+            final = self._read_journal(session, service)
+        except (OSError, LauncherError, StorageUnavailable) as error:
+            open_attempts = self._store.attempts(session=session.id)
+            if self._store.rental_for(session) is not None or not self._all_cancelled(
+                open_attempts
+            ):
+                raise
+            self._diagnose(
+                "observation",
+                "final observation unavailable after shutdown; settling cancelled attempts",
+                error,
+                session=session.id,
+            )
+            final = Observation(alive=False, progress=())
         progress = {entry.attempt: entry for entry in final.progress}
         for attempt in self._store.attempts(session=session.id):
             if attempt.outcome is None:

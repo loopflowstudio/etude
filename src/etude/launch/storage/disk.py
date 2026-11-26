@@ -51,12 +51,15 @@ class DirectoryJournal:
     def stage(self, repo: str, commit: str) -> None:
         """Nothing to do ahead: a session's source is written beside it when it starts."""
 
-    def add(self, session_id: str, work: Work) -> None:
-        added = self._root / session_id / "work"
+    def add(self, session_id: str, work: Work, *, finish: bool = False) -> None:
+        home = self._root / session_id
+        added = home / "work"
         added.mkdir(exist_ok=True)
         if not (added / f"{work.attempt}.json").exists():
-            self._place_source(self._root / session_id, work)
+            self._place_source(home, work)
             write(added / f"{work.attempt}.json", work.model_dump_json())
+        if finish and home.is_dir():
+            (home / "finish").touch()
 
     @staticmethod
     def _place_source(home: Path, work: Work) -> None:
@@ -117,10 +120,10 @@ class DirectoryJournal:
 
     def end(self, session_id: str) -> datetime | None:
         ended = self._root / session_id / "ended"
-        if self._alive(session_id):
+        if self._alive(session_id) and (pid := self._pid(session_id)) is not None:
             try:
-                os.kill(int(self._pid(session_id)), signal.SIGTERM)
-            except ProcessLookupError:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
                 pass
             else:
                 for _ in range(100):
@@ -131,6 +134,8 @@ class DirectoryJournal:
                     return None
         if (recorded := self.ended(session_id)) is not None:
             return recorded
+        if self._alive(session_id):
+            return None
         now = datetime.now(UTC)
         try:
             write(ended, now.isoformat())  # the process is dead without a note
@@ -180,14 +185,20 @@ class DirectoryJournal:
             raise LauncherError(f"output {name!r} no longer matches its recorded digest")
         return copy
 
-    def _pid(self, session_id: str) -> str:
-        return (self._root / session_id / "pid").read_text()
+    def _pid(self, session_id: str) -> int | None:
+        try:
+            text = (self._root / session_id / "pid").read_text().strip()
+        except FileNotFoundError:
+            return None
+        pid = int(text) if text.isdigit() else None
+        return pid if pid is not None and pid > 0 else None
 
     def _alive(self, session_id: str) -> bool:
-        home = self._root / session_id
-        if self.ended(session_id) is not None or not (home / "pid").exists():
+        if self.ended(session_id) is not None:
             return False
-        pid = int(self._pid(session_id))
+        pid = self._pid(session_id)
+        if pid is None:
+            return False
         try:
             os.waitpid(pid, os.WNOHANG)  # collect it if it was ours and has exited
         except ChildProcessError:
@@ -197,7 +208,12 @@ class DirectoryJournal:
         except ProcessLookupError:
             return False
         except PermissionError:
-            return True
+            pass
+        try:
+            if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                return False
+        except (OSError, IndexError):
+            pass
         return True
 
     @staticmethod
