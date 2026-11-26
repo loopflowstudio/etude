@@ -1607,3 +1607,8 @@ def report():
     assert len(scored) == 1
     assert scored[0].at["updates"] == 400.0
     assert (scored[0].matches, scored[0].failed, scored[0].unplayed) == (1, 1, 1)
+    # A status point is also emitted so split/commit filters with no scored cell still show failures.
+    status = [p for p in page.points if p.selection == sel and p.value is None]
+    assert len(status) == 1
+    assert status[0].at["updates"] == 400.0
+    assert (status[0].failed, status[0].unplayed) == (1, 1)

@@ -265,7 +265,8 @@ function model(D) {
   // A value's own position (`at`, from `Player.at`) wins over its mark's, so no point disagrees with the page.
   const xAt = (m, v, c) => v.at?.[c] ?? m.at[c];
   // Per checkpoint, `value(mark)` gives {y, lo, hi, meta}, {missing, meta}, {skip, meta}
-  // for a checkpoint that is no point of this line, or nothing; `gap` says why a value is absent.
+  // for a checkpoint that is no point of this line, or nothing; `gap` marks the baseline
+  // for absent values, or `"failed"` on a scored point that still has failed matches.
   // A job's point needs every seed: seeds align on where each checkpoint stood on the run's
   // first clock, and average; the band is their range, or a single seed's own interval.
   // `some` keeps points only some seeds have, such as direct games one seed played.
@@ -440,11 +441,11 @@ function model(D) {
       }
       const u = unseated.get(`${sel}|${m.key}`);
       if (u) {
-        if (u.gap) return {missing: true, gap: u.gap.missing === "not_yet" ? "pending" : "none", at: u.at, meta: missingText(u.gap)};
         if (u.failed) {
           const tail = u.unplayed ? `, ${u.unplayed} not yet played` : "";
           return {missing: true, gap: "failed", at: u.at, meta: `${u.failed} match${s(u.failed)} failed${tail}`};
         }
+        if (u.gap) return {missing: true, gap: u.gap.missing === "not_yet" ? "pending" : "none", at: u.at, meta: missingText(u.gap)};
         if (u.unplayed) return {missing: true, gap: "pending", at: u.at, meta: `not yet played: ${u.unplayed} match${s(u.unplayed)} eval_jobs(state) wants`};
       }
       return {skip: true, meta: "not in these matches"};

@@ -572,6 +572,38 @@ test("partially scored seated points keep the line unbroken while surfacing fail
   assert.match(context.pointMeta(combined), /mean of 2 seeds:.*1 match failed, 5 not yet played/);
 });
 
+test("seated status points surface failures under split filters and take precedence over gaps", () => {
+  // Split A scored at u400, while split B had 0 scored and 50 failed matches; u200 and u600 scored on both.
+  const data = seated([
+    {at: {updates: 200}, value: 0.5, split: {mode: "A"}, opponents: [0]},
+    {at: {updates: 200}, value: 0.4, split: {mode: "B"}, opponents: [0]},
+    {at: {updates: 400}, value: 0.7, split: {mode: "A"}, opponents: [0], failed: 50, unplayed: 0},
+    {at: {updates: 400}, value: null, gap: null, failed: 50, unplayed: 0},
+    {at: {updates: 600}, value: 0.8, split: {mode: "A"}, opponents: [0]},
+    {at: {updates: 600}, value: 0.6, split: {mode: "B"}, opponents: [0]},
+    // A checkpoint with both a relative-seat gap and failed matches reports failed first.
+    {at: {updates: 100}, value: null, gap: NEVER, failed: 3, unplayed: 1},
+  ]);
+  const m = context.model(data);
+  const splitA = Object.fromEntries(m.jobPoints(m.JOBS[0], "updates", m.evalValue(0, 0, {mode: "A"}, "")).map(p => [p.x, p]));
+  const splitB = Object.fromEntries(m.jobPoints(m.JOBS[0], "updates", m.evalValue(0, 0, {mode: "B"}, "")).map(p => [p.x, p]));
+  assert.equal(splitA[400].y, 0.7);
+  assert.equal(splitA[400].gap, "failed");
+  assert.equal(splitB[400].missing, true);
+  assert.equal(splitB[400].skip, undefined);
+  assert.equal(splitB[400].gap, "failed");
+  assert.match(splitB[400].meta, /50 matches failed/);
+  assert.equal(splitB[100].missing, true);
+  assert.equal(splitB[100].gap, "failed");
+  assert.match(splitB[100].meta, /3 matches failed, 1 not yet played/);
+
+  // Split B renders u400 as null (line break + × failed), never undefined (bridge).
+  const rendered = renderPage({...data, report: {clock: "updates", evals: [{kind: "curve", title: "Half", split: "mode", matches: {seating: "half"}}]}, panel_selections: [{selection: 0, control: false}]});
+  assert.equal(rendered.plots.length, 2);
+  assert.deepEqual([...rendered.plots[0].values[1]], [null, 0.5, 0.7, 0.8]);
+  assert.deepEqual([...rendered.plots[1].values[1]], [null, 0.4, null, 0.6]);
+});
+
 test("ticks a narrow range would label alike are written with the decimals their step needs", () => {
   const two = v => v.toFixed(2);
   assert.deepEqual([...context.tickLabels([0.5, 0.55, 0.6], two, 0.05)], ["0.50", "0.55", "0.60"]);

@@ -1938,7 +1938,7 @@ def _points(
                     )
                 )
             gap = next((gaps[key] for key in here if key in gaps), None)
-            if gap is not None or (not met and (failed_count or unplayed_count)):
+            if gap is not None or failed_count or unplayed_count:
                 points.append(
                     stood.model_copy(
                         update={
