@@ -114,15 +114,27 @@ class DirectoryJournal:
     def end(self, session_id: str) -> datetime | None:
         ended = self._root / session_id / "ended"
         if self._alive(session_id):
-            os.kill(int(self._pid(session_id)), signal.SIGTERM)
-            for _ in range(100):
-                if not self._alive(session_id):
-                    break
-                time.sleep(0.1)
+            try:
+                os.kill(int(self._pid(session_id)), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
             else:
-                return None
+                for _ in range(100):
+                    if not self._alive(session_id):
+                        break
+                    time.sleep(0.1)
+                else:
+                    return None
         if not ended.exists():
-            write(ended, datetime.now(UTC).isoformat())  # the process is dead without a note
+            now = datetime.now(UTC)
+            try:
+                write(ended, now.isoformat())  # the process is dead without a note
+            except OSError:
+                try:
+                    ended.with_name(ended.name + ".partial").unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return now
         return datetime.fromisoformat(ended.read_text())
 
     def logs(

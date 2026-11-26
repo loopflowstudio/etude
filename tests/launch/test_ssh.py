@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import signal
@@ -39,6 +40,7 @@ from etude.launch.ssh import (
     Unreachable,
 )
 from etude.launch.storage.bucket import BucketJournal
+from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.s3 import Bucket
 from etude.records import Clock
 from etude.spec import Job, RunRequest, Until
@@ -1035,3 +1037,126 @@ def test_refusing_owned_host_cools_down_and_yields_to_healthy_sibling(
         assert scheduler.read(run).machine == "healthy-host"
     finally:
         full_root.chmod(0o700)
+
+
+def test_post_pid_full_disk_observe_and_end_settle_without_tmp_writes(
+    tmp_path: Path, exited_pid: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    etude_home = tmp_path / "etude-home"
+    monkeypatch.setenv("ETUDE_HOME", str(etude_home))
+    ro_tmp = tmp_path / "ro-tmp"
+    ro_tmp.mkdir()
+    ro_tmp.chmod(0o500)
+    (tmp_path / "ssh").write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '    case "$1" in\n'
+        "        -G) printf 'connecttimeout none\\nserveraliveinterval 0\\nserveralivecountmax 3\\n'; exit 0 ;;\n"
+        "        -o) shift 2 ;;\n"
+        "        --) shift; break ;;\n"
+        "        -*) shift ;;\n"
+        "        *) break ;;\n"
+        "    esac\n"
+        "done\n"
+        "shift\n"
+        f'exec env TMPDIR={str(ro_tmp)!r} sh -c "$1"\n'
+    )
+    (tmp_path / "ssh").chmod(0o755)
+
+    root = tmp_path / "remote"
+    ssh = SSH("bench", str(root))
+    digest, _ = ssh._program()
+    program_dir = etude_home / "programs" / digest
+    program_dir.mkdir(parents=True)
+    (program_dir / ".venv").symlink_to(Path(sys.prefix))
+    (program_dir / "ready").write_text("ok\n")
+
+    journal = SSHJournal(ssh)
+    home = root / "s_post_pid"
+    home.mkdir(parents=True)
+    (home / "pid").write_text(str(exited_pid))
+    home.chmod(0o500)
+    try:
+        observation = journal.observe("s_post_pid")
+        assert observation.alive is False
+        ended_at = journal.end("s_post_pid")
+        assert ended_at is not None
+        assert not (home / "ended").exists()
+        assert not (home / "ended.partial").exists()
+    finally:
+        home.chmod(0o700)
+        ro_tmp.chmod(0o700)
+
+
+def test_directory_journal_end_full_disk_and_courier_handoff(
+    tmp_path: Path, exited_pid: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "sessions"
+    journal = DirectoryJournal(root)
+
+    # Injected ENOSPC on `ended` write still returns `now` and leaves no partial.
+    dead = root / "s_enospc"
+    dead.mkdir(parents=True)
+    (dead / "pid").write_text(str(exited_pid))
+
+    def fail_enospc(path: Path, text: str) -> None:
+        path.with_name(path.name + ".partial").write_text("")
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("etude.launch.storage.disk.write", fail_enospc)
+        ended_at = journal.end("s_enospc")
+    assert ended_at is not None
+    assert not (dead / "ended").exists()
+    assert not (dead / "ended.partial").exists()
+
+    # Live worker signalled on an unwritable dir settles once it exits.
+    live = root / "s_live"
+    live.mkdir(parents=True)
+    with subprocess.Popen(["sleep", "60"]) as worker:
+        try:
+            (live / "pid").write_text(str(worker.pid))
+            live.chmod(0o500)
+            ended_at = journal.end("s_live")
+            assert ended_at is not None
+            with pytest.raises(ProcessLookupError):
+                os.kill(worker.pid, 0)
+        finally:
+            live.chmod(0o700)
+            worker.kill()
+
+    # A worker that stays alive still returns None instead of faking settlement.
+    stubborn = root / "s_stubborn"
+    stubborn.mkdir(parents=True)
+    (stubborn / "pid").write_text(str(os.getpid()))
+    with monkeypatch.context() as patch:
+        patch.setattr("etude.launch.storage.disk.os.kill", lambda pid, sig: None)
+        patch.setattr("etude.launch.storage.disk.time.sleep", lambda _: None)
+        assert journal.end("s_stubborn") is None
+
+    # Bucket-backed owned host: Executor.end still waits for a live courier on full disk.
+    etude_home = tmp_path / "etude-home"
+    monkeypatch.setenv("ETUDE_HOME", str(etude_home))
+    remote_root = tmp_path / "remote"
+    ssh = SSH("bench", str(remote_root))
+    digest, _ = ssh._program()
+    program_dir = etude_home / "programs" / digest
+    program_dir.mkdir(parents=True)
+    (program_dir / ".venv").symlink_to(Path(sys.prefix))
+    (program_dir / "ready").write_text("ok\n")
+
+    executor = _bucket_host(ssh, Storage())
+    courier_home = remote_root / "s_courier"
+    courier_home.mkdir(parents=True)
+    (courier_home / "pid").write_text(str(exited_pid))
+    with subprocess.Popen(["sleep", "60"]) as courier:
+        try:
+            (courier_home / "courier-pid").write_text(str(courier.pid))
+            courier_home.chmod(0o500)
+            assert executor.end("s_courier") is None
+            courier.terminate()
+            courier.wait(timeout=5)
+            assert executor.end("s_courier") is not None
+        finally:
+            courier_home.chmod(0o700)
+            courier.kill()

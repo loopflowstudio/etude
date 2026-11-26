@@ -228,7 +228,7 @@ if request['action']=='ended':
     text=path.read_text().strip() if path.exists() else ''
     print(json.dumps({'ended_at':text or None})); sys.exit(0)
 if request['action']=='end':
-    home.mkdir(parents=True,exist_ok=True)
+    if not home.is_dir(): home.mkdir(parents=True,exist_ok=True)
     try: (home/'cancel-start').touch()
     except OSError:
         if not ((home/'boot-claim').exists() or (home/'pid').exists()): raise
@@ -362,11 +362,12 @@ if request['action']=='start':
         logging.write_log('bootstrap',logging.CLOSED)
         if links: logging.publish(home/'bootstrap.log',links['log_url'])
     sys.exit(0)
-import tempfile
-with tempfile.TemporaryFile() as payload:
-    payload.write(json.dumps(call).encode()); payload.seek(0)
-    os.dup2(payload.fileno(),0)
-    os.execv(str(root/".venv/bin/python"),[str(root/".venv/bin/python"),"-m","etude.launch.worker.remote"])
+import subprocess
+done=subprocess.run(
+    [str(root/".venv/bin/python"),"-m","etude.launch.worker.remote"],
+    input=json.dumps(call).encode(),
+)
+sys.exit(done.returncode)
 """
 )
 
