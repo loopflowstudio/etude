@@ -11,13 +11,14 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
+from pathlib import Path
 
 from etude.deadline import remaining
 
 CONNECT_TIMEOUT = 30
 SERVER_ALIVE_INTERVAL = 20
 
-_config_cache: dict[tuple[str, str], tuple[str, ...]] = {}
+_config_cache: dict[tuple[str, str, str], tuple[int | None, tuple[str, ...]]] = {}
 _config_lock = threading.Lock()
 
 
@@ -30,13 +31,24 @@ def _default_options() -> tuple[str, ...]:
     )
 
 
+def _config_stamp() -> tuple[str, int | None]:
+    home = os.environ.get("HOME", "")
+    config = Path(home) / ".ssh" / "config" if home else Path.home() / ".ssh" / "config"
+    try:
+        mtime: int | None = config.stat().st_mtime_ns
+    except OSError:
+        mtime = None
+    return home, mtime
+
+
 def _liveness_options(address: str) -> tuple[str, ...]:
-    """Effective liveness `-o` flags for `address`, probed once per address per process."""
-    key = (address, os.environ.get("PATH", ""))
+    """Effective liveness `-o` flags for `address`, cached until `HOME` or `~/.ssh/config` changes."""
+    home, mtime = _config_stamp()
+    key = (address, os.environ.get("PATH", ""), home)
     with _config_lock:
         cached = _config_cache.get(key)
-    if cached is not None:
-        return cached
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
     try:
         result = subprocess.run(
             ["ssh", "-G", "--", address],
@@ -61,7 +73,7 @@ def _liveness_options(address: str) -> tuple[str, ...]:
         options.extend(["-o", f"ServerAliveInterval={SERVER_ALIVE_INTERVAL}"])
     resolved = tuple(options)
     with _config_lock:
-        _config_cache[key] = resolved
+        _config_cache[key] = (mtime, resolved)
     return resolved
 
 

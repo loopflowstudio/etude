@@ -864,3 +864,71 @@ def test_end_signals_boot_claim_pid_and_returns_ended_at_when_ended_unwritable(
         assert not (full / "ended").exists()
     finally:
         full.chmod(0o700)
+
+
+def test_ssh_command_reprobes_when_home_or_ssh_config_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probes = tmp_path / "probes"
+    script = tmp_path / "bin" / "ssh"
+    script.parent.mkdir()
+    script.write_text(
+        "#!/bin/sh\n"
+        f'echo "$HOME|$3" >> {probes}\n'
+        'if [ -f "$HOME/.ssh/config" ] && grep -q custom "$HOME/.ssh/config"; then\n'
+        '    printf "connecttimeout 15\\nserveraliveinterval 45\\n"\n'
+        "else\n"
+        '    printf "connecttimeout none\\nserveraliveinterval 0\\n"\n'
+        "fi\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(script.parent) + os.pathsep + os.environ["PATH"])
+
+    home_a = tmp_path / "home_a"
+    home_b = tmp_path / "home_b"
+    (home_a / ".ssh").mkdir(parents=True)
+    (home_b / ".ssh").mkdir(parents=True)
+    config_a = home_a / ".ssh" / "config"
+    config_a.write_text("# empty\n")
+
+    monkeypatch.setenv("HOME", str(home_a))
+    first = ssh_command("lab-host", "true")
+    second = ssh_command("lab-host", "true")
+    assert (
+        first
+        == second
+        == [
+            "ssh",
+            "-o",
+            "ConnectTimeout=30",
+            "-o",
+            "ServerAliveInterval=20",
+            "--",
+            "lab-host",
+            "true",
+        ]
+    )
+    assert len(probes.read_text().splitlines()) == 1
+
+    # Editing ~/.ssh/config bumps its mtime and invalidates the cache entry.
+    config_a.write_text("# custom\n")
+    bumped = config_a.stat().st_mtime_ns + 1_000_000_000
+    os.utime(config_a, ns=(bumped, bumped))
+    edited = ssh_command("lab-host", "true")
+    assert edited == ["ssh", "--", "lab-host", "true"]
+    assert len(probes.read_text().splitlines()) == 2
+
+    # Switching HOME probes for the new home directory.
+    monkeypatch.setenv("HOME", str(home_b))
+    other = ssh_command("lab-host", "true")
+    assert other == [
+        "ssh",
+        "-o",
+        "ConnectTimeout=30",
+        "-o",
+        "ServerAliveInterval=20",
+        "--",
+        "lab-host",
+        "true",
+    ]
+    assert len(probes.read_text().splitlines()) == 3
