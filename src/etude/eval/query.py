@@ -73,7 +73,7 @@ import threading
 import time
 import warnings
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from contextvars import copy_context
@@ -247,6 +247,23 @@ def _write_catch_up(
     import duckdb  # noqa: PLC0415
 
     current = path.resolve() if path.exists() else None
+    if not rebuild and current is None:
+        # Cold start: publish an empty-schema generation under `.lock` so in-place
+        # catch-up below preserves committed chunks across an interrupt.
+        empty = path.with_name(f"{path.stem}.g{time.time_ns()}.{os.getpid()}.duckdb")
+        link = path.with_suffix(".link")
+        try:
+            with closing(duckdb.connect(empty)) as writer:
+                _ensure_schema(writer, experiment, listing.storage, rollups, summarize=True)
+            link.unlink(missing_ok=True)
+            link.symlink_to(empty.name)
+            link.replace(path)
+        except BaseException:
+            link.unlink(missing_ok=True)
+            empty.unlink(missing_ok=True)
+            Path(f"{empty}.wal").unlink(missing_ok=True)
+            raise
+        current = empty.resolve()
     if not rebuild and current is not None:
         try:
             db = duckdb.connect(current)
@@ -256,7 +273,7 @@ def _write_catch_up(
             try:
                 rebuild = _schema(db) not in (None, SCHEMA)
                 if not rebuild:
-                    _catch_up(db, experiment, allowed, listing, rollups)
+                    _catch_up(db, experiment, allowed, listing, rollups, per_chunk_summaries=True)
                     _sweep_stale_generations(path, current)
                     return
             finally:
@@ -279,7 +296,7 @@ def _write_catch_up(
             except (duckdb.IOException, duckdb.ConnectionException) as locked:
                 raise EtudeError("statsdb_in_use", 409) from locked
         with closing(duckdb.connect(generation)) as writer:
-            _catch_up(writer, experiment, allowed, listing, rollups)
+            _catch_up(writer, experiment, allowed, listing, rollups, per_chunk_summaries=False)
             writer.execute("checkpoint")
         link.unlink(missing_ok=True)
         link.symlink_to(generation.name)
@@ -538,35 +555,30 @@ def _fetch_files(
         raise
 
 
-def _catch_up(
+def _ensure_schema(
     db: duckdb.DuckDBPyConnection,
     experiment: str,
-    allowed: frozenset[str],
-    listing: RunListing,
+    storage: Storage,
     rollups: Sequence[Rollup],
-) -> None:
-    """Read what arrived in `storage` since the last open, in committed, checkpointed chunks.
-
-    Each chunk fetches its objects concurrently before opening its DuckDB
-    transaction, then commits its rows, `kept.seen` names and summaries and
-    checkpoints so an interrupted in-place catch-up resumes from the last
-    committed chunk. Taking in a block is a fixed number of statements however
-    many matches and blobs it holds (`etude.eval.block.stage`).
-    """
-    storage = listing.storage
+    *,
+    summarize: bool,
+) -> bool:
+    """Create the database schema when absent and register requested rollups; return whether created."""
     if _schema(db) is None:
         db.execute("begin")
         try:
             _create(db, experiment, storage)
             for rollup in rollups:
                 _hold(db, rollup)
-            _summaries(db)
+            if summarize:
+                _summaries(db)
             db.execute("commit")
         except BaseException:
             db.execute("rollback")
             raise
         db.execute("checkpoint")
-    elif rollups:
+        return True
+    if rollups:
         held_rollups = dict(db.execute("select name, digest from kept.rollups").fetchall())
         if any(held_rollups.get(rollup.name) != rollup.digest for rollup in rollups):
             db.execute("begin")
@@ -577,8 +589,39 @@ def _catch_up(
             except BaseException:
                 db.execute("rollback")
                 raise
+    return False
+
+
+def _catch_up(
+    db: duckdb.DuckDBPyConnection,
+    experiment: str,
+    allowed: frozenset[str],
+    listing: RunListing,
+    rollups: Sequence[Rollup],
+    *,
+    per_chunk_summaries: bool = True,
+) -> None:
+    """Read what arrived in `storage` since the last open, in committed, checkpointed chunks.
+
+    Each chunk fetches its objects concurrently before opening its DuckDB
+    transaction, then commits its rows and `kept.seen` names and checkpoints so
+    an interrupted in-place catch-up resumes from the last committed chunk.
+    In-place catch-up updates summary tables on every eval chunk so the database
+    stays complete after each commit; private generations run `_summaries` once
+    at the end before publishing. Taking in a block is a fixed number of
+    statements however many matches and blobs it holds (`etude.eval.block.stage`).
+    """
+    storage = listing.storage
+    created = _ensure_schema(db, experiment, storage, rollups, summarize=per_chunk_summaries)
     kept = _Ingested.read(db)
+    eval_changed = False
     with _fetch_pool(storage) as pool:
+
+        def flush(pending: _Chunk) -> None:
+            nonlocal eval_changed
+            if _flush_chunk(db, storage, pool, pending, summarize=per_chunk_summaries):
+                eval_changed = True
+
         chunk = _Chunk()
         for batch in itertools.batched(sorted(listing.folders.items()), _CATCH_UP_CHUNK):
             _prefetch_declarations(pool, listing, batch, kept)
@@ -614,14 +657,20 @@ def _catch_up(
                 if not new:
                     continue
                 if eval_run:
-                    chunk = _queue_eval(db, storage, pool, chunk, run, run_experiment, located, new)
+                    chunk = _queue_eval(db, flush, chunk, run, run_experiment, located, new)
                 else:
-                    chunk = _queue_training(
-                        db, storage, pool, chunk, run, run_experiment, located, new
-                    )
+                    chunk = _queue_training(db, flush, chunk, run, run_experiment, located, new)
         if chunk.has_work():
-            _flush_chunk(db, storage, pool, chunk)
+            flush(chunk)
         _backfill_rollups(db, storage, pool, listing, allowed, kept)
+    if not per_chunk_summaries and (created or eval_changed):
+        db.execute("begin")
+        try:
+            _summaries(db)
+            db.execute("commit")
+        except BaseException:
+            db.execute("rollback")
+            raise
 
 
 @contextmanager
@@ -735,8 +784,7 @@ def _pick_environment(folders: Sequence[str], bodies: Mapping[str, bytes]) -> st
 
 def _queue_eval(
     db: duckdb.DuckDBPyConnection,
-    storage: Storage,
-    pool: ThreadPoolExecutor | None,
+    flush: Callable[[_Chunk], None],
     chunk: _Chunk,
     run: str,
     experiment: str,
@@ -792,7 +840,7 @@ def _queue_eval(
         )
         chunk.weight += 1
         if chunk.weight >= _CATCH_UP_CHUNK:
-            _flush_chunk(db, storage, pool, chunk)
+            flush(chunk)
             return _Chunk()
         return chunk
 
@@ -826,15 +874,14 @@ def _queue_eval(
         chunk.weight += len(piece)
         cursor = end
         if chunk.weight >= _CATCH_UP_CHUNK:
-            _flush_chunk(db, storage, pool, chunk)
+            flush(chunk)
             chunk = _Chunk()
     return chunk
 
 
 def _queue_training(
     db: duckdb.DuckDBPyConnection,
-    storage: Storage,
-    pool: ThreadPoolExecutor | None,
+    flush: Callable[[_Chunk], None],
     chunk: _Chunk,
     run: str,
     experiment: str,
@@ -858,7 +905,7 @@ def _queue_training(
         )
         chunk.weight += 1
         if chunk.weight >= _CATCH_UP_CHUNK:
-            _flush_chunk(db, storage, pool, chunk)
+            flush(chunk)
             return _Chunk()
         return chunk
 
@@ -878,7 +925,7 @@ def _queue_training(
         chunk.weight += len(piece)
         cursor = end
         if chunk.weight >= _CATCH_UP_CHUNK:
-            _flush_chunk(db, storage, pool, chunk)
+            flush(chunk)
             chunk = _Chunk()
     return chunk
 
@@ -888,7 +935,9 @@ def _flush_chunk(
     storage: Storage,
     pool: ThreadPoolExecutor | None,
     chunk: _Chunk,
-) -> None:
+    *,
+    summarize: bool,
+) -> bool:
     """Prefetch a chunk's objects, ingest them in one transaction, checkpoint, and drop copies."""
     with tempfile.TemporaryDirectory(prefix="etude-statsdb-") as copies_root:
         copies = Path(copies_root)
@@ -994,13 +1043,14 @@ def _flush_chunk(
                         {"run": "VARCHAR", "name": "VARCHAR"},
                         [[training.run, name] for name in training.seen],
                     )
-            if eval_changed:
+            if summarize and eval_changed:
                 _summaries(db)
             db.execute("commit")
         except BaseException:
             db.execute("rollback")
             raise
         db.execute("checkpoint")
+        return eval_changed
 
 
 def _ended(
