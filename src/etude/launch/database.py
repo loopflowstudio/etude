@@ -940,19 +940,51 @@ class Database:
         return _run_from_row(row)
 
     def runs(
-        self, *, experiment: str | None = None, job: str | None = None
+        self,
+        *,
+        experiment: str | None = None,
+        job: str | None = None,
+        unfinished: bool = False,
     ) -> tuple[RunRecord, ...]:
         clauses: list[str] = []
-        values: list[str] = []
+        values: list[Fact] = []
         if experiment is not None:
             clauses.append("json_extract(r.spec, '$.experiment') = ?")
             values.append(experiment)
         if job is not None:
             clauses.append("(r.job = ? OR json_extract(r.spec, '$.name') = ?)")
             values.extend((job, job))
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        rows = self._db.execute(f"{_RUNS}{where} ORDER BY r.seq", values)
-        return tuple(_run_from_row(row) for row in rows)
+        if not unfinished:
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            rows = self._db.execute(f"{_RUNS}{where} ORDER BY r.seq", values)
+            return tuple(_run_from_row(row) for row in rows)
+        marks = ", ".join("?" for _ in RETRYABLE)
+        exempt = ", ".join("?" for _ in TRY_EXEMPT)
+        clauses.append(
+            f"""(EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND a.outcome IS NULL)
+                OR (r.cancel_requested_at IS NULL
+                    AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id
+                      AND a.number > r.resume_after AND (
+                        a.outcome IS NULL OR (a.outcome != 'stopped' AND
+                        (a.outcome != 'lost' OR a.cause NOT IN ({marks})))))))"""
+        )
+        where = " WHERE " + " AND ".join(clauses)
+        rows = self._db.execute(
+            f"""SELECT r.*,
+                  CASE WHEN EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND a.outcome IS NULL)
+                         OR NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND a.number > r.resume_after)
+                       THEN -1
+                       ELSE (SELECT count(*) FROM attempts a WHERE a.run = r.id
+                             AND (a.cause IS NULL OR a.cause NOT IN ({exempt})))
+                  END AS tries
+                FROM runs r{where} ORDER BY r.seq""",
+            (*TRY_EXEMPT, *values, *sorted(RETRYABLE)),
+        ).fetchall()
+        return tuple(
+            run
+            for row in rows
+            if (run := _run_from_row(row)).launch.spec.max_attempts > row["tries"]
+        )
 
     def waiting(self, supply: str) -> tuple[RunRecord, ...]:
         """Runs that may use this pool or on-demand and want a new attempt, oldest first.

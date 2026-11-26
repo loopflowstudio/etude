@@ -19,7 +19,7 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.launch import cli, client
+from etude.launch import cli, client, server
 from etude.launch.aws import Keys
 from etude.launch.commands import Kind
 from etude.launch.database import launcher_file, upgrade
@@ -373,3 +373,51 @@ def test_counting_covers_physical_transports(
             is None
         )
         assert counting.snapshot() == Counts(provider=1, bucket=2, ssh=1)
+
+
+@pytest.mark.parametrize("history", [1, 500])
+def test_idle_pace_query_count_ignores_finished_run_history(
+    tmp_path: Path, history: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    b = bench(tmp_path)
+    b.store.add_pool(Pool(name="history"))
+    b.store.add_machine(Machine(name="history", kind="ssh", pool="history", address="fixture"))
+    old = (b.clock() - timedelta(days=1)).isoformat()
+    spec = Job(command="true", max_hours=1, max_usd=Decimal(1)).model_dump_json()
+    b.store._db.executemany(
+        """INSERT INTO runs(id, job, spec, pool, created_at)
+           VALUES (?, 'job', ?, 'history', ?)""",
+        [(f"done-{index}", spec, old) for index in range(history)],
+    )
+    b.store._db.executemany(
+        "INSERT INTO sessions(id, machine, planned_at, ended_at) VALUES (?, 'history', ?, ?)",
+        [(f"sess-{index}", old, old) for index in range(history)],
+    )
+    b.store._db.executemany(
+        """INSERT INTO attempts(id, run, session, machine, number, position,
+               limit_seconds, limit_kind, started_at, finished_at, outcome)
+           VALUES (?, ?, ?, 'history', 1, 0, 3600, 'out_of_time', ?, ?, 'succeeded')""",
+        [(f"att-{index}", f"done-{index}", f"sess-{index}", old, old) for index in range(history)],
+    )
+    counting = Counting(b.store, b.service)
+    with counting.record():
+        assert b.store.runs(unfinished=True) == ()
+        unfinished_query = counting.snapshot()
+    assert unfinished_query == Counts(database=1)
+
+    class _Stop(BaseException):
+        pass
+
+    def stop_on_sleep(seconds: float) -> None:
+        raise _Stop
+
+    monkeypatch.setattr("etude.launch.server.time.sleep", stop_on_sleep)
+    with counting.record():
+        with pytest.raises(_Stop):
+            server.loop(b.scheduler)
+        idle_tick = counting.snapshot()
+    assert idle_tick == Counts(database=42), idle_tick.model_dump()
+    plan = query_plan(b.store, lambda: b.store.runs(unfinished=True))
+    assert not any("SCAN a" in step for step in plan), plan

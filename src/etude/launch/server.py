@@ -42,7 +42,7 @@ from etude.launch.records import (
     Status,
     Target,
 )
-from etude.launch.scheduler.loop import Scheduler, pace_ticks
+from etude.launch.scheduler.loop import Scheduler
 from etude.launch.source import freeze, retain, source_archive, stored
 from etude.launch.ssh import (
     _INSTALL_CODE,
@@ -625,8 +625,7 @@ def loop(scheduler: Scheduler, every: float | None = None) -> None:
             _hand_over(error.program)
         raise error
 
-    pace_ticks(
-        scheduler,
+    scheduler._pace(
         every=every,
         idle_max=_SERVER_IDLE_MAX,
         stop_when_settled=False,
