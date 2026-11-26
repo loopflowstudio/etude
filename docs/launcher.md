@@ -51,25 +51,50 @@ uv run etude launch experiment.py --pool lab
 
 A pool contains machines you own. `--cost-usd` and `--expires-at` record a paid
 owned window when needed; expiry never deletes an owned host. An SSH host needs
-Python 3.12, uv, git and working SSH credentials. The job uses a separate
-Python environment from Etude's client. `--pool lab --rent gpu` uses available
-owned capacity first, then rents. Machine and rental facts are separate from
-scientific run identity.
+Python 3.12, uv, git and working SSH credentials. When `~/.ssh/config` leaves
+`ConnectTimeout` unset (`none`) or `ServerAliveInterval` at `0`, Etude passes
+`ConnectTimeout=30` and `ServerAliveInterval=20` on SSH calls and leaves
+`ServerAliveCountMax` to your config (OpenSSH defaults to 3, so a silent host
+drops as unreachable in about a minute). These detect a dead peer without
+capping a live command; set positive values in `~/.ssh/config` to override them:
+
+```text
+Host mini.local
+    ConnectTimeout 15
+    ServerAliveInterval 30
+    ServerAliveCountMax 4
+```
+
+The job uses a separate Python environment from Etude's client. `--pool lab
+--rent gpu` uses available owned capacity first, then rents. Machine and rental
+facts are separate from scientific run identity.
 
 If starting a session on an owned SSH host loses its reply, Etude checks the
 host directly: an install or worker already running there is recovered and
 tracked without starting a second copy, while an unclaimed session is fenced
 and freed at once so queued work can use the machine even with no startup
-cutoff. Cancelling a run while its owned host is still setting up (installing,
+cutoff. If claiming the session fails on the host (for example, on a full
+disk), the start fails with the host's error and leaves the machine unclaimed.
+Cancelling a run while its owned host is still setting up (installing,
 or fetching and restoring inputs from storage) stops that setup and frees the
-host once stopped. A failed or killed install also frees the host. If the host
-is unreachable, Etude waits until it can check.
+host once stopped, even if a full disk prevents writing the end marker. A
+failed or killed install also frees the host. If the host is unreachable, Etude
+waits until it can check.
 
 On an SSH host with bucket storage, Etude tracks the courier from input fetch
 through final upload. The host stays occupied while the courier delivers the
 last files and logs, even after the job exits. If the courier dies, including
 during the start receipt upload or a host reboot, Etude checks the host, stops
 any remaining worker, and releases the machine for queued work.
+
+After an attempt finishes on any host, Etude deletes its working trees (`src/`,
+`prepared-source/`, `prepared-inputs/` and `inputs/`) while keeping its
+outputs, logs and session journal. With bucket storage, Etude also removes an
+attempt's local `outputs/` once delivery is confirmed and deletes the session's
+`sources/`, `inputs/` and remaining attempt directories after confirmed final
+delivery, keeping only small control files; unconfirmed delivery leaves local
+files in place. On an SSH host without bucket storage, outputs and logs stay on
+the host because its disk is the only copy.
 
 ## Rented machines
 
@@ -276,6 +301,9 @@ free for the next launch, so `launch; wait; launch; wait` needs nothing in
 between. A machine rented by hand with `etude rent` is kept and does not hold
 `wait`. A launch issued while a machine is still finishing says which one:
 `at its machine limit (finishing: gpu-41840a01c3b1)`; `etude wait` clears it.
+`etude wait` and the server loop check every second after a run or machine
+changes state, then back off to every 10 seconds while state is steady, so a
+finished or cancelled run can take up to 10 seconds to notice.
 
 ## Fetching a run's files
 
@@ -344,5 +372,6 @@ For module ownership and dependencies, use the
 [developer reference](dev/launcher.md#layout-and-dependency-rules).
 
 For a bounded wait from Python, call `etude.launch.client.wait(timeout=120)`;
-the CLI `etude wait` waits until its selected runs finish and their rented
-machines are deleted.
+it uses the same 1–10 second backoff by default (`every=None`), or pass a
+positive `every=` in seconds for a fixed polling interval. The CLI `etude wait`
+waits until its selected runs finish and their rented machines are deleted.

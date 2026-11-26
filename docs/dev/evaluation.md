@@ -426,7 +426,10 @@ The database is kept in a file under `ETUDE_HOME/statsdb`, one per
 experiment and store. Opening it lists the store once and reads only what
 arrived since it was last opened, so a query never waits on every result
 being read again: a new block costs its index and one file per table and
-rollup, and never its blobs. A rollup's totals are added to, never summed
+rollup, and never its blobs. Catch-up fetches each chunk of new blocks
+concurrently and commits and checkpoints as it goes, so an interrupted in-place
+catch-up resumes from the last committed chunk (catch-up into a new snapshot
+generation still publishes only at the end). A rollup's totals are added to, never summed
 again from earlier blocks. `read_blobs` reads each pack's adjacent blobs in one range,
 kept on this computer, so asking again reads nothing. The store stays the authority: `statsdb(..., rebuild=True)`
 reads everything again, and a database from another Etude schema is rebuilt

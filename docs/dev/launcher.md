@@ -870,19 +870,28 @@ original numbers, but do not count toward `max_attempts` or the status attempt
 count. Scheduling, status and explicit resume use that same budget rule.
 Timeouts, no reply, 408, 5xx and unreadable or mismatched replies stay unknown.
 A remote start has an exclusive claim; a lost SSH reply cannot start another
-process. On an owned SSH host, the host itself (`control`) settles an
-unconfirmed start: if `boot-claim` or `pid` exists, the session is confirmed
-and tracked; if neither exists, it is fenced (`cancel-start` and `ended`) and
-settled at once as `machine_lost_before_start` even when `startup_seconds` is
-`None`; if the host is unreachable, it waits safely. Cancelling all open
-attempts while an owned host is still booting also writes `cancel-start`.
-Installation and courier setup check it via `startup_timeout`,
-including immediately after the start receipt upload and before spawning the
-worker. `boot-claim` names the boot process until it hands off to a worker
-(`pid`) or, on a bucket-backed host, a courier (`courier-pid`). Before `pid`
-exists, `end` signals the courier and records `ended` once setup has stopped.
-It closes every slot in the session as soon as shutdown is requested. A setup
-that was stopped still publishes its diagnostics if storage is available.
+process. Start forks first and the child writes its own PID into `boot-claim`
+exclusively in one write, unlinking the claim and failing with the host's error
+if the write fails (such as on a full disk). On an owned SSH host, the host
+itself (`control`) settles an unconfirmed start: if `boot-claim` or `pid`
+exists, the session is confirmed and tracked (an empty `boot-claim`, as from a
+prior release, counts as booting only while younger than 60 seconds); if
+neither exists, it is fenced (`cancel-start` and `ended`) and settled at once
+as `machine_lost_before_start` even when `startup_seconds` is `None`; if the
+host is unreachable, it waits safely. Failed SSH calls retain the last line of
+remote stderr through `etude.errors`' sanitizer. `SSH.call` ships the program
+archive only on `start` and when the remote bootstrap reports it missing (exit
+97). Cancelling all open attempts while an owned host is still booting also
+writes `cancel-start`. Installation and courier setup check it via
+`startup_timeout`, including immediately after the start receipt upload and
+before spawning the worker. `boot-claim` names the boot process until it hands
+off to a worker (`pid`) or, on a bucket-backed host, a courier (`courier-pid`).
+Before `pid` exists, `end` signals any live `boot-claim` or courier PID and
+records `ended` once setup has stopped; if nothing is running and the cancel
+fence is in place, a failed write of `ended` on a full disk still answers
+`ended_at` so the session settles as lost. It closes every slot in the session
+as soon as shutdown is requested. A setup that was stopped still publishes its
+diagnostics if storage is available.
 
 On a bucket-backed SSH host, storage supplies attempt progress and `out/receipt`
 records start intent. Until `out/ended` arrives, SSH checks `courier-pid`
@@ -893,6 +902,14 @@ courier dies, host cleanup stops any remaining worker before releasing the
 machine. For sessions started by v0.4.6, `courier-claim` and `pid` identify
 a bucket session whose courier PID is unknown. Etude waits for its bucket end
 receipt.
+
+Disk cleanup on hosts has two owners. Immediately after writing `finished.json`
+on every host, `attempts.py` deletes the attempt's working trees (`src/`,
+`prepared-source/`, `prepared-inputs/` and `inputs/`), keeping outputs, logs
+and journal files. On bucket-backed hosts, `courier.py` removes an attempt's
+`outputs/` once its delivery is confirmed and removes the session's `sources/`,
+`inputs/` and remaining attempt directories after confirmed final delivery,
+keeping only the small control files; unconfirmed delivery keeps local files.
 
 A lost attempt requires evidence that its process or provider machine is gone.
 Infrastructure losses retry up to `max_attempts`,
@@ -1444,8 +1461,12 @@ Startup and log retrieval default to no total timeout. `None` adds no operation 
 operations still obey an existing caller deadline and rental limits. Positive
 values are seconds; CLI `--timeout 0` and `--startup-seconds 0` select no timeout.
 A finite allowance is shared across requests and is never reset by a retry.
-SSH connection options can be set explicitly in the customer's SSH configuration;
-Etude supplies no hidden SSH connection timeout. Provider HTTP uses the enclosing
+SSH calls read the host's effective configuration with `ssh -G` once per
+address per process and add `ConnectTimeout=30` where `none` and
+`ServerAliveInterval=20` where `0`, leaving `ServerAliveCountMax` to the
+configuration (OpenSSH defaults to 3). These detect a dead peer without capping
+a live call; set positive values in `~/.ssh/config` to override them. Provider
+HTTP uses the enclosing
 operation allowance. Storage HTTP also has finite socket limits so a dead
 connection cannot hold delivery indefinitely, even without an operation deadline.
 
