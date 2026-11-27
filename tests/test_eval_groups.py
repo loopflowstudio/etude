@@ -765,7 +765,7 @@ def test_apple_silicon_plan_execution_bounds_games_by_cores_and_memory(
     )
     expected_held = int(memory_gb * 1024**3) if memory_gb is not None else 8 * 1024**3
     expected_budget = (
-        0 if not agents else expected_held if expected_shared else expected_held // max(1, games)
+        0 if not agents else expected_held if expected_shared else expected_held // games
     )
     assert plan.checkpoint_bytes == expected_budget
 
@@ -773,11 +773,7 @@ def test_apple_silicon_plan_execution_bounds_games_by_cores_and_memory(
 def test_probe_skipped_for_code_only_and_direct_overrides(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    probed = 0
-
     def fail_probe() -> None:
-        nonlocal probed
-        probed += 1
         raise AssertionError("GPU probe should not run")
 
     monkeypatch.setattr(eval_resources, "_gpu", fail_probe)
@@ -816,7 +812,6 @@ def test_probe_skipped_for_code_only_and_direct_overrides(
             8,
             1,
         )
-    assert probed == 0
 
     # Host override ETUDE_EVAL_SHARED=1 outranks shared=False and reports any detected GPU.
     monkeypatch.setenv("ETUDE_EVAL_SHARED", "1")
@@ -980,20 +975,14 @@ def test_agents_shared_override_controls_mode_and_grouping(
     tuned_direct_job = job("tuned", tuned_direct)
     tuned_direct_peer = job("tuned_peer", tuned_direct)
     forced_job = job("forced", Agents(load=load, shared=True))
-    auto_lowered = auto_job.lower(state)
-    direct_lowered = direct_job.lower(state)
-    tuned_direct_lowered = tuned_direct_job.lower(state)
-    tuned_peer_lowered = tuned_direct_peer.lower(state)
-    forced_lowered = forced_job.lower(state)
-    keys = {
-        _group_key(lowered, evaluation_group(lowered).evaluations[0])
-        for lowered in (auto_lowered, direct_lowered, tuned_direct_lowered, forced_lowered)
-    }
-    assert len(keys) == 4
+
+    def group_key(item: EvalJob) -> str:
+        lowered = item.lower(state)
+        return _group_key(lowered, evaluation_group(lowered).evaluations[0])
+
+    assert len({group_key(j) for j in (auto_job, direct_job, tuned_direct_job, forced_job)}) == 4
     # Identical direct declarations still group; differing batching stays deterministic for ETUDE_EVAL_SHARED=1.
-    assert _group_key(
-        tuned_direct_lowered, evaluation_group(tuned_direct_lowered).evaluations[0]
-    ) == (_group_key(tuned_peer_lowered, evaluation_group(tuned_peer_lowered).evaluations[0]))
+    assert group_key(tuned_direct_job) == group_key(tuned_direct_peer)
 
     monkeypatch.setattr("etude.eval.run.plan_execution", plan_execution)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)

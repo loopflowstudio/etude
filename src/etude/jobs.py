@@ -443,9 +443,10 @@ class Agents(BaseModel):
         if self.build is not None and len(inspect.signature(self.build).parameters) != 2:
             raise TypeError("build must take player and leaves")
         # Settings that would do nothing without a loader would still split the group key.
-        given = self.model_fields_set
         if self.load is None:
-            unused = sorted(given & {"shared", "max_batch", "max_delay_seconds", "memory_gb"})
+            unused = sorted(
+                self.model_fields_set & {"shared", "max_batch", "max_delay_seconds", "memory_gb"}
+            )
             if unused:
                 raise ValueError(f"{', '.join(unused)} requires a checkpoint loader")
         return self

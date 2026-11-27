@@ -251,14 +251,13 @@ than direct CPU), so `Agents(shared=False)` lets CPU-only loaders opt out of the
 probe and play direct, and `ETUDE_EVAL_SHARED=0|1` overrides sharing for one
 host (such as a Metal-less VM or owned pool Mac, forwarded by `etude worker`
 and validated before `etude smoke` trains) without editing the experiment,
-selecting process
-topology only without hiding MPS or CUDA from the loader. One startup line names
-the mode, why it was chosen, any detected GPU, games and inference threads.
-`Agents` refuses sharing, batching and memory settings without `load`; batching
-settings stay accepted with `shared=False` so toggling sharing preserves them.
-`Agents(shared=True)` forces shared
-inference, reserving at least half the cores for inference when no GPU is
-detected. Old queued `AgentLoader` records default to automatic selection.
+selecting process topology only without hiding MPS or CUDA from the loader. One
+startup line names the mode, why it was chosen, any detected GPU, games and
+inference threads. `Agents` refuses sharing, batching and memory settings
+without `load`; batching settings stay accepted with `shared=False` so toggling
+sharing preserves them. `Agents(shared=True)` forces shared inference, reserving
+at least half the cores for inference when no GPU is detected. Old queued
+`AgentLoader` records default to automatic selection.
 
 `matches.retry` distinguishes retryable infrastructure failures from ordinary
 game errors without adding another status. Standalone and grouped evals retain

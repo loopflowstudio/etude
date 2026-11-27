@@ -118,9 +118,13 @@ type Reason = (
 """What decided shared or direct inference: an override, the GPU found, or why none was."""
 
 
+def _apple_silicon() -> bool:
+    return sys.platform == "darwin" and platform.machine() == "arm64"
+
+
 def _cuda_hidden() -> bool:
     return (
-        not (sys.platform == "darwin" and platform.machine() == "arm64")
+        not _apple_silicon()
         and os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1")
         and shutil.which("nvidia-smi") is not None
     )
@@ -128,7 +132,7 @@ def _cuda_hidden() -> bool:
 
 def _gpu() -> Gpu | None:
     """Read visible NVIDIA or Apple Silicon hardware without importing a model library."""
-    if sys.platform == "darwin" and platform.machine() == "arm64":
+    if _apple_silicon():
         return "apple"
     command = shutil.which("nvidia-smi")
     if command is None or os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1"):
@@ -195,6 +199,28 @@ class ExecutionPlan:
         return f"{line}; {self.threads} inference {unit}"
 
 
+def _select_mode(
+    *, loader: bool, checkpoints: bool, shared: bool | None
+) -> tuple[bool, Gpu | None, Reason]:
+    host = shared_override()
+    if not loader:
+        return False, None, "no loader"
+    if not checkpoints:
+        return False, None, "no checkpoints"
+    if host is not None:
+        return (
+            host,
+            _gpu() if host else None,
+            "ETUDE_EVAL_SHARED=1" if host else "ETUDE_EVAL_SHARED=0",
+        )
+    if shared is not None:
+        return shared, _gpu() if shared else None, "shared=True" if shared else "shared=False"
+    gpu = _gpu()
+    if gpu is not None:
+        return True, gpu, gpu
+    return False, None, "CUDA_VISIBLE_DEVICES hides GPUs" if _cuda_hidden() else "no GPU"
+
+
 def plan_execution(
     pending: int,
     *,
@@ -215,30 +241,16 @@ def plan_execution(
     """
     if pending < 1:
         raise ValueError("an execution plan needs pending matches")
+    use_shared, gpu, reason = _select_mode(loader=loader, checkpoints=checkpoints, shared=shared)
     cpus = available_cpus()
-    host = shared_override()
-    chosen = host if host is not None else shared
-    needs_loading = loader and checkpoints
-    use_shared = needs_loading and chosen is not False
-    gpu = _gpu() if use_shared else None
-    reason: Reason
-    if not loader:
-        reason = "no loader"
-    elif not checkpoints:
-        reason = "no checkpoints"
-    elif host is not None:
-        reason = "ETUDE_EVAL_SHARED=1" if host else "ETUDE_EVAL_SHARED=0"
-    elif shared is not None:
-        reason = "shared=True" if shared else "shared=False"
-    elif gpu is not None:
-        reason = gpu
-    else:
-        reason = "CUDA_VISIBLE_DEVICES hides GPUs" if _cuda_hidden() else "no GPU"
-    use_shared = use_shared and (chosen is True or gpu is not None)
     total_memory = memory_bytes()
-    held = 0
-    if needs_loading:
-        held = total_memory // 2 if memory_gb is None else int(memory_gb * 1024**3)
+    held = (
+        0
+        if not (loader and checkpoints)
+        else total_memory // 2
+        if memory_gb is None
+        else int(memory_gb * 1024**3)
+    )
     if not use_shared:
         capacity = cpus
     elif gpu == "nvidia":
