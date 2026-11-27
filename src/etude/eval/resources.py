@@ -106,8 +106,10 @@ def seconds_left() -> float | None:
 
 
 type Accelerator = Literal["cuda", "metal"]
-type Device = Accelerator | Literal["cpu"]
-type _Unavailable = Literal["cpu", "CUDA_VISIBLE_DEVICES hides GPUs", "nvidia-smi failed"]
+type Device = Literal["cuda", "metal", "cpu"]
+type _Unavailable = Literal[
+    "no accelerator detected", "CUDA_VISIBLE_DEVICES hides GPUs", "nvidia-smi failed"
+]
 type Inference = (
     Accelerator
     | _Unavailable
@@ -127,7 +129,7 @@ def _detect_accelerator() -> Accelerator | _Unavailable:
         return "metal"
     command = shutil.which("nvidia-smi")
     if command is None:
-        return "cpu"
+        return "no accelerator detected"
     if os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1"):
         return "CUDA_VISIBLE_DEVICES hides GPUs"
     try:
@@ -141,7 +143,7 @@ def _detect_accelerator() -> Accelerator | _Unavailable:
         return "nvidia-smi failed"
     except subprocess.TimeoutExpired as error:
         raise RetryRequested("nvidia-smi did not answer before the deadline") from error
-    return "cuda" if listed.strip() else "cpu"
+    return "cuda" if listed.strip() else "no accelerator detected"
 
 
 @dataclass(frozen=True)

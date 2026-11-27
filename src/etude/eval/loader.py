@@ -12,13 +12,15 @@ _DEFAULT_DEVICES: tuple[Device, ...] = ("cuda", "metal")
 
 
 def _normalize_devices(devices: tuple[Device, ...]) -> tuple[Device, ...]:
+    # Checked here rather than with `min_length`, so a misspelled device reports
+    # one error instead of also calling the tuple empty.
+    if not devices:
+        raise ValueError("devices must name at least one device")
     # Direct play is always the fallback, so only accelerators affect grouping.
     return tuple(sorted(set(devices) - {"cpu"})) or ("cpu",)
 
 
-type _Devices = Annotated[
-    tuple[Device, ...], Field(min_length=1), AfterValidator(_normalize_devices)
-]
+type _Devices = Annotated[tuple[Device, ...], AfterValidator(_normalize_devices)]
 
 
 class LoaderDeclaration[F](Record):

@@ -88,7 +88,11 @@ from tests.train.tracking import open_run
 def shared_agents(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
     """Exercise shared transport with bounded, injected hardware; CPU tests opt out."""
     shared = getattr(request, "param", True)
-    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: "cuda" if shared else "cpu")
+    monkeypatch.setattr(
+        eval_resources,
+        "_detect_accelerator",
+        lambda: "cuda" if shared else "no accelerator detected",
+    )
     monkeypatch.setattr(eval_resources, "available_cpus", lambda: 4)
     monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 2 * 1024**3)
 
@@ -589,14 +593,14 @@ def test_plan_execution_respects_cpu_pending_and_memory(
     memory_gb: float | None,
     games: int,
 ) -> None:
-    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: "cpu")
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: "no accelerator detected")
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
     monkeypatch.setattr(
         "etude.eval.resources.memory_bytes", lambda: 16 * 1024**3 if cpus >= 16 else 2 * 1024**3
     )
     loader = Agents(load=load, memory_gb=memory_gb).plain(None)
     plan = plan_execution(pending, loader, checkpoints=agents)
-    reason = "cpu" if agents else "no checkpoints"
+    reason = "no accelerator detected" if agents else "no checkpoints"
     assert (plan.games, plan.threads, plan.inference) == (games, 1, reason)
 
 
@@ -703,7 +707,11 @@ def test_apple_silicon_plan_execution_bounds_games_by_cores_and_memory(
     loader = Agents(load=load, memory_gb=memory_gb, max_batch=batch_inputs).plain(None)
     plan = plan_execution(64, loader, checkpoints=True)
     shared = accelerator is not None
-    assert (plan.games, plan.threads, plan.inference) == (games, threads, accelerator or "cpu")
+    assert (plan.games, plan.threads, plan.inference) == (
+        games,
+        threads,
+        accelerator or "no accelerator detected",
+    )
     held = int(memory_gb * 1024**3) if memory_gb is not None else 8 * 1024**3
     assert plan.checkpoint_bytes == (held if shared else held // games)
 
@@ -715,13 +723,13 @@ def test_apple_silicon_plan_execution_bounds_games_by_cores_and_memory(
         ("metal", ("metal",), "metal"),
         ("cuda", ("metal",), "loader does not declare cuda"),
         ("cuda", ("cuda",), "cuda"),
-        ("cpu", ("cuda",), "cpu"),
-        ("cpu", ("metal",), "cpu"),
+        ("no accelerator detected", ("cuda",), "no accelerator detected"),
+        ("no accelerator detected", ("metal",), "no accelerator detected"),
     ],
 )
 def test_agent_devices_share_only_on_declared_accelerators(
     monkeypatch: pytest.MonkeyPatch,
-    detected: Device,
+    detected: Inference,
     devices: tuple[Device, ...],
     inference: Inference,
 ) -> None:
@@ -842,6 +850,10 @@ def test_agent_device_declarations_validate_and_round_trip() -> None:
         for invalid in ([], ["mps"], "cuda", None):
             with pytest.raises(ValidationError):
                 model.model_validate({"load": load_function, "devices": invalid})
+        with pytest.raises(ValidationError) as misspelled:
+            model.model_validate({"load": load_function, "devices": ["mps"]})
+        assert misspelled.value.error_count() == 1
+        assert "'cuda', 'metal' or 'cpu'" in str(misspelled.value)
         with pytest.raises(ValidationError, match="devices requires a checkpoint loader"):
             model.model_validate({"devices": ["cuda", "metal"]})
     for unused in ({"max_batch": 8}, {"max_delay_seconds": 0.1}, {"memory_gb": 1.0}):
