@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import errno
 import hashlib
 import io
@@ -11,14 +12,14 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 import zipfile
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from threading import Thread
 from typing import Any
 
 import pytest
@@ -92,13 +93,36 @@ def exited_pid() -> int:
     return process.pid
 
 
+@contextlib.contextmanager
+def _reaped_sleep() -> Iterator[tuple[int, Callable[[float], int]]]:
+    """A live `sleep 60` reaped as soon as it exits, as init would on a remote host."""
+    with subprocess.Popen(["sleep", "60"]) as proc:
+        done = threading.Event()
+
+        def _reap() -> None:
+            proc.wait()
+            done.set()
+
+        reaper = threading.Thread(target=_reap, daemon=True)
+        reaper.start()
+
+        def wait_exit(timeout: float = 5.0) -> int:
+            if not done.wait(timeout) or proc.returncode is None:
+                raise TimeoutError(f"process {proc.pid} did not exit within {timeout} s")
+            return proc.returncode
+
+        try:
+            yield proc.pid, wait_exit
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            reaper.join(timeout=5)
+
+
 @pytest.fixture
 def courier_pid() -> Iterator[int]:
-    with subprocess.Popen(["sleep", "60"]) as courier:
-        try:
-            yield courier.pid
-        finally:
-            courier.kill()
+    with _reaped_sleep() as (pid, _):
+        yield pid
 
 
 def _owned_host(
@@ -254,17 +278,13 @@ def test_a_bucket_backed_host_is_free_once_setup_before_any_receipt_fails_or_is_
     (home / "boot-claim").write_text(str(exited_pid))
     assert not service.observe("s1").alive  # the install died without a note
 
-    # Its courier fetches inputs after the boot process exits, then fails.
-    with subprocess.Popen(["sleep", "60"]) as courier:
-        try:
-            (home / "courier-pid").write_text(str(courier.pid))
-            assert service.observe("s1").alive
-            assert service.end("s1") is None  # the courier is told to stop
-            assert courier.wait(timeout=10) == -signal.SIGTERM
-            assert service.end("s1") is not None
-            assert not service.observe("s1").alive
-        finally:
-            courier.kill()
+    # Its courier fetches inputs after the boot process exits, then is stopped.
+    with _reaped_sleep() as (pid, wait_exit):
+        (home / "courier-pid").write_text(str(pid))
+        assert service.observe("s1").alive
+        assert service.end("s1") is not None
+        assert wait_exit(10.0) == -signal.SIGTERM
+        assert not service.observe("s1").alive
 
 
 @pytest.mark.parametrize("legacy", [False, True], ids=["courier-pid", "v0.4.6"])
@@ -369,18 +389,11 @@ def test_dead_courier_leaves_its_worker_to_host_cleanup(tmp_path: Path, exited_p
     home.mkdir()
     (home / "courier-pid").write_text(str(exited_pid))
     storage.objects["etude/sessions/s1/out/receipt"] = str(exited_pid).encode()
-    with subprocess.Popen(["sleep", "60"]) as worker:
-        # Reap the fixture child when SSH signals it, as init would on the host.
-        reap = Thread(target=worker.wait)
-        reap.start()
-        try:
-            (home / "pid").write_text(str(worker.pid))
-            assert not service.observe("s1").alive
-            assert service.end("s1") is not None
-            assert worker.wait(timeout=5) == -signal.SIGTERM
-        finally:
-            worker.kill()
-            reap.join()
+    with _reaped_sleep() as (pid, wait_exit):
+        (home / "pid").write_text(str(pid))
+        assert not service.observe("s1").alive
+        assert service.end("s1") is not None
+        assert wait_exit(5.0) == -signal.SIGTERM
     assert (home / "ended").exists()
 
 
@@ -667,10 +680,14 @@ def test_wait_backs_off_while_steady_and_resets_on_state_change(
     monkeypatch.setattr(SSHStart, "start", lambda *args: None)
     (run,) = scheduler.queue(_echo("steady"), "bench")
     scheduler.tick()
-    session = scheduler.attempts(run)[0].session
+    attempt = scheduler.attempts(run)[0]
+    session = attempt.session
     home = tmp_path / "remote" / session
-    home.mkdir(parents=True)
-    (home / "boot-claim").write_text(str(courier_pid))
+    attempt_dir = home / "attempts" / attempt.id
+    attempt_dir.mkdir(parents=True)
+    (home / "pid").write_text(str(courier_pid))
+    (attempt_dir / "claim").write_text(clock().isoformat())
+    scheduler.tick()  # enter steady running state before measuring backoff
 
     ssh.asks.clear()
     with pytest.raises(TimeoutError):
@@ -680,7 +697,7 @@ def test_wait_backs_off_while_steady_and_resets_on_state_change(
     assert ssh.asks["observe"] <= 16
     assert sleeps[:5] == [1.0, 2.0, 4.0, 8.0, 10.0]
 
-    # A state change (cancel -> ended) returns backoff to 1 s.
+    # A state change (running -> stopping via cancel) returns backoff to 1 s.
     sleeps.clear()
     scheduler.cancel(run)
     # After the second sleep, finish the session so wait returns cleanly.
@@ -852,16 +869,14 @@ def test_end_signals_boot_claim_pid_and_returns_ended_at_when_ended_unwritable(
 ) -> None:
     root = tmp_path / "remote"
     journal = SSHJournal(SSH("bench", str(root)))
-    # Live boot-claim PID is signalled with SIGTERM on end.
+    # Live boot-claim PID is signalled with SIGTERM and confirmed ended in one RPC.
     booting = root / "s_boot"
     booting.mkdir(parents=True)
-    with subprocess.Popen(["sleep", "60"]) as boot_proc:
-        try:
-            (booting / "boot-claim").write_text(str(boot_proc.pid))
-            assert journal.end("s_boot") is None
-            assert boot_proc.wait(timeout=5) == -signal.SIGTERM
-        finally:
-            boot_proc.kill()
+    with _reaped_sleep() as (pid, wait_exit):
+        (booting / "boot-claim").write_text(str(pid))
+        assert journal.end("s_boot") is not None
+        assert wait_exit(5.0) == -signal.SIGTERM
+        assert (booting / "ended").exists()
     # When boot-claim exists (fencing duplicate starts) and the disk is unwritable,
     # end tolerates unwritable cancel-start and ended files and still answers ended_at.
     full = root / "s_full"
@@ -1879,8 +1894,14 @@ def test_almost_full_disk_1slot_ssh_launch_settles_and_frees_machine(
     root = tmp_path / "remote"
     ssh = SSH("bench", str(root))
     service = Executor(OwnedMachine("bench"), SSHStart(ssh), SSHJournal(ssh))
+    healthy_root = tmp_path / "remote_healthy"
+    healthy_ssh = SSH("healthy", str(healthy_root))
+    healthy_service = Executor(
+        OwnedMachine("healthy"), SSHStart(healthy_ssh), SSHJournal(healthy_ssh)
+    )
+    services = {"bench": service, "healthy": healthy_service}
     store = open_database(tmp_path / "state.db")
-    scheduler = Scheduler(store, {"ssh": lambda held: service})
+    scheduler = Scheduler(store, {"ssh": lambda held: services[held.name]})
     scheduler.add_pool(Pool(name="bench"))
     scheduler.add_machine("bench", "bench", pool="bench")
 
@@ -1922,16 +1943,31 @@ def test_almost_full_disk_1slot_ssh_launch_settles_and_frees_machine(
         assert actions == ["start", "add"]
         assert store.session(session_id).ended_at is None
 
-        # Next tick observes the unstarted session, retries `add`, gets `Refused`, ends the session.
+        # Next tick observes the unstarted session, retries `add`, gets `Refused`, ends the
+        # session, records a 60 s refusal cooldown, and settles as `capacity_refused` (0 tries).
         scheduler.tick()
         status = scheduler.read(run)
-        assert status.done
-        assert status.outcome == "lost"
-        assert status.cause == "machine_lost_before_start"
-        assert store.session(session_id).ended_at is not None
+        assert not status.done
+        assert status.phase == "queued"
+        assert status.attempts == 0
+        assert status.reason is not None and "machine refused (bench)" in status.reason
+        attempt = scheduler.attempts(run)[0]
+        assert attempt.outcome == "lost"
+        assert attempt.cause == "capacity_refused"
+        ended_session = store.session(session_id)
+        assert ended_session.ended_at is not None
+        assert ended_session.refused_at is not None
         assert store.finishing_sessions() == ()
         with pytest.raises(ProcessLookupError):
             os.kill(boot_pid, 0)
+
+        # Adding a healthy sibling lets the next tick fail over immediately while `bench` cools down.
+        scheduler.add_machine("healthy", "healthy", pool="bench")
+        monkeypatch.setattr(subprocess, "run", real_run)
+        (finished,) = scheduler.wait(run, every=0.1, timeout=20)
+        assert finished.outcome == "succeeded"
+        assert finished.machine == "healthy"
+        assert finished.attempts == 1
     finally:
         try:
             os.kill(boot_pid, signal.SIGKILL)
@@ -2040,10 +2076,15 @@ def test_almost_full_disk_1slot_ssh_launch_settles_and_frees_machine(
         multi_home.chmod(0o500)
         scheduler2.tick()  # records r1 succeeded
         assert scheduler2.read(r1).outcome == "succeeded"
-        scheduler2.tick()  # only unstarted a2 remains open -> refusal ends session
-        assert store2.session("s_multi").ended_at is not None
-        assert scheduler2.read(r2).outcome == "lost"
-        assert scheduler2.read(r2).cause == "machine_lost_before_start"
+        scheduler2.tick()  # only unstarted a2 remains open -> refusal ends session with cooldown
+        ended_multi = store2.session("s_multi")
+        assert ended_multi.ended_at is not None
+        assert ended_multi.refused_at is not None
+        assert scheduler2.read(r2).phase == "queued"
+        assert scheduler2.read(r2).attempts == 0
+        a2_done = scheduler2.attempts(r2)[0]
+        assert a2_done.outcome == "lost"
+        assert a2_done.cause == "capacity_refused"
         with pytest.raises(ProcessLookupError):
             os.kill(worker_pid, 0)
     finally:

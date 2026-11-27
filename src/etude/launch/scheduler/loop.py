@@ -2503,7 +2503,10 @@ class Scheduler:
                                 session=session.id,
                                 attempt=attempt.id,
                             )
-                            self._end_session(session)
+                            self._end_session(
+                                session,
+                                refused=sanitize(str(error)) or "no reason given",
+                            )
                             return
                         self._diagnose(
                             "work delivery",
@@ -2571,7 +2574,7 @@ class Scheduler:
     def _log_seconds(self, session: Session) -> float:
         return self._store.supply(session.supply).log_seconds or _LOG_SECONDS
 
-    def _end_session(self, session: Session) -> None:
+    def _end_session(self, session: Session, *, refused: str | None = None) -> None:
         """Confirm shutdown, retain final evidence, then settle any unfinished attempts."""
         self._store.check_lock(session.supply)
         service = self._service(session)
@@ -2608,7 +2611,10 @@ class Scheduler:
                     False,
                     gone,
                     unknown_start=final.start_unknown,
+                    refused=refused is not None,
                 )
+        if refused is not None:
+            self._store.record_refusal(self._store.session(session.id), self._clock(), refused)
 
     def _record(
         self,
@@ -2619,6 +2625,7 @@ class Scheduler:
         now: datetime,
         *,
         unknown_start: bool = False,
+        refused: bool = False,
     ) -> None:
         started = None if seen is None else seen.started_at
         if started is not None and attempt.started_at is None:
@@ -2662,6 +2669,9 @@ class Scheduler:
             if run.launch.cancel_requested_at is not None:
                 outcome, cause = "cancelled", None
                 message = "attempt cancelled; session ended without final receipt"
+            elif refused and attempt.started_at is None:
+                outcome, cause = "lost", CAPACITY_REFUSED
+                message = "attempt lost (capacity_refused); host refused work delivery"
             else:
                 outcome = "lost"
                 cause = (
