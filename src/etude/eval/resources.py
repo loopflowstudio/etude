@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -102,6 +102,14 @@ def seconds_left() -> float | None:
 
 type Gpu = Literal["nvidia", "apple"]
 
+type Reason = (
+    Gpu | Literal["shared=True", "shared=False", "ETUDE_EVAL_GPU=none", "no GPU", "no checkpoints"]
+)
+"""Why a plan shares or splits inference: the GPU found, the author's or host's choice, or none.
+
+`"no GPU"` means the probe ran and found nothing; every other non-GPU reason skipped it.
+"""
+
 
 def _gpu() -> Gpu | None:
     """Read visible NVIDIA or Apple Silicon hardware without importing a model library."""
@@ -124,21 +132,50 @@ def _gpu() -> Gpu | None:
     return "nvidia" if listed.strip() else None
 
 
+def _gpu_disabled() -> bool:
+    """`ETUDE_EVAL_GPU=none` hides every GPU from eval sizing, as `CUDA_VISIBLE_DEVICES=""` does for NVIDIA."""
+    match os.environ.get("ETUDE_EVAL_GPU", ""):
+        case "":
+            return False
+        case "none":
+            return True
+        case other:
+            raise ValueError(f"ETUDE_EVAL_GPU must be 'none' or unset, not {other!r}")
+
+
 @dataclass(frozen=True)
 class ExecutionPlan:
-    """Process topology and per-owner checkpoint-byte budget for one eval group."""
+    """Process topology and per-owner checkpoint-byte budget for one eval group.
+
+    `threads` is each inference owner's thread budget: the shared agent process's
+    in shared mode, and each game process's (always one) in direct mode.
+    """
 
     games: int
     threads: int
     shared: bool
-    gpu: Gpu | None
+    reason: Reason
     checkpoint_bytes: int
+
+    def describe(self, tournaments: Sequence[str]) -> str:
+        """One startup line naming the mode, why it was chosen, and its sizing."""
+        games = "game" if self.games == 1 else "games"
+        if self.shared:
+            unit = "thread" if self.threads == 1 else "threads"
+            inference = f"{self.threads} inference {unit}"
+        else:
+            inference = "1 inference thread each"
+        mode = "shared" if self.shared else "direct"
+        return (
+            f"etude: agents: {mode} inference for {', '.join(tournaments)} ({self.reason}); "
+            f"{self.games} {games} at a time; {inference}"
+        )
 
 
 def plan_execution(
     pending: int,
     *,
-    agents: bool,
+    needs_loading: bool,
     memory_gb: float | None = None,
     batch_inputs: int = 32,
     shared: bool | None = None,
@@ -149,15 +186,27 @@ def plan_execution(
     shared agent process. Forced sharing without a detected GPU reserves at
     least half the cores for inference. Direct games split the checkpoint-byte allowance
     across game processes. Memory and pending work may reduce games further.
+    Code-only plays (`needs_loading=False`) and `shared=False` never probe.
     """
-    if pending == 0:
-        return ExecutionPlan(games=0, threads=0, shared=False, gpu=None, checkpoint_bytes=0)
+    if pending < 1:
+        raise ValueError("an execution plan needs pending matches")
     cpus = available_cpus()
-    gpu = _gpu() if agents and shared is not False else None
-    use_shared = agents and (shared is True or gpu is not None)
+    gpu: Gpu | None = None
+    reason: Reason
+    if not needs_loading:
+        reason = "no checkpoints"
+    elif shared is False:
+        reason = "shared=False"
+    elif _gpu_disabled():
+        reason = "shared=True" if shared else "ETUDE_EVAL_GPU=none"
+    elif (gpu := _gpu()) is not None:
+        reason = gpu
+    else:
+        reason = "shared=True" if shared else "no GPU"
+    use_shared = needs_loading and (shared is True or gpu is not None)
     total_memory = memory_bytes()
     held = 0
-    if agents:
+    if needs_loading:
         held = total_memory // 2 if memory_gb is None else int(memory_gb * 1024**3)
     if not use_shared:
         capacity = cpus
@@ -172,12 +221,11 @@ def plan_execution(
         capacity,
         max(1, (total_memory - held) // GAME_BYTES),
     )
-    threads = max(1, cpus - games) if use_shared else 0
     return ExecutionPlan(
         games=games,
-        threads=threads,
+        threads=max(1, cpus - games) if use_shared else 1,
         shared=use_shared,
-        gpu=gpu,
+        reason=reason,
         checkpoint_bytes=held if use_shared else held // games,
     )
 

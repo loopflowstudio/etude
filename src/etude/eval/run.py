@@ -517,20 +517,23 @@ def play_together(
                 for match in each.pending
                 for player in match.players
             )
-            plan = plan_execution(
-                sum(len(each.pending) for each in pending),
-                agents=needs_loading,
-                memory_gb=definition.memory_gb if definition is not None else None,
-                batch_inputs=definition.max_batch if definition is not None else 32,
-                shared=definition.shared if definition is not None else None,
-            )
-            if plan.games:
+            matches = sum(len(each.pending) for each in pending)
+            if matches:
+                plan = plan_execution(
+                    matches,
+                    needs_loading=needs_loading,
+                    memory_gb=definition.memory_gb if definition is not None else None,
+                    batch_inputs=definition.max_batch if definition is not None else 32,
+                    shared=definition.shared if definition is not None else None,
+                )
                 tournaments = [each.tournament or each.run.name for each in pending]
                 with (
-                    running_agents(definition, checkout, resources, tournaments, plan)
+                    running_agents(definition, checkout, resources, plan)
                     if plan.shared and definition is not None
                     else nullcontext()
                 ) as process:
+                    if needs_loading:
+                        print(plan.describe(tournaments), file=sys.stderr, flush=True)
                     _play_matches(
                         plays,
                         resources=resources,
@@ -704,13 +707,6 @@ def _play_matches(
             )
 
     workers = plan.games
-    if load is not None:
-        unit = "process" if workers == 1 else "processes"
-        print(
-            f"etude: agents: direct inference in {workers} game {unit}; 1 thread each",
-            file=sys.stderr,
-            flush=True,
-        )
     address = agent_process.address if agent_process is not None else None
     context = multiprocessing.get_context("spawn")
     pool = ProcessPoolExecutor(

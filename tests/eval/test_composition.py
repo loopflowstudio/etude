@@ -236,7 +236,7 @@ def test_group_builds_nested_players_and_loads_the_shared_leaf_once(
     note = next(n for n in page.notes if n.startswith("Drawn as anchors"))
     assert all(p.name in note for p in page.players)
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [0, 0]
-    assert "agents: started" not in capfd.readouterr().err
+    assert "agents: shared inference" not in capfd.readouterr().err
 
 
 @pytest.mark.parametrize("retry", [False, True])

@@ -452,8 +452,16 @@ class Agents(BaseModel):
             raise TypeError("load must take one checkpoint")
         if self.build is not None and len(inspect.signature(self.build).parameters) != 2:
             raise TypeError("build must take player and leaves")
-        if self.shared is not None and self.load is None:
-            raise ValueError("shared requires a checkpoint loader")
+        # Settings that would do nothing at runtime would still split the group key.
+        given = self.model_fields_set
+        if self.load is None:
+            unused = sorted(given & {"shared", "max_batch", "max_delay_seconds", "memory_gb"})
+            if unused:
+                raise ValueError(f"{', '.join(unused)} requires a checkpoint loader")
+        if self.shared is False:
+            unused = sorted(given & {"max_batch", "max_delay_seconds"})
+            if unused:
+                raise ValueError(f"{', '.join(unused)} requires shared inference")
         return self
 
     def plain(self, repo: Path | None) -> AgentLoader:

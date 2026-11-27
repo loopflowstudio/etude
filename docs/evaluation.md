@@ -164,8 +164,12 @@ from active games batch through one shared agent process and
 
 ```text
 $ uv run etude eval experiment.py
-etude: agents: started for prediction (apple); 7 games at a time; 1 inference thread
+etude: agents: shared inference for prediction (apple); 7 games at a time; 1 inference thread
 ```
+
+The startup line names the mode and why it was chosen: the GPU found
+(`apple`, `nvidia`), `shared=True`, `shared=False`, `ETUDE_EVAL_GPU=none` or
+`no GPU`.
 
 On NVIDIA hardware, active games fill `max_batch` (bounded by pending matches
 and host memory). On an Apple Silicon Mac, active games are sized to host cores
@@ -179,14 +183,24 @@ Honor Etude's thread environment in the loader and choose the model's device
 there (`cuda`, `mps` or MLX on Apple Silicon, `cpu` otherwise): hardware
 detection does not place tensors for you. Pass `Agents(shared=False)` to skip
 the GPU probe and run direct per-game inference (for example with a CPU-only
-loader or a Metal-less macOS VM). Pass `Agents(shared=True)` to force one shared
+loader). To play the same file direct on one host, such as a Metal-less macOS
+VM, set `ETUDE_EVAL_GPU=none`, the counterpart of `CUDA_VISIBLE_DEVICES=""`:
+
+```text
+$ ETUDE_EVAL_GPU=none uv run etude eval experiment.py
+etude: agents: direct inference for prediction (ETUDE_EVAL_GPU=none); 8 games at a time; 1 inference thread each
+```
+
+Pass `Agents(shared=True)` to force one shared
 agent process. Without a detected GPU, games use up to half the cores and
 inference uses the rest, with at least one game process and one inference thread.
 Keep model imports (`torch`, `jax`, `tensorflow`, `mlx`) in the loading module
 so game processes remain light.
 `Agents(max_batch=..., memory_gb=..., shared=...)` tunes batch size,
 checkpoint-byte allowance (default: half of host memory) and inference mode;
-author code keeps one forward deterministic for every batch size.
+author code keeps one forward deterministic for every batch size. These need
+`load`, and `max_batch` and `max_delay_seconds` are refused with
+`shared=False`, where nothing batches.
 
 ## Results and retry
 

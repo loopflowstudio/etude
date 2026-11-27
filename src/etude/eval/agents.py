@@ -12,7 +12,7 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -203,7 +203,6 @@ def running_agents(
     definition: AgentLoader,
     checkout: str | None,
     resources: Resources,
-    tournaments: Sequence[str],
     plan: ExecutionPlan,
 ) -> Iterator[AgentProcess]:
     if definition.load is None:
@@ -259,15 +258,6 @@ def running_agents(
         except EOFError as error:
             raise RetryRequested("agent process exited during startup") from error
         observer.start()
-        label = plan.gpu or "cpu"
-        games = "game" if plan.games == 1 else "games"
-        threads = "thread" if plan.threads == 1 else "threads"
-        print(
-            f"etude: agents: started for {', '.join(tournaments)} ({label}); "
-            f"{plan.games} {games} at a time; {plan.threads} inference {threads}",
-            file=sys.stderr,
-            flush=True,
-        )
         yield agent
     finally:
         failed = sys.exc_info()[0] is not None
