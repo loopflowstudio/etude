@@ -337,7 +337,7 @@ shared agent process from the host probe and the group's play functions:
 | Host | Group | Inference transport |
 |---|---|---|
 | Any host (CPU, Mac, GPU) | Every tournament uses `play_many` | Direct inference thread in 1 game process running the group's tournaments in turn, with the host inference thread budget (`max(1, cpus - 1)`) and checkpoints kept loaded across tournaments |
-| No GPU seen | Any tournament uses `play` | Direct inference thread in each game process, splitting unused host cores (`max(1, (cpus - processes) // processes)` library threads each; 1 process per `play_many` tournament in a mixed group) |
+| No GPU seen | Any tournament uses `play` | Direct inference thread in each game process. `play` processes share each tournament's match queue in turn and reuse loaded checkpoints. Each `play_many` tournament in a mixed group gets its own process. |
 | Visible NVIDIA GPU | Any tournament uses `play` | Shared agent process over a private Unix socket (1 process per `play_many` tournament in a mixed group) |
 
 Code-only players (no loader) start neither an inference thread nor an agent

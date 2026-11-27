@@ -720,7 +720,20 @@ def play_together(
                     context = multiprocessing.get_context("spawn")
                     live: list[_GameProcess] = []
 
-                    def spawn_one(targets: Sequence[Playing]) -> _GameProcess:
+                    if placement.grouped:
+                        stream_groups = [tuple(active_plays)]
+                    elif placement.bus == "local":
+                        # Direct play processes shard each tournament in turn on one bus.
+                        direct = tuple(each for each in active_plays if not each.streaming)
+                        stream_groups = [
+                            (each,) if each.streaming else direct
+                            for each in active_plays
+                            if each.streaming or each is direct[0]
+                        ]
+                    else:
+                        stream_groups = [(each,) for each in active_plays]
+
+                    def spawn_one(targets: tuple[Playing, ...]) -> _GameProcess:
                         parent, child_pipe = context.Pipe()
                         streams = tuple(
                             Stream(
@@ -745,31 +758,26 @@ def play_together(
                         )
                         process.start()
                         child_pipe.close()
-                        return _GameProcess(plays=tuple(targets), process=process, pipe=parent)
+                        return _GameProcess(plays=targets, process=process, pipe=parent)
 
                     def spawn_ready() -> None:
-                        if placement.grouped:
-                            if not live and not stopping:
-                                ready_plays = [each for each in plays if each.pending]
-                                if ready_plays:
-                                    live.append(spawn_one(ready_plays))
-                            return
                         while len(live) < placement.processes and not stopping:
                             spawned = False
-                            for each in plays:
+                            for targets in stream_groups:
                                 if len(live) >= placement.processes:
                                     break
-                                if not each.pending:
+                                pending = max(len(each.pending) for each in targets)
+                                if not pending:
                                     continue
-                                active = sum(1 for child in live if each in child.plays)
+                                active = sum(child.plays is targets for child in live)
                                 needed = (
                                     1
-                                    if each.streaming
-                                    else math.ceil(len(each.pending) / placement.games_per_process)
+                                    if targets[0].streaming
+                                    else math.ceil(pending / placement.games_per_process)
                                 )
                                 if active >= needed:
                                     continue
-                                live.append(spawn_one((each,)))
+                                live.append(spawn_one(targets))
                                 spawned = True
                             if not spawned:
                                 break

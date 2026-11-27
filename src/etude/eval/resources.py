@@ -173,7 +173,9 @@ def place(
     when code-only, uses the shared agent process on visible NVIDIA hardware
     (`agent_threads = max(1, cpus - processes)`), and otherwise runs direct
     inference splitting remaining host cores across game processes
-    (`game_threads = max(1, (cpus - processes) // processes)`).
+    (`game_threads = max(1, (cpus - processes) // processes)`). Direct `play`
+    processes serve tournaments in turn, so their demand comes from the largest
+    queue. Socket `play` processes serve separate queues.
     """
     active_play = tuple(count for count in play if count > 0)
     active_streaming = max(0, streaming)
@@ -220,9 +222,11 @@ def place(
     gpu = _has_gpu()
     memory_processes = max(1, (host_bytes - held) // GAME_BYTES)
     cap = min(max(1, cpus - 1), memory_processes) if gpu else min(cpus, memory_processes)
-    play_cap = min(max(1, cap - active_streaming), sum(active_play))
-    games_per_process = min(math.ceil(max_batch / play_cap), max(active_play))
-    play_needed = sum(math.ceil(count / games_per_process) for count in active_play)
+    largest_play = max(active_play)
+    play_queues = active_play if gpu else (largest_play,)
+    play_cap = min(max(1, cap - active_streaming), sum(play_queues))
+    games_per_process = min(math.ceil(max_batch / play_cap), largest_play)
+    play_needed = sum(math.ceil(count / games_per_process) for count in play_queues)
     processes = min(cap, active_streaming + play_needed)
     if gpu:
         return Placement(

@@ -630,6 +630,8 @@ def test_play_arity_and_removed_workers_are_refused(tmp_path: Path) -> None:
         (16, (16,), 0, True, 32, None, ("local", 8, 1, 0, 2, False)),
         # Mixed CPU/Mac: 500 play_many (1 streaming) + 10 play, max_batch=256, 16 cores -> 2 procs, 7 threads.
         (16, (10,), 1, True, 256, None, ("local", 2, 7, 0, 10, False)),
+        # Direct play tournaments reuse the processes sized for the largest queue.
+        (8, (4, 3, 2), 1, True, 8, None, ("local", 3, 1, 0, 3, False)),
         (3, (20,), 0, True, 32, None, ("local", 2, 1, 0, 11, False)),
         (2, (20,), 0, True, 32, None, ("local", 2, 1, 0, 16, False)),
         (8, (20,), 0, False, 32, None, (None, 8, 1, 0, 1, False)),
@@ -1283,6 +1285,7 @@ def test_a_game_failure_retains_in_flight_outcomes_and_resume_skips_successes(
     assert (repaired.played, repaired.skipped) == (3, 1)
 
 
+@pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
 def test_a_game_failure_stops_only_its_tournament(tmp_path: Path) -> None:
     agents = Agents(load=load)
     bad = job("bad", agents).model_copy(update={"play": fails_game})

@@ -162,10 +162,13 @@ with evaluating(
     `game_threads=max(1, (cpus - processes) // processes)`, `agent_threads=0`,
     `grouped=False`): one direct inference thread per exact spawned game
     process, splitting unused host cores across inference threads and dividing
-    checkpoint memory by `processes`.
+    checkpoint memory by `processes`. The largest `play` match queue sizes
+    the `play` processes. Each process takes matches from every active `play`
+    tournament in turn and keeps its checkpoint cache across streams. In a
+    mixed group, each `play_many` tournament gets its own process.
 
   Each game process runs one `asyncio` event loop. For `play` with a loader,
-  each process keeps `placement.games_per_process` matches in flight and
+  each process keeps up to `placement.games_per_process` matches in flight and
   flushes pending forwards on a zero-delay loop barrier. For `play_many`, each
   process pulls whatever `matches.take(n)` requests from pending matches.
   Per-process diagnostics go to `artifacts/agents/game-{pid}.json`

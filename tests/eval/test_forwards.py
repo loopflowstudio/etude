@@ -101,7 +101,8 @@ def test_cpu_games_reuse_the_checkpoint_across_tournaments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: False)
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     small = checkpoint("small")
     players = (compose(Mirror(over=small)), compose(Mirror(over=small, choice="greedy")))
     declarations = [
@@ -115,12 +116,12 @@ def test_cpu_games_reuse_the_checkpoint_across_tournaments(
         1,
     ]
     artifacts = tmp_path / "grouped/artifacts/agents"
-    reports = [json.loads(path.read_text()) for path in artifacts.glob("game-*.json")]
-    batch_rows = [
-        batch for path in artifacts.glob("batches-*.json") for batch in json.loads(path.read_text())
-    ]
-    assert len(reports) == 2
-    assert sum(report["matches"] for report in reports) == 2
+    [report] = [json.loads(path.read_text()) for path in artifacts.glob("game-*.json")]
+    [batches] = artifacts.glob("batches-*.json")
+    batch_rows = json.loads(batches.read_text())
+    assert report["tournaments"] == ["first", "second"]
+    assert report["matches"] == 2
+    assert sum(batch["loads"] for batch in batch_rows) == 1
     assert sum(batch["forward_calls"] for batch in batch_rows) == 16
-    assert sum(report["bus"]["calls"] for report in reports) == 16
-    assert all(report["bus"]["wire_bytes"] == 0 for report in reports)
+    assert report["bus"]["calls"] == 16
+    assert report["bus"]["wire_bytes"] == 0
