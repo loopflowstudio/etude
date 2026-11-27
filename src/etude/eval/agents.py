@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import multiprocessing
+import pickle
 import socket
 import struct
 import sys
@@ -22,12 +23,15 @@ from multiprocessing.reduction import ForkingPickler
 from typing import TYPE_CHECKING, Protocol, cast
 
 from etude.errors import RetryRequested, explain
+from etude.eval.bus import BusReport, Flight, ForwardCall, arrays, normalize_inputs
 from etude.eval.resources import Cpus, Resources, agent_bytes, seconds_left
 
 __all__ = ("Forward", "ModelForward", "ForwardError")
 
 
 if TYPE_CHECKING:
+    from numpy import ndarray
+
     from etude.call import Function
     from etude.checkpoints import CheckpointRef
     from etude.jobs import AgentLoader
@@ -158,33 +162,38 @@ class _FrameProtocol(asyncio.Protocol):
         self._on_eof()
 
 
-class AgentClient:
-    """Async Unix-socket channel from one game process to the shared agent process."""
+class SocketForwardBus:
+    """Async Unix-socket `ForwardBus` from one game process to the shared agent process."""
 
     def __init__(self, transport: asyncio.Transport) -> None:
         self._transport = transport
         self._next_id = 0
-        self._in_flight: dict[int, tuple[asyncio.Future[Answer], float]] = {}
+        self._checkpoints: dict[str, CheckpointRef] = {}
+        self._flight = Flight()
+        self._in_flight: dict[int, tuple[asyncio.Future[list[object]], float, list[ndarray]]] = {}
         self._closed_error: BaseException | None = None
-        self.requests = 0
-        self.answers = 0
-        self.request_bytes = 0
-        self.answer_bytes = 0
-        self.round_trip_seconds = 0.0
-        self.transport_seconds = 0.0
+        self._calls = 0
+        self._answers = 0
+        self._arrays_copied = 0
+        self._copied_bytes = 0
+        self._pickled = 0
+        self._pickled_bytes = 0
+        self._wire_bytes = 0
+        self._round_trip_seconds = 0.0
+        self._handoff_seconds = 0.0
 
     @classmethod
-    async def connect(cls, address: str) -> AgentClient:
+    async def connect(cls, address: str) -> SocketForwardBus:
         loop = asyncio.get_running_loop()
-        client: AgentClient | None = None
+        bus: SocketForwardBus | None = None
 
         def on_frame(payload: bytes) -> None:
-            assert client is not None
-            client._receive(payload)
+            assert bus is not None
+            bus._receive(payload)
 
         def on_eof() -> None:
-            if client is not None:
-                client._fail_all(RetryRequested("agent process exited before answering"))
+            if bus is not None:
+                bus._fail_all(RetryRequested("agent process exited before answering"))
 
         try:
             transport, _ = await asyncio.wait_for(
@@ -195,65 +204,140 @@ class AgentClient:
             raise RetryRequested("agent connection exceeded the evaluation deadline") from error
         except OSError as error:
             raise RetryRequested("agent process is unavailable") from error
-        client = cls(transport)
-        return client
+        bus = cls(transport)
+        return bus
 
-    def send_batch(
-        self, calls: Sequence[tuple[CheckpointRef, list[object], int]]
-    ) -> list[asyncio.Future[Answer]]:
-        if self._closed_error is not None:
-            raise self._closed_error
+    def bind(self, checkpoint: CheckpointRef) -> None:
+        self._checkpoints.setdefault(checkpoint.key, checkpoint)
+
+    def submit(self, calls: Sequence[ForwardCall]) -> list[asyncio.Future[list[object]]]:
         loop = asyncio.get_running_loop()
-        now = time.monotonic()
-        items: list[CheckpointRequest] = []
-        futures: list[asyncio.Future[Answer]] = []
-        for checkpoint, inputs, rows in calls:
-            self._next_id += 1
-            request_id = self._next_id
-            future: asyncio.Future[Answer] = loop.create_future()
-            self._in_flight[request_id] = (future, now)
-            items.append(CheckpointRequest(request_id, checkpoint, inputs, rows))
-            futures.append(future)
+        if not calls:
+            return []
+        if self._closed_error is not None:
+            return [self._failed(loop, self._closed_error) for _ in calls]
+
         started = time.monotonic()
+        now = started
+        staged: list[
+            tuple[int, CheckpointRequest, asyncio.Future[list[object]], list[ndarray]]
+        ] = []
+        arrays_copied = 0
+        copied_bytes = 0
         try:
-            payload = ForkingPickler.dumps(BatchRequest(tuple(items)))
+            for call in calls:
+                checkpoint = self._checkpoints.get(call.checkpoint)
+                if checkpoint is None:
+                    raise KeyError(f"checkpoint {call.checkpoint} is not bound")
+                normalized = normalize_inputs(call.inputs)
+                for array in arrays(normalized.values):
+                    arrays_copied += 1
+                    copied_bytes += int(array.nbytes)
+                locked = self._flight.lock(call.inputs)
+                self._next_id += 1
+                request_id = self._next_id
+                future: asyncio.Future[list[object]] = loop.create_future()
+                staged.append(
+                    (
+                        request_id,
+                        CheckpointRequest(request_id, checkpoint, normalized.values, call.rows),
+                        future,
+                        locked,
+                    )
+                )
+            payload = ForkingPickler.dumps(BatchRequest(tuple(req for _, req, _, _ in staged)))
+        except (pickle.PicklingError, TypeError, AttributeError) as error:
+            for _, _, _, locked in staged:
+                self._flight.unlock(locked)
+            self._handoff_seconds += time.monotonic() - started
+            if len(calls) == 1:
+                return [self._failed(loop, error)]
+            return [self.submit([call])[0] for call in calls]
+        except BaseException:
+            for _, _, _, locked in staged:
+                self._flight.unlock(locked)
+            self._handoff_seconds += time.monotonic() - started
+            raise
+
+        for request_id, _, future, locked in staged:
+            self._in_flight[request_id] = (future, now, locked)
+        try:
             self._transport.write(_HEADER.pack(len(payload)))
             self._transport.write(payload)
-            self.requests += 1
-            self.request_bytes += len(payload)
-        except OSError as error:
-            failure = RetryRequested("agent process exited before answering")
-            self._fail_all(failure)
-            raise failure from error
+            self._calls += len(calls)
+            self._pickled += 1
+            self._pickled_bytes += len(payload)
+            self._wire_bytes += len(payload)
+            self._arrays_copied += arrays_copied
+            self._copied_bytes += copied_bytes
+        except OSError:
+            self._fail_all(RetryRequested("agent process exited before answering"))
         finally:
-            self.transport_seconds += time.monotonic() - started
-        return futures
+            self._handoff_seconds += time.monotonic() - started
+        return [future for _, _, future, _ in staged]
+
+    def _failed(
+        self, loop: asyncio.AbstractEventLoop, error: BaseException
+    ) -> asyncio.Future[list[object]]:
+        future: asyncio.Future[list[object]] = loop.create_future()
+        future.set_exception(error)
+        return future
 
     def _receive(self, payload: bytes) -> None:
         started = time.monotonic()
         answer = cast(Answer, ForkingPickler.loads(payload))
         now = time.monotonic()
-        self.answers += 1
-        self.answer_bytes += len(payload)
-        self.transport_seconds += now - started
+        self._answers += 1
+        self._wire_bytes += len(payload)
+        self._handoff_seconds += now - started
         entry = self._in_flight.pop(answer.id, None)
-        if entry is not None:
-            future, sent = entry
-            self.round_trip_seconds += now - sent
-            if not future.done():
-                future.set_result(answer)
+        if entry is None:
+            return
+        future, sent, locked = entry
+        self._flight.unlock(locked)
+        self._round_trip_seconds += now - sent
+        if future.done():
+            return
+        if answer.error is not None:
+            future.set_exception(
+                ForwardError(
+                    answer.checkpoint,
+                    answer.error,
+                    retry=answer.retry,
+                    loading=answer.loading,
+                )
+            )
+        else:
+            future.set_result(answer.outputs)
 
     def _fail_all(self, error: BaseException) -> None:
         if self._closed_error is None:
             self._closed_error = error
-        for future, _ in self._in_flight.values():
+        for future, _, locked in self._in_flight.values():
+            self._flight.unlock(locked)
             if not future.done():
                 future.set_exception(error)
         self._in_flight.clear()
 
-    def close(self) -> None:
+    def _report(self) -> BusReport:
+        return BusReport(
+            calls=self._calls,
+            answers=self._answers,
+            arrays=0,
+            arrays_copied=self._arrays_copied,
+            pickled=self._pickled,
+            pickled_bytes=self._pickled_bytes,
+            copied_bytes=self._copied_bytes,
+            wire_bytes=self._wire_bytes,
+            handoff_seconds=self._handoff_seconds,
+            round_trip_seconds=self._round_trip_seconds,
+        )
+
+    async def close(self) -> BusReport:
         with suppress(OSError):
             self._transport.close()
+        self._fail_all(RetryRequested("forward bus is closed"))
+        return self._report()
 
 
 @dataclass(frozen=True)

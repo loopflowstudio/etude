@@ -2,14 +2,12 @@
 
 import asyncio
 import json
-import socket
-from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from random import Random
 
 import pytest
 
-from etude.eval.agents import Answer, CheckpointRequest, recv_frame
+from etude.eval.agents import Answer, CheckpointRequest
 from etude.eval.batching import _Batches
 from etude.eval.records import Code, compose
 from etude.jobs import Agents, hold_group
@@ -34,41 +32,40 @@ def test_mirror_sends_all_branches_once_per_ply_and_builds_author_objects(
     )
     assert hold_group(group(selected), directory=tmp_path)[0].played == 1
     artifacts = tmp_path / "grouped/artifacts/agents"
+    [report] = [json.loads(path.read_text()) for path in artifacts.glob("game-*.json")]
     if shared:
         batches = json.loads((artifacts / "batches.json").read_text())
-        assert sum(batch["forward_calls"] for batch in batches) == 2 * 2 * mirror.depth
-        assert {batch["rows"] for batch in batches} == {mirror.worlds * mirror.actions}
-        assert sum(batch["loads"] for batch in batches) == 1
+        assert report["bus"]["wire_bytes"] > 0
     else:
-        [report] = [json.loads(path.read_text()) for path in artifacts.glob("game-*.json")]
-        assert report["local_forward_calls"] == 2 * 2 * mirror.depth
-        assert report["local_inputs"] == 2 * 2 * mirror.depth * mirror.worlds * mirror.actions
-        assert report["local_loads"] == 1
+        batches = json.loads((artifacts / f"batches-{report['pid']}.json").read_text())
+        assert report["bus"]["wire_bytes"] == 0
         assert not (artifacts / "batches.json").exists()
+    assert sum(batch["forward_calls"] for batch in batches) == 2 * 2 * mirror.depth
+    assert {batch["rows"] for batch in batches} == {mirror.worlds * mirror.actions}
+    assert sum(batch["loads"] for batch in batches) == 1
 
 
 def test_mirror_trajectories_do_not_depend_on_other_inputs_in_the_batch() -> None:
     small = checkpoint("small")
-    parent, child = socket.socketpair()
-    batches = _Batches(load, 32, 1024)
+    batches: _Batches[Answer] = _Batches(load, 32, 1024)
+    answers: list[Answer] = []
     next_id = 0
 
     async def shared(inputs: list[object], *, rows: int | None = None) -> list[object]:
         nonlocal next_id
         next_id += 1
-        batches.add(child, CheckpointRequest(next_id, small.checkpoint, [100], 1))
+        batches.add(answers.append, CheckpointRequest(next_id, small.checkpoint, [100], 1))
         next_id += 1
         batches.add(
-            child,
+            answers.append,
             CheckpointRequest(
                 next_id, small.checkpoint, inputs, len(inputs) if rows is None else rows
             ),
         )
         batches.flush()
-        first = ForkingPickler.loads(recv_frame(parent))
+        first = answers.pop(0)
         assert first == Answer(next_id - 1, small.checkpoint.key, [101])
-        answer = ForkingPickler.loads(recv_frame(parent))
-        assert isinstance(answer, Answer)
+        answer = answers.pop(0)
         assert answer.error is None
         return answer.outputs
 
@@ -81,11 +78,7 @@ def test_mirror_trajectories_do_not_depend_on_other_inputs_in_the_batch() -> Non
                 await remote.choose(actual_random) for _ in range(4)
             ]
 
-    try:
-        asyncio.run(compare())
-    finally:
-        parent.close()
-        child.close()
+    asyncio.run(compare())
 
 
 def test_code_players_build_author_objects_without_an_agent_process(
@@ -120,11 +113,13 @@ def test_cpu_games_reuse_the_checkpoint_across_tournaments(
         1,
         1,
     ]
-    reports = [
-        json.loads(path.read_text())
-        for path in (tmp_path / "grouped/artifacts/agents").glob("game-*.json")
+    artifacts = tmp_path / "grouped/artifacts/agents"
+    reports = [json.loads(path.read_text()) for path in artifacts.glob("game-*.json")]
+    batch_rows = [
+        batch for path in artifacts.glob("batches-*.json") for batch in json.loads(path.read_text())
     ]
     assert len(reports) == 2
     assert sum(report["matches"] for report in reports) == 2
-    assert sum(report["local_forward_calls"] for report in reports) == 16
-    assert all(report["requests"] == report["answers"] == 0 for report in reports)
+    assert sum(batch["forward_calls"] for batch in batch_rows) == 16
+    assert sum(report["bus"]["calls"] for report in reports) == 16
+    assert all(report["bus"]["wire_bytes"] == 0 for report in reports)

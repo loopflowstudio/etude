@@ -1,15 +1,13 @@
 """Player trees share checkpoint loading while retaining independent results."""
 
 import json
-import socket
-from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 
 import pytest
 
 from etude.checkpoints import CheckpointRef, PolicyKey
 from etude.errors import EtudeError, LauncherError, RetryRequested
-from etude.eval.agents import Answer, CheckpointRequest, recv_frame
+from etude.eval.agents import Answer, CheckpointRequest
 from etude.eval.batching import _Batches
 from etude.eval.composition import _restore
 from etude.eval.query import statsdb
@@ -179,21 +177,16 @@ def test_same_named_author_types_have_distinct_labels_and_keys() -> None:
 
 def test_distinct_players_share_a_checkpoint_batch() -> None:
     small = checkpoint("small")
-    parent, child = socket.socketpair()
-    batches = _Batches(echo, 2, 1024)
-    try:
-        for req_id, name in ((1, "bare"), (2, "composed")):
-            batches.add(child, CheckpointRequest(req_id, small.checkpoint, [name], 1))
-        observations = batches.flush()
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(1, "small", ["bare"])
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(2, "small", ["composed"])
-        assert batches.loads == batches.batches == 1
-        assert observations[0].checkpoint == "small"
-        assert observations[0].rows == 2
-        assert observations[0].requests == 2
-    finally:
-        parent.close()
-        child.close()
+    batches: _Batches[Answer] = _Batches(echo, 2, 1024)
+    answers: list[Answer] = []
+    for req_id, name in ((1, "bare"), (2, "composed")):
+        batches.add(answers.append, CheckpointRequest(req_id, small.checkpoint, [name], 1))
+    observations = batches.flush()
+    assert answers == [Answer(1, "small", ["bare"]), Answer(2, "small", ["composed"])]
+    assert batches.loads == batches.batches == 1
+    assert observations[0].checkpoint == "small"
+    assert observations[0].rows == 2
+    assert observations[0].requests == 2
 
 
 def test_group_builds_nested_players_and_loads_the_shared_leaf_once(

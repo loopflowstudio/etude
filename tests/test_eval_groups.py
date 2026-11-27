@@ -518,8 +518,8 @@ def test_two_tournaments_share_loaded_agents_and_resume_without_starting_them(
     ]
     assert len(reports) == 2
     assert sum(r.matches for r in reports) == 2
-    assert sum(r.requests for r in reports) == 4
-    assert sum(r.answers for r in reports) == 4
+    assert sum(r.bus.calls for r in reports) == 4
+    assert sum(r.bus.answers for r in reports) == 4
     log = capfd.readouterr().err
     assert log.count("agents: started") == 1
     assert log.count("agents: loaded") == 2
@@ -783,28 +783,27 @@ def echo(checkpoint: CheckpointRef) -> ModelForward:
 
 
 def test_batch_merges_rows_up_to_max_batch_and_runs_oversized_alone() -> None:
-    first_game, first_agent = socket.socketpair()
-    second_game, second_agent = socket.socketpair()
+    first_answers: list[Answer] = []
+    second_answers: list[Answer] = []
     player = checkpoint("one")
-    batches = _Batches(echo, 4, 1024)
-    with first_game, first_agent, second_game, second_agent:
-        batches.add(first_agent, CheckpointRequest(1, player.checkpoint, [("a", "b")], 2))
-        batches.add(second_agent, CheckpointRequest(2, player.checkpoint, [("c", "d")], 2))
-        batches.add(second_agent, CheckpointRequest(3, player.checkpoint, ["e"], 1))
-        first = batches.flush()
-        assert ForkingPickler.loads(recv_frame(first_game)) == Answer(1, "one", [("a", "b")])
-        assert ForkingPickler.loads(recv_frame(second_game)) == Answer(2, "one", [("c", "d")])
-        assert [b.rows for b in first] == [4]
-        assert [b.requests for b in first] == [2]
-        assert batches.loads == 1
-        second = batches.flush()
-        assert ForkingPickler.loads(recv_frame(second_game)) == Answer(3, "one", ["e"])
-        assert [b.rows for b in second] == [1]
-        # A single pre-collated call above max_batch runs alone and reports real rows.
-        batches.add(first_agent, CheckpointRequest(4, player.checkpoint, ["big"], 6))
-        oversized = batches.flush()
-        assert ForkingPickler.loads(recv_frame(first_game)) == Answer(4, "one", ["big"])
-        assert [b.rows for b in oversized] == [6]
+    batches: _Batches[Answer] = _Batches(echo, 4, 1024)
+    batches.add(first_answers.append, CheckpointRequest(1, player.checkpoint, [("a", "b")], 2))
+    batches.add(second_answers.append, CheckpointRequest(2, player.checkpoint, [("c", "d")], 2))
+    batches.add(second_answers.append, CheckpointRequest(3, player.checkpoint, ["e"], 1))
+    first = batches.flush()
+    assert first_answers.pop(0) == Answer(1, "one", [("a", "b")])
+    assert second_answers.pop(0) == Answer(2, "one", [("c", "d")])
+    assert [b.rows for b in first] == [4]
+    assert [b.requests for b in first] == [2]
+    assert batches.loads == 1
+    second = batches.flush()
+    assert second_answers.pop(0) == Answer(3, "one", ["e"])
+    assert [b.rows for b in second] == [1]
+    # A single pre-collated call above max_batch runs alone and reports real rows.
+    batches.add(first_answers.append, CheckpointRequest(4, player.checkpoint, ["big"], 6))
+    oversized = batches.flush()
+    assert first_answers.pop(0) == Answer(4, "one", ["big"])
+    assert [b.rows for b in oversized] == [6]
 
 
 def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_inputs() -> None:
@@ -818,29 +817,23 @@ def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_inputs() ->
         for name in ("a", "b", "c")
     ]
     a, b, c = players
-    batches = _Batches(echo, 1, 2)
-    parent, child = socket.socketpair()
-    try:
-        for index, player in enumerate((a, b), start=1):
-            batches.add(child, CheckpointRequest(index, player.checkpoint, [player.name], 1))
-            batches.flush()
-            assert ForkingPickler.loads(recv_frame(parent)) == Answer(
-                index, player.checkpoint.key, [player.name]
-            )
-        # While a still has waiting rows in pending, loading c evicts b instead of a.
-        batches.add(child, CheckpointRequest(3, c.checkpoint, ["c"], 1))
-        batches.add(child, CheckpointRequest(4, a.checkpoint, ["a"], 1))
+    batches: _Batches[Answer] = _Batches(echo, 1, 2)
+    answers: list[Answer] = []
+    for index, player in enumerate((a, b), start=1):
+        batches.add(answers.append, CheckpointRequest(index, player.checkpoint, [player.name], 1))
         batches.flush()
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(3, c.checkpoint.key, ["c"])
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(4, a.checkpoint.key, ["a"])
-        assert batches.loads == 3
-        batches.add(child, CheckpointRequest(5, b.checkpoint, ["b"], 1))
-        batches.flush()
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(5, b.checkpoint.key, ["b"])
-        assert batches.loads == 4  # b was evicted to make room for c.
-    finally:
-        parent.close()
-        child.close()
+        assert answers.pop(0) == Answer(index, player.checkpoint.key, [player.name])
+    # While a still has waiting rows in pending, loading c evicts b instead of a.
+    batches.add(answers.append, CheckpointRequest(3, c.checkpoint, ["c"], 1))
+    batches.add(answers.append, CheckpointRequest(4, a.checkpoint, ["a"], 1))
+    batches.flush()
+    assert answers.pop(0) == Answer(3, c.checkpoint.key, ["c"])
+    assert answers.pop(0) == Answer(4, a.checkpoint.key, ["a"])
+    assert batches.loads == 3
+    batches.add(answers.append, CheckpointRequest(5, b.checkpoint, ["b"], 1))
+    batches.flush()
+    assert answers.pop(0) == Answer(5, b.checkpoint.key, ["b"])
+    assert batches.loads == 4  # b was evicted to make room for c.
 
 
 class WrongAnswers:
@@ -874,8 +867,8 @@ def test_bad_batch_answers_fail_all_asking_tournaments(
         for path in (tmp_path / "grouped/artifacts/agents").glob("game-*.json")
     ]
     assert len(reports) == 2
-    assert [r.requests for r in reports] == [1, 1]
-    assert [r.answers for r in reports] == [1, 1]
+    assert [r.bus.calls for r in reports] == [1, 1]
+    assert [r.bus.answers for r in reports] == [1, 1]
     db = statsdb("grouped", tmp_path)
     try:
         assert db.sql("select state, retry from matches").fetchall() == [("failed", False)] * 2
@@ -997,7 +990,7 @@ with TemporaryDirectory(dir="/tmp", prefix="etude-test-") as scratch, socket.soc
         parent.send(Grant(()))
         done = parent.recv()
         assert isinstance(done, Done)
-        assert done.report.requests == done.report.answers == 1
+        assert done.report.bus.calls == done.report.bus.answers == 1
         assert done.report.matches == 1
         print(done.report.imports.model_dump_json())
     driver = threading.Thread(target=drive)
@@ -1053,24 +1046,20 @@ def test_sigterm_reaps_agents_and_games_and_records_retry(tmp_path: Path) -> Non
 
 
 def test_a_failed_load_is_not_attempted_again_in_the_run() -> None:
-    batches = _Batches(raises_load, 1, 10)
-    parent, child = socket.socketpair()
-    try:
-        player = checkpoint("one")
-        batches.add(child, CheckpointRequest(1, player.checkpoint, [1], 1))
-        batches.flush()
-        first = ForkingPickler.loads(recv_frame(parent))
-        assert first.error and "fixture loading error" in first.error and first.loading
-        # If loading is attempted a second time this function would now succeed.
-        batches.forwards.load = echo
-        batches.add(child, CheckpointRequest(2, player.checkpoint, [2], 1))
-        batches.flush()
-        second = ForkingPickler.loads(recv_frame(parent))
-        assert second.error == first.error and second.loading
-        assert batches.loads == 0
-    finally:
-        parent.close()
-        child.close()
+    batches: _Batches[Answer] = _Batches(raises_load, 1, 10)
+    answers: list[Answer] = []
+    player = checkpoint("one")
+    batches.add(answers.append, CheckpointRequest(1, player.checkpoint, [1], 1))
+    batches.flush()
+    first = answers.pop(0)
+    assert first.error and "fixture loading error" in first.error and first.loading
+    # If loading is attempted a second time this function would now succeed.
+    batches.forwards.load = echo
+    batches.add(answers.append, CheckpointRequest(2, player.checkpoint, [2], 1))
+    batches.flush()
+    second = answers.pop(0)
+    assert second.error == first.error and second.loading
+    assert batches.loads == 0
 
 
 @pytest.mark.parametrize("version", [1, 2])
@@ -1488,7 +1477,7 @@ def wire_agent(checkpoint: CheckpointRef) -> ModelForward:
 def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoint() -> None:
     # Small real sockets retain the wire bytes; no load or clock threshold.
     cp = checkpoint("wire")
-    batches = _Batches(wire_agent, 2, 1024)
+    batches: _Batches[memoryview] = _Batches(wire_agent, 2, 1024, encode=ForkingPickler.dumps)
     sockets = [socket.socketpair() for _ in range(2)]
     clients = [parent for parent, _ in sockets]
     receivers = [child for _, child in sockets]
@@ -1496,6 +1485,10 @@ def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoin
     WireValue.serializations = 0
     request_bytes = 0
     observations = []
+
+    def send_to(sock: socket.socket) -> Callable[[memoryview], None]:
+        return lambda payload: send_frame(sock, payload)
+
     try:
         for turn in range(2):
             for index, (peer_client, receiver) in enumerate(zip(clients, receivers, strict=True)):
@@ -1511,7 +1504,7 @@ def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoin
                 send_frame(peer_client, payload)
                 received = recv_frame(receiver)
                 request_bytes += len(received)
-                batches.add_batch(receiver, ForkingPickler.loads(received))
+                batches.add_batch(send_to(receiver), ForkingPickler.loads(received))
             observations.extend(batches.flush())
             for index, peer_client in enumerate(clients):
                 answer_payload = recv_frame(peer_client)
@@ -1540,8 +1533,8 @@ def test_agentless_game_reports_have_no_inference_wait(tmp_path: Path) -> None:
     report = GameReport.model_validate_json(paths[0].read_bytes())
     assert report.matches == 1
     assert report.wall_seconds >= 0.0
-    assert report.requests == report.answers == 0
-    assert report.round_trip_seconds == report.transport_seconds == 0.0
+    assert report.bus.calls == report.bus.answers == 0
+    assert report.bus.round_trip_seconds == report.bus.handoff_seconds == 0.0
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [0]
     assert len(list((tmp_path / "grouped/artifacts/agents").glob("game-*.json"))) == 1
 
@@ -1607,16 +1600,18 @@ def test_barrier_batches_games_into_one_message_per_process_per_round(
         GameReport.model_validate_json(p.read_bytes()) for p in artifacts.glob("game-*.json")
     ]
     assert report.matches == 6
+    assert report.bus.calls == report.bus.answers == 4
     if shared:
         # 4 decision rounds -> exactly 4 socket messages for all 6 games (not 18).
-        assert report.requests == report.answers == 4
+        assert report.bus.wire_bytes > 0
         batches = json.loads((artifacts / "batches.json").read_text())
-        assert [batch["rows"] for batch in batches] == [6, 6, 4, 2]
-        assert [batch["requests"] for batch in batches] == [1, 1, 1, 1]
     else:
-        assert report.local_forward_calls == 4
-        assert report.local_inputs == sum(lengths)
-        assert report.local_loads == 1
+        assert report.bus.wire_bytes == 0
+        assert not (artifacts / "batches.json").exists()
+        batches = json.loads((artifacts / f"batches-{report.pid}.json").read_text())
+    assert [batch["rows"] for batch in batches] == [6, 6, 4, 2]
+    assert [batch["requests"] for batch in batches] == [1, 1, 1, 1]
+    assert sum(batch["loads"] for batch in batches) == 1
 
 
 def test_barrier_batches_across_multiple_processes(
@@ -1645,8 +1640,8 @@ def test_barrier_batches_across_multiple_processes(
     ]
     assert len(reports) == 2
     assert sum(r.matches for r in reports) == 8
-    assert [r.requests for r in reports] == [3, 3]
-    assert [r.answers for r in reports] == [3, 3]
+    assert [r.bus.calls for r in reports] == [3, 3]
+    assert [r.bus.answers for r in reports] == [3, 3]
     batches = json.loads((artifacts / "batches.json").read_text())
     assert sum(batch["rows"] for batch in batches) == 24
     assert all(batch["rows"] <= 8 for batch in batches)

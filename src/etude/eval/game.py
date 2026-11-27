@@ -16,18 +16,22 @@ import sys
 import time
 import typing
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import aclosing
+from contextlib import aclosing, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import lru_cache
 from multiprocessing.connection import Connection
 from multiprocessing.reduction import ForkingPickler
+from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Generic, cast
 
+from pydantic import Field
+
 from etude.call import Function
 from etude.errors import RetryRequested
-from etude.eval.agents import AgentClient, Answer, Forward, ForwardError
+from etude.eval.agents import Forward, ForwardError, SocketForwardBus
+from etude.eval.bus import BusReport, ForwardBus, ForwardCall
 from etude.eval.composition import build_agents
 from etude.eval.records import Match, _MatchConfig
 from etude.eval.resources import Resources, agent_bytes, seconds_left
@@ -38,7 +42,6 @@ __all__ = ("Matches",)
 
 if TYPE_CHECKING:
     from etude.checkpoints import CheckpointRef
-    from etude.eval.forwards import Forwards
 
 MAX_GAME_IMPORTS = 256
 _HEAVY = frozenset({"torch", "jax", "tensorflow"})
@@ -75,18 +78,8 @@ class GameReport(Record):
     tournament: str
     imports: Imports
     matches: int
-    requests: int
-    answers: int
-    request_bytes: int
-    answer_bytes: int
-    round_trip_seconds: float
-    transport_seconds: float
     wall_seconds: float
-    local_inputs: int = 0
-    local_forward_calls: int = 0
-    local_loads: int = 0
-    local_forward_seconds: float = 0.0
-    local_load_seconds: float = 0.0
+    bus: BusReport = Field(default_factory=BusReport)
 
 
 @dataclass(frozen=True)
@@ -195,7 +188,7 @@ class _PendingCall:
 class _BoundForward:
     """Shared per-checkpoint awaitable handle inside one game process."""
 
-    def __init__(self, owner: _Forwarder, checkpoint: CheckpointRef) -> None:
+    def __init__(self, owner: _Forwarder, checkpoint: str) -> None:
         self._owner = owner
         self._checkpoint = checkpoint
 
@@ -222,18 +215,10 @@ class _BoundForward:
 class _Forwarder:
     """Zero-delay barrier batching all waiting checkpoint forwards in one game process."""
 
-    def __init__(
-        self,
-        *,
-        client: AgentClient | None,
-        local: Forwards | None,
-        max_batch: int,
-    ) -> None:
-        self.client = client
-        self.local = local
+    def __init__(self, bus: ForwardBus, *, max_batch: int) -> None:
+        self._bus = bus
         self.max_batch = max_batch
         self._handles: dict[str, _BoundForward] = {}
-        self._checkpoints: dict[str, CheckpointRef] = {}
         self._pending: dict[str, list[_PendingCall]] = {}
         self._flush_scheduled = False
         self._loading_failures: dict[str, CheckpointFailure] = {}
@@ -242,18 +227,17 @@ class _Forwarder:
     def bind(self, checkpoint: CheckpointRef) -> Forward:
         handle = self._handles.get(checkpoint.key)
         if handle is None:
-            handle = _BoundForward(self, checkpoint)
+            self._bus.bind(checkpoint)
+            handle = _BoundForward(self, checkpoint.key)
             self._handles[checkpoint.key] = handle
-            self._checkpoints[checkpoint.key] = checkpoint
         return handle
 
     def enqueue(
-        self, checkpoint: CheckpointRef, inputs: list[object], rows: int
+        self, checkpoint: str, inputs: list[object], rows: int
     ) -> asyncio.Future[list[object]]:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[list[object]] = loop.create_future()
-        self._checkpoints[checkpoint.key] = checkpoint
-        self._pending.setdefault(checkpoint.key, []).append(_PendingCall(inputs, rows, future))
+        self._pending.setdefault(checkpoint, []).append(_PendingCall(inputs, rows, future))
         if not self._flush_scheduled:
             self._flush_scheduled = True
             loop.call_soon(self._flush)
@@ -274,80 +258,65 @@ class _Forwarder:
             chunks.append(current)
         return chunks
 
-    def _deliver(self, chunk: list[_PendingCall], answer: Answer) -> None:
-        if answer.error is not None:
-            error = ForwardError(
-                answer.checkpoint,
-                answer.error,
-                retry=answer.retry,
-                loading=answer.loading,
-            )
-            if answer.loading and answer.checkpoint not in self._loading_failures:
-                self._loading_failures[answer.checkpoint] = CheckpointFailure(
-                    checkpoint=answer.checkpoint,
-                    error=answer.error,
-                    retry=answer.retry,
-                )
-            for call in chunk:
-                if not call.future.done():
-                    call.future.set_exception(error)
-            return
-        offset = 0
-        for call in chunk:
-            size = len(call.inputs)
-            if not call.future.done():
-                call.future.set_result(answer.outputs[offset : offset + size])
-            offset += size
-
     def _flush(self) -> None:
         self._flush_scheduled = False
         pending = self._pending
         self._pending = {}
         if not pending:
             return
-        grouped: list[tuple[CheckpointRef, list[_PendingCall], list[object], int]] = []
+        grouped: list[tuple[list[_PendingCall], ForwardCall]] = []
         for key, calls in pending.items():
-            checkpoint = self._checkpoints[key]
             for chunk in self._chunks(calls):
                 merged = [item for call in chunk for item in call.inputs]
                 rows = sum(call.rows for call in chunk)
-                grouped.append((checkpoint, chunk, merged, rows))
-        if self.client is not None:
-            try:
-                futures = self.client.send_batch(
-                    [(cp, merged, rows) for cp, _, merged, rows in grouped]
-                )
-            except BaseException as error:
-                for _, chunk, _, _ in grouped:
-                    for call in chunk:
-                        if not call.future.done():
-                            call.future.set_exception(error)
-                return
-            for (_, chunk, _, _), answer_future in zip(grouped, futures, strict=True):
-                answer_future.add_done_callback(self._callback(chunk))
+                grouped.append((chunk, ForwardCall(key, merged, rows)))
+        try:
+            futures = self._bus.submit([call for _, call in grouped])
+        except BaseException as error:
+            for chunk, _ in grouped:
+                for call in chunk:
+                    if not call.future.done():
+                        call.future.set_exception(error)
             return
-        assert self.local is not None
-        protected = set(pending)
-        for checkpoint, chunk, merged, rows in grouped:
-            answer = self.local.answer(checkpoint, merged, protected, rows=rows)
-            self._deliver(chunk, answer)
+        for (chunk, _), bus_future in zip(grouped, futures, strict=True):
+            bus_future.add_done_callback(self._callback(chunk))
 
-    def _callback(self, chunk: list[_PendingCall]) -> Callable[[asyncio.Future[Answer]], None]:
-        def done(answer_future: asyncio.Future[Answer]) -> None:
-            self._on_remote(chunk, answer_future)
+    def _callback(
+        self, chunk: list[_PendingCall]
+    ) -> Callable[[asyncio.Future[list[object]]], None]:
+        def done(bus_future: asyncio.Future[list[object]]) -> None:
+            self._on_answer(chunk, bus_future)
 
         return done
 
-    def _on_remote(self, chunk: list[_PendingCall], answer_future: asyncio.Future[Answer]) -> None:
-        if answer_future.cancelled():
+    def _on_answer(
+        self, chunk: list[_PendingCall], bus_future: asyncio.Future[list[object]]
+    ) -> None:
+        if bus_future.cancelled():
             return
-        raised = answer_future.exception()
+        raised = bus_future.exception()
         if raised is not None:
+            if (
+                isinstance(raised, ForwardError)
+                and raised.loading
+                and raised.checkpoint not in self._loading_failures
+            ):
+                self._loading_failures[raised.checkpoint] = CheckpointFailure(
+                    checkpoint=raised.checkpoint,
+                    error=str(raised),
+                    retry=raised.retry,
+                )
             for call in chunk:
                 if not call.future.done():
                     call.future.set_exception(raised)
             return
-        self._deliver(chunk, answer_future.result())
+        outputs = bus_future.result()
+        offset = 0
+        for call in chunk:
+            size = len(call.inputs)
+            if not call.future.done():
+                call.future.set_result(outputs[offset : offset + size])
+            offset += size
 
     def drain_loading_failures(self) -> tuple[CheckpointFailure, ...]:
         fresh = tuple(
@@ -432,17 +401,25 @@ async def _serve_stream(
     load: Function | None,
     memory: int | None,
     max_batch: int,
+    artifacts: Path | None,
     observe_imports: Callable[[], Imports],
 ) -> None:
     started = time.monotonic()
     loop = asyncio.get_running_loop()
-    client: AgentClient | None = None
-    local: Forwards | None = None
+    bus: ForwardBus | None = None
+    bus_report = BusReport()
     forwarder: _Forwarder | None = None
     played_count = 0
     pending_grant: asyncio.Future[tuple[Match, ...]] | None = None
     take_lock = asyncio.Lock()
     held: dict[int, _TakenMatch] = {}
+
+    async def close_bus() -> BusReport:
+        nonlocal bus, bus_report
+        if bus is not None:
+            active, bus = bus, None
+            bus_report = await active.close()
+        return bus_report
 
     def make_report() -> GameReport:
         return GameReport(
@@ -450,18 +427,8 @@ async def _serve_stream(
             tournament=tournament,
             imports=observe_imports(),
             matches=played_count,
-            requests=client.requests if client else 0,
-            answers=client.answers if client else 0,
-            request_bytes=client.request_bytes if client else 0,
-            answer_bytes=client.answer_bytes if client else 0,
-            round_trip_seconds=client.round_trip_seconds if client else 0.0,
-            transport_seconds=client.transport_seconds if client else 0.0,
             wall_seconds=time.monotonic() - started,
-            local_inputs=local.inputs if local else 0,
-            local_forward_calls=local.calls if local else 0,
-            local_loads=local.loads if local else 0,
-            local_forward_seconds=local.forward_seconds if local else 0.0,
-            local_load_seconds=local.load_seconds if local else 0.0,
+            bus=bus_report,
         )
 
     def on_pipe_readable() -> None:
@@ -486,23 +453,21 @@ async def _serve_stream(
             else cast(Callable[[object, Mapping[str, Forward]], object], build.load(checkout))
         )
         if load is not None:
-            # Process entry point: only CPU games import the local checkpoint owner.
-            from etude.eval.forwards import Forwards  # noqa: PLC0415
-
-            loaded_fn: Callable[..., object] | None = None
-
-            def load_checkpoint(checkpoint: CheckpointRef) -> object:
-                nonlocal loaded_fn
-                if loaded_fn is None:
-                    loaded_fn = load.load(checkout)
-                return loaded_fn(checkpoint)
+            # Process entry point: only direct-inference games import the local bus.
+            from etude.eval.batching import LocalForwardBus  # noqa: PLC0415
 
             allowance = agent_bytes(None) if memory is None else memory
-            local = Forwards(load_checkpoint, allowance)
+            bus = LocalForwardBus(
+                load,
+                checkout=checkout,
+                max_batch=max_batch,
+                memory=allowance,
+                artifacts=artifacts,
+            )
         elif agents is not None:
-            client = await AgentClient.connect(agents)
-        if client is not None or local is not None:
-            forwarder = _Forwarder(client=client, local=local, max_batch=max_batch)
+            bus = await SocketForwardBus.connect(agents)
+        if bus is not None:
+            forwarder = _Forwarder(bus, max_batch=max_batch)
 
         bind: Callable[[CheckpointRef], Forward] | None = (
             forwarder.bind if forwarder is not None else None
@@ -560,22 +525,31 @@ async def _serve_stream(
                     result = outcome
                 else:
                     raise TypeError("game outcomes must be tables, a Result or an exception")
+                drained = forwarder.drain_loading_failures() if forwarder else ()
+                if (
+                    isinstance(error, ForwardError)
+                    and error.loading
+                    and not any(failure.checkpoint == error.checkpoint for failure in drained)
+                ):
+                    drained = (
+                        *drained,
+                        CheckpointFailure(error.checkpoint, str(error), error.retry),
+                    )
                 pipe.send(
                     Outcome(
                         match_key=taken.key,
                         result=result,
                         seconds=elapsed,
                         error=_portable_error(error) if error is not None else None,
-                        loading_failures=(
-                            (CheckpointFailure(error.checkpoint, str(error), error.retry),)
-                            if isinstance(error, ForwardError) and error.loading
-                            else ()
-                        ),
+                        loading_failures=drained,
                     )
                 )
+        await close_bus()
         loading_failures = forwarder.drain_loading_failures() if forwarder else ()
         pipe.send(Done(report=make_report(), loading_failures=loading_failures))
     except Exception as error:
+        with suppress(Exception):
+            await close_bus()
         loading_failures = forwarder.drain_loading_failures() if forwarder else ()
         try:
             pipe.send(
@@ -589,8 +563,8 @@ async def _serve_stream(
             pass
     finally:
         loop.remove_reader(pipe.fileno())
-        if client is not None:
-            client.close()
+        with suppress(Exception):
+            await close_bus()
 
 
 def run_game_process(
@@ -649,6 +623,7 @@ def run_game_process(
                 load=load,
                 memory=memory,
                 max_batch=max_batch,
+                artifacts=resources.artifacts,
                 observe_imports=observe_imports,
             )
         )
