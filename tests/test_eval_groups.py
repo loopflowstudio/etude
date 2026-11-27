@@ -700,7 +700,16 @@ def test_a_failing_nvidia_driver_plays_direct(
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
     plan = plan_execution(64, loader=True, checkpoints=True)
-    assert (plan.shared, plan.accelerator, plan.reason, plan.games) == (False, None, "cpu", 4)
+    assert (plan.shared, plan.accelerator, plan.reason, plan.games) == (
+        False,
+        None,
+        "nvidia-smi failed",
+        4,
+    )
+    assert plan.describe(["ladder"]) == (
+        "etude: agents: direct inference for ladder (nvidia-smi failed); "
+        "4 games at a time; 1 inference thread each"
+    )
 
 
 @pytest.mark.parametrize(

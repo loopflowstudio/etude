@@ -21,6 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from etude.errors import RetryRequested
+
 THREAD_VARIABLES = (
     "OMP_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
@@ -102,7 +104,7 @@ def seconds_left() -> float | None:
 
 type Accelerator = Literal["cuda", "metal"]
 type Device = Accelerator | Literal["cpu"]
-type _Unavailable = Literal["cpu", "CUDA_VISIBLE_DEVICES hides GPUs"]
+type _Unavailable = Literal["cpu", "CUDA_VISIBLE_DEVICES hides GPUs", "nvidia-smi failed"]
 type Reason = (
     _Unavailable
     | Literal[
@@ -133,8 +135,10 @@ def _detect_accelerator() -> Accelerator | _Unavailable:
             timeout=seconds_left(),
         )
     except subprocess.CalledProcessError:
-        # nvidia-smi on PATH but failing (driver unloaded or mismatched): no usable GPU.
-        return "cpu"
+        # Driver unloaded or mismatched: play direct, but name the fault at startup.
+        return "nvidia-smi failed"
+    except subprocess.TimeoutExpired as error:
+        raise RetryRequested("nvidia-smi did not answer before the deadline") from error
     return "cuda" if listed.strip() else "cpu"
 
 
