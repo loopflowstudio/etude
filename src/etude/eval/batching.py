@@ -463,17 +463,11 @@ def _inference_loop(
     on_exit: Callable[[BaseException], None],
 ) -> None:
     """Dedicated inference thread body; owns `Forwards`, loader and all loaded models."""
-    batches: _Batches[_LocalReply] = _Batches(
-        _lazy_loader(load, checkout), max_batch, memory, encode=_encode_local, copy_outputs=True
-    )
     bound: dict[str, CheckpointRef] = {}
     report: TextIO | None = None
-    if report_path is not None:
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report = report_path.open("w")
-        report.write("[")
     wait_seconds = 0.0
     stopped_cleanly = False
+    cause = ""
 
     def post(reply: _LocalReply) -> None:
         try:
@@ -515,6 +509,15 @@ def _inference_loop(
             )
 
     try:
+        # Setup sits inside the guard: a report file that cannot open must fail
+        # callers at once rather than leave them waiting for the deadline.
+        batches: _Batches[_LocalReply] = _Batches(
+            _lazy_loader(load, checkout), max_batch, memory, encode=_encode_local, copy_outputs=True
+        )
+        if report_path is not None:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report = report_path.open("w")
+            report.write("[")
         while True:
             if not batches.pending:
                 wait_started = time.monotonic()
@@ -537,16 +540,21 @@ def _inference_loop(
             if flushed:
                 wait_seconds = 0.0
                 _write_batches(report, flushed)
-    except BaseException:
+    except BaseException as error:
         stopped_cleanly = False
+        cause = f"{type(error).__name__}: {explain(error)}"
+        print(f"etude: agents: {cause}", file=sys.stderr, flush=True)
     finally:
         if report is not None:
-            report.write("]")
-            report.close()
+            try:
+                report.write("]")
+                report.close()
+            except OSError:
+                pass  # A full disk must not keep callers from failing fast.
         if not stopped_cleanly:
             try:
                 loop.call_soon_threadsafe(
-                    on_exit, RetryRequested("inference thread exited unexpectedly")
+                    on_exit, RetryRequested(f"inference thread exited unexpectedly: {cause}")
                 )
             except RuntimeError:
                 pass

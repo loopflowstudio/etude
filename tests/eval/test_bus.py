@@ -1201,6 +1201,31 @@ def test_local_bus_thread_exit_fails_pending_and_future_calls_with_retry() -> No
     asyncio.run(run())
 
 
+def test_local_bus_unwritable_report_fails_calls_and_says_why(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cp = checkpoint("unwritable").checkpoint
+    (tmp_path / f"batches-{os.getpid()}.json").mkdir()
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        return lambda inputs: inputs
+
+    async def run() -> None:
+        bus = LocalForwardBus(load, max_batch=8, memory=1024 * 1024, artifacts=tmp_path)
+        try:
+            bus.bind(cp)
+            arr = np.arange(4, dtype=np.float32)
+            [call] = bus.submit([ForwardCall(cp.key, [arr], 1)])
+            with pytest.raises(RetryRequested, match="IsADirectoryError"):
+                await call
+            assert arr.flags.writeable
+        finally:
+            await bus.close()
+
+    asyncio.run(run())
+    assert "etude: agents: IsADirectoryError" in capsys.readouterr().err
+
+
 def _load_example_group(path: Path) -> EvalGroup:
     definition = read_experiment(path)
     assert definition.eval is not None
