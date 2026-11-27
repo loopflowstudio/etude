@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from etude.cli import main
 from etude.jobs import continue_from
@@ -40,6 +41,7 @@ from etude.launch.schemas import AttemptRecord, Finished, Inbox, Packet, Work
 from etude.launch.ssh import (
     SSH,
     HeldRequest,
+    RemoteCall,
     RemoteReply,
     RemoteRequest,
     SessionRequest,
@@ -50,7 +52,9 @@ from etude.launch.ssh import (
 )
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.disk import DirectoryJournal
+from etude.launch.storage.files import write_bytes
 from etude.launch.storage.s3 import Bucket
+from etude.launch.worker import remote as remote_worker
 from etude.records import Clock
 from etude.spec import Job, RunRequest, Until
 from tests.launch.counting import job_text
@@ -1203,15 +1207,22 @@ def test_install_enospc_leaves_no_ended_and_empty_ended_settles(
                 dst.writestr(info, src.read(info.filename))
         dst.writestr(
             "etude/launch/environment.py",
-            "import errno, pathlib\n"
-            "_orig = pathlib.Path.write_text\n"
-            "def _fail_ended(self, data, *a, **kw):\n"
-            "    if self.name.startswith('ended'):\n"
-            "        self.write_bytes(b'')\n"
+            "import errno, os\n"
+            "_orig_open = os.open\n"
+            "_orig_write = os.write\n"
+            "_ended_fds = set()\n"
+            "def _fail_open(path, flags, *a, **kw):\n"
+            "    fd = _orig_open(path, flags, *a, **kw)\n"
+            "    if os.path.basename(str(path)).startswith('.ended.'):\n"
+            "        _ended_fds.add(fd)\n"
+            "    return fd\n"
+            "def _fail_write(fd, data):\n"
+            "    if fd in _ended_fds:\n"
             "        raise OSError(errno.ENOSPC, 'No space left on device')\n"
-            "    return _orig(self, data, *a, **kw)\n"
+            "    return _orig_write(fd, data)\n"
             "def install(code):\n"
-            "    pathlib.Path.write_text = _fail_ended\n"
+            "    os.open = _fail_open\n"
+            "    os.write = _fail_write\n"
             "    raise OSError(errno.ENOSPC, 'No space left on device')\n",
         )
     archive = buf.getvalue()
@@ -1233,7 +1244,7 @@ def test_install_enospc_leaves_no_ended_and_empty_ended_settles(
     assert not journal.observe(packet.session).alive
     assert "No space left on device" in (install_home / "bootstrap.log").read_text()
     assert not (install_home / "ended").exists()
-    assert not (install_home / "ended.partial").exists()
+    assert not list(install_home.glob("*.partial"))
     assert journal.end(packet.session) is not None
 
     # Part 2: pre-existing 0-byte `home/ended` is treated as absent across `_BOOT` and settles.
@@ -2190,3 +2201,133 @@ def test_local_full_disk_cancel_settles_via_directory_journal_refused(tmp_path: 
             os.kill(worker_pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+def test_ssh_boot_and_remote_reject_path_traversal_and_bad_digest(tmp_path: Path) -> None:
+    root = tmp_path / "sessions"
+    root.mkdir()
+    escape = tmp_path / "escaped"
+    body = base64.b64encode(b"evil").decode()
+
+    for bad_session in ("../escaped", "/tmp/escaped", "", "."):
+        with pytest.raises(ValueError, match="invalid session"):
+            ssh_boot.dispatch(
+                {"root": str(root), "request": {"action": "observe", "session": bad_session}}
+            )
+
+    for action, extra in (
+        ("stop", {"attempt": "../escaped"}),
+        ("logs", {"producer": "job", "attempt": "../escaped"}),
+        ("add", {"work": {"attempt": "../escaped", "run": "r"}, "files": {}}),
+    ):
+        with pytest.raises(ValueError, match="invalid attempt"):
+            ssh_boot.dispatch(
+                {"root": str(root), "request": {"action": action, "session": "s1", **extra}}
+            )
+
+    for bad_file in ("../escaped", "sources/../../escaped", "/tmp/escaped"):
+        with pytest.raises(ValueError, match="invalid relative path|escapes"):
+            ssh_boot.dispatch(
+                {
+                    "root": str(root),
+                    "request": {
+                        "action": "add",
+                        "session": "s1",
+                        "work": {"attempt": "a1", "run": "r"},
+                        "files": {bad_file: body},
+                    },
+                }
+            )
+
+    with pytest.raises(ValueError, match="invalid program digest"):
+        ssh_boot.dispatch(
+            {
+                "root": str(root),
+                "digest": "../escaped",
+                "request": {"action": "held", "run": "r"},
+            }
+        )
+
+    packet = Packet(session="s1", deadline=None, work=())
+    with pytest.raises(ValueError, match="invalid relative path|escapes"):
+        remote_worker.invoke(
+            RemoteCall(
+                root=str(root),
+                request=StartRequest(
+                    session="s1",
+                    packet=packet,
+                    files={"../escaped": body},
+                ),
+            )
+        )
+
+    with pytest.raises(ValidationError):
+        Work(
+            attempt="a1",
+            command="true",
+            limit_seconds=60,
+            limit_kind="out_of_time",
+            seed=None,
+            until=None,
+            config=None,
+            repo="r",
+            commit="../../escape",
+            run="exp/job@0",
+        )
+
+    assert not escape.exists()
+
+
+def test_ssh_bounded_log_truncates_on_line_boundaries_before_sanitization(tmp_path: Path) -> None:
+    root = tmp_path / "remote"
+    log = root / "s1" / "attempts" / "a1" / "log"
+    log.parent.mkdir(parents=True)
+
+    # Place secrets across both the 4096-byte head cut and the tail cut.
+    opening = b"start line\n" + b"a" * (4096 - len(b"start line\n") - 20)
+    head_secret = b"https://user:secret@host/path?X-Amz-Security-Token=SECRET123\n"
+    middle = b"m" * (200 * 1024) + b"\n"
+    tail_secret = b"Authorization: Bearer SECRET456\n"
+    tail_keep = b"x" * (1024 * 1024 - 4096 - 100 - len(tail_secret) + 12) + b"\nfinal line\n"
+    log.write_bytes(opening + head_secret + middle + tail_secret + tail_keep)
+
+    journal = SSHJournal(SSH("bench", str(root)))
+    stream = journal.logs("s1", "a1", producer="job")
+    text = "".join(chunk.text for chunk in stream.chunks)
+    assert "start line" in text
+    assert "final line" in text
+    assert stream.truncated is True
+    assert "SECRET123" not in text
+    assert "SECRET456" not in text
+    assert "user:secret" not in text
+
+
+def test_atomic_writes_concurrent_and_handle_end_directory_mode(tmp_path: Path) -> None:
+    fresh = tmp_path / "s_fresh"
+    reply = ssh_boot.handle_end(fresh)
+    assert reply["ended_at"] is not None
+    assert fresh.stat().st_mode & 0o777 == 0o700
+    assert (fresh / "ended").stat().st_mode & 0o777 == 0o600
+
+    target = tmp_path / "concurrent.txt"
+    errors: list[BaseException] = []
+
+    def writer(tag: str) -> None:
+        payload = (tag * 1024).encode()
+        try:
+            for _ in range(40):
+                write_bytes(target, payload)
+                ssh_boot._write_ended(tmp_path, tag * 10)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(ch,)) for ch in ("A", "B")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors
+    assert target.read_bytes() in (b"A" * 1024, b"B" * 1024)
+    assert (tmp_path / "ended").read_text() in ("A" * 10, "B" * 10)
+    assert not list(tmp_path.glob("*.partial"))

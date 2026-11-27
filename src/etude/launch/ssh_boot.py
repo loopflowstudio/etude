@@ -12,6 +12,7 @@ import contextlib
 import io
 import json
 import os
+import secrets
 import signal
 import subprocess
 import sys
@@ -49,32 +50,67 @@ def _read_text(path: Path) -> str | None:
         return None
 
 
+def _safe_segment(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value in (".", "..")
+        or "/" in value
+        or "\\" in value
+        or "\0" in value
+    ):
+        raise ValueError(f"invalid {label}")
+    return value
+
+
+def _safe_relative(home: Path, name: object) -> Path:
+    if not isinstance(name, str) or not name or "\0" in name or "\\" in name:
+        raise ValueError("invalid relative path")
+    if name.startswith("/") or any(part in ("", ".", "..") for part in name.split("/")):
+        raise ValueError(f"invalid relative path: {name!r}")
+    base = home.resolve()
+    target = (base / name).resolve()
+    if target == base or not target.is_relative_to(base):
+        raise ValueError(f"path escapes session directory: {name!r}")
+    return home / name
+
+
+def _safe_digest(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or not all(ch in "0123456789abcdef" for ch in value)
+    ):
+        raise ValueError("invalid program digest")
+    return value
+
+
 def _write_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(path.name + ".partial")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    partial = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.partial")
+    fd = -1
     try:
-        partial.write_bytes(data)
+        fd = os.open(str(partial), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
+        os.close(fd)
+        fd = -1
         os.replace(partial, path)
     except BaseException:
-        try:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        with contextlib.suppress(OSError):
             partial.unlink()
-        except OSError:
-            pass
         raise
 
 
 def _write_ended(home: Path, at: str) -> bool:
-    path = home / "ended"
-    partial = home / "ended.partial"
     try:
-        partial.write_text(at)
-        os.replace(partial, path)
+        _write_bytes(home / "ended", at.encode())
         return True
     except OSError:
-        try:
-            partial.unlink()
-        except OSError:
-            pass
         return False
 
 
@@ -149,6 +185,12 @@ def _read_bounded_log(path: Path) -> bytes | None:
             tail = stream.read(tail_size)
     except OSError:
         return None
+    # Align cuts to complete lines so raw truncation never strips a URL or secret prefix
+    # before client-side sanitization runs.
+    head_cut = head.rfind(b"\n")
+    head = head[: head_cut + 1] if head_cut >= 0 else b""
+    tail_cut = tail.find(b"\n")
+    tail = tail[tail_cut + 1 :] if tail_cut >= 0 else b""
     omitted = size - len(head) - len(tail)
     marker = f"\n[retention truncated: {omitted} characters]\n".encode()
     return head + marker + tail
@@ -156,7 +198,8 @@ def _read_bounded_log(path: Path) -> bytes | None:
 
 def handle_logs(home: Path, producer: str, attempt: str | None) -> dict[str, Any]:
     # A completion marker only covers output read after that marker.
-    if attempt:
+    if attempt is not None:
+        attempt = _safe_segment(attempt, "attempt")
         path = home / "attempts" / attempt / "log"
         closed = (home / "attempts" / attempt / "finished.json").exists()
     elif producer == "worker":
@@ -175,13 +218,14 @@ def handle_logs(home: Path, producer: str, attempt: str | None) -> dict[str, Any
 
 
 def handle_add(home: Path, request: dict[str, Any]) -> dict[str, Any]:
+    work = request["work"]
+    attempt = _safe_segment(work.get("attempt"), "attempt")
+    staged = [(_safe_relative(home, name), body) for name, body in request.get("files", {}).items()]
     try:
         added = home / "work"
-        work = request["work"]
-        target = added / f"{work['attempt']}.json"
+        target = added / f"{attempt}.json"
         if not target.exists():
-            for name, body in request.get("files", {}).items():
-                dest = home / name
+            for dest, body in staged:
                 if not dest.exists():
                     _write_bytes(dest, base64.b64decode(body))
             _write_bytes(target, json.dumps(work).encode())
@@ -239,9 +283,10 @@ def handle_observe(home: Path) -> dict[str, Any]:
 
 
 def handle_stop(home: Path, attempt: str) -> dict[str, Any]:
+    attempt = _safe_segment(attempt, "attempt")
     try:
         stop_dir = home / "stop"
-        stop_dir.mkdir(exist_ok=True)
+        stop_dir.mkdir(exist_ok=True, mode=0o700)
         (stop_dir / attempt).touch()
     except OSError as error:
         return {"refused": f"{type(error).__name__}: {error}"}
@@ -281,7 +326,7 @@ def _record_ended(home: Path) -> str:
 
 def handle_end(home: Path) -> dict[str, Any]:
     if not home.is_dir():
-        home.mkdir(parents=True, exist_ok=True)
+        home.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         (home / "cancel-start").touch()
     except OSError:
@@ -472,38 +517,50 @@ def _start(call: dict[str, Any], home: Path) -> int:
 def dispatch(call: dict[str, Any]) -> int:
     os.environ.update(call.get("storage_environment", {}))
     request = call["request"]
-    home = Path(call["root"]).expanduser() / request.get("session", "")
     action = request["action"]
-    if action == "start":
-        return _start(call, home)
-    reply: dict[str, Any] | None = None
-    match action:
-        case "logs":
-            reply = handle_logs(home, request["producer"], request.get("attempt"))
-        case "started":
-            reply = {"started": (home / "pid").exists()}
-        case "claimed":
-            reply = {"claimed": (home / "boot-claim").exists() or (home / "pid").exists()}
-        case "add":
-            reply = handle_add(home, request)
-        case "observe":
-            reply = handle_observe(home)
-        case "stop":
-            reply = handle_stop(home, request["attempt"])
-        case "finish":
-            reply = handle_finish(home)
-        case "ended":
-            reply = {"ended_at": _read_ended(home)}
-        case "end":
-            reply = handle_end(home)
-    if reply is not None:
+    if action in (
+        "start",
+        "logs",
+        "started",
+        "claimed",
+        "add",
+        "observe",
+        "stop",
+        "finish",
+        "ended",
+        "end",
+    ):
+        session = _safe_segment(request.get("session"), "session")
+        home = Path(call["root"]).expanduser() / session
+        if action == "start":
+            return _start(call, home)
+        reply: dict[str, Any]
+        match action:
+            case "logs":
+                reply = handle_logs(home, request["producer"], request.get("attempt"))
+            case "started":
+                reply = {"started": (home / "pid").exists()}
+            case "claimed":
+                reply = {"claimed": (home / "boot-claim").exists() or (home / "pid").exists()}
+            case "add":
+                reply = handle_add(home, request)
+            case "observe":
+                reply = handle_observe(home)
+            case "stop":
+                reply = handle_stop(home, request["attempt"])
+            case "finish":
+                reply = handle_finish(home)
+            case "ended":
+                reply = {"ended_at": _read_ended(home)}
+            case "end":
+                reply = handle_end(home)
         print(json.dumps(reply))
         return 0
     os.environ.pop("ETUDE_LOG_PATH", None)
     os.environ["ETUDE_STARTUP_DEADLINE"] = call.get("startup_deadline") or ""
     digest = call.pop("digest", None)
     base = Path(os.environ.get("ETUDE_HOME") or Path.home() / ".etude") / "programs"
-    root = base / digest if digest else None
+    root = base / _safe_digest(digest) if digest is not None else None
     if root is None or not (root / "ready").exists():
         if "program" not in call:
             return MISSING

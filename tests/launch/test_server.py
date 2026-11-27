@@ -13,6 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from etude.cli import main
 from etude.errors import LauncherError
@@ -28,7 +29,8 @@ from etude.launch.client import (
 )
 from etude.launch.database import launcher_file, upgrade
 from etude.launch.records import Pool
-from etude.launch.server import PythonClient, loop, warning
+from etude.launch.server import PythonClient, Source, install, loop, warning
+from etude.launch.source import resolve, retain, stored
 from etude.spec import Job, RunRequest, Runtime, Until
 from tests.launch.counting import job_text
 from tests.launch.fake import bench
@@ -506,3 +508,38 @@ def test_server_loop_backs_off_while_steady_and_resets_on_change(
     assert sleeps[:5] == [1.0, 2.0, 4.0, 4.0, 4.0]
     # Active steady passes reset to 1 s on change, then back off to 10 s.
     assert sleeps[5:10] == [1.0, 2.0, 4.0, 8.0, 10.0]
+
+
+def test_server_rejects_traversal_commits_and_sanitizes_remote_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    with pytest.raises(ValidationError):
+        Source(repo="r", commit="../../escape", sha256="0" * 64, body="")
+    with pytest.raises(LauncherError, match="invalid source commit"):
+        retain("r", "../../escape", b"body")
+    # Even if a pre-existing file sat at stored(repo, "../../escape"), resolve refuses the shortcut.
+    bad = stored("r", "../../escape")
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_bytes(b"body")
+    with pytest.raises(LauncherError):
+        resolve(str(tmp_path), "../../escape")
+
+    leaked = (
+        b"Proxy error https://token:SECRET789@proxy.example/simple\n"
+        b"Authorization: Bearer SECRET789\n"
+    )
+
+    def fail_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess([], 1, b"", leaked)
+
+    monkeypatch.setattr("etude.launch.server.subprocess.run", fail_run)
+    with pytest.raises(LauncherError) as install_err:
+        install("lab.local")
+    assert "SECRET789" not in str(install_err.value)
+    assert "token:" not in str(install_err.value)
+
+    with pytest.raises(LauncherError) as req_err:
+        PythonClient("lab.local").status("exp/job@0")
+    assert "SECRET789" not in str(req_err.value)
+    assert "token:" not in str(req_err.value)

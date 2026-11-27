@@ -11,6 +11,7 @@ import base64
 import hashlib
 import math
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -23,10 +24,10 @@ from functools import cache
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn
 
-from pydantic import Field, RootModel, TypeAdapter
+from pydantic import Field, RootModel, TypeAdapter, field_validator
 
 from etude.deadline import limit_time, remaining
-from etude.errors import LauncherError, explain
+from etude.errors import LauncherError, explain, sanitize
 from etude.home import home
 from etude.launch.database import launcher_file, open_home
 from etude.launch.errors import LaunchError, SchemaAdvanced
@@ -62,6 +63,13 @@ class Source(Record):
     commit: str
     sha256: str
     body: str
+
+    @field_validator("commit")
+    @classmethod
+    def _valid_commit(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", value) or value in (".", ".."):
+            raise ValueError(f"invalid source commit {value!r}")
+        return value
 
 
 class LaunchInput(Record):
@@ -286,9 +294,10 @@ def install(address: str, *, startup_seconds: float | None = None) -> None:
         raise LauncherError(f"server {address!r} did not answer over SSH") from None
     if done.returncode:
         said = done.stderr.decode(errors="replace").strip().splitlines()
+        detail = sanitize(said[-1]) if said else ""
         raise LauncherError(
             f"server {address!r} could not take the program"
-            + (f": {said[-1]}" if said else "")
+            + (f": {detail}" if detail else "")
             + f". It needs {remote_python()} and uv on its login shell's PATH and working SSH keys"
         )
 
@@ -404,9 +413,8 @@ class PythonClient:
             **({"timeout": remaining(request.timeout)} if isinstance(request, LogsRequest) else {}),
         )
         if done.returncode:
-            raise LauncherError(
-                done.stderr.decode().strip() or "server request failed; outcome unknown"
-            )
+            detail = sanitize(done.stderr.decode(errors="replace").strip())
+            raise LauncherError(detail or "server request failed; outcome unknown")
         return done.stdout
 
     def _submit(

@@ -22,6 +22,7 @@ from etude.launch.database import launcher_file
 from etude.launch.executor import local as local_service
 from etude.launch.records import Machine, Pool, Status
 from etude.launch.scheduler.loop import Scheduler
+from etude.launch.worker.attempts import remove_tree
 from etude.records import Clock
 from etude.run import runs
 from etude.spec import Input, Job, Preparation, RunRequest, Until, job_id
@@ -454,3 +455,36 @@ def test_finished_attempt_deletes_working_trees_and_keeps_outputs_and_logs(
     assert (attempt_dir / "outputs" / "out.bin").read_bytes() == b"payload"
     assert scheduler.fetch(one, "out.bin", tmp_path / "fetched").read_bytes() == b"payload"
     assert "done" in job_text(scheduler.logs(refresh=True, run=one))
+
+
+def test_remove_tree_preserves_symlink_target_and_shared_cache_hardlink_modes(
+    tmp_path: Path,
+) -> None:
+    secret = tmp_path / "secret"
+    secret.write_text("private")
+    secret.chmod(0o600)
+
+    cache_file = tmp_path / "cache-weight.pt"
+    cache_file.write_bytes(b"weights")
+    cache_file.chmod(0o444)
+
+    outputs = tmp_path / "outputs"
+    outputs_ro = outputs / "ro"
+    outputs_ro.mkdir(parents=True)
+    (outputs_ro / "link").symlink_to(secret)
+    outputs_ro.chmod(0o555)
+
+    inputs = tmp_path / "inputs"
+    inputs_ro = inputs / "ro"
+    inputs_ro.mkdir(parents=True)
+    os.link(cache_file, inputs_ro / "weight.pt")
+    inputs_ro.chmod(0o555)
+
+    remove_tree(outputs)
+    remove_tree(inputs)
+
+    assert not outputs.exists()
+    assert not inputs.exists()
+    assert secret.read_text() == "private"
+    assert secret.stat().st_mode & 0o777 == 0o600
+    assert cache_file.stat().st_mode & 0o777 == 0o444

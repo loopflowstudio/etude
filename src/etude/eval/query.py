@@ -221,7 +221,7 @@ def _open_statsdb(
     except (duckdb.IOException, duckdb.ConnectionException):
         # A writer may be updating in place or retiring the resolved generation.
         pass
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with lock_file(path.with_suffix(".lock")):
         try:
             if (db := current()) is not None:
@@ -546,7 +546,7 @@ def _fetch_files(
 
     def write(target: tuple[str, Path]) -> None:
         key, path = target
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.write_bytes(storage.get(key))
 
     _map_pool(pool, write, pending)

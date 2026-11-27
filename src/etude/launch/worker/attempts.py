@@ -81,10 +81,16 @@ def remove_tree(path: Path) -> None:
             path.unlink(missing_ok=True)
             return
 
+        root = path.resolve()
+
         def _writable(func: Callable[[str], object], target: str, exc: BaseException) -> None:
             if isinstance(exc, PermissionError):
-                os.chmod(os.path.dirname(target), 0o700)
-                os.chmod(target, 0o700)
+                entry = Path(target)
+                parent = entry.parent
+                if not parent.is_symlink() and parent.resolve().is_relative_to(root):
+                    os.chmod(parent, 0o700)
+                if not entry.is_symlink() and entry.is_dir():
+                    os.chmod(entry, 0o700)
                 func(target)
                 return
             if not isinstance(exc, FileNotFoundError):

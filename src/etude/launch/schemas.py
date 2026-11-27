@@ -7,10 +7,11 @@ arguments identify one working session, on added and rented machines alike.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from etude.launch.records import Cause, Limit, Outcome, Output, Prepared
 from etude.launch.storage.download import Download
@@ -50,6 +51,15 @@ class Work(Record):
     experiment: str | None = None
     inputs: tuple[Input, ...] = ()  # delivered to SESSION/inputs/SHA256
     environment: tuple[Variable, ...] = ()
+
+    @field_validator("commit")
+    @classmethod
+    def _valid_commit(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not re.fullmatch(r"[A-Za-z0-9._-]+", value) or value in (".", "..")
+        ):
+            raise ValueError(f"invalid commit {value!r}")
+        return value
 
 
 class Packet(Record):

@@ -4,8 +4,10 @@ Both readers and workers use these file operations; reading a journal never
 loads the process that executes attempts.
 """
 
+import contextlib
 import hashlib
 import os
+import secrets
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -20,15 +22,22 @@ RESULT = "etude-result.json"
 
 def write_bytes(path: Path, data: bytes) -> None:
     """Whole file or no file: readers never see half of it."""
-    partial = path.with_name(path.name + ".partial")
+    partial = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.partial")
+    fd = -1
     try:
-        partial.write_bytes(data)
+        fd = os.open(str(partial), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
+        os.close(fd)
+        fd = -1
         partial.replace(path)
-    except OSError:
-        try:
+    except BaseException:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        with contextlib.suppress(OSError):
             partial.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
 
 

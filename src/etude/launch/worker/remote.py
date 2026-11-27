@@ -19,9 +19,10 @@ from etude.launch.ssh import (
     RemoteReply,
     StartRequest,
 )
+from etude.launch.ssh_boot import _safe_relative, _safe_segment
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
-from etude.launch.storage.files import digest, write
+from etude.launch.storage.files import digest, write, write_bytes
 
 
 def invoke(call: RemoteCall) -> RemoteReply:
@@ -30,10 +31,12 @@ def invoke(call: RemoteCall) -> RemoteReply:
     request = call.request
     match request:
         case StartRequest():
-            for name, body in request.files.items():
-                target = root / request.session / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(base64.b64decode(body))
+            session = _safe_segment(request.session, "session")
+            home = root / session
+            staged = [(_safe_relative(home, name), body) for name, body in request.files.items()]
+            for target, body in staged:
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                write_bytes(target, base64.b64decode(body))
             return _start(root, request)
         case HeldRequest():
             try:
