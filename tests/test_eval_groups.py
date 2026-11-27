@@ -1620,6 +1620,28 @@ def test_later_permanent_loader_failure_keeps_tournament_retryable(
     assert len(found.failed) == 3
 
 
+@pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
+def test_earlier_permanent_tournament_keeps_group_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
+    agents = Agents(load=mixed_retry_load)
+    broken = job("first", agents).model_copy(
+        update={"enter": (checkpoint("broken"), checkpoint("left"))}
+    )
+    transient = job("second", agents).model_copy(
+        update={"enter": (checkpoint("transient"), checkpoint("right"))}
+    )
+    with pytest.raises(RetryRequested):
+        hold_group(group(broken, transient), directory=tmp_path)
+    first = played(broken.tournament, experiment="grouped", enter=broken.enter, directory=tmp_path)
+    second = played(
+        transient.tournament, experiment="grouped", enter=transient.enter, directory=tmp_path
+    )
+    assert len(first.failed) == 1 and not first.retry
+    assert len(second.retry) == 1
+
+
 async def returns_before_loading(match: Match, agents: Sequence[Forward]) -> Tables:
     if any(player.name == "left" for player in match.players):
         return await plain(match, list(agents))

@@ -943,7 +943,10 @@ def hold_group(
                 member.close()
                 results.append(outcome)
         if failures:
-            raise failures[0]
+            # A permanent failure in one tournament must not stop the others retrying.
+            raise next(
+                (error for error in failures if isinstance(error, RetryRequested)), failures[0]
+            )
     return tuple(results)
 
 
