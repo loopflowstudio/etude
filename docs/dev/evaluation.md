@@ -351,8 +351,8 @@ the peer's pending and future calls with a permanent `ForwardError` for each
 checkpoint. An unexpected disconnect requests a retry.
 
 On both transports, the array codec walks lists, tuples, dictionary values and
-dataclass fields, visiting each once. A dataclass whose leaf it converts is
-shallow-copied with the converted fields; otherwise the instance is kept.
+dataclass fields. It retains containers with unchanged leaves and reconstructs
+containers that need a conversion, preserving cycles.
 It tries the buffer protocol before CPU DLPack so lazy MLX outputs materialize
 on the inference thread. It copies the resulting arrays and releases buffer
 views on the producing thread. A device array that cannot export CPU data

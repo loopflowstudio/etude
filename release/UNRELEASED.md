@@ -153,9 +153,7 @@ eval ladder: 48 new, 0 running, 0 failed, running capacity/evals-1a2b3c4d5e6f
 eval gauntlet: 24 new, 0 running, 0 failed, running capacity/evals-1a2b3c4d5e6f
 ```
 
-A pass hands down the eval jobs that can run together as one run on one
-machine, instead of one run per tournament, and their tournaments play at
-once.
+A pass hands down compatible eval jobs as one run on one machine.
 
 An eval job may declare `agents=Agents(load=..., build=...)`. You write the
 game as `async def play(match, agents)` or as a streaming `play_many(matches)`

@@ -318,8 +318,8 @@ In `play`, Etude locks inputs on the call and batches concurrent matches at
 the end of the event-loop turn.
 
 - **NumPy boundary.** Across both direct and shared-process transports, array
-  leaves at any depth of `tuple`, `list` and `dict` values reach `load`'s
-  forward as `numpy.ndarray` and return to game code as owned writable
+  leaves inside tuples, lists, dictionary values and dataclass fields reach
+  `load`'s forward as `numpy.ndarray` and return to game code as owned writable
   `numpy.ndarray`. Non-NumPy or lazy outputs (such as MLX, Torch or JAX arrays)
   exporting the buffer protocol or CPU `__dlpack__` are materialized into owned
   `numpy.ndarray` on the inference thread before leaving (with their backing
@@ -330,9 +330,9 @@ the end of the event-loop turn.
 - **Zero-copy inputs on direct inference.** A top-level C-contiguous non-object
   `numpy.ndarray` passes to the inference thread by pointer with no copy and no
   pickle; nested C-contiguous NumPy leaves inside lists, tuples, dicts and
-  dataclass instances also move without copying their payload bytes. Non-C-contiguous arrays, non-NumPy array leaves,
-  mutable `bytearray`s and plain Python containers are copied; unpicklable
-  inputs fail that call with `ForwardError`.
+  dataclass instances also move without copying their payload bytes.
+  Non-C-contiguous arrays, non-NumPy array leaves, mutable `bytearray`s and
+  plain Python containers are copied. Unpicklable inputs raise `ForwardError`.
 - **Read-only in flight, no aliasing.** In both `play` and `play_many`, a
   writeable NumPy array handed to `forward(...)` is marked read-only on the call
   until its answer arrives—writing to it while in flight raises `ValueError`—and
