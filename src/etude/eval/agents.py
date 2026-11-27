@@ -331,12 +331,11 @@ def _run(
     resources.configure(threads)
     try:
         # Process entry point: keep durable records and model loading out of game clients.
-        from etude.eval.batching import _run_agents  # noqa: PLC0415
+        from etude.eval.batching import _lazy_loader, _run_agents  # noqa: PLC0415
 
         _run_agents(
             address,
-            load,
-            checkout,
+            _lazy_loader(load, checkout),
             max_batch,
             memory,
             control,

@@ -284,7 +284,7 @@ async def advance_halves(
     half_b: np.ndarray,
     rows: int,
 ) -> tuple[object, object]:
-    # Calling forward(...) submits now and locks half_a read-only until awaited.
+    # half_a stays read-only until its reply arrives.
     pending_a = forward([half_a], rows=rows)
     step_half(half_b)  # runs while half_a's forward executes on the inference thread
     [out_a] = await pending_a  # half_a is writable again; out_a holds NumPy leaves
@@ -294,13 +294,10 @@ async def advance_halves(
     return out_a, out_b
 ```
 
-- **Submission timing.** In `play_many`, `forward(inputs, rows=...)` locks its
-  inputs and submits on the call, returning an awaitable; no
-  `asyncio.create_task` or `asyncio.sleep(0)` is needed to overlap stepping
-  with inference. Calls queued while a forward is running still merge per
-  checkpoint up to `max_batch` rows. In `play`, calls also lock their inputs on
-  the call and stay on the game process's zero-delay barrier so concurrent match
-  tasks merge before the first forward starts.
+Calls queued during inference can merge up to `max_batch` rows per checkpoint.
+In `play`, Etude locks inputs on the call and batches concurrent matches at
+the end of the event-loop turn.
+
 - **NumPy boundary.** Across both direct and shared-process transports, array
   leaves at any depth of `tuple`, `list` and `dict` values reach `load`'s
   forward as `numpy.ndarray` and return to game code as owned writable

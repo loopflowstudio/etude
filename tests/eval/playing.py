@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from etude.checkpoints import CheckpointRef
+from etude.eval.bus import ForwardOutcome
 from etude.eval.records import (
     Benchmark,
     Environment,
@@ -20,6 +21,10 @@ from etude.eval.result import EvalResult, Result, Tables
 from etude.eval.tournament import _open_evaluation, evaluating
 from etude.jobs import Agents
 from etude.storage import Storage
+
+
+def identify_outcome(request_id: int, outcome: ForwardOutcome) -> tuple[int, ForwardOutcome]:
+    return request_id, outcome
 
 
 def wait_for_games(monkeypatch: pytest.MonkeyPatch, *, processes: int, rounds: int = 1) -> None:

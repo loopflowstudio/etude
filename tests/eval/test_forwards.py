@@ -15,6 +15,7 @@ from etude.jobs import Agents, hold_group
 from tests.eval.arithmetic import checkpoint
 from tests.eval.arithmetic import load as load_adder
 from tests.eval.mirror import Mirror, Search, async_forward, build, load, play
+from tests.eval.playing import identify_outcome
 from tests.test_eval_groups import group, job
 
 
@@ -49,7 +50,9 @@ def test_mirror_sends_all_branches_once_per_ply_and_builds_author_objects(
 
 def test_mirror_trajectories_do_not_depend_on_other_inputs_in_the_batch() -> None:
     small = checkpoint("small")
-    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(load, 32, 1024)
+    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(
+        load, 32, 1024, encode=identify_outcome
+    )
     answers: list[tuple[int, ForwardOutcome]] = []
     next_id = 0
 

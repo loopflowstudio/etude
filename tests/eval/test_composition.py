@@ -33,6 +33,7 @@ from etude.jobs import Agents, EvalJob, ExperimentState, checkpoint_inputs, hold
 from etude.page import build as build_page
 from etude.records import ArtifactRef
 from tests.eval.arithmetic import Shift, build, checkpoint, load
+from tests.eval.playing import identify_outcome
 from tests.eval.trees import Ensemble, Tagged
 from tests.test_eval_groups import (
     asks_or_returns,
@@ -177,7 +178,7 @@ def test_same_named_author_types_have_distinct_labels_and_keys() -> None:
 
 def test_distinct_players_share_a_checkpoint_batch() -> None:
     small = checkpoint("small")
-    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(echo, 2, 1024)
+    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(echo, 2, 1024, encode=identify_outcome)
     answers: list[tuple[int, ForwardOutcome]] = []
     for req_id, name in ((1, "bare"), (2, "composed")):
         batches.add(answers.append, req_id, small.checkpoint, [name], 1)

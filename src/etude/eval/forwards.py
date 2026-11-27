@@ -26,7 +26,6 @@ class Forwards:
         self.failed: dict[str, ForwardOutcome] = {}
         self.loads = 0
         self.calls = 0
-        self.inputs = 0
         self.load_seconds = 0.0
         self.forward_seconds = 0.0
 
@@ -35,8 +34,6 @@ class Forwards:
         checkpoint: CheckpointRef,
         inputs: list[object],
         protected: Set[str] = frozenset(),
-        *,
-        rows: int | None = None,
     ) -> ForwardOutcome:
         key = checkpoint.key
         if key in self.failed:
@@ -60,7 +57,7 @@ class Forwards:
                         retry=isinstance(error, RetryRequested),
                         loading=True,
                     )
-                    raise
+                    return self.failed[key]
                 finally:
                     self.load_seconds += time.monotonic() - started
                 self.loaded[key] = (cast("ModelForward", forward), length)
@@ -68,7 +65,6 @@ class Forwards:
             self.loaded.move_to_end(key)
             started = time.monotonic()
             self.calls += 1
-            self.inputs += len(inputs) if rows is None else rows
             try:
                 outputs = list(self.loaded[key][0](inputs))
             finally:
@@ -77,7 +73,7 @@ class Forwards:
                 raise ValueError("forward must return one output per input")
             return ForwardOutcome(checkpoint=key, outputs=outputs)
         except Exception as error:
-            return self.failed.get(key) or ForwardOutcome(
+            return ForwardOutcome(
                 checkpoint=key,
                 outputs=[],
                 error=f"agent {key}: {explain(error)}",

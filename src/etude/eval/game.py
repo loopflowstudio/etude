@@ -217,17 +217,18 @@ class _PendingCall:
     future: asyncio.Future[list[object]]
     locked: list[ndarray] = field(default_factory=list)
 
+    def fail(self, error: BaseException) -> None:
+        if not self.future.done():
+            self.future.set_exception(error)
+            # A stream can abandon its awaitable. A later await still raises this error.
+            self.future.exception()
+
 
 class _PendingAnswer:
     """Awaitable returned by `_BoundForward.__call__` without creating an unawaited coroutine."""
 
-    def __init__(
-        self,
-        future: asyncio.Future[list[object]] | None,
-        on_awaited: Callable[[asyncio.Future[list[object]]], None] | None = None,
-    ) -> None:
+    def __init__(self, future: asyncio.Future[list[object]] | None) -> None:
         self._future = future
-        self._on_awaited = on_awaited
 
     async def _resolve(self) -> list[object]:
         if self._future is None:
@@ -241,9 +242,6 @@ class _PendingAnswer:
             if tracker is not None:
                 tracker.append(error)
             raise
-        finally:
-            if self._on_awaited is not None:
-                self._on_awaited(self._future)
 
     def __await__(self) -> Generator[object, None, list[object]]:
         return self._resolve().__await__()
@@ -265,7 +263,7 @@ class _BoundForward:
         if count < 1:
             raise ValueError("rows must be positive for non-empty inputs")
         future = self._owner.call(self._checkpoint, list(inputs), count)
-        return _PendingAnswer(future, self._owner.release_future)
+        return _PendingAnswer(future)
 
 
 class _Forwarder:
@@ -278,11 +276,8 @@ class _Forwarder:
         self._handles: dict[str, _BoundForward] = {}
         self._pending: dict[str, list[_PendingCall]] = {}
         self._flight = Flight()
-        self._flush_scheduled = False
-        self._closing = False
-        self._active_futures: set[asyncio.Future[list[object]]] = set()
-        self._loading_failures: dict[str, CheckpointFailure] = {}
-        self._reported_failures: set[str] = set()
+        self._loading_failures: list[CheckpointFailure] = []
+        self._failed_checkpoints: set[str] = set()
 
     def bind(self, checkpoint: CheckpointRef) -> Forward:
         handle = self._handles.get(checkpoint.key)
@@ -292,105 +287,67 @@ class _Forwarder:
             self._handles[checkpoint.key] = handle
         return handle
 
-    def release_future(self, future: asyncio.Future[list[object]]) -> None:
-        self._active_futures.discard(future)
-
     def call(
         self, checkpoint: str, inputs: list[object], rows: int
     ) -> asyncio.Future[list[object]]:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[list[object]] = loop.create_future()
         if self._eager:
-            return self._submit_now(checkpoint, inputs, rows)
-        return self.enqueue(checkpoint, inputs, rows)
-
-    def _fail_future(self, future: asyncio.Future[list[object]], error: BaseException) -> None:
-        if not future.done():
-            future.set_exception(error)
-            if self._closing:
-                future.exception()
-                self._active_futures.discard(future)
-
-    def _submit_now(
-        self, checkpoint: str, inputs: list[object], rows: int
-    ) -> asyncio.Future[list[object]]:
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[list[object]] = loop.create_future()
-        self._active_futures.add(future)
-        pending = _PendingCall(inputs, rows, future)
-        try:
-            (bus_future,) = self._bus.submit([ForwardCall(checkpoint, inputs, rows)])
-        except BaseException as error:
-            self._fail_future(future, error)
-            return future
-        bus_future.add_done_callback(partial(self._on_answer, [pending]))
-        return future
-
-    def enqueue(
-        self, checkpoint: str, inputs: list[object], rows: int
-    ) -> asyncio.Future[list[object]]:
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[list[object]] = loop.create_future()
-        self._active_futures.add(future)
-        # The barrier holds these locks until the bus answers, including when
-        # the game's await is cancelled while inference is still running.
-        locked = self._flight.lock(inputs)
-        self._pending.setdefault(checkpoint, []).append(_PendingCall(inputs, rows, future, locked))
-        if not self._flush_scheduled:
-            self._flush_scheduled = True
-            loop.call_soon(self._flush)
+            self._submit([(checkpoint, [_PendingCall(inputs, rows, future)])])
+        else:
+            # The barrier holds these locks through the bus reply, even on cancellation.
+            pending = _PendingCall(inputs, rows, future, self._flight.lock(inputs))
+            if not self._pending:
+                loop.call_soon(self._flush)
+            self._pending.setdefault(checkpoint, []).append(pending)
         return future
 
     def clear_pending(self) -> None:
-        """Release staged barrier locks and silence unawaited exceptions on bus shutdown."""
-        self._closing = True
-        pending = self._pending
-        self._pending = {}
-        self._flush_scheduled = False
-        for calls in pending.values():
+        """Release locks on calls that have not yet reached the bus."""
+        for calls in self._pending.values():
             for call in calls:
                 self._flight.unlock(call.locked)
-                self._active_futures.discard(call.future)
-        for future in list(self._active_futures):
-            if future.done():
-                if not future.cancelled():
-                    future.exception()
-                self._active_futures.discard(future)
+        self._pending.clear()
 
-    def _chunks(self, calls: list[_PendingCall]) -> list[list[_PendingCall]]:
-        chunks: list[list[_PendingCall]] = []
-        current: list[_PendingCall] = []
+    def _chunks(self, calls: list[_PendingCall]) -> Iterator[list[_PendingCall]]:
+        chunk: list[_PendingCall] = []
         rows = 0
         for call in calls:
-            if current and rows + call.rows > self.max_batch:
-                chunks.append(current)
-                current = []
+            if chunk and rows + call.rows > self.max_batch:
+                yield chunk
+                chunk = []
                 rows = 0
-            current.append(call)
+            chunk.append(call)
             rows += call.rows
-        if current:
-            chunks.append(current)
-        return chunks
+        if chunk:
+            yield chunk
 
     def _flush(self) -> None:
-        self._flush_scheduled = False
-        pending = self._pending
-        self._pending = {}
-        if not pending:
-            return
-        grouped: list[tuple[list[_PendingCall], ForwardCall]] = []
-        for key, calls in pending.items():
-            for chunk in self._chunks(calls):
-                merged = [item for call in chunk for item in call.inputs]
-                rows = sum(call.rows for call in chunk)
-                grouped.append((chunk, ForwardCall(key, merged, rows)))
+        groups = [
+            (key, chunk) for key, calls in self._pending.items() for chunk in self._chunks(calls)
+        ]
+        self._pending.clear()
+        if groups:
+            self._submit(groups)
+
+    def _submit(self, groups: list[tuple[str, list[_PendingCall]]]) -> None:
+        calls = []
+        for key, chunk in groups:
+            if len(chunk) == 1:
+                (call,) = chunk
+                calls.append(ForwardCall(key, call.inputs, call.rows))
+            else:
+                inputs = [value for call in chunk for value in call.inputs]
+                calls.append(ForwardCall(key, inputs, sum(call.rows for call in chunk)))
         try:
-            futures = self._bus.submit([call for _, call in grouped])
+            futures = self._bus.submit(calls)
         except BaseException as error:
-            for chunk, _ in grouped:
+            for _, chunk in groups:
                 for call in chunk:
                     self._flight.unlock(call.locked)
-                    self._fail_future(call.future, error)
+                    call.fail(error)
             return
-        for (chunk, _), bus_future in zip(grouped, futures, strict=True):
+        for (_, chunk), bus_future in zip(groups, futures, strict=True):
             bus_future.add_done_callback(partial(self._on_answer, chunk))
 
     def _on_answer(
@@ -405,15 +362,14 @@ class _Forwarder:
             if (
                 isinstance(raised, ForwardError)
                 and raised.loading
-                and raised.checkpoint not in self._loading_failures
+                and raised.checkpoint not in self._failed_checkpoints
             ):
-                self._loading_failures[raised.checkpoint] = CheckpointFailure(
-                    checkpoint=raised.checkpoint,
-                    error=str(raised),
-                    retry=raised.retry,
+                self._failed_checkpoints.add(raised.checkpoint)
+                self._loading_failures.append(
+                    CheckpointFailure(raised.checkpoint, str(raised), raised.retry)
                 )
             for call in chunk:
-                self._fail_future(call.future, raised)
+                call.fail(raised)
             return
         outputs = bus_future.result()
         offset = 0
@@ -421,16 +377,11 @@ class _Forwarder:
             size = len(call.inputs)
             if not call.future.done():
                 call.future.set_result(outputs[offset : offset + size])
-            self._active_futures.discard(call.future)
             offset += size
 
     def drain_loading_failures(self) -> tuple[CheckpointFailure, ...]:
-        fresh = tuple(
-            failure
-            for key, failure in self._loading_failures.items()
-            if key not in self._reported_failures
-        )
-        self._reported_failures.update(failure.checkpoint for failure in fresh)
+        fresh = tuple(self._loading_failures)
+        self._loading_failures.clear()
         return fresh
 
 
@@ -600,7 +551,7 @@ async def _serve_stream(
     take_lock = asyncio.Lock()
     tournaments = tuple(spec.tournament for spec in streams)
 
-    async def close_bus() -> BusReport:
+    async def close_bus() -> None:
         nonlocal bus, bus_report
         if forwarder is not None:
             forwarder.clear_pending()
@@ -610,7 +561,6 @@ async def _serve_stream(
             # Let `fail_all` callbacks run so loading failures drain and unawaited
             # futures settle before process exit.
             await asyncio.sleep(0)
-        return bus_report
 
     def drain_failures(error: BaseException | None = None) -> tuple[CheckpointFailure, ...]:
         drained = forwarder.drain_loading_failures() if forwarder else ()
@@ -724,7 +674,7 @@ async def _serve_stream(
 
         for stream_index, (spec, loaded) in enumerate(zip(streams, loaded_streams, strict=True)):
             held: dict[int, _TakenMatch] = {}
-            stream_matches = 0
+            before_stream = played_count
             stream_error: BaseException | None = None
             if isinstance(loaded, Exception):
                 stream_error = loaded
@@ -758,7 +708,6 @@ async def _serve_stream(
                                 )
                             elapsed = time.monotonic() - taken.started
                             played_count += 1
-                            stream_matches += 1
                             result: Tables | Result | None = None
                             error: BaseException | None = None
                             if isinstance(outcome, BaseException):
@@ -786,7 +735,7 @@ async def _serve_stream(
             pipe.send(
                 StreamEnd(
                     stream=stream_index,
-                    matches=stream_matches,
+                    matches=played_count - before_stream,
                     error=_portable_error(stream_error) if stream_error is not None else None,
                     loading_failures=drain_failures(),
                 )

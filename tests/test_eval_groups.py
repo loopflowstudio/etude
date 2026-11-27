@@ -84,7 +84,7 @@ from etude.spec import Job, RunRequest
 from etude.storage import DirectoryStorage, default_root
 from etude.train.read import read_all
 from tests.eval.arithmetic import checkpoint, load, play
-from tests.eval.playing import wait_for_games
+from tests.eval.playing import identify_outcome, wait_for_games
 from tests.eval.thread_budget import load_array_checkpoint, load_checkpoint
 from tests.launch.counting import Counting, job_text
 from tests.launch.fake import bench
@@ -926,7 +926,7 @@ def test_batch_merges_rows_up_to_max_batch_and_runs_oversized_alone() -> None:
     first_answers: list[tuple[int, ForwardOutcome]] = []
     second_answers: list[tuple[int, ForwardOutcome]] = []
     player = checkpoint("one")
-    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(echo, 4, 1024)
+    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(echo, 4, 1024, encode=identify_outcome)
     batches.add(first_answers.append, 1, player.checkpoint, [("a", "b")], 2)
     batches.add(second_answers.append, 2, player.checkpoint, [("c", "d")], 2)
     batches.add(second_answers.append, 3, player.checkpoint, ["e"], 1)
@@ -957,7 +957,7 @@ def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_inputs() ->
         for name in ("a", "b", "c")
     ]
     a, b, c = players
-    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(echo, 1, 2)
+    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(echo, 1, 2, encode=identify_outcome)
     answers: list[tuple[int, ForwardOutcome]] = []
     for index, player in enumerate((a, b), start=1):
         batches.add(answers.append, index, player.checkpoint, [player.name], 1)
@@ -1198,7 +1198,9 @@ def test_sigterm_reaps_agents_and_games_and_records_retry(
 
 
 def test_a_failed_load_is_not_attempted_again_in_the_run() -> None:
-    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(raises_load, 1, 10)
+    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(
+        raises_load, 1, 10, encode=identify_outcome
+    )
     answers: list[tuple[int, ForwardOutcome]] = []
     player = checkpoint("one")
     batches.add(answers.append, 1, player.checkpoint, [1], 1)

@@ -5,15 +5,11 @@ per call with its outputs, or with `ForwardError`. Two transports implement it:
 `LocalForwardBus` (`etude.eval.batching`, an inference thread in the game
 process) and `SocketForwardBus` (`etude.eval.agents`, the shared agent process).
 
-The codec and flight state here run on both. `normalize_inputs` and
-`normalize_outputs` turn array leaves at any depth of `tuple`/`list`/`dict`
-into owned CPU `numpy.ndarray`s and reject non-CPU device tensors with
-`ValueError`, so games and models only ever exchange NumPy. `Flight` locks the
-game's arrays read-only from call until the answer; `_FlightBook` owns the
-shared in-flight table, atomic stage-commit-rollback, and `BusReport`
-accounting across transports. `freeze` gives the model read-only inputs.
-NumPy is found through `sys.modules` and imported only when a non-NumPy array
-is first seen, so a game process that never sees an array never loads it.
+Both transports normalize buffer and CPU DLPack leaves on the producing
+thread. NumPy inputs can travel by pointer. `Flight` holds them read-only
+through the reply and `freeze` protects the model's inputs. `_FlightBook`
+owns request IDs, lock rollback and the transfer counts in `BusReport`.
+Games exchanging plain values can run without importing NumPy.
 """
 
 from __future__ import annotations
@@ -41,7 +37,7 @@ _PLAIN = (type(None), bool, int, float, complex, str, bytes, bytearray)
 class ForwardCall:
     """One merged forward request: a checkpoint key and its inputs."""
 
-    checkpoint: str  # key; the CheckpointRef crosses once, in bind()
+    checkpoint: str  # Key registered by bind().
     inputs: list[object]
     rows: int
 
@@ -89,34 +85,17 @@ class ForwardBus(Protocol):
     async def close(self) -> BusReport: ...
 
 
-@dataclass
-class _NormalizeStats:
-    copied: int = 0
-    copied_bytes: int = 0
-    owned_ids: set[int] = field(default_factory=set)
-
-
 @dataclass(frozen=True)
 class Normalized:
     """Game inputs with non-NumPy array leaves materialized as owned ndarrays."""
 
     values: list[object]
-    copied: int
     copied_bytes: int
     owned_ids: frozenset[int]
 
 
 def _numpy() -> ModuleType | None:
     return sys.modules.get("numpy")
-
-
-def _require_numpy() -> ModuleType:
-    found = _numpy()
-    if found is None:
-        # NumPy is a dependency, imported only once a non-NumPy array is seen so
-        # code-only and plain-value game processes stay light.
-        found = importlib.import_module("numpy")
-    return found
 
 
 def _non_cpu_error(
@@ -135,99 +114,69 @@ def _non_cpu_error(
 
 def _as_array(
     value: object,
-    *,
-    stats: _NormalizeStats | None,
     direction: Literal["input", "output"],
-) -> object:
+) -> ndarray | None:
     """A buffer, else CPU DLPack, exporter as an owned ndarray; reject non-CPU tensors."""
     try:
         view = memoryview(value)  # type: ignore[arg-type]  # Probing the buffer protocol.
     except (TypeError, BufferError):
         if isinstance(value, type):
-            return value
+            return None
         has_dlpack = callable(getattr(value, "__dlpack__", None))
         has_cuda = getattr(value, "__cuda_array_interface__", None) is not None
         if not has_dlpack and not has_cuda:
-            return value
+            return None
         if not has_dlpack:
             raise _non_cpu_error(value, direction) from None
-        np = _require_numpy()
+        np = importlib.import_module("numpy")
         try:
             array = np.from_dlpack(value)
         except (BufferError, RuntimeError, TypeError, ValueError) as error:
             raise _non_cpu_error(value, direction, error) from error
-        owned = np.array(array, copy=True, order="C")
+        owned: ndarray = np.array(array, copy=True, order="C")
     else:
-        np = _require_numpy()
+        np = importlib.import_module("numpy")
         try:
             owned = np.array(view, copy=True, order="C")
         finally:
             view.release()
-    if stats is not None:
-        stats.copied += 1
-        stats.copied_bytes += int(owned.nbytes)
-        stats.owned_ids.add(id(owned))
     return owned
 
 
-def _normalize(
-    value: object,
-    *,
-    copy_arrays: bool,
-    stats: _NormalizeStats | None,
-    direction: Literal["input", "output"],
-) -> object:
-    kind = type(value)
-    if kind in _PLAIN:
+def _normalize(value: object, copy_arrays: bool, copied: list[ndarray] | None) -> object:
+    if type(value) in _PLAIN:
         return value
+    if type(value) is list:
+        return [_normalize(item, copy_arrays, copied) for item in value]
+    if type(value) is tuple:
+        return tuple(_normalize(item, copy_arrays, copied) for item in value)
+    if type(value) is dict:
+        return {key: _normalize(item, copy_arrays, copied) for key, item in value.items()}
     np = _numpy()
-    if np is not None and kind is np.ndarray:
-        return np.array(value, copy=True, order="C") if copy_arrays else value
-    if kind is list:
-        return [
-            _normalize(item, copy_arrays=copy_arrays, stats=stats, direction=direction)
-            for item in value  # type: ignore[attr-defined]
-        ]
-    if kind is tuple:
-        return tuple(
-            _normalize(item, copy_arrays=copy_arrays, stats=stats, direction=direction)
-            for item in value  # type: ignore[attr-defined]
-        )
-    if kind is dict:
-        return {
-            k: _normalize(v, copy_arrays=copy_arrays, stats=stats, direction=direction)
-            for k, v in value.items()  # type: ignore[attr-defined]
-        }
     if np is not None and isinstance(value, np.ndarray):
         return np.array(value, copy=True, order="C") if copy_arrays else value
-    return _as_array(value, stats=stats, direction=direction)
+    array = _as_array(value, "output" if copied is None else "input")
+    if array is None:
+        return value
+    if copied is not None:
+        copied.append(array)
+    return array
 
 
 def normalize_inputs(values: list[object]) -> Normalized:
-    """Convert non-NumPy array leaves in game inputs into bus-owned C-contiguous ndarrays."""
-    stats = _NormalizeStats()
-    normalized = [
-        _normalize(item, copy_arrays=False, stats=stats, direction="input") for item in values
-    ]
+    """Convert non-NumPy inputs on the game thread and account for their copies."""
+    copied: list[ndarray] = []
+    normalized = [_normalize(item, copy_arrays=False, copied=copied) for item in values]
     return Normalized(
         values=normalized,
-        copied=stats.copied,
-        copied_bytes=stats.copied_bytes,
-        owned_ids=frozenset(stats.owned_ids),
+        copied_bytes=sum(array.nbytes for array in copied),
+        owned_ids=frozenset(map(id, copied)),
     )
 
 
 def normalize_outputs(values: list[object], *, copy_arrays: bool = False) -> list[object]:
-    """Materialize model outputs into owned CPU ndarrays on the producing thread.
-
-    Non-NumPy buffer/DLPack leaves always copy and release their backing view on
-    this thread. When `copy_arrays` is true, existing `ndarray` leaves are also
-    copied into owned C-contiguous writable arrays so outputs can never alias
-    in-flight inputs or reused model staging buffers.
-    """
-    return [
-        _normalize(item, copy_arrays=copy_arrays, stats=None, direction="output") for item in values
-    ]
+    """Materialize model outputs on the producing thread, copying ndarrays for local delivery."""
+    return [_normalize(item, copy_arrays=copy_arrays, copied=None) for item in values]
 
 
 def arrays(value: object) -> Iterator[ndarray]:
@@ -261,32 +210,30 @@ class Flight:
     only on the game process's event loop.
     """
 
-    _held: dict[int, tuple[ndarray, int]] = field(default_factory=dict)
+    _held: dict[int, int] = field(default_factory=dict)
 
     def lock(self, values: list[object]) -> list[ndarray]:
         locked: list[ndarray] = []
         for array in arrays(values):
             key = id(array)
-            entry = self._held.get(key)
-            if entry is not None:
-                self._held[key] = (array, entry[1] + 1)
-            elif array.flags.writeable:
+            count = self._held.get(key, 0)
+            if count == 0:
+                if not array.flags.writeable:
+                    continue
                 array.flags.writeable = False
-                self._held[key] = (array, 1)
-            else:
-                continue
+            self._held[key] = count + 1
             locked.append(array)
         return locked
 
     def unlock(self, locked: list[ndarray]) -> None:
         for array in locked:
             key = id(array)
-            held, count = self._held[key]
+            count = self._held[key]
             if count > 1:
-                self._held[key] = (held, count - 1)
+                self._held[key] = count - 1
             else:
                 del self._held[key]
-                held.flags.writeable = True
+                array.flags.writeable = True
 
 
 @dataclass(frozen=True)
@@ -326,8 +273,7 @@ class _FlightStage:
     def rollback(self) -> None:
         """Unlock every uncommitted staged call."""
         while self._entries:
-            entry = self._entries.pop()
-            self._book._flight.unlock(entry.locked)
+            self.rollback_last()
 
     def commit(
         self,

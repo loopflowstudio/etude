@@ -550,12 +550,6 @@ class _GameProcess:
     pipe: Connection
     held: dict[int, dict[str, Match]] = field(default_factory=dict)
     done: bool = False
-    pipe_closed: bool = False
-
-    def close_pipe(self) -> None:
-        if not self.pipe_closed:
-            self.pipe.close()
-            self.pipe_closed = True
 
 
 def _retain(name: str, report: GameReport, directory: Path) -> None:
@@ -817,23 +811,27 @@ def play_together(
                             RuntimeError("play_many returned without taking pending matches"),
                         )
                     child.held.pop(message.stream, None)
-                elif isinstance(message, Done):
+                elif isinstance(message, (Done, Fatal)):
                     fail_checkpoints(message.loading_failures)
                     record_report(message.report)
+                    if isinstance(message, Fatal):
+                        if isinstance(message.error, RetryRequested):
+                            raise message.error
+                        for index, each in enumerate(child.plays):
+                            fail_held(each, child.held.get(index, {}), message.error)
+                            child.held.pop(index, None)
                     child.done = True
-                    child.close_pipe()
-                elif isinstance(message, Fatal):
-                    fail_checkpoints(message.loading_failures)
-                    record_report(message.report)
-                    if isinstance(message.error, RetryRequested):
-                        raise message.error
-                    for index, each in enumerate(child.plays):
-                        fail_held(each, child.held.get(index, {}), message.error)
-                        child.held.pop(index, None)
-                    child.done = True
-                    child.close_pipe()
+                    child.pipe.close()
                 else:
                     raise TypeError(f"unexpected game message {type(message).__name__}")
+
+            def receive(child: _GameProcess) -> None:
+                try:
+                    message = child.pipe.recv()
+                except (EOFError, OSError):
+                    child.pipe.close()
+                else:
+                    handle_message(child, message)
 
             try:
                 spawn_ready()
@@ -851,7 +849,7 @@ def play_together(
                     )
                     handles: list[Connection | int] = []
                     for child in live:
-                        if not child.pipe_closed:
+                        if not child.pipe.closed:
                             handles.append(child.pipe)
                         handles.append(child.process.sentinel)
                     if agent_process is not None:
@@ -863,30 +861,20 @@ def play_together(
                             raise RetryRequested("agent process exited before games finished")
                     if not ready:
                         raise RetryRequested("evaluation deadline reached before a match completed")
-                    for child in list(live):
-                        if not child.pipe_closed and child.pipe in ready:
-                            try:
-                                message = child.pipe.recv()
-                            except (EOFError, OSError):
-                                child.close_pipe()
-                            else:
-                                handle_message(child, message)
+                    for child in live:
+                        if not child.pipe.closed and child.pipe in ready:
+                            receive(child)
                     for child in list(live):
                         if child.process.sentinel not in ready:
                             continue
-                        while not child.pipe_closed and child.pipe.poll():
-                            try:
-                                message = child.pipe.recv()
-                            except (EOFError, OSError):
-                                child.close_pipe()
-                                break
-                            handle_message(child, message)
+                        while not child.pipe.closed and child.pipe.poll():
+                            receive(child)
                         child.process.join()
                         if not child.done or child.process.exitcode != 0:
                             raise RetryRequested("game process exited before returning its match")
                         live.remove(child)
                         child.process.close()
-                        child.close_pipe()
+                        child.pipe.close()
                     spawn_ready()
             except RetryRequested:
                 # Keep unreturned grants eligible for retry after the children are reaped.
@@ -901,7 +889,7 @@ def play_together(
                 for child in live:
                     child.process.join()
                     child.process.close()
-                    child.close_pipe()
+                    child.pipe.close()
             if agent_process is not None:
                 agent_process.check()
             if stopping:

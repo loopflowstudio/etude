@@ -5,15 +5,12 @@ from __future__ import annotations
 import asyncio
 import gc
 import os
-import select
-import selectors
-import socket
 import sys
 import threading
 import weakref
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from multiprocessing.reduction import ForkingPickler
+from multiprocessing import Pipe
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal, cast
@@ -25,21 +22,13 @@ from etude.checkpoints import CheckpointRef
 from etude.controller.declarations import asked, read_experiment
 from etude.errors import EtudeError, RetryRequested
 from etude.eval.agents import (
-    BatchRequest,
     Forward,
     ForwardError,
     ModelForward,
     SocketForwardBus,
-    recv_frame,
     running_agents,
 )
-from etude.eval.batching import (
-    LocalForwardBus,
-    _add_socket_batch,
-    _Batches,
-    _encode_socket,
-    _send_peer,
-)
+from etude.eval.batching import LocalForwardBus, _run_agents
 from etude.eval.bus import BusReport, ForwardBus, ForwardCall
 from etude.eval.composition import build_agents
 from etude.eval.game import GameReport, Matches, _Forwarder
@@ -55,59 +44,6 @@ from tests.eval.arithmetic import checkpoint
 from tests.test_eval_groups import group, job
 
 type _Transport = Literal["local", "socket"]
-
-
-def _serve_socket(
-    address: str,
-    load: Callable[[CheckpointRef], object],
-    max_batch: int,
-    memory: int,
-    ready: threading.Event,
-    stop_read: int,
-) -> None:
-    batches: _Batches[memoryview] = _Batches(
-        load, max_batch, memory, encode=_encode_socket, copy_outputs=False
-    )
-    peers: list[socket.socket] = []
-    try:
-        with (
-            socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener,
-            selectors.DefaultSelector() as selector,
-        ):
-            listener.bind(address)
-            listener.listen()
-            selector.register(listener, selectors.EVENT_READ)
-            selector.register(stop_read, selectors.EVENT_READ)
-            ready.set()
-            while True:
-                events = selector.select(0.0 if batches.pending else None)
-                for event, _ in events:
-                    if event.fileobj == stop_read:
-                        return
-                    if event.fileobj is listener:
-                        peer, _ = listener.accept()
-                        peers.append(peer)
-                        selector.register(peer, selectors.EVENT_READ)
-                    else:
-                        peer = cast(socket.socket, event.fileobj)
-                        while True:
-                            try:
-                                payload = recv_frame(peer)
-                                request = cast(BatchRequest, ForkingPickler.loads(payload))
-                            except (EOFError, OSError):
-                                selector.unregister(peer)
-                                peer.close()
-                                peers.remove(peer)
-                                break
-                            else:
-                                _add_socket_batch(batches, _send_peer(peer), request)
-                            if not select.select([peer], [], [], 0.0)[0]:
-                                break
-                batches.flush()
-    finally:
-        for peer in peers:
-            peer.close()
-        os.close(stop_read)
 
 
 @asynccontextmanager
@@ -132,23 +68,25 @@ async def _open_bus(
     # Short temp dir under /tmp so AF_UNIX path length stays well under macOS limits.
     with TemporaryDirectory(dir="/tmp", prefix="etude-bus-") as scratch:
         address = scratch + "/agents.sock"
-        ready = threading.Event()
-        stop_read, stop_write = os.pipe()
-        server = threading.Thread(
-            target=_serve_socket,
-            args=(address, load, max_batch, memory, ready, stop_read),
-            daemon=True,
-        )
-        server.start()
-        ready.wait(timeout=5.0)
-        bus = await SocketForwardBus.connect(address)
-        try:
-            yield bus
-        finally:
-            await bus.close()
-            os.write(stop_write, b"x")
-            os.close(stop_write)
-            server.join(timeout=5.0)
+        parent, child = Pipe()
+        with parent, child:
+            server = threading.Thread(
+                target=_run_agents,
+                args=(address, load, max_batch, memory, child, scratch),
+            )
+            server.start()
+            try:
+                assert parent.poll(5), "socket listener did not start"
+                parent.recv()
+                bus = await SocketForwardBus.connect(address)
+                try:
+                    yield bus
+                finally:
+                    await bus.close()
+            finally:
+                parent.send(None)
+                server.join(5)
+                assert not server.is_alive(), "socket listener did not stop"
 
 
 class _LazyBuffer:
@@ -229,7 +167,6 @@ def test_splits_merged_batch_back_to_each_caller(transport: _Transport) -> None:
     async def run() -> None:
         async with _open_bus(transport, load, max_batch=8) as bus:
             bus.bind(cp)
-            # Gate first forward so the second and third queue together and merge.
             first, second = bus.submit(
                 [ForwardCall(cp.key, [1, 2], 2), ForwardCall(cp.key, [3], 1)]
             )
