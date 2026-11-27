@@ -49,6 +49,7 @@ from etude.checkpoints import (
 )
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval.game import _match_type
+from etude.eval.loader import AgentLoader, LoaderDeclaration
 from etude.eval.records import (
     Benchmark,
     CheckpointPlayer,
@@ -66,13 +67,9 @@ from etude.eval.records import (
     relocate_player,
     select_policy,
 )
-from etude.eval.resources import DEFAULT_DEVICES, resources
 from etude.eval.result import EvalResult, Result, Tables
 from etude.eval.run import (
-    AgentLoader,
-    EvalRun,
     Playing,
-    _Devices,
     _group_progress,
     _terminable,
     play_together,
@@ -426,16 +423,10 @@ class JobOptions(TypedDict, total=False):
 _BENCHMARK_CHECKPOINT = "checkpoint"
 
 
-class Agents(BaseModel):
+class Agents(LoaderDeclaration[Callable[..., object]]):
     """Checkpoint forwards and optional game-side player construction."""
 
-    model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
-    load: Callable[..., object] | None = None
-    build: Callable[..., object] | None = None
-    devices: _Devices = DEFAULT_DEVICES
-    max_batch: int = Field(default=32, ge=1)
-    max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
-    memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    model_config = {"arbitrary_types_allowed": True}
 
     @model_validator(mode="after")
     def _validate_loading(self) -> Agents:
@@ -877,8 +868,8 @@ def hold_group(
             )
             base = declared.root
         artifacts = (base if launched else base / experiment) / "artifacts" / "agents"
-        owned = lifetime.enter_context(resources(artifacts))
-        opened: list[tuple[Evaluation, EvalRun, ExitStack]] = []
+        plays: list[Playing] = []
+        members: list[ExitStack] = []
         for spec in group.evaluations:
             if spec.experiment is None:
                 raise EtudeError("evaluation_names_no_experiment", 422)
@@ -895,26 +886,23 @@ def hold_group(
                     resume=True,
                 )
             )
-            opened.append((spec, active, member))
-        report = progress or opened[0][1]._report
-        report.total = sum(len(active.matches) for _, active, _ in opened)
-        report.done = sum(
-            sum(m.key in active.done for m in active.matches) for _, active, _ in opened
-        )
-        for _, active, _ in opened:
-            active._report = report
-        report.write()
-        plays = [
-            Playing(
-                run=active,
-                play=spec.play,
-                tournament=spec.definition.name,
-                agent_loader=spec.agents,
+            members.append(member)
+            plays.append(
+                Playing(
+                    run=active,
+                    play=spec.play,
+                    tournament=spec.definition.name,
+                    agent_loader=spec.agents,
+                )
             )
-            for spec, active, _ in opened
-        ]
-        outcomes = play_together(plays, resources=owned, checkout=checkout)
-        for (_, _, member), outcome in zip(opened, outcomes, strict=True):
+        report = progress or plays[0].run._report
+        report.total = sum(len(each.run.matches) for each in plays)
+        report.done = sum(each.skipped for each in plays)
+        for each in plays:
+            each.run._report = report
+        report.write()
+        outcomes = play_together(plays, artifacts=artifacts, checkout=checkout)
+        for member, outcome in zip(members, outcomes, strict=True):
             if isinstance(outcome, (EtudeError, RetryRequested)):
                 member.__exit__(type(outcome), outcome, outcome.__traceback__)
                 failures.append(outcome)

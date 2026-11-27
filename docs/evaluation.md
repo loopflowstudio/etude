@@ -127,13 +127,12 @@ from etude.eval.agents import Forward
 
 
 def load(checkpoint: CheckpointRef) -> Forward:
-    device = (
-        "cuda"
-        if torch.cuda.is_available()
-        else "mps"
-        if torch.backends.mps.is_available()
-        else "cpu"
-    )
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
     model = load_model(checkpoint.path).to(device).eval()
 
     def forward(inputs: list[object]) -> list[object]:
@@ -158,38 +157,31 @@ as identity and `Sampler.choose` as the action method.
 [`agent_models.py`](../examples/agent_models.py) shows a loader. Both are used
 by the runnable [`agents.py`](../examples/agents.py) experiment.
 
-Declare the hardware your checkpoint loader can use. The default
-`devices=("cuda", "metal")` batches calls on a visible NVIDIA GPU or an Apple
-Silicon Mac running native arm64 Python. The shared agent process writes each
-forward's batch composition to `artifacts/agents/batches.json`.
+Declare the hardware your loader can use with `Agents(load=load, devices=...)`.
+The default `("cuda", "metal")` shares inference on a visible NVIDIA GPU or an
+Apple Silicon Mac running native arm64 Python. Use `("cuda",)` for a CUDA-only
+loader or `("metal",)` for Apple GPU libraries such as PyTorch MPS and MLX.
 
 ```text
 $ uv run etude eval experiment.py
 etude: agents: shared inference for prediction (metal); 7 games at a time; 1 inference thread
 ```
 
-Use `Agents(load=load, devices=("cuda",))` for NVIDIA, `devices=("metal",)` for
-Apple Silicon (PyTorch MPS or MLX), or `devices=("cpu",)` for a CPU-only loader.
-Direct inference is the fallback whenever Etude finds no matching accelerator.
-Each game caches its own forwards with one model-library thread and a share of
-the checkpoint-byte allowance. Etude drops `"cpu"` from declarations that also
-include an accelerator. A CPU-only declaration skips the accelerator probe,
-accepts `memory_gb`, and rejects `max_batch` and `max_delay_seconds`.
-The startup line names the shared accelerator or explains why inference is
-direct, including when `CUDA_VISIBLE_DEVICES` hides GPUs on an NVIDIA host.
+On CUDA, active games fill `max_batch`. On Metal, games use up to one fewer
+than the available cores, with at least one game. Pending matches and remaining
+host memory bound both counts. Each shared forward handles up to `max_batch`
+rows and records its batch composition in `artifacts/agents/batches.json`.
 
-On CUDA, active games fill `max_batch`. On Metal, active games use up to one
-fewer than the host's cores, with at least one game. Pending matches and
-remaining host memory can reduce both counts, and each shared forward is capped
-at `max_batch`. The checkpoint-byte allowance defaults to half of host memory.
+Without a matching accelerator, each game caches its own forwards, uses one
+model-library thread, and gets a share of the checkpoint allowance (half of
+host memory by default). The startup line explains direct inference, including
+when `CUDA_VISIBLE_DEVICES` hides a GPU. Declare `("cpu",)` when your loader
+uses CPU so Etude skips the probe. Etude drops `"cpu"` from mixed declarations.
 
-Choose the model device inside `load` and honor Etude's thread environment there.
-Etude uses hardware detection to place inference in processes. The loader owns
-tensor placement and any CPU fallback. If your loader selects CPU for a run,
-declare `devices=("cpu",)` for that run as well. Keep model imports (`torch`,
-`jax`, `tensorflow`, `mlx`) in the loading module so with shared inference the
-game processes remain light. `devices`, `max_batch`, `max_delay_seconds`, and
-`memory_gb` require `load`.
+Choose tensor placement inside `load`, honor Etude's thread environment, and
+keep model-library imports in the loading module so shared games stay light.
+`devices`, `memory_gb`, `max_batch`, and `max_delay_seconds` require a loader.
+The two batching settings also require a declared accelerator.
 
 ## Results and retry
 

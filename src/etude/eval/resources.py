@@ -19,9 +19,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from etude.errors import RetryRequested
+
+if TYPE_CHECKING:
+    from etude.eval.loader import AgentLoader
 
 THREAD_VARIABLES = (
     "OMP_NUM_THREADS",
@@ -105,8 +108,9 @@ def seconds_left() -> float | None:
 type Accelerator = Literal["cuda", "metal"]
 type Device = Accelerator | Literal["cpu"]
 type _Unavailable = Literal["cpu", "CUDA_VISIBLE_DEVICES hides GPUs", "nvidia-smi failed"]
-type Reason = (
-    _Unavailable
+type Inference = (
+    Accelerator
+    | _Unavailable
     | Literal[
         "no loader",
         "no checkpoints",
@@ -115,8 +119,6 @@ type Reason = (
         "loader does not declare metal",
     ]
 )
-
-DEFAULT_DEVICES: tuple[Device, ...] = ("cuda", "metal")
 
 
 def _detect_accelerator() -> Accelerator | _Unavailable:
@@ -148,28 +150,27 @@ class ExecutionPlan:
 
     `threads` is each inference owner's thread budget: the shared agent process's
     in shared mode, and each game process's (always one) in direct mode.
-    `reason` explains direct play. Shared play names its accelerator.
+    `inference` names the shared accelerator or explains direct play.
     """
 
     games: int
     threads: int
-    accelerator: Accelerator | None
-    reason: Reason | None
+    inference: Inference
     checkpoint_bytes: int
 
     @property
     def shared(self) -> bool:
-        return self.accelerator is not None
+        return self.inference in ("cuda", "metal")
 
     def describe(self, tournaments: Sequence[str]) -> str | None:
         """One startup line naming the mode, why it was chosen, and its sizing; None without loading."""
-        if self.reason in ("no loader", "no checkpoints"):
+        if self.inference in ("no loader", "no checkpoints"):
             return None
         games = "game" if self.games == 1 else "games"
         mode = "shared" if self.shared else "direct"
         line = (
             f"etude: agents: {mode} inference for {', '.join(tournaments)} "
-            f"({self.accelerator or self.reason}); "
+            f"({self.inference}); "
             f"{self.games} {games} at a time"
         )
         if not self.shared:
@@ -178,32 +179,27 @@ class ExecutionPlan:
         return f"{line}; {self.threads} inference {unit}"
 
 
-def _select_mode(
-    *, loader: bool, checkpoints: bool, devices: tuple[Device, ...]
-) -> Accelerator | Reason:
-    if not loader:
+def _select_inference(loader: "AgentLoader", checkpoints: bool) -> Inference:
+    if loader.load is None:
         return "no loader"
     if not checkpoints:
         return "no checkpoints"
-    if devices == ("cpu",):
+    if loader.devices == ("cpu",):
         return "cpu-only loader"
     match _detect_accelerator():
         case "cuda":
-            return "cuda" if "cuda" in devices else "loader does not declare cuda"
+            return "cuda" if "cuda" in loader.devices else "loader does not declare cuda"
         case "metal":
-            return "metal" if "metal" in devices else "loader does not declare metal"
+            return "metal" if "metal" in loader.devices else "loader does not declare metal"
         case unavailable:
             return unavailable
 
 
 def plan_execution(
     pending: int,
+    loader: "AgentLoader",
     *,
-    loader: bool,
     checkpoints: bool,
-    memory_gb: float | None = None,
-    batch_inputs: int = 32,
-    devices: tuple[Device, ...] = DEFAULT_DEVICES,
 ) -> ExecutionPlan:
     """Choose shared or direct inference and size games, threads and checkpoint bytes.
 
@@ -214,33 +210,27 @@ def plan_execution(
     """
     if pending < 1:
         raise ValueError("an execution plan needs pending matches")
-    mode = _select_mode(loader=loader, checkpoints=checkpoints, devices=devices)
+    inference = _select_inference(loader, checkpoints)
     cpus = available_cpus()
     total_memory = memory_bytes()
-    held = (
-        0
-        if not (loader and checkpoints)
-        else total_memory // 2
-        if memory_gb is None
-        else int(memory_gb * 1024**3)
-    )
-    if mode == "cuda" or mode == "metal":
-        accelerator, reason = mode, None
-        capacity = batch_inputs if mode == "cuda" else max(1, cpus - 1)
-    else:
-        accelerator, reason = None, mode
-        capacity = cpus
-    games = min(
-        pending,
-        capacity,
-        max(1, (total_memory - held) // GAME_BYTES),
-    )
+    held = 0
+    if loader.load is not None and checkpoints:
+        held = total_memory // 2 if loader.memory_gb is None else int(loader.memory_gb * 1024**3)
+
+    match inference:
+        case "cuda":
+            capacity = loader.max_batch
+        case "metal":
+            capacity = max(1, cpus - 1)
+        case _:
+            capacity = cpus
+    games = min(pending, capacity, max(1, (total_memory - held) // GAME_BYTES))
+    shared = inference in ("cuda", "metal")
     return ExecutionPlan(
+        inference=inference,
         games=games,
-        threads=max(1, cpus - games) if accelerator else 1,
-        accelerator=accelerator,
-        reason=reason,
-        checkpoint_bytes=held if accelerator else held // games,
+        threads=max(1, cpus - games) if shared else 1,
+        checkpoint_bytes=held if shared else held // games,
     )
 
 

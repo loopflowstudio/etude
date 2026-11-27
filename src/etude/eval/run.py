@@ -27,9 +27,7 @@ from hashlib import sha256
 from pathlib import Path
 from queue import Empty
 from types import FrameType
-from typing import TYPE_CHECKING, Annotated, Literal, NoReturn, cast
-
-from pydantic import AfterValidator, Field, model_validator
+from typing import TYPE_CHECKING, Literal, NoReturn, cast
 
 from etude.call import Function
 from etude.errors import EtudeError, RetryRequested, explain, sanitize
@@ -44,6 +42,7 @@ from etude.eval.block import (
     stage,
 )
 from etude.eval.game import Execution, Imports, Performance, initialize_game, play_match
+from etude.eval.loader import AgentLoader
 from etude.eval.records import (
     ADDED,
     COLUMN_TYPES,
@@ -59,8 +58,6 @@ from etude.eval.records import (
     player_checkpoints,
 )
 from etude.eval.resources import (
-    DEFAULT_DEVICES,
-    Device,
     ExecutionPlan,
     Resources,
     plan_execution,
@@ -71,7 +68,7 @@ from etude.eval.result import EvalResult as EvalResult
 from etude.eval.result import Result as Result
 from etude.eval.result import Row
 from etude.eval.result import Tables as Tables
-from etude.records import Record, RunCounters, RunWriter, Tally
+from etude.records import RunCounters, RunWriter, Tally
 from etude.run import Declared, Run, StorageDestination, report_progress
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage, Storage, run_prefix
@@ -154,11 +151,11 @@ class EvalRun(Run):
         function = Function(module=authored.__module__, name=authored.__qualname__)
         definition = agents.plain(None) if agents is not None else AgentLoader()
         artifacts = self.files.root / "artifacts" / "agents"
-        with _terminable(), resources(artifacts) as owned:
-            (result,) = play_together(
-                (Playing(run=self, play=function, agent_loader=definition),),
-                resources=owned,
+        with _terminable():
+            tournament = Playing(
+                run=self, play=function, tournament=self.name, agent_loader=definition
             )
+            (result,) = play_together((tournament,), artifacts=artifacts)
             if isinstance(result, (EtudeError, RetryRequested)):
                 raise result
             return result
@@ -489,44 +486,14 @@ def _terminable() -> Iterator[None]:
         signal.signal(signal.SIGTERM, before)
 
 
-def _normalize_devices(devices: tuple[Device, ...]) -> tuple[Device, ...]:
-    accelerators = tuple(sorted(set(devices) - {"cpu"}))
-    return accelerators or ("cpu",)
-
-
-type _Devices = Annotated[
-    tuple[Device, ...], Field(min_length=1), AfterValidator(_normalize_devices)
-]
-
-
-class AgentLoader(Record):
-    """Portable loading declaration; batching never enters scientific identity."""
-
-    load: Function | None = None
-    build: Function | None = None
-    # An omitted default also round-trips build-only records, which cannot declare devices.
-    devices: _Devices = Field(
-        default=DEFAULT_DEVICES, exclude_if=lambda devices: devices == DEFAULT_DEVICES
-    )
-    max_batch: int = Field(default=32, ge=1)
-    max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
-    memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-
-    @model_validator(mode="after")
-    def _validate_loading(self) -> AgentLoader:
-        if self.load is None and "devices" in self.model_fields_set:
-            raise ValueError("devices requires a checkpoint loader")
-        return self
-
-
 @dataclass
 class Playing:
     """A live tournament, its authored functions and its dispatch state."""
 
     run: EvalRun
     play: Function
-    tournament: str | None = None
-    agent_loader: AgentLoader = AgentLoader()
+    tournament: str
+    agent_loader: AgentLoader
     pending: deque[Match] = field(init=False)
     skipped: int = field(init=False)
     played: int = 0
@@ -540,50 +507,18 @@ class Playing:
 def play_together(
     plays: Sequence[Playing],
     *,
-    resources: Resources,
+    artifacts: Path,
     checkout: str | None = None,
 ) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
-    """Own inference and game execution, retaining unfinished work on interruption."""
+    """Play tournaments sharing one progress report and retain unfinished work on interruption."""
+    if not plays:
+        return ()
+    report = plays[0].run._report
     try:
-        with _terminable():
+        with resources(artifacts) as owned:
             pending = [each for each in plays if each.pending]
             if pending:
-                definition = pending[0].agent_loader
-                if any(each.agent_loader != definition for each in pending):
-                    raise EtudeError("incompatible_eval_agents", 422)
-                has_checkpoints = any(
-                    player_checkpoints(player)
-                    for each in pending
-                    for match in each.pending
-                    for player in match.players
-                )
-                matches = sum(len(each.pending) for each in pending)
-                plan = plan_execution(
-                    matches,
-                    loader=definition.load is not None,
-                    checkpoints=has_checkpoints,
-                    memory_gb=definition.memory_gb,
-                    batch_inputs=definition.max_batch,
-                    devices=definition.devices,
-                )
-                tournaments = [each.tournament or each.run.name for each in pending]
-                with (
-                    running_agents(definition, checkout, resources, plan)
-                    if plan.shared
-                    else nullcontext()
-                ) as process:
-                    if line := plan.describe(tournaments):
-                        print(line, file=sys.stderr, flush=True)
-                    _play_matches(
-                        plays,
-                        resources=resources,
-                        plan=plan,
-                        checkout=checkout,
-                        agent_process=process,
-                        load=definition.load if has_checkpoints and not plan.shared else None,
-                    )
-                    if process is not None:
-                        process.check()
+                _play_pending(pending, owned, checkout)
     except RetryRequested as error:
         delivery_failure = None
         for each in plays:
@@ -596,10 +531,8 @@ def play_together(
             raise delivery_failure from error
         raise
     finally:
-        for each in plays:
-            each.run._report.failed += each.run.failed
-        for report in dict.fromkeys(each.run._report for each in plays):
-            report.write()
+        report.failed = sum(each.run.failed for each in plays)
+        report.write()
     return tuple(
         each.failure
         if each.failure is not None
@@ -612,6 +545,36 @@ def play_together(
         )
         for each in plays
     )
+
+
+def _play_pending(plays: Sequence[Playing], resources: Resources, checkout: str | None) -> None:
+    definition = plays[0].agent_loader
+    if any(each.agent_loader != definition for each in plays):
+        raise EtudeError("incompatible_eval_agents", 422)
+    has_checkpoints = definition.load is not None and any(
+        player_checkpoints(player)
+        for each in plays
+        for match in each.pending
+        for player in match.players
+    )
+    matches = sum(len(each.pending) for each in plays)
+    plan = plan_execution(matches, definition, checkpoints=has_checkpoints)
+    tournaments = [each.tournament for each in plays]
+    with (
+        running_agents(definition, checkout, resources, plan) if plan.shared else nullcontext()
+    ) as process:
+        if line := plan.describe(tournaments):
+            print(line, file=sys.stderr, flush=True)
+        _play_matches(
+            plays,
+            resources=resources,
+            plan=plan,
+            checkout=checkout,
+            agent_process=process,
+            load=definition.load if has_checkpoints and not plan.shared else None,
+        )
+        if process is not None:
+            process.check()
 
 
 def _retain(name: str, report: Imports | Performance, directory: Path) -> None:
@@ -722,9 +685,7 @@ def _play_matches(
         if match.key in each.run._failed:
             return
         if agent_process is not None:
-            failure = agent_process.failures.pop(
-                (each.tournament or each.run.name, match.key), None
-            )
+            failure = agent_process.failures.pop((each.tournament, match.key), None)
             if failure is not None:
                 outcome = (
                     RetryRequested(failure.error) if failure.retry else RuntimeError(failure.error)
@@ -773,7 +734,7 @@ def _play_matches(
                     match,
                     address,
                     checkout,
-                    each.tournament or each.run.name,
+                    each.tournament,
                     each.agent_loader.build,
                     load,
                     memory=plan.checkpoint_bytes,

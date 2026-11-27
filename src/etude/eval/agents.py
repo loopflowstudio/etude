@@ -30,7 +30,7 @@ __all__ = ("Forward",)
 if TYPE_CHECKING:
     from etude.call import Function
     from etude.checkpoints import CheckpointRef
-    from etude.eval.run import AgentLoader
+    from etude.eval.loader import AgentLoader
 
 
 type Forward = Callable[[list[object]], list[object]]
