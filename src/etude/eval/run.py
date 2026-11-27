@@ -499,18 +499,6 @@ class AgentLoader(Record):
     max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
     memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
-    def normalized(self) -> AgentLoader:
-        """Drop batching settings ignored when sharing is off, for grouping and compatibility."""
-        if self.shared is False:
-            defaults = AgentLoader()
-            return self.model_copy(
-                update={
-                    "max_batch": defaults.max_batch,
-                    "max_delay_seconds": defaults.max_delay_seconds,
-                }
-            )
-        return self
-
 
 @dataclass
 class Playing:
@@ -542,9 +530,7 @@ def play_together(
             pending = [each for each in plays if each.pending]
             if pending:
                 definition = pending[0].agent_loader
-                if any(
-                    each.agent_loader.normalized() != definition.normalized() for each in pending
-                ):
+                if any(each.agent_loader != definition for each in pending):
                     raise EtudeError("incompatible_eval_agents", 422)
                 has_checkpoints = any(
                     player_checkpoints(player)
@@ -567,8 +553,8 @@ def play_together(
                     if plan.shared
                     else nullcontext()
                 ) as process:
-                    if definition.load is not None and has_checkpoints:
-                        print(plan.describe(tournaments), file=sys.stderr, flush=True)
+                    if line := plan.describe(tournaments):
+                        print(line, file=sys.stderr, flush=True)
                     _play_matches(
                         plays,
                         resources=resources,

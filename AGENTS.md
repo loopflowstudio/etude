@@ -289,8 +289,9 @@ gives inference the remaining cores (at least one thread). Pending matches and
 remaining host memory bound active games. Each shared forward stays capped at
 `max_batch`. `Agents(shared=False)` plays direct and `Agents(shared=True)` forces
 sharing when checkpoint loading is needed; host `ETUDE_EVAL_SHARED=0|1` overrides
-`Agents(shared=...)` in both directions and is validated before writing any run
-folder. `ETUDE_EVAL_SHARED` selects Etude's process topology only and does not
+`Agents(shared=...)` in both directions (forwarded by `etude worker`) and is
+validated before writing any run folder or smoking training. `ETUDE_EVAL_SHARED`
+selects Etude's process topology only and does not
 hide MPS or CUDA from the loader. Probe hardware without importing the loader.
 Plays without a loader or checkpoints, `shared=False` and `ETUDE_EVAL_SHARED=0`
 keep direct capacity and skip the probe; `play_together` prints one startup line

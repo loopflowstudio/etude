@@ -785,15 +785,25 @@ def test_probe_skipped_for_code_only_and_direct_overrides(
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
     no_loader = plan_execution(8, loader=False, checkpoints=True)
     assert (no_loader.shared, no_loader.gpu, no_loader.reason) == (False, None, "no loader")
-    assert "inference thread" not in no_loader.describe(["t"])
+    assert no_loader.describe(["t"]) is None
     no_checkpoints = plan_execution(8, loader=True, checkpoints=False)
     assert (no_checkpoints.shared, no_checkpoints.gpu, no_checkpoints.reason) == (
         False,
         None,
         "no checkpoints",
     )
-    assert "inference thread" not in no_checkpoints.describe(["t"])
+    assert no_checkpoints.describe(["t"]) is None
     assert plan_execution(8, loader=True, checkpoints=True, shared=False).reason == "shared=False"
+
+    # CUDA_VISIBLE_DEVICES="" without nvidia-smi reports "no GPU", not hidden CUDA GPUs.
+    monkeypatch.setattr(eval_resources, "_gpu", _gpu)
+    monkeypatch.setattr("etude.eval.resources.sys.platform", "darwin")
+    monkeypatch.setattr("etude.eval.resources.platform.machine", lambda: "x86_64")
+    monkeypatch.setattr("etude.eval.resources.shutil.which", lambda _: None)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    assert plan_execution(8, loader=True, checkpoints=True).reason == "no GPU"
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES")
+    monkeypatch.setattr(eval_resources, "_gpu", fail_probe)
 
     # Host override ETUDE_EVAL_SHARED=0 skips the probe and outranks shared=True.
     monkeypatch.setenv("ETUDE_EVAL_SHARED", "0")
@@ -968,35 +978,39 @@ def test_agents_shared_override_controls_mode_and_grouping(
     auto_job = job("auto", Agents(load=load))
     direct_job = job("direct", Agents(load=load, shared=False))
     tuned_direct_job = job("tuned", tuned_direct)
+    tuned_direct_peer = job("tuned_peer", tuned_direct)
     forced_job = job("forced", Agents(load=load, shared=True))
     auto_lowered = auto_job.lower(state)
     direct_lowered = direct_job.lower(state)
     tuned_direct_lowered = tuned_direct_job.lower(state)
+    tuned_peer_lowered = tuned_direct_peer.lower(state)
     forced_lowered = forced_job.lower(state)
     keys = {
         _group_key(lowered, evaluation_group(lowered).evaluations[0])
-        for lowered in (auto_lowered, direct_lowered, forced_lowered)
+        for lowered in (auto_lowered, direct_lowered, tuned_direct_lowered, forced_lowered)
     }
-    assert len(keys) == 3
-    # Batching settings do not split direct jobs or fail compatibility in play_together.
-    assert _group_key(direct_lowered, evaluation_group(direct_lowered).evaluations[0]) == (
-        _group_key(tuned_direct_lowered, evaluation_group(tuned_direct_lowered).evaluations[0])
-    )
+    assert len(keys) == 4
+    # Identical direct declarations still group; differing batching stays deterministic for ETUDE_EVAL_SHARED=1.
+    assert _group_key(
+        tuned_direct_lowered, evaluation_group(tuned_direct_lowered).evaluations[0]
+    ) == (_group_key(tuned_peer_lowered, evaluation_group(tuned_peer_lowered).evaluations[0]))
 
     monkeypatch.setattr("etude.eval.run.plan_execution", plan_execution)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
 
-    # shared=False plays direct even on Apple Silicon, including mixed batching settings.
+    # shared=False plays direct even on Apple Silicon; mixed batching settings are refused in one group.
     monkeypatch.setattr(eval_resources, "_gpu", lambda: "apple")
+    with pytest.raises(EtudeError, match="incompatible_eval_agents"):
+        hold_group(group(direct_job, tuned_direct_job), directory=tmp_path / "incompatible")
     direct_dir = tmp_path / "direct"
     assert [
         result.played
-        for result in hold_group(group(direct_job, tuned_direct_job), directory=direct_dir)
+        for result in hold_group(group(tuned_direct_job, tuned_direct_peer), directory=direct_dir)
     ] == [1, 1]
     err = capfd.readouterr().err
     assert (
-        "etude: agents: direct inference for direct, tuned (shared=False); 2 games at a time; 1 inference thread each"
+        "etude: agents: direct inference for tuned, tuned_peer (shared=False); 2 games at a time; 1 inference thread each"
         in err
     )
     assert not (direct_dir / "grouped/artifacts/agents/batches.json").exists()

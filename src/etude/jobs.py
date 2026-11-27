@@ -824,7 +824,7 @@ def _group_key(job: Job, spec: Evaluation) -> str:
         "cleanup_seconds",
         "max_attempts",
     }
-    return job.model_dump_json(include=shared) + spec.agents.normalized().model_dump_json()
+    return job.model_dump_json(include=shared) + spec.agents.model_dump_json()
 
 
 def hold_group(

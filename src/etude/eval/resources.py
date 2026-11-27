@@ -119,17 +119,19 @@ type Reason = (
 
 
 def _cuda_hidden() -> bool:
-    return os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1")
+    return (
+        not (sys.platform == "darwin" and platform.machine() == "arm64")
+        and os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1")
+        and shutil.which("nvidia-smi") is not None
+    )
 
 
 def _gpu() -> Gpu | None:
     """Read visible NVIDIA or Apple Silicon hardware without importing a model library."""
     if sys.platform == "darwin" and platform.machine() == "arm64":
         return "apple"
-    if _cuda_hidden():
-        return None
     command = shutil.which("nvidia-smi")
-    if command is None:
+    if command is None or os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1"):
         return None
     try:
         listed = subprocess.check_output(
@@ -176,8 +178,10 @@ class ExecutionPlan:
     reason: Reason
     checkpoint_bytes: int
 
-    def describe(self, tournaments: Sequence[str]) -> str:
-        """One startup line naming the mode, why it was chosen, and its sizing."""
+    def describe(self, tournaments: Sequence[str]) -> str | None:
+        """One startup line naming the mode, why it was chosen, and its sizing; None without loading."""
+        if self.reason in ("no loader", "no checkpoints"):
+            return None
         games = "game" if self.games == 1 else "games"
         mode = "shared" if self.shared else "direct"
         why = self.reason if self.gpu in (None, self.reason) else f"{self.reason}, {self.gpu}"
@@ -185,8 +189,6 @@ class ExecutionPlan:
             f"etude: agents: {mode} inference for {', '.join(tournaments)} ({why}); "
             f"{self.games} {games} at a time"
         )
-        if self.reason in ("no loader", "no checkpoints"):
-            return line
         if not self.shared:
             return f"{line}; 1 inference thread each"
         unit = "thread" if self.threads == 1 else "threads"

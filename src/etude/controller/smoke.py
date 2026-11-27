@@ -32,6 +32,7 @@ from typing import Literal
 from etude.controller.declarations import asked, read_experiment, read_training_jobs
 from etude.errors import LauncherError
 from etude.eval.records import Benchmark, RoundRobin
+from etude.eval.resources import shared_override
 from etude.eval.tournament import played
 from etude.experiment import observe, read_tournament_lines
 from etude.experiment_file import defined_functions, experiment_named, refuse_renamed
@@ -76,6 +77,8 @@ def smoke_file(
         raise LauncherError("--source is for smoking eval and report without the train step")
     if "train" not in steps and source is None and set(steps) & {"eval", "report"}:
         raise LauncherError("smoking eval or report without train needs --source")
+    if "eval" in steps:
+        shared_override()
     if "train" in steps and runs is None:
         runs = read_training_jobs(path)
     experiment = experiment_named(path)

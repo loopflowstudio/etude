@@ -193,7 +193,8 @@ $ ETUDE_EVAL_SHARED=0 uv run etude eval experiment.py
 etude: agents: direct inference for prediction (ETUDE_EVAL_SHARED=0); 8 games at a time; 1 inference thread each
 ```
 
-`ETUDE_EVAL_SHARED` outranks `Agents(shared=...)` and selects Etude's process
+`ETUDE_EVAL_SHARED` outranks `Agents(shared=...)` (including on pool hosts,
+where `etude worker` forwards it) and selects Etude's process
 topology only — it does not hide MPS or CUDA from PyTorch or MLX. To force a
 GPU-capable loader onto CPU, use your loader's own device setting (or
 `CUDA_VISIBLE_DEVICES=""` on NVIDIA).
@@ -207,7 +208,7 @@ so game processes remain light.
 checkpoint-byte allowance (default: half of host memory) and inference mode;
 author code keeps one forward deterministic for every batch size. These need
 `load`; `max_batch` and `max_delay_seconds` are accepted with `shared=False`
-and ignored when grouping direct jobs.
+so toggling sharing keeps them.
 
 ## Results and retry
 

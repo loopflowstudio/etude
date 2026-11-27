@@ -249,12 +249,14 @@ games/hour, 71.2 s, mean 9.12 rows/forward) and direct CPU batch 1 (16 games,
 single-thread shared process dropped to 1,222 games/hour (377.2 s, 5.1× slower
 than direct CPU), so `Agents(shared=False)` lets CPU-only loaders opt out of the
 probe and play direct, and `ETUDE_EVAL_SHARED=0|1` overrides sharing for one
-host (such as a Metal-less VM) without editing the experiment, selecting process
+host (such as a Metal-less VM or owned pool Mac, forwarded by `etude worker`
+and validated before `etude smoke` trains) without editing the experiment,
+selecting process
 topology only without hiding MPS or CUDA from the loader. One startup line names
 the mode, why it was chosen, any detected GPU, games and inference threads.
 `Agents` refuses sharing, batching and memory settings without `load`; batching
-settings stay accepted with `shared=False` and are ignored when grouping direct
-jobs. `Agents(shared=True)` forces shared
+settings stay accepted with `shared=False` so toggling sharing preserves them.
+`Agents(shared=True)` forces shared
 inference, reserving at least half the cores for inference when no GPU is
 detected. Old queued `AgentLoader` records default to automatic selection.
 
