@@ -720,16 +720,11 @@ def play_together(
                     context = multiprocessing.get_context("spawn")
                     live: list[_GameProcess] = []
 
-                    if placement.grouped:
-                        stream_groups = [tuple(active_plays)]
-                    elif placement.bus == "local":
-                        # Direct play processes shard each tournament in turn on one bus.
-                        direct = tuple(each for each in active_plays if not each.streaming)
-                        stream_groups = [
-                            (each,) if each.streaming else direct
-                            for each in active_plays
-                            if each.streaming or each is direct[0]
-                        ]
+                    if placement.share_streams:
+                        by_kind: dict[bool, list[Playing]] = {}
+                        for each in active_plays:
+                            by_kind.setdefault(each.streaming, []).append(each)
+                        stream_groups = [tuple(streams) for streams in by_kind.values()]
                     else:
                         stream_groups = [(each,) for each in active_plays]
 

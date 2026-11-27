@@ -39,7 +39,7 @@ from etude.eval.agents import (
     recv_frame,
     send_frame,
 )
-from etude.eval.batching import _add_socket_batch, _Batches, _encode_socket
+from etude.eval.batching import Batch, _add_socket_batch, _Batches, _encode_socket
 from etude.eval.bus import ForwardOutcome
 from etude.eval.game import GameReport, Matches
 from etude.eval.match import environment
@@ -620,31 +620,32 @@ def test_play_arity_and_removed_workers_are_refused(tmp_path: Path) -> None:
     ),
     [
         # Saturated play CPU: 64 pending, max_batch=32 -> 16/32 processes.
-        (32, (64,), 0, True, 32, None, ("local", 32, 1, 0, 1, False)),
-        (16, (64,), 0, True, 32, None, ("local", 16, 1, 0, 2, False)),
+        (32, (64,), 0, True, 32, None, ("local", 32, 1, 0, 1, True)),
+        (16, (64,), 0, True, 32, None, ("local", 16, 1, 0, 2, True)),
         # Small play CPU: 5 pending, max_batch=32, 16 cores -> 1 process, 15 inference threads.
-        (16, (5,), 0, True, 32, None, ("local", 1, 15, 0, 5, False)),
+        (16, (5,), 0, True, 32, None, ("local", 1, 15, 0, 5, True)),
         # Medium play CPU: 30 pending, max_batch=256, 16 cores -> 2 processes, 7 threads each.
-        (16, (30,), 0, True, 256, None, ("local", 2, 7, 0, 16, False)),
+        (16, (30,), 0, True, 256, None, ("local", 2, 7, 0, 16, True)),
         # Medium play CPU: 16 pending, max_batch=32, 16 cores -> 8 processes (2 games each, 1 thread).
-        (16, (16,), 0, True, 32, None, ("local", 8, 1, 0, 2, False)),
+        (16, (16,), 0, True, 32, None, ("local", 8, 1, 0, 2, True)),
         # Mixed CPU/Mac: 500 play_many (1 streaming) + 10 play, max_batch=256, 16 cores -> 2 procs, 7 threads.
-        (16, (10,), 1, True, 256, None, ("local", 2, 7, 0, 10, False)),
-        # Direct play tournaments reuse the processes sized for the largest queue.
-        (8, (4, 3, 2), 1, True, 8, None, ("local", 3, 1, 0, 3, False)),
-        (3, (20,), 0, True, 32, None, ("local", 2, 1, 0, 11, False)),
-        (2, (20,), 0, True, 32, None, ("local", 2, 1, 0, 16, False)),
+        (16, (10,), 1, True, 256, None, ("local", 2, 7, 0, 10, True)),
+        # Direct play shares the largest queue's processes and reserves one streaming slot.
+        (8, (4, 3, 2), 1, True, 8, None, ("local", 3, 1, 0, 3, True)),
+        (8, (4, 3), 2, True, 16, None, ("local", 2, 3, 0, 4, True)),
+        (3, (20,), 0, True, 32, None, ("local", 2, 1, 0, 11, True)),
+        (2, (20,), 0, True, 32, None, ("local", 2, 1, 0, 16, True)),
         (8, (20,), 0, False, 32, None, (None, 8, 1, 0, 1, False)),
         # Code-only mixed: 3 play + 2 streaming -> 5 processes.
         (8, (3,), 2, False, 32, None, (None, 5, 1, 0, 1, False)),
-        (8, (20,), 0, True, 32, None, ("local", 3, 1, 0, 8, False)),
-        (8, (20,), 0, True, 32, 1.5, ("local", 2, 3, 0, 16, False)),
-        (8, (1,), 0, True, 32, None, ("local", 1, 7, 0, 1, False)),
-        (1, (20,), 0, True, 32, None, ("local", 1, 1, 0, 20, False)),
+        (8, (20,), 0, True, 32, None, ("local", 3, 1, 0, 8, True)),
+        (8, (20,), 0, True, 32, 1.5, ("local", 2, 3, 0, 16, True)),
+        (8, (1,), 0, True, 32, None, ("local", 1, 7, 0, 1, True)),
+        (1, (20,), 0, True, 32, None, ("local", 1, 1, 0, 20, True)),
         (1, (20,), 0, False, 32, None, (None, 1, 1, 0, 1, False)),
         (8, (), 0, True, 32, None, (None, 0, 1, 0, 0, False)),
         (8, (0,), 0, True, 32, None, (None, 0, 1, 0, 0, False)),
-        (8, (20,), 0, True, 32, 2.0, ("local", 1, 7, 0, 20, False)),
+        (8, (20,), 0, True, 32, 2.0, ("local", 1, 7, 0, 20, True)),
     ],
 )
 def test_place_respects_cpu_pending_and_memory(
@@ -670,7 +671,7 @@ def test_place_respects_cpu_pending_and_memory(
         chosen.game_threads,
         chosen.agent_threads,
         chosen.games_per_process,
-        chosen.grouped,
+        chosen.share_streams,
     ) == expected
 
 
@@ -698,11 +699,11 @@ def test_place_respects_cpu_pending_and_memory(
         (4, (1, 1, 1), 0, 32, None, True, "0", ("socket", 3, 1, 1, 1, False)),
         (4, (64,), 0, 8, None, True, "0", ("socket", 3, 1, 1, 3, False)),
         (4, (64,), 0, 32, 15.5, True, "0", ("socket", 2, 1, 2, 16, False)),
-        # All-play_many routes direct with grouped=True on GPU and non-GPU.
+        # All-play_many shares streams on GPU and non-GPU.
         (4, (), 2, 32, None, True, "0", ("local", 1, 3, 0, 0, True)),
         (4, (64,), 0, 32, None, False, "0", (None, 4, 1, 0, 1, False)),
         (4, (), 2, 32, None, False, "0", (None, 1, 4, 0, 0, True)),
-        (4, (64,), 0, 32, None, True, "", ("local", 4, 1, 0, 8, False)),
+        (4, (64,), 0, 32, None, True, "", ("local", 4, 1, 0, 8, True)),
         (4, (), 2, 32, None, True, "", ("local", 1, 3, 0, 0, True)),
     ],
 )
@@ -734,7 +735,7 @@ def test_gpu_placement_fills_batches_and_routes_streaming_direct(
         chosen.game_threads,
         chosen.agent_threads,
         chosen.games_per_process,
-        chosen.grouped,
+        chosen.share_streams,
     ) == expected
 
 
@@ -753,7 +754,7 @@ def test_code_only_and_streaming_placement_do_not_probe_gpu(
         game_threads=1,
         agent_threads=0,
         games_per_process=1,
-        grouped=False,
+        share_streams=False,
         checkpoint_bytes=0,
         reason="no checkpoints to load",
     )
@@ -763,7 +764,7 @@ def test_code_only_and_streaming_placement_do_not_probe_gpu(
         game_threads=4,
         agent_threads=0,
         games_per_process=0,
-        grouped=True,
+        share_streams=True,
         checkpoint_bytes=0,
         reason="no checkpoints to load",
     )
@@ -773,7 +774,7 @@ def test_code_only_and_streaming_placement_do_not_probe_gpu(
         game_threads=3,
         agent_threads=0,
         games_per_process=0,
-        grouped=True,
+        share_streams=True,
         checkpoint_bytes=8 * 1024**3,
         reason="all tournaments use play_many",
     )
@@ -1896,17 +1897,17 @@ def test_play_many_backfills_after_a_yielded_error(
 
 
 @pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
-def test_mixed_play_and_play_many_group_caps_each_play_many_at_one_process(
+def test_mixed_eval_group_shares_streams_with_direct_inference(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
+    capfd: pytest.CaptureFixture[str],
 ) -> None:
     shared = bool(request.node.callspec.params["shared_agents"])
-    # Budget exceeds total tournaments to verify each play_many tournament spawns
-    # exactly one process with zero empty game-*.json reports.
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 4 * 1024**3)
-    agents = Agents(load=load_vector, max_batch=3)
+    agents = Agents(load=load_array_checkpoint, max_batch=3)
+    players = (checkpoint("left"), checkpoint("right"))
     jobs = [
         EvalJob(
             tournament=RoundRobin(
@@ -1916,8 +1917,8 @@ def test_mixed_play_and_play_many_group_caps_each_play_many_at_one_process(
                 games=2,
                 base_seed=seed,
             ),
-            enter=(checkpoint("left"), checkpoint("right")),
-            play_many=vector_slots,
+            enter=players,
+            play_many=array_vector_slots,
             agents=agents,
             repo=None,
             max_hours=0.1,
@@ -1932,25 +1933,30 @@ def test_mixed_play_and_play_many_group_caps_each_play_many_at_one_process(
     reports = [
         GameReport.model_validate_json(path.read_bytes()) for path in artifacts.glob("game-*.json")
     ]
-    assert len(reports) == 3
-    assert sorted((report.tournaments, report.matches) for report in reports) == [
-        (("first",), 2),
-        (("ordinary",), 1),
-        (("second",), 2),
-    ]
+    tournaments = sorted((report.tournaments, report.matches) for report in reports)
     if shared:
+        assert tournaments == [(("first",), 2), (("ordinary",), 1), (("second",), 2)]
         assert all(report.bus.wire_bytes > 0 for report in reports)
         batches = json.loads((artifacts / "batches.json").read_text())
-        assert sum(batch["rows"] for batch in batches) == 6
+        assert sum(batch["rows"] for batch in batches) == 10
         assert max(batch["rows"] for batch in batches) <= 3
-        assert sum(batch["requests"] for batch in batches) == 4
+        assert sum(batch["requests"] for batch in batches) == 6
     else:
+        assert tournaments == [(("first", "second"), 4), (("ordinary",), 1)]
+        assert (
+            "2 game processes, slots requested by play_many; play holds up to 1 game each; "
+            "3 inference threads each" in capfd.readouterr().err
+        )
         assert all(report.bus.wire_bytes == 0 for report in reports)
         assert not (artifacts / "batches.json").exists()
-        batch_files = list(artifacts.glob("batches-*.json"))
-        assert len(batch_files) == 3
-        all_batches = [batch for path in batch_files for batch in json.loads(path.read_text())]
-        assert sum(batch["rows"] for batch in all_batches) == 6
+        [stream] = [report for report in reports if report.tournaments == ("first", "second")]
+        stream_batches = [
+            Batch.model_validate(batch)
+            for batch in json.loads((artifacts / f"batches-{stream.pid}.json").read_text())
+        ]
+        assert sum(batch.rows for batch in stream_batches) == 8
+        loads = sorted((batch.checkpoint, batch.loads) for batch in stream_batches if batch.loads)
+        assert loads == sorted((player.checkpoint.key, 1) for player in players)
     db = statsdb("grouped", tmp_path)
     try:
         assert db.sql("select count(*) from vector_scores").fetchone() == (4,)
@@ -2105,7 +2111,8 @@ def test_code_only_play_many_group_runs_in_one_process_without_bus(
     assert report.bus.calls == 0
 
 
-def test_direct_play_many_group_isolates_stream_failure_between_tournaments(
+@pytest.mark.parametrize("shared_agents", [False], indirect=True)
+def test_direct_mixed_group_isolates_stream_failure_between_tournaments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
@@ -2140,19 +2147,20 @@ def test_direct_play_many_group_isolates_stream_failure_between_tournaments(
         max_hours=0.1,
     )
     with pytest.raises(EtudeError, match="first tournament failed"):
-        hold_group(group(broken, healthy), directory=tmp_path)
+        hold_group(group(broken, healthy, job("ordinary", agents)), directory=tmp_path)
     artifacts = tmp_path / "grouped/artifacts/agents"
-    [report_file] = list(artifacts.glob("game-*.json"))
-    assert GameReport.model_validate_json(report_file.read_bytes()).tournaments == (
-        "broken",
-        "healthy",
-    )
+    assert sorted(
+        GameReport.model_validate_json(path.read_bytes()).tournaments
+        for path in artifacts.glob("game-*.json")
+    ) == [("broken", "healthy"), ("ordinary",)]
     db = statsdb("grouped", tmp_path)
     try:
         assert db.sql("select count(*) from vector_scores").fetchone() == (2,)
+        assert db.sql("select count(*) from scores").fetchone() == (2,)
         assert db.sql("select count(*) from matches where state = 'failed'").fetchone() == (2,)
         assert sorted(row[0] for row in db.sql("select state from runs").fetchall()) == [
             "failed",
+            "finished",
             "finished",
         ]
     finally:
