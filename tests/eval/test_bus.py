@@ -31,6 +31,7 @@ from etude.eval.agents import (
     ModelForward,
     SocketForwardBus,
     recv_frame,
+    running_agents,
 )
 from etude.eval.batching import (
     LocalForwardBus,
@@ -45,6 +46,7 @@ from etude.eval.game import GameReport, Matches, _Forwarder
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Match, compose
+from etude.eval.resources import place, resources
 from etude.eval.result import Tables
 from etude.eval.tournament import evaluating
 from etude.jobs import Agents, EvalGroup, ExperimentState, evaluation_group, hold_group
@@ -1441,3 +1443,38 @@ def test_unpicklable_reply_fails_fast_redacts_secrets_and_unlocks_arrays(
             assert arr.flags.writeable
 
     asyncio.run(run())
+
+
+def test_unpicklable_request_disconnects_only_its_peer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
+    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: True)
+    placement = place((2,), agents=True)
+    definition = Agents(load=_identity_load).plain(None)
+    cp = checkpoint("bad_request").checkpoint
+
+    async def run(address: str) -> None:
+        healthy = await SocketForwardBus.connect(address)
+        broken = await SocketForwardBus.connect(address)
+        try:
+            healthy.bind(cp)
+            broken.bind(cp)
+            [before] = healthy.submit([ForwardCall(cp.key, [1], 1)])
+            assert await asyncio.wait_for(before, timeout=5) == [1]
+            [bad] = broken.submit([ForwardCall(cp.key, [_ExplodingUnpickle()], 1)])
+            with pytest.raises(RetryRequested, match="agent process exited before answering"):
+                await asyncio.wait_for(bad, timeout=5)
+            [after] = healthy.submit([ForwardCall(cp.key, [2], 1)])
+            assert await asyncio.wait_for(after, timeout=5) == [2]
+        finally:
+            await broken.close()
+            await healthy.close()
+
+    with resources(tmp_path) as owned, running_agents(definition, None, owned, placement) as agent:
+        asyncio.run(run(agent.address))
+    stderr = capfd.readouterr().err
+    assert "agent request failed to decode: " in stderr
+    assert "corrupt output" in stderr
+    assert "topsecret" not in stderr

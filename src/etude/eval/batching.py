@@ -721,6 +721,17 @@ def _send_peer(peer: socket.socket) -> Callable[[memoryview], None]:
     return send
 
 
+def _receive_request(peer: socket.socket) -> BatchRequest:
+    payload = recv_frame(peer)
+    try:
+        request = ForkingPickler.loads(payload)
+        if not isinstance(request, BatchRequest):
+            raise TypeError("expected BatchRequest")
+    except Exception as error:
+        raise ValueError(f"agent request failed to decode: {explain(error)}") from None
+    return request
+
+
 def _run_agents(
     address: str,
     load: Function,
@@ -763,17 +774,17 @@ def _run_agents(
                         while True:
                             started = time.monotonic()
                             try:
-                                payload = recv_frame(peer)
-                                request = cast(BatchRequest, ForkingPickler.loads(payload))
-                            except (EOFError, OSError):
+                                request = _receive_request(peer)
+                            except (EOFError, OSError, ValueError) as error:
+                                if isinstance(error, ValueError):
+                                    print(f"etude: agents: {error}", file=sys.stderr, flush=True)
                                 selector.unregister(peer)
                                 peer.close()
                                 peers.remove(peer)
                                 break
-                            else:
-                                _add_socket_batch(
-                                    batches, _send_peer(peer), request, time.monotonic() - started
-                                )
+                            _add_socket_batch(
+                                batches, _send_peer(peer), request, time.monotonic() - started
+                            )
                             if not select.select([peer], [], [], 0.0)[0]:
                                 break
                 flushed = batches.flush(wait_seconds)
