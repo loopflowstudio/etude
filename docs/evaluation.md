@@ -260,6 +260,10 @@ retention.
   above `max_batch` rows runs alone. An engine can choose smaller batches
   when its model needs a hard limit. Every match in the process shares one `Forward`
   object per checkpoint, engines can group ready rows by forward identity.
+- Size the engine's slots to the panel. Each process takes matches as it has
+  free slots, so a slot count near the whole panel puts every game's host work
+  on one or two cores while the GPU waits for requests. Fewer slots spread
+  matches across more processes.
 - Yield `(match, tables)` or `(match, Result(...))` with the match object
   returned by `take`. Yield as each slot finishes so it can backfill
   without waiting for stragglers.
