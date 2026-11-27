@@ -542,7 +542,7 @@ def _inference_loop(
                 _write_batches(report, flushed)
     except BaseException as error:
         stopped_cleanly = False
-        cause = f"{type(error).__name__}: {explain(error)}"
+        cause = explain(error)
         print(f"etude: agents: {cause}", file=sys.stderr, flush=True)
     finally:
         if report is not None:
