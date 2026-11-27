@@ -55,7 +55,7 @@ from etude.eval.resources import (
     resources,
 )
 from etude.eval.result import Result, Tables
-from etude.eval.run import Terminated
+from etude.eval.run import EvalRun, Terminated
 from etude.eval.tournament import evaluating, played
 from etude.experiment import observe, state_of
 from etude.jobs import (
@@ -79,7 +79,7 @@ from etude.records import (
     RunRecord,
     RunSubmission,
 )
-from etude.run import sync
+from etude.run import Run, sync
 from etude.spec import Job, RunRequest
 from etude.storage import DirectoryStorage, default_root
 from etude.train.read import read_all
@@ -1296,8 +1296,6 @@ def test_a_game_failure_retains_in_flight_outcomes_and_resume_skips_successes(
             matches[1].key: ("done", False),
             matches[2].key: ("failed", retry),
         }
-        if retry:
-            expected[matches[3].key] = ("failed", True)
         assert records == expected
         assert db.sql("select count(*) from scores").fetchone() == (1,)
         assert db.sql("select state from runs").fetchall() == [("failed",)]
@@ -2171,6 +2169,7 @@ async def code_only_vector_slots(
                 os._exit(3)
             if match.config.error == "stop":
                 os.kill(os.getppid(), signal.SIGTERM)
+                signal.pause()
                 return
             if match.config.error == "retry":
                 yield match, RetryRequested("fixture slot retry")
@@ -2232,6 +2231,112 @@ def test_interrupted_phase_keeps_completed_tournament_finished(
         stream.tournament, experiment="grouped", enter=stream.enter, directory=tmp_path
     )
     assert len(interrupted.new) == len(interrupted.failed) == len(interrupted.retry) == 3
+
+
+async def fail_first_stream_match(
+    matches: Matches[VectorRules],
+) -> AsyncIterator[tuple[Match[VectorRules], Exception]]:
+    for match, _ in await matches.take(1):
+        yield match, ValueError("fixture stream error")
+        raise ValueError("fixture stream error")
+
+
+@pytest.mark.parametrize(
+    ("first_streaming", "interruption"),
+    [(False, "stop"), (False, "exit"), (True, "stop"), (True, "exit"), (False, "teardown")],
+    ids=["phase-stop", "phase-crash", "stream-stop", "stream-crash", "teardown"],
+)
+def test_interruption_leaves_abandoned_matches_unplayed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    first_streaming: bool,
+    interruption: str,
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
+    monkeypatch.setenv("ETUDE_RUN_ADDRESS", "grouped/interrupted")
+    players = (checkpoint("left"), checkpoint("right"))
+    agents = Agents(load=load_vector) if first_streaming else Agents()
+    broken = EvalJob(
+        tournament=RoundRobin(
+            name="broken", environment=environment("grouped"), config=VectorRules(), games=3
+        ),
+        enter=players,
+        play=None if first_streaming else fails_game,
+        play_many=fail_first_stream_match if first_streaming else None,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    later = EvalJob(
+        tournament=RoundRobin(
+            name="later",
+            environment=environment("grouped"),
+            config=VectorRules(error="" if interruption == "teardown" else interruption),
+            games=3,
+            base_seed=1,
+        ),
+        enter=players,
+        play_many=code_only_vector_slots,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    if interruption == "teardown":
+        put = DirectoryStorage.put
+
+        def fail_later_report(storage: DirectoryStorage, key: str, data: bytes) -> None:
+            if key.startswith("game-") and GameReport.model_validate_json(data).tournaments == (
+                "later",
+            ):
+                raise OSError("fixture could not write the final report")
+            put(storage, key, data)
+
+        monkeypatch.setattr(DirectoryStorage, "put", fail_later_report)
+    selected = group(broken, later)
+    error, detail = {
+        "stop": (Terminated, "received SIGTERM"),
+        "exit": (RetryRequested, "game process exited"),
+        "teardown": (RetryRequested, "game report .* could not be retained"),
+    }[interruption]
+    with pytest.raises(error, match=detail):
+        hold_group(selected, directory=tmp_path)
+    if first_streaming:
+        assert "direct inference for broken, later (play_many); 1 game process" in (
+            capfd.readouterr().err
+        )
+
+    root = tmp_path / "grouped/interrupted"
+    for spec, state in zip(
+        selected.evaluations,
+        ("failed", "stopped" if interruption == "stop" else "failed"),
+        strict=True,
+    ):
+        outcome = root / spec.address / "outcome.json"
+        assert RunOutcome.model_validate_json(outcome.read_bytes()).state == state
+    first = played(broken.tournament, experiment="grouped", enter=players, directory=tmp_path)
+    assert [match.index for match in first.failed] == [0]
+    assert {match.index for match in first.new} == {1, 2}
+    assert not first.retry
+    second = played(later.tournament, experiment="grouped", enter=players, directory=tmp_path)
+    if interruption == "teardown":
+        assert len(second.delivered) == 3
+    else:
+        assert len(second.failed) == len(second.retry) == 3
+
+
+def test_a_stop_on_the_final_take_leaves_the_tournament_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def stop_after_last_match(run: EvalRun) -> bool:
+        return len(run.done) == len(run.matches)
+
+    monkeypatch.setattr(Run, "should_stop", property(stop_after_last_match))
+    selected = group(job("finished", None))
+    (result,) = hold_group(selected, directory=tmp_path)
+    assert result.played == 1
+    outcome = tmp_path / selected.evaluations[0].address / "outcome.json"
+    assert RunOutcome.model_validate_json(outcome.read_bytes()).state == "finished"
 
 
 @pytest.mark.parametrize("crash", [False, True])

@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -215,10 +215,11 @@ class EvalRun(Run):
                 found += block.matches
         return outcomes(found)
 
-    def fail_pending(self, error: RetryRequested) -> bool:
-        """Record retryable failures for unfinished matches and report whether any were found."""
+    def fail_pending(self, error: RetryRequested, matches: Iterable[Match] | None = None) -> bool:
+        """Record retryable failures for unrecorded matches in the given set or the whole run."""
+        candidates = self.matches if matches is None else matches
         affected = False
-        for match in self.matches:
+        for match in candidates:
             if match.key not in self.done and match.key not in self._failed:
                 self._stage_failure(match, str(error), retry=True)
                 affected = True
@@ -649,21 +650,17 @@ def play_together(
 
     def fail_held(each: Playing, held: dict[str, Match], error: BaseException) -> None:
         matches = list(held.values())
-        held.clear()
-        if not matches and not each.streaming:
-            if each.pending:
-                matches = [each.pending.popleft()]
-            else:
-                return
+        if not matches and not each.streaming and each.pending:
+            matches = [each.pending[0]]
         matches = [
             match
             for match in matches
             if match.key not in each.run._failed and match.key not in each.run.done
         ]
         if each.streaming:
-            each.pending.clear()
             # A broken stream fails the tournament even after releasing its last match.
             remember_failure(each, each.run._record_failure(matches, error))
+            each.pending.clear()
             return
         for match in matches:
             try:
@@ -783,26 +780,28 @@ def play_together(
                 nonlocal stopping
                 if isinstance(message, Take):
                     each = child.plays[message.stream]
-                    if not stopping and each.run.should_stop:
+                    if not stopping and each.pending and each.run.should_stop:
                         stopping = True
                     granted: list[Match] = []
                     if not stopping and message.count > 0:
                         held = child.held.setdefault(message.stream, {})
                         while each.pending and len(granted) < message.count:
-                            match = each.pending.popleft()
-                            if match.key in each.run._failed or match.key in each.run.done:
-                                continue
-                            held[match.key] = match
-                            granted.append(match)
+                            match = each.pending[0]
+                            if match.key not in each.run._failed and match.key not in each.run.done:
+                                held[match.key] = match
+                                granted.append(match)
+                            each.pending.popleft()
                     child.pipe.send(Grant(tuple(granted)))
                 elif isinstance(message, Outcome):
                     each = child.plays[message.stream]
-                    match = child.held[message.stream].pop(message.match_key)
-                    accept(each, match, message)
+                    held = child.held[message.stream]
+                    # A retry during acceptance still belongs to this grant.
+                    accept(each, held[message.match_key], message)
+                    del held[message.match_key]
                 elif isinstance(message, StreamEnd):
                     each = child.plays[message.stream]
                     fail_checkpoints(message.loading_failures)
-                    held = child.held.pop(message.stream, {})
+                    held = child.held.get(message.stream, {})
                     if message.error is not None:
                         fail_held(each, held, message.error)
                     elif held:
@@ -817,6 +816,7 @@ def play_together(
                             {},
                             RuntimeError("play_many returned without taking pending matches"),
                         )
+                    child.held.pop(message.stream, None)
                 elif isinstance(message, Done):
                     fail_checkpoints(message.loading_failures)
                     record_report(message.report)
@@ -828,7 +828,8 @@ def play_together(
                     if isinstance(message.error, RetryRequested):
                         raise message.error
                     for index, each in enumerate(child.plays):
-                        fail_held(each, child.held.pop(index, {}), message.error)
+                        fail_held(each, child.held.get(index, {}), message.error)
+                        child.held.pop(index, None)
                     child.done = True
                     child.close_pipe()
                 else:
@@ -881,13 +882,18 @@ def play_together(
                                 break
                             handle_message(child, message)
                         child.process.join()
-                        exitcode = child.process.exitcode
+                        if not child.done or child.process.exitcode != 0:
+                            raise RetryRequested("game process exited before returning its match")
+                        live.remove(child)
                         child.process.close()
                         child.close_pipe()
-                        live.remove(child)
-                        if not child.done or exitcode != 0:
-                            raise RetryRequested("game process exited before returning its match")
                     spawn_ready()
+            except RetryRequested:
+                # Keep unreturned grants eligible for retry after the children are reaped.
+                for child in live:
+                    for index, held in child.held.items():
+                        child.plays[index].pending.extend(held.values())
+                raise
             finally:
                 for child in live:
                     if child.process.is_alive():
@@ -912,9 +918,10 @@ def play_together(
     except RetryRequested as error:
         affected = False
         for each in plays:
-            if each.run.fail_pending(error):
+            if each.run.fail_pending(error, each.pending):
                 each.failure = error
                 affected = True
+            each.pending.clear()
         # A teardown error can have no match to attach to.
         if not affected:
             raise

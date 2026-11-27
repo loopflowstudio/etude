@@ -266,10 +266,11 @@ with evaluating(
   `run.play_many(play_many)` to carry on.
   A launched retry resumes automatically. Matches already delivered to any
   of `storages` are skipped, even on a machine with an empty disk.
-  A retryable phase error is returned for each tournament with unfinished
-  matches so completed tournaments can close as finished. The group raises
+  A retryable phase error is returned for each tournament with queued or
+  in-flight matches. Matches dropped from the queue after a permanent failure
+  remain unplayed. The group raises
   `Terminated` after closing its members when a stop interrupted them.
-  A teardown error with no unfinished matches propagates directly.
+  A teardown error with no queued or in-flight matches propagates directly.
 - **Progress.** Each stored match prints one line to stderr:
   `etude: RUN: 12/36 matches played, 220s elapsed`.
 - **Storage.** Stored matches are sealed into blocks every five minutes (or

@@ -32,8 +32,8 @@ failure recovery requires.
   NVIDIA hardware. Your loader must honor the thread environment and choose
   its device. A batch allowance
   does not guarantee GPU memory residency. If a game process crashes during
-  play, unfinished matches are recorded as retryable failures. Completed
-  matches and the finished status of completed tournaments are retained.
+  play, queued and in-flight matches are recorded as retryable failures.
+  Tournaments that already finished or failed keep their status.
 - Direct inference isolates loaded models on the inference thread, but a game
   module that defines `load` (or imports the same stateful module) still shares
   Python module globals with it inside one interpreter. The in-flight read-only

@@ -360,9 +360,10 @@ return {"scores": [{"seat": 0, "won": True}, {"seat": 1, "won": False}]}
 
 A successful match is reused across an experiment's tournaments in the same
 environment. If a game process exits unexpectedly or a wait for results expires,
-unfinished matches can retry and completed tournaments keep their `finished`
-status. A stop records `stopped` for the group and the tournaments it interrupts.
-Ordinary game failures require `--retry-failed`.
+queued and in-flight matches can retry. A stop records `stopped` for the group
+and the tournaments it interrupts. Tournaments that already finished or failed
+keep their status. Matches dropped from the queue after an ordinary game
+failure remain unplayed. Retrying the recorded failure requires `--retry-failed`.
 
 An undecodable request or reply on shared inference closes that game process's
 connection and fails its pending forwards. Other game processes keep playing.
