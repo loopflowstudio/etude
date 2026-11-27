@@ -11,21 +11,18 @@ import tempfile
 from pathlib import Path
 
 from etude.launch.ssh import (
-    AddRequest,
     EncodedOutput,
     HeldRequest,
     HoldRequest,
-    LogsRequest,
     OutputRequest,
     RemoteCall,
     RemoteReply,
-    SessionRequest,
     StartRequest,
-    StopRequest,
 )
+from etude.launch.ssh_boot import _safe_relative, _safe_segment
 from etude.launch.startup import ProcessStart
 from etude.launch.storage.disk import DirectoryJournal
-from etude.launch.storage.files import digest, write
+from etude.launch.storage.files import digest, write, write_bytes
 
 
 def invoke(call: RemoteCall) -> RemoteReply:
@@ -33,30 +30,14 @@ def invoke(call: RemoteCall) -> RemoteReply:
     journal = DirectoryJournal(root)
     request = call.request
     match request:
-        case StartRequest() | AddRequest():
-            for name, body in request.files.items():
-                target = root / request.session / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(base64.b64decode(body))
-    match request:
         case StartRequest():
+            session = _safe_segment(request.session, "session")
+            home = root / session
+            staged = [(_safe_relative(home, name), body) for name, body in request.files.items()]
+            for target, body in staged:
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                write_bytes(target, base64.b64decode(body))
             return _start(root, request)
-        case AddRequest():
-            added = root / request.session / "work"
-            added.mkdir(exist_ok=True)
-            if not (added / f"{request.work.attempt}.json").exists():
-                write(added / f"{request.work.attempt}.json", request.work.model_dump_json())
-            return RemoteReply()
-        case SessionRequest(action="started"):
-            return RemoteReply(started=journal.started(request.session))
-        case SessionRequest(action="ended"):
-            return RemoteReply(ended_at=journal.ended(request.session))
-        case SessionRequest(action="end"):
-            return RemoteReply(ended_at=journal.end(request.session))
-        case SessionRequest(action="finish"):
-            return RemoteReply(ended_at=journal.finish(request.session))
-        case SessionRequest(action="observe"):
-            return RemoteReply(observation=journal.observe(request.session))
         case HeldRequest():
             try:
                 held = journal.held(request.run, request.key)
@@ -71,13 +52,6 @@ def invoke(call: RemoteCall) -> RemoteReply:
                 {key: base64.b64decode(body) for key, body in request.folder.items()},
             )
             return RemoteReply()
-        case StopRequest():
-            journal.stop(request.session, request.attempt)
-            return RemoteReply()
-        case LogsRequest():
-            return RemoteReply(
-                stream=journal.logs(request.session, request.attempt, producer=request.producer)
-            )
         case OutputRequest():
             with tempfile.TemporaryDirectory() as directory:
                 path = journal.fetch(

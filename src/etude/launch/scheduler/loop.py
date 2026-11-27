@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import subprocess
 import time
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import ExitStack
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import chain
@@ -40,12 +42,11 @@ from etude.identity import resume_conflicts, run_address
 from etude.launch import source
 from etude.launch.commands import ProviderKind
 from etude.launch.database import Database
-from etude.launch.errors import LaunchError, ProviderUnavailable
+from etude.launch.errors import LaunchError, ProviderUnavailable, Refused
 from etude.launch.executor import Execution, ProviderService
 from etude.launch.logging import bounded
 from etude.launch.provisioner.machines import (
     Allocation,
-    Refused,
     Safeguards,
     creation_guard,
 )
@@ -71,6 +72,8 @@ from etude.launch.records import (
     MachineTemplate,
     Offer,
     OnDemand,
+    Outcome,
+    Phase,
     Pool,
     Provider,
     Quote,
@@ -124,6 +127,53 @@ _JOB_LOG_SECONDS = 30.0
 # A log read without a supply's `log_seconds`: one stalled bucket must not hold
 # the pass that ends every other machine at its deadline.
 _LOG_SECONDS = 30.0
+_PACE_MIN = 1.0
+_PACE_MAX = 10.0
+
+
+@dataclass(frozen=True)
+class _PaceState:
+    """Scheduler-acted state compared between wait passes: no clocks or spend."""
+
+    runs: tuple[tuple[str, Phase, Outcome | None, str | None, str | None], ...]
+    finishing: tuple[str, ...]
+
+
+class Pacer:
+    """Delay between wait passes: fixed `every`, or 1 s doubling to cap while state is steady."""
+
+    def __init__(self, every: float | None = None, *, idle_max: float | None = None) -> None:
+        if every is not None and (not math.isfinite(every) or every <= 0):
+            raise ValueError("every must be positive and finite, or None")
+        self._every = every
+        self._idle_max = _PACE_MAX if idle_max is None else idle_max
+        self._previous: _PaceState | None = None
+        self._interval = _PACE_MIN
+
+    def delay(self, state: _PaceState | None) -> float:
+        if self._every is not None:
+            return self._every
+        cap = (
+            self._idle_max
+            if state is not None and not state.runs and not state.finishing
+            else _PACE_MAX
+        )
+        if self._previous is None or state != self._previous:
+            self._interval = _PACE_MIN
+        else:
+            self._interval = min(self._interval * 2, cap)
+        self._previous = state
+        return self._interval
+
+
+def _pace_state(statuses: Sequence[Status], ending: Sequence[Session]) -> _PaceState:
+    return _PaceState(
+        runs=tuple(
+            (status.run, status.phase, status.outcome, status.attempt, status.machine)
+            for status in statuses
+        ),
+        finishing=tuple(session.id for session in ending),
+    )
 
 
 def _limit_usd(job: Job) -> Decimal:
@@ -153,7 +203,13 @@ def _id() -> str:
     return uuid4().hex[:12]
 
 
-def _refused(session: Session) -> str:
+def _refused(session: Session, *, owned: bool = False) -> str:
+    if owned:
+        return (
+            f"machine refused ({session.machine}): {session.refusal}"
+            if session.refusal is not None
+            else f"machine refused ({session.machine})"
+        )
     return (
         f"provider refused: {session.refusal}"
         if session.refusal is not None
@@ -863,11 +919,15 @@ class Scheduler:
                     )
             for name in names:
                 self._confirm_ends(self._store.supply(name))
-            placements = self._capacity(records)
+            remaining_records = list(records)
+            excluded_machines: set[str] = set()
+            excluded_sessions: set[str] = set()
+            placements = self._capacity(remaining_records)
             made: list[Session] = []
             attempts: list[RunAttempt] = []
             try:
-                for placement in placements:
+                while placements:
+                    placement = placements.pop(0)
                     existing = placement.session
                     machine, price = placement.machine, placement.rate.usd_per_hour
                     self._check_locks(names)
@@ -895,21 +955,39 @@ class Scheduler:
                             session = _new_session(_id(), supply, machine, now)
                         self._store.plan(session, (), rented, rental, launch=launch)
                         made.append(session)
-                        if rented is not None:
+                        if rented is not None or (machine is not None and machine.kind == "ssh"):
                             # Boot an empty inbox. No executable work leaves before
                             # the entire first wave has confirmed capacity.
-                            self._create(session, now, idle=True, budget_cap=wave_cap)
+                            self._create(
+                                session,
+                                now,
+                                idle=True,
+                                budget_cap=wave_cap if rented is not None else None,
+                            )
                             session = self._store.session(session.id)
                             if session.provider_id is None:
+                                if rented is None and session.refused_at is not None:
+                                    excluded_machines.add(session.machine)
+                                    try:
+                                        placements = self._capacity(
+                                            remaining_records,
+                                            excluded_machines=excluded_machines,
+                                            excluded_sessions=excluded_sessions,
+                                        )
+                                        continue
+                                    except LauncherError:
+                                        pass
                                 if attempts:
                                     break  # keep confirmed placements; later runs stay queued
-                                reason = "create reply unknown"
-                                if session.refused_at is not None:
-                                    reason = _refused(session)
+                                reason = (
+                                    _refused(session, owned=rented is None)
+                                    if session.refused_at is not None
+                                    else "create reply unknown"
+                                )
                                 raise LauncherError(
                                     f"cannot launch on {placement.supply!r}: {reason};"
                                     " etude queue would wait"
-                                )
+                                ) from None
                     else:
                         session = self._store.session(existing.id)
                         if not self._live(session, now):
@@ -917,6 +995,7 @@ class Scheduler:
                                 "rented machine expired during launch; etude queue would wait"
                             )
                     self._store.link_launch(launch, session.id)
+                    excluded_sessions.add(session.id)
                     held = len(self._store.attempts(session=session.id))
                     observed = self._store.rental_for(session) if price is None else None
                     share_price = (
@@ -951,6 +1030,8 @@ class Scheduler:
                                 added=session.provider_id is not None,
                             )
                         )
+                    placed_ids = {planned.run.id for planned in placement.runs}
+                    remaining_records = [r for r in remaining_records if r.id not in placed_ids]
                 self._check_locks(names)
                 if any(
                     not self._live(self._store.session(a.session), self._clock()) for a in attempts
@@ -978,9 +1059,9 @@ class Scheduler:
                     self._check_locks(names)
                     if session.claimed_at is None:
                         self._create(session, self._clock())
-                    else:
-                        self._observe(session, self._clock())
-                except (Stale, OSError, LauncherError, StorageUnavailable) as error:
+                    elif attempt.added:
+                        self._hand(session, attempt)
+                except (Stale, OSError, LauncherError, StorageUnavailable, Refused) as error:
                     self._diagnose(
                         "work delivery",
                         "delivery pending",
@@ -993,14 +1074,19 @@ class Scheduler:
     def _capacity(
         self,
         records: Sequence[RunRecord],
+        *,
+        excluded_machines: Collection[str] = (),
+        excluded_sessions: Collection[str] = (),
     ) -> list[Placement]:
         """Choose the first wave, checking all limits before spending.
 
         A chosen machine's free slots fill before another is taken. Machines
-        with free slots come first, then the pool's free machines, then rentals
-        from the on-demand, up to its remaining machine capacity.
-        Runs left over wait in the queue. Nothing is claimed here.
-        Both quote and admission pass records for one pool/on-demand target.
+        with free slots come first, then unrefused free machines of the pool,
+        then rentals from the on-demand up to its remaining machine capacity,
+        then recently refused free machines of the pool only when nothing else
+        could place any work. Runs left over wait in the queue. Nothing is
+        claimed here. Both quote and admission pass records for one
+        pool/on-demand target.
         """
         placements: list[Placement] = []
         target = Target(pool=records[0].launch.pool, rent=records[0].launch.rent)
@@ -1075,6 +1161,8 @@ class Scheduler:
             if supply is None:
                 continue
             for session, free in self._open_sessions(supply, now):
+                if session.id in excluded_sessions:
+                    continue
                 if not pending:
                     break
                 rental = self._store.rental_for(session)
@@ -1086,10 +1174,10 @@ class Scheduler:
                     rental or HourlyRate(usd_per_hour=Decimal(0)),
                     rental=rental,
                 )
-        if pool is not None:
-            used: set[str] = set()
+        used: set[str] = set(excluded_machines)
+        if pool is not None and pending:
             while pending:
-                owned = self._free_owned(pool, now, excluded=used)
+                owned = self._free_owned(pool, now, excluded=used, allow_refused=False)
                 if owned is None:
                     reason = self._trouble.get(pool.name, reason)
                     break
@@ -1097,8 +1185,6 @@ class Scheduler:
                 place(pool, pool.slots, owned, None, HourlyRate(usd_per_hour=Decimal(0)))
         if ondemand is not None and pending:
             first = len(placements)
-            requested_machines = (len(pending) + ondemand.slots - 1) // ondemand.slots
-            work = sum(budgets[key].seconds for key in pending)
             while pending:
                 offer = self._rentable(ondemand, additional=len(placements) - first)
                 if offer is None:
@@ -1115,6 +1201,13 @@ class Scheduler:
                     break
             if pending and len(placements) > first:
                 # Only runs still waiting after the wave can fund extra machine time.
+                placed_runs = [p.run for placement in placements[first:] for p in placement.runs]
+                requested_machines = (
+                    len(placed_runs) + len(pending) + ondemand.slots - 1
+                ) // ondemand.slots
+                work = sum(budgets[r.id].seconds for r in placed_runs) + sum(
+                    budgets[key].seconds for key in pending
+                )
                 machines = max(
                     len(placements) - first,
                     min(requested_machines, ondemand.max_machines - self._in_use(ondemand)),
@@ -1129,6 +1222,13 @@ class Scheduler:
                     placements[index] = placements[index].extend(
                         target_seconds, waiting_cap, increment
                     )
+        if pool is not None and not placements:
+            while pending:
+                owned = self._free_owned(pool, now, excluded=used, allow_refused=True)
+                if owned is None:
+                    break
+                used.add(owned.name)
+                place(pool, pool.slots, owned, None, HourlyRate(usd_per_hour=Decimal(0)))
         if not placements:
             if underfunded:
                 reason = "job dollars do not cover the hours"
@@ -1159,23 +1259,36 @@ class Scheduler:
         """Runs oldest first, filtered without advancing execution. `done` includes history."""
         return tuple(
             r
-            for r in self._store.runs(experiment=experiment, job=job)
+            for r in self._store.runs(experiment=experiment, job=job, unfinished=not done)
             if done or not self.read(r.id).done
         )
 
-    def wait(self, *runs: str, every: float = 1.0, timeout: float | None = None) -> list[Status]:
+    def _unfinished_statuses(self) -> list[Status]:
+        return [
+            status
+            for r in self._store.runs(unfinished=True)
+            if not (status := self.read(r.id)).done
+        ]
+
+    def _pace_snapshot(self, runs: Sequence[str] = ()) -> _PaceState:
+        active = [self.read(run) for run in runs] if runs else self._unfinished_statuses()
+        return _pace_state(active, self._store.finishing_sessions(runs))
+
+    def wait(
+        self, *runs: str, every: float | None = None, timeout: float | None = None
+    ) -> list[Status]:
         """Work until the selected runs and their requested machine shutdowns settle.
 
         With no runs named, work until nothing launched is left unfinished. That
         is the loop to leave running so a queue keeps moving.
         """
+        pacer = Pacer(every)
         give_up = None if timeout is None else self._clock() + timedelta(seconds=timeout)
         while True:
             self.tick()
             statuses = [self.read(run) for run in runs]
-            unfinished = not all(status.done for status in statuses)
-            if not runs:
-                unfinished = bool(self.runs())
+            active = statuses if runs else self._unfinished_statuses()
+            unfinished = not all(status.done for status in statuses) if runs else bool(active)
             ending = self._store.finishing_sessions(runs)
             if not unfinished and not ending:
                 return statuses
@@ -1185,7 +1298,10 @@ class Scheduler:
                         "machines still finishing: " + ", ".join(s.machine for s in ending)
                     )
                 raise TimeoutError("runs still running: " + ", ".join(runs))
-            self._sleep(every)
+            delay = pacer.delay(_pace_state(active, ending) if every is None else None)
+            if give_up is not None:
+                delay = min(delay, max(0.0, (give_up - self._clock()).total_seconds()))
+            self._sleep(delay)
 
     def cancel(self, run: str) -> Status:
         record = self._store.run(run)
@@ -1461,7 +1577,7 @@ class Scheduler:
             if superseded:
                 reason = "explicit resume"
             elif refused:
-                reason = _refused(session)
+                reason = _refused(session, owned=rental is None)
             else:
                 reason = f"retrying after {last.cause or last.outcome}"
             return seen.model_copy(update={"reason": reason})
@@ -1543,19 +1659,32 @@ class Scheduler:
                     self._store.record_finish(idle, now)
             except (OSError, LauncherError, StorageUnavailable):
                 continue  # cleanup retained its error and remains unconfirmed
-        self._confirm_ends(supply)
-        for session in self._store.unsettled_sessions():
-            if session.supply == supply.name and session.claimed_at is None:
-                self._create(session, now)
+        if isinstance(supply, OnDemand):
+            self._confirm_ends(supply)
+        attempted: set[str] = set()
+        while True:
+            refused = False
+            for session in self._store.unsettled_sessions():
+                if (
+                    session.supply == supply.name
+                    and session.claimed_at is None
+                    and session.id not in attempted
+                ):
+                    attempted.add(session.id)
+                    refused |= self._create(session, now)
+            if not (isinstance(supply, Pool) and refused):
+                break
+            self._store.check_lock(supply.name)
+            self._plan(supply, now)
 
     def _confirm_ends(self, supply: Supply) -> None:
         """Settle only shutdowns already requested; never place work or decide to end a rental."""
         for session in self._store.finishing_sessions(supply=supply.name):
             self._store.check_lock(supply.name)
-            if isinstance(supply, Pool) and session.started_at is None:
-                continue  # _observe retries the host fence without loading its client.
             try:
-                if self._service(session).finish(session.id) is not None:
+                if isinstance(supply, Pool):
+                    self._end_session(session)
+                elif self._service(session).finish(session.id) is not None:
                     self._end_session(session)
             except (OSError, LauncherError, StorageUnavailable):
                 continue  # the existing cleanup path retains uncertainty for a later pass
@@ -1616,7 +1745,16 @@ class Scheduler:
                 self._store.check_lock(supply.name)
                 waiting.remove(planned.run)
                 held = self._store.session(held.id)
-                self._hand(held, attempt)
+                try:
+                    self._hand(held, attempt)
+                except (OSError, LauncherError, StorageUnavailable, Refused) as error:
+                    self._diagnose(
+                        "work delivery",
+                        "delivery pending",
+                        error,
+                        session=held.id,
+                        attempt=attempt.id,
+                    )
         while waiting:
             if isinstance(supply, Pool):
                 owned = self._free_owned(supply, now)
@@ -1628,7 +1766,10 @@ class Scheduler:
                 session = _new_session(_id(), supply, owned, now)
                 rented, rental = None, None
             else:
-                refused = self._store.recent_refusal(supply.name, now - timedelta(minutes=15))
+                recent = self._store.recent_refusals(
+                    supply.name, now - timedelta(minutes=15), limit=1
+                )
+                refused = recent[0] if recent else None
                 if refused is not None and refused.refused_at is not None:
                     # Post-assign ceiling refusals allocate and tear down a real VM; back off longer.
                     pause = (
@@ -1696,23 +1837,48 @@ class Scheduler:
         return batch
 
     def _free_owned(
-        self, pool: Pool, now: datetime, *, excluded: set[str] | None = None
+        self,
+        pool: Pool,
+        now: datetime,
+        *,
+        excluded: set[str] | None = None,
+        allow_refused: bool = False,
     ) -> Machine | None:
-        """A machine of the pool with no session or unfinished run, and not expired.
+        """A machine of the pool with no session or unfinished run, not expired or recently refused.
 
+        With `allow_refused=True` (explicit `launch`/`quote`), prefers unrefused
+        machines and falls back to a recently refused one instead of pausing it.
         Its cost is already committed, so it never limits placement.
         """
         busy = {s.machine for s in self._store.unsettled_sessions() if s.supply == pool.name}
         busy |= excluded or set()
+        refused: dict[str, Session] = {}
+        for session in self._store.recent_refusals(pool.name, now - timedelta(seconds=60)):
+            refused.setdefault(session.machine, session)
+        blocked: Session | None = None
+        fallback: Machine | None = None
         for machine in self._store.machines(pool.name):
             if (
-                machine.name not in busy
-                and not machine.expired(now)
-                and not self._store.machine_busy(machine.name)
+                machine.name in busy
+                or machine.expired(now)
+                or self._store.machine_busy(machine.name)
             ):
-                self._trouble.pop(pool.name, None)
-                return machine
-        self._trouble[pool.name] = "no free machine"
+                continue
+            if machine.name in refused:
+                candidate = refused[machine.name]
+                if blocked is None or (candidate.refused_at or now) > (blocked.refused_at or now):
+                    blocked = candidate
+                if fallback is None:
+                    fallback = machine
+                continue
+            self._trouble.pop(pool.name, None)
+            return machine
+        if allow_refused and fallback is not None:
+            self._trouble.pop(pool.name, None)
+            return fallback
+        self._trouble[pool.name] = (
+            _refused(blocked, owned=True) if blocked is not None else "no free machine"
+        )
         return None
 
     def _offer(self, ondemand: OnDemand) -> Offer:
@@ -1909,20 +2075,23 @@ class Scheduler:
         *,
         idle: bool = False,
         budget_cap: Decimal | None = None,
-    ) -> None:
+    ) -> bool:
+        """Create a planned session; return whether the host or provider refused it."""
         self._store.check_lock(session.supply)
         try:
             packet = self._packet(session)
         except _RELAY_WAITS as error:
             self._await_relay(session, error)
-            return
+            return False
+        if idle:
+            packet = packet.model_copy(update={"kept": True})
         if not packet.work and not packet.kept:
             self._store.confirm_ended(session, now)  # every attempt ended undelivered
-            return
+            return False
         try:
             self._store.claim(session, self._clock())
         except Stale:
-            return  # someone else holds the right to create it
+            return False  # someone else holds the right to create it
         session = self._store.session(session.id)
         packet = packet.model_copy(update={"startup_deadline": session.startup_deadline})
         service = self._service(session)
@@ -1941,17 +2110,21 @@ class Scheduler:
             if seconds is not None and seconds <= 0:
                 raise Refused("startup or rental deadline reached before creation")
             with creation_guard(check), limit_time(seconds):
-                provider_id = service.create(
-                    packet.model_copy(update={"kept": True}) if idle else packet
-                )
+                provider_id = service.create(packet)
         except Refused as error:
+            owned = self._store.rental_for(session) is None
             self._diagnose(
-                "machine create", "provider refused; no machine acquired", error, session=session.id
+                "machine create",
+                "machine refused; no session started"
+                if owned
+                else "provider refused; no machine acquired",
+                error,
+                session=session.id,
             )
             self._store.record_refusal(session, now, sanitize(str(error)) or "no reason given")
             for attempt in self._store.attempts(session=session.id):
                 self._store.fail_before_start(attempt, CAPACITY_REFUSED, now)
-            return
+            return True
         except Exception as error:  # noqa: BLE001
             self._diagnose(
                 "machine create",
@@ -1961,13 +2134,15 @@ class Scheduler:
             )
             # No answer is not a refusal: a rental may exist. It is looked up by its
             # identity on later ticks and is never asked for a second time.
-            return
+            return False
         try:
             self._store.record_provider_id(session, provider_id)
             self._diagnose("machine create", "machine confirmed", session=session.id)
-            self._creation_facts(self._store.session(session.id), now, budget_cap=budget_cap)
+            if session.autorun or self._store.machine(session.machine).kind != "ssh":
+                self._creation_facts(self._store.session(session.id), now, budget_cap=budget_cap)
         except Stale:
             pass  # another process already found the rental by its identity
+        return False
 
     def _observed_rental(
         self,
@@ -2172,7 +2347,9 @@ class Scheduler:
         """Add placed work to a kept session; while its run's folder cannot be relayed, it waits.
 
         A placed attempt not yet in the session's journal is handed again on
-        each pass, so the wait ends when the holding machine answers.
+        each pass, so the wait ends when the holding machine answers. A 1-slot
+        owned session receives `finish=True` with its work so it exits and
+        cleans up on its own without a later scheduler pass.
         """
         try:
             work = self._work(attempt)
@@ -2180,7 +2357,11 @@ class Scheduler:
             self._await_relay(session, error, attempt=attempt.id)
             return
         if work is not None:
-            self._service(session).add(session.id, work)
+            finish = (
+                self._store.rental_for(session) is None
+                and self._store.supply(session.supply).slots == 1
+            )
+            self._service(session).add(session.id, work, finish=finish)
 
     def _await_relay(
         self, session: Session, error: Exception, *, attempt: str | None = None
@@ -2234,6 +2415,12 @@ class Scheduler:
         for event in seen.transfers:
             self._store.retain_transfer(event.model_copy(update={"machine": session.machine}))
         return seen
+
+    def _all_cancelled(self, attempts: Sequence[RunAttempt]) -> bool:
+        open_attempts = [a for a in attempts if a.outcome is None]
+        return bool(open_attempts) and all(
+            self._store.run(a.run).launch.cancel_requested_at is not None for a in open_attempts
+        )
 
     def _observe(self, session: Session, now: datetime) -> None:
         if session.ended_at is not None:
@@ -2300,17 +2487,63 @@ class Scheduler:
         progress = {entry.attempt: entry for entry in seen.progress}
         for attempt in attempts:
             if attempt.outcome is None:
-                if seen.alive and attempt.added and attempt.id not in progress:
+                if attempt.added and attempt.id not in progress:
                     self._store.check_lock(session.supply)
-                    self._hand(session, attempt)
-                self._record(
-                    session,
-                    attempt,
-                    progress.get(attempt.id),
-                    seen.alive,
-                    now,
-                    unknown_start=seen.start_unknown,
-                )
+                    try:
+                        self._hand(session, attempt)
+                    except Refused as error:
+                        if rental is None and not any(
+                            a.outcome is None and (a.started_at is not None or a.id in progress)
+                            for a in attempts
+                        ):
+                            self._diagnose(
+                                "work delivery",
+                                "host refused work delivery; ending session",
+                                error,
+                                session=session.id,
+                                attempt=attempt.id,
+                            )
+                            self._end_session(
+                                session,
+                                refused=sanitize(str(error)) or "no reason given",
+                            )
+                            return
+                        self._diagnose(
+                            "work delivery",
+                            "host refused work delivery; leaving started attempts running"
+                            if rental is None
+                            else "host refused work delivery",
+                            error,
+                            session=session.id,
+                            attempt=attempt.id,
+                        )
+                try:
+                    self._record(
+                        session,
+                        attempt,
+                        progress.get(attempt.id),
+                        seen.alive,
+                        now,
+                        unknown_start=seen.start_unknown,
+                    )
+                except Refused as error:
+                    if rental is None and self._all_cancelled(attempts):
+                        self._diagnose(
+                            "cancellation",
+                            "host refused stop request; ending session",
+                            error,
+                            session=session.id,
+                            attempt=attempt.id,
+                        )
+                        self._end_session(session)
+                        return
+                    self._diagnose(
+                        "cancellation",
+                        "host refused stop request; leaving other attempts running",
+                        error,
+                        session=session.id,
+                        attempt=attempt.id,
+                    )
         for entry in seen.progress:
             self._retain_job_log(session, entry, now)
         open_attempts = any(a.outcome is None for a in self._store.attempts(session=session.id))
@@ -2341,7 +2574,7 @@ class Scheduler:
     def _log_seconds(self, session: Session) -> float:
         return self._store.supply(session.supply).log_seconds or _LOG_SECONDS
 
-    def _end_session(self, session: Session) -> None:
+    def _end_session(self, session: Session, *, refused: str | None = None) -> None:
         """Confirm shutdown, retain final evidence, then settle any unfinished attempts."""
         self._store.check_lock(session.supply)
         service = self._service(session)
@@ -2378,7 +2611,10 @@ class Scheduler:
                     False,
                     gone,
                     unknown_start=final.start_unknown,
+                    refused=refused is not None,
                 )
+        if refused is not None:
+            self._store.record_refusal(self._store.session(session.id), self._clock(), refused)
 
     def _record(
         self,
@@ -2389,6 +2625,7 @@ class Scheduler:
         now: datetime,
         *,
         unknown_start: bool = False,
+        refused: bool = False,
     ) -> None:
         started = None if seen is None else seen.started_at
         if started is not None and attempt.started_at is None:
@@ -2428,21 +2665,31 @@ class Scheduler:
             )
         elif not alive:
             # Confirmed shutdown fences the old attempt before a replacement is allowed.
-            cause: Cause = (
-                "machine_lost_before_start"
-                if attempt.started_at is None and not unknown_start
-                else "create_unconfirmed"
-                if attempt.started_at is None
-                else "machine_lost"
-            )
-            if cause == "machine_lost":
-                supply = self._store.supply(session.supply)
-                if isinstance(supply, OnDemand) and supply.template.spot:
-                    cause = "spot_machine_lost"
+            cause: Cause | None
+            if run.launch.cancel_requested_at is not None:
+                outcome, cause = "cancelled", None
+                message = "attempt cancelled; session ended without final receipt"
+            elif refused and attempt.started_at is None:
+                outcome, cause = "lost", CAPACITY_REFUSED
+                message = "attempt lost (capacity_refused); host refused work delivery"
+            else:
+                outcome = "lost"
+                cause = (
+                    "machine_lost_before_start"
+                    if attempt.started_at is None and not unknown_start
+                    else "create_unconfirmed"
+                    if attempt.started_at is None
+                    else "machine_lost"
+                )
+                if cause == "machine_lost":
+                    supply = self._store.supply(session.supply)
+                    if isinstance(supply, OnDemand) and supply.template.spot:
+                        cause = "spot_machine_lost"
+                message = f"attempt lost ({cause}); final exit status not received"
             self._store.finish(
                 attempt,
                 now,
-                "lost",
+                outcome,
                 cause=cause,
                 clocks=seen.clocks if seen else attempt.clocks,
                 outputs=seen.outputs if seen else attempt.outputs,
@@ -2450,12 +2697,7 @@ class Scheduler:
                 tally=seen.tally if seen else attempt.tally,
                 writers=seen.writers if seen else attempt.writers,
             )
-            self._diagnose(
-                "execution",
-                f"attempt lost ({cause}); final exit status not received",
-                session=session.id,
-                attempt=attempt.id,
-            )
+            self._diagnose("execution", message, session=session.id, attempt=attempt.id)
         else:
             if seen is not None:
                 self._store.record_progress(attempt, seen.clocks, seen.tally, seen.writers)

@@ -13,8 +13,15 @@ const num = v => v == null ? "—" : Math.abs(v) >= 1e9 ? (v / 1e9).toPrecision(
 const fmt = v => v == null ? "—" : v !== 0 && Math.abs(v) < 1e-3 ? v.toExponential(2) : num(v);
 const scoreFormat = v => v == null ? "—" : Math.abs(v) >= 0.01 && Math.abs(v) < 100 ? v.toFixed(2) : fmt(v);
 const scoreCount = (c, score) => `${c.rows} ${score?.unit || "rows"} · ${c.matches} matches`;
+const matchStatus = (failed, unplayed) => [
+  failed && `${failed} match${failed > 1 ? "es" : ""} failed`,
+  unplayed && `${unplayed} not yet played`,
+].filter(Boolean).join(", ");
 // Keep partial-seed notices; format full seed means with the chart's precision.
-const pointMeta = (p, format = fmt) => p.meta ?? (p.seeds ? `mean of ${p.seeds.length} seeds: ${p.seeds.map(format).join(", ")}` : "");
+const pointMeta = (p, format = fmt) => {
+  const base = p.meta ?? (p.seeds ? `mean of ${p.seeds.length} seeds: ${p.seeds.map(format).join(", ")}` : "");
+  return p.note ? (base ? `${base} · ${p.note}` : p.note) : base;
+};
 const pointText = (p, format = fmt) => format(p.y) + (p.lo != null ? ` · ${p.intervalLabel || (p.seeds ? "seed range" : "95% interval")} ${format(p.lo)}–${format(p.hi)}` : "");
 const dur = s => s >= 3600 ? (s / 3600).toFixed(2) + " h" : s >= 60 ? (s / 60).toFixed(1) + " min" : s.toFixed(s < 1 ? 2 : 1) + " s";
 const when = ms => new Date(ms).toLocaleString([], {month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
@@ -74,6 +81,19 @@ function isolated(ys) {
   return found;
 }
 
+// uPlot joins over `undefined` but clears a `null` only back to the x values beside it, so a
+// joined run beside a break would draw a stub toward it: such a run joins the break instead.
+function breakBeside(ys) {
+  for (let i = 0; i < ys.length; i++) {
+    if (ys[i] !== undefined) continue;
+    let end = i;
+    while (end < ys.length && ys[end] === undefined) end++;
+    if (ys[i - 1] === null || ys[end] === null) ys.fill(null, i, end);
+    i = end;
+  }
+  return ys;
+}
+
 // series: [{label, color, dotted, opacity, width, faint, pointFill, points: [{x, y, lo, hi, missing, skip, gap, meta}]}]
 // A missing point is null to uPlot, so its line breaks: an evaluation that did not happen is
 // never bridged. A skipped point is no point of the line (undefined, which uPlot joins over).
@@ -99,7 +119,7 @@ function line(host, series, o = {}) {
   if (o.checkpoint != null) positions.add(o.checkpoint);
   const xs = [...positions].sort((a, b) => a - b);
   const maps = series.map(s => new Map(s.points.filter(p => p.x != null).map(p => [p.x, p])));
-  const column = (m, f) => xs.map(x => { const p = m.get(x); if (!p || p.skip) return undefined; return drawn(p) ? f(p) : null; });
+  const column = (m, f) => breakBeside(xs.map(x => { const p = m.get(x); if (!p || p.skip) return undefined; return drawn(p) ? f(p) : null; }));
   const muted = css("--muted"), grid = css("--grid"), ink2 = css("--ink-2");
   const data = [xs], spec = [{}], bands = [], whiskers = [];
   series.forEach((s, i) => {
@@ -214,11 +234,12 @@ function model(D) {
   const placed = i => D.players[i].placed;
   const lineOf = i => D.players[i].line ?? "";
   const positioned = indices.filter(i => D.players[i].run == null && placed(i));
-  const atClocks = [...new Set(positioned.flatMap(i => Object.keys(D.players[i].at)))];
+  const extPoints = (D.points || []).filter(p => p.run == null && p.at && Object.keys(p.at).length);
+  const atClocks = [...new Set([...positioned.flatMap(i => Object.keys(D.players[i].at)), ...extPoints.flatMap(p => Object.keys(p.at))])];
   // The clock a line's checkpoints are keyed by: a job's first, else the one the report names.
   const alignClock = T.clocks.find(c => !BUILT_IN.includes(c.name))?.name ?? (atClocks.includes(R.clock) ? R.clock : atClocks[0]);
   // Named lines in order, then the checkpoints of no line. A colour follows the curve's position, never its rank.
-  const named = [...new Set(positioned.map(lineOf))].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b));
+  const named = [...new Set([...positioned.map(lineOf), ...extPoints.map(p => p.line ?? "")])].sort((a, b) => (a === "") - (b === "") || a.localeCompare(b));
   // A curve's key identifies it on the page: a job's name, or its line. Only external
   // curves carry a line; the empty string is the unnamed learner.
   const curves = [...T.jobs.map(j => ({...j, key: j.name, members: j.runs.map(runMember)})), ...named.map(line => {
@@ -242,19 +263,21 @@ function model(D) {
     marks.get(member).push({...m, key: runMark(m.run, m.ordinal)});
   }
   const lineMarks = new Map();
-  for (const i of positioned) {
-    const at = D.players[i].at, line = lineOf(i), member = lineMember(line).key;
-    if (at[alignClock] == null) continue;
-    const key = lineMark(line, at);
+  const addLineMark = (line, at) => {
+    if (at[alignClock] == null) return;
+    const member = lineMember(line).key, key = lineMark(line, at);
     if (!lineMarks.has(member)) lineMarks.set(member, new Map());
-    lineMarks.get(member).set(key, {key, line, at, align: at[alignClock], elapsed: null, pace: {}});
-  }
+    if (!lineMarks.get(member).has(key)) lineMarks.get(member).set(key, {key, line, at, align: at[alignClock], elapsed: null, pace: {}});
+  };
+  for (const i of positioned) addLineMark(lineOf(i), D.players[i].at);
+  for (const p of extPoints) addLineMark(p.line ?? "", p.at);
   for (const [member, got] of lineMarks) marks.set(member, [...got.values()].sort((a, b) => a.align - b.align));
   const markOf = (run, ordinal) => (marks.get(runMember(run).key) || []).find(m => m.ordinal === ordinal);
   // A value's own position (`at`, from `Player.at`) wins over its mark's, so no point disagrees with the page.
   const xAt = (m, v, c) => v.at?.[c] ?? m.at[c];
   // Per checkpoint, `value(mark)` gives {y, lo, hi, meta}, {missing, meta}, {skip, meta}
-  // for a checkpoint that is no point of this line, or nothing; `gap` says why a value is absent.
+  // for a checkpoint that is no point of this line, or nothing; `gap` marks the baseline
+  // for absent values, or `"failed"` on a scored point that still has failed matches.
   // A job's point needs every seed: seeds align on where each checkpoint stood on the run's
   // first clock, and average; the band is their range, or a single seed's own interval.
   // `some` keeps points only some seeds have, such as direct games one seed played.
@@ -288,9 +311,14 @@ function model(D) {
     if (new Set(got.map(([, v]) => v.inference).filter(v => v != null)).size > 1)
       return {x, key, missing: true, gap: "none", meta: "seeds played different inference variants; choose a seating"};
     const ys = got.map(([, v]) => v.y), y = mean(ys);
-    return got.length > 1
-      ? {x, key, y, lo: Math.min(...ys), hi: Math.max(...ys), seeds: ys}
-      : {x, key, y, lo: got[0][1].lo, hi: got[0][1].hi, meta: got[0][1].meta};
+    const gap = got.some(([, v]) => v.gap === "failed") ? "failed" : undefined;
+    if (got.length > 1) {
+      const failed = got.reduce((a, [, v]) => a + (v.failed || 0), 0);
+      const unplayed = got.reduce((a, [, v]) => a + (v.unplayed || 0), 0);
+      const note = matchStatus(failed, unplayed);
+      return {x, key, y, lo: Math.min(...ys), hi: Math.max(...ys), seeds: ys, ...(gap && {gap}), ...(note && {note})};
+    }
+    return {x, key, y, lo: got[0][1].lo, hi: got[0][1].hi, meta: got[0][1].meta, ...(gap && {gap})};
   }
 
   // ---- evals: what compare computed
@@ -352,7 +380,13 @@ function model(D) {
     return {...subject, index: i};
   }
   function selName(s) {
-    if (Array.isArray(s)) return s.map(selName).join(" + ");
+    if (Array.isArray(s)) {
+      if (s.length > 3) {
+        const noun = s.every(p => p && !Array.isArray(p) && p.seating != null) ? "seatings" : "selections";
+        return `${selName(s[0])} … ${selName(s[s.length - 1])} (${s.length} ${noun})`;
+      }
+      return s.map(selName).join(" + ");
+    }
     const detail = s.seating ?? (s.tag != null ? `tagged ${s.tag}` : null);
     if (s.kind === "outside") return "matches outside a tournament";
     return s.tournament == null ? detail ?? "every tournament" : detail == null ? s.tournament : `${s.tournament} · ${detail}`;
@@ -402,11 +436,22 @@ function model(D) {
       const p = scored.get(`${sel}|${score}|${splitKey(split)}|${m.key}`);
       if (p) {
         const several = p.opponents.length > 1 ? `mean of ${p.opponents.length} · ` : "";
-        return {y: p.value, lo: p.interval?.[0], hi: p.interval?.[1], at: p.at, whole: p.whole, meta: `${scoreCount(p, D.scores?.[score])} · ${several}vs ${p.opponents.map(playerName).join(", ")}`};
+        const extra = matchStatus(p.failed, p.unplayed);
+        const tail = extra ? ` · ${extra}` : "";
+        return {
+          y: p.value, lo: p.interval?.[0], hi: p.interval?.[1], at: p.at, whole: p.whole,
+          meta: `${scoreCount(p, D.scores?.[score])} · ${several}vs ${p.opponents.map(playerName).join(", ")}${tail}`,
+          ...(p.failed && {gap: "failed", failed: p.failed}),
+          ...(p.unplayed && {unplayed: p.unplayed}),
+        };
       }
       const u = unseated.get(`${sel}|${m.key}`);
-      if (u) return {missing: true, gap: u.gap.missing === "not_yet" ? "pending" : "none", at: u.at, meta: missingText(u.gap)};
-      return gapOf(sel, m);
+      if (u) {
+        if (u.failed) return {missing: true, gap: "failed", at: u.at, whole: u.whole, meta: matchStatus(u.failed, u.unplayed)};
+        if (u.gap) return {missing: true, gap: u.gap.missing === "not_yet" ? "pending" : "none", at: u.at, whole: u.whole, meta: missingText(u.gap)};
+        if (u.unplayed) return {missing: true, gap: "pending", at: u.at, whole: u.whole, meta: `not yet played: ${u.unplayed} match${u.unplayed > 1 ? "es" : ""} eval_jobs(state) wants`};
+      }
+      return {skip: true, meta: "not in these matches"};
     };
   }
   // Each checkpoint's value in the requested matches: as seated, for a selection of seatings;

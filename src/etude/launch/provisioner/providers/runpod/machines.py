@@ -12,12 +12,11 @@ from decimal import Decimal
 
 from etude.deadline import limit_time
 from etude.errors import LauncherError
-from etude.launch.errors import ProviderUnavailable
+from etude.launch.errors import ProviderUnavailable, Refused
 from etude.launch.provisioner.machines import (
     Allocation,
     Bill,
     MachineRequest,
-    Refused,
     Safeguards,
     check_creation,
 )

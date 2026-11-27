@@ -1,5 +1,6 @@
 """Startup policy persists once and does not turn slowness into duplicate work."""
 
+import base64
 import os
 import sys
 import time
@@ -113,7 +114,20 @@ def test_detached_ssh_install_is_readable_cancellable_and_not_replayed(
     monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
     ssh_script = tmp_path / "ssh"
     # Avoid a login shell resetting PATH in this executable stand-in.
-    ssh_script.write_text('#!/bin/sh\nshift 2\nshift\nexec sh -c "$1"\n')
+    ssh_script.write_text(
+        "#!/bin/sh\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '    case "$1" in\n'
+        "        -G) printf 'connecttimeout none\\nserveraliveinterval 0\\n'; exit 0 ;;\n"
+        "        -o) shift 2 ;;\n"
+        "        --) shift; break ;;\n"
+        "        -*) shift ;;\n"
+        "        *) break ;;\n"
+        "    esac\n"
+        "done\n"
+        "shift\n"
+        'exec sh -c "$1"\n'
+    )
     ssh_script.chmod(0o700)
     monkeypatch.setattr("etude.launch.ssh.login_shell", lambda command: command)
     root = tmp_path / "remote"
@@ -134,9 +148,12 @@ def test_detached_ssh_install_is_readable_cancellable_and_not_replayed(
             time.sleep(0.01)
         assert calls.read_text().splitlines() == ["install"]
         bootstrap = LogsRequest(session=packet.session, producer="bootstrap")
-        assert "starting uv sync" in (ssh.call(bootstrap).log or "")
+        log = ssh.call(bootstrap).log
+        assert log is not None and log.body is not None
+        assert "starting uv sync" in base64.b64decode(log.body).decode()
         assert not ssh.call(SessionRequest(action="started", session=packet.session)).started
-        assert ssh.call(SessionRequest(action="end", session=packet.session)).ended_at is None
+        # One end stops the install and confirms it.
+        assert ssh.call(SessionRequest(action="end", session=packet.session)).ended_at is not None
     finally:
         gate.touch()
     latest = time.monotonic() + 5

@@ -313,6 +313,21 @@ def _iso(at: datetime | None) -> str | None:
 # SQLite scalars already match the model fields. Only JSON columns need
 # adapting; records own scalar validation.
 _RUNS = "SELECT r.* FROM runs r"
+_RETRYABLE_MARKS = ", ".join("?" for _ in RETRYABLE)
+_RETRYABLE_VALUES = tuple(sorted(RETRYABLE))
+_TRY_EXEMPT_MARKS = ", ".join("?" for _ in TRY_EXEMPT)
+_OPEN_ATTEMPT = "EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND a.outcome IS NULL)"
+_WAITING_RUN = (
+    "r.cancel_requested_at IS NULL "
+    "AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id "
+    "AND a.number > r.resume_after AND ("
+    "a.outcome IS NULL OR (a.outcome != 'stopped' AND "
+    f"(a.outcome != 'lost' OR a.cause NOT IN ({_RETRYABLE_MARKS})))))"
+)
+_RUN_TRIES = (
+    "(SELECT count(*) FROM attempts a WHERE a.run = r.id "
+    f"AND (a.cause IS NULL OR a.cause NOT IN ({_TRY_EXEMPT_MARKS})))"
+)
 
 
 def _run_from_row(row: sqlite3.Row) -> RunRecord:
@@ -468,11 +483,16 @@ class Database:
                         f"run {request.run!r} already admitted; choose --experiment NAME for a new run; "
                         "use --resume to carry on, or --resume --until CLOCK=TARGET to train further"
                     )
+                # An unsettled rental from a failed launch may be a paid machine; wait for its
+                # provider to settle it. An owned host's session never got the run's work and
+                # keeps the host busy itself, and settling it can wait on the host answering.
                 for previous in self.launches(request.run):
                     if previous.state in {"preparing", "admitting"} or (
                         previous.state != "admitted"
                         and any(
-                            session.refused_at is None and session.ended_at is None
+                            session.refused_at is None
+                            and session.ended_at is None
+                            and isinstance(self.supply(session.supply), OnDemand)
                             for session in self.launch_sessions(previous.id, acquired_only=True)
                         )
                     ):
@@ -940,19 +960,37 @@ class Database:
         return _run_from_row(row)
 
     def runs(
-        self, *, experiment: str | None = None, job: str | None = None
+        self,
+        *,
+        experiment: str | None = None,
+        job: str | None = None,
+        unfinished: bool = False,
     ) -> tuple[RunRecord, ...]:
         clauses: list[str] = []
-        values: list[str] = []
+        values: list[Fact] = []
         if experiment is not None:
             clauses.append("json_extract(r.spec, '$.experiment') = ?")
             values.append(experiment)
         if job is not None:
             clauses.append("(r.job = ? OR json_extract(r.spec, '$.name') = ?)")
             values.extend((job, job))
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        rows = self._db.execute(f"{_RUNS}{where} ORDER BY r.seq", values)
-        return tuple(_run_from_row(row) for row in rows)
+        if not unfinished:
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            rows = self._db.execute(f"{_RUNS}{where} ORDER BY r.seq", values)
+            return tuple(_run_from_row(row) for row in rows)
+        clauses.append(f"({_OPEN_ATTEMPT} OR ({_WAITING_RUN}))")
+        where = " WHERE " + " AND ".join(clauses)
+        candidates = self._db.execute(
+            f"""SELECT r.*,
+                  CASE WHEN {_OPEN_ATTEMPT} THEN -1 ELSE {_RUN_TRIES} END AS tries
+                FROM runs r{where} ORDER BY r.seq""",
+            (*TRY_EXEMPT, *values, *_RETRYABLE_VALUES),
+        ).fetchall()
+        return tuple(
+            run
+            for row in candidates
+            if (run := _run_from_row(row)).launch.spec.max_attempts > row["tries"]
+        )
 
     def waiting(self, supply: str) -> tuple[RunRecord, ...]:
         """Runs that may use this pool or on-demand and want a new attempt, oldest first.
@@ -961,20 +999,14 @@ class Database:
         confirmed infrastructure loss, with tries left. Capacity refusals and started
         attempts lost with spot machines spend no try. The launcher checks budgets.
         """
-        marks = ", ".join("?" for _ in RETRYABLE)
-        exempt = ", ".join("?" for _ in TRY_EXEMPT)
         rows = self._db.execute(
-            f"""SELECT r.*, (SELECT count(*) FROM attempts a WHERE a.run = r.id
-                  AND (a.cause IS NULL OR a.cause NOT IN ({exempt}))) AS tries
+            f"""SELECT r.*, {_RUN_TRIES} AS tries
                 FROM runs r
                 WHERE r.id IN (
                   SELECT id FROM runs WHERE pool = ? UNION SELECT id FROM runs WHERE rent = ?
-                ) AND r.cancel_requested_at IS NULL
-                AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.run = r.id AND a.number > r.resume_after AND (
-                  a.outcome IS NULL OR (a.outcome != 'stopped' AND
-                  (a.outcome != 'lost' OR a.cause NOT IN ({marks})))))
+                ) AND {_WAITING_RUN}
                 ORDER BY r.seq""",
-            (*TRY_EXEMPT, supply, supply, *sorted(RETRYABLE)),
+            (*TRY_EXEMPT, supply, supply, *_RETRYABLE_VALUES),
         ).fetchall()
         return tuple(
             run
@@ -1200,14 +1232,19 @@ class Database:
             )
         )
 
-    def recent_refusal(self, supply: str, since: datetime) -> Session | None:
-        """The newest refusal in this supply's retry pause, across scheduler starts."""
-        row = self._db.execute(
-            f"""{_SESSIONS} WHERE w.refusal IS NOT NULL AND w.refused_at > ? AND m.ondemand = ?
-                ORDER BY w.refused_at DESC LIMIT 1""",
-            (since.isoformat(), supply),
-        ).fetchone()
-        return None if row is None else _session_from_row(row)
+    def recent_refusals(
+        self, supply: str, since: datetime, *, limit: int | None = None
+    ) -> tuple[Session, ...]:
+        """Refusals of this pool or on-demand since `since`, newest first."""
+        sql = (
+            f"{_SESSIONS} WHERE w.refusal IS NOT NULL AND w.refused_at > ? "
+            "AND (m.pool = ? OR m.ondemand = ?) ORDER BY w.refused_at DESC"
+        )
+        params: tuple[Fact, ...] = (since.isoformat(), supply, supply)
+        if limit is not None:
+            sql += " LIMIT ?"
+            params += (limit,)
+        return tuple(_session_from_row(row) for row in self._db.execute(sql, params))
 
     def record_refusal(self, session: Session, at: datetime, reason: str | None) -> None:
         self._change(

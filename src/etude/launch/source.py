@@ -23,6 +23,15 @@ from etude.identity import run_address
 from etude.records import RunRecord
 from etude.spec import RunRequest, SourcePosition
 
+_COMMIT = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def validate_commit(commit: str) -> str:
+    """Reject path separators or traversal segments in a frozen source commit identifier."""
+    if not _COMMIT.fullmatch(commit) or commit in (".", ".."):
+        raise LauncherError(f"invalid source commit {commit!r}")
+    return commit
+
 
 def stored(repo: str, commit: str) -> Path:
     key = hashlib.sha256((repo + "\0" + commit).encode()).hexdigest()
@@ -31,6 +40,7 @@ def stored(repo: str, commit: str) -> Path:
 
 def retain(repo: str, commit: str, body: bytes) -> None:
     """Publish a complete archive once; concurrent clients must agree on its bytes."""
+    validate_commit(commit)
     target = stored(repo, commit)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.NamedTemporaryFile(dir=target.parent) as temporary:
@@ -44,7 +54,11 @@ def retain(repo: str, commit: str, body: bytes) -> None:
 
 
 def resolve(repo: str, revision: str) -> str:
-    if stored(repo, revision).is_file():
+    if (
+        _COMMIT.fullmatch(revision)
+        and revision not in (".", "..")
+        and stored(repo, revision).is_file()
+    ):
         return revision
     found = subprocess.run(
         ["git", "-C", repo, "rev-parse", "--verify", revision + "^{commit}"],

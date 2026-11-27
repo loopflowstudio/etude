@@ -12,13 +12,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
+from etude.launch.errors import Refused
 from etude.launch.provisioner.machines import (
     Allocation,
     Bill,
     MachineRequest,
     Machines,
     OwnedMachine,
-    Refused,
     Safeguards,
     check_creation,
 )
@@ -58,7 +58,7 @@ class Execution(Protocol):
         """
         ...
 
-    def add(self, session_id: str, work: Work) -> None:
+    def add(self, session_id: str, work: Work, *, finish: bool = False) -> None:
         """Hand one more piece of work to a kept session. Safe to repeat."""
         ...
 
@@ -115,7 +115,7 @@ class Execution(Protocol):
 
 
 class Journal(Protocol):
-    def add(self, session_id: str, work: Work) -> None: ...
+    def add(self, session_id: str, work: Work, *, finish: bool = False) -> None: ...
     def stage(self, repo: str, commit: str) -> None: ...
     def observe(self, session_id: str) -> Observation: ...
     def held(self, run: str, key: str | None = None) -> dict[str, bytes]: ...
@@ -237,8 +237,8 @@ class Executor:
     def finish(self, session_id: str) -> datetime | None:
         return self.journal.finish(session_id)
 
-    def add(self, session_id: str, work: Work) -> None:
-        self.journal.add(session_id, work)
+    def add(self, session_id: str, work: Work, *, finish: bool = False) -> None:
+        self.journal.add(session_id, work, finish=finish)
 
     def stage(self, repo: str, commit: str) -> None:
         self.journal.stage(repo, commit)

@@ -4,24 +4,46 @@ Both readers and workers use these file operations; reading a journal never
 loads the process that executes attempts.
 """
 
+import contextlib
 import hashlib
 import os
+import secrets
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from etude.errors import LauncherError
 from etude.launch.records import Output
+from etude.launch.usage import Transfer
 from etude.out import OutFile, OutFiles
 from etude.records import RunProgress
 
 RESULT = "etude-result.json"
 
 
+def write_bytes(path: Path, data: bytes) -> None:
+    """Whole file or no file: readers never see half of it."""
+    partial = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.partial")
+    fd = -1
+    try:
+        fd = os.open(str(partial), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view) :]
+        os.close(fd)
+        fd = -1
+        partial.replace(path)
+    except BaseException:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        with contextlib.suppress(OSError):
+            partial.unlink(missing_ok=True)
+        raise
+
+
 def write(path: Path, text: str) -> None:
     """Whole file or no file: readers never see half of it."""
-    partial = path.with_name(path.name + ".partial")
-    partial.write_text(text)
-    partial.replace(path)
+    write_bytes(path, text.encode())
 
 
 def append_usage(session: Path, raw: str) -> None:
@@ -40,11 +62,34 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(file, "sha256").hexdigest()
 
 
+def parse_result(raw: bytes | str | None) -> RunProgress:
+    """Validate job-owned progress once; unreadable or partial reports mean no progress."""
+    if raw is None:
+        return RunProgress()
+    try:
+        return RunProgress.model_validate_json(raw, strict=True)
+    except ValueError:
+        return RunProgress()
+
+
+def parse_transfers(raw: str | None) -> tuple[Transfer, ...]:
+    """Decode complete lines of a session's `usage.jsonl`, skipping lines still being written."""
+    if raw is None:
+        return ()
+    events: list[Transfer] = []
+    for line in raw.splitlines():
+        try:
+            events.append(Transfer.model_validate_json(line))
+        except ValueError:
+            continue
+    return tuple(events)
+
+
 def read_result(outputs: Path) -> RunProgress:
     """Validate job-owned progress once; unreadable or partial reports mean no progress."""
     try:
-        return RunProgress.model_validate_json((outputs / RESULT).read_bytes(), strict=True)
-    except (OSError, ValueError):
+        return parse_result((outputs / RESULT).read_bytes())
+    except OSError:
         return RunProgress()
 
 
