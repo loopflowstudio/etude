@@ -93,7 +93,7 @@ def test_code_players_build_author_objects_without_an_agent_process(
         }
     )
     assert hold_group(group(selected), directory=tmp_path)[0].played == 1
-    assert "agents: started" not in capfd.readouterr().err
+    assert "agents: shared inference" not in capfd.readouterr().err
     assert not (tmp_path / "grouped/artifacts/agents/batches.json").exists()
 
 

@@ -136,9 +136,10 @@ with evaluating(
   inside `play`. Group `all` holds every seat; a player may sit in two seats.
 - **Game processes and placement.** Placement is decided once per eval run or
   group from its active tournament shape (`play` pending counts, `streaming`
-  count, `max_batch`) into a frozen `Placement(bus: Literal["local", "socket"]
-  | None, processes: int, game_threads: int, agent_threads: int,
-  games_per_process: int, grouped: bool = False)`:
+  count, `max_batch`). `Placement` owns the topology, the selection reason,
+  the checkpoint byte allowance per inference owner, and the startup line.
+  The checkpoint allowance starts from `Agents.memory_gb` or half of host
+  memory.
   - All-`play_many` with loader (`bus="local"`, `processes=1`,
     `game_threads=max(1, cpus - 1)`, `agent_threads=0`, `games_per_process=0`,
     `grouped=True`): 1 direct game process on every host (skipping the GPU

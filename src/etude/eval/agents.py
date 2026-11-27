@@ -32,7 +32,7 @@ from etude.eval.bus import (
     arrays,
     normalize_inputs,
 )
-from etude.eval.resources import Placement, Resources, agent_bytes, seconds_left
+from etude.eval.resources import Placement, Resources, seconds_left
 
 __all__ = ("Forward", "ModelForward", "ForwardError")
 
@@ -349,10 +349,7 @@ def running_agents(
     definition: AgentLoader,
     checkout: str | None,
     resources: Resources,
-    tournaments: Sequence[str],
     placement: Placement,
-    *,
-    streaming: bool = False,
 ) -> Iterator[AgentProcess]:
     if definition.load is None:
         raise ValueError("an agent process needs a checkpoint loader")
@@ -366,7 +363,7 @@ def running_agents(
             definition.load,
             checkout,
             definition.max_batch,
-            agent_bytes(definition.memory_gb),
+            placement.checkpoint_bytes,
             placement.agent_threads,
             child,
             resources,
@@ -383,17 +380,6 @@ def running_agents(
             parent.recv()
         except EOFError as error:
             raise RetryRequested("agent process exited during startup") from error
-        print(
-            f"etude: agents: started for {', '.join(tournaments)}; "
-            + (
-                ""
-                if streaming
-                else f"{placement.processes} processes, {placement.games_per_process} games each; "
-            )
-            + f"{placement.agent_threads} inference threads",
-            file=sys.stderr,
-            flush=True,
-        )
         yield agent
     finally:
         failed = sys.exc_info()[0] is not None

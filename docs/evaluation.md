@@ -196,7 +196,7 @@ process on every host—CPU, Apple Silicon, or NVIDIA GPU—and prints its place
 to stderr:
 
 ```text
-etude: agents: direct inference in 1 game process, slots requested by play_many; 15 threads
+etude: agents: direct inference for vector (all tournaments use play_many); 1 game process, slots requested by play_many; 15 inference threads
 ```
 
 Direct-mode `threads` sets the game process's model and BLAS thread environment

@@ -46,7 +46,7 @@ from etude.eval.agents import Forward, ForwardError, SocketForwardBus
 from etude.eval.bus import BusReport, ForwardBus, ForwardCall
 from etude.eval.composition import build_agents
 from etude.eval.records import Match, _MatchConfig
-from etude.eval.resources import Resources, agent_bytes, seconds_left
+from etude.eval.resources import Resources, seconds_left
 from etude.eval.result import Result, Tables
 from etude.records import Record
 
@@ -586,7 +586,7 @@ async def _serve_stream(
     checkout: str | None,
     build: Function | None,
     load: Function | None,
-    memory: int | None,
+    checkpoint_bytes: int,
     max_batch: int,
     artifacts: Path | None,
     imports: _ImportTracker,
@@ -673,12 +673,11 @@ async def _serve_stream(
                     # Process entry point: only direct-inference games import the local bus.
                     from etude.eval.batching import LocalForwardBus  # noqa: PLC0415
 
-                allowance = agent_bytes(None) if memory is None else memory
                 bus = LocalForwardBus(
                     load,
                     checkout=checkout,
                     max_batch=max_batch,
-                    memory=allowance,
+                    memory=checkpoint_bytes,
                     artifacts=artifacts,
                 )
             elif agents is not None:
@@ -819,12 +818,12 @@ def run_game_process(
     resources: Resources,
     streams: Sequence[Stream],
     *,
+    checkpoint_bytes: int,
     threads: int = 1,
     agents: str | None = None,
     checkout: str | None = None,
     build: Function | None = None,
     load: Function | None = None,
-    memory: int | None = None,
     max_batch: int = 32,
 ) -> None:
     """Spawn target for one game process; configures child environment before author imports."""
@@ -840,7 +839,7 @@ def run_game_process(
                     checkout=checkout,
                     build=build,
                     load=load,
-                    memory=memory,
+                    checkpoint_bytes=checkpoint_bytes,
                     max_batch=max_batch,
                     artifacts=resources.artifacts,
                     imports=imports,

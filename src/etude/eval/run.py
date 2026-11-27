@@ -69,7 +69,7 @@ from etude.eval.records import (
     outcomes,
     player_checkpoints,
 )
-from etude.eval.resources import Placement, Resources, agent_bytes, place, resources, seconds_left
+from etude.eval.resources import Resources, place, resources, seconds_left
 from etude.eval.result import EvalResult as EvalResult
 from etude.eval.result import Result as Result
 from etude.eval.result import Row
@@ -553,25 +553,6 @@ class _GameProcess:
             self.pipe_closed = True
 
 
-def _startup_banner(placement: Placement, live: int, *, streaming: bool, mixed: bool) -> str:
-    """Summarize spawned game processes for direct-inference or `play_many` runs."""
-    game_noun = "game" if placement.games_per_process == 1 else "games"
-    if streaming:
-        capacity = "slots requested by play_many"
-        if mixed:
-            capacity += f"; play holds up to {placement.games_per_process} {game_noun} each"
-    else:
-        capacity = f"{placement.games_per_process} {game_noun} each"
-    direct = placement.bus == "local"
-    prefix = "agents: direct inference in " if direct else ""
-    noun = "game process" if live == 1 else "game processes"
-    threads = ""
-    if direct:
-        unit = "thread" if placement.game_threads == 1 else "threads"
-        threads = f"; {placement.game_threads} {unit}" + ("" if live == 1 else " each")
-    return f"etude: {prefix}{live} {noun}, {capacity}{threads}"
-
-
 def _retain(name: str, report: GameReport, directory: Path) -> None:
     """Keep per-process reports beside group batches, or under a standalone run's artifacts."""
     try:
@@ -700,37 +681,24 @@ def play_together(
             for player in match.players
         )
     )
-    any_streaming = any(each.streaming for each in active_plays)
-    any_play = any(not each.streaming for each in active_plays)
+    streaming = sum(each.streaming for each in active_plays)
     max_batch = agents.max_batch if agents is not None else 32
     placement = place(
         [len(each.pending) for each in active_plays if not each.streaming],
-        sum(1 for each in active_plays if each.streaming),
+        streaming,
         agents=needs_loading,
         max_batch=max_batch,
         memory_gb=agents.memory_gb if agents is not None else None,
     )
     build = agents.build if agents is not None else None
     load = agents.load if placement.bus == "local" and agents is not None else None
-    memory = (
-        agent_bytes(agents.memory_gb) // placement.processes
-        if placement.bus == "local" and agents is not None and placement.processes > 0
-        else None
-    )
 
     try:
         with _terminable(), ExitStack() as agent_lifetime:
             agent_process: AgentProcess | None = None
             if placement.bus == "socket" and agents is not None:
                 agent_process = agent_lifetime.enter_context(
-                    running_agents(
-                        agents,
-                        checkout,
-                        resources,
-                        [each.tournament or each.run.name for each in active_plays],
-                        placement,
-                        streaming=any_streaming,
-                    )
+                    running_agents(agents, checkout, resources, placement)
                 )
             agent_address = agent_process.address if agent_process is not None else None
 
@@ -771,7 +739,7 @@ def play_together(
                                 "checkout": checkout,
                                 "build": build,
                                 "load": load,
-                                "memory": memory,
+                                "checkpoint_bytes": placement.checkpoint_bytes,
                                 "max_batch": max_batch,
                             },
                         )
@@ -872,14 +840,13 @@ def play_together(
 
                     try:
                         spawn_ready()
-                        if live and (any_streaming or placement.bus == "local"):
-                            print(
-                                _startup_banner(
-                                    placement, len(live), streaming=any_streaming, mixed=any_play
-                                ),
-                                file=sys.stderr,
-                                flush=True,
-                            )
+                        description = placement.describe(
+                            [each.tournament or each.run.name for each in active_plays],
+                            len(live),
+                            streaming=streaming > 0,
+                        )
+                        if description is not None:
+                            print(description, file=sys.stderr, flush=True)
                         while live:
                             left = seconds_left()
                             allowance = (

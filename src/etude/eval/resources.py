@@ -92,11 +92,6 @@ def memory_bytes() -> int:
     return physical
 
 
-def agent_bytes(memory_gb: float | None) -> int:
-    """Loaded-checkpoint bytes the agent process may hold: declared, or half of memory."""
-    return int(memory_gb * 1024**3) if memory_gb is not None else memory_bytes() // 2
-
-
 def seconds_left() -> float | None:
     """Seconds before the run's `ETUDE_DEADLINE`, never negative; None without one."""
     deadline = os.environ.get("ETUDE_DEADLINE")
@@ -123,14 +118,38 @@ def _has_gpu() -> bool:
 
 @dataclass(frozen=True)
 class Placement:
-    """Inference transport, game-process budget, thread budgets, concurrency and grouping."""
+    """Topology, thread budgets, and checkpoint bytes per inference owner."""
 
     bus: Literal["local", "socket"] | None
     processes: int
     game_threads: int
     agent_threads: int
     games_per_process: int
-    grouped: bool = False
+    grouped: bool
+    checkpoint_bytes: int
+    reason: str
+
+    def describe(self, tournaments: Sequence[str], live: int, *, streaming: bool) -> str | None:
+        """Describe the placement of the games that started."""
+        if not live or (self.bus is None and not streaming):
+            return None
+        process = "game process" if live == 1 else "game processes"
+        game = "game" if self.games_per_process == 1 else "games"
+        capacity = f"{self.games_per_process} {game} each"
+        if streaming:
+            slots = "slots requested by play_many"
+            capacity = slots if self.grouped else f"{slots}; play holds up to {capacity}"
+        games = f"{live} {process}, {capacity}"
+        if self.bus is None:
+            return f"etude: {games}"
+        mode = "shared" if self.bus == "socket" else "direct"
+        threads = self.agent_threads if self.bus == "socket" else self.game_threads
+        unit = "thread" if threads == 1 else "threads"
+        each = " each" if self.bus == "local" and live > 1 else ""
+        return (
+            f"etude: agents: {mode} inference for {', '.join(tournaments)} ({self.reason}); "
+            f"{games}; {threads} inference {unit}{each}"
+        )
 
 
 def place(
@@ -166,8 +185,15 @@ def place(
             agent_threads=0,
             games_per_process=0,
             grouped=False,
+            checkpoint_bytes=0,
+            reason="no pending matches",
         )
     cpus = available_cpus()
+    # One reservation covers the shared cache or all direct caches combined.
+    host_bytes = memory_bytes() if active_play or (agents and memory_gb is None) else 0
+    held = 0
+    if agents:
+        held = int(memory_gb * 1024**3) if memory_gb is not None else host_bytes // 2
     if not active_play:
         return Placement(
             bus="local" if agents else None,
@@ -176,9 +202,11 @@ def place(
             agent_threads=0,
             games_per_process=0,
             grouped=True,
+            checkpoint_bytes=held,
+            reason="all tournaments use play_many" if agents else "no checkpoints to load",
         )
     if not agents:
-        cap = min(cpus, max(1, memory_bytes() // GAME_BYTES))
+        cap = min(cpus, max(1, host_bytes // GAME_BYTES))
         return Placement(
             bus=None,
             processes=min(cap, active_streaming + sum(active_play)),
@@ -186,10 +214,11 @@ def place(
             agent_threads=0,
             games_per_process=1,
             grouped=False,
+            checkpoint_bytes=0,
+            reason="no checkpoints to load",
         )
     gpu = _has_gpu()
-    held = agent_bytes(memory_gb)
-    memory_processes = max(1, (memory_bytes() - held) // GAME_BYTES)
+    memory_processes = max(1, (host_bytes - held) // GAME_BYTES)
     cap = min(max(1, cpus - 1), memory_processes) if gpu else min(cpus, memory_processes)
     play_cap = min(max(1, cap - active_streaming), sum(active_play))
     games_per_process = min(math.ceil(max_batch / play_cap), max(active_play))
@@ -203,6 +232,8 @@ def place(
             agent_threads=max(1, cpus - processes),
             games_per_process=games_per_process,
             grouped=False,
+            checkpoint_bytes=held,
+            reason="NVIDIA GPU visible",
         )
     return Placement(
         bus="local",
@@ -211,6 +242,8 @@ def place(
         agent_threads=0,
         games_per_process=games_per_process,
         grouped=False,
+        checkpoint_bytes=held // processes,
+        reason="no NVIDIA GPU visible",
     )
 
 
