@@ -411,6 +411,36 @@ with evaluating(
   source recorded make one `Scores` per seating,
   ordered by name, numbers in order (`updates-900` before `updates-1000`).
 
+## Measuring CUDA evaluation
+
+Read `game-*.json` for matches played by each process and `batches.json` for
+rows per forward and time spent waiting for requests. For `play_many`, the
+engine's slot count determines how much of the panel each process can take.
+`max_batch` defaults to 32 rows and bounds how much the agent process merges.
+An oversized pre-collated request runs alone.
+
+On one RTX 4090, Manabot played the same 128-game float32 panel through
+Etude's synchronous API and through `play_many` with 64 slots per process.
+All 128 traces per checkpoint matched across the two callbacks. Two of the
+12 streaming processes played matches. The socket arm spent 30–38 seconds
+waiting for requests and 11–12 seconds in forwards.
+
+| Checkpoint | Sync games/hour | Streaming games/hour | Sync GPU busy | Streaming GPU busy |
+| --- | ---: | ---: | ---: | ---: |
+| Trained `w160l8` | 11,686 | 8,017 | 20.1% | 13.3% |
+| Seeded `w384l8` | 11,506 | 9,488 | 23.6% | 17.4% |
+
+Sync used Manabot `966e8ff296` and streaming used `fb1580b472`. These figures
+capture the combined changes to game stepping and Etude serving on one host.
+
+With `w384l8`, cutting the engine to 16 slots gave eight processes matches
+and raised streaming throughput to 17,995 games/hour at 33.1% GPU busy.
+Mean rows per forward fell from 8.25 to 6.37 as time waiting for requests
+fell from 30.3 to 5.6 seconds. The 64-slot arm also ran with `max_batch=64`
+and delivered 9,441 games/hour at the same mean rows per forward. Capping
+that 64-slot callback at four processes with `max_batch=32` delivered
+9,403 games/hour. Two processes received matches in both runs.
+
 ## Querying
 
 `statsdb(experiment, store)` gives each of your tables across every eval run of
