@@ -593,10 +593,11 @@ def play_together(
                 ]
                 if not affected:
                     continue
-                each.failure = (
+                remember_failure(
+                    each,
                     RetryRequested(failure.error)
                     if failure.retry
-                    else EtudeError("match_failed", 500, detail=failure.error)
+                    else EtudeError("match_failed", 500, detail=failure.error),
                 )
                 for match in affected:
                     each.run._stage_failure(match, failure.error, retry=failure.retry)
@@ -667,7 +668,7 @@ def play_together(
             except EtudeError as match_error:
                 if match_error.code != "match_failed":
                     raise
-                each.failure = match_error
+                remember_failure(each, match_error)
                 each.pending.clear()
 
     active_plays = [each for each in plays if each.pending]

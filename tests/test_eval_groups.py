@@ -1591,6 +1591,42 @@ def test_loader_failure_reaches_undispatched_matches_across_tournaments(
         db.close()
 
 
+async def asks_last_seat_first(match: Match, agents: Sequence[Forward]) -> Tables:
+    # The first forwards ask "transient", "transient" and "left": the retryable leaf fails first.
+    for agent in reversed(agents):
+        try:
+            await agent([1])
+        except ForwardError:
+            pass
+    return {"scores": [{"seat": 0, "score": 99}]}
+
+
+def mixed_retry_load(checkpoint: CheckpointRef) -> ModelForward:
+    if str(checkpoint.key) == "transient":
+        raise RetryRequested("fixture player unavailable")
+    if str(checkpoint.key) == "broken":
+        raise ValueError("fixture broken player")
+    return load(checkpoint)
+
+
+@pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
+def test_later_permanent_loader_failure_keeps_tournament_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
+    active = job("one", Agents(load=mixed_retry_load)).model_copy(
+        update={
+            "enter": (checkpoint("transient"), checkpoint("broken"), checkpoint("left")),
+            "play": asks_last_seat_first,
+        }
+    )
+    with pytest.raises(RetryRequested):
+        hold_group(group(active), directory=tmp_path)
+    found = played(active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path)
+    assert len(found.retry) >= 1
+    assert len(found.failed) == 3
+
+
 async def returns_before_loading(match: Match, agents: Sequence[Forward]) -> Tables:
     if any(player.name == "left" for player in match.players):
         return await plain(match, list(agents))
