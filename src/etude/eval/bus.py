@@ -80,16 +80,11 @@ class BusReport(Record):
 
 
 class ForwardBus(Protocol):
-    @property
-    def flight(self) -> Flight:
-        """Refcounted game-side flight locks shared with barrier staging."""
-        ...
-
     def bind(self, checkpoint: CheckpointRef) -> None:
         """Make `checkpoint` callable by key; binding twice is a no-op."""
 
     def submit(self, calls: Sequence[ForwardCall]) -> list[asyncio.Future[list[object]]]:
-        """Send `calls` as one unit; each future raises `ForwardError` on failure."""
+        """Send `calls` as one unit, holding inputs read-only even if an await is cancelled."""
 
     async def close(self) -> BusReport: ...
 
@@ -317,7 +312,7 @@ class _FlightStage:
 
     def add(self, call: ForwardCall) -> tuple[int, asyncio.Future[list[object]]]:
         """Lock `inputs`, reserve a request id and future, and record for commit/rollback."""
-        locked = self._book.flight.lock(call.inputs)
+        locked = self._book._flight.lock(call.inputs)
         request_id = self._book._reserve_id()
         future: asyncio.Future[list[object]] = self._loop.create_future()
         self._entries.append(_Flight(request_id, call.checkpoint, future, locked, self._sent_at))
@@ -326,13 +321,13 @@ class _FlightStage:
     def rollback_last(self) -> None:
         """Undo the most recently staged call (e.g. when its input packing failed)."""
         entry = self._entries.pop()
-        self._book.flight.unlock(entry.locked)
+        self._book._flight.unlock(entry.locked)
 
     def rollback(self) -> None:
         """Unlock every uncommitted staged call."""
         while self._entries:
             entry = self._entries.pop()
-            self._book.flight.unlock(entry.locked)
+            self._book._flight.unlock(entry.locked)
 
     def commit(
         self,
@@ -367,7 +362,7 @@ class _FlightBook:
 
     def __init__(self, make_error: Callable[[ForwardOutcome], BaseException]) -> None:
         self._make_error = make_error
-        self.flight = Flight()
+        self._flight = Flight()
         self._next_id = 0
         self._in_flight: dict[int, _Flight] = {}
         self.closed_error: _FlightError | None = None
@@ -411,7 +406,7 @@ class _FlightBook:
         entry = self._in_flight.pop(request_id, None)
         if entry is None:
             return
-        self.flight.unlock(entry.locked)
+        self._flight.unlock(entry.locked)
         self._answers += 1
         self._round_trip_seconds += time.monotonic() - entry.sent_at
         future = entry.future
@@ -426,7 +421,7 @@ class _FlightBook:
         if self.closed_error is None:
             self.closed_error = error
         for entry in self._in_flight.values():
-            self.flight.unlock(entry.locked)
+            self._flight.unlock(entry.locked)
             if not entry.future.done():
                 entry.future.set_exception(
                     error if isinstance(error, BaseException) else error(entry.checkpoint)

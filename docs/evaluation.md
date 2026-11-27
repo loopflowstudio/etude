@@ -196,7 +196,7 @@ game process on CPU, Apple Silicon, and NVIDIA GPU hosts. Etude prints the
 placement to stderr.
 
 ```text
-etude: agents: direct inference for vector (all tournaments use play_many); 1 game process, slots requested by play_many; 15 inference threads
+etude: agents: direct inference for vector (play_many); 1 game process, slots requested by play_many; 15 inference threads
 ```
 
 Direct-mode `threads` sets the game process's model and BLAS thread environment

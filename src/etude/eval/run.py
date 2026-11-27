@@ -699,6 +699,7 @@ def play_together(
         )
         build = agents.build if agents is not None else None
         load = agents.load if placement.bus == "local" and agents is not None else None
+        games_per_process = placement.games_per_process
 
         with ExitStack() as agent_lifetime:
             agent_process: AgentProcess | None = None
@@ -731,7 +732,7 @@ def play_together(
                     Stream(
                         tournament=each.tournament or each.run.name,
                         function=each.play,
-                        concurrency=None if streaming else placement.games_per_process,
+                        concurrency=games_per_process,
                     )
                     for each in targets
                 )
@@ -763,7 +764,9 @@ def play_together(
                             continue
                         active = sum(child.plays is targets for child in live)
                         needed = (
-                            1 if streaming else math.ceil(pending / placement.games_per_process)
+                            1
+                            if games_per_process is None
+                            else math.ceil(pending / games_per_process)
                         )
                         if active >= needed:
                             continue
@@ -830,9 +833,7 @@ def play_together(
             try:
                 spawn_ready()
                 description = placement.describe(
-                    [each.tournament or each.run.name for each in active_plays],
-                    len(live),
-                    streaming=streaming,
+                    [each.tournament or each.run.name for each in active_plays]
                 )
                 if description is not None:
                     print(description, file=sys.stderr, flush=True)

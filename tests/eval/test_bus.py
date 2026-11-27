@@ -739,6 +739,83 @@ def test_play_locks_inputs_immediately_on_call_before_barrier_flush(transport: _
             assert obs[0] == 42.0
             assert not readonly.flags.writeable
 
+            report = await bus.close()
+            assert report.calls == report.answers == 2
+            if transport == "local":
+                assert report.arrays == 3
+                assert report.arrays_copied == report.copied_bytes == 0
+                assert report.pickled == report.pickled_bytes == report.wire_bytes == 0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("transport", ["local", "socket"])
+def test_play_barrier_unlocks_inputs_when_submit_raises(transport: _Transport) -> None:
+    cp = checkpoint("play_submit_failure").checkpoint
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        return lambda inputs: ["ok" for _ in inputs]
+
+    async def run() -> None:
+        async with _open_bus(transport, load) as bus:
+            forwarder = _Forwarder(bus, max_batch=8)
+            forward = forwarder.bind(cp)
+            arr = np.arange(4, dtype=np.float32)
+            valid = forward([arr])
+            unbound = forwarder.call("unbound", [arr], rows=1)
+            assert not arr.flags.writeable
+
+            with pytest.raises(KeyError, match="unbound"):
+                await unbound
+            with pytest.raises(KeyError, match="unbound"):
+                await valid
+            assert arr.flags.writeable
+            assert await forward([arr]) == ["ok"]
+
+    asyncio.run(run())
+
+
+def test_play_barrier_keeps_in_flight_inputs_locked_if_close_cannot_join(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cp = checkpoint("play_close").checkpoint
+    entered = threading.Event()
+    release = threading.Event()
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        def forward(inputs: list[object]) -> list[object]:
+            entered.set()
+            release.wait(timeout=5.0)
+            return ["done" for _ in inputs]
+
+        return forward
+
+    async def run() -> None:
+        async with _open_bus("local", load) as bus:
+            forwarder = _Forwarder(bus, max_batch=8)
+            forward = forwarder.bind(cp)
+            running = np.arange(8, dtype=np.float32)
+            staged = np.arange(4, dtype=np.float32)
+            answer = forward([running])
+            try:
+                assert await asyncio.to_thread(entered.wait, 5.0)
+                forward([staged])
+                assert not staged.flags.writeable
+                forwarder.clear_pending()
+                assert staged.flags.writeable
+
+                with monkeypatch.context() as patch:
+                    patch.setattr("etude.eval.batching.seconds_left", lambda: 0.0)
+                    report = await bus.close()
+                assert report.calls == 1
+                assert report.answers == 0
+                assert not running.flags.writeable
+            finally:
+                release.set()
+
+            assert await asyncio.wait_for(answer, timeout=5.0) == ["done"]
+            assert running.flags.writeable
+
     asyncio.run(run())
 
 

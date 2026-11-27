@@ -43,7 +43,7 @@ from pydantic import Field
 from etude.call import Function
 from etude.errors import RetryRequested
 from etude.eval.agents import Forward, ForwardError, SocketForwardBus
-from etude.eval.bus import BusReport, ForwardBus, ForwardCall
+from etude.eval.bus import BusReport, Flight, ForwardBus, ForwardCall
 from etude.eval.composition import build_agents
 from etude.eval.records import Match, _MatchConfig
 from etude.eval.resources import Resources, seconds_left
@@ -277,6 +277,7 @@ class _Forwarder:
         self._eager = eager
         self._handles: dict[str, _BoundForward] = {}
         self._pending: dict[str, list[_PendingCall]] = {}
+        self._flight = Flight()
         self._flush_scheduled = False
         self._closing = False
         self._active_futures: set[asyncio.Future[list[object]]] = set()
@@ -329,10 +330,9 @@ class _Forwarder:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[list[object]] = loop.create_future()
         self._active_futures.add(future)
-        # Lock inputs immediately on the forward() call using the bus's shared
-        # flight table so `play` matches `play_many` with zero unlock gap across
-        # `_flush` handoff into `bus.submit`.
-        locked = self._bus.flight.lock(inputs)
+        # The barrier holds these locks until the bus answers, including when
+        # the game's await is cancelled while inference is still running.
+        locked = self._flight.lock(inputs)
         self._pending.setdefault(checkpoint, []).append(_PendingCall(inputs, rows, future, locked))
         if not self._flush_scheduled:
             self._flush_scheduled = True
@@ -347,7 +347,7 @@ class _Forwarder:
         self._flush_scheduled = False
         for calls in pending.values():
             for call in calls:
-                self._bus.flight.unlock(call.locked)
+                self._flight.unlock(call.locked)
                 self._active_futures.discard(call.future)
         for future in list(self._active_futures):
             if future.done():
@@ -387,18 +387,17 @@ class _Forwarder:
         except BaseException as error:
             for chunk, _ in grouped:
                 for call in chunk:
+                    self._flight.unlock(call.locked)
                     self._fail_future(call.future, error)
             return
-        finally:
-            for chunk, _ in grouped:
-                for call in chunk:
-                    self._bus.flight.unlock(call.locked)
         for (chunk, _), bus_future in zip(grouped, futures, strict=True):
             bus_future.add_done_callback(partial(self._on_answer, chunk))
 
     def _on_answer(
         self, chunk: list[_PendingCall], bus_future: asyncio.Future[list[object]]
     ) -> None:
+        for call in chunk:
+            self._flight.unlock(call.locked)
         if bus_future.cancelled():
             return
         raised = bus_future.exception()

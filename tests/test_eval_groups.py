@@ -638,8 +638,8 @@ def test_play_arity_and_removed_workers_are_refused(tmp_path: Path) -> None:
         (8, (1,), True, 32, None, ("local", 1, 7, 0, 1, True)),
         (1, (20,), True, 32, None, ("local", 1, 1, 0, 20, True)),
         (1, (20,), False, 32, None, (None, 1, 1, 0, 1, False)),
-        (8, (), True, 32, None, (None, 0, 1, 0, 0, False)),
-        (8, (0,), True, 32, None, (None, 0, 1, 0, 0, False)),
+        (8, (), True, 32, None, (None, 0, 1, 0, None, False)),
+        (8, (0,), True, 32, None, (None, 0, 1, 0, None, False)),
         (8, (20,), True, 32, 2.0, ("local", 1, 7, 0, 20, True)),
     ],
 )
@@ -650,7 +650,7 @@ def test_place_respects_cpu_pending_and_memory(
     agents: bool,
     max_batch: int,
     memory_gb: float | None,
-    expected: tuple[str | None, int, int, int, int, bool],
+    expected: tuple[str | None, int, int, int, int | None, bool],
 ) -> None:
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     monkeypatch.setattr(eval_resources, "_has_gpu", lambda: False)
@@ -710,11 +710,11 @@ def test_place_sizes_direct_caches_for_a_match(
         (4, (64,), False, 8, None, True, "0", ("socket", 3, 1, 1, 3, False)),
         (4, (64,), False, 32, 15.5, True, "0", ("socket", 2, 1, 2, 16, False)),
         # All-play_many shares streams on GPU and non-GPU.
-        (4, (2, 3), True, 32, None, True, "0", ("local", 1, 3, 0, 0, True)),
+        (4, (2, 3), True, 32, None, True, "0", ("local", 1, 3, 0, None, True)),
         (4, (64,), False, 32, None, False, "0", (None, 4, 1, 0, 1, False)),
-        (4, (2, 3), True, 32, None, False, "0", (None, 1, 4, 0, 0, True)),
+        (4, (2, 3), True, 32, None, False, "0", (None, 1, 4, 0, None, True)),
         (4, (64,), False, 32, None, True, "", ("local", 4, 1, 0, 8, True)),
-        (4, (2, 3), True, 32, None, True, "", ("local", 1, 3, 0, 0, True)),
+        (4, (2, 3), True, 32, None, True, "", ("local", 1, 3, 0, None, True)),
     ],
 )
 def test_gpu_placement_fills_batches_and_routes_streaming_direct(
@@ -727,7 +727,7 @@ def test_gpu_placement_fills_batches_and_routes_streaming_direct(
     memory_gb: float | None,
     agents: bool,
     visible: str,
-    expected: tuple[str | None, int, int, int, int, bool],
+    expected: tuple[str | None, int, int, int, int | None, bool],
 ) -> None:
     monkeypatch.setattr(eval_resources, "_has_gpu", _has_gpu)
     # Controlled hardware output, without importing or executing a model library.
@@ -775,7 +775,7 @@ def test_code_only_and_streaming_placement_do_not_probe_gpu(
         processes=1,
         game_threads=4,
         agent_threads=0,
-        games_per_process=0,
+        games_per_process=None,
         share_streams=True,
         checkpoint_bytes=0,
         reason="no checkpoints to load",
@@ -785,10 +785,10 @@ def test_code_only_and_streaming_placement_do_not_probe_gpu(
         processes=1,
         game_threads=3,
         agent_threads=0,
-        games_per_process=0,
+        games_per_process=None,
         share_streams=True,
         checkpoint_bytes=8 * 1024**3,
-        reason="all tournaments use play_many",
+        reason="play_many",
     )
 
 
@@ -2075,7 +2075,7 @@ def test_mixed_eval_group_gives_each_phase_the_host(
     assert startup == [
         f"etude: agents: {ordinary_mode} inference for ordinary ({reason}); "
         "1 game process, 1 game each; 7 inference threads",
-        "etude: agents: direct inference for first, second (all tournaments use play_many); "
+        "etude: agents: direct inference for first, second (play_many); "
         "1 game process, slots requested by play_many; 7 inference threads",
     ]
     assert stderr.index("1/1 matches played") < stderr.index(startup[1])
@@ -2227,7 +2227,7 @@ def test_play_many_group_runs_in_one_direct_process_across_tournaments(
     assert [result.played for result in results] == [2, 2]
     stderr = capfd.readouterr().err
     assert (
-        "etude: agents: direct inference for first, second (all tournaments use play_many); "
+        "etude: agents: direct inference for first, second (play_many); "
         "1 game process, slots requested by play_many; 15 inference threads" in stderr
     )
     assert "agents: shared inference" not in stderr

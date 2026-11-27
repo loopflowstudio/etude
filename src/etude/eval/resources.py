@@ -124,27 +124,29 @@ class Placement:
     processes: int
     game_threads: int
     agent_threads: int
-    games_per_process: int
+    games_per_process: int | None  # `play_many` requests its own slots.
     share_streams: bool
     checkpoint_bytes: int
     reason: str
 
-    def describe(self, tournaments: Sequence[str], live: int, *, streaming: bool) -> str | None:
-        """Describe the placement of the games that started."""
-        if not live or (self.bus is None and not streaming):
+    def describe(self, tournaments: Sequence[str]) -> str | None:
+        """Describe the placement of one evaluation phase."""
+        if not self.processes or (self.bus is None and self.games_per_process is not None):
             return None
-        process = "game process" if live == 1 else "game processes"
+        process = "game process" if self.processes == 1 else "game processes"
         game = "game" if self.games_per_process == 1 else "games"
         capacity = (
-            "slots requested by play_many" if streaming else f"{self.games_per_process} {game} each"
+            "slots requested by play_many"
+            if self.games_per_process is None
+            else f"{self.games_per_process} {game} each"
         )
-        games = f"{live} {process}, {capacity}"
+        games = f"{self.processes} {process}, {capacity}"
         if self.bus is None:
             return f"etude: {games}"
         mode = "shared" if self.bus == "socket" else "direct"
         threads = self.agent_threads if self.bus == "socket" else self.game_threads
         unit = "thread" if threads == 1 else "threads"
-        each = " each" if self.bus == "local" and live > 1 else ""
+        each = " each" if self.bus == "local" and self.processes > 1 else ""
         return (
             f"etude: agents: {mode} inference for {', '.join(tournaments)} ({self.reason}); "
             f"{games}; {threads} inference {unit}{each}"
@@ -173,7 +175,7 @@ def place(
             processes=0,
             game_threads=1,
             agent_threads=0,
-            games_per_process=0,
+            games_per_process=None,
             share_streams=False,
             checkpoint_bytes=0,
             reason="no pending matches",
@@ -190,10 +192,10 @@ def place(
             processes=1,
             game_threads=max(1, cpus - 1) if agents else cpus,
             agent_threads=0,
-            games_per_process=0,
+            games_per_process=None,
             share_streams=True,
             checkpoint_bytes=held,
-            reason="all tournaments use play_many" if agents else "no checkpoints to load",
+            reason="play_many" if agents else "no checkpoints to load",
         )
     if not agents:
         cap = min(cpus, max(1, host_bytes // GAME_BYTES))

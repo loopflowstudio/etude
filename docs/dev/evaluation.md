@@ -143,13 +143,13 @@ with evaluating(
   host memory. With `share_streams=True`, its game processes serve the queues
   in tournament order.
   - `play_many` with loader (`bus="local"`, `processes=1`,
-    `game_threads=max(1, cpus - 1)`, `agent_threads=0`, `games_per_process=0`,
+    `game_threads=max(1, cpus - 1)`, `agent_threads=0`, `games_per_process=None`,
     `share_streams=True`): 1 direct game process on every host (skipping the GPU
     probe), configuring the process's model/BLAS thread environment variables
     to `game_threads` and running the phase's tournaments in turn on one
     `LocalForwardBus` so checkpoints stay loaded.
   - Code-only `play_many` (`bus=None`, `processes=1`, `game_threads=cpus`,
-    `agent_threads=0`, `games_per_process=0`, `share_streams=True`): no bus, no GPU
+    `agent_threads=0`, `games_per_process=None`, `share_streams=True`): no bus, no GPU
     probe, 1 game process owning the host's BLAS thread budget.
   - Code-only `play` (`bus=None`, `game_threads=1`, `agent_threads=0`,
     `games_per_process=1`, `share_streams=False`): no bus, no GPU probe, one match at
@@ -174,8 +174,9 @@ with evaluating(
 
   Each game process runs one `asyncio` event loop. For `play` with a loader,
   each process keeps up to `placement.games_per_process` matches in flight and
-  flushes pending forwards on a zero-delay loop barrier. For `play_many`, each
-  process pulls whatever `matches.take(n)` requests from pending matches.
+  flushes pending forwards on a zero-delay loop barrier. A `play_many`
+  placement sets `games_per_process=None` so the process takes up to
+  `matches.take(n)`'s requested count from pending matches.
   Per-process diagnostics go to `artifacts/agents/game-{pid}.json`
   (`GameReport` with `tournaments: tuple[str, ...]`), keeping a game-thread-filtered
   `builtins.__import__` hook active from module load through player wrapper
@@ -308,8 +309,6 @@ class ForwardCall:
 
 
 class ForwardBus(Protocol):
-    @property
-    def flight(self) -> Flight: ...
     def bind(self, checkpoint: CheckpointRef) -> None: ...
     def submit(self, calls: Sequence[ForwardCall]) -> list[asyncio.Future[list[object]]]: ...
     async def close(self) -> BusReport: ...
@@ -317,12 +316,12 @@ class ForwardBus(Protocol):
 
 - **Ownership above and below the bus.** `_Forwarder` holds one `ForwardBus`,
   and `_BoundForward` holds the forwarder plus a checkpoint key. `_Forwarder`
-  owns the `play` zero-delay barrier (locking inputs on call through
-  `bus.flight` so `play` and `play_many` share one refcounted lock table with
-  no gap across `_flush`), `ForwardError` attribution at the awaiting call,
-  per-match error tracking and loading-failure fan-out so all transports behave
-  identically. Below the bus, `_FlightBook` in `bus.py` owns shared in-flight
-  request ids, transactional stage-commit-rollback, uniform `handoff_seconds`
+  owns the `play` zero-delay barrier and holds its own refcounted input locks
+  from the call through the bus reply. If submission raises, it releases
+  the affected locks immediately. It tracks `ForwardError`s per match and
+  fans out checkpoint-loading failures. Below the bus, `_FlightBook` in
+  `bus.py` owns input locks acquired on submit, in-flight request ids,
+  transactional stage-commit-rollback, uniform `handoff_seconds`
   and per-call `pickled` accounting, and `fail_all` shutdown semantics across
   transports. `Forwards` (`forwards.py`) and `_Batches` (`batching.py`) return
   transport-neutral `ForwardOutcome`s; socket wire envelopes (`Answer`,
@@ -338,7 +337,9 @@ class ForwardBus(Protocol):
   checkpoint up to `max_batch` rows and posting answers back with
   `loop.call_soon_threadsafe`. `close()` sends a sentinel and joins within
   `seconds_left()`. If the thread exits unexpectedly, pending and later calls
-  fail with `RetryRequested` and held matches retry.
+  fail with `RetryRequested` and held matches retry. If the join allowance
+  expires while inference is still running, the outstanding inputs stay locked
+  until their forwards settle.
 - **`SocketForwardBus` (shared-process transport).** Wraps the private Unix
   socket to the shared agent process under the same `ForwardBus` protocol,
   keeping the length-prefixed `Answer` wire format. An undecodable request
@@ -352,12 +353,12 @@ class ForwardBus(Protocol):
   game code can step a second half of its pool while the inference thread runs
   the first. Calls arriving while a forward executes still merge per checkpoint
   in `_Batches`. On every host, a `play_many` phase with a loader gets
-  `Placement(bus="local", processes=1, game_threads=max(1, cpus - 1), agent_threads=0, games_per_process=0, share_streams=True)`
+  `Placement(bus="local", processes=1, game_threads=max(1, cpus - 1), agent_threads=0, games_per_process=None, share_streams=True)`
   and runs each tournament's stream sequentially inside that one game process
   on one `LocalForwardBus`, keeping loaded checkpoints resident across
-  tournaments. In `play`, `_BoundForward.__call__` locks inputs immediately via
-  `bus.flight`, stages into the zero-delay barrier, and flushes a grouped
-  `bus.submit(calls)` when no task can add another input.
+  tournaments. In `play`, `_Forwarder` locks inputs on call, stages them in
+  the zero-delay barrier, and flushes a grouped `bus.submit(calls)` when no
+  task can add another input.
 - **Symmetric recursive codec and flight lock (both transports).** One
   recursive normalizer walks `tuple`, `list` and `dict` values (with a fast
   path for `ndarray` and plain scalars). Any non-`ndarray` leaf exporting the
