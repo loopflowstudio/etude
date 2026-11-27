@@ -283,8 +283,13 @@ keeps the completed prefix; changing config or base seed changes match keys.
   module-level functions. There is one signature, `play(match, agents)`.
 
 CPU games load forwards directly and keep one model-library thread per game.
-On visible NVIDIA hardware, a shared agent process batches checkpoint forwards;
-only that path keeps model loading out of game imports. Code-only builds start
+On visible NVIDIA hardware or native arm64 macOS, when `Agents.devices` declares
+it, a shared agent process batches checkpoint forwards; only that path keeps
+model loading out of game imports. This Mac exercises the Metal path directly:
+the example labs print `shared inference … (metal)` and write
+`home/track/<experiment>/artifacts/agents/batches.json`. For the direct path on
+the same Mac, pin `cpython-3.12.12-macos-x86_64-none` in a lab's
+`.python-version` (Rosetta), or declare `devices=("cpu",)`. Code-only builds start
 no loading process and perform no hardware probe. Check controlled CPU/memory
 capacity, cross-tournament batching, multiple leaves, eviction and partial-batch
 drain with bounded fixtures; never create resource pressure. Keep complete
