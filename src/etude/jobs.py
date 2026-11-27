@@ -66,9 +66,10 @@ from etude.eval.records import (
     relocate_player,
     select_policy,
 )
-from etude.eval.resources import resources
+from etude.eval.resources import resources, shared_override
 from etude.eval.result import EvalResult, Result, Tables
 from etude.eval.run import (
+    AgentLoader,
     EvalRun,
     Playing,
     _group_progress,
@@ -424,17 +425,6 @@ class JobOptions(TypedDict, total=False):
 _BENCHMARK_CHECKPOINT = "checkpoint"
 
 
-class AgentLoader(Record):
-    """Portable loading declaration; batching never enters scientific identity."""
-
-    load: Function | None = None
-    build: Function | None = None
-    shared: bool | None = None
-    max_batch: int = Field(default=32, ge=1)
-    max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
-    memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
-
-
 class Agents(BaseModel):
     """Checkpoint forwards and optional game-side player construction."""
 
@@ -452,16 +442,12 @@ class Agents(BaseModel):
             raise TypeError("load must take one checkpoint")
         if self.build is not None and len(inspect.signature(self.build).parameters) != 2:
             raise TypeError("build must take player and leaves")
-        # Settings that would do nothing at runtime would still split the group key.
+        # Settings that would do nothing without a loader would still split the group key.
         given = self.model_fields_set
         if self.load is None:
             unused = sorted(given & {"shared", "max_batch", "max_delay_seconds", "memory_gb"})
             if unused:
                 raise ValueError(f"{', '.join(unused)} requires a checkpoint loader")
-        if self.shared is False:
-            unused = sorted(given & {"max_batch", "max_delay_seconds"})
-            if unused:
-                raise ValueError(f"{', '.join(unused)} requires shared inference")
         return self
 
     def plain(self, repo: Path | None) -> AgentLoader:
@@ -838,7 +824,7 @@ def _group_key(job: Job, spec: Evaluation) -> str:
         "cleanup_seconds",
         "max_attempts",
     }
-    return job.model_dump_json(include=shared) + spec.agents.model_dump_json()
+    return job.model_dump_json(include=shared) + spec.agents.normalized().model_dump_json()
 
 
 def hold_group(
@@ -853,6 +839,7 @@ def hold_group(
     A launch owns the aggregate tally and closes its root after every tournament
     and shared resource closes. Each tournament keeps its scientific result files.
     """
+    shared_override()
     results: list[EvalResult] = []
     failures: list[EtudeError | RetryRequested] = []
     # A launched attempt's courier collects only below its assigned track folder.

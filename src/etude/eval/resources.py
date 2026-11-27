@@ -103,19 +103,30 @@ def seconds_left() -> float | None:
 type Gpu = Literal["nvidia", "apple"]
 
 type Reason = (
-    Gpu | Literal["shared=True", "shared=False", "ETUDE_EVAL_GPU=none", "no GPU", "no checkpoints"]
+    Gpu
+    | Literal[
+        "ETUDE_EVAL_SHARED=0",
+        "ETUDE_EVAL_SHARED=1",
+        "shared=True",
+        "shared=False",
+        "CUDA_VISIBLE_DEVICES hides GPUs",
+        "no GPU",
+        "no loader",
+        "no checkpoints",
+    ]
 )
-"""Why a plan shares or splits inference: the GPU found, the author's or host's choice, or none.
+"""What decided shared or direct inference: an override, the GPU found, or why none was."""
 
-`"no GPU"` means the probe ran and found nothing; every other non-GPU reason skipped it.
-"""
+
+def _cuda_hidden() -> bool:
+    return os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1")
 
 
 def _gpu() -> Gpu | None:
     """Read visible NVIDIA or Apple Silicon hardware without importing a model library."""
     if sys.platform == "darwin" and platform.machine() == "arm64":
         return "apple"
-    if os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1"):
+    if _cuda_hidden():
         return None
     command = shutil.which("nvidia-smi")
     if command is None:
@@ -132,15 +143,21 @@ def _gpu() -> Gpu | None:
     return "nvidia" if listed.strip() else None
 
 
-def _gpu_disabled() -> bool:
-    """`ETUDE_EVAL_GPU=none` hides every GPU from eval sizing, as `CUDA_VISIBLE_DEVICES=""` does for NVIDIA."""
-    match os.environ.get("ETUDE_EVAL_GPU", ""):
+def shared_override() -> bool | None:
+    """The host's `ETUDE_EVAL_SHARED=0|1`, which outranks `Agents(shared=...)`; None when unset.
+
+    It chooses Etude's process topology only: the loader still picks its own device.
+    Entry points call it before writing a run folder so a bad value fails first.
+    """
+    match os.environ.get("ETUDE_EVAL_SHARED", ""):
         case "":
+            return None
+        case "0":
             return False
-        case "none":
+        case "1":
             return True
         case other:
-            raise ValueError(f"ETUDE_EVAL_GPU must be 'none' or unset, not {other!r}")
+            raise ValueError(f"ETUDE_EVAL_SHARED must be 0, 1 or unset, not {other!r}")
 
 
 @dataclass(frozen=True)
@@ -148,62 +165,74 @@ class ExecutionPlan:
     """Process topology and per-owner checkpoint-byte budget for one eval group.
 
     `threads` is each inference owner's thread budget: the shared agent process's
-    in shared mode, and each game process's (always one) in direct mode.
+    in shared mode, and each game process's (always one) in direct mode. `gpu` is
+    what the probe found, or None when it found nothing or did not run.
     """
 
     games: int
     threads: int
     shared: bool
+    gpu: Gpu | None
     reason: Reason
     checkpoint_bytes: int
 
     def describe(self, tournaments: Sequence[str]) -> str:
         """One startup line naming the mode, why it was chosen, and its sizing."""
         games = "game" if self.games == 1 else "games"
-        if self.shared:
-            unit = "thread" if self.threads == 1 else "threads"
-            inference = f"{self.threads} inference {unit}"
-        else:
-            inference = "1 inference thread each"
         mode = "shared" if self.shared else "direct"
-        return (
-            f"etude: agents: {mode} inference for {', '.join(tournaments)} ({self.reason}); "
-            f"{self.games} {games} at a time; {inference}"
+        why = self.reason if self.gpu in (None, self.reason) else f"{self.reason}, {self.gpu}"
+        line = (
+            f"etude: agents: {mode} inference for {', '.join(tournaments)} ({why}); "
+            f"{self.games} {games} at a time"
         )
+        if self.reason in ("no loader", "no checkpoints"):
+            return line
+        if not self.shared:
+            return f"{line}; 1 inference thread each"
+        unit = "thread" if self.threads == 1 else "threads"
+        return f"{line}; {self.threads} inference {unit}"
 
 
 def plan_execution(
     pending: int,
     *,
-    needs_loading: bool,
+    loader: bool,
+    checkpoints: bool,
     memory_gb: float | None = None,
     batch_inputs: int = 32,
     shared: bool | None = None,
 ) -> ExecutionPlan:
     """Choose shared or direct inference and size games, threads and checkpoint bytes.
 
-    NVIDIA games fill one shared batch. Apple Silicon games leave a core for the
-    shared agent process. Forced sharing without a detected GPU reserves at
-    least half the cores for inference. Direct games split the checkpoint-byte allowance
-    across game processes. Memory and pending work may reduce games further.
-    Code-only plays (`needs_loading=False`) and `shared=False` never probe.
+    Precedence: nothing to load, then `ETUDE_EVAL_SHARED`, then the author's
+    `shared`, then the probe. NVIDIA games fill one shared batch. Apple Silicon
+    games leave a core for the shared agent process. Forced sharing without a
+    detected GPU reserves at least half the cores for inference. Direct games
+    split the checkpoint-byte allowance across game processes. Memory and pending
+    work may reduce games further. Direct plans never probe.
     """
     if pending < 1:
         raise ValueError("an execution plan needs pending matches")
     cpus = available_cpus()
-    gpu: Gpu | None = None
+    host = shared_override()
+    chosen = host if host is not None else shared
+    needs_loading = loader and checkpoints
+    use_shared = needs_loading and chosen is not False
+    gpu = _gpu() if use_shared else None
     reason: Reason
-    if not needs_loading:
+    if not loader:
+        reason = "no loader"
+    elif not checkpoints:
         reason = "no checkpoints"
-    elif shared is False:
-        reason = "shared=False"
-    elif _gpu_disabled():
-        reason = "shared=True" if shared else "ETUDE_EVAL_GPU=none"
-    elif (gpu := _gpu()) is not None:
+    elif host is not None:
+        reason = "ETUDE_EVAL_SHARED=1" if host else "ETUDE_EVAL_SHARED=0"
+    elif shared is not None:
+        reason = "shared=True" if shared else "shared=False"
+    elif gpu is not None:
         reason = gpu
     else:
-        reason = "shared=True" if shared else "no GPU"
-    use_shared = needs_loading and (shared is True or gpu is not None)
+        reason = "CUDA_VISIBLE_DEVICES hides GPUs" if _cuda_hidden() else "no GPU"
+    use_shared = use_shared and (chosen is True or gpu is not None)
     total_memory = memory_bytes()
     held = 0
     if needs_loading:
@@ -225,6 +254,7 @@ def plan_execution(
         games=games,
         threads=max(1, cpus - games) if use_shared else 1,
         shared=use_shared,
+        gpu=gpu,
         reason=reason,
         checkpoint_bytes=held if use_shared else held // games,
     )

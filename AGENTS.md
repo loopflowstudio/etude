@@ -288,11 +288,13 @@ without a detected GPU gives games up to half the cores (at least one game) and
 gives inference the remaining cores (at least one thread). Pending matches and
 remaining host memory bound active games. Each shared forward stays capped at
 `max_batch`. `Agents(shared=False)` plays direct and `Agents(shared=True)` forces
-sharing when checkpoint loading is needed; host `ETUDE_EVAL_GPU=none` hides every
-GPU from sizing, as `CUDA_VISIBLE_DEVICES=""` does for NVIDIA. Probe hardware
-without importing the loader. Code-only games, `shared=False` and
-`ETUDE_EVAL_GPU=none` keep direct capacity and skip the probe; `play_together`
-prints one startup line naming the mode and its reason.
+sharing when checkpoint loading is needed; host `ETUDE_EVAL_SHARED=0|1` overrides
+`Agents(shared=...)` in both directions and is validated before writing any run
+folder. `ETUDE_EVAL_SHARED` selects Etude's process topology only and does not
+hide MPS or CUDA from the loader. Probe hardware without importing the loader.
+Plays without a loader or checkpoints, `shared=False` and `ETUDE_EVAL_SHARED=0`
+keep direct capacity and skip the probe; `play_together` prints one startup line
+naming the mode, why it was chosen, and any detected GPU.
 Hardware capacity does not select the author's model device or promise GPU
 memory residency.
 

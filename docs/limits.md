@@ -27,8 +27,10 @@ failure recovery requires.
   inference batches through a shared agent process by default. Detection checks
   the host, not your loader or macOS VM Metal support: a CPU-only loader on an
   Apple Silicon Mac runs behind the shared process unless it declares
-  `Agents(shared=False)`, or the host sets `ETUDE_EVAL_GPU=none`, to stay
-  direct. With `Agents(shared=True)` and no
+  `Agents(shared=False)`, or the host sets `ETUDE_EVAL_SHARED=0`, to stay
+  direct (`ETUDE_EVAL_SHARED=0|1` outranks `Agents.shared` and controls process
+  topology only; it does not hide MPS or CUDA from your loader). With
+  `Agents(shared=True)` or `ETUDE_EVAL_SHARED=1` and no
   detected GPU, games use up to half the cores and inference uses the rest,
   with at least one game process and one inference thread. Your loader must
   honor the thread environment and choose its device (`cuda`, `mps`, MLX or

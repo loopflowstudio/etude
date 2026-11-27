@@ -72,6 +72,7 @@ from etude.eval.records import (
     resolve_player,
     validate_checkpoints,
 )
+from etude.eval.resources import shared_override
 from etude.eval.run import ETUDE_TABLES, EvalRun, _Report
 from etude.eval.schedule import ordered
 from etude.records import Digest, Record
@@ -208,6 +209,7 @@ def _open_evaluation(
     progress: _Report | None = None,
 ) -> Iterator[EvalRun]:
     """Open the run once. A tournament also records the definition it will resume."""
+    shared_override()
     if isinstance(definition, TournamentRun):
         environment = definition.tournament.environment
         rollups = definition.tournament.rollups

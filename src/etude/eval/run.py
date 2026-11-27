@@ -29,6 +29,8 @@ from queue import Empty
 from types import FrameType
 from typing import TYPE_CHECKING, Literal, NoReturn, cast
 
+from pydantic import Field
+
 from etude.call import Function
 from etude.errors import EtudeError, RetryRequested, explain, sanitize
 from etude.eval.agents import AgentFailure, AgentProcess, running_agents
@@ -56,12 +58,19 @@ from etude.eval.records import (
     outcomes,
     player_checkpoints,
 )
-from etude.eval.resources import ExecutionPlan, Resources, plan_execution, resources, seconds_left
+from etude.eval.resources import (
+    ExecutionPlan,
+    Resources,
+    plan_execution,
+    resources,
+    seconds_left,
+    shared_override,
+)
 from etude.eval.result import EvalResult as EvalResult
 from etude.eval.result import Result as Result
 from etude.eval.result import Row
 from etude.eval.result import Tables as Tables
-from etude.records import RunCounters, RunWriter, Tally
+from etude.records import Record, RunCounters, RunWriter, Tally
 from etude.run import Declared, Run, StorageDestination, report_progress
 from etude.stopping import Stopped
 from etude.storage import DirectoryStorage, Storage, run_prefix
@@ -69,7 +78,7 @@ from etude.storage import DirectoryStorage, Storage, run_prefix
 if TYPE_CHECKING:
     import duckdb
 
-    from etude.jobs import AgentLoader, Agents
+    from etude.jobs import Agents
 
 # Etude's own tables, which `etude.eval.query.statsdb` keeps beside the author's.
 ETUDE_TABLES = (
@@ -140,9 +149,10 @@ class EvalRun(Run):
         self, play: Callable[..., Tables | Result], *, agents: Agents | None = None
     ) -> EvalResult:
         """Play selected matches with constructed seats, skipping durable results on resume."""
+        shared_override()
         authored = inspect.unwrap(play)
         function = Function(module=authored.__module__, name=authored.__qualname__)
-        definition = agents.plain(None) if agents is not None else None
+        definition = agents.plain(None) if agents is not None else AgentLoader()
         artifacts = self.files.root / "artifacts" / "agents"
         with _terminable(), resources(artifacts) as owned:
             (result,) = play_together(
@@ -479,6 +489,29 @@ def _terminable() -> Iterator[None]:
         signal.signal(signal.SIGTERM, before)
 
 
+class AgentLoader(Record):
+    """Portable loading declaration; batching never enters scientific identity."""
+
+    load: Function | None = None
+    build: Function | None = None
+    shared: bool | None = None
+    max_batch: int = Field(default=32, ge=1)
+    max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
+    memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+    def normalized(self) -> AgentLoader:
+        """Drop batching settings ignored when sharing is off, for grouping and compatibility."""
+        if self.shared is False:
+            defaults = AgentLoader()
+            return self.model_copy(
+                update={
+                    "max_batch": defaults.max_batch,
+                    "max_delay_seconds": defaults.max_delay_seconds,
+                }
+            )
+        return self
+
+
 @dataclass
 class Playing:
     """A live tournament, its authored functions and its dispatch state."""
@@ -486,7 +519,7 @@ class Playing:
     run: EvalRun
     play: Function
     tournament: str | None = None
-    agent_loader: AgentLoader | None = None
+    agent_loader: AgentLoader = AgentLoader()
     pending: deque[Match] = field(init=False)
     skipped: int = field(init=False)
     played: int = 0
@@ -507,32 +540,34 @@ def play_together(
     try:
         with _terminable():
             pending = [each for each in plays if each.pending]
-            definition = pending[0].agent_loader if pending else None
-            if any(each.agent_loader != definition for each in pending):
-                raise EtudeError("incompatible_eval_agents", 422)
-            load = definition.load if definition is not None else None
-            needs_loading = load is not None and any(
-                player_checkpoints(player)
-                for each in pending
-                for match in each.pending
-                for player in match.players
-            )
-            matches = sum(len(each.pending) for each in pending)
-            if matches:
+            if pending:
+                definition = pending[0].agent_loader
+                if any(
+                    each.agent_loader.normalized() != definition.normalized() for each in pending
+                ):
+                    raise EtudeError("incompatible_eval_agents", 422)
+                has_checkpoints = any(
+                    player_checkpoints(player)
+                    for each in pending
+                    for match in each.pending
+                    for player in match.players
+                )
+                matches = sum(len(each.pending) for each in pending)
                 plan = plan_execution(
                     matches,
-                    needs_loading=needs_loading,
-                    memory_gb=definition.memory_gb if definition is not None else None,
-                    batch_inputs=definition.max_batch if definition is not None else 32,
-                    shared=definition.shared if definition is not None else None,
+                    loader=definition.load is not None,
+                    checkpoints=has_checkpoints,
+                    memory_gb=definition.memory_gb,
+                    batch_inputs=definition.max_batch,
+                    shared=definition.shared,
                 )
                 tournaments = [each.tournament or each.run.name for each in pending]
                 with (
                     running_agents(definition, checkout, resources, plan)
-                    if plan.shared and definition is not None
+                    if plan.shared
                     else nullcontext()
                 ) as process:
-                    if needs_loading:
+                    if definition.load is not None and has_checkpoints:
                         print(plan.describe(tournaments), file=sys.stderr, flush=True)
                     _play_matches(
                         plays,
@@ -540,7 +575,7 @@ def play_together(
                         plan=plan,
                         checkout=checkout,
                         agent_process=process,
-                        load=load if needs_loading and not plan.shared else None,
+                        load=definition.load if has_checkpoints and not plan.shared else None,
                     )
                     if process is not None:
                         process.check()
@@ -734,7 +769,7 @@ def _play_matches(
                     address,
                     checkout,
                     each.tournament or each.run.name,
-                    each.agent_loader.build if each.agent_loader is not None else None,
+                    each.agent_loader.build,
                     load,
                     memory=plan.checkpoint_bytes,
                 )
