@@ -136,23 +136,36 @@ with evaluating(
   inside `play`. Group `all` holds every seat; a player may sit in two seats.
 - **Game processes and placement.** Placement is decided once per eval run or
   group into a frozen `Placement(bus: Literal["local", "socket"] | None,
-  processes: int, threads: int)`:
-  - No loader (`bus=None`): no bus, one match at a time in `play`.
-  - No GPU seen (`bus="local"`): one direct inference thread per game process,
-    1 model-library thread each, bounded by pending matches, CPUs and memory.
-  - Visible NVIDIA GPU, every tournament `play_many` (`bus="local"`): 1 game
-    process with the host inference thread budget, running the group's
-    tournaments one after another on one bus so checkpoints stay loaded.
-  - Visible NVIDIA GPU, any tournament `play` (`bus="socket"`): one shared
-    agent process (reserving one core) and game processes bound to one
-    tournament each.
+  processes: int, threads: int, grouped: bool = False)`:
+  - All-`play_many` with loader (`bus="local"`, `processes=1`,
+    `threads=max(1, cpus - 1)`, `grouped=True`): 1 direct game process on every
+    host (skipping the GPU probe), configuring the process's model/BLAS thread
+    environment variables to `threads` and running the group's tournaments in
+    turn on one `LocalForwardBus` so checkpoints stay loaded.
+  - Code-only `play_many` (`bus=None`, `processes=1`, `threads=0`,
+    `grouped=True`): no bus, no GPU probe, 1 game process.
+  - Code-only `play` or mixed (`bus=None`, `grouped=False`): no bus, no GPU
+    probe, one match at a time in `play` (1 process per `play_many` tournament
+    in a mixed group).
+  - Visible NVIDIA GPU, any tournament `play` (`bus="socket"`, `grouped=False`):
+    one shared agent process (reserving one core) and game processes bound to
+    one tournament each (`play` bounded by `ceil(pending / games_per_process)`;
+    each `play_many` tournament capped at 1 process).
+  - No GPU seen, any tournament `play` (`bus="local"`, `threads=1`,
+    `grouped=False`): one direct inference thread per game process, 1
+    model-library thread each (`play` bounded by `processes`; each `play_many`
+    tournament capped at 1 process).
 
   Each game process runs one `asyncio` event loop. For `play` with a loader,
   each process keeps `ceil(max_batch / processes)` matches in flight and
   flushes pending forwards on a zero-delay loop barrier. For `play_many`, each
   process pulls whatever `matches.take(n)` requests from pending matches.
-  Per-process diagnostics go to `artifacts/agents/game-{pid}.json`, embedding a
-  frozen `BusReport` (`calls`, `answers`, `arrays`, `arrays_copied`, `pickled`,
+  Per-process diagnostics go to `artifacts/agents/game-{pid}.json`
+  (`GameReport` with `tournaments: tuple[str, ...]`), snapshotting game-side
+  `Imports` (with `"mlx"` alongside `"torch"`, `"jax"`, `"tensorflow"` in
+  `_HEAVY`) and restoring `builtins.__import__` after loading `build` and
+  stream functions and before starting the bus. `GameReport` embeds a frozen
+  `BusReport` (`calls`, `answers`, `arrays`, `arrays_copied`, `pickled`,
   `pickled_bytes`, `copied_bytes`, `wire_bytes`, `handoff_seconds`,
   `round_trip_seconds`).
   Batch row counts and stage timings use one `Batch` record:
@@ -275,6 +288,8 @@ class ForwardCall:
 
 
 class ForwardBus(Protocol):
+    @property
+    def flight(self) -> Flight: ...
     def bind(self, checkpoint: CheckpointRef) -> None: ...
     def submit(self, calls: Sequence[ForwardCall]) -> list[asyncio.Future[list[object]]]: ...
     async def close(self) -> BusReport: ...
@@ -282,20 +297,28 @@ class ForwardBus(Protocol):
 
 - **Ownership above and below the bus.** `_Forwarder` holds one `ForwardBus`,
   and `_BoundForward` holds the forwarder plus a checkpoint key. `_Forwarder`
-  owns the `play` zero-delay barrier, `ForwardError` attribution at the
-  awaiting call, per-match error tracking and loading-failure fan-out so all
-  transports behave identically. The bus owns request ids, `CheckpointRef`
-  binding via `bind()`, and transport-private reply records.
+  owns the `play` zero-delay barrier (locking inputs on call through
+  `bus.flight` so `play` and `play_many` share one refcounted lock table with
+  no gap across `_flush`), `ForwardError` attribution at the awaiting call,
+  per-match error tracking and loading-failure fan-out so all transports behave
+  identically. Below the bus, `_FlightBook` in `bus.py` owns shared in-flight
+  request ids, transactional stage-commit-rollback, uniform `handoff_seconds`
+  and per-call `pickled` accounting, and `fail_all` shutdown semantics across
+  transports. `Forwards` (`forwards.py`) and `_Batches` (`batching.py`) return
+  transport-neutral `ForwardOutcome`s; socket wire envelopes (`Answer`,
+  `CheckpointRequest`, `BatchRequest`) stay in `agents.py` and `_run_agents`.
 - **`LocalForwardBus` (in-process direct transport).** Runs one long-lived,
-  non-daemon inference thread per game process. `Forwards`, the imported loader
-  and every `ModelForward` live strictly as locals of the thread function;
-  nothing reachable from a `Forward` handle reaches a loaded model. The thread
-  runs the same `_Batches` merger as the shared agent process (parameterized by
-  a per-request reply callable instead of a socket), merging calls that arrive
-  during a forward per checkpoint up to `max_batch` rows and posting answers
-  back with `loop.call_soon_threadsafe`. `close()` sends a sentinel and joins
-  within `seconds_left()`. If the thread exits unexpectedly, pending and later
-  calls fail with `RetryRequested` and held matches retry.
+  non-daemon inference thread per game process, alongside its local packing
+  helpers (`pack_local_inputs`, `pack_local_outputs`, `unpack_local`) in
+  `batching.py`. `Forwards`, the imported loader and every `ModelForward` live
+  strictly as locals of the thread function; nothing reachable from a `Forward`
+  handle reaches a loaded model. The thread runs the same `_Batches` merger as
+  the shared agent process (parameterized by a per-request reply callable
+  instead of a socket), merging calls that arrive during a forward per
+  checkpoint up to `max_batch` rows and posting answers back with
+  `loop.call_soon_threadsafe`. `close()` sends a sentinel and joins within
+  `seconds_left()`. If the thread exits unexpectedly, pending and later calls
+  fail with `RetryRequested` and held matches retry.
 - **`SocketForwardBus` (shared-process transport).** Wraps the private Unix
   socket to the shared agent process under the same `ForwardBus` protocol,
   keeping the length-prefixed `Answer` wire format.
@@ -304,30 +327,35 @@ class ForwardBus(Protocol):
   `bus.submit([ForwardCall(...)])` eagerly on call, returning the awaitable so
   game code can step a second half of its pool while the inference thread runs
   the first. Calls arriving while a forward executes still merge per checkpoint
-  in `_Batches`. On a GPU host, an all-`play_many` group gets
-  `Placement(bus="local", processes=1, threads=...)` and runs each tournament's
-  stream sequentially inside that one game process on one `LocalForwardBus`,
-  keeping loaded checkpoints resident across tournaments. In `play`,
-  `_BoundForward.__call__` stages into the zero-delay barrier and flushes a
-  grouped `bus.submit(calls)` when no task can add another input.
-- **Recursive codec and flight lock (both transports).** One recursive
-  normalizer walks `tuple`, `list` and `dict` values (with a fast path for
-  `ndarray` and plain scalars). Any non-`ndarray` leaf exporting the buffer
-  protocol, else CPU `__dlpack__` (buffer protocol first so lazy MLX arrays
-  evaluate without hitting DLPack errors), is materialized to `numpy.ndarray`
-  on its producing thread: on the game side before submit for both transports,
-  and inside `_Batches` on the inference thread or agent process before
-  replying. On `LocalForwardBus`, a top-level C-contiguous non-object `ndarray`
-  moves by pointer; containers, scalars and nested arrays round-trip through
-  pickle protocol 5 with out-of-band buffers so nested NumPy leaves still move
-  without copying payload bytes while containers arrive as fresh objects.
-  Non-contiguous arrays take the copy tier; unpicklable inputs fail the call.
-  On submit, each writeable input `ndarray` has `flags.writeable` cleared
-  (reference-counted per array so shared inputs unlock once; read-only inputs
-  stay read-only) and the model receives a read-only view. A cancelled await
-  keeps its arrays locked until the thread posts completion, then unlocks them
-  and still fans out any `loading=True` failure. Any output leaf sharing memory
-  with an in-flight input is copied before returning.
+  in `_Batches`. On every host, an all-`play_many` group with a loader gets
+  `Placement(bus="local", processes=1, threads=max(1, cpus - 1), grouped=True)`
+  and runs each tournament's stream sequentially inside that one game process
+  on one `LocalForwardBus`, keeping loaded checkpoints resident across
+  tournaments. In `play`, `_BoundForward.__call__` locks inputs immediately via
+  `bus.flight`, stages into the zero-delay barrier, and flushes a grouped
+  `bus.submit(calls)` when no task can add another input.
+- **Symmetric recursive codec and flight lock (both transports).** One
+  recursive normalizer walks `tuple`, `list` and `dict` values (with a fast
+  path for `ndarray` and plain scalars). Any non-`ndarray` leaf exporting the
+  buffer protocol, else CPU `__dlpack__` (buffer protocol first so lazy MLX
+  arrays evaluate without hitting DLPack errors), is materialized with
+  `copy=True, order="C"` and immediate `view.release()` on its producing
+  thread: on the game side before submit for both transports, and inside
+  `_Batches` on the inference thread or agent process before replying. Non-CPU
+  `__dlpack__` or `__cuda_array_interface__` objects fail with `ValueError`
+  (delivered as `ForwardError`). On `LocalForwardBus`, `normalize_outputs` also
+  copies `ndarray` output leaves once into owned C-contiguous writable arrays
+  on the inference thread (`copy_arrays=True`), so outputs can never alias
+  in-flight inputs or reused model staging buffers (`SocketForwardBus` copies
+  during `ForkingPickler.dumps`). On `LocalForwardBus`, top-level and nested
+  C-contiguous non-object `ndarray`s pass by pointer (with pickle protocol 5
+  out-of-band buffers for containers); non-C-contiguous arrays and mutable
+  `bytearray`s copy consistently, and input serialization failures resolve that
+  call with `ForwardError`. Writeable input `ndarray`s have `flags.writeable`
+  cleared on call (reference-counted per array; read-only inputs stay
+  read-only) and the model receives a read-only view. A cancelled await keeps
+  its arrays locked until completion, then unlocks them and still fans out any
+  `loading=True` failure.
 - **Contract suite.** `tests/eval/test_bus.py` parametrizes one contract suite
   over both `local` and `socket` transports (and future shared-memory
   transports) to enforce identical boundary, locking, cancellation, error

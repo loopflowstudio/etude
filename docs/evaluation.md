@@ -191,12 +191,17 @@ Run the [vectorized example](../examples/vectorized.py):
 uv run etude eval examples/vectorized.py --source /tmp/vectorized
 ```
 
-On a GPU host, an all-`play_many` group runs inference directly inside one game
-process and prints its placement to stderr:
+An all-`play_many` group with a loader runs inference directly inside one game
+process on every host—CPU, Apple Silicon, or NVIDIA GPU—and prints its placement
+to stderr:
 
 ```text
 etude: agents: direct inference in 1 game process, slots requested by play_many; 15 threads
 ```
+
+Direct-mode `threads` sets the game process's model and BLAS thread environment
+variables (`OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, etc.)
+before author modules are imported.
 
 For engines that step many games together and collate observations themselves,
 write an async generator `play_many(matches)` instead of `play(match, agents)`:
@@ -289,48 +294,54 @@ async def advance_halves(
     return out_a, out_b
 ```
 
-- **Submission timing.** In `play_many`, `forward(inputs, rows=...)` normalizes
-  and locks its inputs and submits on the call, returning an awaitable; no
+- **Submission timing.** In `play_many`, `forward(inputs, rows=...)` locks its
+  inputs and submits on the call, returning an awaitable; no
   `asyncio.create_task` or `asyncio.sleep(0)` is needed to overlap stepping
   with inference. Calls queued while a forward is running still merge per
-  checkpoint up to `max_batch` rows. In `play`, calls stay on the game
-  process's zero-delay barrier so concurrent match tasks merge before the first
-  forward starts.
+  checkpoint up to `max_batch` rows. In `play`, calls also lock their inputs on
+  the call and stay on the game process's zero-delay barrier so concurrent match
+  tasks merge before the first forward starts.
 - **NumPy boundary.** Across both direct and shared-process transports, array
   leaves at any depth of `tuple`, `list` and `dict` values reach `load`'s
-  forward as `numpy.ndarray` and return to game code as `numpy.ndarray`.
-  Non-NumPy or lazy outputs (such as MLX, Torch or JAX arrays) exporting the
-  buffer protocol or CPU `__dlpack__` are materialized into `numpy.ndarray` on
-  the inference thread before leaving, and non-NumPy input leaves are converted
-  before submit. Etude imports no model library.
+  forward as `numpy.ndarray` and return to game code as owned writable
+  `numpy.ndarray`. Non-NumPy or lazy outputs (such as MLX, Torch or JAX arrays)
+  exporting the buffer protocol or CPU `__dlpack__` are materialized into owned
+  `numpy.ndarray` on the inference thread before leaving (with their backing
+  views released on that thread), and non-NumPy input leaves are converted
+  before submit. Non-CPU device tensors (CUDA/MPS) in inputs or outputs fail
+  with `ForwardError` asking `load` or game code to move them to CPU/NumPy.
+  Etude imports no model library.
 - **Zero-copy inputs on direct inference.** A top-level C-contiguous non-object
   `numpy.ndarray` passes to the inference thread by pointer with no copy and no
-  pickle; nested NumPy leaves inside containers also move without copying their
-  payload bytes. Non-contiguous arrays, non-NumPy array leaves and plain Python
-  containers are copied; unpicklable inputs fail that call.
-- **Read-only in flight, no aliasing.** A writeable NumPy array handed to
-  `forward(...)` is marked read-only until its answer arrives—writing to it
-  while in flight raises `ValueError`—and restored afterwards; an array already
-  read-only on entry stays read-only. Cancelling the await does not unlock the
-  array early: it unlocks once the inference thread finishes that forward. The
-  model receives a read-only view, so an in-place mutation such as `x /= 255`
-  inside `load`'s forward raises `ValueError` (delivered to the game as
-  `ForwardError`) without modifying the game's array. A loader calling
-  `torch.from_numpy(x)` on CPU sees PyTorch's one-time read-only warning;
-  copying to a device or calling `torch.tensor(x)` avoids it. Outputs never
-  alias an in-flight input array.
+  pickle; nested C-contiguous NumPy leaves inside containers also move without
+  copying their payload bytes. Non-C-contiguous arrays, non-NumPy array leaves,
+  mutable `bytearray`s and plain Python containers are copied; unpicklable
+  inputs fail that call with `ForwardError`.
+- **Read-only in flight, no aliasing.** In both `play` and `play_many`, a
+  writeable NumPy array handed to `forward(...)` is marked read-only on the call
+  until its answer arrives—writing to it while in flight raises `ValueError`—and
+  restored afterwards; an array already read-only on entry stays read-only.
+  Cancelling the await does not unlock the array early: it unlocks once the
+  inference thread finishes that forward. The model receives a read-only view,
+  so an in-place mutation such as `x /= 255` inside `load`'s forward raises
+  `ValueError` (delivered to the game as `ForwardError`) without modifying the
+  game's array. A loader calling `torch.from_numpy(x)` on CPU sees PyTorch's
+  one-time read-only warning; copying to a device or calling `torch.tensor(x)`
+  avoids it. Model outputs are copied into owned writable arrays before crossing
+  back to the game loop, so outputs never alias an in-flight input array or a
+  reused buffer inside `load`.
 
 Etude chooses between a direct inference thread inside the game process and a
 shared agent process from the host probe and the group's play functions:
 
 | Host | Group | Inference transport |
 |---|---|---|
-| No GPU seen | Any | Direct inference thread in each game process, 1 library thread each |
-| Visible NVIDIA GPU | Every tournament uses `play_many` | Direct inference thread in 1 game process running the group's tournaments in turn, with the host inference thread budget and checkpoints kept loaded across tournaments |
-| Visible NVIDIA GPU | Any tournament uses `play` | Shared agent process over a private Unix socket |
+| Any host (CPU, Mac, GPU) | Every tournament uses `play_many` | Direct inference thread in 1 game process running the group's tournaments in turn, with the host inference thread budget (`max(1, cpus - 1)`) and checkpoints kept loaded across tournaments |
+| No GPU seen | Any tournament uses `play` | Direct inference thread in each game process, 1 library thread each (1 process per `play_many` tournament in a mixed group) |
+| Visible NVIDIA GPU | Any tournament uses `play` | Shared agent process over a private Unix socket (1 process per `play_many` tournament in a mixed group) |
 
 Code-only players (no loader) start neither an inference thread nor an agent
-process.
+process; code-only `play_many` groups run sequentially in 1 game process.
 
 ## Results and retry
 

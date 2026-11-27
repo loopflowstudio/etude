@@ -695,7 +695,6 @@ def play_together(
         if placement.bus == "local" and agents is not None
         else None
     )
-    grouped_direct = placement.bus == "local" and all_streaming and placement.processes == 1
 
     def concurrency_for(each: Playing) -> int | None:
         if each.streaming:
@@ -762,7 +761,7 @@ def play_together(
                         return _GameProcess(plays=tuple(targets), process=process, pipe=parent)
 
                     def spawn_ready() -> None:
-                        if grouped_direct:
+                        if placement.grouped:
                             if not live and not stopping:
                                 ready_plays = [each for each in plays if each.pending]
                                 if ready_plays:
@@ -776,9 +775,11 @@ def play_together(
                                 if not each.pending:
                                     continue
                                 active = sum(1 for child in live if each in child.plays)
-                                needed = len(each.pending)
-                                if not each.streaming:
-                                    needed = math.ceil(needed / games_per_process)
+                                needed = (
+                                    1
+                                    if each.streaming
+                                    else math.ceil(len(each.pending) / games_per_process)
+                                )
                                 if active >= needed:
                                     continue
                                 live.append(spawn_one((each,)))

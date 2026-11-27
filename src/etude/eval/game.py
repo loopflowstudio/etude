@@ -1,9 +1,11 @@
-"""Game-process event loop, zero-delay forward barrier and match streaming.
+"""Game-process event loop, forward submission and match streaming.
 
-Each spawned game process runs one `asyncio` event loop consuming a match stream
-(`Matches[Rules]`) over its parent pipe. `play_many` consumes it directly;
-Etude drives `async def play` as bounded match tasks. Both share the zero-delay
-forward barrier and send each finished match to the parent for storage.
+Each spawned game process runs one `asyncio` event loop consuming one or more
+tournament streams (`Matches[Rules]`) over its parent pipe. `play_many`
+consumes `Matches` directly and submits forwards eagerly on call; Etude drives
+`async def play` as bounded match tasks behind a zero-delay forward barrier.
+Both share one `ForwardBus` (`LocalForwardBus` or `SocketForwardBus`) and send
+each finished match to the parent for storage.
 """
 
 from __future__ import annotations
@@ -54,7 +56,7 @@ if TYPE_CHECKING:
     from etude.checkpoints import CheckpointRef
 
 MAX_GAME_IMPORTS = 256
-_HEAVY = frozenset({"torch", "jax", "tensorflow"})
+_HEAVY = frozenset({"torch", "jax", "tensorflow", "mlx"})
 
 # Per-match ForwardError tracker for `play` tasks so caught forward errors still fail the match.
 _match_errors: ContextVar[list[ForwardError] | None] = ContextVar("_match_errors", default=None)
@@ -85,7 +87,7 @@ class GameReport(Record):
     """One game process's startup imports and measured work."""
 
     pid: int
-    tournament: str
+    tournaments: tuple[str, ...]
     imports: Imports
     matches: int
     wall_seconds: float
@@ -494,7 +496,7 @@ async def _serve_stream(
     played_count = 0
     pending_grant: asyncio.Future[tuple[Match, ...]] | None = None
     take_lock = asyncio.Lock()
-    tournament_label = ", ".join(spec.tournament for spec in streams)
+    tournaments = tuple(spec.tournament for spec in streams)
 
     async def close_bus() -> BusReport:
         nonlocal bus, bus_report
@@ -508,7 +510,7 @@ async def _serve_stream(
     def make_report() -> GameReport:
         return GameReport(
             pid=os.getpid(),
-            tournament=tournament_label,
+            tournaments=tournaments,
             imports=observe_imports(),
             matches=played_count,
             wall_seconds=time.monotonic() - started,
@@ -534,20 +536,36 @@ async def _serve_stream(
             if build is None
             else cast(Callable[[object, Mapping[str, Forward]], object], build.load(checkout))
         )
-        if load is not None:
-            # Process entry point: only direct-inference games import the local bus.
-            from etude.eval.batching import LocalForwardBus  # noqa: PLC0415
+        loaded_streams: list[tuple[Callable[..., object], type[Match]] | Exception] = []
+        for spec in streams:
+            try:
+                play_fn = spec.function.load(checkout)
+                kind = _match_type(play_fn, streaming=spec.concurrency is None)
+            except RetryRequested:
+                raise
+            except Exception as load_error:
+                loaded_streams.append(load_error)
+            else:
+                loaded_streams.append((play_fn, kind))
+        # Snapshot game-side imports and restore `builtins.__import__` before
+        # starting the inference bus so direct-mode model imports on the
+        # inference thread are never attributed to the game module.
+        observe_imports()
+        if any(not isinstance(entry, Exception) for entry in loaded_streams):
+            if load is not None:
+                # Process entry point: only direct-inference games import the local bus.
+                from etude.eval.batching import LocalForwardBus  # noqa: PLC0415
 
-            allowance = agent_bytes(None) if memory is None else memory
-            bus = LocalForwardBus(
-                load,
-                checkout=checkout,
-                max_batch=max_batch,
-                memory=allowance,
-                artifacts=artifacts,
-            )
-        elif agents is not None:
-            bus = await SocketForwardBus.connect(agents)
+                allowance = agent_bytes(None) if memory is None else memory
+                bus = LocalForwardBus(
+                    load,
+                    checkout=checkout,
+                    max_batch=max_batch,
+                    memory=allowance,
+                    artifacts=artifacts,
+                )
+            elif agents is not None:
+                bus = await SocketForwardBus.connect(agents)
         if bus is not None:
             forwarder = _Forwarder(
                 bus,
@@ -562,12 +580,22 @@ async def _serve_stream(
         def build_seats(match: Match) -> Sequence[object]:
             return build_agents(match.players, bind, build_hook)
 
-        for stream_index, spec in enumerate(streams):
+        for stream_index, (spec, loaded) in enumerate(zip(streams, loaded_streams, strict=True)):
             held: dict[int, _TakenMatch] = {}
             stream_matches = 0
+            if isinstance(loaded, Exception):
+                drained = forwarder.drain_loading_failures() if forwarder else ()
+                pipe.send(
+                    StreamEnd(
+                        stream=stream_index,
+                        matches=0,
+                        error=_portable_error(loaded),
+                        loading_failures=drained,
+                    )
+                )
+                continue
             try:
-                play = spec.function.load(checkout)
-                kind = _match_type(play, streaming=spec.concurrency is None)
+                play, kind = loaded
 
                 def validate(
                     match: Match,
@@ -734,16 +762,21 @@ def run_game_process(
 
     builtins.__import__ = importing
     module_label = ", ".join(dict.fromkeys(spec.function.module for spec in streams))
+    snapshot: Imports | None = None
 
     def observe_imports() -> Imports:
-        return Imports(
-            pid=os.getpid(),
-            module=module_label,
-            count=len(set(sys.modules) - before),
-            total=len(sys.modules),
-            heavy=tuple(sorted(_HEAVY.intersection(sys.modules))),
-            importer=first_importer,
-        )
+        nonlocal snapshot
+        if snapshot is None:
+            builtins.__import__ = original
+            snapshot = Imports(
+                pid=os.getpid(),
+                module=module_label,
+                count=len(set(sys.modules) - before),
+                total=len(sys.modules),
+                heavy=tuple(sorted(_HEAVY.intersection(sys.modules))),
+                importer=first_importer,
+            )
+        return snapshot
 
     try:
         asyncio.run(

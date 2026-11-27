@@ -123,11 +123,12 @@ def _has_gpu() -> bool:
 
 @dataclass(frozen=True)
 class Placement:
-    """Inference transport, game-process budget and inference-thread budget."""
+    """Inference transport, game-process budget, inference threads and grouping."""
 
     bus: Literal["local", "socket"] | None
     processes: int
     threads: int
+    grouped: bool = False
 
     def games(self, max_batch: int) -> int:
         """Concurrent `play` matches per game process."""
@@ -143,23 +144,27 @@ def place(
     streaming: bool = False,
     memory_gb: float | None = None,
 ) -> Placement:
-    """Choose inference transport, game processes and inference threads.
+    """Choose inference transport, game processes, inference threads and grouping.
 
-    Code-only runs (`agents=False`) skip the GPU probe. On a visible GPU, an
-    all-`play_many` run (`streaming=True`) keeps one direct-inference process
-    with the host inference thread budget; any `play` tournament uses the
-    shared agent process. Without a visible GPU, each game process runs direct
-    inference with one model-library thread.
+    An all-`play_many` group (`streaming=True`) runs sequentially in one game
+    process (`grouped=True`) on every host without probing GPU hardware: with a
+    loader it uses a direct inference thread with the host inference thread
+    budget (`max(1, cpus - 1)`); code-only runs use no bus. Any group with
+    `play` skips the GPU probe when code-only, uses the shared agent process on
+    visible NVIDIA hardware, and otherwise runs direct inference with one
+    model-library thread per game process.
     """
     if pending <= 0:
         return Placement(bus=None, processes=0, threads=0)
     cpus = available_cpus()
+    if streaming:
+        if not agents:
+            return Placement(bus=None, processes=1, threads=0, grouped=True)
+        return Placement(bus="local", processes=1, threads=max(1, cpus - 1), grouped=True)
     if not agents:
         memory_processes = max(1, memory_bytes() // GAME_BYTES)
         return Placement(bus=None, processes=min(pending, cpus, memory_processes), threads=0)
     gpu = _has_gpu()
-    if gpu and streaming:
-        return Placement(bus="local", processes=1, threads=max(1, cpus - 1))
     held = agent_bytes(memory_gb)
     memory_processes = max(1, (memory_bytes() - held) // GAME_BYTES)
     if gpu:

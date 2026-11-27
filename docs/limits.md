@@ -25,10 +25,11 @@ failure recovery requires.
   must be importable top-level definitions. Games run in spawned processes.
   Multiple `async def play` matches share one `asyncio` event loop per game
   process; blocking the loop without awaiting stalls the other games in that
-  process until the run deadline. Without a visible GPU, each game process runs
-  a direct inference thread with one model-library thread; on visible NVIDIA
-  hardware, `play` batches through a shared agent process while an
-  all-`play_many` group runs direct inference in one game process. Your loader
+  process until the run deadline. An all-`play_many` group with a loader runs
+  direct inference in one game process on every host with the host inference
+  thread budget; for `play` (and mixed groups), each game process runs a direct
+  inference thread with one model-library thread when no GPU is seen, or batches
+  through a shared agent process on visible NVIDIA hardware. Your loader
   must honor the thread environment and choose its device. A batch allowance
   does not guarantee GPU memory residency. If a game process crashes—including
   a native crash in the model or engine under direct inference—every match it

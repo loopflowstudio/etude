@@ -1313,7 +1313,7 @@ def test_vectorized_example_uses_two_half_numpy_arrays_zero_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: False)
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
     definition = read_experiment(Path("examples/vectorized.py"))
     assert definition.eval is not None
     state = ExperimentState(experiment=definition.name)
@@ -1330,7 +1330,9 @@ def test_vectorized_example_uses_two_half_numpy_arrays_zero_copy(
         GameReport.model_validate_json(path.read_bytes()) for path in artifacts.glob("game-*.json")
     ]
     assert len(reports) == 1
+    assert reports[0].tournaments == ("vector",)
     assert reports[0].matches == 8
+    assert reports[0].imports.heavy == ()
     assert reports[0].bus.arrays > 0
     assert reports[0].bus.arrays_copied == 0
     assert reports[0].bus.copied_bytes == 0
