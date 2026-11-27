@@ -281,6 +281,23 @@ keeps the completed prefix; changing config or base seed changes match keys.
   matches=matches) as run: run.play(play, agents=Agents(...))`. Put execution
   under `if __name__ == "__main__":`; play, load and build are importable
   module-level functions. There is one signature, `play(match, agents)`.
+  `Match` has `players`, `config`, `games`, `index` and `base_seed` (no
+  `seed`). Outside a launch each `evaluating` call opens a new run and plays
+  every match again; pass `resume=True, run=NAME` to continue one.
+- Interrupting `etude eval` with SIGINT exits 0 with no summary line; the
+  next plain `etude eval` plays only the unfinished matches. Drive it with a
+  Python driver that reads output on a thread and sends SIGINT after N
+  `matches played` lines. Read results with `statsdb(EXPERIMENT).sql(...)`;
+  `matches` has `run, match, state, retry, error`, `scores` has
+  `seat, score, run, match`.
+- To check what the bus moves for Manabot's real `Prepared`, run a probe from
+  Manabot's checkout with its own `.venv/bin/python -I`, putting this
+  branch's `src` first on `sys.path`: build observations with
+  `managym.Env`, `encode_observation` and `prepare(...)`, call
+  `Flight().lock([prepared])` (packing only sends locked, read-only arrays
+  out of band), then `pack_local_inputs(normalize_inputs([prepared]))` and
+  read `arrays`, `arrays_copied` and `pickled_bytes`. Never edit Manabot's
+  checkout or environment for this.
 
 CPU games load forwards directly and keep one model-library thread per game.
 On visible NVIDIA hardware, a shared agent process batches checkpoint forwards;
