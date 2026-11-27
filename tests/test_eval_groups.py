@@ -408,19 +408,19 @@ def test_unknown_durations_rent_instead_of_stranding_new_tournaments(
         assert len(b.scheduler.runs()) == 1
 
 
-def test_an_execution_deadline_is_a_retryable_failure_not_a_success(
+def test_a_deadline_before_play_stops_the_tournament_with_retryable_matches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ETUDE_DEADLINE", "2000-01-01T00:00:00+00:00")
     active = job("deadline", None)
-    with pytest.raises(RetryRequested, match="execution deadline"):
+    with pytest.raises(Terminated, match="execution deadline"):
         hold_group(group(active), directory=tmp_path)
     result = played(active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path)
     assert len(result.new) == len(result.failed) == len(result.retry) == 1
     db = statsdb("grouped", tmp_path)
     try:
         assert db.sql("select state, retry from matches").fetchall() == [("failed", True)]
-        assert db.sql("select state from runs").fetchall() == [("failed",)]
+        assert db.sql("select state from runs").fetchall() == [("stopped",)]
     finally:
         db.close()
 
@@ -1176,14 +1176,25 @@ async def stop_parent(match: Match, agents: Sequence[Forward]) -> Tables:
     return {"scores": [{"seat": 0, "score": 1}]}
 
 
-def test_sigterm_reaps_agents_and_games_and_records_retry(tmp_path: Path) -> None:
+def test_sigterm_reaps_agents_and_games_and_records_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     before = {p.pid for p in active_children()}
     active = job("stop", Agents(load=load)).model_copy(update={"play": stop_parent})
+    selected = group(active)
+    address = "grouped/interrupted"
+    monkeypatch.setenv("ETUDE_RUN_ADDRESS", address)
     with pytest.raises(Terminated):
-        hold_group(group(active), directory=tmp_path)
+        hold_group(selected, directory=tmp_path)
     assert {p.pid for p in active_children()} <= before
     found = played(active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path)
     assert len(found.new) == len(found.retry) == len(found.failed) == 1
+    root = tmp_path / address
+    member = root / selected.evaluations[0].address
+    for folder in (root, member):
+        assert RunOutcome.model_validate_json((folder / "outcome.json").read_bytes()).state == (
+            "stopped"
+        )
 
 
 def test_a_failed_load_is_not_attempted_again_in_the_run() -> None:
@@ -2150,16 +2161,77 @@ async def failing_stream(
 
 async def code_only_vector_slots(
     matches: Matches[VectorRules],
-) -> AsyncIterator[tuple[Match[VectorRules], Result]]:
+) -> AsyncIterator[tuple[Match[VectorRules], Result | RetryRequested]]:
     while True:
         taken = await matches.take(2)
         if not taken:
             return
         for match, _ in taken:
-            yield (
-                match,
-                Result(tables={"vector_scores": [{"seat": 0, "score": match.config.turns}]}),
-            )
+            if match.config.error == "exit":
+                os._exit(3)
+            if match.config.error == "stop":
+                os.kill(os.getppid(), signal.SIGTERM)
+                return
+            if match.config.error == "retry":
+                yield match, RetryRequested("fixture slot retry")
+            else:
+                yield (
+                    match,
+                    Result(tables={"vector_scores": [{"seat": 0, "score": match.config.turns}]}),
+                )
+
+
+@pytest.mark.parametrize("stop", [False, True], ids=["crash", "sigterm"])
+def test_interrupted_phase_keeps_completed_tournament_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: bool
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 2)
+    ordinary = job("ordinary", None)
+
+    def streaming_job(name: str, error: str, games: int) -> EvalJob:
+        return EvalJob(
+            tournament=RoundRobin(
+                name=name,
+                environment=environment("grouped"),
+                config=VectorRules(error=error),
+                games=games,
+            ),
+            enter=ordinary.enter,
+            play_many=code_only_vector_slots,
+            repo=None,
+            max_hours=0.1,
+        )
+
+    stream = streaming_job("stream", "stop" if stop else "exit", 3)
+    members = [stream, ordinary]
+    if stop:
+        # A retry from an earlier stream must not mask the group's stop.
+        members.insert(0, streaming_job("earlier-retry", "retry", 1))
+    selected = group(*members)
+    address = "grouped/mixed"
+    monkeypatch.setenv("ETUDE_RUN_ADDRESS", address)
+    error = Terminated if stop else RetryRequested
+    detail = "received SIGTERM" if stop else "game process exited"
+    with pytest.raises(error, match=detail):
+        hold_group(selected, directory=tmp_path)
+
+    root = tmp_path / address
+    stream_run, ordinary_run = selected.evaluations[-2:]
+    interrupted_state = "stopped" if stop else "failed"
+    for folder, state in (
+        (root, interrupted_state),
+        (root / stream_run.address, interrupted_state),
+        (root / ordinary_run.address, "finished"),
+    ):
+        assert RunOutcome.model_validate_json((folder / "outcome.json").read_bytes()).state == state
+    completed = played(
+        ordinary.tournament, experiment="grouped", enter=ordinary.enter, directory=tmp_path
+    )
+    assert len(completed.delivered) == 1 and not completed.failed
+    interrupted = played(
+        stream.tournament, experiment="grouped", enter=stream.enter, directory=tmp_path
+    )
+    assert len(interrupted.new) == len(interrupted.failed) == len(interrupted.retry) == 3
 
 
 @pytest.mark.parametrize("crash", [False, True])

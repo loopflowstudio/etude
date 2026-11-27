@@ -359,15 +359,18 @@ return {"scores": [{"seat": 0, "won": True}, {"seat": 1, "won": False}]}
 ```
 
 A successful match is reused across an experiment's tournaments in the same
-environment. Errors retain completed results; infrastructure failures retry,
-ordinary game failures require `--retry-failed`. An undecodable request or
-reply on shared inference closes that game process's connection and fails
-its pending forwards. Other game processes keep playing. A forward failure raises
-`ForwardError` (with `.checkpoint` naming the checkpoint key) at the awaiting
-call. In `play`, catching `ForwardError` does not hide it from Etude's failure
-retention: the match still fails. In `play_many`, catching `ForwardError` lets
-you drop affected slots and yield `(match, error)` while unrelated matches
-complete. [Limits](limits.md) covers process, event-loop and API side effects.
+environment. If a game process exits unexpectedly or a wait for results expires,
+unfinished matches can retry and completed tournaments keep their `finished`
+status. A stop records `stopped` for the group and the tournaments it interrupts.
+Ordinary game failures require `--retry-failed`.
+
+An undecodable request or reply on shared inference closes that game process's
+connection and fails its pending forwards. Other game processes keep playing.
+A failed forward raises `ForwardError` at the awaiting call, with the checkpoint
+key on `.checkpoint`. In `play`, Etude records the match as failed even if the
+game catches the error. In `play_many`, catch it to drop affected slots and
+yield `(match, error)` while unrelated matches complete. [Limits](limits.md)
+covers process, event-loop and API side effects.
 
 ## Querying
 

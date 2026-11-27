@@ -71,6 +71,7 @@ from etude.eval.result import EvalResult
 from etude.eval.run import (
     EvalRun,
     Playing,
+    Terminated,
     _group_progress,
     _terminable,
     play_together,
@@ -943,9 +944,13 @@ def hold_group(
                 member.close()
                 results.append(outcome)
         if failures:
-            # A permanent failure in one tournament must not stop the others retrying.
-            raise next(
-                (error for error in failures if isinstance(error, RetryRequested)), failures[0]
+            # Stops determine the group's status. Otherwise, retryable failures take priority.
+            raise max(
+                failures,
+                key=lambda error: (
+                    isinstance(error, Terminated),
+                    isinstance(error, RetryRequested),
+                ),
             )
     return tuple(results)
 

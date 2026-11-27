@@ -13,11 +13,10 @@ provenance and tables remain readable without reinterpreting stored results.
 an explicit match list; `run.play(play)` plays its unstored matches with an
 `async def play(match, agents)`, and `run.play_many(play_many)` drives a
 streaming async generator over `Matches`. Outside a launch, give `experiment=`.
-`run.should_stop` stops granting new matches; a planned stop seals completed
-tables and raises `Stopped`. Use the evaluating context and its play methods;
-one-call adapters have been removed. Games play in fresh `multiprocessing` spawn
-processes, which import the calling script again: a script keeps `run.play` and
-`run.play_many` under `if __name__ == "__main__":`.
+When `run.should_stop` is true, the runner stops granting matches. On a stop
+request or SIGTERM it seals staged results and raises `Terminated`. Games play
+in fresh `multiprocessing` spawn processes, which import the calling script
+again. Keep `run.play` and `run.play_many` under `if __name__ == "__main__":`.
 
 <!-- implementation-reference -->
 ```python
@@ -257,8 +256,7 @@ with evaluating(
   tournament. In-flight outcomes are retained. In `play_many`, yield
   `(match, error)` to fail one slot and keep taking pending matches. A raised
   error or an unknown or duplicate yield fails every held match. Returning with
-  held matches unyielded fails each unyielded match. A run with failed matches
-  ends failed.
+  held matches unyielded fails each unyielded match.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each drawn value from the
   environment whose latest match is newest, noting only overlaps on values
@@ -268,6 +266,10 @@ with evaluating(
   `run.play_many(play_many)` to carry on.
   A launched retry resumes automatically. Matches already delivered to any
   of `storages` are skipped, even on a machine with an empty disk.
+  A retryable phase error is returned for each tournament with unfinished
+  matches so completed tournaments can close as finished. The group raises
+  `Terminated` after closing its members when a stop interrupted them.
+  A teardown error with no unfinished matches propagates directly.
 - **Progress.** Each stored match prints one line to stderr:
   `etude: RUN: 12/36 matches played, 220s elapsed`.
 - **Storage.** Stored matches are sealed into blocks every five minutes (or

@@ -215,12 +215,16 @@ class EvalRun(Run):
                 found += block.matches
         return outcomes(found)
 
-    def fail_pending(self, error: RetryRequested) -> None:
-        """Mark unfinished matches failed with retry=True before the run fails."""
+    def fail_pending(self, error: RetryRequested) -> bool:
+        """Record retryable failures for unfinished matches and report whether any were found."""
+        affected = False
         for match in self.matches:
             if match.key not in self.done and match.key not in self._failed:
                 self._stage_failure(match, str(error), retry=True)
-        self._seal()
+                affected = True
+        if affected:
+            self._seal()
+        return affected
 
     @property
     def failed(self) -> int:
@@ -500,7 +504,7 @@ class _Report:
 
 
 class Terminated(RetryRequested):
-    """SIGTERM reached an eval run: what is staged is sealed before it ends."""
+    """An eval run stopped on request, SIGTERM, or an approaching deadline."""
 
 
 @contextmanager
@@ -906,9 +910,14 @@ def play_together(
                 if active_plays:
                     run_phase(active_plays, streaming=streaming)
     except RetryRequested as error:
+        affected = False
         for each in plays:
-            each.run.fail_pending(error)
-        raise
+            if each.run.fail_pending(error):
+                each.failure = error
+                affected = True
+        # A teardown error can have no match to attach to.
+        if not affected:
+            raise
     finally:
         for each in plays:
             each.run._report.failed += each.run.failed

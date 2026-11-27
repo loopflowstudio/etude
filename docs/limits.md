@@ -31,9 +31,9 @@ failure recovery requires.
   NVIDIA GPU is seen, or batches through a shared agent process on visible
   NVIDIA hardware. Your loader must honor the thread environment and choose
   its device. A batch allowance
-  does not guarantee GPU memory residency. If a game process crashes—including
-  a native crash in the model or engine under direct inference—every match it
-  holds fails with retry while already-sealed matches survive.
+  does not guarantee GPU memory residency. If a game process crashes during
+  play, unfinished matches are recorded as retryable failures. Completed
+  matches and the finished status of completed tournaments are retained.
 - Direct inference isolates loaded models on the inference thread, but a game
   module that defines `load` (or imports the same stateful module) still shares
   Python module globals with it inside one interpreter. The in-flight read-only

@@ -72,7 +72,7 @@ from etude.eval.records import (
     resolve_player,
     validate_checkpoints,
 )
-from etude.eval.run import ETUDE_TABLES, EvalRun, _Report
+from etude.eval.run import ETUDE_TABLES, EvalRun, Terminated, _Report
 from etude.eval.schedule import ordered
 from etude.records import Digest, Record
 from etude.run import RunListing, declare, destinations
@@ -249,7 +249,7 @@ def _open_evaluation(
     )
     try:
         yield writer
-    except Stopped:
+    except (Stopped, Terminated):
         writer.finish("stopped")
         raise
     except BaseException:
