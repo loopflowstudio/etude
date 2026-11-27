@@ -6,11 +6,9 @@ loads wrapper modules; network model loading remains in the agent process.
 
 import importlib
 from collections.abc import Callable, Mapping, Sequence
-from typing import cast
 
 from pydantic import BaseModel, JsonValue, TypeAdapter
 
-from etude.call import Function
 from etude.checkpoints import CheckpointRef
 from etude.eval.agents import Forward
 from etude.eval.records import CheckpointPlayer, Composition, Player, player_checkpoints
@@ -64,26 +62,20 @@ def _restore(value: object) -> object:
 
 def build_agents(
     players: Sequence[Player],
-    bind: Callable[[CheckpointRef, str], Forward] | None,
-    build: Function | None,
-    checkout: str | None,
+    bind: Callable[[CheckpointRef], Forward] | None,
+    build: Callable[[object, Mapping[str, Forward]], object] | None,
 ) -> Sequence[object]:
-    hook = (
-        None
-        if build is None
-        else cast(Callable[[object, Mapping[str, Forward]], object], build.load(checkout))
-    )
     agents: list[object] = []
     for player in players:
         leaves: dict[str, Forward] = {
-            checkpoint.key: bind(checkpoint, player.key)
+            checkpoint.key: bind(checkpoint)
             for checkpoint in player_checkpoints(player)
             if bind is not None
         }
         if isinstance(player, CheckpointPlayer) and not player.config and bind is not None:
             agents.append(leaves[player.checkpoint.key])
-        elif hook is None:
+        elif build is None:
             agents.append(_restore(player))
         else:
-            agents.append(hook(_restore(player), leaves))
+            agents.append(build(_restore(player), leaves))
     return agents

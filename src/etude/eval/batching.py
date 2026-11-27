@@ -1,8 +1,8 @@
-"""The agent process's batching loop and durable batch observations.
+"""The agent process's zero-delay batching loop and durable batch observations.
 
-`_Batches` owns pending inputs; Forwards owns loading and byte-based eviction. `_run_agents`
-imports the authored loader and records batches as frozen Pydantic records;
-game processes never import this module.
+`_Batches` owns pending requests; `Forwards` owns loading and byte-based eviction.
+`_run_agents` imports the authored loader and records batches as frozen Pydantic
+records; game processes never import this module.
 """
 
 from __future__ import annotations
@@ -20,32 +20,29 @@ from typing import cast
 
 from etude.call import Function
 from etude.errors import RetryRequested, explain
-from etude.eval.agents import AgentFailure, Answer, Request
+from etude.eval.agents import Answer, BatchRequest, CheckpointRequest, recv_frame, send_frame
 from etude.eval.forwards import Forwards
 from etude.records import Record
 
 
-class BatchInput(Record):
-    player: str
-    tournament: str
-    match: str
-
-
 class Batch(Record):
     checkpoint: str
-    inputs: tuple[BatchInput, ...]
-    forward_seconds: float
+    rows: int
+    requests: int
+    queue_wait_seconds: float
+    receive_seconds: float
     load_seconds: float
+    forward_seconds: float
+    encode_seconds: float
+    send_seconds: float
     forward_calls: int
     loads: int
-    transport_seconds: float
 
 
 @dataclass
 class _Pending:
-    connection: Connection
-    request: Request
-    since: float
+    peer: socket.socket
+    request: CheckpointRequest
     receive_seconds: float
 
 
@@ -56,7 +53,14 @@ def _responses(answer: Answer, batch: list[_Pending]) -> list[memoryview]:
         size = len(item.request.inputs)
         responses.append(
             ForkingPickler.dumps(
-                Answer(answer.outputs[offset : offset + size], answer.error, answer.retry)
+                Answer(
+                    id=item.request.id,
+                    checkpoint=answer.checkpoint,
+                    outputs=answer.outputs[offset : offset + size],
+                    error=answer.error,
+                    retry=answer.retry,
+                    loading=answer.loading,
+                )
             )
         )
         offset += size
@@ -64,54 +68,58 @@ def _responses(answer: Answer, batch: list[_Pending]) -> list[memoryview]:
 
 
 class _Batches:
-    """Single-thread ownership of loaded agents and queued requests."""
+    """Single-thread ownership of loaded agents and queued per-checkpoint requests."""
 
     def __init__(
         self,
         load: Callable[..., object],
         max_batch: int,
-        max_delay: float,
         memory: int,
     ) -> None:
         self.forwards = Forwards(load, memory)
         self.max_batch = max_batch
-        self.max_delay = max_delay
         self.pending: dict[str, list[_Pending]] = {}
         self.batches = 0
-        self.inputs = 0
+        self.rows = 0
 
     @property
     def loads(self) -> int:
         return self.forwards.loads
 
     def add(
-        self, connection: Connection, request: Request, now: float, receive_seconds: float = 0.0
+        self,
+        peer: socket.socket,
+        request: CheckpointRequest,
+        receive_seconds: float = 0.0,
     ) -> None:
         self.pending.setdefault(request.checkpoint.key, []).append(
-            _Pending(connection, request, now, receive_seconds)
+            _Pending(peer, request, receive_seconds)
         )
 
-    def delay(self, now: float) -> float | None:
-        if not self.pending:
-            return None
-        return max(0, min(items[0].since + self.max_delay for items in self.pending.values()) - now)
+    def add_batch(
+        self,
+        peer: socket.socket,
+        batch: BatchRequest,
+        receive_seconds: float = 0.0,
+    ) -> None:
+        if not batch.requests:
+            return
+        share = receive_seconds / len(batch.requests)
+        for request in batch.requests:
+            self.add(peer, request, share)
 
-    def flush(self, now: float, control: Connection | None = None) -> list[Batch]:
+    def flush(self, queue_wait_seconds: float = 0.0) -> list[Batch]:
+        """Forward one chunk per pending checkpoint, up to `max_batch` rows each."""
         observations: list[Batch] = []
+        remaining_wait = queue_wait_seconds
         for key, items in list(self.pending.items()):
-            if (
-                sum(len(p.request.inputs) for p in items) < self.max_batch
-                and now < items[0].since + self.max_delay
-            ):
-                continue
             batch: list[_Pending] = []
-            count = 0
+            rows = 0
             for item in items:
-                size = len(item.request.inputs)
-                if batch and count + size > self.max_batch:
+                if batch and rows + item.request.rows > self.max_batch:
                     break
                 batch.append(item)
-                count += size
+                rows += item.request.rows
             del items[: len(batch)]
             if not items:
                 del self.pending[key]
@@ -121,6 +129,7 @@ class _Batches:
                 batch[0].request.checkpoint,
                 [item for pending in batch for item in pending.request.inputs],
                 self.pending.keys(),
+                rows=rows,
             )
             forward_seconds = self.forwards.forward_seconds - before_forward
             load_seconds = self.forwards.load_seconds - before_load
@@ -135,54 +144,40 @@ class _Batches:
                 responses = _responses(answer, batch)
             except Exception as error:
                 answer = Answer(
-                    [], f"agent {key}: {explain(error)}", isinstance(error, RetryRequested)
+                    id=0,
+                    checkpoint=key,
+                    outputs=[],
+                    error=f"agent {key}: {explain(error)}",
+                    retry=isinstance(error, RetryRequested),
                 )
                 responses = _responses(answer, batch)
-            transport_seconds = time.monotonic() - started + sum(p.receive_seconds for p in batch)
-            if answer.error is not None and control is not None:
-                control.send(
-                    [
-                        AgentFailure(
-                            checkpoint=key,
-                            tournament=p.request.tournament,
-                            match=p.request.match,
-                            error=answer.error,
-                            retry=answer.retry,
-                            loading=key in self.forwards.failed,
-                        )
-                        for p in batch
-                    ]
-                )
-                # Only failure metadata crosses the control pipe; inputs stay direct.
-                control.recv()
+            encode_seconds = time.monotonic() - started
+            receive_seconds = sum(p.receive_seconds for p in batch)
             started = time.monotonic()
             for item, response in zip(batch, responses, strict=True):
                 try:
-                    item.connection.send_bytes(response)
+                    send_frame(item.peer, response)
                 except (OSError, EOFError):
                     pass  # The game may have been cancelled at its deadline.
-            transport_seconds += time.monotonic() - started
-            self.inputs += count
+            send_seconds = time.monotonic() - started
+            self.rows += rows
             self.batches += 1
             observations.append(
                 Batch(
                     checkpoint=key,
-                    forward_seconds=forward_seconds,
+                    rows=rows,
+                    requests=len(batch),
+                    queue_wait_seconds=remaining_wait,
+                    receive_seconds=receive_seconds,
                     load_seconds=load_seconds,
+                    forward_seconds=forward_seconds,
+                    encode_seconds=encode_seconds,
+                    send_seconds=send_seconds,
                     forward_calls=forward_calls,
                     loads=loads,
-                    transport_seconds=transport_seconds,
-                    inputs=tuple(
-                        BatchInput(
-                            player=p.request.player,
-                            tournament=p.request.tournament,
-                            match=p.request.match,
-                        )
-                        for p in batch
-                        for _ in p.request.inputs
-                    ),
                 )
             )
+            remaining_wait = 0.0
         return observations
 
 
@@ -191,15 +186,15 @@ def _run_agents(
     load: Function,
     checkout: str | None,
     max_batch: int,
-    max_delay: float,
     memory: int,
     control: Connection,
     artifacts: str,
 ) -> None:
-    batches = _Batches(load.load(checkout), max_batch, max_delay, memory)
-    peers: list[Connection] = []
+    batches = _Batches(load.load(checkout), max_batch, memory)
+    peers: list[socket.socket] = []
     report = Path(artifacts, "batches.json").open("w")
     report.write("[")
+    wait_seconds = 0.0
     try:
         with (
             socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener,
@@ -211,38 +206,44 @@ def _run_agents(
             selector.register(control, selectors.EVENT_READ)
             control.send(None)
             while True:
-                for event, _ in selector.select(batches.delay(time.monotonic())):
+                wait_started = time.monotonic()
+                events = selector.select(0.0 if batches.pending else None)
+                wait_seconds += time.monotonic() - wait_started
+                for event, _ in events:
                     if event.fileobj is control:
                         return
                     if event.fileobj is listener:
                         peer, _ = listener.accept()
-                        connection = Connection(peer.detach())
-                        peers.append(connection)
-                        selector.register(connection, selectors.EVENT_READ)
+                        peers.append(peer)
+                        selector.register(peer, selectors.EVENT_READ)
                     else:
-                        connection = cast(Connection, event.fileobj)
+                        peer = cast(socket.socket, event.fileobj)
                         started = time.monotonic()
                         try:
-                            request = cast(Request, connection.recv())
+                            payload = recv_frame(peer)
+                            request = cast(BatchRequest, ForkingPickler.loads(payload))
                         except (EOFError, OSError):
-                            selector.unregister(connection)
-                            connection.close()
-                            peers.remove(connection)
+                            selector.unregister(peer)
+                            peer.close()
+                            peers.remove(peer)
                         else:
-                            received = time.monotonic()
-                            batches.add(connection, request, received, received - started)
-                for batch in batches.flush(time.monotonic(), control):
+                            batches.add_batch(peer, request, time.monotonic() - started)
+                flushed = batches.flush(wait_seconds)
+                if flushed:
+                    wait_seconds = 0.0
+                for batch in flushed:
                     if report.tell() > 1:
                         report.write(",")
                     report.write(batch.model_dump_json())
-                report.flush()
+                if flushed:
+                    report.flush()
     finally:
-        for connection in peers:
-            connection.close()
+        for peer in peers:
+            peer.close()
         report.write("]")
         report.close()
         print(
-            f"etude: agents: stopped; {batches.loads} checkpoints loaded, {batches.inputs} inputs in {batches.batches} batches",
+            f"etude: agents: stopped; {batches.loads} checkpoints loaded, {batches.rows} rows in {batches.batches} batches",
             file=sys.stderr,
             flush=True,
         )

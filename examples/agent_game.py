@@ -30,9 +30,9 @@ class Sampler:
         self.forward = forward
         self.temperature = temperature
 
-    def choose(self, observation: object, random: Random) -> int:
+    async def choose(self, observation: object, random: Random) -> int:
         # This game owns the logits shape returned by its loading module.
-        [output] = self.forward([observation])
+        [output] = await self.forward([observation])
         logits = cast(list[float], output)
         if self.temperature is None:
             return max(range(len(logits)), key=logits.__getitem__)
@@ -46,13 +46,13 @@ def build(player: object, leaves: Mapping[str, Forward]) -> Sampler:
     raise TypeError(f"unknown player {type(player).__name__}")
 
 
-def play(match: Match, agents: Sequence[Forward | Sampler]) -> Tables:
+async def play(match: Match, agents: Sequence[Forward | Sampler]) -> Tables:
     random = Random(match.seed)
     players = [agent if isinstance(agent, Sampler) else Sampler(agent, None) for agent in agents]
     # A two-action bandit: action 1 earns a reward, action 0 does not.
     return {
         "scores": [
-            {"seat": seat, "score": player.choose(None, random)}
+            {"seat": seat, "score": await player.choose(None, random)}
             for seat, player in enumerate(players)
         ]
     }

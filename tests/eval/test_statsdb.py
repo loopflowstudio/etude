@@ -7,7 +7,7 @@ import os
 import shutil
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import duckdb
@@ -165,7 +165,7 @@ def test_a_match_counts_once_from_the_latest_block_holding_it(tmp_path: Path) ->
         assert held("cards", bucket) == (1, 2, 2 * 2 * 2)
 
 
-def broken(match: Match, agents: list[object]) -> Tables:
+async def broken(match: Match, agents: list[object]) -> Tables:
     raise RuntimeError("engine crashed")
 
 
@@ -257,7 +257,7 @@ def _as_published(folder: Path) -> None:
         )
 
 
-def _published(tmp_path: Path, play: Callable[..., Tables]) -> tuple[Path, Path]:
+def _published(tmp_path: Path, play: Callable[..., Awaitable[Tables]]) -> tuple[Path, Path]:
     """Run `a` played as blocks (`now`), and the same run as published etude-sdk stored it, converted."""
     players = pair(tmp_path)
     now = tmp_path / "now"

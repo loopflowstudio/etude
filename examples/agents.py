@@ -12,7 +12,7 @@ from etude.jobs import Agents, EvalJob, ExperimentState
 
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
-    agents = Agents(load=load, build=build, max_delay_seconds=0.05)
+    agents = Agents(load=load, build=build)
     small = checkpoint("small")
     return [
         EvalJob(

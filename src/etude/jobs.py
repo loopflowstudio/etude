@@ -49,7 +49,7 @@ from etude.checkpoints import (
 )
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval.agents import AgentProcess, running_agents
-from etude.eval.game import _match_type
+from etude.eval.game import Play, PlayMany, _match_type
 from etude.eval.records import (
     Benchmark,
     CheckpointPlayer,
@@ -68,7 +68,7 @@ from etude.eval.records import (
     select_policy,
 )
 from etude.eval.resources import agent_bytes, divide_cpus, resources
-from etude.eval.result import EvalResult, Result, Tables
+from etude.eval.result import EvalResult
 from etude.eval.run import (
     EvalRun,
     Playing,
@@ -431,7 +431,6 @@ class AgentLoader(Record):
     load: Function | None = None
     build: Function | None = None
     max_batch: int = Field(default=32, ge=1)
-    max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
     memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 
@@ -442,7 +441,6 @@ class Agents(BaseModel):
     load: Callable[..., object] | None = None
     build: Callable[..., object] | None = None
     max_batch: int = Field(default=32, ge=1)
-    max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
     memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
@@ -458,7 +456,6 @@ class Agents(BaseModel):
             load=None if self.load is None else _function(self.load, repo),
             build=None if self.build is None else _function(self.build, repo),
             max_batch=self.max_batch,
-            max_delay_seconds=self.max_delay_seconds,
             memory_gb=self.memory_gb,
         )
 
@@ -473,6 +470,7 @@ class Evaluation(Record):
     tournament: TournamentRun
     experiment: str | None
     play: Function
+    streaming: bool = Field(default=False, exclude_if=lambda value: not value)
     matches: tuple[Match, ...]
     files: dict[str, str] = {}
     run: str | None = None
@@ -483,6 +481,12 @@ class Evaluation(Record):
     def _released(cls, value: object) -> object:
         if not isinstance(value, dict):
             return value
+        agents = value.get("agents")
+        if isinstance(agents, dict) and "max_delay_seconds" in agents:
+            value = {
+                **value,
+                "agents": {k: v for k, v in agents.items() if k != "max_delay_seconds"},
+            }
         definition = value.get("tournament")
         if (
             isinstance(definition, dict)
@@ -650,7 +654,8 @@ class EvalJob(Job):
     """Declare matches through a generator, with their play, loading and machine needs."""
 
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
-    play: Callable[..., Tables | Result] = Field(exclude=True)
+    play: Play | None = Field(default=None, exclude=True)
+    play_many: PlayMany | None = Field(default=None, exclude=True)
     tournament: Benchmark | RoundRobin = Field(exclude=True)
     checkpoint: CheckpointRecord | Input | None = Field(default=None, exclude=True)
     checkpoints: Sequence[CheckpointRecord] = Field(default=(), exclude=True)
@@ -696,7 +701,7 @@ class EvalJob(Job):
                 f"{self.tournament.name} is a round robin: give it entrants, no checkpoint"
             )
         try:
-            _match_type(self.play)
+            _match_type(self._game(), streaming=self.play_many is not None)
         except TypeError as error:
             raise LauncherError(str(error)) from None
         players = list(self.enter)
@@ -717,6 +722,13 @@ class EvalJob(Job):
         ):
             raise LauncherError("composed and code players need Agents(build=)")
         return self
+
+    def _game(self) -> Play | PlayMany:
+        if self.play is not None and self.play_many is None:
+            return self.play
+        if self.play_many is not None and self.play is None:
+            return self.play_many
+        raise LauncherError("give either async def play or async def play_many")
 
     def recorded(self) -> TournamentRun:
         """The author's selection; no scheduling, source lookup or executable payload."""
@@ -747,7 +759,8 @@ class EvalJob(Job):
             )
         options = _options(self)
         options["name"] = self.tournament.name
-        repo = _repo(self.play, options)
+        game = self._game()
+        repo = _repo(game, options)
         recorded = self.recorded()
         experiment = state.experiment or None
         bound = recorded.bind(lines, experiment=experiment) if experiment is not None else recorded
@@ -776,7 +789,8 @@ class EvalJob(Job):
         spec = Evaluation(
             tournament=bound.model_copy(update={"seated": resolved.seated}),
             experiment=experiment,
-            play=_function(self.play, repo),
+            play=_function(game, repo),
+            streaming=self.play_many is not None,
             matches=selected,
             files=files,
             agents=self.agents.plain(repo),
@@ -785,7 +799,7 @@ class EvalJob(Job):
         return _job(
             _hold,
             EvalGroup(evaluations=(spec,)),
-            origin=self.play,
+            origin=game,
             options=options,
             experiment=experiment,
             extras=self.extras,
@@ -932,18 +946,21 @@ def hold_group(
                         owned,
                         [spec.definition.name for spec, _ in pending],
                         cpus,
+                        streaming=any(spec.streaming for spec, _ in pending),
                     )
                 )
             plays = [
                 Playing(
                     run=active,
                     play=spec.play,
+                    streaming=spec.streaming,
                     checkout=checkout,
                     tournament=spec.definition.name,
                     agents=agent_process.address if agent_process else None,
                     build=spec.agents.build,
                     load=spec.agents.load if needs_loading and agent_process is None else None,
-                    memory=agent_bytes(spec.agents.memory_gb) // max(1, cpus.games),
+                    memory=agent_bytes(spec.agents.memory_gb) // max(1, cpus.processes),
+                    max_batch=spec.agents.max_batch,
                 )
                 for spec, active, _ in opened
             ]
