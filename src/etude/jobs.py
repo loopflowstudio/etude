@@ -452,8 +452,8 @@ class Agents(BaseModel):
             raise TypeError("load must take one checkpoint")
         if self.build is not None and len(inspect.signature(self.build).parameters) != 2:
             raise TypeError("build must take player and leaves")
-        if self.shared is True and self.load is None:
-            raise ValueError("shared=True requires a checkpoint loader")
+        if self.shared is not None and self.load is None:
+            raise ValueError("shared requires a checkpoint loader")
         return self
 
     def plain(self, repo: Path | None) -> AgentLoader:

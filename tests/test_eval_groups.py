@@ -857,8 +857,9 @@ def test_agents_shared_override_controls_mode_and_grouping(
     monkeypatch: pytest.MonkeyPatch,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    with pytest.raises(ValidationError, match="shared=True requires a checkpoint loader"):
-        Agents(shared=True)
+    for shared in (True, False):
+        with pytest.raises(ValidationError, match="shared requires a checkpoint loader"):
+            Agents(shared=shared)
     assert AgentLoader.model_validate_json('{"max_batch": 16}').shared is None
 
     state = ExperimentState(experiment="grouped")
