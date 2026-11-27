@@ -443,13 +443,15 @@ class Agents(BaseModel):
             raise TypeError("load must take one checkpoint")
         if self.build is not None and len(inspect.signature(self.build).parameters) != 2:
             raise TypeError("build must take player and leaves")
-        # Settings that would do nothing without a loader would still split the group key.
+        # Unused settings would still split the group key.
+        fields = self.model_fields_set
+        batching = fields & {"max_batch", "max_delay_seconds"}
         if self.load is None:
-            unused = sorted(
-                self.model_fields_set & {"devices", "max_batch", "max_delay_seconds", "memory_gb"}
-            )
+            unused = sorted(batching | (fields & {"devices", "memory_gb"}))
             if unused:
                 raise ValueError(f"{', '.join(unused)} requires a checkpoint loader")
+        elif self.devices == ("cpu",) and batching:
+            raise ValueError(f"{', '.join(sorted(batching))} requires an accelerator in devices")
         return self
 
     def plain(self, repo: Path | None) -> AgentLoader:

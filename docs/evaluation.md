@@ -170,10 +170,13 @@ etude: agents: shared inference for prediction (metal); 7 games at a time; 1 inf
 
 Use `Agents(load=load, devices=("cuda",))` for NVIDIA, `devices=("metal",)` for
 Apple Silicon (PyTorch MPS or MLX), or `devices=("cpu",)` for a CPU-only loader.
-A CPU-only declaration skips the accelerator probe. If Etude finds no matching
-accelerator, each game caches its own forwards with one model-library thread
-and a share of the checkpoint-byte allowance. The startup line gives the
-device or the reason for direct inference.
+Direct inference is the fallback whenever Etude finds no matching accelerator.
+Each game caches its own forwards with one model-library thread and a share of
+the checkpoint-byte allowance. Etude drops `"cpu"` from declarations that also
+include an accelerator. A CPU-only declaration skips the accelerator probe,
+accepts `memory_gb`, and rejects `max_batch` and `max_delay_seconds`.
+The startup line names the shared accelerator or explains why inference is
+direct, including when `CUDA_VISIBLE_DEVICES` hides GPUs on an NVIDIA host.
 
 On CUDA, active games fill `max_batch`. On Metal, active games use up to one
 fewer than the host's cores, with at least one game. Pending matches and

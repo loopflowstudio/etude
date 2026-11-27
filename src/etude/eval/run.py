@@ -490,7 +490,8 @@ def _terminable() -> Iterator[None]:
 
 
 def _normalize_devices(devices: tuple[Device, ...]) -> tuple[Device, ...]:
-    return tuple(dict.fromkeys(sorted(devices)))
+    accelerators = tuple(sorted(set(devices) - {"cpu"}))
+    return accelerators or ("cpu",)
 
 
 type _Devices = Annotated[

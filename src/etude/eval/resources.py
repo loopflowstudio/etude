@@ -100,20 +100,32 @@ def seconds_left() -> float | None:
     return max(0.0, datetime.fromisoformat(deadline).timestamp() - time.time())
 
 
-type Device = Literal["cuda", "metal", "cpu"]
+type Accelerator = Literal["cuda", "metal"]
+type Device = Accelerator | Literal["cpu"]
+type _Unavailable = Literal["cpu", "CUDA_VISIBLE_DEVICES hides GPUs"]
+type Reason = (
+    _Unavailable
+    | Literal[
+        "no loader",
+        "no checkpoints",
+        "cpu-only loader",
+        "loader does not declare cuda",
+        "loader does not declare metal",
+    ]
+)
 
 DEFAULT_DEVICES: tuple[Device, ...] = ("cuda", "metal")
 
 
-def _device() -> Device:
-    """Read visible NVIDIA or Apple Silicon hardware without importing a model library."""
+def _detect_accelerator() -> Accelerator | _Unavailable:
+    """Find visible hardware or explain its absence without importing a model library."""
     if sys.platform == "darwin" and platform.machine() == "arm64":
         return "metal"
-    if os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1"):
-        return "cpu"
     command = shutil.which("nvidia-smi")
     if command is None:
         return "cpu"
+    if os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1"):
+        return "CUDA_VISIBLE_DEVICES hides GPUs"
     try:
         listed = subprocess.check_output(
             [command, "--query-gpu=index", "--format=csv,noheader"],
@@ -132,15 +144,18 @@ class ExecutionPlan:
 
     `threads` is each inference owner's thread budget: the shared agent process's
     in shared mode, and each game process's (always one) in direct mode.
-    `device` describes host detection, defaulting to CPU when the probe is skipped.
+    `reason` explains direct play. Shared play names its accelerator.
     """
 
     games: int
     threads: int
-    shared: bool
-    device: Device
-    reason: str
+    accelerator: Accelerator | None
+    reason: Reason | None
     checkpoint_bytes: int
+
+    @property
+    def shared(self) -> bool:
+        return self.accelerator is not None
 
     def describe(self, tournaments: Sequence[str]) -> str | None:
         """One startup line naming the mode, why it was chosen, and its sizing; None without loading."""
@@ -149,7 +164,8 @@ class ExecutionPlan:
         games = "game" if self.games == 1 else "games"
         mode = "shared" if self.shared else "direct"
         line = (
-            f"etude: agents: {mode} inference for {', '.join(tournaments)} ({self.reason}); "
+            f"etude: agents: {mode} inference for {', '.join(tournaments)} "
+            f"({self.accelerator or self.reason}); "
             f"{self.games} {games} at a time"
         )
         if not self.shared:
@@ -160,19 +176,20 @@ class ExecutionPlan:
 
 def _select_mode(
     *, loader: bool, checkpoints: bool, devices: tuple[Device, ...]
-) -> tuple[bool, Device, str]:
+) -> Accelerator | Reason:
     if not loader:
-        return False, "cpu", "no loader"
+        return "no loader"
     if not checkpoints:
-        return False, "cpu", "no checkpoints"
+        return "no checkpoints"
     if devices == ("cpu",):
-        return False, "cpu", "cpu-only loader"
-    device = _device()
-    if device == "cpu":
-        return False, device, device
-    if device not in devices:
-        return False, device, f"loader does not declare {device}"
-    return True, device, device
+        return "cpu-only loader"
+    match _detect_accelerator():
+        case "cuda":
+            return "cuda" if "cuda" in devices else "loader does not declare cuda"
+        case "metal":
+            return "metal" if "metal" in devices else "loader does not declare metal"
+        case unavailable:
+            return unavailable
 
 
 def plan_execution(
@@ -193,7 +210,7 @@ def plan_execution(
     """
     if pending < 1:
         raise ValueError("an execution plan needs pending matches")
-    shared, device, reason = _select_mode(loader=loader, checkpoints=checkpoints, devices=devices)
+    mode = _select_mode(loader=loader, checkpoints=checkpoints, devices=devices)
     cpus = available_cpus()
     total_memory = memory_bytes()
     held = (
@@ -203,12 +220,12 @@ def plan_execution(
         if memory_gb is None
         else int(memory_gb * 1024**3)
     )
-    if not shared:
-        capacity = cpus
-    elif device == "cuda":
-        capacity = batch_inputs
+    if mode == "cuda" or mode == "metal":
+        accelerator, reason = mode, None
+        capacity = batch_inputs if mode == "cuda" else max(1, cpus - 1)
     else:
-        capacity = max(1, cpus - 1)
+        accelerator, reason = None, mode
+        capacity = cpus
     games = min(
         pending,
         capacity,
@@ -216,11 +233,10 @@ def plan_execution(
     )
     return ExecutionPlan(
         games=games,
-        threads=max(1, cpus - games) if shared else 1,
-        shared=shared,
-        device=device,
+        threads=max(1, cpus - games) if accelerator else 1,
+        accelerator=accelerator,
         reason=reason,
-        checkpoint_bytes=held if shared else held // games,
+        checkpoint_bytes=held if accelerator else held // games,
     )
 
 
