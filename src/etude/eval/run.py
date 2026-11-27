@@ -568,9 +568,8 @@ def play_together(
     agents: AgentLoader | None = None,
     checkout: str | None = None,
 ) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
-    """Place inference, play tournament streams in spawned processes and retain outcomes."""
+    """Run the play phase, then the play_many phase, sharing outcomes and progress."""
     started = time.monotonic()
-    stopping = False
     warned_imports = False
     failed_checkpoints: set[str] = set()
 
@@ -671,36 +670,37 @@ def play_together(
                 remember_failure(each, match_error)
                 each.pending.clear()
 
-    active_plays = [each for each in plays if each.pending]
-    needs_loading = False
-    match_bytes = 0
-    if agents is not None and agents.load is not None:
-        for each in active_plays:
-            for match in each.pending:
-                sizes: dict[str, int] = {}
-                for player in match.players:
-                    for checkpoint in player_checkpoints(player):
-                        key = checkpoint.key
-                        size = checkpoint.artifact.size_bytes or 0
-                        sizes[key] = max(sizes.get(key, 0), size)
-                if sizes:
-                    needs_loading = True
-                    match_bytes = max(match_bytes, sum(sizes.values()))
-    streaming = sum(each.streaming for each in active_plays)
-    max_batch = agents.max_batch if agents is not None else 32
-    placement = place(
-        [len(each.pending) for each in active_plays if not each.streaming],
-        streaming,
-        agents=needs_loading,
-        max_batch=max_batch,
-        memory_gb=agents.memory_gb if agents is not None else None,
-        match_bytes=match_bytes,
-    )
-    build = agents.build if agents is not None else None
-    load = agents.load if placement.bus == "local" and agents is not None else None
+    def run_phase(active_plays: tuple[Playing, ...], *, streaming: bool) -> None:
+        if any(each.run.should_stop for each in active_plays):
+            raise Terminated("evaluation stopped before its execution deadline")
+        stopping = False
+        needs_loading = False
+        match_bytes = 0
+        if agents is not None and agents.load is not None:
+            for each in active_plays:
+                for match in each.pending:
+                    sizes: dict[str, int] = {}
+                    for player in match.players:
+                        for checkpoint in player_checkpoints(player):
+                            key = checkpoint.key
+                            size = checkpoint.artifact.size_bytes or 0
+                            sizes[key] = max(sizes.get(key, 0), size)
+                    if sizes:
+                        needs_loading = True
+                        match_bytes = max(match_bytes, sum(sizes.values()))
+        max_batch = agents.max_batch if agents is not None else 32
+        placement = place(
+            [len(each.pending) for each in active_plays],
+            streaming=streaming,
+            agents=needs_loading,
+            max_batch=max_batch,
+            memory_gb=agents.memory_gb if agents is not None else None,
+            match_bytes=match_bytes,
+        )
+        build = agents.build if agents is not None else None
+        load = agents.load if placement.bus == "local" and agents is not None else None
 
-    try:
-        with _terminable(), ExitStack() as agent_lifetime:
+        with ExitStack() as agent_lifetime:
             agent_process: AgentProcess | None = None
             if placement.bus == "socket" and agents is not None:
                 agent_process = agent_lifetime.enter_context(
@@ -719,208 +719,191 @@ def play_together(
                         print(warning, file=sys.stderr, flush=True)
                         warned_imports = True
 
-            if placement.processes > 0:
-                if any(each.pending and each.run.should_stop for each in plays):
-                    stopping = True
-                if not stopping:
-                    context = multiprocessing.get_context("spawn")
-                    live: list[_GameProcess] = []
+            context = multiprocessing.get_context("spawn")
+            live: list[_GameProcess] = []
+            stream_groups = (
+                [active_plays] if placement.share_streams else [(each,) for each in active_plays]
+            )
 
-                    if placement.share_streams:
-                        by_kind: dict[bool, list[Playing]] = {}
-                        for each in active_plays:
-                            by_kind.setdefault(each.streaming, []).append(each)
-                        stream_groups = [tuple(streams) for streams in by_kind.values()]
-                    else:
-                        stream_groups = [(each,) for each in active_plays]
+            def spawn_one(targets: tuple[Playing, ...]) -> _GameProcess:
+                parent, child_pipe = context.Pipe()
+                streams = tuple(
+                    Stream(
+                        tournament=each.tournament or each.run.name,
+                        function=each.play,
+                        concurrency=None if streaming else placement.games_per_process,
+                    )
+                    for each in targets
+                )
+                process = context.Process(
+                    target=run_game_process,
+                    args=(child_pipe, resources, streams),
+                    kwargs={
+                        "threads": placement.game_threads,
+                        "agents": agent_address,
+                        "checkout": checkout,
+                        "build": build,
+                        "load": load,
+                        "checkpoint_bytes": placement.checkpoint_bytes,
+                        "max_batch": max_batch,
+                    },
+                )
+                process.start()
+                child_pipe.close()
+                return _GameProcess(plays=targets, process=process, pipe=parent)
 
-                    def spawn_one(targets: tuple[Playing, ...]) -> _GameProcess:
-                        parent, child_pipe = context.Pipe()
-                        streams = tuple(
-                            Stream(
-                                tournament=each.tournament or each.run.name,
-                                function=each.play,
-                                concurrency=None if each.streaming else placement.games_per_process,
-                            )
-                            for each in targets
+            def spawn_ready() -> None:
+                while len(live) < placement.processes and not stopping:
+                    spawned = False
+                    for targets in stream_groups:
+                        if len(live) >= placement.processes:
+                            break
+                        pending = max(len(each.pending) for each in targets)
+                        if not pending:
+                            continue
+                        active = sum(child.plays is targets for child in live)
+                        needed = (
+                            1 if streaming else math.ceil(pending / placement.games_per_process)
                         )
-                        process = context.Process(
-                            target=run_game_process,
-                            args=(child_pipe, resources, streams),
-                            kwargs={
-                                "threads": placement.game_threads,
-                                "agents": agent_address,
-                                "checkout": checkout,
-                                "build": build,
-                                "load": load,
-                                "checkpoint_bytes": placement.checkpoint_bytes,
-                                "max_batch": max_batch,
-                            },
+                        if active >= needed:
+                            continue
+                        live.append(spawn_one(targets))
+                        spawned = True
+                    if not spawned:
+                        break
+
+            def handle_message(child: _GameProcess, message: object) -> None:
+                nonlocal stopping
+                if isinstance(message, Take):
+                    each = child.plays[message.stream]
+                    if not stopping and each.run.should_stop:
+                        stopping = True
+                    granted: list[Match] = []
+                    if not stopping and message.count > 0:
+                        held = child.held.setdefault(message.stream, {})
+                        while each.pending and len(granted) < message.count:
+                            match = each.pending.popleft()
+                            if match.key in each.run._failed or match.key in each.run.done:
+                                continue
+                            held[match.key] = match
+                            granted.append(match)
+                    child.pipe.send(Grant(tuple(granted)))
+                elif isinstance(message, Outcome):
+                    each = child.plays[message.stream]
+                    match = child.held[message.stream].pop(message.match_key)
+                    accept(each, match, message)
+                elif isinstance(message, StreamEnd):
+                    each = child.plays[message.stream]
+                    fail_checkpoints(message.loading_failures)
+                    held = child.held.pop(message.stream, {})
+                    if message.error is not None:
+                        fail_held(each, held, message.error)
+                    elif held:
+                        fail_held(
+                            each,
+                            held,
+                            RuntimeError("play_many returned without yielding its held matches"),
                         )
-                        process.start()
-                        child_pipe.close()
-                        return _GameProcess(plays=targets, process=process, pipe=parent)
-
-                    def spawn_ready() -> None:
-                        while len(live) < placement.processes and not stopping:
-                            spawned = False
-                            for targets in stream_groups:
-                                if len(live) >= placement.processes:
-                                    break
-                                pending = max(len(each.pending) for each in targets)
-                                if not pending:
-                                    continue
-                                active = sum(child.plays is targets for child in live)
-                                needed = (
-                                    1
-                                    if targets[0].streaming
-                                    else math.ceil(pending / placement.games_per_process)
-                                )
-                                if active >= needed:
-                                    continue
-                                live.append(spawn_one(targets))
-                                spawned = True
-                            if not spawned:
-                                break
-
-                    def handle_message(child: _GameProcess, message: object) -> None:
-                        nonlocal stopping
-                        if isinstance(message, Take):
-                            each = child.plays[message.stream]
-                            if not stopping and each.run.should_stop:
-                                stopping = True
-                            granted: list[Match] = []
-                            if not stopping and message.count > 0:
-                                held = child.held.setdefault(message.stream, {})
-                                while each.pending and len(granted) < message.count:
-                                    match = each.pending.popleft()
-                                    if match.key in each.run._failed or match.key in each.run.done:
-                                        continue
-                                    held[match.key] = match
-                                    granted.append(match)
-                            child.pipe.send(Grant(tuple(granted)))
-                        elif isinstance(message, Outcome):
-                            each = child.plays[message.stream]
-                            match = child.held[message.stream].pop(message.match_key)
-                            accept(each, match, message)
-                        elif isinstance(message, StreamEnd):
-                            each = child.plays[message.stream]
-                            fail_checkpoints(message.loading_failures)
-                            held = child.held.pop(message.stream, {})
-                            if message.error is not None:
-                                fail_held(each, held, message.error)
-                            elif held:
-                                fail_held(
-                                    each,
-                                    held,
-                                    RuntimeError(
-                                        "play_many returned without yielding its held matches"
-                                    ),
-                                )
-                            elif (
-                                each.streaming
-                                and not stopping
-                                and each.pending
-                                and not message.matches
-                            ):
-                                fail_held(
-                                    each,
-                                    {},
-                                    RuntimeError(
-                                        "play_many returned without taking pending matches"
-                                    ),
-                                )
-                        elif isinstance(message, Done):
-                            fail_checkpoints(message.loading_failures)
-                            record_report(message.report)
-                            child.done = True
-                            child.close_pipe()
-                        elif isinstance(message, Fatal):
-                            fail_checkpoints(message.loading_failures)
-                            record_report(message.report)
-                            if isinstance(message.error, RetryRequested):
-                                raise message.error
-                            for index, each in enumerate(child.plays):
-                                fail_held(each, child.held.pop(index, {}), message.error)
-                            child.done = True
-                            child.close_pipe()
-                        else:
-                            raise TypeError(f"unexpected game message {type(message).__name__}")
-
-                    try:
-                        spawn_ready()
-                        description = placement.describe(
-                            [each.tournament or each.run.name for each in active_plays],
-                            len(live),
-                            streaming=streaming > 0,
+                    elif each.streaming and not stopping and each.pending and not message.matches:
+                        fail_held(
+                            each,
+                            {},
+                            RuntimeError("play_many returned without taking pending matches"),
                         )
-                        if description is not None:
-                            print(description, file=sys.stderr, flush=True)
-                        while live:
-                            left = seconds_left()
-                            allowance = (
-                                None
-                                if left is None
-                                else max(0.0, left - max(each.run._slowest for each in plays))
-                            )
-                            handles: list[Connection | int] = []
-                            for child in live:
-                                if not child.pipe_closed:
-                                    handles.append(child.pipe)
-                                handles.append(child.process.sentinel)
-                            if agent_process is not None:
-                                handles.append(agent_process.process.sentinel)
-                            ready = set(wait(handles, timeout=allowance))
-                            if agent_process is not None:
-                                agent_process.check()
-                                if agent_process.process.sentinel in ready:
-                                    raise RetryRequested(
-                                        "agent process exited before games finished"
-                                    )
-                            if not ready:
-                                raise RetryRequested(
-                                    "evaluation deadline reached before a match completed"
-                                )
-                            for child in list(live):
-                                if not child.pipe_closed and child.pipe in ready:
-                                    try:
-                                        message = child.pipe.recv()
-                                    except (EOFError, OSError):
-                                        child.close_pipe()
-                                    else:
-                                        handle_message(child, message)
-                            for child in list(live):
-                                if child.process.sentinel not in ready:
-                                    continue
-                                while not child.pipe_closed and child.pipe.poll():
-                                    try:
-                                        message = child.pipe.recv()
-                                    except (EOFError, OSError):
-                                        child.close_pipe()
-                                        break
-                                    handle_message(child, message)
-                                child.process.join()
-                                exitcode = child.process.exitcode
-                                child.process.close()
+                elif isinstance(message, Done):
+                    fail_checkpoints(message.loading_failures)
+                    record_report(message.report)
+                    child.done = True
+                    child.close_pipe()
+                elif isinstance(message, Fatal):
+                    fail_checkpoints(message.loading_failures)
+                    record_report(message.report)
+                    if isinstance(message.error, RetryRequested):
+                        raise message.error
+                    for index, each in enumerate(child.plays):
+                        fail_held(each, child.held.pop(index, {}), message.error)
+                    child.done = True
+                    child.close_pipe()
+                else:
+                    raise TypeError(f"unexpected game message {type(message).__name__}")
+
+            try:
+                spawn_ready()
+                description = placement.describe(
+                    [each.tournament or each.run.name for each in active_plays],
+                    len(live),
+                    streaming=streaming,
+                )
+                if description is not None:
+                    print(description, file=sys.stderr, flush=True)
+                while live:
+                    left = seconds_left()
+                    allowance = (
+                        None
+                        if left is None
+                        else max(0.0, left - max(each.run._slowest for each in active_plays))
+                    )
+                    handles: list[Connection | int] = []
+                    for child in live:
+                        if not child.pipe_closed:
+                            handles.append(child.pipe)
+                        handles.append(child.process.sentinel)
+                    if agent_process is not None:
+                        handles.append(agent_process.process.sentinel)
+                    ready = set(wait(handles, timeout=allowance))
+                    if agent_process is not None:
+                        agent_process.check()
+                        if agent_process.process.sentinel in ready:
+                            raise RetryRequested("agent process exited before games finished")
+                    if not ready:
+                        raise RetryRequested("evaluation deadline reached before a match completed")
+                    for child in list(live):
+                        if not child.pipe_closed and child.pipe in ready:
+                            try:
+                                message = child.pipe.recv()
+                            except (EOFError, OSError):
                                 child.close_pipe()
-                                live.remove(child)
-                                if not child.done or exitcode != 0:
-                                    raise RetryRequested(
-                                        "game process exited before returning its match"
-                                    )
-                            spawn_ready()
-                    finally:
-                        for child in live:
-                            if child.process.is_alive():
-                                child.process.terminate()
-                        for child in live:
-                            child.process.join()
-                            child.process.close()
-                            child.close_pipe()
+                            else:
+                                handle_message(child, message)
+                    for child in list(live):
+                        if child.process.sentinel not in ready:
+                            continue
+                        while not child.pipe_closed and child.pipe.poll():
+                            try:
+                                message = child.pipe.recv()
+                            except (EOFError, OSError):
+                                child.close_pipe()
+                                break
+                            handle_message(child, message)
+                        child.process.join()
+                        exitcode = child.process.exitcode
+                        child.process.close()
+                        child.close_pipe()
+                        live.remove(child)
+                        if not child.done or exitcode != 0:
+                            raise RetryRequested("game process exited before returning its match")
+                    spawn_ready()
+            finally:
+                for child in live:
+                    if child.process.is_alive():
+                        child.process.terminate()
+                for child in live:
+                    child.process.join()
+                    child.process.close()
+                    child.close_pipe()
             if agent_process is not None:
                 agent_process.check()
             if stopping:
                 raise Terminated("evaluation stopped before its execution deadline")
+
+    try:
+        with _terminable():
+            for streaming in (False, True):
+                active_plays = tuple(
+                    each for each in plays if each.streaming == streaming and each.pending
+                )
+                if active_plays:
+                    run_phase(active_plays, streaming=streaming)
     except RetryRequested as error:
         for each in plays:
             each.run.fail_pending(error)

@@ -134,33 +134,32 @@ with evaluating(
   `games`: the unit Etude schedules, resumes and resamples. A tournament's
   `Seating` makes one match per config. Seat swaps belong
   inside `play`. Group `all` holds every seat; a player may sit in two seats.
-- **Game processes and placement.** Placement is decided once per eval run or
-  group from its active tournament shape (`play` pending counts, `streaming`
-  count, `max_batch`). `Placement` owns the topology, stream sharing, the
-  selection reason, the checkpoint byte allowance per inference owner, and
-  the startup line. With `share_streams=True`, the runner groups streams by
-  play function kind and preserves tournament order within each kind.
-  The checkpoint allowance starts from `Agents.memory_gb` or half of host
-  memory.
-  - All-`play_many` with loader (`bus="local"`, `processes=1`,
+- **Game processes and placement.** A group runs its pending `play`
+  tournaments first, then its pending `play_many` tournaments. Each phase
+  places its active queues after the previous phase's processes exit. The
+  phases share scratch, progress and checkpoint failures. `Placement` owns
+  the process layout, stream sharing, checkpoint bytes per inference owner
+  and the startup line. Each phase starts with `Agents.memory_gb` or half of
+  host memory. With `share_streams=True`, its game processes serve the queues
+  in tournament order.
+  - `play_many` with loader (`bus="local"`, `processes=1`,
     `game_threads=max(1, cpus - 1)`, `agent_threads=0`, `games_per_process=0`,
     `share_streams=True`): 1 direct game process on every host (skipping the GPU
     probe), configuring the process's model/BLAS thread environment variables
-    to `game_threads` and running the group's tournaments in turn on one
+    to `game_threads` and running the phase's tournaments in turn on one
     `LocalForwardBus` so checkpoints stay loaded.
   - Code-only `play_many` (`bus=None`, `processes=1`, `game_threads=cpus`,
     `agent_threads=0`, `games_per_process=0`, `share_streams=True`): no bus, no GPU
     probe, 1 game process owning the host's BLAS thread budget.
-  - Code-only `play` or mixed (`bus=None`, `game_threads=1`, `agent_threads=0`,
+  - Code-only `play` (`bus=None`, `game_threads=1`, `agent_threads=0`,
     `games_per_process=1`, `share_streams=False`): no bus, no GPU probe, one match at
-    a time in `play` (1 process per `play_many` tournament in a mixed group).
-  - Visible NVIDIA GPU, any tournament `play` (`bus="socket"`,
+    a time per game process.
+  - Visible NVIDIA GPU, `play` (`bus="socket"`,
     `game_threads=1`, `agent_threads=max(1, cpus - processes)`,
     `share_streams=False`): one shared agent process. Each game process serves
-    one tournament. Each `play` tournament can use up to
-    `ceil(pending / games_per_process)` processes and each `play_many`
-    tournament uses one. Unused cores go to `agent_threads`.
-  - No GPU seen, any tournament `play` (`bus="local"`,
+    one tournament, which can use up to `ceil(pending / games_per_process)`
+    processes. Unused cores go to `agent_threads`.
+  - No NVIDIA GPU seen, `play` (`bus="local"`,
     `game_threads=max(1, (cpus - processes) // processes)`, `agent_threads=0`,
     `share_streams=True`): one direct inference thread per game
     process, splitting unused host cores across inference threads and dividing
@@ -170,9 +169,8 @@ with evaluating(
     checkpoint key once per match. If those bytes exceed the full allowance,
     only one game process runs at a time. This sizing uses artifact lengths.
     Several in-flight matches can still contend for the same cache. Each process
-    takes matches from every active `play` tournament in turn. In a mixed group,
-    all `play_many` tournaments share one separate process. Each process keeps
-    its checkpoint cache across streams.
+    takes matches from every active `play` tournament in turn and keeps its
+    checkpoint cache across streams.
 
   Each game process runs one `asyncio` event loop. For `play` with a loader,
   each process keeps up to `placement.games_per_process` matches in flight and
@@ -353,7 +351,7 @@ class ForwardBus(Protocol):
   `bus.submit([ForwardCall(...)])` eagerly on call, returning the awaitable so
   game code can step a second half of its pool while the inference thread runs
   the first. Calls arriving while a forward executes still merge per checkpoint
-  in `_Batches`. On every host, an all-`play_many` group with a loader gets
+  in `_Batches`. On every host, a `play_many` phase with a loader gets
   `Placement(bus="local", processes=1, game_threads=max(1, cpus - 1), agent_threads=0, games_per_process=0, share_streams=True)`
   and runs each tournament's stream sequentially inside that one game process
   on one `LocalForwardBus`, keeping loaded checkpoints resident across

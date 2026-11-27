@@ -849,7 +849,7 @@ def hold_group(
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
 ) -> tuple[EvalResult, ...]:
-    """Start agents once, play every tournament, then raise any match failure.
+    """Play every tournament on one host, then raise any match failure.
 
     A launch owns the aggregate tally and closes its root after every tournament
     and shared resource closes. Each tournament keeps its scientific result files.

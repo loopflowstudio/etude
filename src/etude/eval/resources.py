@@ -135,10 +135,9 @@ class Placement:
             return None
         process = "game process" if live == 1 else "game processes"
         game = "game" if self.games_per_process == 1 else "games"
-        capacity = f"{self.games_per_process} {game} each"
-        if streaming:
-            slots = "slots requested by play_many"
-            capacity = f"{slots}; play holds up to {capacity}" if self.games_per_process else slots
+        capacity = (
+            "slots requested by play_many" if streaming else f"{self.games_per_process} {game} each"
+        )
         games = f"{live} {process}, {capacity}"
         if self.bus is None:
             return f"etude: {games}"
@@ -153,37 +152,22 @@ class Placement:
 
 
 def place(
-    play: Sequence[int] = (),
-    streaming: int = 0,
+    pending: Sequence[int],
     *,
+    streaming: bool = False,
     agents: bool,
     max_batch: int = 32,
     memory_gb: float | None = None,
     match_bytes: int = 0,
 ) -> Placement:
-    """Choose inference transport, exact game processes, thread budgets, concurrency and grouping.
+    """Allocate the host to tournaments using the same kind of play function.
 
-    `play` gives pending match counts per active `play` tournament. `streaming`
-    counts active `play_many` tournaments. `match_bytes` is the largest known
-    total of distinct checkpoints seated in a pending match.
-
-    An all-`play_many` group runs sequentially in one game process on every
-    host and skips the GPU probe. With a loader, it uses a direct inference
-    thread with the host inference thread budget
-    (`max(1, cpus - 1)`); code-only runs use no bus and give the single process
-    the host's `cpus` BLAS budget. Any group with `play` skips the GPU probe
-    when code-only, uses the shared agent process on visible NVIDIA hardware
-    (`agent_threads = max(1, cpus - processes)`), and otherwise runs direct
-    inference splitting remaining host cores across game processes
-    (`game_threads = max(1, (cpus - processes) // processes)`). With direct
-    inference, processes serve tournaments of the same kind in turn. One
-    process serves the `play_many` streams and the largest `play` queue sizes
-    the `play` processes. Socket and code-only mixed groups use separate
-    processes for each tournament.
+    `pending` gives the match count per tournament. `match_bytes` is the largest
+    known total of distinct checkpoints seated in a pending match. A streaming
+    phase serves every tournament in one process and skips the GPU probe.
     """
-    active_play = tuple(count for count in play if count > 0)
-    active_streaming = max(0, streaming)
-    if not active_play and active_streaming <= 0:
+    queues = tuple(count for count in pending if count > 0)
+    if not queues:
         return Placement(
             bus=None,
             processes=0,
@@ -196,11 +180,11 @@ def place(
         )
     cpus = available_cpus()
     # One reservation covers the shared cache or all direct caches combined.
-    host_bytes = memory_bytes() if active_play or (agents and memory_gb is None) else 0
+    host_bytes = memory_bytes() if not streaming or (agents and memory_gb is None) else 0
     held = 0
     if agents:
         held = int(memory_gb * 1024**3) if memory_gb is not None else host_bytes // 2
-    if not active_play:
+    if streaming:
         return Placement(
             bus="local" if agents else None,
             processes=1,
@@ -215,7 +199,7 @@ def place(
         cap = min(cpus, max(1, host_bytes // GAME_BYTES))
         return Placement(
             bus=None,
-            processes=min(cap, active_streaming + sum(active_play)),
+            processes=min(cap, sum(queues)),
             game_threads=1,
             agent_threads=0,
             games_per_process=1,
@@ -230,13 +214,12 @@ def place(
     if share_streams and match_bytes > 0:
         # Each direct process needs room for a match in its own checkpoint cache.
         cap = min(cap, max(1, held // match_bytes))
-    largest_play = max(active_play)
-    play_queues = (largest_play,) if share_streams else active_play
-    streaming_slots = min(1, active_streaming) if share_streams else active_streaming
-    play_cap = min(max(1, cap - streaming_slots), sum(play_queues))
-    games_per_process = min(math.ceil(max_batch / play_cap), largest_play)
-    play_needed = sum(math.ceil(count / games_per_process) for count in play_queues)
-    processes = min(cap, streaming_slots + play_needed)
+    largest = max(queues)
+    # Direct processes share every queue and can reuse their checkpoint cache.
+    if share_streams:
+        queues = (largest,)
+    games_per_process = min(math.ceil(max_batch / min(cap, sum(queues))), largest)
+    processes = min(cap, sum(math.ceil(count / games_per_process) for count in queues))
     return Placement(
         bus="socket" if gpu else "local",
         processes=processes,

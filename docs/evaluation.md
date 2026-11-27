@@ -191,9 +191,9 @@ Run the [vectorized example](../examples/vectorized.py):
 uv run etude eval examples/vectorized.py --source /tmp/vectorized
 ```
 
-An all-`play_many` group with a loader runs inference directly inside one game
-process on every host—CPU, Apple Silicon, or NVIDIA GPU—and prints its placement
-to stderr:
+A `play_many` tournament with a loader runs inference directly inside one
+game process on CPU, Apple Silicon, and NVIDIA GPU hosts. Etude prints the
+placement to stderr.
 
 ```text
 etude: agents: direct inference for vector (all tournaments use play_many); 1 game process, slots requested by play_many; 15 inference threads
@@ -331,17 +331,19 @@ async def advance_halves(
   back to the game loop, so outputs never alias an in-flight input array or a
   reused buffer inside `load`.
 
-Etude chooses between a direct inference thread inside the game process and a
-shared agent process from the host probe and the group's play functions:
+When a group contains both kinds of play function, Etude finishes its `play`
+tournaments first and then runs its `play_many` tournaments on the same host.
+Each phase gets the host's thread budget and the full checkpoint allowance
+from `Agents.memory_gb`. A checkpoint used in both phases loads in each phase.
 
-| Host | Group | Inference transport |
+| Host | Play function | Inference transport |
 |---|---|---|
-| Any host (CPU, Mac, GPU) | Every tournament uses `play_many` | Direct inference thread in 1 game process running the group's tournaments in turn, with the host inference thread budget (`max(1, cpus - 1)`) and checkpoints kept loaded across tournaments |
-| No GPU seen | Any tournament uses `play` | Direct inference thread in each game process. The `play` processes serve each `play` tournament's match queue in turn. One separate game process runs all `play_many` tournaments in turn. Each process reuses its loaded checkpoints across tournaments. |
-| Visible NVIDIA GPU | Any tournament uses `play` | Shared agent process over a private Unix socket (1 process per `play_many` tournament in a mixed group) |
+| Any host (CPU, Mac, GPU) | `play_many` | Direct inference thread in one game process. It serves each tournament in turn, keeps checkpoints loaded across tournaments, and gets `max(1, cpus - 1)` inference threads. |
+| No NVIDIA GPU seen | `play` | Direct inference thread in each game process. Each process serves the tournament queues in turn and reuses its loaded checkpoints. |
+| Visible NVIDIA GPU | `play` | Shared agent process over a private Unix socket. |
 
 Code-only players (no loader) start neither an inference thread nor an agent
-process; code-only `play_many` groups run sequentially in 1 game process.
+process. Code-only `play_many` tournaments run in turn in one game process.
 
 ## Results and retry
 
