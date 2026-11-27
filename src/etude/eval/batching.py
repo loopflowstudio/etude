@@ -13,6 +13,7 @@ import asyncio
 import os
 import pickle
 import queue
+import select
 import selectors
 import socket
 import sys
@@ -637,16 +638,22 @@ def _run_agents(
                         selector.register(peer, selectors.EVENT_READ)
                     else:
                         peer = cast(socket.socket, event.fileobj)
-                        started = time.monotonic()
-                        try:
-                            payload = recv_frame(peer)
-                            request = cast(BatchRequest, ForkingPickler.loads(payload))
-                        except (EOFError, OSError):
-                            selector.unregister(peer)
-                            peer.close()
-                            peers.remove(peer)
-                        else:
-                            batches.add_batch(_send_peer(peer), request, time.monotonic() - started)
+                        while True:
+                            started = time.monotonic()
+                            try:
+                                payload = recv_frame(peer)
+                                request = cast(BatchRequest, ForkingPickler.loads(payload))
+                            except (EOFError, OSError):
+                                selector.unregister(peer)
+                                peer.close()
+                                peers.remove(peer)
+                                break
+                            else:
+                                batches.add_batch(
+                                    _send_peer(peer), request, time.monotonic() - started
+                                )
+                            if not select.select([peer], [], [], 0.0)[0]:
+                                break
                 flushed = batches.flush(wait_seconds)
                 if flushed:
                     wait_seconds = 0.0

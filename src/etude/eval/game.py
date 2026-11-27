@@ -15,7 +15,15 @@ import os
 import sys
 import time
 import typing
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Generator,
+    Mapping,
+    Sequence,
+)
 from contextlib import aclosing, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -185,24 +193,17 @@ class _PendingCall:
     future: asyncio.Future[list[object]]
 
 
-class _BoundForward:
-    """Shared per-checkpoint awaitable handle inside one game process."""
+class _PendingAnswer:
+    """Awaitable returned by `_BoundForward.__call__` without creating an unawaited coroutine."""
 
-    def __init__(self, owner: _Forwarder, checkpoint: str) -> None:
-        self._owner = owner
-        self._checkpoint = checkpoint
+    def __init__(self, future: asyncio.Future[list[object]] | None) -> None:
+        self._future = future
 
-    async def __call__(self, inputs: list[object], *, rows: int | None = None) -> list[object]:
-        if rows is not None and rows < 0:
-            raise ValueError("rows must be non-negative")
-        if not inputs:
+    async def _resolve(self) -> list[object]:
+        if self._future is None:
             return []
-        count = len(inputs) if rows is None else rows
-        if count < 1:
-            raise ValueError("rows must be positive for non-empty inputs")
-        future = self._owner.enqueue(self._checkpoint, list(inputs), count)
         try:
-            return await asyncio.wait_for(future, timeout=seconds_left())
+            return await asyncio.wait_for(self._future, timeout=seconds_left())
         except TimeoutError as error:
             raise RetryRequested("agent response exceeded the evaluation deadline") from error
         except ForwardError as error:
@@ -211,13 +212,36 @@ class _BoundForward:
                 tracker.append(error)
             raise
 
+    def __await__(self) -> Generator[object, None, list[object]]:
+        return self._resolve().__await__()
+
+
+class _BoundForward:
+    """Shared per-checkpoint awaitable handle inside one game process."""
+
+    def __init__(self, owner: _Forwarder, checkpoint: str) -> None:
+        self._owner = owner
+        self._checkpoint = checkpoint
+
+    def __call__(self, inputs: list[object], *, rows: int | None = None) -> Awaitable[list[object]]:
+        if rows is not None and rows < 0:
+            raise ValueError("rows must be non-negative")
+        if not inputs:
+            return _PendingAnswer(None)
+        count = len(inputs) if rows is None else rows
+        if count < 1:
+            raise ValueError("rows must be positive for non-empty inputs")
+        future = self._owner.call(self._checkpoint, list(inputs), count)
+        return _PendingAnswer(future)
+
 
 class _Forwarder:
-    """Zero-delay barrier batching all waiting checkpoint forwards in one game process."""
+    """Barrier (`play`) or eager (`play_many`) forward submission in one game process."""
 
-    def __init__(self, bus: ForwardBus, *, max_batch: int) -> None:
+    def __init__(self, bus: ForwardBus, *, max_batch: int, eager: bool = False) -> None:
         self._bus = bus
         self.max_batch = max_batch
+        self._eager = eager
         self._handles: dict[str, _BoundForward] = {}
         self._pending: dict[str, list[_PendingCall]] = {}
         self._flush_scheduled = False
@@ -231,6 +255,27 @@ class _Forwarder:
             handle = _BoundForward(self, checkpoint.key)
             self._handles[checkpoint.key] = handle
         return handle
+
+    def call(
+        self, checkpoint: str, inputs: list[object], rows: int
+    ) -> asyncio.Future[list[object]]:
+        if self._eager:
+            return self._submit_now(checkpoint, inputs, rows)
+        return self.enqueue(checkpoint, inputs, rows)
+
+    def _submit_now(
+        self, checkpoint: str, inputs: list[object], rows: int
+    ) -> asyncio.Future[list[object]]:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[list[object]] = loop.create_future()
+        pending = _PendingCall(inputs, rows, future)
+        try:
+            (bus_future,) = self._bus.submit([ForwardCall(checkpoint, inputs, rows)])
+        except BaseException as error:
+            future.set_exception(error)
+            return future
+        bus_future.add_done_callback(self._callback([pending]))
+        return future
 
     def enqueue(
         self, checkpoint: str, inputs: list[object], rows: int
@@ -467,7 +512,7 @@ async def _serve_stream(
         elif agents is not None:
             bus = await SocketForwardBus.connect(agents)
         if bus is not None:
-            forwarder = _Forwarder(bus, max_batch=max_batch)
+            forwarder = _Forwarder(bus, max_batch=max_batch, eager=concurrency is None)
 
         bind: Callable[[CheckpointRef], Forward] | None = (
             forwarder.bind if forwarder is not None else None

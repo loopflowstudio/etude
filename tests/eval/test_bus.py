@@ -6,6 +6,7 @@ import asyncio
 import gc
 import os
 import pickle
+import select
 import selectors
 import socket
 import sys
@@ -90,15 +91,19 @@ def _serve_socket(
                         selector.register(peer, selectors.EVENT_READ)
                     else:
                         peer = cast(socket.socket, event.fileobj)
-                        try:
-                            payload = recv_frame(peer)
-                            request = cast(BatchRequest, ForkingPickler.loads(payload))
-                        except (EOFError, OSError):
-                            selector.unregister(peer)
-                            peer.close()
-                            peers.remove(peer)
-                        else:
-                            batches.add_batch(send_to(peer), request)
+                        while True:
+                            try:
+                                payload = recv_frame(peer)
+                                request = cast(BatchRequest, ForkingPickler.loads(payload))
+                            except (EOFError, OSError):
+                                selector.unregister(peer)
+                                peer.close()
+                                peers.remove(peer)
+                                break
+                            else:
+                                batches.add_batch(send_to(peer), request)
+                            if not select.select([peer], [], [], 0.0)[0]:
+                                break
                 batches.flush()
     finally:
         for peer in peers:
@@ -812,3 +817,139 @@ def test_local_and_socket_store_identical_rows(
             db.close()
     assert example_results["local"] == example_results["socket"]
     assert len(example_results["local"]) == 12
+
+
+@pytest.mark.parametrize("transport", ["local", "socket"])
+def test_play_many_submits_eagerly_and_merges_queued_calls_without_a_clock(
+    transport: _Transport,
+) -> None:
+    cp = checkpoint("eager").checkpoint
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    batch_rows: list[int] = []
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        def forward(inputs: list[object]) -> list[object]:
+            total_rows = sum(int(cast(np.ndarray, x).shape[0]) for x in inputs)
+            batch_rows.append(total_rows)
+            if len(batch_rows) == 1:
+                first_entered.set()
+                release_first.wait(timeout=5.0)
+            return [cast(np.ndarray, x) + 1.0 for x in inputs]
+
+        return forward
+
+    async def run() -> None:
+        async with _open_bus(transport, load, max_batch=8) as bus:
+            forwarder = _Forwarder(bus, max_batch=8, eager=True)
+            forward = forwarder.bind(cp)
+            a = np.array([1.0, 2.0], dtype=np.float32)
+            b = np.array([3.0, 4.0], dtype=np.float32)
+            c = np.array([5.0, 6.0], dtype=np.float32)
+
+            # Submitting on the call reaches the inference thread before any await.
+            pending_a = forward([a], rows=2)
+            assert first_entered.wait(timeout=5.0)
+            with pytest.raises(ValueError, match="read-only"):
+                a[0] = 0.0
+
+            # Game code runs and submits two more calls while forward A is still held.
+            stepped_while_held = True
+            pending_b = forward([b], rows=2)
+            pending_c = forward([c], rows=2)
+            assert stepped_while_held
+            release_first.set()
+
+            [out_a] = await pending_a
+            [out_b] = await pending_b
+            [out_c] = await pending_c
+            assert np.array_equal(cast(np.ndarray, out_a), np.array([2.0, 3.0], dtype=np.float32))
+            assert np.array_equal(cast(np.ndarray, out_b), np.array([4.0, 5.0], dtype=np.float32))
+            assert np.array_equal(cast(np.ndarray, out_c), np.array([6.0, 7.0], dtype=np.float32))
+
+    asyncio.run(run())
+    # Calls b and c arrived during forward A and merged into one 4-row batch.
+    assert batch_rows == [2, 4]
+
+
+@pytest.mark.parametrize("transport", ["local", "socket"])
+def test_play_barrier_runs_other_match_and_accepts_second_call_while_first_is_held(
+    transport: _Transport,
+) -> None:
+    cp = checkpoint("play_overlap").checkpoint
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    calls_seen = 0
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        def forward(inputs: list[object]) -> list[object]:
+            nonlocal calls_seen
+            calls_seen += 1
+            if calls_seen == 1:
+                first_entered.set()
+                release_first.wait(timeout=5.0)
+            return [int(str(x)) + 10 for x in inputs]
+
+        return forward
+
+    async def run() -> None:
+        async with _open_bus(transport, load, max_batch=8) as bus:
+            forwarder = _Forwarder(bus, max_batch=8, eager=False)
+            forward = forwarder.bind(cp)
+            match2_stepped_while_held = False
+
+            async def match_one() -> list[object]:
+                return await forward([1])
+
+            async def match_two() -> list[object]:
+                nonlocal match2_stepped_while_held
+                assert await asyncio.to_thread(first_entered.wait, 5.0)
+                # Another match's game code runs while match 1's forward is held.
+                match2_stepped_while_held = True
+
+                async def call_second() -> list[object]:
+                    return await forward([2])
+
+                second_task: asyncio.Task[list[object]] = asyncio.create_task(call_second())
+                # Let the barrier flush match 2's call to the bus while match 1 is still held.
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+                release_first.set()
+                return await second_task
+
+            out1, out2 = await asyncio.gather(match_one(), match_two())
+            assert match2_stepped_while_held
+            assert out1 == [11]
+            assert out2 == [12]
+
+    asyncio.run(run())
+    assert calls_seen == 2
+
+
+def test_vectorized_example_uses_two_half_numpy_arrays_zero_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: False)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
+    definition = read_experiment(Path("examples/vectorized.py"))
+    assert definition.eval is not None
+    state = ExperimentState(experiment=definition.name)
+    vector_jobs = asked(definition.eval, state)
+    eval_group = EvalGroup(
+        evaluations=tuple(
+            spec for each in vector_jobs for spec in evaluation_group(each.lower(state)).evaluations
+        )
+    )
+    results = hold_group(eval_group, directory=tmp_path)
+    assert [r.played for r in results] == [8]
+    artifacts = tmp_path / "vectorized/artifacts/agents"
+    reports = [
+        GameReport.model_validate_json(path.read_bytes()) for path in artifacts.glob("game-*.json")
+    ]
+    assert len(reports) == 1
+    assert reports[0].matches == 8
+    assert reports[0].bus.arrays > 0
+    assert reports[0].bus.arrays_copied == 0
+    assert reports[0].bus.copied_bytes == 0
+    assert reports[0].bus.pickled == 0
+    assert reports[0].bus.wire_bytes == 0
