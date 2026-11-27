@@ -243,7 +243,9 @@ inference through one shared agent process, with up to `cpus - 1` game processes
 and a cap of `max_batch` rows per forward. On a 16-core M4 Max, 128 held-out
 Manabot `w160l8` games reached 6,992 games/hour with 15 concurrent games and
 shared MPS (7.43 mean rows/forward), 6,470 games/hour with 32 concurrent
-games and shared MPS, and 6,183 games/hour with direct CPU inference.
+games and shared MPS, and 6,183 games/hour with direct CPU inference. The
+single-thread shared CPU comparison reached 1,222 games/hour. These results
+measure one checkpoint and one host.
 
 `Agents(load=load, devices=("cuda", "metal"))` is the default for checkpoint
 loaders. Use `("cuda",)` or `("metal",)` to share only on the corresponding

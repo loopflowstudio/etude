@@ -118,6 +118,8 @@ show as coverage gaps instead of fabricated scores.
 There is one game signature: `play(match, agents)`. Each seated player gets one
 author object in `agents`, in seat order.
 
+This PyTorch loader uses your experiment's `load_model` to read the checkpoint.
+
 ```python
 # models.py: keep model imports here so game processes stay light
 import torch

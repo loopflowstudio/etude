@@ -22,7 +22,8 @@ def test_mirror_sends_all_branches_once_per_ply_and_builds_author_objects(
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     monkeypatch.setattr(
-        "etude.eval.resources._detect_accelerator", lambda: "cuda" if shared else "no accelerator detected"
+        "etude.eval.resources._detect_accelerator",
+        lambda: "cuda" if shared else "no accelerator detected",
     )
     small = checkpoint("small")
     mirror = Mirror(over=small)
@@ -93,7 +94,9 @@ def test_code_players_build_author_objects_without_an_agent_process(
 def test_cpu_games_reuse_the_checkpoint_across_tournaments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources._detect_accelerator", lambda: "no accelerator detected")
+    monkeypatch.setattr(
+        "etude.eval.resources._detect_accelerator", lambda: "no accelerator detected"
+    )
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     small = checkpoint("small")
     players = (compose(Mirror(over=small)), compose(Mirror(over=small, choice="greedy")))

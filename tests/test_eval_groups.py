@@ -1049,7 +1049,6 @@ def test_launched_group_delivers_members_then_the_next_pass_plays_nothing(
             "launched_agents.py": f"""
 from etude.jobs import Agents, EvalJob, ExperimentState
 from etude.eval.records import Code, RoundRobin, checkpoint_player
-from etude.eval.loader import AgentLoader
 from etude.eval.match import environment
 from etude.spec import Runtime
 from tests.eval.arithmetic import load
@@ -1347,7 +1346,6 @@ def test_heavy_import_warning_is_once_and_only_for_games_with_agents(
 import sys
 sys.path.insert(0, sys.argv[1])
 from heavy_fixture_game import play
-from etude.eval.loader import AgentLoader
 from etude.eval.match import environment
 from etude.eval.records import Code, RoundRobin, checkpoint_player
 from etude.jobs import Agents, EvalGroup, EvalJob, evaluation_group, hold_group, ExperimentState
