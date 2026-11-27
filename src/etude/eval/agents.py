@@ -260,10 +260,11 @@ def running_agents(
             raise RetryRequested("agent process exited during startup") from error
         observer.start()
         label = plan.gpu or "cpu"
-        unit = "thread" if plan.threads == 1 else "threads"
+        games = "game" if plan.games == 1 else "games"
+        threads = "thread" if plan.threads == 1 else "threads"
         print(
             f"etude: agents: started for {', '.join(tournaments)} ({label}); "
-            f"{plan.games} games at a time; {plan.threads} inference {unit}",
+            f"{plan.games} {games} at a time; {plan.threads} inference {threads}",
             file=sys.stderr,
             flush=True,
         )

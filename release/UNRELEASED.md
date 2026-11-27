@@ -248,12 +248,15 @@ games/hour, 71.2 s, mean 9.12 rows/forward) and direct CPU batch 1 (16 games,
 16 loads: 6,183 games/hour, 74.5 s). Running a CPU-only loader through the
 single-thread shared process dropped to 1,222 games/hour (377.2 s, 5.1× slower
 than direct CPU), so `Agents(shared=False)` lets CPU-only loaders or Metal-less
-VMs opt out of the probe and play direct (`Agents(shared=True)` forces shared
-mode on any host; old queued `AgentLoader` records default to automatic).
+VMs opt out of the probe and play direct. `Agents(shared=True)` forces shared
+inference, reserving at least half the cores for inference when no GPU is
+detected. Old queued `AgentLoader` records default to automatic selection.
 
 `matches.retry` distinguishes retryable infrastructure failures from ordinary
-game errors without adding another status. Older match records default it to
-false. The derived statsdb cache rebuilds from schema 14 or 15 to 16 automatically.
+game errors without adding another status. Standalone and grouped evals retain
+unfinished matches for retry when the shared agent process fails. Older match
+records default `retry` to false. The derived statsdb cache rebuilds from schema
+14 or 15 to 16 automatically.
 Game processes load play's defining module; for a job using shared inference, heavy
 imports there produce one warning per run naming their importer.
 

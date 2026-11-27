@@ -21,7 +21,7 @@ from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
@@ -144,24 +144,11 @@ class EvalRun(Run):
         function = Function(module=authored.__module__, name=authored.__qualname__)
         definition = agents.plain(None) if agents is not None else None
         artifacts = self.files.root / "artifacts" / "agents"
-        with (
-            _terminable(),
-            resources(artifacts) as owned,
-            start_agents(
-                definition,
-                runs=(self,),
-                tournaments=(self.name,),
-                checkout=None,
+        with _terminable(), resources(artifacts) as owned:
+            (result,) = play_together(
+                (Playing(run=self, play=function, agent_loader=definition),),
                 resources=owned,
-            ) as execution,
-        ):
-            results = play_together(
-                (execution.playing(self, function),),
-                resources=owned,
-                plan=execution.plan,
-                agent_process=execution.process,
             )
-            result = results[0]
             if isinstance(result, (EtudeError, RetryRequested)):
                 raise result
             return result
@@ -494,16 +481,12 @@ def _terminable() -> Iterator[None]:
 
 @dataclass
 class Playing:
-    """A live tournament and its game function and optional agent address."""
+    """A live tournament, its authored functions and its dispatch state."""
 
     run: EvalRun
     play: Function
-    checkout: str | None = None
     tournament: str | None = None
-    agents: str | None = None
-    build: Function | None = None
-    load: Function | None = None
-    memory: int | None = None
+    agent_loader: AgentLoader | None = None
     pending: deque[Match] = field(init=False)
     skipped: int = field(init=False)
     played: int = 0
@@ -514,84 +497,78 @@ class Playing:
         self.skipped = len(self.run.matches) - len(self.pending)
 
 
-@dataclass(frozen=True)
-class EvalAgents:
-    """Planned inference topology and optional live shared agent process."""
-
-    plan: ExecutionPlan
-    process: AgentProcess | None
-    definition: AgentLoader | None
-    needs_loading: bool
-
-    def playing(
-        self,
-        run: EvalRun,
-        play: Function,
-        *,
-        checkout: str | None = None,
-        tournament: str | None = None,
-        build: Function | None = None,
-    ) -> Playing:
-        """Build a tournament's Playing record from this inference topology."""
-        resolved_build = (
-            build if build is not None else (self.definition.build if self.definition else None)
-        )
-        direct = self.needs_loading and self.process is None and self.definition is not None
-        return Playing(
-            run=run,
-            play=play,
-            checkout=checkout,
-            tournament=tournament,
-            agents=self.process.address if self.process is not None else None,
-            build=resolved_build,
-            load=self.definition.load if direct and self.definition is not None else None,
-            memory=self.plan.checkpoint_bytes if direct else None,
-        )
-
-
-@contextmanager
-def start_agents(
-    definition: AgentLoader | None,
+def play_together(
+    plays: Sequence[Playing],
     *,
-    runs: Sequence[EvalRun],
-    tournaments: Sequence[str],
-    checkout: str | None,
     resources: Resources,
-) -> Iterator[EvalAgents]:
-    """Size the eval group and own the shared agent process when selected."""
-    pending = sum(match.key not in run.done for run in runs for match in run.matches)
-    needs_loading = (
-        definition is not None
-        and definition.load is not None
-        and any(
-            player_checkpoints(player)
-            for run in runs
-            for match in run.matches
-            if match.key not in run.done
-            for player in match.players
-        )
-    )
-    plan = plan_execution(
-        pending,
-        agents=needs_loading,
-        memory_gb=definition.memory_gb if definition is not None else None,
-        batch_inputs=definition.max_batch if definition is not None else 32,
-        shared=definition.shared if definition is not None else None,
-    )
-    with ExitStack() as lifetime:
-        process = (
-            lifetime.enter_context(
-                running_agents(definition, checkout, resources, tournaments, plan)
+    checkout: str | None = None,
+) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
+    """Own inference and game execution, retaining unfinished work on interruption."""
+    try:
+        with _terminable():
+            pending = [each for each in plays if each.pending]
+            definition = pending[0].agent_loader if pending else None
+            if any(each.agent_loader != definition for each in pending):
+                raise EtudeError("incompatible_eval_agents", 422)
+            load = definition.load if definition is not None else None
+            needs_loading = load is not None and any(
+                player_checkpoints(player)
+                for each in pending
+                for match in each.pending
+                for player in match.players
             )
-            if plan.shared and definition is not None
-            else None
+            plan = plan_execution(
+                sum(len(each.pending) for each in pending),
+                agents=needs_loading,
+                memory_gb=definition.memory_gb if definition is not None else None,
+                batch_inputs=definition.max_batch if definition is not None else 32,
+                shared=definition.shared if definition is not None else None,
+            )
+            if plan.games:
+                tournaments = [each.tournament or each.run.name for each in pending]
+                with (
+                    running_agents(definition, checkout, resources, tournaments, plan)
+                    if plan.shared and definition is not None
+                    else nullcontext()
+                ) as process:
+                    _play_matches(
+                        plays,
+                        resources=resources,
+                        plan=plan,
+                        checkout=checkout,
+                        agent_process=process,
+                        load=load if needs_loading and not plan.shared else None,
+                    )
+                    if process is not None:
+                        process.check()
+    except RetryRequested as error:
+        delivery_failure = None
+        for each in plays:
+            try:
+                each.run.fail_pending(error)
+            except RetryRequested as undelivered:
+                # The block is already sealed locally. Keep recording the other runs.
+                delivery_failure = undelivered
+        if delivery_failure is not None:
+            raise delivery_failure
+        raise
+    finally:
+        for each in plays:
+            each.run._report.failed += each.run.failed
+        for report in dict.fromkeys(each.run._report for each in plays):
+            report.write()
+    return tuple(
+        each.failure
+        if each.failure is not None
+        else EvalResult(
+            experiment=each.run.experiment,
+            name=each.run.name,
+            environment=each.run.environment,
+            played=each.played,
+            skipped=each.skipped,
         )
-        yield EvalAgents(
-            plan=plan,
-            process=process,
-            definition=definition,
-            needs_loading=needs_loading,
-        )
+        for each in plays
+    )
 
 
 def _retain(name: str, report: Imports | Performance, directory: Path) -> None:
@@ -602,13 +579,15 @@ def _retain(name: str, report: Imports | Performance, directory: Path) -> None:
         raise RetryRequested(f"game report {name} could not be retained") from error
 
 
-def play_together(
+def _play_matches(
     plays: Sequence[Playing],
     *,
     resources: Resources,
-    plan: ExecutionPlan | None = None,
-    agent_process: AgentProcess | None = None,
-) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
+    plan: ExecutionPlan,
+    checkout: str | None,
+    agent_process: AgentProcess | None,
+    load: Function | None,
+) -> None:
     """Play tournaments on one pool; loader failures follow every seated checkpoint.
 
     Other match failures stop dispatch for their tournament; in-flight outcomes
@@ -681,7 +660,12 @@ def play_together(
         if performance is not None:
             # The run writer distinguishes retries and tournaments with identical matches.
             _retain(f"protocol-{each.run.id}-{match.key}.json", performance, resources.artifacts)
-        if each.agents and imports is not None and imports.warning and not warned_imports:
+        if (
+            agent_process is not None
+            and imports is not None
+            and imports.warning
+            and not warned_imports
+        ):
             print(imports.warning, file=sys.stderr, flush=True)
             warned_imports = True
         if isinstance(outcome, BaseException):
@@ -719,118 +703,90 @@ def play_together(
                 flush=True,
             )
 
-    if plan is None:
-        plan = plan_execution(sum(len(each.pending) for each in plays), agents=False)
     workers = plan.games
-    if workers and any(each.load is not None for each in plays):
+    if load is not None:
+        unit = "process" if workers == 1 else "processes"
         print(
-            f"etude: agents: direct inference in {workers} game processes; 1 thread each",
+            f"etude: agents: direct inference in {workers} game {unit}; 1 thread each",
             file=sys.stderr,
             flush=True,
         )
-    try:
-        with _terminable():
-            if workers > 0:
-                context = multiprocessing.get_context("spawn")
-                pool = ProcessPoolExecutor(
-                    workers, mp_context=context, initializer=initialize_game, initargs=(resources,)
-                )
-                running: dict[Future[Execution], tuple[Playing, Match]] = {}
-
-                def start() -> None:
-                    nonlocal stopping
-                    fail_checkpoints()
-                    for _ in range(len(order)):
-                        each = order.popleft()
-                        order.append(each)
-                        if not each.pending:
-                            continue
-                        if stopping or each.run.should_stop:
-                            stopping = True
-                            return
-                        match = each.pending.popleft()
-                        running[
-                            pool.submit(
-                                play_match,
-                                each.play,
-                                match,
-                                each.agents,
-                                each.checkout,
-                                each.tournament or each.run.name,
-                                each.build,
-                                each.load,
-                                each.memory,
-                            )
-                        ] = (each, match)
-                        return
-
-                try:
-                    for _ in range(workers):
-                        start()
-                    while running:
-                        left = seconds_left()
-                        allowance = (
-                            None
-                            if left is None
-                            else max(0.0, left - max(each.run._slowest for each in plays))
-                        )
-                        # Future is invariant; wait observes completion, never result values.
-                        signals = cast(
-                            list[Future[object]],
-                            [*running, *([agent_process.exited] if agent_process else [])],
-                        )
-                        finished, _ = wait(
-                            signals,
-                            timeout=allowance,
-                            return_when=FIRST_COMPLETED,
-                        )
-                        if agent_process is not None:
-                            agent_process.check()
-                            if agent_process.exited in finished:
-                                raise RetryRequested("agent process exited before games finished")
-                        if not finished:
-                            raise RetryRequested(
-                                "evaluation deadline reached before a match completed"
-                            )
-                        for future in list(running):
-                            if future not in finished:
-                                continue
-                            each, match = running.pop(future)
-                            raised = future.exception()
-                            if isinstance(raised, BrokenProcessPool):
-                                raise RetryRequested(
-                                    "game process exited before returning its match"
-                                ) from raised
-                            accept(each, match, raised if raised is not None else future.result())
-                            start()
-                finally:
-                    # Python 3.12 has no public terminate_workers. Reap children on
-                    # cancellation before the agent process is stopped.
-                    if sys.exc_info()[0] is not None:
-                        processes = pool._processes  # Python 3.12 executor-owned children.
-                        for process in processes.values():
-                            process.terminate()
-                    pool.shutdown(wait=True, cancel_futures=True)
-            if stopping:
-                raise Terminated("evaluation stopped before its execution deadline")
-    except RetryRequested as error:
-        for each in plays:
-            each.run.fail_pending(error)
-        raise
-    finally:
-        for each in plays:
-            each.run._report.failed += each.run.failed
-        for each in plays:
-            each.run._report.write()
-    return tuple(
-        each.failure
-        if each.failure is not None
-        else EvalResult(
-            experiment=each.run.experiment,
-            name=each.run.name,
-            environment=each.run.environment,
-            played=each.played,
-            skipped=each.skipped,
-        )
-        for each in plays
+    address = agent_process.address if agent_process is not None else None
+    context = multiprocessing.get_context("spawn")
+    pool = ProcessPoolExecutor(
+        workers, mp_context=context, initializer=initialize_game, initargs=(resources,)
     )
+    running: dict[Future[Execution], tuple[Playing, Match]] = {}
+
+    def start() -> None:
+        nonlocal stopping
+        fail_checkpoints()
+        for _ in range(len(order)):
+            each = order.popleft()
+            order.append(each)
+            if not each.pending:
+                continue
+            if stopping or each.run.should_stop:
+                stopping = True
+                return
+            match = each.pending.popleft()
+            running[
+                pool.submit(
+                    play_match,
+                    each.play,
+                    match,
+                    address,
+                    checkout,
+                    each.tournament or each.run.name,
+                    each.agent_loader.build if each.agent_loader is not None else None,
+                    load,
+                    memory=plan.checkpoint_bytes,
+                )
+            ] = (each, match)
+            return
+
+    try:
+        for _ in range(workers):
+            start()
+        while running:
+            left = seconds_left()
+            allowance = (
+                None if left is None else max(0.0, left - max(each.run._slowest for each in plays))
+            )
+            # Future is invariant; wait observes completion, never result values.
+            signals = cast(
+                list[Future[object]],
+                [*running, *([agent_process.exited] if agent_process else [])],
+            )
+            finished, _ = wait(
+                signals,
+                timeout=allowance,
+                return_when=FIRST_COMPLETED,
+            )
+            if agent_process is not None:
+                agent_process.check()
+                if agent_process.exited in finished:
+                    raise RetryRequested("agent process exited before games finished")
+            if not finished:
+                raise RetryRequested("evaluation deadline reached before a match completed")
+            for future in list(running):
+                if future not in finished:
+                    continue
+                each, match = running.pop(future)
+                raised = future.exception()
+                if isinstance(raised, BrokenProcessPool):
+                    raise RetryRequested(
+                        "game process exited before returning its match"
+                    ) from raised
+                accept(each, match, raised if raised is not None else future.result())
+                start()
+    finally:
+        # Python 3.12 has no public terminate_workers. Reap children on
+        # cancellation before the agent process is stopped.
+        if sys.exc_info()[0] is not None:
+            processes = pool._processes  # Python 3.12 executor-owned children.
+            for process in processes.values():
+                process.terminate()
+        pool.shutdown(wait=True, cancel_futures=True)
+    if stopping:
+        raise Terminated("evaluation stopped before its execution deadline")

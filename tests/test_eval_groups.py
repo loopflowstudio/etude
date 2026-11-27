@@ -12,6 +12,7 @@ from concurrent.futures import Future, wait
 from contextlib import nullcontext
 from dataclasses import replace
 from decimal import Decimal
+from importlib import import_module
 from multiprocessing import active_children, get_context
 from multiprocessing.connection import Connection
 from multiprocessing.reduction import ForkingPickler
@@ -445,29 +446,23 @@ def test_statsdb_rebuilds_the_last_released_schema_with_retry_flags(tmp_path: Pa
 
 
 def test_delivery_failure_preserves_local_results_and_fails_the_run_for_retry(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    active = job("delivery", None)
-    active = active.model_copy(
-        update={
-            "tournament": active.tournament.model_copy(
-                update={"configs": ({"case": 0}, {"case": 1})}
-            )
-        }
-    )
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
+    first, second = job("first", None), job("second", None)
     with pytest.raises(RetryRequested, match="delivery failed"):
         hold_group(
-            group(active),
+            group(first, second),
             directory=tmp_path / "local",
             storages=[OfflineStorage(tmp_path / "offline")],
         )
     db = statsdb("grouped", tmp_path / "local")
     try:
-        assert db.sql("select state from runs").fetchall() == [("failed",)]
-        assert set(db.sql("select state, retry from matches").fetchall()) == {
+        assert db.sql("select state from runs").fetchall() == [("failed",)] * 2
+        assert db.sql("select state, retry from matches order by state").fetchall() == [
             ("done", False),
             ("failed", True),
-        }
+        ]
     finally:
         db.close()
 
@@ -686,7 +681,10 @@ def test_gpu_games_fill_a_batch_with_pending_and_memory_bounds(
         ("darwin", "x86_64", 8, 64, True, None, 32, None, 8, 0, False, None),
         ("linux", "arm64", 8, 64, True, None, 32, None, 8, 0, False, None),
         ("darwin", "arm64", 8, 64, True, None, 32, False, 8, 0, False, None),
-        ("linux", "x86_64", 8, 64, True, None, 32, True, 7, 1, True, None),
+        ("linux", "x86_64", 8, 64, True, None, 32, True, 4, 4, True, None),
+        ("linux", "x86_64", 9, 64, True, None, 32, True, 4, 5, True, None),
+        ("linux", "x86_64", 1, 64, True, None, 32, True, 1, 1, True, None),
+        ("linux", "x86_64", 8, 64, True, 15.5, 32, True, 2, 6, True, None),
     ],
 )
 def test_apple_silicon_plan_execution_bounds_games_by_cores_and_memory(
@@ -742,7 +740,9 @@ def test_probe_skipped_for_code_only_and_shared_false(monkeypatch: pytest.Monkey
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
     assert plan_execution(8, agents=False).shared is False
-    assert plan_execution(0, agents=True).shared is False
+    assert plan_execution(0, agents=True, memory_gb=2, shared=True) == ExecutionPlan(
+        games=0, threads=0, shared=False, gpu=None, checkpoint_bytes=0
+    )
     assert plan_execution(8, agents=True, shared=False).shared is False
     assert probed == 0
 
@@ -805,9 +805,10 @@ def test_group_execution_respects_declared_agent_memory(
     assert [result.played for result in hold_group(selected, directory=tmp_path)] == [1, 1, 1]
     assert max(outstanding) == concurrent
     threads = max(1, cpus - concurrent)
-    unit = "thread" if threads == 1 else "threads"
+    game_unit = "game" if concurrent == 1 else "games"
+    thread_unit = "thread" if threads == 1 else "threads"
     assert (
-        f"(nvidia); {concurrent} games at a time; {threads} inference {unit}"
+        f"(nvidia); {concurrent} {game_unit} at a time; {threads} inference {thread_unit}"
         in capfd.readouterr().err
     )
     batches = json.loads((tmp_path / "grouped/artifacts/agents/batches.json").read_bytes())
@@ -884,7 +885,7 @@ def test_agents_shared_override_controls_mode_and_grouping(
     direct_dir = tmp_path / "direct"
     assert [result.played for result in hold_group(group(direct_job), directory=direct_dir)] == [1]
     err = capfd.readouterr().err
-    assert "etude: agents: direct inference in 1 game processes; 1 thread each" in err
+    assert "etude: agents: direct inference in 1 game process; 1 thread each" in err
     assert not (direct_dir / "grouped/artifacts/agents/batches.json").exists()
 
     # shared=True forces the shared agent process even when no GPU is detected.
@@ -892,7 +893,7 @@ def test_agents_shared_override_controls_mode_and_grouping(
     forced_dir = tmp_path / "forced"
     assert [result.played for result in hold_group(group(forced_job), directory=forced_dir)] == [1]
     err = capfd.readouterr().err
-    assert "etude: agents: started for forced (cpu); 1 games at a time; 1 inference thread" in err
+    assert "etude: agents: started for forced (cpu); 1 game at a time; 1 inference thread" in err
     assert (forced_dir / "grouped/artifacts/agents/batches.json").is_file()
 
 
@@ -1119,7 +1120,7 @@ with TemporaryDirectory(dir="/tmp", prefix="etude-test-") as scratch, socket.soc
     thread = threading.Thread(target=answer)
     thread.start()
     result = play_match(Function(module="light_agent_game", name="play", path=sys.argv[1]),
-                        Match(players=(checkpoint("one"),)), address)
+                        Match(players=(checkpoint("one"),)), address, memory=0)
     thread.join()
 assert counts == {"sent": 1, "received": 1}
 assert result.performance.requests == result.performance.answers == 1
@@ -1354,37 +1355,44 @@ hold_group(EvalGroup(evaluations=tuple(evaluation_group(job.lower(ExperimentStat
         assert "move the import to load's module" in result.stderr
 
 
+@pytest.mark.parametrize("grouped", [False, True], ids=["standalone", "group"])
 def test_agent_startup_failure_reports_retryable_matches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    grouped: bool,
 ) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
     monkeypatch.setenv("ETUDE_FIXTURE_TOKEN", "synthetic-fixture-credential")
-    (tmp_path / "bad_agent_import_fixture.py").write_text(
-        "import os\nraise RuntimeError('startup: ' + os.environ['ETUDE_FIXTURE_TOKEN'])\n"
+    module = f"bad_agent_import_fixture_{'group' if grouped else 'standalone'}"
+    (tmp_path / f"{module}.py").write_text(
+        "import os\n"
+        "from multiprocessing import parent_process\n"
+        "from etude.checkpoints import CheckpointRef\n"
+        "from etude.eval.agents import Forward\n"
+        "if parent_process() is not None:\n"
+        "    raise RuntimeError('startup: ' + os.environ['ETUDE_FIXTURE_TOKEN'])\n"
+        "def load(checkpoint: CheckpointRef) -> Forward:\n"
+        "    raise AssertionError('the agent should fail before loading')\n"
     )
-    selected = group(job("startup", Agents(load=load)))
-    spec = selected.evaluations[0]
-    assert spec.agents is not None
-    spec = spec.model_copy(
-        update={
-            "agents": spec.agents.model_copy(
-                update={
-                    "load": Function(
-                        module="bad_agent_import_fixture", name="load", path=str(tmp_path)
-                    )
-                }
-            )
-        }
-    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    agents = Agents(load=import_module(module).load)
+    selected = job("startup", agents)
     with pytest.raises(RetryRequested, match="startup"):
-        hold_group(EvalGroup(evaluations=(spec,)), directory=tmp_path)
+        if grouped:
+            hold_group(group(selected), directory=tmp_path)
+        else:
+            with evaluating(
+                selected.tournament, experiment="grouped", enter=selected.enter, directory=tmp_path
+            ) as active:
+                active.play(selected.play, agents=agents)
     log = capfd.readouterr().err
     assert "[redacted]" in log and "synthetic-fixture-credential" not in log
     assert json.loads((outputs / "etude-result.json").read_text())["tally"]["failed"] == 1
     found = played(
-        spec.definition, experiment="grouped", enter=spec.tournament.entrants, directory=tmp_path
+        selected.tournament, experiment="grouped", enter=selected.enter, directory=tmp_path
     )
     assert len(found.new) == len(found.retry) == len(found.failed) == 1
 

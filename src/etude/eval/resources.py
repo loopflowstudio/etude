@@ -92,11 +92,6 @@ def memory_bytes() -> int:
     return physical
 
 
-def agent_bytes(memory_gb: float | None) -> int:
-    """Loaded-checkpoint bytes the agent process may hold: declared, or half of memory."""
-    return int(memory_gb * 1024**3) if memory_gb is not None else memory_bytes() // 2
-
-
 def seconds_left() -> float | None:
     """Seconds before the run's `ETUDE_DEADLINE`, never negative; None without one."""
     deadline = os.environ.get("ETUDE_DEADLINE")
@@ -147,40 +142,40 @@ def plan_execution(
 ) -> ExecutionPlan:
     """Choose shared or direct inference and size games, threads and checkpoint bytes.
 
-    NVIDIA games fill one shared batch; Apple Silicon and forced-shared CPU games
-    leave at least one core for the shared agent process. Direct games own their
-    checkpoint forwards and split the checkpoint-byte allowance across game
-    processes. Memory and pending work may reduce games further, but never leave
-    queued work with zero capacity.
+    NVIDIA games fill one shared batch. Apple Silicon games leave a core for the
+    shared agent process. Forced sharing without a detected GPU reserves at
+    least half the cores for inference. Direct games split the checkpoint-byte allowance
+    across game processes. Memory and pending work may reduce games further.
     """
+    if pending == 0:
+        return ExecutionPlan(games=0, threads=0, shared=False, gpu=None, checkpoint_bytes=0)
     cpus = available_cpus()
-    probe = agents and pending > 0 and shared is not False
-    gpu = _gpu() if probe else None
-    use_shared = agents and pending > 0 and (shared is True or (shared is None and gpu is not None))
+    gpu = _gpu() if agents and shared is not False else None
+    use_shared = agents and (shared is True or gpu is not None)
     total_memory = memory_bytes()
-    held = (
-        (int(memory_gb * 1024**3) if memory_gb is not None else total_memory // 2) if agents else 0
-    )
+    held = 0
+    if agents:
+        held = total_memory // 2 if memory_gb is None else int(memory_gb * 1024**3)
     if not use_shared:
         capacity = cpus
     elif gpu == "nvidia":
         capacity = batch_inputs
-    else:
-        # The GPU shares cores and memory with the games; a core stays for inference.
+    elif gpu == "apple":
         capacity = max(1, cpus - 1)
+    else:
+        capacity = max(1, cpus // 2)
     games = min(
         pending,
         capacity,
         max(1, (total_memory - held) // GAME_BYTES),
     )
     threads = max(1, cpus - games) if use_shared else 0
-    checkpoint_bytes = 0 if not agents else held if use_shared else held // max(1, games)
     return ExecutionPlan(
         games=games,
         threads=threads,
         shared=use_shared,
         gpu=gpu,
-        checkpoint_bytes=checkpoint_bytes,
+        checkpoint_bytes=held if use_shared else held // games,
     )
 
 

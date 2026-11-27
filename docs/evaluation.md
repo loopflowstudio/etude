@@ -179,9 +179,11 @@ Honor Etude's thread environment in the loader and choose the model's device
 there (`cuda`, `mps` or MLX on Apple Silicon, `cpu` otherwise): hardware
 detection does not place tensors for you. Pass `Agents(shared=False)` to skip
 the GPU probe and run direct per-game inference (for example with a CPU-only
-loader or a Metal-less macOS VM), or `Agents(shared=True)` to force one shared
-agent process on any host. Keep model imports (`torch`, `jax`, `tensorflow`,
-`mlx`) in the loading module so game processes remain light.
+loader or a Metal-less macOS VM). Pass `Agents(shared=True)` to force one shared
+agent process. Without a detected GPU, games use up to half the cores and
+inference uses the rest, with at least one game process and one inference thread.
+Keep model imports (`torch`, `jax`, `tensorflow`, `mlx`) in the loading module
+so game processes remain light.
 `Agents(max_batch=..., memory_gb=..., shared=...)` tunes batch size,
 checkpoint-byte allowance (default: half of host memory) and inference mode;
 author code keeps one forward deterministic for every batch size.

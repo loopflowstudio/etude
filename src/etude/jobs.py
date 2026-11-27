@@ -70,10 +70,10 @@ from etude.eval.resources import resources
 from etude.eval.result import EvalResult, Result, Tables
 from etude.eval.run import (
     EvalRun,
+    Playing,
     _group_progress,
     _terminable,
     play_together,
-    start_agents,
 )
 from etude.eval.tournament import _open_evaluation
 from etude.identity import run_address, stored_owner
@@ -903,46 +903,16 @@ def hold_group(
         for _, active, _ in opened:
             active._report = report
         report.write()
-        pending = [
-            (spec, active)
+        plays = [
+            Playing(
+                run=active,
+                play=spec.play,
+                tournament=spec.definition.name,
+                agent_loader=spec.agents,
+            )
             for spec, active, _ in opened
-            if any(m.key not in active.done for m in active.matches)
         ]
-        definition = pending[0][0].agents if pending else None
-        if any(spec.agents != definition for spec, _ in pending):
-            raise EtudeError("incompatible_eval_agents", 422)
-        try:
-            with start_agents(
-                definition,
-                runs=[active for _, active in pending],
-                tournaments=[spec.definition.name for spec, _ in pending],
-                checkout=checkout,
-                resources=owned,
-            ) as execution:
-                plays = [
-                    execution.playing(
-                        active,
-                        spec.play,
-                        checkout=checkout,
-                        tournament=spec.definition.name,
-                        build=spec.agents.build,
-                    )
-                    for spec, active, _ in opened
-                ]
-                outcomes = play_together(
-                    plays,
-                    resources=owned,
-                    plan=execution.plan,
-                    agent_process=execution.process,
-                )
-                if execution.process is not None:
-                    execution.process.check()
-        except RetryRequested as error:
-            for _, active, _ in opened:
-                active.fail_pending(error)
-            report.failed = sum(active.failed for _, active, _ in opened)
-            report.write()
-            raise
+        outcomes = play_together(plays, resources=owned, checkout=checkout)
         for (_, _, member), outcome in zip(opened, outcomes, strict=True):
             if isinstance(outcome, (EtudeError, RetryRequested)):
                 member.__exit__(type(outcome), outcome, outcome.__traceback__)

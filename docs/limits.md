@@ -27,9 +27,11 @@ failure recovery requires.
   inference batches through a shared agent process by default. Detection checks
   the host, not your loader or macOS VM Metal support: a CPU-only loader on an
   Apple Silicon Mac runs behind the shared process unless it declares
-  `Agents(shared=False)` to stay direct. Your loader must honor the thread
-  environment and choose its device (`cuda`, `mps`, MLX or `cpu`). A batch or
-  memory allowance does not guarantee GPU memory residency.
+  `Agents(shared=False)` to stay direct. With `Agents(shared=True)` and no
+  detected GPU, games use up to half the cores and inference uses the rest,
+  with at least one game process and one inference thread. Your loader must
+  honor the thread environment and choose its device (`cuda`, `mps`, MLX or
+  `cpu`). A batch or memory allowance does not guarantee GPU memory residency.
 - A match must return rows to count as done. Caught forward failures still
   propagate to retention. Ordinary game failures need `--retry-failed`;
   transient infrastructure failures can retry automatically.

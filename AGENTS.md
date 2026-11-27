@@ -282,14 +282,16 @@ Etude sets the model-library thread environment before importing the checkpoint
 loading module. Direct game processes load through the same cache/eviction owner
 as shared inference and report failures to the parent even when play catches them. Loaders must honor that inference budget when configuring
 their library; each game process keeps one thread.
-On visible NVIDIA hardware, active games fill the declared batch, bounded by
-pending matches and host memory; on native arm64 Apple Silicon (and forced-shared
-CPU runs), active games fill `cpus - 1` (at least 1), bounded by pending matches
-and remaining memory, while each forward stays capped at `max_batch`. `Agents(shared=...)`
-overrides automatic selection (`False` skips the probe and plays direct; `True` forces
-shared). Probe hardware without importing the loader; code-only games and `shared=False`
-keep direct capacity and perform no GPU probe. Hardware capacity does not select the
-author's model device or promise GPU memory residency.
+On visible NVIDIA hardware, active games fill the declared batch. On native
+arm64 Apple Silicon, they fill `cpus - 1`, with at least one game. Forced sharing
+without a detected GPU gives games up to half the cores (at least one game) and
+gives inference the remaining cores (at least one thread). Pending matches and
+remaining host memory bound active games. Each shared forward stays capped at
+`max_batch`. `Agents(shared=False)` plays direct and `Agents(shared=True)` forces
+sharing when checkpoint loading is needed. Probe hardware without importing the
+loader. Code-only games and `shared=False` keep direct capacity and skip the probe.
+Hardware capacity does not select the author's model device or promise GPU
+memory residency.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any

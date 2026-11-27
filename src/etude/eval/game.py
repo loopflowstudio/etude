@@ -31,7 +31,7 @@ from etude.eval.agents import (
 )
 from etude.eval.composition import build_agents
 from etude.eval.records import Match
-from etude.eval.resources import Resources, agent_bytes
+from etude.eval.resources import Resources
 from etude.eval.result import Result, Tables
 from etude.records import Record
 
@@ -200,7 +200,8 @@ def play_match(
     tournament: str = "",
     build: Function | None = None,
     load: Function | None = None,
-    memory: int | None = None,
+    *,
+    memory: int,
 ) -> Execution:
     if _startup_modules is None:
         raise RuntimeError("initialize_game must start the game process")
@@ -222,17 +223,16 @@ def play_match(
     started = time.monotonic()
     try:
         if load is not None:
-            # Process entry point: only CPU games import the local checkpoint owner.
+            # Process entry point: only direct games import the local checkpoint owner.
             from etude.eval import forwards  # noqa: PLC0415
 
             global _local_agents
-            allowance = agent_bytes(None) if memory is None else memory
             if _local_agents is None or (
                 _local_agents.load,
                 _local_agents.checkout,
                 _local_agents.memory,
-            ) != (load, checkout, allowance):
-                _local_agents = forwards.LocalAgents(load, checkout, allowance)
+            ) != (load, checkout, memory):
+                _local_agents = forwards.LocalAgents(load, checkout, memory)
             local = _local_agents
             local.begin(tournament, match.key)
         play = cast(Callable[..., Tables | Result], function.load(checkout))
