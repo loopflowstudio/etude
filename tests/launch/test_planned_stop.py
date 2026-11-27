@@ -106,28 +106,3 @@ def test_failed_input_delivery_retries_the_whole_initial_directory(tmp_path: Pat
     (session / "inputs" / seed.sha256).write_bytes(body)
     environment, _ = _lay_out(session, home, work)
     assert (Path(environment["ETUDE_OUT"]) / "state.pt").read_bytes() == body
-
-
-def test_lay_out_forwards_host_eval_shared_override(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    b = bench(tmp_path)
-    (run,) = b.scheduler.queue(job(), rent="l4")
-    b.scheduler.tick()
-    attempt = b.scheduler.attempts(run)[0]
-    work = b.scheduler._work(attempt)
-    assert work is not None
-
-    monkeypatch.setenv("ETUDE_EVAL_SHARED", "0")
-    session = tmp_path / "machine/sessions/shared-on"
-    home = session / "attempts/shared-on"
-    home.mkdir(parents=True)
-    environment, _ = _lay_out(session, home, work)
-    assert environment["ETUDE_EVAL_SHARED"] == "0"
-
-    monkeypatch.delenv("ETUDE_EVAL_SHARED")
-    session_unset = tmp_path / "machine/sessions/shared-unset"
-    home_unset = session_unset / "attempts/shared-unset"
-    home_unset.mkdir(parents=True)
-    environment_unset, _ = _lay_out(session_unset, home_unset, work)
-    assert "ETUDE_EVAL_SHARED" not in environment_unset

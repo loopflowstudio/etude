@@ -282,22 +282,16 @@ Etude sets the model-library thread environment before importing the checkpoint
 loading module. Direct game processes load through the same cache/eviction owner
 as shared inference and report failures to the parent even when play catches them. Loaders must honor that inference budget when configuring
 their library; each game process keeps one thread.
-On visible NVIDIA hardware, active games fill the declared batch. On native
-arm64 Apple Silicon, they fill `cpus - 1`, with at least one game. Forced sharing
-without a detected GPU gives games up to half the cores (at least one game) and
-gives inference the remaining cores (at least one thread). Pending matches and
-remaining host memory bound active games. Each shared forward stays capped at
-`max_batch`. `Agents(shared=False)` plays direct and `Agents(shared=True)` forces
-sharing when checkpoint loading is needed; host `ETUDE_EVAL_SHARED=0|1` overrides
-`Agents(shared=...)` in both directions (forwarded by `etude worker`) and is
-validated before writing any run folder or smoking training. `ETUDE_EVAL_SHARED`
-selects Etude's process topology only and does not hide MPS or CUDA from the
-loader. Probe hardware without importing the loader.
-Plays without a loader or checkpoints, `shared=False` and `ETUDE_EVAL_SHARED=0`
-keep direct capacity and skip the probe; `play_together` prints one startup line
-naming the mode, why it was chosen, and any detected GPU.
-Hardware capacity does not select the author's model device or promise GPU
-memory residency.
+With a visible CUDA GPU and `"cuda"` in `Agents.devices`, active games fill
+the declared batch. With native arm64 Apple Silicon and `"metal"` declared,
+they fill `cpus - 1`, with at least one game. Pending matches and remaining
+host memory bound active games. Each shared forward stays capped at
+`max_batch`. Devices default to `("cuda", "metal")`. An absent or undeclared
+accelerator plays direct. Plays without a loader or checkpoints and
+`devices=("cpu",)` keep direct capacity and skip the probe.
+`play_together` prints one startup line for checkpoint inference, with its mode,
+reason and sizing. Probe hardware without importing the loader. The loader
+selects its own device and owns GPU memory residency.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any

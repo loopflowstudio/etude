@@ -238,26 +238,19 @@ shared arm. This is one shuffled panel on one host; it does not establish a
 universal CPU model-size crossover. GPU placement retains the earlier fair
 Large-checkpoint results below.
 
-On an Apple Silicon Mac (native arm64 Python), `etude eval` starts the shared
-agent process with up to `cpus - 1` game processes and one checkpoint copy in
-unified memory, capping each forward at `max_batch`. On a 16-core M4 Max
-playing 128 held-out Manabot `w160l8` games (32 paired deals, 12,298 forwards),
-shared MPS at `cpus - 1` (15 games, 1 load) reached 6,992 games/hour (65.9 s,
-mean 7.43 rows/forward), beating shared MPS at `max_batch` (32 games: 6,470
-games/hour, 71.2 s, mean 9.12 rows/forward) and direct CPU batch 1 (16 games,
-16 loads: 6,183 games/hour, 74.5 s). Running a CPU-only loader through the
-single-thread shared process dropped to 1,222 games/hour (377.2 s, 5.1× slower
-than direct CPU), so `Agents(shared=False)` lets CPU-only loaders opt out of the
-probe and play direct, and `ETUDE_EVAL_SHARED=0|1` overrides sharing for one
-host (such as a Metal-less VM or owned pool Mac, forwarded by `etude worker`
-and validated before `etude smoke` trains) without editing the experiment,
-selecting process topology only without hiding MPS or CUDA from the loader. One
-startup line names the mode, why it was chosen, any detected GPU, games and
-inference threads. `Agents` refuses sharing, batching and memory settings
-without `load`; batching settings stay accepted with `shared=False` so toggling
-sharing preserves them. `Agents(shared=True)` forces shared inference, reserving
-at least half the cores for inference when no GPU is detected. Old queued
-`AgentLoader` records default to automatic selection.
+On an Apple Silicon Mac (native arm64 Python), `etude eval` can batch checkpoint
+inference through one shared agent process, with up to `cpus - 1` game processes
+and a cap of `max_batch` rows per forward. On a 16-core M4 Max, 128 held-out
+Manabot `w160l8` games reached 6,992 games/hour with 15 concurrent games and
+shared MPS (7.43 mean rows/forward), 6,470 games/hour with 32 concurrent
+games and shared MPS, and 6,183 games/hour with direct CPU inference.
+
+`Agents(load=load, devices=("cuda", "metal"))` is the default for checkpoint
+loaders. Use `("cuda",)` or `("metal",)` to share only on the corresponding
+hardware, or `("cpu",)` for direct inference on all hosts. Undeclared or
+unavailable accelerators use direct inference. Startup output names the mode,
+its reason, the game count and the thread budget. Older queued loader records
+without a device declaration use the default.
 
 `matches.retry` distinguishes retryable infrastructure failures from ordinary
 game errors without adding another status. Standalone and grouped evals retain

@@ -22,19 +22,13 @@ failure recovery requires.
   config or names when new behavior should be a new scientific condition.
   Keep published checkpoint contents fixed under their keys.
 - Game functions and wrapper records must be importable top-level definitions.
-  Games run in spawned processes. Direct games use one model-library thread;
-  on a visible NVIDIA GPU or an Apple Silicon Mac (native arm64 Python),
-  inference batches through a shared agent process by default. Detection checks
-  the host, not your loader or macOS VM Metal support: a CPU-only loader on an
-  Apple Silicon Mac runs behind the shared process unless it declares
-  `Agents(shared=False)`, or the host sets `ETUDE_EVAL_SHARED=0`, to stay
-  direct (`ETUDE_EVAL_SHARED=0|1` outranks `Agents.shared` and controls process
-  topology only; it does not hide MPS or CUDA from your loader). With
-  `Agents(shared=True)` or `ETUDE_EVAL_SHARED=1` and no
-  detected GPU, games use up to half the cores and inference uses the rest,
-  with at least one game process and one inference thread. Your loader must
-  honor the thread environment and choose its device (`cuda`, `mps`, MLX or
-  `cpu`). A batch or memory allowance does not guarantee GPU memory residency.
+  Games run in spawned processes. Checkpoint inference batches through a shared
+  agent process when the loader declares the detected accelerator (`cuda` or
+  `metal`). Apple detection uses native arm64 macOS. Declare `devices=("cpu",)`
+  for a CPU-only loader or a Mac without usable Metal. Direct games use one
+  model-library thread each. Your loader owns device selection and must honor
+  the thread environment. The batch and memory allowances describe process
+  capacity. The model library owns GPU memory residency.
 - A match must return rows to count as done. Caught forward failures still
   propagate to retention. Ordinary game failures need `--retry-failed`;
   transient infrastructure failures can retry automatically.

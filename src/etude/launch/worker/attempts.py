@@ -147,11 +147,11 @@ def _lay_out(session: Path, home: Path, work: Work) -> tuple[dict[str, str], dic
     source = home / "src"
     source.mkdir()
     (home / "outputs").mkdir()
-    # Only plain settings cross into the job, plus GPU and eval topology host overrides. No keys.
+    # Only plain settings cross into the job, and what a GPU needs to be found. No keys.
     environment = {
         name: value
         for name, value in os.environ.items()
-        if name in ("PATH", "HOME", "LANG", "TMPDIR", "LD_LIBRARY_PATH", "ETUDE_EVAL_SHARED")
+        if name in ("PATH", "HOME", "LANG", "TMPDIR", "LD_LIBRARY_PATH")
         or name.startswith(("NVIDIA_", "CUDA_"))
     }
     # The job's own; Etude's names below win.

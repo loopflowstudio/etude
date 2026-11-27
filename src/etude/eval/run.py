@@ -27,9 +27,9 @@ from hashlib import sha256
 from pathlib import Path
 from queue import Empty
 from types import FrameType
-from typing import TYPE_CHECKING, Literal, NoReturn, cast
+from typing import TYPE_CHECKING, Annotated, Literal, NoReturn, cast
 
-from pydantic import Field
+from pydantic import AfterValidator, Field, model_validator
 
 from etude.call import Function
 from etude.errors import EtudeError, RetryRequested, explain, sanitize
@@ -59,12 +59,13 @@ from etude.eval.records import (
     player_checkpoints,
 )
 from etude.eval.resources import (
+    DEFAULT_DEVICES,
+    Device,
     ExecutionPlan,
     Resources,
     plan_execution,
     resources,
     seconds_left,
-    shared_override,
 )
 from etude.eval.result import EvalResult as EvalResult
 from etude.eval.result import Result as Result
@@ -149,7 +150,6 @@ class EvalRun(Run):
         self, play: Callable[..., Tables | Result], *, agents: Agents | None = None
     ) -> EvalResult:
         """Play selected matches with constructed seats, skipping durable results on resume."""
-        shared_override()
         authored = inspect.unwrap(play)
         function = Function(module=authored.__module__, name=authored.__qualname__)
         definition = agents.plain(None) if agents is not None else AgentLoader()
@@ -489,15 +489,33 @@ def _terminable() -> Iterator[None]:
         signal.signal(signal.SIGTERM, before)
 
 
+def _normalize_devices(devices: tuple[Device, ...]) -> tuple[Device, ...]:
+    return tuple(dict.fromkeys(sorted(devices)))
+
+
+type _Devices = Annotated[
+    tuple[Device, ...], Field(min_length=1), AfterValidator(_normalize_devices)
+]
+
+
 class AgentLoader(Record):
     """Portable loading declaration; batching never enters scientific identity."""
 
     load: Function | None = None
     build: Function | None = None
-    shared: bool | None = None
+    # An omitted default also round-trips build-only records, which cannot declare devices.
+    devices: _Devices = Field(
+        default=DEFAULT_DEVICES, exclude_if=lambda devices: devices == DEFAULT_DEVICES
+    )
     max_batch: int = Field(default=32, ge=1)
     max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
     memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _validate_loading(self) -> AgentLoader:
+        if self.load is None and "devices" in self.model_fields_set:
+            raise ValueError("devices requires a checkpoint loader")
+        return self
 
 
 @dataclass
@@ -545,7 +563,7 @@ def play_together(
                     checkpoints=has_checkpoints,
                     memory_gb=definition.memory_gb,
                     batch_inputs=definition.max_batch,
-                    shared=definition.shared,
+                    devices=definition.devices,
                 )
                 tournaments = [each.tournament or each.run.name for each in pending]
                 with (

@@ -158,57 +158,35 @@ as identity and `Sampler.choose` as the action method.
 [`agent_models.py`](../examples/agent_models.py) shows a loader. Both are used
 by the runnable [`agents.py`](../examples/agents.py) experiment.
 
-On a visible NVIDIA GPU or an Apple Silicon Mac (native arm64 Python), calls
-from active games batch through one shared agent process and
-`artifacts/agents/batches.json` records each forward's batch composition:
+Declare the hardware your checkpoint loader can use. The default
+`devices=("cuda", "metal")` batches calls on a visible NVIDIA GPU or an Apple
+Silicon Mac running native arm64 Python. The shared agent process writes each
+forward's batch composition to `artifacts/agents/batches.json`.
 
 ```text
 $ uv run etude eval experiment.py
-etude: agents: shared inference for prediction (apple); 7 games at a time; 1 inference thread
+etude: agents: shared inference for prediction (metal); 7 games at a time; 1 inference thread
 ```
 
-The startup line names the mode and why it was chosen: the GPU found
-(`apple`, `nvidia`), `ETUDE_EVAL_SHARED=0|1`, `shared=True`, `shared=False`,
-`CUDA_VISIBLE_DEVICES hides GPUs` or `no GPU` (appending the detected GPU when
-a host or author override forces sharing on GPU hardware).
+Use `Agents(load=load, devices=("cuda",))` for NVIDIA, `devices=("metal",)` for
+Apple Silicon (PyTorch MPS or MLX), or `devices=("cpu",)` for a CPU-only loader.
+A CPU-only declaration skips the accelerator probe. If Etude finds no matching
+accelerator, each game caches its own forwards with one model-library thread
+and a share of the checkpoint-byte allowance. The startup line gives the
+device or the reason for direct inference.
 
-On NVIDIA hardware, active games fill `max_batch` (bounded by pending matches
-and host memory). On an Apple Silicon Mac, active games are sized to host cores
-minus one (leaving a core for the shared agent process), bounded by pending
-matches and remaining unified memory, while each forward is still capped at
-`max_batch`. On other hosts (Linux CPU, Intel Mac, or x86 Python under Rosetta),
-each game process caches forwards directly with one model-library thread per
-game and a share of the checkpoint-byte allowance.
+On CUDA, active games fill `max_batch`. On Metal, active games use up to one
+fewer than the host's cores, with at least one game. Pending matches and
+remaining host memory can reduce both counts, and each shared forward is capped
+at `max_batch`. The checkpoint-byte allowance defaults to half of host memory.
 
-Honor Etude's thread environment in the loader and choose the model's device
-there (`cuda`, `mps` or MLX on Apple Silicon, `cpu` otherwise): hardware
-detection does not place tensors for you. Pass `Agents(shared=False)` to skip
-the GPU probe and run direct per-game inference (for example with a CPU-only
-loader). To override sharing for one host without editing the experiment (such
-as playing direct on a Metal-less macOS VM, or forcing shared inference on a
-CPU host), set `ETUDE_EVAL_SHARED=0` or `ETUDE_EVAL_SHARED=1`:
-
-```text
-$ ETUDE_EVAL_SHARED=0 uv run etude eval experiment.py
-etude: agents: direct inference for prediction (ETUDE_EVAL_SHARED=0); 8 games at a time; 1 inference thread each
-```
-
-`ETUDE_EVAL_SHARED` outranks `Agents(shared=...)` (including on pool hosts,
-where `etude worker` forwards it) and selects Etude's process
-topology only — it does not hide MPS or CUDA from PyTorch or MLX. To force a
-GPU-capable loader onto CPU, use your loader's own device setting (or
-`CUDA_VISIBLE_DEVICES=""` on NVIDIA).
-
-Pass `Agents(shared=True)` to force one shared
-agent process. Without a detected GPU, games use up to half the cores and
-inference uses the rest, with at least one game process and one inference thread.
-Keep model imports (`torch`, `jax`, `tensorflow`, `mlx`) in the loading module
-so game processes remain light.
-`Agents(max_batch=..., memory_gb=..., shared=...)` tunes batch size,
-checkpoint-byte allowance (default: half of host memory) and inference mode;
-author code keeps one forward deterministic for every batch size. These need
-`load`; `max_batch` and `max_delay_seconds` are accepted with `shared=False`
-so toggling sharing keeps them.
+Choose the model device inside `load` and honor Etude's thread environment there.
+Etude uses hardware detection to place inference in processes. The loader owns
+tensor placement and any CPU fallback. If your loader selects CPU for a run,
+declare `devices=("cpu",)` for that run as well. Keep model imports (`torch`,
+`jax`, `tensorflow`, `mlx`) in the loading module so with shared inference the
+game processes remain light. `devices`, `max_batch`, `max_delay_seconds`, and
+`memory_gb` require `load`.
 
 ## Results and retry
 

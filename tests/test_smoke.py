@@ -238,17 +238,6 @@ def test_eval_and_report_alone_read_a_source_and_deliver_nothing_to_it(
     assert "needs --source" in capsys.readouterr().err
 
 
-def test_invalid_eval_shared_env_fails_smoke_before_training(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    file = experiment(tmp_path / "lab")
-    monkeypatch.setenv("ETUDE_EVAL_SHARED", "maybe")
-    assert main(["smoke", str(file)]) == 1
-    err = capsys.readouterr().err
-    assert "ETUDE_EVAL_SHARED must be 0, 1 or unset" in err
-    assert "smoke train" not in err
-
-
 @pytest.mark.parametrize(
     ("change", "said"),
     [

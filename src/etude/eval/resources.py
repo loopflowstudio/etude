@@ -100,43 +100,20 @@ def seconds_left() -> float | None:
     return max(0.0, datetime.fromisoformat(deadline).timestamp() - time.time())
 
 
-type Gpu = Literal["nvidia", "apple"]
+type Device = Literal["cuda", "metal", "cpu"]
 
-type Reason = (
-    Gpu
-    | Literal[
-        "ETUDE_EVAL_SHARED=0",
-        "ETUDE_EVAL_SHARED=1",
-        "shared=True",
-        "shared=False",
-        "CUDA_VISIBLE_DEVICES hides GPUs",
-        "no GPU",
-        "no loader",
-        "no checkpoints",
-    ]
-)
-"""What decided shared or direct inference: an override, the GPU found, or why none was."""
+DEFAULT_DEVICES: tuple[Device, ...] = ("cuda", "metal")
 
 
-def _apple_silicon() -> bool:
-    return sys.platform == "darwin" and platform.machine() == "arm64"
-
-
-def _cuda_hidden() -> bool:
-    return (
-        not _apple_silicon()
-        and os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1")
-        and shutil.which("nvidia-smi") is not None
-    )
-
-
-def _gpu() -> Gpu | None:
+def _device() -> Device:
     """Read visible NVIDIA or Apple Silicon hardware without importing a model library."""
-    if _apple_silicon():
-        return "apple"
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        return "metal"
+    if os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1"):
+        return "cpu"
     command = shutil.which("nvidia-smi")
-    if command is None or os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1"):
-        return None
+    if command is None:
+        return "cpu"
     try:
         listed = subprocess.check_output(
             [command, "--query-gpu=index", "--format=csv,noheader"],
@@ -145,25 +122,8 @@ def _gpu() -> Gpu | None:
         )
     except subprocess.CalledProcessError:
         # nvidia-smi on PATH but failing (driver unloaded or mismatched): no usable GPU.
-        return None
-    return "nvidia" if listed.strip() else None
-
-
-def shared_override() -> bool | None:
-    """The host's `ETUDE_EVAL_SHARED=0|1`, which outranks `Agents(shared=...)`; None when unset.
-
-    It chooses Etude's process topology only: the loader still picks its own device.
-    Entry points call it before writing a run folder so a bad value fails first.
-    """
-    match os.environ.get("ETUDE_EVAL_SHARED", ""):
-        case "":
-            return None
-        case "0":
-            return False
-        case "1":
-            return True
-        case other:
-            raise ValueError(f"ETUDE_EVAL_SHARED must be 0, 1 or unset, not {other!r}")
+        return "cpu"
+    return "cuda" if listed.strip() else "cpu"
 
 
 @dataclass(frozen=True)
@@ -171,15 +131,15 @@ class ExecutionPlan:
     """Process topology and per-owner checkpoint-byte budget for one eval group.
 
     `threads` is each inference owner's thread budget: the shared agent process's
-    in shared mode, and each game process's (always one) in direct mode. `gpu` is
-    what the probe found, or None when it found nothing or did not run.
+    in shared mode, and each game process's (always one) in direct mode.
+    `device` describes host detection, defaulting to CPU when the probe is skipped.
     """
 
     games: int
     threads: int
     shared: bool
-    gpu: Gpu | None
-    reason: Reason
+    device: Device
+    reason: str
     checkpoint_bytes: int
 
     def describe(self, tournaments: Sequence[str]) -> str | None:
@@ -188,9 +148,8 @@ class ExecutionPlan:
             return None
         games = "game" if self.games == 1 else "games"
         mode = "shared" if self.shared else "direct"
-        why = self.reason if self.gpu in (None, self.reason) else f"{self.reason}, {self.gpu}"
         line = (
-            f"etude: agents: {mode} inference for {', '.join(tournaments)} ({why}); "
+            f"etude: agents: {mode} inference for {', '.join(tournaments)} ({self.reason}); "
             f"{self.games} {games} at a time"
         )
         if not self.shared:
@@ -200,25 +159,20 @@ class ExecutionPlan:
 
 
 def _select_mode(
-    *, loader: bool, checkpoints: bool, shared: bool | None
-) -> tuple[bool, Gpu | None, Reason]:
-    host = shared_override()
+    *, loader: bool, checkpoints: bool, devices: tuple[Device, ...]
+) -> tuple[bool, Device, str]:
     if not loader:
-        return False, None, "no loader"
+        return False, "cpu", "no loader"
     if not checkpoints:
-        return False, None, "no checkpoints"
-    if host is not None:
-        return (
-            host,
-            _gpu() if host else None,
-            "ETUDE_EVAL_SHARED=1" if host else "ETUDE_EVAL_SHARED=0",
-        )
-    if shared is not None:
-        return shared, _gpu() if shared else None, "shared=True" if shared else "shared=False"
-    gpu = _gpu()
-    if gpu is not None:
-        return True, gpu, gpu
-    return False, None, "CUDA_VISIBLE_DEVICES hides GPUs" if _cuda_hidden() else "no GPU"
+        return False, "cpu", "no checkpoints"
+    if devices == ("cpu",):
+        return False, "cpu", "cpu-only loader"
+    device = _device()
+    if device == "cpu":
+        return False, device, device
+    if device not in devices:
+        return False, device, f"loader does not declare {device}"
+    return True, device, device
 
 
 def plan_execution(
@@ -228,20 +182,18 @@ def plan_execution(
     checkpoints: bool,
     memory_gb: float | None = None,
     batch_inputs: int = 32,
-    shared: bool | None = None,
+    devices: tuple[Device, ...] = DEFAULT_DEVICES,
 ) -> ExecutionPlan:
     """Choose shared or direct inference and size games, threads and checkpoint bytes.
 
-    Precedence: nothing to load, then `ETUDE_EVAL_SHARED`, then the author's
-    `shared`, then the probe. NVIDIA games fill one shared batch. Apple Silicon
-    games leave a core for the shared agent process. Forced sharing without a
-    detected GPU reserves at least half the cores for inference. Direct games
-    split the checkpoint-byte allowance across game processes. Memory and pending
-    work may reduce games further. Direct plans never probe.
+    A declared, detected accelerator enables sharing. CUDA games fill one
+    shared batch, and Metal games leave a core for the shared agent process.
+    Direct games split the checkpoint-byte allowance across game processes.
+    Memory and pending work may reduce games further.
     """
     if pending < 1:
         raise ValueError("an execution plan needs pending matches")
-    use_shared, gpu, reason = _select_mode(loader=loader, checkpoints=checkpoints, shared=shared)
+    shared, device, reason = _select_mode(loader=loader, checkpoints=checkpoints, devices=devices)
     cpus = available_cpus()
     total_memory = memory_bytes()
     held = (
@@ -251,14 +203,12 @@ def plan_execution(
         if memory_gb is None
         else int(memory_gb * 1024**3)
     )
-    if not use_shared:
+    if not shared:
         capacity = cpus
-    elif gpu == "nvidia":
+    elif device == "cuda":
         capacity = batch_inputs
-    elif gpu == "apple":
-        capacity = max(1, cpus - 1)
     else:
-        capacity = max(1, cpus // 2)
+        capacity = max(1, cpus - 1)
     games = min(
         pending,
         capacity,
@@ -266,11 +216,11 @@ def plan_execution(
     )
     return ExecutionPlan(
         games=games,
-        threads=max(1, cpus - games) if use_shared else 1,
-        shared=use_shared,
-        gpu=gpu,
+        threads=max(1, cpus - games) if shared else 1,
+        shared=shared,
+        device=device,
         reason=reason,
-        checkpoint_bytes=held if use_shared else held // games,
+        checkpoint_bytes=held if shared else held // games,
     )
 
 

@@ -66,12 +66,13 @@ from etude.eval.records import (
     relocate_player,
     select_policy,
 )
-from etude.eval.resources import resources, shared_override
+from etude.eval.resources import DEFAULT_DEVICES, resources
 from etude.eval.result import EvalResult, Result, Tables
 from etude.eval.run import (
     AgentLoader,
     EvalRun,
     Playing,
+    _Devices,
     _group_progress,
     _terminable,
     play_together,
@@ -431,7 +432,7 @@ class Agents(BaseModel):
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
     load: Callable[..., object] | None = None
     build: Callable[..., object] | None = None
-    shared: bool | None = None
+    devices: _Devices = DEFAULT_DEVICES
     max_batch: int = Field(default=32, ge=1)
     max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
     memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
@@ -445,17 +446,20 @@ class Agents(BaseModel):
         # Settings that would do nothing without a loader would still split the group key.
         if self.load is None:
             unused = sorted(
-                self.model_fields_set & {"shared", "max_batch", "max_delay_seconds", "memory_gb"}
+                self.model_fields_set & {"devices", "max_batch", "max_delay_seconds", "memory_gb"}
             )
             if unused:
                 raise ValueError(f"{', '.join(unused)} requires a checkpoint loader")
         return self
 
     def plain(self, repo: Path | None) -> AgentLoader:
+        build = None if self.build is None else _function(self.build, repo)
+        if self.load is None:
+            return AgentLoader(build=build)
         return AgentLoader(
-            load=None if self.load is None else _function(self.load, repo),
-            build=None if self.build is None else _function(self.build, repo),
-            shared=self.shared,
+            load=_function(self.load, repo),
+            build=build,
+            devices=self.devices,
             max_batch=self.max_batch,
             max_delay_seconds=self.max_delay_seconds,
             memory_gb=self.memory_gb,
@@ -840,7 +844,6 @@ def hold_group(
     A launch owns the aggregate tally and closes its root after every tournament
     and shared resource closes. Each tournament keeps its scientific result files.
     """
-    shared_override()
     results: list[EvalResult] = []
     failures: list[EtudeError | RetryRequested] = []
     # A launched attempt's courier collects only below its assigned track folder.

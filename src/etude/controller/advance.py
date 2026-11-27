@@ -21,7 +21,6 @@ from etude.controller.declarations import (
 from etude.controller.smoke import smoke_file
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import digest, find_line_experiments
-from etude.eval.resources import shared_override
 from etude.eval.result import EvalResult
 from etude.eval.tournament import StoredRuns, played
 from etude.experiment import TrainingRuns, observe, read_tournament_lines
@@ -127,8 +126,6 @@ def advance(
     """
     if max_usd is not None and (not max_usd.is_finite() or max_usd < 0):
         raise LauncherError("--max-usd must be a finite, nonnegative dollar limit")
-    if mode == "local":
-        shared_override()
     listing = RunListing.read(source, experiments=(experiment.name,) if scoped else None)
     state = observe(listing, experiment.name)
     committed = state.committed_usd
