@@ -224,7 +224,7 @@ $ etude provider set aws --kind ec2 --storage west
 $ etude ondemand add l4 --provider aws --gpu L4 --max 1 --max-usd-per-hour 0.90
 $ etude availability l4 --timeout 60
 l4  g6.xlarge: L4 with at least 4 vCPUs, 16 GB at $0.8226/hour (ceiling $0.90)  available  0 of 1 in use  rentable now  asked 2026-11-17 19:02:11 UTC
-$ etude launch job.py --rent l4 --max-usd 2
+$ etude launch job.py --rent l4
 $ etude wait
 $ etude machines --all
 l4-41840a01c3b1  l4  deleted, g6.xlarge: L4 with at least 4 vCPUs, 16 GB, rented, ended 2026-11-17 19:31 UTC, ~$0.31
@@ -307,7 +307,7 @@ $ etude provider set lambda --kind lambda --storage west
 $ etude ondemand add a10 --provider lambda --gpu "A10 (24 GB PCIe)" --max 1 --max-usd-per-hour 1.50
 $ etude availability a10 --timeout 60
 a10  gpu_1x_a10: A10 (24 GB PCIe) with at least 30 vCPUs, 200 GB at $1.29/hour (ceiling $1.50)  available  0 of 1 in use  rentable now  asked 2026-11-17 19:10:52 UTC
-$ etude launch job.py --rent a10 --max-usd 2
+$ etude launch job.py --rent a10
 ```
 
 The launcher needs two keys, and refuses to ask or rent while either is unset:
@@ -488,9 +488,9 @@ On a CPU pod `os.cpu_count()` reports the host's CPUs; size worker pools from
 ```sh
 etude ondemand add cpu --provider runpod --vcpus 8 --memory-gb 16 --max 2 --max-usd-per-hour 0.40
 etude availability cpu
-etude launch job.py --rent cpu --max-usd 1 --quote
-etude launch job.py --rent cpu --max-usd 1     # rents up to the on-demand's 2 machines
-
+etude limit set job --max-usd 1
+etude launch job.py --rent cpu --quote
+etude launch job.py --rent cpu     # rents up to the on-demand's 2 machines
 ```
 
 `availability` asks the provider, so it is a wait: it prints what would be

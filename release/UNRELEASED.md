@@ -67,6 +67,7 @@ cohorts, which sat between, are removed.
 | `etude status COHORT`, `wait`, `cancel`, `logs --cohort` | `--experiment E`, `--job J`, or run addresses |
 | `etude continue --run COHORT --cohort NEXT` | `etude continue --run RUN`, one run at a time |
 | `ETUDE_COHORT`, `track(cohort=...)` | removed |
+| `etude launch/queue FILE --max-usd D` | `etude limit set EXPERIMENT --max-usd D` (stored in the launcher database) |
 | `etude controller`, `controller set`, `unset`, `run` | `etude server`, `server set`, `unset`, `run` |
 
 - **Old names are refused, not aliased.** Every command that reads the file
@@ -99,17 +100,25 @@ cohorts, which sat between, are removed.
   room for and queues the rest, which start by themselves as room appears;
   one launch may rent up to the on-demand's `--max` machines. Select several
   runs with `--experiment` and `--job`.
-- **`--max-usd D` bounds the experiment**, on `etude launch FILE` and
-  `etude queue FILE`: the cost of its ended runs plus the `max_usd` of those
-  queued and running, plus a new run's, must fit, or the run is not queued
-  and its line says so. The limit is not stored; each pass applies the one it
-  is given.
+- **Experiment spending limits are stored in the launcher database.** Set a
+  label's ceiling once with `etude limit set EXPERIMENT --max-usd D`, list
+  limits with `etude limits`, and remove one with `etude limit unset
+  EXPERIMENT`. The limit holds across every launch under that label in the
+  same database (`launch`, `queue`, `continue`, `--resume`, `--quote`, and
+  Python `launch`/`queue`/`quote`), including runs recorded before the limit
+  was set. Unfinished paid runs commit `max(spent, max_usd)` and finished runs
+  commit attributed cost; owned-pool runs commit `$0`, and `--max-usd 0`
+  freezes paid spend. `--max-usd` is removed from `etude launch FILE` and
+  `etude queue FILE` and is refused with a hint to run `etude limit set`.
 - **The SSH controller is the server.** `etude server set HOST`; the setting
   file is `~/.etude/server`, and a selection is set again after upgrading.
   "Controller" now means the pass over an experiment file.
 - **Launcher upgrades are explicit.** Install the SDK, inspect with `etude database
   status`, then run `etude database upgrade`. Ordinary reads do not migrate or
-  select copied queues. All compatible clients share `launcher.sqlite`. Workers
+  select copied queues. Stored experiment limits add a breaking migration
+  (`experiment_limits.sql`) raising the reader floor so older clients of a
+  shared `launcher.sqlite` cannot spend past a stored limit; upgrade every
+  client sharing that database. Workers
   and guardians keep running during upgrades. Cohort evidence remains stored.
   Unmerged SQL requires an empty
   development fixture. See [Upgrading Etude](../docs/launcher.md#upgrading-etude).
@@ -171,7 +180,7 @@ code-only group starts no agent process
 ([Agents](../docs/evaluation.md#agents)).
 
 `etude launch` and `etude queue` submit compatible pending eval matches as one
-run within `--max-usd`. Existing capacity is reused; a rental target permits
+run within the experiment's spending limit. Existing capacity is reused; a rental target permits
 renting when no machine has room, regardless of training activity or historical
 match duration. Without a rental target, the run waits in the pool's queue
 ([Experiments](../docs/evaluation.md)).
@@ -199,11 +208,11 @@ match duration. Without a rental target, the run waits in the pool's queue
 - **Small eval backlogs can rent immediately.** `--min-eval-hours` is
   removed from `launch` and `queue`. Pending matches no longer wait for an
   estimated amount of work or for training to finish. Existing capacity,
-  `--max-usd`, rental limits and retry rules still apply; `queue` continues
+  the experiment's spending limit, rental limits and retry rules still apply; `queue` continues
   to record the request and return without renting itself.
 - **A run's limits are its jobs' summed.** The eval run's `max_hours` and
-  `max_usd` are the totals of the eval jobs it plays, and `--max-usd` admits
-  it as one run.
+  `max_usd` are the totals of the eval jobs it plays, and the experiment's
+  spending limit admits it as one run.
 - **A failed match stops its tournament.** Matches already in flight retain
   their outcomes, so successful matches are not replayed and failed ones keep
   their retry flags. The other tournaments keep playing, and the run ends

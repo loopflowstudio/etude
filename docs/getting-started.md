@@ -50,17 +50,20 @@ uv run etude storage add demo --bucket YOUR_BUCKET --prefix etude/demo --provide
 uv run etude provider set runpod --kind runpod --storage demo
 uv run etude ondemand add demo-cpu --provider runpod --vcpus 2 --memory-gb 4 \
     --max 1 --max-usd-per-hour 0.40
-uv run etude launch examples/prototype.py --rent demo-cpu --max-usd 0.20 --quote
-uv run etude launch examples/prototype.py --rent demo-cpu --max-usd 0.20
+uv run etude limit set prototype --max-usd 0.20
+uv run etude launch examples/prototype.py --rent demo-cpu --quote
+uv run etude launch examples/prototype.py --rent demo-cpu
 uv run etude wait
 ```
 
-Launch reconciles the declarations with retained results: it starts training
-when no checkpoint exists, then a later pass discovers the eval matches.
-Keep using the same experiment file and storage:
+`limit set` stores the spending limit for the `prototype` experiment label in
+the launcher database so it holds across both launches. Launch reconciles the
+declarations with retained results: it starts training when no checkpoint
+exists, then a later pass discovers the eval matches. Keep using the same
+experiment file and storage:
 
 ```sh
-uv run etude launch examples/prototype.py --rent demo-cpu --max-usd 0.20
+uv run etude launch examples/prototype.py --rent demo-cpu
 uv run etude wait
 uv run etude report examples/prototype.py --source s3://YOUR_BUCKET/etude/demo --open
 uv run etude fetch prototype/coin@0 coin.json fetched
