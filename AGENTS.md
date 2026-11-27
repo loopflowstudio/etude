@@ -275,17 +275,23 @@ of inputs to a list of outputs. `Agents` declares it and an optional game-side
 `build(player, leaves)`, whose return value belongs to the author and is never
 called by Etude. Sampling belongs in game code, seeded from `match.seed`. Player
 wrappers are frozen author records; checkpoint leaves share loading and batches.
-The shared agent process or each CPU game process holds checkpoint forwards;
+The shared agent process or each direct game process holds checkpoint forwards;
 game processes build wrappers and play; say neither "server", "worker" nor "policy"
 for any of these ("policy" is reserved for policy keys).
 Etude sets the model-library thread environment before importing the checkpoint
-loading module. CPU game processes load through the same cache/eviction owner
-as shared GPU inference and report failures to the parent even when play catches them. Loaders must honor that inference budget when configuring
+loading module. Direct game processes load through the same cache/eviction owner
+as shared inference and report failures to the parent even when play catches them. Loaders must honor that inference budget when configuring
 their library; each game process keeps one thread.
-On visible NVIDIA hardware, active games fill the declared batch, bounded by
-pending matches and host memory. Probe hardware without importing the loader;
-code-only games keep CPU capacity and perform no GPU probe. Hardware capacity
-does not select the author's model device or promise GPU memory residency.
+`Agents.devices` declares loader capabilities in hardware terms (default
+`("cuda", "metal")`). Derive shared or direct inference from that declaration
+and detected hardware, without a separate topology switch. Probe without
+importing the loader or its framework. The loader owns placement and GPU memory.
+Shared CUDA fills the declared batch. Shared Metal on native arm64 macOS uses
+`max(1, cpus - 1)` games. Pending matches and remaining host memory bound both.
+Cap each shared forward at `max_batch`. An absent or undeclared accelerator plays
+direct. Skip the probe for CPU-only loaders and plays without a loader or
+checkpoints. For checkpoint inference, `play_together` logs mode, reason and
+sizing in one startup line.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any

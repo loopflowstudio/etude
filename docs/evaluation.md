@@ -118,6 +118,32 @@ show as coverage gaps instead of fabricated scores.
 There is one game signature: `play(match, agents)`. Each seated player gets one
 author object in `agents`, in seat order.
 
+This PyTorch loader uses your experiment's `load_model` to read the checkpoint.
+
+```python
+# models.py: keep model imports here so game processes stay light
+import torch
+
+from etude.checkpoints import CheckpointRef
+from etude.eval.agents import Forward
+
+
+def load(checkpoint: CheckpointRef) -> Forward:
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+    model = load_model(checkpoint.path).to(device).eval()
+
+    def forward(inputs: list[object]) -> list[object]:
+        with torch.inference_mode():
+            return model(torch.as_tensor(inputs, device=device)).tolist()
+
+    return forward
+```
+
 - `load(checkpoint)` returns a **deterministic** callable from a list of inputs
   to a list of outputs, preserving length and order. Load model weights from
   `checkpoint.path`; a named-object checkpoint is a folder with `checkpoint.json`.
@@ -133,13 +159,32 @@ as identity and `Sampler.choose` as the action method.
 [`agent_models.py`](../examples/agent_models.py) shows a loader. Both are used
 by the runnable [`agents.py`](../examples/agents.py) experiment.
 
-CPU games cache forwards directly with one model-library thread per game and a
-share of the host checkpoint-byte allowance. On visible NVIDIA hardware, calls
-from active games batch through a shared agent process. Honor Etude's thread
-environment in the loader and choose the model's device there: hardware capacity
-does not place tensors for you. Keep model imports in the loading module so the
-GPU game processes remain light. `Agents(max_batch=..., memory_gb=...)` tunes
-capacity; author code keeps one forward deterministic for every batch size.
+Declare the hardware your loader can use with `Agents(load=load, devices=...)`.
+The default `("cuda", "metal")` shares inference on a visible NVIDIA GPU or an
+Apple Silicon Mac running native arm64 Python. Use `("cuda",)` for a CUDA-only
+loader or `("metal",)` for Apple GPU libraries such as PyTorch MPS and MLX.
+
+```text
+$ uv run etude eval experiment.py
+etude: agents: shared inference for prediction (metal); 7 games at a time; 1 inference thread
+```
+
+On CUDA, active games fill `max_batch`. On Metal, games use up to one fewer
+than the available cores, with at least one game. Pending matches and remaining
+host memory bound both counts. Each shared forward handles up to `max_batch`
+rows and records its batch composition in `artifacts/agents/batches.json`.
+Larger game requests use multiple forwards and receive one ordered reply.
+
+Without a matching accelerator, each game caches its own forwards, uses one
+model-library thread, and gets a share of the checkpoint allowance (half of
+host memory by default). The startup line explains direct inference, including
+when `CUDA_VISIBLE_DEVICES` hides a GPU. Declare `("cpu",)` when your loader
+uses CPU so Etude skips the probe. Etude drops `"cpu"` from mixed declarations.
+
+Choose tensor placement inside `load`, honor Etude's thread environment, and
+keep model-library imports in the loading module so shared games stay light.
+`devices`, `memory_gb`, `max_batch`, and `max_delay_seconds` require a loader.
+The two batching settings also require a declared accelerator.
 
 ## Results and retry
 

@@ -96,6 +96,43 @@ class _Batches:
             return None
         return max(0, min(items[0].since + self.max_delay for items in self.pending.values()) - now)
 
+    def _forward(self, batch: list[_Pending]) -> tuple[Answer, list[Batch]]:
+        """Cap forwards even when one game requests more than a batch of rows."""
+        checkpoint = batch[0].request.checkpoint
+        inputs = [item for pending in batch for item in pending.request.inputs]
+        origins = tuple(
+            BatchInput(
+                player=p.request.player, tournament=p.request.tournament, match=p.request.match
+            )
+            for p in batch
+            for _ in p.request.inputs
+        )
+        outputs: list[object] = []
+        observations: list[Batch] = []
+        for start in range(0, len(inputs), self.max_batch):
+            stop = start + self.max_batch
+            before_calls, before_loads = self.forwards.calls, self.forwards.loads
+            before_forward, before_load = self.forwards.forward_seconds, self.forwards.load_seconds
+            answer = self.forwards.answer(checkpoint, inputs[start:stop], self.pending.keys())
+            loads = self.forwards.loads - before_loads
+            if loads:
+                print(f"etude: agents: loaded {checkpoint.key}", file=sys.stderr, flush=True)
+            observations.append(
+                Batch(
+                    checkpoint=checkpoint.key,
+                    inputs=origins[start:stop],
+                    forward_seconds=self.forwards.forward_seconds - before_forward,
+                    load_seconds=self.forwards.load_seconds - before_load,
+                    forward_calls=self.forwards.calls - before_calls,
+                    loads=loads,
+                    transport_seconds=0,
+                )
+            )
+            if answer.error is not None:
+                return answer, observations
+            outputs.extend(answer.outputs)
+        return Answer(outputs), observations
+
     def flush(self, now: float, control: Connection | None = None) -> list[Batch]:
         observations: list[Batch] = []
         for key, items in list(self.pending.items()):
@@ -115,19 +152,7 @@ class _Batches:
             del items[: len(batch)]
             if not items:
                 del self.pending[key]
-            before_calls, before_loads = self.forwards.calls, self.forwards.loads
-            before_forward, before_load = self.forwards.forward_seconds, self.forwards.load_seconds
-            answer = self.forwards.answer(
-                batch[0].request.checkpoint,
-                [item for pending in batch for item in pending.request.inputs],
-                self.pending.keys(),
-            )
-            forward_seconds = self.forwards.forward_seconds - before_forward
-            load_seconds = self.forwards.load_seconds - before_load
-            forward_calls = self.forwards.calls - before_calls
-            loads = self.forwards.loads - before_loads
-            if loads:
-                print(f"etude: agents: loaded {key}", file=sys.stderr, flush=True)
+            answer, forwarded = self._forward(batch)
             # Serialize every reply before delivery: an unpicklable answer fails
             # the whole batch, while successful payloads are encoded only once.
             started = time.monotonic()
@@ -162,27 +187,14 @@ class _Batches:
                 except (OSError, EOFError):
                     pass  # The game may have been cancelled at its deadline.
             transport_seconds += time.monotonic() - started
-            self.inputs += count
-            self.batches += 1
-            observations.append(
-                Batch(
-                    checkpoint=key,
-                    forward_seconds=forward_seconds,
-                    load_seconds=load_seconds,
-                    forward_calls=forward_calls,
-                    loads=loads,
-                    transport_seconds=transport_seconds,
-                    inputs=tuple(
-                        BatchInput(
-                            player=p.request.player,
-                            tournament=p.request.tournament,
-                            match=p.request.match,
-                        )
-                        for p in batch
-                        for _ in p.request.inputs
-                    ),
+            if forwarded:
+                # One transport exchange covers all slices of an oversized request.
+                forwarded[0] = forwarded[0].model_copy(
+                    update={"transport_seconds": transport_seconds}
                 )
-            )
+            self.inputs += sum(len(each.inputs) for each in forwarded)
+            self.batches += len(forwarded)
+            observations.extend(forwarded)
         return observations
 
 

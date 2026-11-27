@@ -159,8 +159,9 @@ once.
 
 An eval job may declare `agents=Agents(load=..., build=...)`. You write the
 game, `play(match, agents)`, and how a checkpoint is loaded, `load(checkpoint)`, which returns a deterministic callable forward. Etude runs the rest: light
-game processes and shared checkpoint batching on visible NVIDIA hardware;
-on CPUs each game process caches and calls the same checkpoint forwards directly.
+game processes and shared checkpoint batching on visible NVIDIA hardware and
+Apple Silicon Macs (native arm64 Python); on other hosts each game process
+caches and calls the same checkpoint forwards directly.
 The forward returns one output per input, in order, independently of batch
 composition. Your game owns sampling, seeded from `match.seed`; player-record
 fields describe greedy/sample choice and temperature. The build hook returns
@@ -181,9 +182,10 @@ match duration. Without a rental target, the run waits in the pool's queue
   is removed. `build(player, leaves)` returns whatever your game uses;
   `load(checkpoint)` returns a callable forward, never an action sampler.
 - **Remove `workers=`** from `EvalJob(...)` and `evaluating(...)`; it is
-  refused. Etude owns game concurrency: CPU and memory allowances bound CPU
-  games; on a visible NVIDIA GPU, games fill the declared batch, bounded by
-  pending work and memory. The one-call `evaluate(workers=)` adapter is removed. Eval jobs already queued with `workers` still run.
+  refused. Etude owns game concurrency: CPU and memory allowances bound direct
+  games; on a visible NVIDIA GPU, games fill the declared batch, and on Apple
+  Silicon Macs games fill host cores minus one (leaving a core for the shared
+  agent process), bounded by pending work and memory. The one-call `evaluate(workers=)` adapter is removed. Eval jobs already queued with `workers` still run.
 - **Guard Python scripts that play.** `evaluating(...)` without `workers=`
   played in its own process; its games now play in fresh processes, which
   import the script again. Put `run.play` under `if __name__ == "__main__":`.
@@ -236,9 +238,27 @@ shared arm. This is one shuffled panel on one host; it does not establish a
 universal CPU model-size crossover. GPU placement retains the earlier fair
 Large-checkpoint results below.
 
+On an Apple Silicon Mac (native arm64 Python), `etude eval` can batch checkpoint
+inference through one shared agent process, with up to `cpus - 1` game processes
+and a cap of `max_batch` rows per forward. On a 16-core M4 Max, 128 held-out
+Manabot `w160l8` games reached 6,992 games/hour with 15 concurrent games and
+shared MPS (7.43 mean rows/forward), 6,470 games/hour with 32 concurrent
+games and shared MPS, and 6,183 games/hour with direct CPU inference. The
+single-thread shared CPU comparison reached 1,222 games/hour. These results
+measure one checkpoint and one host.
+
+`Agents(load=load, devices=("cuda", "metal"))` is the default for checkpoint
+loaders. Use `("cuda",)` or `("metal",)` to share only on the corresponding
+hardware, or `("cpu",)` for direct inference on all hosts. Undeclared or
+unavailable accelerators use direct inference. Startup output names the mode,
+its reason, the game count and the thread budget. Older queued loader records
+without a device declaration use the default.
+
 `matches.retry` distinguishes retryable infrastructure failures from ordinary
-game errors without adding another status. Older match records default it to
-false. The derived statsdb cache rebuilds from schema 14 or 15 to 16 automatically.
+game errors without adding another status. Standalone and grouped evals retain
+unfinished matches for retry when the shared agent process fails. Older match
+records default `retry` to false. The derived statsdb cache rebuilds from schema
+14 or 15 to 16 automatically.
 Game processes load play's defining module; for a job using shared inference, heavy
 imports there produce one warning per run naming their importer.
 
