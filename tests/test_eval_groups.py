@@ -2244,7 +2244,7 @@ hold_group(
 direct_report = GameReport.model_validate_json(report_path.read_bytes())
 assert direct_report.tournaments == ("clean",)
 assert direct_report.imports.heavy == ()
-assert direct_report.imports.warning is None
+assert direct_report.imports.warning() is None
 
 # 2. Shared-agent play importing mlx in the game module warns on mlx.
 etude.eval.resources._has_gpu = lambda: True
@@ -2264,8 +2264,9 @@ hold_group(
 [shared_path] = list((shared_root / "imp2/artifacts/agents").glob("game-*.json"))
 shared_report = GameReport.model_validate_json(shared_path.read_bytes())
 assert shared_report.imports.heavy == ("mlx",)
-assert shared_report.imports.warning is not None
-assert "imported mlx" in shared_report.imports.warning
+shared_warning = shared_report.imports.warning()
+assert shared_warning is not None
+assert "imported mlx" in shared_warning
 """
     result = subprocess.run(
         [sys.executable, "-c", program, str(tmp_path)],
@@ -2353,7 +2354,7 @@ hold_group(evaluation_group(wrap_job.lower(ExperimentState(experiment="w"))), di
 wrap_report = GameReport.model_validate_json(wrap_path.read_bytes())
 assert wrap_report.imports.heavy == ("torch",)
 assert wrap_report.imports.importer == "heavy_wrapper_fixture"
-assert wrap_report.imports.warning is not None
+assert wrap_report.imports.warning() is not None
 
 # 2. Lazy import inside play() after the inference thread already loaded mlx is caught too.
 lazy_root = Path(sys.argv[1]) / "lazy"
@@ -2370,7 +2371,7 @@ hold_group(evaluation_group(lazy_job.lower(ExperimentState(experiment="l"))), di
 lazy_report = GameReport.model_validate_json(lazy_path.read_bytes())
 assert lazy_report.imports.heavy == ("mlx",)
 assert lazy_report.imports.importer == "lazy_mlx_game_fixture"
-assert lazy_report.imports.warning is not None
+assert lazy_report.imports.warning() is not None
 """
     result = subprocess.run(
         [sys.executable, "-c", program, str(tmp_path), str(gpu)],
@@ -2438,8 +2439,8 @@ hold_group(evaluation_group(job.lower(ExperimentState(experiment="many"))), dire
 report = GameReport.model_validate_json(path.read_bytes())
 assert report.imports.heavy == ()
 assert report.imports.count > MAX_GAME_IMPORTS
-assert report.imports.warning_for(count_limit=False) is None
-assert report.imports.warning_for(count_limit=True) is not None
+assert report.imports.warning(count_limit=False) is None
+assert report.imports.warning(count_limit=True) is not None
 """
     result = subprocess.run(
         [sys.executable, "-c", program, str(tmp_path), str(gpu)],

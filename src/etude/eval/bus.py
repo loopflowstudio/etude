@@ -162,16 +162,12 @@ def _as_array(
         except (BufferError, RuntimeError, TypeError, ValueError) as error:
             raise _non_cpu_error(value, direction, error) from error
         owned = np.array(array, copy=True, order="C")
-        if stats is not None:
-            stats.copied += 1
-            stats.copied_bytes += int(owned.nbytes)
-            stats.owned_ids.add(id(owned))
-        return owned
-    np = _require_numpy()
-    try:
-        owned = np.array(view, copy=True, order="C")
-    finally:
-        view.release()
+    else:
+        np = _require_numpy()
+        try:
+            owned = np.array(view, copy=True, order="C")
+        finally:
+            view.release()
     if stats is not None:
         stats.copied += 1
         stats.copied_bytes += int(owned.nbytes)

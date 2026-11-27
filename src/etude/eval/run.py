@@ -69,7 +69,7 @@ from etude.eval.records import (
     outcomes,
     player_checkpoints,
 )
-from etude.eval.resources import Resources, agent_bytes, place, resources, seconds_left
+from etude.eval.resources import Placement, Resources, agent_bytes, place, resources, seconds_left
 from etude.eval.result import EvalResult as EvalResult
 from etude.eval.result import Result as Result
 from etude.eval.result import Row
@@ -547,6 +547,29 @@ class _GameProcess:
     done: bool = False
     pipe_closed: bool = False
 
+    def close_pipe(self) -> None:
+        if not self.pipe_closed:
+            self.pipe.close()
+            self.pipe_closed = True
+
+
+def _startup_banner(placement: Placement, live: int, *, streaming: bool, mixed: bool) -> str:
+    """Summarize spawned game processes for direct-inference or `play_many` runs."""
+    if streaming:
+        capacity = "slots requested by play_many"
+        if mixed:
+            capacity += f"; play holds up to {placement.games_per_process} games each"
+    else:
+        capacity = f"{placement.games_per_process} games each"
+    direct = placement.bus == "local"
+    prefix = "agents: direct inference in " if direct else ""
+    noun = "game process" if live == 1 else "game processes"
+    threads = ""
+    if direct:
+        unit = "thread" if placement.game_threads == 1 else "threads"
+        threads = f"; {placement.game_threads} {unit}" + ("" if live == 1 else " each")
+    return f"etude: {prefix}{live} {noun}, {capacity}{threads}"
+
 
 def _retain(name: str, report: GameReport, directory: Path) -> None:
     """Keep per-process reports beside group batches, or under a standalone run's artifacts."""
@@ -677,6 +700,7 @@ def play_together(
         )
     )
     any_streaming = any(each.streaming for each in active_plays)
+    any_play = any(not each.streaming for each in active_plays)
     max_batch = agents.max_batch if agents is not None else 32
     placement = place(
         [len(each.pending) for each in active_plays if not each.streaming],
@@ -685,8 +709,6 @@ def play_together(
         max_batch=max_batch,
         memory_gb=agents.memory_gb if agents is not None else None,
     )
-    budget = placement.processes
-    games_per_process = placement.games_per_process
     build = agents.build if agents is not None else None
     load = agents.load if placement.bus == "local" and agents is not None else None
     memory = (
@@ -694,11 +716,6 @@ def play_together(
         if placement.bus == "local" and agents is not None and placement.processes > 0
         else None
     )
-
-    def concurrency_for(each: Playing) -> int | None:
-        if each.streaming:
-            return None
-        return games_per_process
 
     try:
         with _terminable(), ExitStack() as agent_lifetime:
@@ -721,12 +738,13 @@ def play_together(
                 if report is None:
                     return
                 _retain(f"game-{report.pid}.json", report, resources.artifacts)
-                warning = report.imports.warning_for(count_limit=placement.bus == "socket")
-                if placement.bus is not None and warning and not warned_imports:
-                    print(warning, file=sys.stderr, flush=True)
-                    warned_imports = True
+                if placement.bus is not None and not warned_imports:
+                    warning = report.imports.warning(count_limit=placement.bus == "socket")
+                    if warning:
+                        print(warning, file=sys.stderr, flush=True)
+                        warned_imports = True
 
-            if budget > 0:
+            if placement.processes > 0:
                 if any(each.pending and each.run.should_stop for each in plays):
                     stopping = True
                 if not stopping:
@@ -739,7 +757,7 @@ def play_together(
                             Stream(
                                 tournament=each.tournament or each.run.name,
                                 function=each.play,
-                                concurrency=concurrency_for(each),
+                                concurrency=None if each.streaming else placement.games_per_process,
                             )
                             for each in targets
                         )
@@ -767,10 +785,10 @@ def play_together(
                                 if ready_plays:
                                     live.append(spawn_one(ready_plays))
                             return
-                        while len(live) < budget and not stopping:
+                        while len(live) < placement.processes and not stopping:
                             spawned = False
                             for each in plays:
-                                if len(live) >= budget:
+                                if len(live) >= placement.processes:
                                     break
                                 if not each.pending:
                                     continue
@@ -778,7 +796,7 @@ def play_together(
                                 needed = (
                                     1
                                     if each.streaming
-                                    else math.ceil(len(each.pending) / games_per_process)
+                                    else math.ceil(len(each.pending) / placement.games_per_process)
                                 )
                                 if active >= needed:
                                     continue
@@ -838,8 +856,7 @@ def play_together(
                             fail_checkpoints(message.loading_failures)
                             record_report(message.report)
                             child.done = True
-                            child.pipe.close()
-                            child.pipe_closed = True
+                            child.close_pipe()
                         elif isinstance(message, Fatal):
                             fail_checkpoints(message.loading_failures)
                             record_report(message.report)
@@ -848,32 +865,17 @@ def play_together(
                             for index, each in enumerate(child.plays):
                                 fail_held(each, child.held.pop(index, {}), message.error)
                             child.done = True
-                            child.pipe.close()
-                            child.pipe_closed = True
+                            child.close_pipe()
                         else:
                             raise TypeError(f"unexpected game message {type(message).__name__}")
 
                     try:
                         spawn_ready()
-                        streaming = any(each.streaming and each.pending for each in plays)
-                        direct = placement.bus == "local"
-                        if live and (streaming or direct):
-                            capacity = f"{games_per_process} games each"
-                            if streaming:
-                                capacity = "slots requested by play_many"
-                                if any(not each.streaming and each.pending for each in plays):
-                                    capacity += f"; play holds up to {games_per_process} games each"
-                            prefix = "agents: direct inference in " if direct else ""
-                            noun = "game process" if len(live) == 1 else "game processes"
-                            if direct:
-                                unit = "thread" if placement.game_threads == 1 else "threads"
-                                threads = f"; {placement.game_threads} {unit}" + (
-                                    "" if len(live) == 1 else " each"
-                                )
-                            else:
-                                threads = ""
+                        if live and (any_streaming or placement.bus == "local"):
                             print(
-                                f"etude: {prefix}{len(live)} {noun}, {capacity}{threads}",
+                                _startup_banner(
+                                    placement, len(live), streaming=any_streaming, mixed=any_play
+                                ),
                                 file=sys.stderr,
                                 flush=True,
                             )
@@ -907,8 +909,7 @@ def play_together(
                                     try:
                                         message = child.pipe.recv()
                                     except (EOFError, OSError):
-                                        child.pipe.close()
-                                        child.pipe_closed = True
+                                        child.close_pipe()
                                     else:
                                         handle_message(child, message)
                             for child in list(live):
@@ -918,16 +919,13 @@ def play_together(
                                     try:
                                         message = child.pipe.recv()
                                     except (EOFError, OSError):
-                                        child.pipe.close()
-                                        child.pipe_closed = True
+                                        child.close_pipe()
                                         break
                                     handle_message(child, message)
                                 child.process.join()
                                 exitcode = child.process.exitcode
                                 child.process.close()
-                                if not child.pipe_closed:
-                                    child.pipe.close()
-                                    child.pipe_closed = True
+                                child.close_pipe()
                                 live.remove(child)
                                 if not child.done or exitcode != 0:
                                     raise RetryRequested(
@@ -941,9 +939,7 @@ def play_together(
                         for child in live:
                             child.process.join()
                             child.process.close()
-                            if not child.pipe_closed:
-                                child.pipe.close()
-                                child.pipe_closed = True
+                            child.close_pipe()
             if agent_process is not None:
                 agent_process.check()
             if stopping:

@@ -31,9 +31,14 @@ from etude.eval.agents import (
     ModelForward,
     SocketForwardBus,
     recv_frame,
-    send_frame,
 )
-from etude.eval.batching import LocalForwardBus, _add_socket_batch, _Batches, _encode_socket
+from etude.eval.batching import (
+    LocalForwardBus,
+    _add_socket_batch,
+    _Batches,
+    _encode_socket,
+    _send_peer,
+)
 from etude.eval.bus import BusReport, ForwardBus, ForwardCall
 from etude.eval.composition import build_agents
 from etude.eval.game import GameReport, Matches, _Forwarder
@@ -62,16 +67,6 @@ def _serve_socket(
         load, max_batch, memory, encode=_encode_socket, copy_outputs=False
     )
     peers: list[socket.socket] = []
-
-    def send_to(sock: socket.socket) -> Callable[[memoryview], None]:
-        def send(payload: memoryview) -> None:
-            try:
-                send_frame(sock, payload)
-            except (OSError, EOFError):
-                pass
-
-        return send
-
     try:
         with (
             socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener,
@@ -103,7 +98,7 @@ def _serve_socket(
                                 peers.remove(peer)
                                 break
                             else:
-                                _add_socket_batch(batches, send_to(peer), request)
+                                _add_socket_batch(batches, _send_peer(peer), request)
                             if not select.select([peer], [], [], 0.0)[0]:
                                 break
                 batches.flush()
@@ -772,11 +767,9 @@ def test_cancelled_await_keeps_arrays_locked_until_completion(transport: _Transp
             with pytest.raises(ValueError, match="read-only"):
                 arr[0] = 1.0
             release.set()
-            # Poll the event loop briefly without sleeping long; completion unlocks arr.
-            for _ in range(200):
-                if arr.flags.writeable:
-                    break
-                await asyncio.sleep(0.005)
+            # A later call on the same FIFO bus completes only after the first reply unlocks arr.
+            [sync] = bus.submit([ForwardCall(cp.key, ["sync"], 1)])
+            assert await sync == ["done"]
             assert arr.flags.writeable
             arr[0] = 7.0
             assert arr[0] == 7.0
@@ -1129,6 +1122,19 @@ def test_local_bus_thread_exit_fails_pending_and_future_calls_with_retry() -> No
     asyncio.run(run())
 
 
+def _load_example_group(path: Path) -> EvalGroup:
+    definition = read_experiment(path)
+    assert definition.eval is not None
+    state = ExperimentState(experiment=definition.name)
+    return EvalGroup(
+        evaluations=tuple(
+            spec
+            for each in asked(definition.eval, state)
+            for spec in evaluation_group(each.lower(state)).evaluations
+        )
+    )
+
+
 def test_local_and_socket_store_identical_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1161,15 +1167,7 @@ def test_local_and_socket_store_identical_rows(
     assert len(mirror_results["local"]) == 4
 
     # 2. examples/agents.py under local vs socket.
-    definition = read_experiment(Path("examples/agents.py"))
-    assert definition.eval is not None
-    state = ExperimentState(experiment=definition.name)
-    agent_jobs = asked(definition.eval, state)
-    eval_group = EvalGroup(
-        evaluations=tuple(
-            spec for each in agent_jobs for spec in evaluation_group(each.lower(state)).evaluations
-        )
-    )
+    eval_group = _load_example_group(Path("examples/agents.py"))
     example_results: dict[_Transport, list[tuple[object, ...]]] = {}
     for transport in transports:
         monkeypatch.setattr("etude.eval.resources._has_gpu", lambda t=transport: t == "socket")
@@ -1237,10 +1235,8 @@ def test_play_many_submits_eagerly_and_merges_queued_calls_without_a_clock(
                 a[0] = 0.0
 
             # Game code runs and submits two more calls while forward A is still held.
-            stepped_while_held = True
             pending_b = forward([b], rows=2)
             pending_c = forward([c], rows=2)
-            assert stepped_while_held
             release_first.set()
 
             [out_a] = await pending_a
@@ -1314,15 +1310,7 @@ def test_vectorized_example_uses_two_half_numpy_arrays_zero_copy(
 ) -> None:
     monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: False)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
-    definition = read_experiment(Path("examples/vectorized.py"))
-    assert definition.eval is not None
-    state = ExperimentState(experiment=definition.name)
-    vector_jobs = asked(definition.eval, state)
-    eval_group = EvalGroup(
-        evaluations=tuple(
-            spec for each in vector_jobs for spec in evaluation_group(each.lower(state)).evaluations
-        )
-    )
+    eval_group = _load_example_group(Path("examples/vectorized.py"))
     results = hold_group(eval_group, directory=tmp_path)
     assert [r.played for r in results] == [8]
     artifacts = tmp_path / "vectorized/artifacts/agents"
@@ -1381,7 +1369,6 @@ def test_unawaited_play_many_future_on_early_exit_emits_no_warning_and_unlocks(
             release_slow.set()
             await bus.close()
             await asyncio.sleep(0)
-            forwarder.clear_pending()
             assert arr.flags.writeable
             assert any(f.checkpoint == cp_bad.key for f in forwarder.drain_loading_failures())
         gc.collect()

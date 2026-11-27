@@ -83,18 +83,35 @@ class PackResult:
     pickled_bytes: int
 
 
-def _is_fast_array(value: object, np: ModuleType | None) -> bool:
-    if np is None or type(value) is not np.ndarray:
-        return False
-    array = cast("ndarray", value)
-    return bool(array.flags.c_contiguous) and not bool(array.dtype.hasobject)
-
-
 def _is_plain_array(value: object, np: ModuleType) -> bool:
-    if type(value) is not np.ndarray:
-        return False
-    array = cast("ndarray", value)
-    return not bool(array.dtype.hasobject)
+    return type(value) is np.ndarray and not bool(cast("ndarray", value).dtype.hasobject)
+
+
+def _is_fast_array(value: object, np: ModuleType | None) -> bool:
+    return (
+        np is not None
+        and _is_plain_array(value, np)
+        and bool(cast("ndarray", value).flags.c_contiguous)
+    )
+
+
+def _pickle_with_buffers(
+    values: list[object], pointer_ids: set[int], *, require_readonly: bool
+) -> PickledPayload:
+    """Pickle protocol 5 emitting only selected ndarray buffers out-of-band."""
+    buffers: list[pickle.PickleBuffer] = []
+
+    def collect(buf: pickle.PickleBuffer) -> bool:
+        view = memoryview(buf)
+        by_pointer = (not require_readonly or view.readonly) and id(view.obj) in pointer_ids
+        view.release()
+        if by_pointer:
+            buffers.append(buf)
+            return False
+        return True
+
+    data = pickle.dumps(values, protocol=5, buffer_callback=collect)
+    return PickledPayload(data=data, buffers=buffers)
 
 
 def pack_local_inputs(normalized: Normalized) -> PackResult:
@@ -140,42 +157,29 @@ def pack_local_inputs(normalized: Normalized) -> PackResult:
     # Mark freshly materialized non-NumPy arrays read-only so pickle emits them
     # out-of-band alongside locked game arrays, while mutable bytearrays copy in-band.
     pointer_ids: set[int] = set()
-    for array in arrays(values):
-        if id(array) in normalized.owned_ids:
-            array.flags.writeable = False
-        if _is_fast_array(array, np):
-            pointer_ids.add(id(array))
-
-    buffers: list[pickle.PickleBuffer] = []
-
-    def collect(buf: pickle.PickleBuffer) -> bool:
-        view = memoryview(buf)
-        by_pointer = view.readonly and id(view.obj) in pointer_ids
-        view.release()
-        if by_pointer:
-            buffers.append(buf)
-            return False
-        return True
-
-    data = pickle.dumps(values, protocol=5, buffer_callback=collect)
     pointer_arrays = 0
     copied_arrays = 0
     copied_bytes = 0
     for array in arrays(values):
-        if id(array) in normalized.owned_ids:
-            continue
-        if id(array) in pointer_ids:
-            pointer_arrays += 1
-        else:
+        owned = id(array) in normalized.owned_ids
+        if owned:
+            array.flags.writeable = False
+        if _is_fast_array(array, np):
+            pointer_ids.add(id(array))
+            if not owned:
+                pointer_arrays += 1
+        elif not owned:
             copied_arrays += 1
             copied_bytes += int(array.nbytes)
+
+    payload = _pickle_with_buffers(values, pointer_ids, require_readonly=True)
     return PackResult(
-        payload=PickledPayload(data=data, buffers=buffers),
+        payload=payload,
         arrays=pointer_arrays,
         arrays_copied=normalized.copied + copied_arrays,
         copied_bytes=normalized.copied_bytes + copied_bytes,
         pickled=1,
-        pickled_bytes=len(data),
+        pickled_bytes=len(payload.data),
     )
 
 
@@ -191,19 +195,7 @@ def pack_local_outputs(outputs: list[object]) -> list[object] | PickledPayload:
     if all(type(item) in _IMMUTABLE_PLAIN or _is_fast_array(item, np) for item in outputs):
         return outputs
     owned_ids = {id(array) for array in arrays(outputs) if _is_fast_array(array, np)}
-    buffers: list[pickle.PickleBuffer] = []
-
-    def collect(buf: pickle.PickleBuffer) -> bool:
-        view = memoryview(buf)
-        owned_ndarray = id(view.obj) in owned_ids
-        view.release()
-        if owned_ndarray:
-            buffers.append(buf)
-            return False
-        return True
-
-    data = pickle.dumps(outputs, protocol=5, buffer_callback=collect)
-    return PickledPayload(data=data, buffers=buffers)
+    return _pickle_with_buffers(outputs, owned_ids, require_readonly=False)
 
 
 def unpack_local(payload: list[object] | PickledPayload) -> list[object]:
@@ -235,6 +227,15 @@ class _Pending[Encoded]:
     inputs: list[object]
     rows: int
     receive_seconds: float
+
+
+def _failed_outcome(checkpoint: str, error: Exception) -> ForwardOutcome:
+    return ForwardOutcome(
+        checkpoint=checkpoint,
+        outputs=[],
+        error=f"agent {checkpoint}: {explain(error)}",
+        retry=isinstance(error, RetryRequested),
+    )
 
 
 def _identity_outcome(request_id: int, outcome: ForwardOutcome) -> tuple[int, ForwardOutcome]:
@@ -338,30 +339,16 @@ class _Batches[Encoded]:
             # an unpicklable or non-CPU output fails the whole batch, while
             # successful payloads are encoded only once.
             started = time.monotonic()
-            if outcome.error is None:
-                try:
-                    outputs = normalize_outputs(outcome.outputs, copy_arrays=self._copy_outputs)
-                except Exception as error:
-                    outcome = ForwardOutcome(
-                        checkpoint=key,
-                        outputs=[],
-                        error=f"agent {key}: {explain(error)}",
-                        retry=isinstance(error, RetryRequested),
-                    )
-                else:
-                    outcome = ForwardOutcome(checkpoint=key, outputs=outputs)
             try:
+                if outcome.error is None:
+                    outputs = normalize_outputs(outcome.outputs, copy_arrays=self._copy_outputs)
+                    outcome = ForwardOutcome(checkpoint=key, outputs=outputs)
                 encoded = [
                     self._encode(request_id, item_outcome)
                     for request_id, item_outcome in _slice_outcomes(outcome, batch)
                 ]
             except Exception as error:
-                failed = ForwardOutcome(
-                    checkpoint=key,
-                    outputs=[],
-                    error=f"agent {key}: {explain(error)}",
-                    retry=isinstance(error, RetryRequested),
-                )
+                failed = _failed_outcome(key, error)
                 encoded = [
                     self._encode(request_id, item_outcome)
                     for request_id, item_outcome in _slice_outcomes(failed, batch)
@@ -394,11 +381,6 @@ class _Batches[Encoded]:
 
 
 @dataclass(frozen=True)
-class _BindMessage:
-    checkpoint: CheckpointRef
-
-
-@dataclass(frozen=True)
 class _LocalCall:
     id: int
     checkpoint: str
@@ -406,17 +388,8 @@ class _LocalCall:
     rows: int
 
 
-@dataclass(frozen=True)
-class _SubmitMessage:
-    items: tuple[_LocalCall, ...]
-
-
-@dataclass(frozen=True)
-class _StopMessage:
-    pass
-
-
-type _LocalMessage = _BindMessage | _SubmitMessage | _StopMessage
+# None is the stop sentinel; CheckpointRef binds a checkpoint; a tuple submits calls.
+type _LocalMessage = CheckpointRef | tuple[_LocalCall, ...] | None
 
 
 @dataclass(frozen=True)
@@ -508,11 +481,11 @@ def _inference_loop(
         except RuntimeError:
             pass  # Event loop closed during shutdown.
 
-    def handle(message: _BindMessage | _SubmitMessage) -> None:
-        if isinstance(message, _BindMessage):
-            bound.setdefault(message.checkpoint.key, message.checkpoint)
+    def handle(message: CheckpointRef | tuple[_LocalCall, ...]) -> None:
+        if not isinstance(message, tuple):
+            bound.setdefault(message.key, message)
             return
-        for item in message.items:
+        for item in message:
             checkpoint = bound.get(item.checkpoint)
             if checkpoint is None:
                 post(
@@ -530,17 +503,7 @@ def _inference_loop(
             try:
                 inputs = unpack_local(item.payload)
             except Exception as error:
-                post(
-                    (
-                        item.id,
-                        ForwardOutcome(
-                            checkpoint=item.checkpoint,
-                            outputs=[],
-                            error=f"agent {item.checkpoint}: {explain(error)}",
-                            retry=isinstance(error, RetryRequested),
-                        ),
-                    )
-                )
+                post((item.id, _failed_outcome(item.checkpoint, error)))
                 continue
             batches.add(
                 post,
@@ -553,33 +516,23 @@ def _inference_loop(
 
     try:
         while True:
-            if batches.pending:
-                while True:
-                    try:
-                        message = inbox.get_nowait()
-                    except queue.Empty:
-                        break
-                    if isinstance(message, _StopMessage):
-                        stopped_cleanly = True
-                        return
-                    handle(message)
-            else:
+            if not batches.pending:
                 wait_started = time.monotonic()
                 message = inbox.get()
                 wait_seconds += time.monotonic() - wait_started
-                if isinstance(message, _StopMessage):
+                if message is None:
                     stopped_cleanly = True
                     return
                 handle(message)
-                while True:
-                    try:
-                        extra = inbox.get_nowait()
-                    except queue.Empty:
-                        break
-                    if isinstance(extra, _StopMessage):
-                        stopped_cleanly = True
-                        return
-                    handle(extra)
+            while True:
+                try:
+                    message = inbox.get_nowait()
+                except queue.Empty:
+                    break
+                if message is None:
+                    stopped_cleanly = True
+                    return
+                handle(message)
             flushed = batches.flush(wait_seconds)
             if flushed:
                 wait_seconds = 0.0
@@ -642,7 +595,7 @@ class LocalForwardBus:
         if checkpoint.key in self._bound:
             return
         self._bound.add(checkpoint.key)
-        self._inbox.put(_BindMessage(checkpoint))
+        self._inbox.put(checkpoint)
 
     def submit(self, calls: Sequence[ForwardCall]) -> list[asyncio.Future[list[object]]]:
         if not calls:
@@ -665,21 +618,9 @@ class LocalForwardBus:
         pickled_bytes = 0
         try:
             for call in calls:
-                try:
-                    normalized = normalize_inputs(call.inputs)
-                except (pickle.PicklingError, TypeError, AttributeError, ValueError) as error:
-                    futures.append(
-                        self._book.failed(
-                            self._loop,
-                            ForwardError(
-                                call.checkpoint, f"agent {call.checkpoint}: {explain(error)}"
-                            ),
-                        )
-                    )
-                    continue
                 request_id, future = stage.add(call.inputs)
                 try:
-                    packed = pack_local_inputs(normalized)
+                    packed = pack_local_inputs(normalize_inputs(call.inputs))
                 except (pickle.PicklingError, TypeError, AttributeError, ValueError) as error:
                     stage.rollback_last()
                     futures.append(
@@ -707,7 +648,7 @@ class LocalForwardBus:
                     pickled=pickled,
                     pickled_bytes=pickled_bytes,
                 )
-                self._inbox.put(_SubmitMessage(tuple(queued)))
+                self._inbox.put(tuple(queued))
         except BaseException:
             stage.rollback()
             raise
@@ -719,18 +660,13 @@ class LocalForwardBus:
         if isinstance(reply, _PackedReply):
             started = time.monotonic()
             try:
-                outputs = unpack_local(reply.payload)
-            except Exception as error:
-                self._book.add_handoff(time.monotonic() - started)
                 outcome = ForwardOutcome(
-                    checkpoint=reply.checkpoint,
-                    outputs=[],
-                    error=f"agent {reply.checkpoint}: {explain(error)}",
-                    retry=isinstance(error, RetryRequested),
+                    checkpoint=reply.checkpoint, outputs=unpack_local(reply.payload)
                 )
-            else:
+            except Exception as error:
+                outcome = _failed_outcome(reply.checkpoint, error)
+            finally:
                 self._book.add_handoff(time.monotonic() - started)
-                outcome = ForwardOutcome(checkpoint=reply.checkpoint, outputs=outputs)
             self._book.deliver(reply.id, outcome)
             return
         request_id, outcome = reply
@@ -739,7 +675,7 @@ class LocalForwardBus:
     async def close(self) -> BusReport:
         if self._book.closed_error is None:
             self._book.closed_error = RetryRequested("forward bus is closed")
-        self._inbox.put(_StopMessage())
+        self._inbox.put(None)
         remaining = seconds_left()
         timeout = None if remaining is None else max(0.0, remaining)
         await asyncio.to_thread(self._thread.join, timeout)

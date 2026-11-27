@@ -31,7 +31,7 @@ from collections.abc import (
 from contextlib import aclosing, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import lru_cache, partial
 from multiprocessing.connection import Connection
 from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
@@ -72,11 +72,7 @@ class Imports(Record):
     heavy: tuple[str, ...]
     importer: str | None
 
-    @property
-    def warning(self) -> str | None:
-        return self.warning_for(count_limit=True)
-
-    def warning_for(self, *, count_limit: bool) -> str | None:
+    def warning(self, *, count_limit: bool = True) -> str | None:
         if not self.heavy and (not count_limit or self.count <= MAX_GAME_IMPORTS):
             return None
         reason = (
@@ -305,6 +301,13 @@ class _Forwarder:
             return self._submit_now(checkpoint, inputs, rows)
         return self.enqueue(checkpoint, inputs, rows)
 
+    def _fail_future(self, future: asyncio.Future[list[object]], error: BaseException) -> None:
+        if not future.done():
+            future.set_exception(error)
+            if self._closing:
+                future.exception()
+                self._active_futures.discard(future)
+
     def _submit_now(
         self, checkpoint: str, inputs: list[object], rows: int
     ) -> asyncio.Future[list[object]]:
@@ -315,9 +318,9 @@ class _Forwarder:
         try:
             (bus_future,) = self._bus.submit([ForwardCall(checkpoint, inputs, rows)])
         except BaseException as error:
-            future.set_exception(error)
+            self._fail_future(future, error)
             return future
-        bus_future.add_done_callback(self._callback([pending]))
+        bus_future.add_done_callback(partial(self._on_answer, [pending]))
         return future
 
     def enqueue(
@@ -384,26 +387,14 @@ class _Forwarder:
         except BaseException as error:
             for chunk, _ in grouped:
                 for call in chunk:
-                    if not call.future.done():
-                        call.future.set_exception(error)
-                        if self._closing:
-                            call.future.exception()
-                            self._active_futures.discard(call.future)
+                    self._fail_future(call.future, error)
             return
         finally:
             for chunk, _ in grouped:
                 for call in chunk:
                     self._bus.flight.unlock(call.locked)
         for (chunk, _), bus_future in zip(grouped, futures, strict=True):
-            bus_future.add_done_callback(self._callback(chunk))
-
-    def _callback(
-        self, chunk: list[_PendingCall]
-    ) -> Callable[[asyncio.Future[list[object]]], None]:
-        def done(bus_future: asyncio.Future[list[object]]) -> None:
-            self._on_answer(chunk, bus_future)
-
-        return done
+            bus_future.add_done_callback(partial(self._on_answer, chunk))
 
     def _on_answer(
         self, chunk: list[_PendingCall], bus_future: asyncio.Future[list[object]]
@@ -423,11 +414,7 @@ class _Forwarder:
                     retry=raised.retry,
                 )
             for call in chunk:
-                if not call.future.done():
-                    call.future.set_exception(raised)
-                    if self._closing:
-                        call.future.exception()
-                        self._active_futures.discard(call.future)
+                self._fail_future(call.future, raised)
             return
         outputs = bus_future.result()
         offset = 0
@@ -624,9 +611,17 @@ async def _serve_stream(
             # Let `fail_all` callbacks run so loading failures drain and unawaited
             # futures settle before process exit.
             await asyncio.sleep(0)
-        if forwarder is not None:
-            forwarder.clear_pending()
         return bus_report
+
+    def drain_failures(error: BaseException | None = None) -> tuple[CheckpointFailure, ...]:
+        drained = forwarder.drain_loading_failures() if forwarder else ()
+        if (
+            isinstance(error, ForwardError)
+            and error.loading
+            and not any(failure.checkpoint == error.checkpoint for failure in drained)
+        ):
+            return (*drained, CheckpointFailure(error.checkpoint, str(error), error.retry))
+        return drained
 
     def make_report() -> GameReport:
         return GameReport(
@@ -702,145 +697,113 @@ async def _serve_stream(
         def build_seats(match: Match) -> Sequence[object]:
             return build_agents(match.players, bind, build_hook)
 
+        def validate(
+            target_kind: type[Match], target_held: dict[int, _TakenMatch], match: Match
+        ) -> Match:
+            authored = (
+                target_kind.model_validate_json(match.model_dump_json())
+                if target_kind is not Match
+                else match
+            )
+            # The author's config type may fill defaults. Keep the scheduled key.
+            target_held[id(authored)] = _TakenMatch(authored, match.key, time.monotonic())
+            return authored
+
+        async def take_raw(current_stream: int, count: int) -> Sequence[Match]:
+            nonlocal pending_grant
+            async with take_lock:
+                future: asyncio.Future[tuple[Match, ...]] = loop.create_future()
+                pending_grant = future
+                try:
+                    pipe.send(Take(count, stream=current_stream))
+                except (EOFError, OSError):
+                    pending_grant = None
+                    return ()
+                try:
+                    return await future
+                finally:
+                    pending_grant = None
+
         for stream_index, (spec, loaded) in enumerate(zip(streams, loaded_streams, strict=True)):
             held: dict[int, _TakenMatch] = {}
             stream_matches = 0
+            stream_error: BaseException | None = None
             if isinstance(loaded, Exception):
-                drained = forwarder.drain_loading_failures() if forwarder else ()
-                pipe.send(
-                    StreamEnd(
-                        stream=stream_index,
-                        matches=0,
-                        error=_portable_error(loaded),
-                        loading_failures=drained,
-                    )
-                )
-                continue
-            try:
-                play, kind = loaded
-
-                def validate(
-                    match: Match,
-                    *,
-                    target_kind: type[Match] = kind,
-                    target_held: dict[int, _TakenMatch] = held,
-                ) -> Match:
-                    authored = (
-                        target_kind.model_validate_json(match.model_dump_json())
-                        if target_kind is not Match
-                        else match
-                    )
-                    # The author's config type may fill defaults. Keep the scheduled key.
-                    target_held[id(authored)] = _TakenMatch(authored, match.key, time.monotonic())
-                    return authored
-
-                async def take_raw(
-                    count: int, *, current_stream: int = stream_index
-                ) -> Sequence[Match]:
-                    nonlocal pending_grant
-                    async with take_lock:
-                        future: asyncio.Future[tuple[Match, ...]] = loop.create_future()
-                        pending_grant = future
-                        try:
-                            pipe.send(Take(count, stream=current_stream))
-                        except (EOFError, OSError):
-                            pending_grant = None
-                            return ()
-                        try:
-                            return await future
-                        finally:
-                            pending_grant = None
-
-                source: Matches = Matches(take_raw, validate, build_seats)
-                stream = (
-                    cast(
-                        Callable[
-                            [Matches], AsyncGenerator[tuple[Match, Tables | Result | Exception]]
-                        ],
-                        play,
-                    )(source)
-                    if spec.concurrency is None
-                    else _drive_play(cast(Play, play), source, spec.concurrency)
-                )
-                async with aclosing(stream):
-                    async for match, outcome in stream:
-                        taken = held.pop(id(match), None)
-                        if taken is None:
-                            identity = (
-                                match.key if isinstance(match, Match) else type(match).__name__
-                            )
-                            raise ValueError(
-                                f"play_many yielded an unknown or already-yielded match: {identity}"
-                            )
-                        elapsed = time.monotonic() - taken.started
-                        played_count += 1
-                        stream_matches += 1
-                        result: Tables | Result | None = None
-                        error: BaseException | None = None
-                        if isinstance(outcome, BaseException):
-                            error = outcome
-                        elif isinstance(outcome, (Result, Mapping)):
-                            result = outcome
-                        else:
-                            raise TypeError(
-                                "game outcomes must be tables, a Result or an exception"
-                            )
-                        drained = forwarder.drain_loading_failures() if forwarder else ()
-                        if (
-                            isinstance(error, ForwardError)
-                            and error.loading
-                            and not any(
-                                failure.checkpoint == error.checkpoint for failure in drained
-                            )
-                        ):
-                            drained = (
-                                *drained,
-                                CheckpointFailure(error.checkpoint, str(error), error.retry),
-                            )
-                        pipe.send(
-                            Outcome(
-                                match_key=taken.key,
-                                result=result,
-                                seconds=elapsed,
-                                error=_portable_error(error) if error is not None else None,
-                                loading_failures=drained,
-                                stream=stream_index,
-                            )
-                        )
-            except RetryRequested:
-                raise
-            except Exception as error:
-                drained = forwarder.drain_loading_failures() if forwarder else ()
-                pipe.send(
-                    StreamEnd(
-                        stream=stream_index,
-                        matches=stream_matches,
-                        error=_portable_error(error),
-                        loading_failures=drained,
-                    )
-                )
+                stream_error = loaded
             else:
-                drained = forwarder.drain_loading_failures() if forwarder else ()
-                pipe.send(
-                    StreamEnd(
-                        stream=stream_index,
-                        matches=stream_matches,
-                        loading_failures=drained,
+                try:
+                    play, kind = loaded
+                    source: Matches = Matches(
+                        partial(take_raw, stream_index),
+                        partial(validate, kind, held),
+                        build_seats,
                     )
+                    stream = (
+                        cast(
+                            Callable[
+                                [Matches], AsyncGenerator[tuple[Match, Tables | Result | Exception]]
+                            ],
+                            play,
+                        )(source)
+                        if spec.concurrency is None
+                        else _drive_play(cast(Play, play), source, spec.concurrency)
+                    )
+                    async with aclosing(stream):
+                        async for match, outcome in stream:
+                            taken = held.pop(id(match), None)
+                            if taken is None:
+                                identity = (
+                                    match.key if isinstance(match, Match) else type(match).__name__
+                                )
+                                raise ValueError(
+                                    f"play_many yielded an unknown or already-yielded match: {identity}"
+                                )
+                            elapsed = time.monotonic() - taken.started
+                            played_count += 1
+                            stream_matches += 1
+                            result: Tables | Result | None = None
+                            error: BaseException | None = None
+                            if isinstance(outcome, BaseException):
+                                error = outcome
+                            elif isinstance(outcome, (Result, Mapping)):
+                                result = outcome
+                            else:
+                                raise TypeError(
+                                    "game outcomes must be tables, a Result or an exception"
+                                )
+                            pipe.send(
+                                Outcome(
+                                    match_key=taken.key,
+                                    result=result,
+                                    seconds=elapsed,
+                                    error=_portable_error(error) if error is not None else None,
+                                    loading_failures=drain_failures(error),
+                                    stream=stream_index,
+                                )
+                            )
+                except RetryRequested:
+                    raise
+                except Exception as error:
+                    stream_error = error
+            pipe.send(
+                StreamEnd(
+                    stream=stream_index,
+                    matches=stream_matches,
+                    error=_portable_error(stream_error) if stream_error is not None else None,
+                    loading_failures=drain_failures(),
                 )
+            )
         await close_bus()
-        loading_failures = forwarder.drain_loading_failures() if forwarder else ()
-        pipe.send(Done(report=make_report(), loading_failures=loading_failures))
+        pipe.send(Done(report=make_report(), loading_failures=drain_failures()))
     except Exception as error:
         with suppress(Exception):
             await close_bus()
-        loading_failures = forwarder.drain_loading_failures() if forwarder else ()
         try:
             pipe.send(
                 Fatal(
                     error=_portable_error(error),
                     report=make_report(),
-                    loading_failures=loading_failures,
+                    loading_failures=drain_failures(),
                 )
             )
         except (EOFError, OSError):

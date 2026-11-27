@@ -114,16 +114,6 @@ class Answer:
     retry: bool = False
     loading: bool = False
 
-    def result(self) -> list[object]:
-        if self.error is not None:
-            raise ForwardError(
-                self.checkpoint,
-                self.error,
-                retry=self.retry,
-                loading=self.loading,
-            )
-        return self.outputs
-
 
 _HEADER = struct.Struct("!Q")
 
@@ -291,12 +281,12 @@ class SocketForwardBus:
             if not isinstance(answer, Answer):
                 raise TypeError(f"expected Answer, got {type(answer).__name__}")
         except Exception as error:
-            self._book.add_handoff(time.monotonic() - started, wire_bytes=len(payload))
             self._book.fail_all(RetryRequested(f"agent reply failed to decode: {explain(error)}"))
             with suppress(OSError):
                 self._transport.close()
             return
-        self._book.add_handoff(time.monotonic() - started, wire_bytes=len(payload))
+        finally:
+            self._book.add_handoff(time.monotonic() - started, wire_bytes=len(payload))
         self._book.deliver(
             answer.id,
             ForwardOutcome(
