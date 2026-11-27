@@ -1,4 +1,4 @@
-"""Checkpoint forwards shared by CPU game processes and the GPU batching process.
+"""Checkpoint forwards shared by direct inference threads and the shared agent process.
 
 Forwards owns loading, failed-loader caching, byte charging and eviction.
 """
@@ -11,10 +11,11 @@ from collections.abc import Callable, Set
 from typing import TYPE_CHECKING, cast
 
 from etude.errors import RetryRequested, explain
-from etude.eval.agents import Answer, ModelForward
+from etude.eval.bus import ForwardOutcome
 
 if TYPE_CHECKING:
     from etude.checkpoints import CheckpointRef
+    from etude.eval.agents import ModelForward
 
 
 class Forwards:
@@ -22,7 +23,7 @@ class Forwards:
         self.load = load
         self.memory = memory
         self.loaded: OrderedDict[str, tuple[ModelForward, int]] = OrderedDict()
-        self.failed: dict[str, Answer] = {}
+        self.failed: dict[str, ForwardOutcome] = {}
         self.loads = 0
         self.calls = 0
         self.inputs = 0
@@ -36,7 +37,7 @@ class Forwards:
         protected: Set[str] = frozenset(),
         *,
         rows: int | None = None,
-    ) -> Answer:
+    ) -> ForwardOutcome:
         key = checkpoint.key
         if key in self.failed:
             return self.failed[key]
@@ -52,8 +53,7 @@ class Forwards:
                     if not callable(forward):
                         raise TypeError("load must return a callable batched forward")
                 except Exception as error:
-                    self.failed[key] = Answer(
-                        id=0,
+                    self.failed[key] = ForwardOutcome(
                         checkpoint=key,
                         outputs=[],
                         error=f"load failed for {key}: {explain(error)}",
@@ -63,7 +63,7 @@ class Forwards:
                     raise
                 finally:
                     self.load_seconds += time.monotonic() - started
-                self.loaded[key] = (cast(ModelForward, forward), length)
+                self.loaded[key] = (cast("ModelForward", forward), length)
                 self.loads += 1
             self.loaded.move_to_end(key)
             started = time.monotonic()
@@ -75,10 +75,9 @@ class Forwards:
                 self.forward_seconds += time.monotonic() - started
             if len(outputs) != len(inputs):
                 raise ValueError("forward must return one output per input")
-            return Answer(id=0, checkpoint=key, outputs=outputs)
+            return ForwardOutcome(checkpoint=key, outputs=outputs)
         except Exception as error:
-            return self.failed.get(key) or Answer(
-                id=0,
+            return self.failed.get(key) or ForwardOutcome(
                 checkpoint=key,
                 outputs=[],
                 error=f"agent {key}: {explain(error)}",

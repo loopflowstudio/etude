@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import gc
 import os
-import pickle
 import select
 import selectors
 import socket
 import sys
 import threading
+import weakref
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from multiprocessing.reduction import ForkingPickler
@@ -33,7 +33,7 @@ from etude.eval.agents import (
     recv_frame,
     send_frame,
 )
-from etude.eval.batching import LocalForwardBus, _Batches
+from etude.eval.batching import LocalForwardBus, _add_socket_batch, _Batches, _encode_socket
 from etude.eval.bus import BusReport, ForwardBus, ForwardCall
 from etude.eval.composition import build_agents
 from etude.eval.game import GameReport, _Forwarder
@@ -58,7 +58,9 @@ def _serve_socket(
     ready: threading.Event,
     stop_read: int,
 ) -> None:
-    batches: _Batches[memoryview] = _Batches(load, max_batch, memory, encode=ForkingPickler.dumps)
+    batches: _Batches[memoryview] = _Batches(
+        load, max_batch, memory, encode=_encode_socket, copy_outputs=False
+    )
     peers: list[socket.socket] = []
 
     def send_to(sock: socket.socket) -> Callable[[memoryview], None]:
@@ -101,7 +103,7 @@ def _serve_socket(
                                 peers.remove(peer)
                                 break
                             else:
-                                batches.add_batch(send_to(peer), request)
+                                _add_socket_batch(batches, send_to(peer), request)
                             if not select.select([peer], [], [], 0.0)[0]:
                                 break
                 batches.flush()
@@ -153,15 +155,19 @@ async def _open_bus(
 
 
 class _LazyBuffer:
-    """Buffer-protocol exporter that records the thread that first reads it."""
+    """Buffer-protocol exporter recording the threads that read and release its view."""
 
     def __init__(self, data: np.ndarray) -> None:
         self._data = data
         self.read_threads: list[int] = []
+        self.release_threads: list[int] = []
 
     def __buffer__(self, flags: int) -> memoryview:
         self.read_threads.append(threading.get_ident())
         return memoryview(self._data)
+
+    def __release_buffer__(self, view: memoryview) -> None:
+        self.release_threads.append(threading.get_ident())
 
 
 class _CpuDlpack:
@@ -175,6 +181,40 @@ class _CpuDlpack:
 
     def __dlpack_device__(self) -> tuple[int, int]:
         return self._data.__dlpack_device__()
+
+
+class _NonCpuDlpack:
+    """Simulated GPU/MPS DLPack tensor whose CPU export fails."""
+
+    def __dlpack__(self, stream: int | None = None) -> object:
+        raise BufferError("Unsupported device in DLTensor")
+
+    def __dlpack_device__(self) -> tuple[int, int]:
+        return (2, 0)
+
+
+class _CudaArrayOnly:
+    """Simulated CUDA array exposing only __cuda_array_interface__."""
+
+    __cuda_array_interface__ = {
+        "shape": (4,),
+        "typestr": "<f4",
+        "data": (0, False),
+        "version": 3,
+    }
+
+
+def _has_no_external_owner(array: np.ndarray) -> bool:
+    """Verify an output ndarray pins no PyCapsule, lazy buffer, or model object via .base."""
+    cur: object = array.base
+    while cur is not None:
+        if type(cur) is np.ndarray:
+            cur = cur.base
+        elif isinstance(cur, memoryview):
+            cur = cur.obj
+        else:
+            return False
+    return True
 
 
 @pytest.mark.parametrize("transport", ["local", "socket"])
@@ -362,7 +402,8 @@ def test_non_numpy_leaves_normalize_on_producing_thread_at_any_depth(
 ) -> None:
     cp = checkpoint("lazy").checkpoint
     model_threads: list[int] = []
-    lazy_outputs: list[_LazyBuffer] = []
+    lazy_records: list[tuple[list[int], list[int], weakref.ReferenceType[_LazyBuffer]]] = []
+    lazy_backings: list[np.ndarray] = []
     input_checks: list[bool] = []
     top_backing = np.array([1.0, 2.0, 3.0], dtype=np.float32)
     nested_backing = np.array([4.0, 5.0], dtype=np.float32)
@@ -381,11 +422,16 @@ def test_non_numpy_leaves_normalize_on_producing_thread_at_any_depth(
                 and isinstance(nested_in["dl"], np.ndarray)
                 and not np.shares_memory(cast(np.ndarray, nested_in["dl"]), dl_backing)
             )
-            a = _LazyBuffer(np.array([10.0, 20.0], dtype=np.float32))
-            b = _LazyBuffer(np.array([30.0], dtype=np.float32))
-            c = _LazyBuffer(np.array([40.0, 50.0], dtype=np.float32))
-            d = _LazyBuffer(np.array([60.0], dtype=np.float32))
-            lazy_outputs.extend([a, b, c, d])
+            backings = [
+                np.array([10.0, 20.0], dtype=np.float32),
+                np.array([30.0], dtype=np.float32),
+                np.array([40.0, 50.0], dtype=np.float32),
+                np.array([60.0], dtype=np.float32),
+            ]
+            lazy_backings.extend(backings)
+            a, b, c, d = (_LazyBuffer(arr) for arr in backings)
+            for lazy in (a, b, c, d):
+                lazy_records.append((lazy.read_threads, lazy.release_threads, weakref.ref(lazy)))
             return [(a, b), {"logits": c, "value": d}]
 
         return forward
@@ -408,25 +454,179 @@ def test_non_numpy_leaves_normalize_on_producing_thread_at_any_depth(
             tup_out, dict_out = await fut
             logits_t, value_t = cast(tuple[object, object], tup_out)
             mapping = cast(dict[str, object], dict_out)
-            assert isinstance(logits_t, np.ndarray) and np.array_equal(
-                logits_t, np.array([10.0, 20.0], dtype=np.float32)
-            )
-            assert isinstance(value_t, np.ndarray) and np.array_equal(
-                value_t, np.array([30.0], dtype=np.float32)
-            )
-            assert isinstance(mapping["logits"], np.ndarray) and np.array_equal(
-                mapping["logits"], np.array([40.0, 50.0], dtype=np.float32)
-            )
-            assert isinstance(mapping["value"], np.ndarray) and np.array_equal(
-                mapping["value"], np.array([60.0], dtype=np.float32)
-            )
+            leaves = [logits_t, value_t, mapping["logits"], mapping["value"]]
+            expected = [
+                np.array([10.0, 20.0], dtype=np.float32),
+                np.array([30.0], dtype=np.float32),
+                np.array([40.0, 50.0], dtype=np.float32),
+                np.array([60.0], dtype=np.float32),
+            ]
+            for leaf, want, backing in zip(leaves, expected, lazy_backings, strict=True):
+                assert isinstance(leaf, np.ndarray)
+                assert np.array_equal(leaf, want)
+                assert leaf.flags.writeable
+                assert not np.shares_memory(leaf, backing)
+                assert _has_no_external_owner(leaf)
+                leaf[0] = -1.0
+            gc.collect()
+            assert all(ref() is None for _, _, ref in lazy_records)
 
     asyncio.run(run())
     assert input_checks == [True]
     assert len(model_threads) == 1
-    assert all(lazy.read_threads == [model_threads[0]] for lazy in lazy_outputs)
+    assert all(
+        read == [model_threads[0]] and released == [model_threads[0]]
+        for read, released, _ in lazy_records
+    )
     assert "torch" not in sys.modules
     assert "mlx" not in sys.modules
+
+
+@pytest.mark.parametrize("transport", ["local", "socket"])
+def test_model_reused_output_buffer_does_not_alias_game_answers(transport: _Transport) -> None:
+    cp_top = checkpoint("reused_top").checkpoint
+    cp_nested = checkpoint("reused_nested").checkpoint
+    backing = np.zeros(4, dtype=np.float32)
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        def forward(inputs: list[object]) -> list[object]:
+            step = float(str(inputs[0]))
+            backing[:] = step
+            if ref.key == cp_top.key:
+                return [backing]
+            return [{"nested": backing, "tuple": (backing,)}]
+
+        return forward
+
+    async def run() -> None:
+        async with _open_bus(transport, load) as bus:
+            bus.bind(cp_top)
+            bus.bind(cp_nested)
+            [first_top_fut] = bus.submit([ForwardCall(cp_top.key, [1], 1)])
+            [first_top] = await first_top_fut
+            assert isinstance(first_top, np.ndarray)
+            [first_nested_fut] = bus.submit([ForwardCall(cp_nested.key, [1], 1)])
+            [first_nested] = await first_nested_fut
+            first_map = cast(dict[str, object], first_nested)
+            first_dict_arr = cast(np.ndarray, first_map["nested"])
+            (first_tup_arr,) = cast(tuple[np.ndarray], first_map["tuple"])
+
+            [second_fut] = bus.submit([ForwardCall(cp_top.key, [2], 1)])
+            [second_top] = await second_fut
+            assert isinstance(second_top, np.ndarray)
+
+            assert np.all(first_top == 1.0)
+            assert np.all(first_dict_arr == 1.0)
+            assert np.all(first_tup_arr == 1.0)
+            assert np.all(second_top == 2.0)
+            assert not np.shares_memory(first_top, backing)
+            assert not np.shares_memory(first_dict_arr, backing)
+            assert not np.shares_memory(first_tup_arr, backing)
+            assert first_top.flags.writeable and first_top.base is None
+            assert first_dict_arr.flags.writeable and _has_no_external_owner(first_dict_arr)
+            assert first_tup_arr.flags.writeable and _has_no_external_owner(first_tup_arr)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("transport", ["local", "socket"])
+def test_cpu_dlpack_outputs_arrive_writable_and_owned(transport: _Transport) -> None:
+    cp_top = checkpoint("dlpack_top").checkpoint
+    cp_nested = checkpoint("dlpack_nested").checkpoint
+    top_backing = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    nested_backing = np.array([4.0, 5.0], dtype=np.float32)
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        if ref.key == cp_top.key:
+            return lambda inputs: [_CpuDlpack(top_backing) for _ in inputs]
+        return lambda inputs: [{"dl": _CpuDlpack(nested_backing)} for _ in inputs]
+
+    async def run() -> None:
+        async with _open_bus(transport, load) as bus:
+            bus.bind(cp_top)
+            bus.bind(cp_nested)
+            [top_fut] = bus.submit([ForwardCall(cp_top.key, [0], 1)])
+            [top_out] = await top_fut
+            assert isinstance(top_out, np.ndarray)
+            assert np.array_equal(top_out, top_backing)
+            assert top_out.flags.writeable
+            assert top_out.base is None
+            assert not np.shares_memory(top_out, top_backing)
+            top_out[0] = -1.0
+            assert top_backing[0] == 1.0
+
+            [nested_fut] = bus.submit([ForwardCall(cp_nested.key, [0], 1)])
+            [nested_out] = await nested_fut
+            nested_arr = cast(np.ndarray, cast(dict[str, object], nested_out)["dl"])
+            assert isinstance(nested_arr, np.ndarray)
+            assert np.array_equal(nested_arr, nested_backing)
+            assert nested_arr.flags.writeable
+            assert _has_no_external_owner(nested_arr)
+            assert not np.shares_memory(nested_arr, nested_backing)
+            nested_arr[0] = -2.0
+            assert nested_backing[0] == 4.0
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("transport", ["local", "socket"])
+@pytest.mark.parametrize("bad_factory", [_NonCpuDlpack, _CudaArrayOnly])
+def test_non_cpu_tensor_outputs_and_inputs_fail_with_forward_error(
+    transport: _Transport, bad_factory: Callable[[], object]
+) -> None:
+    cp_out = checkpoint("gpu_out").checkpoint
+    cp_in = checkpoint("gpu_in").checkpoint
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        if ref.key == cp_out.key:
+            return lambda inputs: [{"logits": bad_factory()} for _ in inputs]
+        return lambda inputs: ["ok" for _ in inputs]
+
+    async def run() -> None:
+        async with _open_bus(transport, load) as bus:
+            bus.bind(cp_out)
+            bus.bind(cp_in)
+
+            [out_fut] = bus.submit([ForwardCall(cp_out.key, [1], 1)])
+            with pytest.raises(ForwardError, match="CPU") as out_info:
+                await out_fut
+            assert out_info.value.checkpoint == cp_out.key
+
+            arr = np.arange(4, dtype=np.float32)
+            [in_fut] = bus.submit([ForwardCall(cp_in.key, [{"arr": arr, "gpu": bad_factory()}], 1)])
+            with pytest.raises(ForwardError, match="CPU") as in_info:
+                await in_fut
+            assert in_info.value.checkpoint == cp_in.key
+            assert arr.flags.writeable
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("transport", ["local", "socket"])
+def test_bytearray_outputs_are_copied_not_shared(transport: _Transport) -> None:
+    cp = checkpoint("bytes").checkpoint
+    backing = bytearray(b"abcd")
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        def forward(inputs: list[object]) -> list[object]:
+            if inputs[0] == 2:
+                backing[0] = ord("Z")
+            return [backing, {"ba": backing}]
+
+        return forward
+
+    async def run() -> None:
+        async with _open_bus(transport, load) as bus:
+            bus.bind(cp)
+            [first] = bus.submit([ForwardCall(cp.key, [1, 1], 2)])
+            top1, nested1 = await first
+            [second] = bus.submit([ForwardCall(cp.key, [2, 2], 2)])
+            top2, _ = await second
+            assert top1 == bytearray(b"abcd")
+            assert cast(dict[str, object], nested1)["ba"] == bytearray(b"abcd")
+            assert top2 == bytearray(b"Zbcd")
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("transport", ["local", "socket"])
@@ -449,9 +649,98 @@ def test_unpicklable_input_fails_only_that_call_and_unlocks_arrays(
                 ]
             )
             assert await good_fut == ["ok"]
-            with pytest.raises((pickle.PicklingError, AttributeError, TypeError)):
+            with pytest.raises(ForwardError) as info:
                 await bad_fut
+            assert info.value.checkpoint == cp.key
             assert arr.flags.writeable
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("transport", ["local", "socket"])
+def test_atomic_submit_rollback_when_later_call_is_unbound(transport: _Transport) -> None:
+    cp = checkpoint("bound").checkpoint
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        return lambda inputs: ["ok" for _ in inputs]
+
+    async def run() -> None:
+        async with _open_bus(transport, load) as bus:
+            bus.bind(cp)
+            arr = np.arange(4, dtype=np.float32)
+            with pytest.raises(KeyError, match="unbound"):
+                bus.submit(
+                    [
+                        ForwardCall(cp.key, [arr], 1),
+                        ForwardCall("unbound", [arr], 1),
+                    ]
+                )
+            assert arr.flags.writeable
+            [fut] = bus.submit([ForwardCall(cp.key, [arr], 1)])
+            assert await fut == ["ok"]
+            assert arr.flags.writeable
+            report = await bus.close()
+            assert report.calls == report.answers == 1
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("transport", ["local", "socket"])
+def test_play_locks_inputs_immediately_on_call_before_barrier_flush(transport: _Transport) -> None:
+    cp = checkpoint("play_lock").checkpoint
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    release_second = threading.Event()
+    calls = 0
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        def forward(inputs: list[object]) -> list[object]:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_entered.set()
+                release_first.wait(timeout=5.0)
+            elif calls == 2:
+                second_entered.set()
+                release_second.wait(timeout=5.0)
+            return [float(cast(np.ndarray, item)[0]) for item in inputs]
+
+        return forward
+
+    async def run() -> None:
+        async with _open_bus(transport, load, max_batch=8) as bus:
+            forwarder = _Forwarder(bus, max_batch=8, eager=False)
+            forward = forwarder.bind(cp)
+            obs = np.array([5.0, 6.0], dtype=np.float32)
+            readonly = np.array([7.0, 8.0], dtype=np.float32)
+            readonly.flags.writeable = False
+
+            # Locking happens synchronously on call, before the barrier flushes.
+            first = forward([obs, readonly])
+            with pytest.raises(ValueError, match="read-only"):
+                obs[0] = 999.0
+
+            async def await_first() -> list[object]:
+                return await first
+
+            first_task: asyncio.Task[list[object]] = asyncio.create_task(await_first())
+            assert await asyncio.to_thread(first_entered.wait, 5.0)
+
+            # Enqueue a second call sharing `obs` while call 1 is in flight, then
+            # let call 1 finish while call 2 is held; `obs` stays locked throughout.
+            second = forward([obs])
+            release_first.set()
+            assert await first_task == [5.0, 7.0]
+            assert await asyncio.to_thread(second_entered.wait, 5.0)
+            with pytest.raises(ValueError, match="read-only"):
+                obs[0] = 888.0
+
+            release_second.set()
+            assert await second == [5.0]
+            obs[0] = 42.0
+            assert obs[0] == 42.0
+            assert not readonly.flags.writeable
 
     asyncio.run(run())
 
@@ -568,6 +857,44 @@ def test_raising_forward_fails_play_match_even_when_caught(
     ):
         active.play(_catches_forward_error, agents=Agents(load=_raising_load))
     db = statsdb("errors", tmp_path)
+    try:
+        assert db.sql("select state from matches").fetchall() == [("failed",)]
+    finally:
+        db.close()
+
+
+def _identity_load(ref: CheckpointRef) -> ModelForward:
+    return lambda inputs: inputs
+
+
+async def _catches_unpicklable_input(match: Match, agents: Sequence[Forward]) -> Tables:
+    try:
+        await agents[0]([{"fn": lambda: None}])
+    except ForwardError as error:
+        assert error.checkpoint == "unpicklable"
+    return {"scores": [{"seat": 0, "score": 1}]}
+
+
+@pytest.mark.parametrize("transport", ["local", "socket"])
+def test_unpicklable_input_in_play_fails_match_even_when_caught(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: _Transport
+) -> None:
+    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: transport == "socket")
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
+    cp = checkpoint("unpicklable")
+    match = Match(players=(cp,), games=1)
+    with (
+        pytest.raises(EtudeError),
+        evaluating(
+            environment("unpicklable_play"),
+            experiment="unpicklable_play",
+            matches=(match,),
+            run=transport,
+            directory=tmp_path,
+        ) as active,
+    ):
+        active.play(_catches_unpicklable_input, agents=Agents(load=_identity_load))
+    db = statsdb("unpicklable_play", tmp_path)
     try:
         assert db.sql("select state from matches").fetchall() == [("failed",)]
     finally:
@@ -717,6 +1044,62 @@ def test_local_bus_counts_dict_of_arrays_with_small_pickle_and_zero_array_copies
     assert report.arrays_copied == 0
     assert report.copied_bytes == 0
     assert report.wire_bytes == 0
+    assert report.handoff_seconds > 0.0
+
+
+def test_local_bus_counts_fortran_contiguous_consistently_at_top_level_and_nested() -> None:
+    cp = checkpoint("fortran").checkpoint
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        def forward(inputs: list[object]) -> list[object]:
+            top = cast(np.ndarray, inputs[0])
+            nested = cast(dict[str, np.ndarray], inputs[1])["arr"]
+            return [{"sum": float(top.sum())}, {"sum": float(nested.sum())}]
+
+        return forward
+
+    async def run() -> tuple[BusReport, int]:
+        bus = LocalForwardBus(load, max_batch=8, memory=1024 * 1024)
+        bus.bind(cp)
+        f_top = np.asfortranarray(np.arange(12, dtype=np.float32).reshape(3, 4))
+        f_nested = np.asfortranarray(np.arange(12, dtype=np.float32).reshape(3, 4))
+        assert not f_top.flags.c_contiguous and f_top.flags.f_contiguous
+        [fut_top, fut_nested] = bus.submit(
+            [
+                ForwardCall(cp.key, [f_top], rows=1),
+                ForwardCall(cp.key, [{"arr": f_nested}], rows=1),
+            ]
+        )
+        assert await fut_top == [{"sum": float(f_top.sum())}]
+        assert await fut_nested == [{"sum": float(f_nested.sum())}]
+        return await bus.close(), int(f_top.nbytes)
+
+    report, nbytes = asyncio.run(run())
+    assert report.calls == report.answers == 2
+    assert report.arrays == 0
+    assert report.arrays_copied == 2
+    assert report.copied_bytes == 2 * nbytes
+    assert report.pickled == 1
+    assert report.handoff_seconds > 0.0
+
+
+def test_socket_bus_counts_pickled_per_call() -> None:
+    cp = checkpoint("sock_count").checkpoint
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        return lambda inputs: [x for x in inputs]
+
+    async def run() -> BusReport:
+        async with _open_bus("socket", load, max_batch=8) as bus:
+            bus.bind(cp)
+            f1, f2 = bus.submit([ForwardCall(cp.key, [1], 1), ForwardCall(cp.key, [2], 1)])
+            assert await f1 == [1]
+            assert await f2 == [2]
+            return await bus.close()
+
+    report = asyncio.run(run())
+    assert report.calls == report.answers == 2
+    assert report.pickled == 2
 
 
 def test_local_bus_thread_exit_fails_pending_and_future_calls_with_retry() -> None:

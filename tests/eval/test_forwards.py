@@ -7,8 +7,8 @@ from random import Random
 
 import pytest
 
-from etude.eval.agents import Answer, CheckpointRequest
 from etude.eval.batching import _Batches
+from etude.eval.bus import ForwardOutcome
 from etude.eval.records import Code, compose
 from etude.jobs import Agents, hold_group
 from tests.eval.arithmetic import checkpoint
@@ -47,25 +47,26 @@ def test_mirror_sends_all_branches_once_per_ply_and_builds_author_objects(
 
 def test_mirror_trajectories_do_not_depend_on_other_inputs_in_the_batch() -> None:
     small = checkpoint("small")
-    batches: _Batches[Answer] = _Batches(load, 32, 1024)
-    answers: list[Answer] = []
+    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(load, 32, 1024)
+    answers: list[tuple[int, ForwardOutcome]] = []
     next_id = 0
 
     async def shared(inputs: list[object], *, rows: int | None = None) -> list[object]:
         nonlocal next_id
         next_id += 1
-        batches.add(answers.append, CheckpointRequest(next_id, small.checkpoint, [100], 1))
+        batches.add(answers.append, next_id, small.checkpoint, [100], 1)
         next_id += 1
         batches.add(
             answers.append,
-            CheckpointRequest(
-                next_id, small.checkpoint, inputs, len(inputs) if rows is None else rows
-            ),
+            next_id,
+            small.checkpoint,
+            inputs,
+            len(inputs) if rows is None else rows,
         )
         batches.flush()
         first = answers.pop(0)
-        assert first == Answer(next_id - 1, small.checkpoint.key, [101])
-        answer = answers.pop(0)
+        assert first == (next_id - 1, ForwardOutcome(small.checkpoint.key, [101]))
+        _, answer = answers.pop(0)
         assert answer.error is None
         return answer.outputs
 

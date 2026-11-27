@@ -39,7 +39,8 @@ from etude.eval.agents import (
     recv_frame,
     send_frame,
 )
-from etude.eval.batching import _Batches
+from etude.eval.batching import _add_socket_batch, _Batches, _encode_socket
+from etude.eval.bus import ForwardOutcome
 from etude.eval.game import GameReport, Matches
 from etude.eval.match import environment
 from etude.eval.query import _kept_path, statsdb
@@ -812,26 +813,26 @@ def echo(checkpoint: CheckpointRef) -> ModelForward:
 
 
 def test_batch_merges_rows_up_to_max_batch_and_runs_oversized_alone() -> None:
-    first_answers: list[Answer] = []
-    second_answers: list[Answer] = []
+    first_answers: list[tuple[int, ForwardOutcome]] = []
+    second_answers: list[tuple[int, ForwardOutcome]] = []
     player = checkpoint("one")
-    batches: _Batches[Answer] = _Batches(echo, 4, 1024)
-    batches.add(first_answers.append, CheckpointRequest(1, player.checkpoint, [("a", "b")], 2))
-    batches.add(second_answers.append, CheckpointRequest(2, player.checkpoint, [("c", "d")], 2))
-    batches.add(second_answers.append, CheckpointRequest(3, player.checkpoint, ["e"], 1))
+    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(echo, 4, 1024)
+    batches.add(first_answers.append, 1, player.checkpoint, [("a", "b")], 2)
+    batches.add(second_answers.append, 2, player.checkpoint, [("c", "d")], 2)
+    batches.add(second_answers.append, 3, player.checkpoint, ["e"], 1)
     first = batches.flush()
-    assert first_answers.pop(0) == Answer(1, "one", [("a", "b")])
-    assert second_answers.pop(0) == Answer(2, "one", [("c", "d")])
+    assert first_answers.pop(0) == (1, ForwardOutcome("one", [("a", "b")]))
+    assert second_answers.pop(0) == (2, ForwardOutcome("one", [("c", "d")]))
     assert [b.rows for b in first] == [4]
     assert [b.requests for b in first] == [2]
     assert batches.loads == 1
     second = batches.flush()
-    assert second_answers.pop(0) == Answer(3, "one", ["e"])
+    assert second_answers.pop(0) == (3, ForwardOutcome("one", ["e"]))
     assert [b.rows for b in second] == [1]
     # A single pre-collated call above max_batch runs alone and reports real rows.
-    batches.add(first_answers.append, CheckpointRequest(4, player.checkpoint, ["big"], 6))
+    batches.add(first_answers.append, 4, player.checkpoint, ["big"], 6)
     oversized = batches.flush()
-    assert first_answers.pop(0) == Answer(4, "one", ["big"])
+    assert first_answers.pop(0) == (4, ForwardOutcome("one", ["big"]))
     assert [b.rows for b in oversized] == [6]
 
 
@@ -846,22 +847,22 @@ def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_inputs() ->
         for name in ("a", "b", "c")
     ]
     a, b, c = players
-    batches: _Batches[Answer] = _Batches(echo, 1, 2)
-    answers: list[Answer] = []
+    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(echo, 1, 2)
+    answers: list[tuple[int, ForwardOutcome]] = []
     for index, player in enumerate((a, b), start=1):
-        batches.add(answers.append, CheckpointRequest(index, player.checkpoint, [player.name], 1))
+        batches.add(answers.append, index, player.checkpoint, [player.name], 1)
         batches.flush()
-        assert answers.pop(0) == Answer(index, player.checkpoint.key, [player.name])
+        assert answers.pop(0) == (index, ForwardOutcome(player.checkpoint.key, [player.name]))
     # While a still has waiting rows in pending, loading c evicts b instead of a.
-    batches.add(answers.append, CheckpointRequest(3, c.checkpoint, ["c"], 1))
-    batches.add(answers.append, CheckpointRequest(4, a.checkpoint, ["a"], 1))
+    batches.add(answers.append, 3, c.checkpoint, ["c"], 1)
+    batches.add(answers.append, 4, a.checkpoint, ["a"], 1)
     batches.flush()
-    assert answers.pop(0) == Answer(3, c.checkpoint.key, ["c"])
-    assert answers.pop(0) == Answer(4, a.checkpoint.key, ["a"])
+    assert answers.pop(0) == (3, ForwardOutcome(c.checkpoint.key, ["c"]))
+    assert answers.pop(0) == (4, ForwardOutcome(a.checkpoint.key, ["a"]))
     assert batches.loads == 3
-    batches.add(answers.append, CheckpointRequest(5, b.checkpoint, ["b"], 1))
+    batches.add(answers.append, 5, b.checkpoint, ["b"], 1)
     batches.flush()
-    assert answers.pop(0) == Answer(5, b.checkpoint.key, ["b"])
+    assert answers.pop(0) == (5, ForwardOutcome(b.checkpoint.key, ["b"]))
     assert batches.loads == 4  # b was evicted to make room for c.
 
 
@@ -1075,18 +1076,18 @@ def test_sigterm_reaps_agents_and_games_and_records_retry(tmp_path: Path) -> Non
 
 
 def test_a_failed_load_is_not_attempted_again_in_the_run() -> None:
-    batches: _Batches[Answer] = _Batches(raises_load, 1, 10)
-    answers: list[Answer] = []
+    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(raises_load, 1, 10)
+    answers: list[tuple[int, ForwardOutcome]] = []
     player = checkpoint("one")
-    batches.add(answers.append, CheckpointRequest(1, player.checkpoint, [1], 1))
+    batches.add(answers.append, 1, player.checkpoint, [1], 1)
     batches.flush()
-    first = answers.pop(0)
+    _, first = answers.pop(0)
     assert first.error and "fixture loading error" in first.error and first.loading
     # If loading is attempted a second time this function would now succeed.
     batches.forwards.load = echo
-    batches.add(answers.append, CheckpointRequest(2, player.checkpoint, [2], 1))
+    batches.add(answers.append, 2, player.checkpoint, [2], 1)
     batches.flush()
-    second = answers.pop(0)
+    _, second = answers.pop(0)
     assert second.error == first.error and second.loading
     assert batches.loads == 0
 
@@ -1506,7 +1507,7 @@ def wire_agent(checkpoint: CheckpointRef) -> ModelForward:
 def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoint() -> None:
     # Small real sockets retain the wire bytes; no load or clock threshold.
     cp = checkpoint("wire")
-    batches: _Batches[memoryview] = _Batches(wire_agent, 2, 1024, encode=ForkingPickler.dumps)
+    batches: _Batches[memoryview] = _Batches(wire_agent, 2, 1024, encode=_encode_socket)
     sockets = [socket.socketpair() for _ in range(2)]
     clients = [parent for parent, _ in sockets]
     receivers = [child for _, child in sockets]
@@ -1533,7 +1534,7 @@ def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoin
                 send_frame(peer_client, payload)
                 received = recv_frame(receiver)
                 request_bytes += len(received)
-                batches.add_batch(send_to(receiver), ForkingPickler.loads(received))
+                _add_socket_batch(batches, send_to(receiver), ForkingPickler.loads(received))
             observations.extend(batches.flush())
             for index, peer_client in enumerate(clients):
                 answer_payload = recv_frame(peer_client)

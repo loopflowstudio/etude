@@ -26,7 +26,7 @@ from collections.abc import (
 )
 from contextlib import aclosing, suppress
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from multiprocessing.connection import Connection
 from multiprocessing.reduction import ForkingPickler
@@ -49,6 +49,8 @@ from etude.records import Record
 __all__ = ("Matches",)
 
 if TYPE_CHECKING:
+    from numpy import ndarray
+
     from etude.checkpoints import CheckpointRef
 
 MAX_GAME_IMPORTS = 256
@@ -210,6 +212,7 @@ class _PendingCall:
     inputs: list[object]
     rows: int
     future: asyncio.Future[list[object]]
+    locked: list[ndarray] = field(default_factory=list)
 
 
 class _PendingAnswer:
@@ -301,11 +304,24 @@ class _Forwarder:
     ) -> asyncio.Future[list[object]]:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[list[object]] = loop.create_future()
-        self._pending.setdefault(checkpoint, []).append(_PendingCall(inputs, rows, future))
+        # Lock inputs immediately on the forward() call using the bus's shared
+        # flight table so `play` matches `play_many` with zero unlock gap across
+        # `_flush` handoff into `bus.submit`.
+        locked = self._bus.flight.lock(inputs)
+        self._pending.setdefault(checkpoint, []).append(_PendingCall(inputs, rows, future, locked))
         if not self._flush_scheduled:
             self._flush_scheduled = True
             loop.call_soon(self._flush)
         return future
+
+    def clear_pending(self) -> None:
+        """Release any staged barrier locks if the process shuts down before `_flush` runs."""
+        pending = self._pending
+        self._pending = {}
+        self._flush_scheduled = False
+        for calls in pending.values():
+            for call in calls:
+                self._bus.flight.unlock(call.locked)
 
     def _chunks(self, calls: list[_PendingCall]) -> list[list[_PendingCall]]:
         chunks: list[list[_PendingCall]] = []
@@ -342,6 +358,10 @@ class _Forwarder:
                     if not call.future.done():
                         call.future.set_exception(error)
             return
+        finally:
+            for chunk, _ in grouped:
+                for call in chunk:
+                    self._bus.flight.unlock(call.locked)
         for (chunk, _), bus_future in zip(grouped, futures, strict=True):
             bus_future.add_done_callback(self._callback(chunk))
 
@@ -478,6 +498,8 @@ async def _serve_stream(
 
     async def close_bus() -> BusReport:
         nonlocal bus, bus_report
+        if forwarder is not None:
+            forwarder.clear_pending()
         if bus is not None:
             active, bus = bus, None
             bus_report = await active.close()
