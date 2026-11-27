@@ -29,11 +29,12 @@ Neither designates a player as the subject: both sides contribute results, and
 your report chooses whose score to show.
 
 An `EvalJob(tournament=PANEL, play=play, agents=Agents(load=load, build=build),
-checkpoints=saved, max_hours=...)` declares the match generator and how to play.
-For a round robin, pass `enter=(a, b, c)` instead of checkpoints. Compatible jobs
-share compute automatically. The launcher prints one run address for the
-group. Its directory holds the launch declaration, writer and outcome, with
-the tournaments’ result directories beneath it. A retry can reuse their
+checkpoints=saved, max_hours=...)` declares the match generator and how to play
+(`play=` for `async def play(match, agents)`, or `play_many=` for a vectorized
+engine). For a round robin, pass `enter=(a, b, c)` instead of checkpoints.
+Compatible jobs share compute automatically. The launcher prints one run address
+for the group. Its directory holds the launch declaration, writer and outcome,
+with the tournaments’ result directories beneath it. A retry can reuse their
 sealed matches on a fresh machine. Queries and reports keep the original
 tournament and match identifiers.
 
@@ -50,19 +51,21 @@ influence it. The match key includes the seated player keys, groups, config,
 base seed and index; the total panel size does not.
 
 ```python
+from collections.abc import Sequence
 from random import Random
 
+from etude.eval.agents import Forward
 from etude.eval.records import Match
 from etude.eval.result import Tables
 
 
-def play(match: Match, agents: list[object]) -> Tables:
+async def play(match: Match, agents: Sequence[Forward]) -> Tables:
     config_random = Random(f"{match.seed}:config")
     engine_random = Random(f"{match.seed}:engine")
     player_random = [Random(f"{match.seed}:player:{i}") for i in range(len(agents))]
-    # Resolve random decks from config_random, then play using engine_random
-    # and each player's independent stream. Return your own table rows.
-    return run_game(match.config, agents, config_random, engine_random, player_random)
+    # Resolve random decks from config_random, then await agents[seat]([obs])
+    # using engine_random and each player's independent stream.
+    return await run_game(match.config, agents, config_random, engine_random, player_random)
 ```
 
 Use `Match[Rules]` to receive your Pydantic config as a typed model. Otherwise
@@ -115,38 +118,144 @@ show as coverage gaps instead of fabricated scores.
 
 ## Agents
 
-There is one game signature: `play(match, agents)`. Each seated player gets one
-author object in `agents`, in seat order.
+```python
+# models.py: may import Torch and choose the model's device
+from etude.checkpoints import CheckpointRef
+from etude.eval.agents import ModelForward
 
-- `load(checkpoint)` returns a **deterministic** callable from a list of inputs
-  to a list of outputs, preserving length and order. Load model weights from
-  `checkpoint.path`; a named-object checkpoint is a folder with `checkpoint.json`.
+
+def load(checkpoint: CheckpointRef) -> ModelForward:
+    model = load_weights(checkpoint.path)
+
+    def forward(inputs: list[object]) -> list[object]:
+        return model.predict(inputs)
+
+    return forward
+```
+
+```python
+# game.py: keep model libraries out of this module
+from collections.abc import Sequence
+from random import Random
+
+from etude.eval.agents import Forward
+from etude.eval.records import Match
+from etude.eval.result import Tables
+
+
+async def play(match: Match, agents: Sequence[Forward]) -> Tables:
+    rng = Random(match.seed)
+    [logits] = await agents[0]([initial_observation(match.config)])
+    action = sample(logits, rng)
+    return {"scores": [{"seat": 0, "score": score(action)}]}
+```
+
+Per-match games use `async def play(match, agents)`. Each seated player gets one
+author object in `agents`, in seat order. A synchronous `def play` is refused
+when the job is declared.
+
+- `load(checkpoint)` returns a **deterministic** `ModelForward` from a list of
+  inputs to a list of outputs, preserving length and order independently of
+  batch composition. Load model weights from `checkpoint.path`; a named-object
+  checkpoint is a folder with `checkpoint.json`.
 - `build(player, leaves)` returns what the game uses. `leaves` maps each
-  checkpoint key to its forward. It can build search, sampling or an ensemble.
-  Sampling and action choice belong in game code, seeded from `match.seed`.
-- A bare checkpoint with no build hook receives its forward directly. Code/API
-  players use `build` too; without checkpoint leaves they start no model-loading
-  process and perform no GPU probe. Your build hook owns API credentials and clients.
+  checkpoint key to its awaitable `Forward`. Within a game process, every match
+  seating a checkpoint shares that checkpoint's `Forward` object. Sampling and
+  action choice belong in game code, seeded from `match.seed`.
+- A bare checkpoint with no build hook receives its `Forward` directly. Code and
+  API players use `build` too; without checkpoint leaves they run one game per
+  process, start no model-loading process and perform no GPU probe. Your build
+  hook owns API credentials and clients.
 
 [`agent_game.py`](../examples/agent_game.py) shows `Sampled(temperature=...)`
 as identity and `Sampler.choose` as the action method.
 [`agent_models.py`](../examples/agent_models.py) shows a loader. Both are used
 by the runnable [`agents.py`](../examples/agents.py) experiment.
 
-CPU games cache forwards directly with one model-library thread per game and a
-share of the host checkpoint-byte allowance. On visible NVIDIA hardware, calls
-from active games batch through a shared agent process. Honor Etude's thread
-environment in the loader and choose the model's device there: hardware capacity
-does not place tensors for you. Keep model imports in the loading module so the
-GPU game processes remain light. `Agents(max_batch=..., memory_gb=...)` tunes
-capacity; author code keeps one forward deterministic for every batch size.
+Each game process runs many `play` tasks on one `asyncio` event loop. When no
+running game in the process can add another input, pending calls flush together
+with no timer. On CPU, each game process caches and calls forwards directly with
+one model-library thread per process and a share of the host checkpoint-byte
+allowance. On visible NVIDIA hardware, each game process sends its pending rows
+per checkpoint in one message to a shared agent process, which merges ready
+calls up to `max_batch` rows without waiting. Honor Etude's thread environment
+in the loader and choose the model's device there: hardware capacity does not
+place tensors for you. Keep model imports in the loading module so GPU game
+processes remain light, and avoid blocking the event loop between `await`s.
+`Agents(max_batch=..., memory_gb=...)` tunes batch rows and checkpoint memory;
+author code keeps `load`'s forward deterministic for every batch size.
+
+## Vectorized engines
+
+For engines that step many games together and collate observations themselves,
+write an async generator `play_many(matches)` instead of `play(match, agents)`:
+
+```python
+from collections.abc import AsyncIterator
+
+from etude.eval.agents import Forward, ForwardError
+from etude.eval.game import Matches
+from etude.eval.records import Match
+from etude.eval.result import Tables
+from etude.jobs import Agents, EvalJob
+
+
+async def play_many(
+    matches: Matches[Rules],
+) -> AsyncIterator[tuple[Match[Rules], Tables | Exception]]:
+    pool = RolloutPool(slots=256)
+    while True:
+        for match, agents in await matches.take(pool.free):
+            pool.load(match, agents)
+        if not pool.active:
+            return
+        for forward, batch, rows, slots in pool.ready_batches():
+            try:
+                [outputs] = await forward([batch], rows=rows)
+            except ForwardError as error:
+                for match in pool.drop(slots):
+                    yield match, error
+                continue
+            for match, tables in pool.step(slots, outputs):
+                yield match, tables
+
+
+job = EvalJob(
+    tournament=PANEL,
+    play_many=play_many,
+    agents=Agents(load=load, max_batch=256),
+    checkpoints=saved,
+    max_hours=1,
+)
+```
+
+Give `EvalJob` either `play=` or `play_many=`, never both. Etude still owns
+scheduling, checkpoint caching and eviction, durable match storage and failure
+retention:
+
+- `await matches.take(n)` pulls up to `n` pending `(match, agents)` pairs in one
+  step. Returning `[]` for `n > 0` means no pending matches remain (or the run
+  is stopping).
+- `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
+  `rows=` for a pre-collated batch so the agent process never merges calls past
+  `max_batch` rows and reports real row counts. A single call above `max_batch`
+  rows runs alone. Because every match in the process shares one `Forward`
+  object per checkpoint, engines can group ready rows by forward identity.
+- Yield `(match, tables)` or `(match, Result(...))` as each slot finishes so
+  finished slots backfill immediately without waiting for stragglers.
+- Yield `(match, error)` to fail one match while the remaining slots keep
+  stepping. An uncaught exception fails every match the generator holds.
+  Yielding an unknown or already-yielded match fails the generator and its held
+  matches; returning with held matches unyielded fails each unyielded match.
 
 ## Results and retry
 
-Return `Tables`, a mapping of table names to rows. Use plain identifier names
-for tables/columns. A row may name `seat` (zero-based player position), `game`
-(if your domain has subgames), or `group` for a team result. Group `all` contains
-every seat. Etude adds `run` and `match`; every successful match must return rows.
+Return `Tables`, a mapping of table names to rows (or `Result(tables=...,
+blobs=..., execution=...)` from `etude.eval.result` when keeping blobs or
+execution provenance). Use plain identifier names for tables/columns. A row may
+name `seat` (zero-based player position), `game` (if your domain has subgames),
+or `group` for a team result. Group `all` contains every seat. Etude adds `run`
+and `match`; every successful match must return rows.
 
 ```python
 return {"scores": [{"seat": 0, "won": True}, {"seat": 1, "won": False}]}
@@ -154,9 +263,12 @@ return {"scores": [{"seat": 0, "won": True}, {"seat": 1, "won": False}]}
 
 A successful match is reused across an experiment's tournaments in the same
 environment. Errors retain completed results; infrastructure failures retry,
-ordinary game failures require `--retry-failed`. Catching a forward error in play
-does not hide it from Etude's failure retention. Unrelated matches can complete.
-[Limits](limits.md) covers process and API side effects.
+ordinary game failures require `--retry-failed`. A forward failure raises
+`ForwardError` (with `.checkpoint` naming the checkpoint key) at the awaiting
+call. In `play`, catching `ForwardError` does not hide it from Etude's failure
+retention: the match still fails. In `play_many`, catching `ForwardError` lets
+you drop affected slots and yield `(match, error)` while unrelated matches
+complete. [Limits](limits.md) covers process, event-loop and API side effects.
 
 ## Querying
 
@@ -178,6 +290,7 @@ of large raw tables. [Tracking](tracking.md#reports) covers report declarations;
 
 For explicit match lists outside declarations, open
 `evaluating(environment, experiment=..., matches=matches)` and call
-`run.play(play, agents=Agents(...))` under `if __name__ == "__main__":`.
-Games run in fresh spawned processes; play, load, build and wrapper records must
+`run.play(play, agents=Agents(...))` or `run.play_many(play_many,
+agents=Agents(...))` under `if __name__ == "__main__":`. Games run in fresh
+spawned processes; `play`, `play_many`, `load`, `build` and wrapper records must
 be importable module-level definitions.
