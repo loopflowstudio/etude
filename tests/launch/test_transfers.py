@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import io
 import os
+import shutil
 import subprocess
 import tarfile
 import threading
@@ -18,7 +19,7 @@ from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
 import pytest
@@ -54,7 +55,7 @@ from etude.launch.storage.files import RESULT, select_output
 from etude.launch.storage.s3 import Bucket, Grant, PostForm, _send, read
 from etude.launch.storage.transport import HTTPReply, attribute, observe
 from etude.launch.usage import Transfer, Usage
-from etude.launch.worker.courier import Courier
+from etude.launch.worker.courier import Courier, _cache
 from etude.out import OutFile, OutFiles
 from etude.records import RunProgress as Result
 from etude.records import RunRecord
@@ -1611,3 +1612,33 @@ def test_unknown_fetch_lists_at_most_twenty_names(tmp_path: Path) -> None:
         select_output("run", "missing", (), lambda: OutFiles(files=members))
     assert str(failure.value).endswith("file19, and 3 more")
     assert "file20" not in str(failure.value)
+
+
+def test_worker_cache_bound_stays_fixed_across_owned_host_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    cache_root = Cache().root
+    cache_root.mkdir(parents=True, exist_ok=True)
+    disk_total = 1_000_000
+    disk_free = disk_total
+
+    class _Usage(NamedTuple):
+        total: int
+        used: int
+        free: int
+
+    def fake_usage(path: Path) -> _Usage:
+        return _Usage(disk_total, disk_total - disk_free, disk_free)
+
+    monkeypatch.setattr(shutil, "disk_usage", fake_usage)
+    # First session sees empty cache: bound is half the disk.
+    first = _cache()
+    assert first.max_bytes == disk_total // 2
+    # Across subsequent sessions as cached files grow and free space shrinks by the same amount,
+    # the bound stays fixed at (held + free) // 2 instead of ratcheting toward the whole disk.
+    for index in range(3):
+        size = 150_000
+        (cache_root / f"item-{index}").write_bytes(b"x" * size)
+        disk_free -= size
+        assert _cache().max_bytes == disk_total // 2

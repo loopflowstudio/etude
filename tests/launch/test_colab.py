@@ -21,10 +21,10 @@ from etude.launch import database
 from etude.launch.aws import Keys
 from etude.launch.client import _open
 from etude.launch.database import launcher_file, migrations, open_home, upgrade
-from etude.launch.errors import ProviderUnavailable
+from etude.launch.errors import ProviderUnavailable, Refused
 from etude.launch.executor import Execution, Executor, ProviderService
 from etude.launch.listing import show_availability, show_machines, show_quote
-from etude.launch.provisioner.machines import MachineRequest, Refused
+from etude.launch.provisioner.machines import MachineRequest
 from etude.launch.provisioner.providers.colab.api import (
     ColabAPI,
     resolve_template,

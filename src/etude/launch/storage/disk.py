@@ -14,12 +14,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from etude.carriage import put_back, recorded_file, restore_set
-from etude.errors import LauncherError
+from etude.errors import LauncherError, sanitize
+from etude.launch.errors import Refused
 from etude.launch.logs import snapshot_stream
 from etude.launch.records import BootstrapLinks, LogStream, Output
 from etude.launch.schemas import Finished, Observation, Packet, Progress, Work
 from etude.launch.source import source_archive
-from etude.launch.storage.files import digest, read_result, select_output, write
+from etude.launch.storage.files import (
+    digest,
+    parse_transfers,
+    read_result,
+    select_output,
+    write,
+    write_bytes,
+)
 from etude.launch.usage import Transfer
 from etude.out import MEMBERSHIP, OutFiles
 
@@ -42,17 +50,29 @@ class DirectoryJournal:
 
     def ended(self, session_id: str) -> datetime | None:
         note = self._root / session_id / "ended"
-        return datetime.fromisoformat(note.read_text()) if note.exists() else None
+        try:
+            text = note.read_text().strip()
+        except FileNotFoundError:
+            return None
+        return datetime.fromisoformat(text) if text else None
 
     def stage(self, repo: str, commit: str) -> None:
         """Nothing to do ahead: a session's source is written beside it when it starts."""
 
-    def add(self, session_id: str, work: Work) -> None:
-        added = self._root / session_id / "work"
-        added.mkdir(exist_ok=True)
-        if not (added / f"{work.attempt}.json").exists():
-            self._place_source(self._root / session_id, work)
-            write(added / f"{work.attempt}.json", work.model_dump_json())
+    def add(self, session_id: str, work: Work, *, finish: bool = False) -> None:
+        home = self._root / session_id
+        added = home / "work"
+        try:
+            added.mkdir(exist_ok=True)
+            if not (added / f"{work.attempt}.json").exists():
+                self._place_source(home, work)
+                write(added / f"{work.attempt}.json", work.model_dump_json())
+            if finish and home.is_dir():
+                (home / "finish").touch()
+        except OSError as error:
+            raise Refused(
+                sanitize(f"{type(error).__name__}: {error}") or "host refused work delivery"
+            ) from error
 
     @staticmethod
     def _place_source(home: Path, work: Work) -> None:
@@ -61,9 +81,7 @@ class DirectoryJournal:
         archive = home / "sources" / f"{work.commit}.tar"
         if not archive.exists():
             archive.parent.mkdir(exist_ok=True)
-            partial = archive.with_name(archive.name + ".partial")
-            partial.write_bytes(source_archive(work.repo, work.commit))
-            partial.replace(archive)
+            write_bytes(archive, source_archive(work.repo, work.commit))
 
     def _folder(self, run: str) -> Path:
         """The run's tracked folder on this host, shared by its sessions (`ETUDE_TRACK_DIR`)."""
@@ -92,18 +110,17 @@ class DirectoryJournal:
     def _transfers(home: Path) -> tuple[Transfer, ...]:
         """What the session's attempts recorded in its usage journal."""
         path = home / "usage.jsonl"
-        events = []
-        for line in path.read_text().splitlines() if path.exists() else []:
-            try:
-                events.append(Transfer.model_validate_json(line))
-            except ValueError:
-                continue  # a line still being written; read again next time
-        return tuple(events)
+        return parse_transfers(path.read_text() if path.exists() else None)
 
     def stop(self, session_id: str, attempt: str) -> None:
         stop = self._root / session_id / "stop"
-        stop.mkdir(exist_ok=True)
-        (stop / attempt).touch()
+        try:
+            stop.mkdir(exist_ok=True)
+            (stop / attempt).touch()
+        except OSError as error:
+            raise Refused(
+                sanitize(f"{type(error).__name__}: {error}") or "host refused stop"
+            ) from error
 
     def finish(self, session_id: str) -> datetime | None:
         home = self._root / session_id
@@ -113,17 +130,32 @@ class DirectoryJournal:
 
     def end(self, session_id: str) -> datetime | None:
         ended = self._root / session_id / "ended"
-        if self._alive(session_id):
-            os.kill(int(self._pid(session_id)), signal.SIGTERM)
-            for _ in range(100):
-                if not self._alive(session_id):
-                    break
-                time.sleep(0.1)
+        if self._alive(session_id) and (pid := self._pid(session_id)) is not None:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
             else:
-                return None
-        if not ended.exists():
-            write(ended, datetime.now(UTC).isoformat())  # the process is dead without a note
-        return datetime.fromisoformat(ended.read_text())
+                for _ in range(100):
+                    if not self._alive(session_id):
+                        break
+                    time.sleep(0.1)
+                else:
+                    return None
+        if (recorded := self.ended(session_id)) is not None:
+            return recorded
+        if self._alive(session_id):
+            return None
+        now = datetime.now(UTC)
+        try:
+            write(ended, now.isoformat())  # the process is dead without a note
+        except OSError:
+            try:
+                ended.with_name(ended.name + ".partial").unlink(missing_ok=True)
+            except OSError:
+                pass
+            return now
+        return self.ended(session_id) or now
 
     def logs(
         self, session_id: str, attempt: str | None = None, *, producer: str = "job"
@@ -138,7 +170,7 @@ class DirectoryJournal:
         closed = (
             (home / "attempts" / attempt / "finished.json").exists()
             if attempt
-            else (home / "ended").exists()
+            else self.ended(session_id) is not None
         )
         raw = log.read_bytes() if log.exists() else None
         return snapshot_stream(session_id, attempt, producer, raw, closed)
@@ -163,14 +195,20 @@ class DirectoryJournal:
             raise LauncherError(f"output {name!r} no longer matches its recorded digest")
         return copy
 
-    def _pid(self, session_id: str) -> str:
-        return (self._root / session_id / "pid").read_text()
+    def _pid(self, session_id: str) -> int | None:
+        try:
+            text = (self._root / session_id / "pid").read_text().strip()
+        except FileNotFoundError:
+            return None
+        pid = int(text) if text.isdigit() else None
+        return pid if pid is not None and pid > 0 else None
 
     def _alive(self, session_id: str) -> bool:
-        home = self._root / session_id
-        if (home / "ended").exists() or not (home / "pid").exists():
+        if self.ended(session_id) is not None:
             return False
-        pid = int(self._pid(session_id))
+        pid = self._pid(session_id)
+        if pid is None:
+            return False
         try:
             os.waitpid(pid, os.WNOHANG)  # collect it if it was ours and has exited
         except ChildProcessError:
@@ -180,7 +218,12 @@ class DirectoryJournal:
         except ProcessLookupError:
             return False
         except PermissionError:
-            return True
+            pass
+        try:
+            if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                return False
+        except (OSError, IndexError):
+            pass
         return True
 
     @staticmethod
@@ -188,18 +231,10 @@ class DirectoryJournal:
         claim, finished, log = home / "claim", home / "finished.json", home / "log"
         started = datetime.fromisoformat(claim.read_text()) if claim.exists() else None
         if not finished.exists():
-            result = read_result(home / "outputs")
-            return Progress(
-                attempt=home.name,
-                started_at=started,
-                finished_at=None,
-                outcome=None,
-                cause=None,
-                clocks=result.clocks,
-                outputs=(),
-                exit_code=None,
-                tally=result.tally,
-                writers=result.writers,
+            return Progress.running(
+                home.name,
+                started,
+                read_result(home / "outputs"),
                 log_bytes=log.stat().st_size if log.exists() else 0,
             )
         return Finished.model_validate_json(finished.read_text()).progress(home.name, started)

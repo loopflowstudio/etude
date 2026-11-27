@@ -30,7 +30,7 @@ from etude.launch.logs import LogCursor, render, snapshot_stream
 from etude.launch.provisioner.providers import bootstrap
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.provisioner.providers.runpod import pod
-from etude.launch.records import Diagnostic, LogSnapshot, LogStream
+from etude.launch.records import Diagnostic, LogSnapshot, LogStream, Pool
 from etude.launch.records import Storage as StorageRecord
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import (
@@ -38,8 +38,8 @@ from etude.launch.schemas import (
     AttemptRecord,
     Bootstrap,
     Finished,
-    Observation,
     Packet,
+    Work,
     WorkerLog,
     attempt_log,
     log_piece,
@@ -54,7 +54,7 @@ from etude.launch.worker.courier import Courier
 from etude.launch.worker.main import work
 from etude.spec import RunRequest
 from tests.launch.counting import Counting, Counts, job_text
-from tests.launch.fake import bench, open_database
+from tests.launch.fake import Clock, FakeService, bench, open_database
 from tests.launch.test_runpod_machines import Storage as MemoryStorage
 from tests.launch.test_scheduler import job
 from tests.launch.test_source import repository  # noqa: F401
@@ -112,6 +112,29 @@ def test_uncertain_creation_blocks_reusing_id_until_confirmed_cleanup(tmp_path: 
     b.run(1)
     b.scheduler.launch(requested, rent="l4")
     assert b.service.creates == 2 and len(b.store.runs()) == 1
+
+
+def test_an_owned_host_that_never_answers_does_not_block_launching_elsewhere(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    hosts = {name: FakeService(clock, "0") for name in ("asleep", "awake")}
+    hosts["asleep"].lose_reply = 1
+    scheduler = Scheduler(
+        open_database(launcher_file(tmp_path)), {"ssh": lambda held: hosts[held.name]}, clock=clock
+    )
+    for name in hosts:
+        scheduler.add_pool(Pool(name=name))
+        scheduler.add_machine(name, f"{name}.local", pool=name)
+    requested = RunRequest(id="chosen", job=job(max_usd=None))
+    with pytest.raises(LaunchError, match="create reply unknown"):
+        scheduler.launch(requested, "asleep")
+    # Its unsettled session still holds the asleep host, but the run may go anywhere else.
+    with pytest.raises(LaunchError, match="no free machine"):
+        scheduler.launch(requested, "asleep")
+    assert scheduler.launch(requested, "awake") == ("chosen",)
+    assert scheduler.read("chosen").machine == "awake"
+    assert hosts["asleep"].creates == 1
 
 
 def test_partial_cohort_retains_shared_failure_without_admitting_members(
@@ -838,10 +861,10 @@ def test_failure_after_atomic_admission_does_not_relabel_it_as_failed_admission(
 ) -> None:
     b = bench(tmp_path)
 
-    def broken(session: str) -> Observation:
+    def broken(session: str, work: Work, *, finish: bool = False) -> None:
         raise RuntimeError("unexpected delivery failure")
 
-    monkeypatch.setattr(b.service, "observe", broken)
+    monkeypatch.setattr(b.service, "add", broken)
     with pytest.raises(LaunchError, match="run admitted; delivery unconfirmed"):
         b.scheduler.launch(RunRequest(id="admitted", job=job()), rent="l4")
     assert b.store.run("admitted").id == "admitted"

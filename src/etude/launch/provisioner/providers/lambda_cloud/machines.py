@@ -6,12 +6,11 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from etude.errors import sanitize
-from etude.launch.errors import ProviderUnavailable
+from etude.launch.errors import ProviderUnavailable, Refused
 from etude.launch.provisioner.machines import (
     Allocation,
     Bill,
     MachineRequest,
-    Refused,
     Safeguards,
     check_creation,
 )
