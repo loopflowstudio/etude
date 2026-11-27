@@ -73,9 +73,11 @@ import threading
 import time
 import warnings
 from collections import defaultdict
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
-from dataclasses import dataclass
+from contextvars import copy_context
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -84,7 +86,7 @@ import numpy.typing as npt
 from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from etude.cache import lock_file
-from etude.carriage import EVAL_BLOCK_INDEX, EVAL_BLOCK_PACK
+from etude.carriage import EVAL_BLOCK_INDEX, EVAL_BLOCK_PACK, EVAL_BLOCKS
 from etude.checkpoints import CheckpointRecord
 from etude.errors import EtudeError
 from etude.eval.block import (
@@ -94,7 +96,6 @@ from etude.eval.block import (
     partial_totals,
     per_file,
     quote,
-    read,
     refuse_unconverted,
     stage,
 )
@@ -142,6 +143,10 @@ NUMERIC = ("BOOLEAN", "BIGINT", "DOUBLE")
 KEYS = ("seat", "group", "game", "run", "match")
 # A kept database of another schema is deleted and read again from its store.
 SCHEMA = 16
+# New blocks ingested per transaction and checkpoint during catch-up.
+_CATCH_UP_CHUNK = 64
+# Bounded object fetch pool, inside botocore's default 10-connection pool.
+_FETCH_WORKERS = 8
 
 # How a match's records order, newest first: by when each was recorded, then by run name.
 # `matches.newest` ranks done records so; `etude.eval.tournament.played` orders runs alike.
@@ -216,7 +221,7 @@ def _open_statsdb(
     except (duckdb.IOException, duckdb.ConnectionException):
         # A writer may be updating in place or retiring the resolved generation.
         pass
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with lock_file(path.with_suffix(".lock")):
         try:
             if (db := current()) is not None:
@@ -225,6 +230,23 @@ def _open_statsdb(
             raise EtudeError("statsdb_in_use", 409) from locked
         _write_catch_up(path, experiment, allowed, listing, rollups, rebuild=rebuild)
         return duckdb.connect(path.resolve(), read_only=True)
+
+
+def _publish_generation(path: Path, populate: Callable[[Path], None]) -> Path:
+    """Populate a fresh generation beside `path` and publish it atomically via symlink."""
+    generation = path.with_name(f"{path.stem}.g{time.time_ns()}.{os.getpid()}.duckdb")
+    link = path.with_suffix(".link")
+    try:
+        populate(generation)
+        link.unlink(missing_ok=True)
+        link.symlink_to(generation.name)
+        link.replace(path)
+    except BaseException:
+        link.unlink(missing_ok=True)
+        generation.unlink(missing_ok=True)
+        Path(f"{generation}.wal").unlink(missing_ok=True)
+        raise
+    return generation
 
 
 def _write_catch_up(
@@ -241,6 +263,14 @@ def _write_catch_up(
     import duckdb  # noqa: PLC0415
 
     current = path.resolve() if path.exists() else None
+    if not rebuild and current is None:
+        # Cold start: publish an empty-schema generation under `.lock` so in-place
+        # catch-up below preserves committed chunks across an interrupt.
+        def seed_empty(target: Path) -> None:
+            with closing(duckdb.connect(target)) as writer:
+                _ensure_schema(writer, experiment, listing.storage, rollups, summarize=True)
+
+        current = _publish_generation(path, seed_empty).resolve()
     if not rebuild and current is not None:
         try:
             db = duckdb.connect(current)
@@ -250,7 +280,7 @@ def _write_catch_up(
             try:
                 rebuild = _schema(db) not in (None, SCHEMA)
                 if not rebuild:
-                    _catch_up(db, experiment, allowed, listing, rollups)
+                    _catch_up(db, experiment, allowed, listing, rollups, per_chunk_summaries=True)
                     _sweep_stale_generations(path, current)
                     return
             finally:
@@ -258,31 +288,24 @@ def _write_catch_up(
 
     # DuckDB shares connections by realpath in one process. A distinct file
     # lets old readers keep their snapshot while new readers open the new one.
-    generation = path.with_name(f"{path.stem}.g{time.time_ns()}.{os.getpid()}.duckdb")
-    link = path.with_suffix(".link")
     old_generation = current if path.is_symlink() else None
-    try:
+
+    def build_generation(target: Path) -> None:
         if current is not None and not rebuild:
             try:
                 with closing(duckdb.connect(current, read_only=True)) as reader:
                     if _schema(reader) == SCHEMA:
-                        shutil.copy2(current, generation)
+                        shutil.copy2(current, target)
                         wal = Path(f"{current}.wal")
                         if wal.exists():
-                            shutil.copy2(wal, Path(f"{generation}.wal"))
+                            shutil.copy2(wal, Path(f"{target}.wal"))
             except (duckdb.IOException, duckdb.ConnectionException) as locked:
                 raise EtudeError("statsdb_in_use", 409) from locked
-        with closing(duckdb.connect(generation)) as writer:
-            _catch_up(writer, experiment, allowed, listing, rollups)
+        with closing(duckdb.connect(target)) as writer:
+            _catch_up(writer, experiment, allowed, listing, rollups, per_chunk_summaries=False)
             writer.execute("checkpoint")
-        link.unlink(missing_ok=True)
-        link.symlink_to(generation.name)
-        link.replace(path)
-    except BaseException:
-        link.unlink(missing_ok=True)
-        generation.unlink(missing_ok=True)
-        Path(f"{generation}.wal").unlink(missing_ok=True)
-        raise
+
+    generation = _publish_generation(path, build_generation)
     if old_generation is not None:
         old_generation.unlink(missing_ok=True)
         Path(f"{old_generation}.wal").unlink(missing_ok=True)
@@ -435,92 +458,286 @@ def _create(db: duckdb.DuckDBPyConnection, experiment: str, storage: Storage) ->
     )
 
 
+@dataclass
+class _EvalSlice:
+    """One chunk's portion of an eval run's newly arrived files."""
+
+    run: str
+    experiment: str
+    located: Mapping[str, str]
+    blocks: list[tuple[str, str]]
+    seen: list[str]
+    tournament_key: str | None = None
+    outcome: tuple[str, str] | None = None
+    old: list[str] = field(default_factory=list)
+
+
+@dataclass
+class _TrainingSlice:
+    """One chunk's portion of a training run's newly arrived files."""
+
+    run: str
+    experiment: str
+    checkpoints: list[tuple[str, str]]
+    seen: list[str]
+
+
+@dataclass
+class _Chunk:
+    """Work committed and checkpointed in one catch-up transaction."""
+
+    declarations: list[tuple[str, str | None]] = field(default_factory=list)
+    runs: list[tuple[str, str, str | None]] = field(default_factory=list)
+    environments: list[tuple[str, str]] = field(default_factory=list)
+    evals: list[_EvalSlice] = field(default_factory=list)
+    trainings: list[_TrainingSlice] = field(default_factory=list)
+    weight: int = 0
+
+    def has_work(self) -> bool:
+        return bool(
+            self.declarations or self.runs or self.environments or self.evals or self.trainings
+        )
+
+
+def _map_pool[T, R](
+    pool: ThreadPoolExecutor | None,
+    fn: Callable[[T], R],
+    items: Sequence[T],
+) -> list[R]:
+    """Apply `fn` to `items`, concurrently on `pool` with contextvars when more than one item."""
+    if not items:
+        return []
+    if pool is None or len(items) == 1:
+        return [fn(item) for item in items]
+    futures = [pool.submit(copy_context().run, fn, item) for item in items]
+    try:
+        return [future.result() for future in futures]
+    except BaseException:
+        for future in futures:
+            future.cancel()
+        raise
+
+
+def _fetch_all(
+    pool: ThreadPoolExecutor | None,
+    storage: Storage,
+    keys: Sequence[str],
+) -> dict[str, bytes]:
+    """Fetch distinct `keys` from `storage`, concurrently when `pool` is given."""
+    unique = list(dict.fromkeys(keys))
+    return dict(zip(unique, _map_pool(pool, storage.get, unique), strict=True))
+
+
+def _fetch_files(
+    pool: ThreadPoolExecutor | None,
+    storage: Storage,
+    targets: Sequence[tuple[str, Path]],
+) -> None:
+    """Copy each `(key, destination)` from `storage` to local disk, skipping existing files."""
+    if isinstance(storage, DirectoryStorage):
+        return
+    pending: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+    for key, path in targets:
+        if path in seen or path.exists():
+            continue
+        seen.add(path)
+        pending.append((key, path))
+
+    def write(target: tuple[str, Path]) -> None:
+        key, path = target
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_bytes(storage.get(key))
+
+    _map_pool(pool, write, pending)
+
+
+@contextmanager
+def _transaction(db: duckdb.DuckDBPyConnection, *, checkpoint: bool = False) -> Iterator[None]:
+    """Run one DuckDB transaction with rollback on error and optional post-commit checkpoint."""
+    db.execute("begin")
+    try:
+        yield
+        db.execute("commit")
+    except BaseException:
+        db.execute("rollback")
+        raise
+    if checkpoint:
+        db.execute("checkpoint")
+
+
+def _located(listing: RunListing, folders: Sequence[str]) -> dict[str, str]:
+    """Map each file name in a run's folders to its first containing folder."""
+    located: dict[str, str] = {}
+    for place in folders:
+        for name in listing.names_in(place):
+            located.setdefault(name, place)
+    return located
+
+
+def _pack_chunks[T](
+    items: Sequence[T],
+    chunk: _Chunk,
+    flush: Callable[[_Chunk], None],
+    append: Callable[[_Chunk, list[T], bool, bool], None],
+) -> _Chunk:
+    """Slice `items` across `_CATCH_UP_CHUNK`-bounded chunks, emitting once when empty."""
+    if not items:
+        append(chunk, [], True, True)
+        chunk.weight += 1
+        if chunk.weight >= _CATCH_UP_CHUNK:
+            flush(chunk)
+            return _Chunk()
+        return chunk
+    cursor = 0
+    total = len(items)
+    while cursor < total:
+        room = max(1, _CATCH_UP_CHUNK - chunk.weight)
+        end = min(total, cursor + room)
+        piece = list(items[cursor:end])
+        append(chunk, piece, cursor == 0, end == total)
+        chunk.weight += len(piece)
+        cursor = end
+        if chunk.weight >= _CATCH_UP_CHUNK:
+            flush(chunk)
+            chunk = _Chunk()
+    return chunk
+
+
+def _ensure_schema(
+    db: duckdb.DuckDBPyConnection,
+    experiment: str,
+    storage: Storage,
+    rollups: Sequence[Rollup],
+    *,
+    summarize: bool,
+) -> bool:
+    """Create the database schema when absent and register requested rollups; return whether created."""
+    if _schema(db) is None:
+        with _transaction(db, checkpoint=True):
+            _create(db, experiment, storage)
+            for rollup in rollups:
+                _hold(db, rollup)
+            if summarize:
+                _summaries(db)
+        return True
+    if rollups:
+        held_rollups = dict(db.execute("select name, digest from kept.rollups").fetchall())
+        if any(held_rollups.get(rollup.name) != rollup.digest for rollup in rollups):
+            with _transaction(db):
+                for rollup in rollups:
+                    _hold(db, rollup)
+    return False
+
+
 def _catch_up(
     db: duckdb.DuckDBPyConnection,
     experiment: str,
     allowed: frozenset[str],
     listing: RunListing,
     rollups: Sequence[Rollup],
+    *,
+    per_chunk_summaries: bool = True,
 ) -> None:
-    """Read what arrived in `storage` since the last open, in one transaction.
+    """Read what arrived in `storage` since the last open, in committed, checkpointed chunks.
 
-    An interrupted catch-up commits nothing, so the next open repeats it.
-    Taking in a block is a fixed number of statements however many matches
-    and blobs it holds: rows arrive as one file each (`etude.eval.block.stage`).
+    Each chunk fetches its objects concurrently before opening its DuckDB
+    transaction, then commits its rows and `kept.seen` names and checkpoints so
+    an interrupted in-place catch-up resumes from the last committed chunk.
+    In-place catch-up updates summary tables on every eval chunk so the database
+    stays complete after each commit; private generations run `_summaries` once
+    at the end before publishing. Taking in a block is a fixed number of
+    statements however many matches and blobs it holds (`etude.eval.block.stage`).
     """
     storage = listing.storage
-    db.execute("begin")
-    try:
-        created = _schema(db) is None
-        if created:
-            _create(db, experiment, storage)
-        for rollup in rollups:
-            _hold(db, rollup)
-        kept = _Ingested.read(db)
-        changed = created
-        with tempfile.TemporaryDirectory(prefix="etude-statsdb-") as copies:
-            for run, folders in sorted(listing.folders.items()):
-                matched = [
-                    (folder, owner)
-                    for folder in folders
-                    if (owner := _ours(db, listing, run, folder, allowed, kept)) is not None
-                ]
-                if not matched:
-                    continue
-                folders = [folder for folder, _ in matched]
-                run_experiment = matched[0][1]
+    created = _ensure_schema(db, experiment, storage, rollups, summarize=per_chunk_summaries)
+    kept = _Ingested.read(db)
+    eval_changed = False
+    with _fetch_pool(storage) as pool:
+
+        def flush(pending: _Chunk) -> None:
+            nonlocal eval_changed
+            if _flush_chunk(db, storage, pool, pending, summarize=per_chunk_summaries):
+                eval_changed = True
+
+        chunk = _Chunk()
+        for batch in itertools.batched(sorted(listing.folders.items()), _CATCH_UP_CHUNK):
+            _prefetch_declarations(pool, listing, batch, kept)
+            matched_runs: list[tuple[str, list[str], str]] = []
+            for run, folders in batch:
+                matched: list[tuple[str, str]] = []
+                for folder in folders:
+                    owner = _resolve_folder(listing, run, folder, allowed, kept, chunk)
+                    if owner is not None:
+                        matched.append((folder, owner))
+                if matched:
+                    matched_runs.append((run, [folder for folder, _ in matched], matched[0][1]))
+            env_needing = [
+                (run, folders)
+                for run, folders, _ in matched_runs
+                if kept.kinds[run] == KIND and run not in kept.environments
+            ]
+            env_bodies = _fetch_environments(pool, storage, listing, env_needing)
+            for run, folders in env_needing:
+                if (encoded := _pick_environment(folders, env_bodies)) is not None:
+                    kept.environments.add(run)
+                    chunk.environments.append((run, encoded))
+            for run, folders, run_experiment in matched_runs:
                 eval_run = kept.kinds[run] == KIND
                 if eval_run and run not in kept.environments:
-                    if not _environment(db, storage, run, folders):
-                        continue  # an eval run counts once its environment arrives
+                    continue  # an eval run counts once its environment arrives
                 # One run may be copied to several places; a file's name is the same in each.
-                located: dict[str, str] = {}
-                for place in folders:
-                    for name in listing.names_in(place):
-                        located.setdefault(name, place)
+                located = _located(listing, folders)
                 new = sorted(located.keys() - kept.seen[run])
+                if not new:
+                    continue
                 if eval_run:
-                    for name in new:
-                        changed |= _read(
-                            db,
-                            storage,
-                            run,
-                            located[name],
-                            name,
-                            Path(copies),
-                            experiment=run_experiment,
-                        )
-                    # A resumed run, such as a retry of failed matches, writes its end again.
-                    if new and (
-                        outcome := next((name for name in _OUTCOME_FILES if name in located), None)
-                    ):
-                        _ended(db, storage, run, located[outcome], outcome)
-                        changed = True
-                    _sum_missing(db, storage, run, located, Path(copies), experiment=run_experiment)
-                elif new:
-                    changed |= _training_checkpoints(db, storage, run, run_experiment, located, new)
-                if new:
-                    _put(db, "kept.seen", {"run": "VARCHAR", "name": "VARCHAR"},
-                         [[run, name] for name in new])  # fmt: skip
-                    # A name seen before passed this check when it was first read.
-                    _refuse_unconverted(db, run, new)
-        if changed:
+                    chunk = _queue_eval(db, flush, chunk, run, run_experiment, located, new)
+                else:
+                    chunk = _queue_training(db, flush, chunk, run, run_experiment, located, new)
+        if chunk.has_work():
+            flush(chunk)
+        _backfill_rollups(db, storage, pool, listing, allowed, kept)
+    if not per_chunk_summaries and (created or eval_changed):
+        with _transaction(db):
             _summaries(db)
-        db.execute("commit")
-    except BaseException:
-        db.execute("rollback")
-        raise
 
 
-def _ours(
-    db: duckdb.DuckDBPyConnection,
+@contextmanager
+def _fetch_pool(storage: Storage) -> Iterator[ThreadPoolExecutor | None]:
+    if isinstance(storage, DirectoryStorage):
+        yield None
+        return
+    with ThreadPoolExecutor(max_workers=_FETCH_WORKERS) as pool:
+        yield pool
+
+
+def _prefetch_declarations(
+    pool: ThreadPoolExecutor | None,
+    listing: RunListing,
+    batch: Sequence[tuple[str, Sequence[str]]],
+    kept: _Ingested,
+) -> None:
+    unknown = [
+        folder
+        for _, folders in batch
+        for folder in folders
+        if folder not in kept.declarations and folder + "run.json" in listing.objects
+    ]
+    if pool is None or len(unknown) <= 1:
+        return
+    _map_pool(pool, listing.declaration, unknown)
+
+
+def _resolve_folder(
     listing: RunListing,
     run: str,
     folder: str,
     allowed: frozenset[str],
     kept: _Ingested,
+    chunk: _Chunk,
 ) -> str | None:
-    """Select a folder by its own declaration; retain each declaration once."""
+    """Select a folder by its own declaration; record unseen declarations in `chunk`."""
     if folder in kept.declarations:
         owner = kept.declarations[folder]
         return owner if owner is not None and owner in allowed else None
@@ -530,26 +747,277 @@ def _ours(
     # A group is an operational run. Only its tournaments supply scientific rows.
     owner = declaration.experiment if declaration.members is None else None
     kept.declarations[folder] = owner
-    db.execute("insert into kept.declarations values (?, ?)", [folder, owner])
+    chunk.declarations.append((folder, owner))
     if owner is None or owner not in allowed:
         return None
     kept.kinds.setdefault(run, declaration.kind)
-    db.execute(
-        "insert into kept.runs values (?, ?, ?, null) on conflict do nothing",
-        [run, owner, declaration.kind],
-    )
+    chunk.runs.append((run, owner, declaration.kind))
     return owner
 
 
-def _ended(
-    db: duckdb.DuckDBPyConnection, storage: Storage, run: str, place: str, name: str
-) -> None:
+def _fetch_environments(
+    pool: ThreadPoolExecutor | None,
+    storage: Storage,
+    listing: RunListing,
+    needing: Sequence[tuple[str, Sequence[str]]],
+) -> dict[str, bytes]:
+    keys = [
+        place + _ENVIRONMENT_FILE
+        for _, folders in needing
+        for place in folders
+        if place + _ENVIRONMENT_FILE in listing.objects
+    ]
+    unique = list(dict.fromkeys(keys))
+
+    def read_one(key: str) -> bytes | None:
+        try:
+            return storage.get(key)
+        except FileNotFoundError:
+            return None
+
+    return {
+        key: body
+        for key, body in zip(unique, _map_pool(pool, read_one, unique), strict=True)
+        if body is not None
+    }
+
+
+def _pick_environment(folders: Sequence[str], bodies: Mapping[str, bytes]) -> str | None:
+    for place in folders:
+        body = bodies.get(place + _ENVIRONMENT_FILE)
+        if body is None:
+            continue
+        try:
+            environment = Environment.model_validate_json(body)
+        except ValidationError:
+            continue
+        return environment.model_dump_json()
+    return None
+
+
+def _queue_eval(
+    db: duckdb.DuckDBPyConnection,
+    flush: Callable[[_Chunk], None],
+    chunk: _Chunk,
+    run: str,
+    experiment: str,
+    located: Mapping[str, str],
+    new: Sequence[str],
+) -> _Chunk:
+    """Slice one eval run's new files across chunks, flushing each full chunk."""
+    old = [name for name in new if per_file(name)]
+    blocks: list[tuple[str, str]] = []
+    block_ids: set[str] = set()
+    for name in new:
+        if found := BLOCK_FILE.match(name):
+            blocks.append((located[name], found[1]))
+            block_ids.add(found[1])
+    # Refuse purely unconverted runs before reading any of their objects.
+    if old and not blocks:
+        _refuse_unconverted(db, run, old)
+
+    by_block: dict[str, list[str]] = defaultdict(list)
+    other: list[str] = []
+    has_tournament = False
+    for name in new:
+        if name == TOURNAMENT_FILE:
+            has_tournament = True
+        elif per_file(name):
+            continue
+        elif name.startswith(f"{EVAL_BLOCKS}/"):
+            parts = name.split("/", 2)
+            if len(parts) == 3 and parts[1] in block_ids:
+                by_block[parts[1]].append(name)
+            else:
+                other.append(name)
+        else:
+            other.append(name)
+
+    outcome_name = next((name for name in _OUTCOME_FILES if name in located), None)
+    outcome = (located[outcome_name], outcome_name) if outcome_name is not None else None
+    tournament_key = located[TOURNAMENT_FILE] + TOURNAMENT_FILE if has_tournament else None
+
+    def append_eval(target: _Chunk, piece: list[tuple[str, str]], first: bool, last: bool) -> None:
+        seen = [TOURNAMENT_FILE] if first and has_tournament else []
+        for _, block_name in piece:
+            seen.extend(by_block[block_name])
+        if last:
+            seen.extend(other)
+            seen.extend(old)
+        target.evals.append(
+            _EvalSlice(
+                run=run,
+                experiment=experiment,
+                located=located,
+                blocks=piece,
+                seen=seen,
+                tournament_key=tournament_key if first else None,
+                outcome=outcome if last else None,
+                old=old if last else [],
+            )
+        )
+
+    return _pack_chunks(blocks, chunk, flush, append_eval)
+
+
+def _queue_training(
+    db: duckdb.DuckDBPyConnection,
+    flush: Callable[[_Chunk], None],
+    chunk: _Chunk,
+    run: str,
+    experiment: str,
+    located: Mapping[str, str],
+    new: Sequence[str],
+) -> _Chunk:
+    """Slice one training run's new files across chunks, flushing each full chunk."""
+    old = [name for name in new if per_file(name)]
+    if old:
+        _refuse_unconverted(db, run, old)
+    checkpoints = [
+        (name, located[name] + name)
+        for name in new
+        if name.startswith("checkpoints/") and name.endswith(".json")
+    ]
+    checkpoint_names = {name for name, _ in checkpoints}
+    other = [name for name in new if name not in checkpoint_names]
+
+    def append_training(
+        target: _Chunk, piece: list[tuple[str, str]], _first: bool, last: bool
+    ) -> None:
+        seen = [name for name, _ in piece]
+        if last:
+            seen.extend(other)
+        target.trainings.append(
+            _TrainingSlice(run=run, experiment=experiment, checkpoints=piece, seen=seen)
+        )
+
+    return _pack_chunks(checkpoints, chunk, flush, append_training)
+
+
+def _flush_chunk(
+    db: duckdb.DuckDBPyConnection,
+    storage: Storage,
+    pool: ThreadPoolExecutor | None,
+    chunk: _Chunk,
+    *,
+    summarize: bool,
+) -> bool:
+    """Prefetch a chunk's objects, ingest them in one transaction, checkpoint, and drop copies."""
+    with tempfile.TemporaryDirectory(prefix="etude-statsdb-") as copies_root:
+        copies = Path(copies_root)
+        json_keys: list[str] = []
+        for part in chunk.evals:
+            if part.tournament_key is not None:
+                json_keys.append(part.tournament_key)
+            for place, block_name in part.blocks:
+                json_keys.append(place + file_key(block_name, EVAL_BLOCK_INDEX))
+            if part.outcome is not None:
+                json_keys.append(part.outcome[0] + part.outcome[1])
+        for training in chunk.trainings:
+            for _, key in training.checkpoints:
+                json_keys.append(key)
+        fetched = _fetch_all(pool, storage, json_keys)
+
+        parsed: dict[tuple[str, str], Block] = {}
+        parquet_targets: list[tuple[str, Path]] = []
+        for part in chunk.evals:
+            for place, block_name in part.blocks:
+                index_key = place + file_key(block_name, EVAL_BLOCK_INDEX)
+                original = Block.model_validate_json(fetched[index_key])
+                parsed[(part.run, block_name)] = original
+                for table in original.tables:
+                    file = file_key(block_name, f"{table}.parquet")
+                    parquet_targets.append((place + file, copies / part.run / file))
+                for rollup in original.summed:
+                    file = file_key(block_name, f"{rollup.name}.parquet")
+                    parquet_targets.append((place + file, copies / part.run / file))
+        _fetch_files(pool, storage, parquet_targets)
+
+        with _transaction(db, checkpoint=True):
+            for folder, owner in chunk.declarations:
+                db.execute(
+                    "insert into kept.declarations values (?, ?) on conflict do nothing",
+                    [folder, owner],
+                )
+            for run, owner, kind in chunk.runs:
+                db.execute(
+                    "insert into kept.runs values (?, ?, ?, null) on conflict do nothing",
+                    [run, owner, kind],
+                )
+            eval_changed = False
+            for run, encoded in chunk.environments:
+                db.execute("insert into kept.environments values (?, ?)", [run, encoded])
+                eval_changed = True
+            for part in chunk.evals:
+                if part.tournament_key is not None:
+                    held = TournamentRun.model_validate_json(
+                        fetched[part.tournament_key], context={"experiment": part.experiment}
+                    )
+                    db.execute(
+                        "insert into kept.tournament_runs values (?, ?)",
+                        [part.run, held.model_dump_json()],
+                    )
+                    eval_changed = True
+                block_names: list[str] = []
+                for place, block_name in part.blocks:
+                    _block(
+                        db,
+                        storage,
+                        part.run,
+                        place,
+                        block_name,
+                        copies,
+                        experiment=part.experiment,
+                        original=parsed[(part.run, block_name)],
+                    )
+                    block_names.append(block_name)
+                    eval_changed = True
+                if block_names:
+                    _sum_missing(
+                        db,
+                        storage,
+                        part.run,
+                        part.located,
+                        copies,
+                        block_names,
+                        experiment=part.experiment,
+                    )
+                if part.outcome is not None:
+                    place, name = part.outcome
+                    _ended(db, part.run, fetched[place + name])
+                    eval_changed = True
+                if part.old:
+                    _refuse_unconverted(db, part.run, part.old)
+                if part.seen:
+                    _put(
+                        db,
+                        "kept.seen",
+                        {"run": "VARCHAR", "name": "VARCHAR"},
+                        [[part.run, name] for name in part.seen],
+                    )
+            for training in chunk.trainings:
+                _training_checkpoints(
+                    db, training.run, training.experiment, training.checkpoints, fetched
+                )
+                if training.seen:
+                    _put(
+                        db,
+                        "kept.seen",
+                        {"run": "VARCHAR", "name": "VARCHAR"},
+                        [[training.run, name] for name in training.seen],
+                    )
+            if summarize and eval_changed:
+                _summaries(db)
+        return eval_changed
+
+
+def _ended(db: duckdb.DuckDBPyConnection, run: str, raw: bytes) -> None:
     """Record how the eval run last ended, from its `outcome.json`.
 
     Read when it first arrives and again whenever the run delivers new files:
     a resumed run seals new blocks before it writes its end again.
     """
-    ended = RunOutcome.model_validate_json(storage.get(place + name))
+    ended = RunOutcome.model_validate_json(raw)
     db.execute("update kept.runs set state = ? where run = ?", [ended.state, run])
 
 
@@ -562,41 +1030,24 @@ def _refuse_unconverted(db: duckdb.DuckDBPyConnection, run: str, names: Sequence
     refuse_unconverted(run, old, (name for (name,) in replaced))
 
 
-def _environment(
-    db: duckdb.DuckDBPyConnection, storage: Storage, run: str, folders: Sequence[str]
-) -> bool:
-    """Whether the eval run's environment is held, reading it until it arrives."""
-    for place in folders:
-        try:
-            environment = Environment.model_validate_json(storage.get(place + _ENVIRONMENT_FILE))
-        except (FileNotFoundError, ValidationError):
-            continue
-        db.execute(
-            "insert into kept.environments values (?, ?)", [run, environment.model_dump_json()]
-        )
-        return True
-    return False
-
-
 def _training_checkpoints(
     db: duckdb.DuckDBPyConnection,
-    storage: Storage,
     run: str,
     experiment: str,
-    located: Mapping[str, str],
-    names: Sequence[str],
-) -> bool:
-    """Take in a training run's checkpoint files among `names`; whether any arrived."""
+    checkpoints: Sequence[tuple[str, str]],
+    fetched: Mapping[str, bytes],
+) -> None:
+    """Take in a training run's prefetched checkpoint files."""
     rows: list[list[object]] = []
-    for name in names:
-        if not (name.startswith("checkpoints/") and name.endswith(".json")):
-            continue
-        stored = CheckpointRecord.model_validate_json(storage.get(located[name] + name))
+    for _, key in checkpoints:
+        stored = CheckpointRecord.model_validate_json(fetched[key])
         rows.append(
             [run, experiment, stored.ordinal,
              stored.model_copy(update={"experiment": experiment, "run": run}).key,
              stored.artifact.sha256, stored.wall_ms, json.dumps(stored.at)]
         )  # fmt: skip
+    if not rows:
+        return
     stage(
         db,
         "_arrived_checkpoints",
@@ -611,30 +1062,6 @@ def _training_checkpoints(
         " qualify row_number() over (partition by a.ordinal) = 1"
     )
     db.execute("drop table _arrived_checkpoints")
-    return bool(rows)
-
-
-def _read(
-    db: duckdb.DuckDBPyConnection,
-    storage: Storage,
-    run: str,
-    place: str,
-    name: str,
-    copies: Path,
-    *,
-    experiment: str,
-) -> bool:
-    """Take in one file of the eval run not read before; whether any table changed."""
-    if name == TOURNAMENT_FILE:
-        held = TournamentRun.model_validate_json(
-            storage.get(place + name), context={"experiment": experiment}
-        )
-        db.execute("insert into kept.tournament_runs values (?, ?)", [run, held.model_dump_json()])
-        return True
-    if found := BLOCK_FILE.match(name):
-        _block(db, storage, run, place, found[1], copies, experiment=experiment)
-        return True
-    return False
 
 
 def _block(
@@ -646,9 +1073,9 @@ def _block(
     copies: Path,
     *,
     experiment: str,
+    original: Block,
 ) -> None:
     """Take in block `name`: its match records, where its blobs lie, then its tables and rollups."""
-    original = read(storage, place, name)
     # Kept as stored: `_sum_missing` reads its tables' own match keys again.
     held = original.model_dump_json(
         exclude={"blobs": True, "replaces": True, "matches": {"__all__": {"blobs"}}}
@@ -997,24 +1424,44 @@ def _sum_missing(
     run: str,
     located: Mapping[str, str],
     copies: Path,
+    blocks: Sequence[str],
     *,
     experiment: str,
 ) -> None:
-    """Add each held rollup's partial totals of the run's blocks that lack them.
+    """Add each held rollup's partial totals of the run's newly ingested blocks that lack them.
 
     A block lacks a rollup it was sealed without. Its partials are summed
     from its tables here, once: they are kept in this database and never
     written to the store, and the block is not summed for that rollup again.
     """
+    wanted = ", ".join(quote(block_name) for block_name in blocks)
     missing = db.execute(
         "select r.rollup, b.block, b.held from kept.rollups r cross join kept.blocks b"
         " anti join kept.summed s on s.name = r.name and s.run = b.run and s.block = b.block"
-        " where b.run = ? order by b.block, r.name",
-        [run],
+        f" where b.run = {quote(run)} and b.block in ({wanted})"
+        " order by b.block, r.name"
     ).fetchall()
+    if not missing:
+        return
+    entries = [
+        (name, Rollup.model_validate_json(text), Block.model_validate_json(held))
+        for text, name, held in missing
+    ]
+    _sum_entries(db, storage, run, located, copies, entries, experiment=experiment)
+
+
+def _sum_entries(
+    db: duckdb.DuckDBPyConnection,
+    storage: Storage,
+    run: str,
+    located: Mapping[str, str],
+    copies: Path,
+    entries: Sequence[tuple[str, Rollup, Block]],
+    *,
+    experiment: str,
+) -> None:
     summed: list[list[object]] = []
-    for text, name, held in missing:
-        rollup, block = Rollup.model_validate_json(text), Block.model_validate_json(held)
+    for name, rollup, block in entries:
         summed.append([rollup.name, run, name])
         needed = (rollup.table, *rollup.join)
         if not set(needed) <= set(block.tables):
@@ -1030,6 +1477,67 @@ def _sum_missing(
             with _qualified(db, experiment, block):
                 _rollup(db, run, rollup, name, target)
     _put(db, "kept.summed", {"name": "VARCHAR", "run": "VARCHAR", "block": "VARCHAR"}, summed)
+
+
+def _backfill_rollups(
+    db: duckdb.DuckDBPyConnection,
+    storage: Storage,
+    pool: ThreadPoolExecutor | None,
+    listing: RunListing,
+    allowed: frozenset[str],
+    kept: _Ingested,
+) -> None:
+    """Sum newly requested rollups for blocks ingested in earlier opens, in chunks."""
+    missing = db.execute(
+        "select b.run, b.block, r.rollup, b.held from kept.rollups r cross join kept.blocks b"
+        " anti join kept.summed s on s.name = r.name and s.run = b.run and s.block = b.block"
+        " order by b.run, b.block, r.name"
+    ).fetchall()
+    if not missing:
+        return
+    run_info: dict[str, tuple[str, dict[str, str]]] = {}
+    for run, folders in listing.folders.items():
+        matched = [
+            (folder, owner)
+            for folder in folders
+            if (owner := kept.declarations.get(folder)) is not None and owner in allowed
+        ]
+        if not matched:
+            continue
+        run_info[run] = (matched[0][1], _located(listing, [folder for folder, _ in matched]))
+    grouped: list[tuple[str, str, list[tuple[str, Rollup, Block]]]] = []
+    for (run, block_name), items in itertools.groupby(missing, key=lambda row: (row[0], row[1])):
+        if run not in run_info:
+            continue
+        entries = [
+            (block_name, Rollup.model_validate_json(rollup_json), Block.model_validate_json(held))
+            for _, _, rollup_json, held in items
+        ]
+        grouped.append((run, block_name, entries))
+    for batch in itertools.batched(grouped, _CATCH_UP_CHUNK):
+        with tempfile.TemporaryDirectory(prefix="etude-statsdb-") as copies_root:
+            copies = Path(copies_root)
+            parquet_targets: list[tuple[str, Path]] = []
+            for run, block_name, entries in batch:
+                _, located = run_info[run]
+                index_name = file_key(block_name, EVAL_BLOCK_INDEX)
+                if index_name not in located:
+                    continue
+                place = located[index_name]
+                for _, rollup, block in entries:
+                    needed = (rollup.table, *rollup.join)
+                    if not set(needed) <= set(block.tables):
+                        continue
+                    for table in needed:
+                        file = file_key(block_name, f"{table}.parquet")
+                        parquet_targets.append((place + file, copies / run / file))
+            _fetch_files(pool, storage, parquet_targets)
+            with _transaction(db, checkpoint=True):
+                for run, _, entries in batch:
+                    run_experiment, located = run_info[run]
+                    _sum_entries(
+                        db, storage, run, located, copies, entries, experiment=run_experiment
+                    )
 
 
 def _exists(db: duckdb.DuckDBPyConnection, schema: str, table: str) -> bool:

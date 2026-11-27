@@ -11,6 +11,7 @@ import base64
 import hashlib
 import math
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -23,14 +24,15 @@ from functools import cache
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn
 
-from pydantic import Field, RootModel, TypeAdapter
+from pydantic import Field, RootModel, TypeAdapter, field_validator
 
 from etude.deadline import limit_time, remaining
-from etude.errors import LauncherError, explain
+from etude.errors import LauncherError, explain, sanitize
 from etude.home import home
 from etude.launch.database import launcher_file, open_home
 from etude.launch.errors import LaunchError, SchemaAdvanced
 from etude.launch.logs import ConsoleTail
+from etude.launch.openssh import ssh_command
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import (
     Launch,
@@ -41,11 +43,12 @@ from etude.launch.records import (
     Status,
     Target,
 )
-from etude.launch.scheduler.loop import Scheduler
+from etude.launch.scheduler.loop import Pacer, Scheduler
 from etude.launch.source import freeze, retain, source_archive, stored
 from etude.launch.ssh import (
-    _INSTALL_CODE,
+    _MISSING,
     EncodedOutput,
+    boot_script,
     login_shell,
     remote_python,
 )
@@ -60,6 +63,13 @@ class Source(Record):
     commit: str
     sha256: str
     body: str
+
+    @field_validator("commit")
+    @classmethod
+    def _valid_commit(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", value) or value in (".", ".."):
+            raise ValueError(f"invalid source commit {value!r}")
+        return value
 
 
 class LaunchInput(Record):
@@ -158,7 +168,7 @@ def retained_scheduler() -> Iterator[Scheduler | None]:
 class WaitRequest(Record):
     operation: Literal["wait"] = "wait"
     runs: tuple[str, ...]
-    every: float = 1.0
+    every: float | None = None
     timeout: float | None = None
 
 
@@ -237,8 +247,6 @@ def unset() -> None:
 # The server runs the client's own code, sent over SSH and kept by digest
 # beside its database, installed with uv in its own environment. The two sides
 # always use the same source and dependency lock.
-_MISSING = 97  # the remote exit status meaning "that program is not here yet"
-_INSTALL = "import sys\ncode=sys.stdin.buffer.read()\n" + _INSTALL_CODE
 
 
 @cache
@@ -251,15 +259,13 @@ def _command(address: str, argv: Sequence[str]) -> list[str]:
     # A remote setting cannot forward again. No local environment/keys are serialized.
     root = '"${ETUDE_HOME:-$HOME/.etude}/programs/' + _program()[0] + '"'
     run = root + "/.venv/bin/python -m etude"
-    return [
-        "ssh",
-        "--",
+    return ssh_command(
         address,
         login_shell(
             f"test -f {root}/ready || exit {_MISSING}; "
             f"ETUDE_SERVER_LOCAL=1 exec {run} {shlex.join(argv)}"
         ),
-    ]
+    )
 
 
 def install(address: str, *, startup_seconds: float | None = None) -> None:
@@ -272,10 +278,14 @@ def install(address: str, *, startup_seconds: float | None = None) -> None:
         if allowance is not None
         else ""
     )
-    program = "import os\nos.environ['ETUDE_STARTUP_DEADLINE']=" + repr(deadline) + "\n" + _INSTALL
     try:
         done = subprocess.run(
-            ["ssh", "--", address, login_shell(shlex.join([remote_python(), "-c", program]))],
+            ssh_command(
+                address,
+                login_shell(
+                    shlex.join([remote_python(), "-c", boot_script(), "--install", deadline])
+                ),
+            ),
             input=_program()[1],
             capture_output=True,
             timeout=allowance,
@@ -284,9 +294,10 @@ def install(address: str, *, startup_seconds: float | None = None) -> None:
         raise LauncherError(f"server {address!r} did not answer over SSH") from None
     if done.returncode:
         said = done.stderr.decode(errors="replace").strip().splitlines()
+        detail = sanitize(said[-1]) if said else ""
         raise LauncherError(
             f"server {address!r} could not take the program"
-            + (f": {said[-1]}" if said else "")
+            + (f": {detail}" if detail else "")
             + f". It needs {remote_python()} and uv on its login shell's PATH and working SSH keys"
         )
 
@@ -402,9 +413,8 @@ class PythonClient:
             **({"timeout": remaining(request.timeout)} if isinstance(request, LogsRequest) else {}),
         )
         if done.returncode:
-            raise LauncherError(
-                done.stderr.decode().strip() or "server request failed; outcome unknown"
-            )
+            detail = sanitize(done.stderr.decode(errors="replace").strip())
+            raise LauncherError(detail or "server request failed; outcome unknown")
         return done.stdout
 
     def _submit(
@@ -487,7 +497,9 @@ class PythonClient:
     def read(self, run: str) -> Status:
         return Status.model_validate_json(self._request(RunOperation(operation="read", run=run)))
 
-    def wait(self, *runs: str, every: float = 1.0, timeout: float | None = None) -> list[Status]:
+    def wait(
+        self, *runs: str, every: float | None = None, timeout: float | None = None
+    ) -> list[Status]:
         return TypeAdapter(list[Status]).validate_json(
             self._request(WaitRequest(runs=runs, every=every, timeout=timeout))
         )
@@ -609,19 +621,23 @@ def _answer(scheduler: Scheduler, request: Request) -> Response:
     return response
 
 
-def loop(scheduler: Scheduler, every: float = 1.0) -> None:
+_SERVER_IDLE_MAX = 4.0
+
+
+def loop(scheduler: Scheduler, every: float | None = None) -> None:
     """Keep matching even when the queue empties; heartbeat means a completed tick.
 
     When a newer etude migrates the database, this loop replaces itself with that
     program's loop, so running rentals keep a server through an upgrade.
     """
+    pacer = Pacer(every, idle_max=_SERVER_IDLE_MAX)
     while True:
         try:
             scheduler.tick()
-        except SchemaAdvanced as advanced:
-            _hand_over(advanced.program)
+        except SchemaAdvanced as error:
+            _hand_over(error.program)
         write(home() / "server-heartbeat", datetime.now(UTC).isoformat())
-        time.sleep(every)
+        time.sleep(pacer.delay(scheduler._pace_snapshot() if every is None else None))
 
 
 def _hand_over(program: str | None) -> NoReturn:

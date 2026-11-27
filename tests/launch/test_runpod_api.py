@@ -17,8 +17,8 @@ import pytest
 from etude.errors import LauncherError
 from etude.launch.aws import Keys
 from etude.launch.database import launcher_file
-from etude.launch.errors import ProviderUnavailable
-from etude.launch.provisioner.machines import MachineRequest, Refused
+from etude.launch.errors import ProviderUnavailable, Refused
+from etude.launch.provisioner.machines import MachineRequest
 from etude.launch.provisioner.providers.http import MAX_ERROR_BYTES, send_to_provider
 from etude.launch.provisioner.providers.program import boot_source
 from etude.launch.provisioner.providers.runpod.api import PodFact, RunPodAPI

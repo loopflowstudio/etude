@@ -43,7 +43,7 @@ import tarfile
 import tempfile
 import threading
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -70,6 +70,35 @@ _halt = threading.Event()
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def remove_tree(path: Path) -> None:
+    """Best-effort deletion of a scratch file or directory tree, including read-only entries."""
+    if not path.exists() and not path.is_symlink():
+        return
+    try:
+        if path.is_symlink() or not path.is_dir():
+            path.unlink(missing_ok=True)
+            return
+
+        root = path.resolve()
+
+        def _writable(func: Callable[[str], object], target: str, exc: BaseException) -> None:
+            if isinstance(exc, PermissionError):
+                entry = Path(target)
+                parent = entry.parent
+                if not parent.is_symlink() and parent.resolve().is_relative_to(root):
+                    os.chmod(parent, 0o700)
+                if not entry.is_symlink() and entry.is_dir():
+                    os.chmod(entry, 0o700)
+                func(target)
+                return
+            if not isinstance(exc, FileNotFoundError):
+                raise exc
+
+        shutil.rmtree(path, onexc=_writable)
+    except OSError:
+        pass
 
 
 def _finish(
@@ -106,6 +135,10 @@ def _finish(
             if p != outputs / RESULT
         ),
     )
+    # Nothing above reads the working trees or input links, and removing them first frees
+    # the space finished.json needs when the job or its layout filled the disk.
+    for scratch in ("src", "prepared-source", "prepared-inputs", "inputs"):
+        remove_tree(home / scratch)
     write(home / "finished.json", record.model_dump_json())
 
 
@@ -695,5 +728,7 @@ def run(directory: Path) -> int:
                 pool.shutdown(wait=False, cancel_futures=True)
                 raise
     finally:
+        if not (session / "courier-claim").exists():
+            remove_tree(session / "sources")
         write(session / "ended", _now().isoformat())
     return 0

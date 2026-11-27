@@ -15,8 +15,8 @@ import pytest
 from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch.database import launcher_file
+from etude.launch.errors import Refused
 from etude.launch.listing import show_machines, show_ondemands, show_runs
-from etude.launch.provisioner.machines import Refused
 from etude.launch.records import (
     GPU,
     LogStream,
@@ -25,6 +25,7 @@ from etude.launch.records import (
     Offer,
     OnDemand,
     Pool,
+    Provider,
     Rental,
     Session,
     Stale,
@@ -307,8 +308,8 @@ def test_empty_refusal_records_a_reason_for_status_and_admission(tmp_path: Path)
             b.scheduler.launch(job(), rent="l4")
     restarted = Scheduler(b.store, {}, clock=b.clock)
     assert str(restarted.read(one)) == "queued (provider refused: no reason given), $0.00"
-    refused = b.store.recent_refusal("l4", b.clock() - timedelta(seconds=60))
-    assert refused is not None and refused.refusal == "no reason given"
+    (refused,) = b.store.recent_refusals("l4", b.clock() - timedelta(seconds=60), limit=1)
+    assert refused.refusal == "no reason given"
 
 
 @pytest.mark.parametrize("spot", [True, False])
@@ -1189,3 +1190,399 @@ def test_launch_names_the_machine_still_finishing_and_quote_settles_its_receipt(
     quote = b.scheduler.quote([RunRequest(job=job())], rent="l4")
     assert quote.machines and b.service.creates == 1
     assert b.scheduler.read(one).rental_ended
+
+
+def test_pool_refusal_tries_healthy_sibling_before_renting(tmp_path: Path) -> None:
+    def setup(
+        subdir: str, *, refuse_first: int, refuse_second: int
+    ) -> tuple[Scheduler, FakeService, FakeService, FakeService]:
+        clock = Clock()
+        store = open_database(tmp_path / subdir / "state.db")
+        first = FakeService(clock)
+        second = FakeService(clock)
+        rent = FakeService(clock)
+        first.refuse = refuse_first
+        second.refuse = refuse_second
+        owned = {"m1": first, "m2": second}
+        scheduler = Scheduler(
+            store,
+            {"ssh": lambda held: owned[held.name], "runpod": lambda held: rent},
+            clock=clock,
+        )
+        scheduler.add_storage(
+            Storage(name="west", bucket="b", prefix="p", provider="s3", region="us-west-2")
+        )
+        scheduler.set_provider(
+            Provider(name="fake", kind="runpod", registry="ghcr.io/test", storage="west")
+        )
+        scheduler.add_ondemand(OnDemand(name="l4", template=L4, max_machines=2, setup_seconds=0))
+        scheduler.add_pool(Pool(name="lab"))
+        scheduler.add_machine("m1", "m1.local", pool="lab")
+        scheduler.add_machine("m2", "m2.local", pool="lab")
+        return scheduler, first, second, rent
+
+    # Machine 1 refuses -> same tick places on healthy machine 2 with 0 provider rent calls.
+    scheduler, m1, m2, rent = setup("one_refuses", refuse_first=1, refuse_second=0)
+    (run,) = scheduler.queue(job(), pool="lab", rent="l4")
+    scheduler.tick()
+    assert m1.creates == 1
+    assert m2.creates == 1
+    assert rent.creates == 0
+    assert rent.offers == 0
+    assert scheduler.read(run).machine == "m2"
+
+    # Both pool machines refuse -> same tick spills over to 1 on-demand rental.
+    scheduler2, m1_b, m2_b, rent_b = setup("both_refuse", refuse_first=1, refuse_second=1)
+    (run2,) = scheduler2.queue(job(), pool="lab", rent="l4")
+    scheduler2.tick()
+    assert m1_b.creates == 1
+    assert m2_b.creates == 1
+    assert rent_b.creates == 1
+    machine2 = scheduler2.read(run2).machine
+    assert machine2 is not None and machine2.startswith("l4-")
+
+
+def test_unfinished_runs_and_waiting_share_retryability_rules(tmp_path: Path) -> None:
+    b = bench(tmp_path)
+    now = b.clock().isoformat()
+    b.store.add_pool(Pool(name="lab"))
+    b.store.add_machine(Machine(name="m1", kind="ssh", pool="lab", address="m1"))
+
+    def add_run(
+        name: str,
+        *,
+        max_attempts: int = 2,
+        cancelled: bool = False,
+        resume_after: int = 0,
+        attempts: tuple[tuple[str | None, str | None], ...] = (),
+    ) -> str:
+        spec = job(name=name, max_attempts=max_attempts).model_dump_json()
+        b.store._db.execute(
+            """INSERT INTO runs(id, job, spec, pool, created_at, cancel_requested_at, resume_after)
+               VALUES (?, ?, ?, 'lab', ?, ?, ?)""",
+            (name, name, spec, now, now if cancelled else None, resume_after),
+        )
+        for index, (outcome, cause) in enumerate(attempts, start=1):
+            session_id = f"sess-{name}-{index}"
+            b.store._db.execute(
+                "INSERT INTO sessions(id, machine, planned_at, ended_at) VALUES (?, 'm1', ?, ?)",
+                (session_id, now, None if outcome is None else now),
+            )
+            b.store._db.execute(
+                """INSERT INTO attempts(id, run, session, machine, number, position,
+                       limit_seconds, limit_kind, outcome, cause)
+                   VALUES (?, ?, ?, 'm1', ?, 0, 3600, 'out_of_time', ?, ?)""",
+                (f"att-{name}-{index}", name, session_id, index, outcome, cause),
+            )
+        return name
+
+    fresh = add_run("fresh")
+    running_last = add_run("running-last", max_attempts=1, attempts=((None, None),))
+    add_run("succeeded", attempts=(("succeeded", None),))
+    add_run("failed", attempts=(("failed", None),))
+    add_run("cancelled-idle", cancelled=True)
+    stopping = add_run("cancelled-open", cancelled=True, attempts=((None, None),))
+    stopped_retry = add_run("stopped-retry", max_attempts=2, attempts=(("stopped", None),))
+    lost_retry = add_run("lost-retry", max_attempts=2, attempts=(("lost", "machine_lost"),))
+    add_run(
+        "lost-exhausted",
+        max_attempts=1,
+        attempts=(("lost", "machine_lost"),),
+    )
+    exempt_retry = add_run(
+        "exempt-retry",
+        max_attempts=1,
+        attempts=(("lost", "capacity_refused"), ("lost", "spot_machine_lost")),
+    )
+    add_run("non-retryable", max_attempts=3, attempts=(("lost", "input_undelivered"),))
+    resumed = add_run(
+        "resumed",
+        max_attempts=2,
+        resume_after=1,
+        attempts=(("failed", None),),
+    )
+
+    waiting = {r.id for r in b.store.waiting("lab")}
+    unfinished = {r.id for r in b.store.runs(unfinished=True)}
+    assert waiting == {fresh, stopped_retry, lost_retry, exempt_retry, resumed}
+    assert unfinished == waiting | {running_last, stopping}
+
+
+def test_explicit_launch_and_quote_order_refused_owned_behind_ondemand(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    store = open_database(tmp_path / "state.db")
+    m1 = FakeService(clock, seconds=10)
+    m2 = FakeService(clock, seconds=10)
+    rent = FakeService(clock, seconds=10)
+    owned = {"m1": m1, "m2": m2}
+    scheduler = Scheduler(
+        store,
+        {"ssh": lambda held: owned[held.name], "runpod": lambda held: rent},
+        clock=clock,
+    )
+    scheduler.add_storage(
+        Storage(name="west", bucket="b", prefix="p", provider="s3", region="us-west-2")
+    )
+    scheduler.set_provider(
+        Provider(name="fake", kind="runpod", registry="ghcr.io/test", storage="west")
+    )
+    scheduler.add_ondemand(OnDemand(name="l4", template=L4, max_machines=1, setup_seconds=0))
+    scheduler.add_pool(Pool(name="lab"))
+    scheduler.add_machine("m1", "m1.local", pool="lab")
+
+    # Solo pool host refuses queued work and enters the 60 s cooldown.
+    m1.refuse = 1
+    (queued,) = scheduler.queue(job(), pool="lab")
+    scheduler.tick()
+    assert m1.creates == 1
+    assert scheduler.read(queued).phase == "queued"
+
+    # 10 s later: queued retry still waits, while `--pool lab --rent l4` prefers on-demand over refused m1.
+    clock.advance(10)
+    scheduler.tick()
+    assert m1.creates == 1
+    assert scheduler.read(queued).phase == "queued"
+
+    quote = scheduler.quote([RunRequest(job=job())], pool="lab", rent="l4")
+    assert len(quote.machines) == 1
+    assert quote.machines[0].machine is None
+    assert quote.machines[0].usd_per_hour == Decimal("0.59")
+    assert rent.offers == 1
+    assert rent.creates == 0
+
+    (rented,) = scheduler.launch(job(), pool="lab", rent="l4")
+    assert m1.creates == 1
+    assert rent.creates == 1
+    assert (scheduler.read(rented).machine or "").startswith("l4-")
+
+    # Multi-run quote/launch with a refused host and 1-machine on-demand places on l4 and queues
+    # overflow instead of promising refused m1 alongside a paid rental.
+    clock.advance(10)  # `rented` finishes on l4; m1's refusal is 20 s old (< 60 s)
+    scheduler.tick()
+    assert scheduler.read(rented).outcome == "succeeded"
+    overflow_quote = scheduler.quote(
+        [RunRequest(job=job()), RunRequest(job=job())], pool="lab", rent="l4"
+    )
+    assert len(overflow_quote.machines) == 1
+    assert overflow_quote.machines[0].machine is None
+    assert overflow_quote.machines[0].usd_per_hour == Decimal("0.59")
+
+    placed_on_l4, overflow_queued = scheduler.launch(job().runs(10, 11), pool="lab", rent="l4")
+    assert (scheduler.read(placed_on_l4).machine or "").startswith("l4-")
+    assert scheduler.read(overflow_queued).phase == "queued"
+    assert m1.creates == 1
+    assert rent.creates == 2
+
+    # With l4 at its machine limit, explicit quote and launch fall back to recently refused m1.
+    fallback_quote = scheduler.quote([RunRequest(job=job())], pool="lab", rent="l4")
+    assert len(fallback_quote.machines) == 1
+    assert fallback_quote.machines[0].machine == "m1"
+    assert fallback_quote.machines[0].usd_per_hour == Decimal(0)
+
+    (fallback,) = scheduler.launch(job(), pool="lab", rent="l4")
+    assert m1.creates == 2
+    assert rent.creates == 2
+    assert scheduler.read(fallback).machine == "m1"
+
+    # Solo-pool explicit launch still retries a recently refused host immediately.
+    clock.advance(10)  # `placed_on_l4`, `overflow_queued`, `fallback` advance; refuse m1 again
+    scheduler.tick()
+    clock.advance(10)
+    scheduler.tick()
+    m1.refuse = 1
+    with pytest.raises(LauncherError, match=r"machine refused \(m1\)"):
+        scheduler.launch(job(), pool="lab")
+    clock.advance(5)  # still within 60 s cooldown
+    (solo_retry,) = scheduler.launch(job(), pool="lab")
+    assert scheduler.read(solo_retry).machine == "m1"
+
+    # When an unrefused sibling exists, explicit quote and launch prefer it over both l4 and refused m1.
+    scheduler.add_machine("m2", "m2.local", pool="lab")
+    clock.advance(10)  # `solo_retry` finishes; m1's refusal is 15 s old (< 60 s)
+    scheduler.tick()  # `queued` runs on healthy m2
+    assert scheduler.read(queued).machine == "m2"
+    clock.advance(10)  # `queued` finishes on m2; m1's refusal is 25 s old (< 60 s)
+    scheduler.tick()
+    offers_before = rent.offers
+    creates_before = rent.creates
+    prefer = scheduler.quote([RunRequest(job=job())], pool="lab", rent="l4")
+    assert prefer.machines[0].machine == "m2"
+    assert rent.offers == offers_before
+    (on_m2,) = scheduler.launch(job(), pool="lab", rent="l4")
+    assert scheduler.read(on_m2).machine == "m2"
+    assert rent.creates == creates_before
+
+
+def test_explicit_launch_on_owned_ssh_pool_confirms_pre_commit_and_replans_on_refusal(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    store = open_database(tmp_path / "state.db")
+    mini1 = FakeService(clock, seconds=10)
+    mini2 = FakeService(clock, seconds=10)
+    mini3 = FakeService(clock, seconds=10)
+    rent = FakeService(clock, seconds=10)
+    owned = {"mini-1": mini1, "mini-2": mini2, "mini-3": mini3}
+    scheduler = Scheduler(
+        store,
+        {"ssh": lambda held: owned[held.name], "runpod": lambda held: rent},
+        clock=clock,
+    )
+    scheduler.add_storage(
+        Storage(name="west", bucket="b", prefix="p", provider="s3", region="us-west-2")
+    )
+    scheduler.set_provider(
+        Provider(name="fake", kind="runpod", registry="ghcr.io/test", storage="west")
+    )
+    scheduler.add_ondemand(OnDemand(name="gpu", template=L4, max_machines=2, setup_seconds=0))
+    scheduler.add_pool(Pool(name="lab"))
+    scheduler.add_machine("mini-1", "mini-1.local", pool="lab")
+
+    # Solo refusing pool rejects before committing any run row.
+    mini1.refuse = 1
+    with pytest.raises(LauncherError, match=r"machine refused \(mini-1\)"):
+        scheduler.launch(job(), pool="lab")
+    assert store.runs() == ()
+    assert mini1.creates == 1
+
+    # Adding a healthy sibling lets launch fail over pre-commit from refusing mini-1 to mini-2.
+    clock.advance(61)  # mini-1 cooldown expired so it is tried first
+    scheduler.add_machine("mini-2", "mini-2.local", pool="lab")
+    mini1.refuse = 1
+    (run_a,) = scheduler.launch(job(), pool="lab")
+    assert scheduler.read(run_a).machine == "mini-2"
+    assert mini1.creates == 2
+    assert mini2.creates == 1
+    clock.advance(10)
+    scheduler.tick()
+    assert scheduler.read(run_a).outcome == "succeeded"
+
+    # When every owned host refuses, `--pool lab --rent gpu` re-plans onto gpu pre-commit.
+    clock.advance(61)
+    mini1.refuse = 1
+    mini2.refuse = 1
+    (run_b,) = scheduler.launch(job(), pool="lab", rent="gpu")
+    assert (scheduler.read(run_b).machine or "").startswith("gpu-")
+    assert rent.creates == 1
+    clock.advance(10)
+    scheduler.tick()
+    assert scheduler.read(run_b).outcome == "succeeded"
+
+    # Multi-run launch: confirmed mini-1 is not double-booked when mini-2 refuses; mini-3 takes run 2.
+    clock.advance(61)
+    scheduler.add_machine("mini-3", "mini-3.local", pool="lab")
+    mini2.refuse = 1
+    first, second = scheduler.launch(job().runs(1, 2), pool="lab")
+    assert scheduler.read(first).machine == "mini-1"
+    assert scheduler.read(second).machine == "mini-3"
+    clock.advance(10)
+    scheduler.tick()
+    assert scheduler.read(first).outcome == "succeeded"
+    assert scheduler.read(second).outcome == "succeeded"
+
+    # Multi-run launch with no sibling left after mini-2 refuses keeps mini-1 and queues run 2.
+    clock.advance(61)
+    mini2.refuse = 1
+    mini3.refuse = 1
+    kept, waiting = scheduler.launch(job().runs(3, 4), pool="lab")
+    assert scheduler.read(kept).machine == "mini-1"
+    assert scheduler.read(waiting).phase == "queued"
+
+
+def test_cancelled_owned_session_observe_error_does_not_end_or_double_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock()
+    store = open_database(tmp_path / "state.db")
+    host = FakeService(clock, seconds=600)
+    scheduler = Scheduler(store, {"ssh": lambda held: host}, clock=clock)
+    scheduler.add_pool(Pool(name="lab", slots=2))
+    scheduler.add_machine("mini", "mini.local", pool="lab")
+
+    # Part 1: StorageUnavailable during observe on a cancelled owned session does not stamp
+    # finish_requested_at or end the session; recovery settles cleanly via graceful stop.
+    (run,) = scheduler.launch(job(max_attempts=1), pool="lab")
+    session_id = scheduler.attempts(run)[0].session
+    scheduler.tick()
+    assert store.session(session_id).started_at is not None
+
+    real_observe = host.observe
+    real_end = host.end
+    real_stop = host.stop
+    observe_calls = 0
+    end_calls = 0
+    fail_observe: Exception | None = StorageUnavailable("R2 503")
+    refuse_stop = False
+
+    def wrapped_observe(session_id: str) -> Observation:
+        nonlocal observe_calls
+        observe_calls += 1
+        if fail_observe is not None:
+            raise fail_observe
+        return real_observe(session_id)
+
+    def wrapped_end(session_id: str) -> object:
+        nonlocal end_calls
+        end_calls += 1
+        return real_end(session_id)
+
+    def wrapped_stop(session_id: str, attempt: str) -> None:
+        if refuse_stop:
+            raise Refused("OSError: [Errno 28] No space left on device")
+        real_stop(session_id, attempt)
+
+    monkeypatch.setattr(host, "observe", wrapped_observe)
+    monkeypatch.setattr(host, "end", wrapped_end)
+    monkeypatch.setattr(host, "stop", wrapped_stop)
+
+    status = scheduler.cancel(run)
+    assert status.phase == "stopping"
+    assert store.session(session_id).finish_requested_at is None
+    assert store.session(session_id).ended_at is None
+    assert end_calls == 0
+    assert observe_calls == 1
+
+    # Part 2: An asleep host (Unreachable on observe) costs exactly 1 observe call per tick,
+    # never calling end or stamping finish_requested_at.
+    observe_calls = 0
+    fail_observe = Unreachable("SSH wait exceeded 30 seconds")
+    scheduler.tick()
+    assert observe_calls == 1
+    assert end_calls == 0
+    assert store.session(session_id).finish_requested_at is None
+    assert store.session(session_id).ended_at is None
+
+    # Once the host answers again, graceful stop finishes and settles the cancelled run.
+    fail_observe = None
+    scheduler.tick()  # delivers graceful stop
+    assert scheduler.read(run).phase == "stopping"
+    scheduler.tick()  # observes graceful cancellation and settles
+    assert scheduler.read(run).outcome == "cancelled"
+    assert store.session(session_id).ended_at is not None
+
+    # Part 3: Refused from stop escalates to _end_session only when every open attempt is cancelled.
+    end_calls = 0
+    first, second = scheduler.launch(job(max_attempts=1).runs(1, 2), pool="lab")
+    shared = scheduler.attempts(first)[0].session
+    assert scheduler.attempts(second)[0].session == shared
+    clock.advance(1)
+    scheduler.tick()
+    assert scheduler.read(first).phase == "running"
+    assert scheduler.read(second).phase == "running"
+    refuse_stop = True
+
+    # Cancelling only one of two attempts does not kill the sibling.
+    scheduler.cancel(first)
+    assert end_calls == 0
+    assert store.session(shared).ended_at is None
+    assert scheduler.read(second).phase == "running"
+
+    # Cancelling the remaining attempt makes _all_cancelled True -> escalates to _end_session,
+    # settling both runs `cancelled` even with max_attempts=1.
+    scheduler.cancel(second)
+    assert end_calls == 1
+    assert store.session(shared).ended_at is not None
+    assert scheduler.read(first).outcome == "cancelled"
+    assert scheduler.read(second).outcome == "cancelled"

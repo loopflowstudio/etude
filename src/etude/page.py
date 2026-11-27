@@ -247,10 +247,12 @@ class Point(Record):
     `at` in `line`. A scored point is the first seat's score against the
     second, in one view (`commit`), `score` and `split` as a `Cell` is: the
     mean over `opponents`, the players it met in the second seat, indexing
-    `Page.players`, with `interval` where it met one. A point with no
-    `value` has `gap`, what its relative seat looked for, in every view. `whole` marks a `seeds="one"`
-    seating's point, which stands for its job though one seed's checkpoint
-    was held for it.
+    `Page.players`, with `interval` where it met one, and any `failed` or
+    `unplayed` matches still held for that checkpoint. A point with no `value`
+    has `gap` (what its relative seat looked for), `failed` or `unplayed`
+    match counts, in every view. `whole` marks a `seeds="one"` seating's
+    point, which stands for its job though one seed's checkpoint was held for
+    it.
     """
 
     selection: int
@@ -268,6 +270,8 @@ class Point(Record):
     matches: int = 0
     opponents: tuple[int, ...] = ()
     gap: Gap | None = None
+    failed: int = 0
+    unplayed: int = 0
 
 
 class Commit(Record):
@@ -1832,7 +1836,11 @@ def _points(
     index = {each.key: i for i, each in enumerate(players)}
     refs = {str(ref.key): ref for each in held for ref in each.tournament.checkpoints}
     pairs: dict[_HeldFor, set[tuple[int, int]]] = {}
+    failed_matches: dict[_HeldFor, set[str]] = {}
+    unplayed_matches: dict[_HeldFor, set[str]] = {}
     for each in held:
+        failed_keys = {match.key for match in each.played.failed}
+        new_keys = {match.key for match in each.played.new}
         for called in each.schedule:
             if called.seating is None:
                 continue
@@ -1843,7 +1851,12 @@ def _points(
                     continue
                 held_for = leaf.key
                 refs.setdefault(str(held_for), leaf)
-            seated = pairs.setdefault(_HeldFor(each.name, called.seating, str(held_for)), set())
+            key = _HeldFor(each.name, called.seating, str(held_for))
+            seated = pairs.setdefault(key, set())
+            if called.match.key in failed_keys:
+                failed_matches.setdefault(key, set()).add(called.match.key)
+            if called.match.key in new_keys:
+                unplayed_matches.setdefault(key, set()).add(called.match.key)
             # A player no eval run seated yet has played nothing to draw.
             first, second = (index.get(p.key) for p in called.match.players[:2])
             if first is not None and second is not None:
@@ -1905,6 +1918,8 @@ def _points(
                     seated_pairs.add(pair)
                 for cell, split_key in scored.get(pair, ()):
                     met.setdefault((cell.commit, cell.score, split_key), []).append(cell)
+            failed_count = len({match for key in here for match in failed_matches.get(key, ())})
+            unplayed_count = len({match for key in here for match in unplayed_matches.get(key, ())})
             for counted in met.values():
                 points.append(
                     stood.model_copy(
@@ -1917,12 +1932,22 @@ def _points(
                             "rows": sum(cell.rows for cell in counted),
                             "matches": sum(cell.matches for cell in counted),
                             "opponents": tuple(cell.opponent for cell in counted),
+                            "failed": failed_count,
+                            "unplayed": unplayed_count,
                         }
                     )
                 )
             gap = next((gaps[key] for key in here if key in gaps), None)
-            if gap is not None:
-                points.append(stood.model_copy(update={"gap": gap}))
+            if gap is not None or failed_count or unplayed_count:
+                points.append(
+                    stood.model_copy(
+                        update={
+                            "gap": gap,
+                            "failed": failed_count,
+                            "unplayed": unplayed_count,
+                        }
+                    )
+                )
     return tuple(points), seated_pairs
 
 

@@ -631,8 +631,8 @@ log) and links it, read-only and without a copy, at `ETUDE_INPUTS_DIR/NAME`.
 Bytes that do not match the digest are refused: the
 job's command never runs and the attempt ends `lost (input_undelivered)` with the
 reason in its log, and is not retried, since a retry would be given the same bytes.
-A worker's cache may use what it holds plus half the disk
-free when its session began. Inputs are part of the job's identity. A machine with no
+A worker's cache may use half of what it holds plus the disk
+free when its session began, so the bound stays fixed across an owned host's sessions. Inputs are part of the job's identity. A machine with no
 storage can be given only a run's file (`Input.run`, as continuation does). Unless
 the machine keeps records in the same storage as the machine that ran that run,
 the launcher relays the file, verified, from that storage or that machine's disk.
@@ -865,24 +865,63 @@ the reason from its latest attempt's session, never from diagnostics, so it
 survives scheduler restarts and the retry pause. Queued work does not ask that
 on-demand again within 60 seconds of a provider's refusal; an explicit `launch`
 is not paused, and releasing a claim that never reached the provider pauses
-nothing. Attempts ending as `capacity_refused` remain in the history, with their
+nothing. For queued work, an owned pool skips a machine for 60 seconds after it
+refuses a start, immediately re-planning onto healthy siblings in the same tick
+before any on-demand supply rents. An explicit `launch` or `quote` places work
+in order: open sessions, then unrefused owned hosts, then on-demand rentals,
+and falls back to recently refused owned hosts only when nothing else placed any
+work. Explicit
+`launch` confirms owned SSH sessions before committing runs (as for rentals);
+on `Refused`, it re-plans onto remaining owned or on-demand capacity, or fails
+with `machine refused` and no run recorded. After commit, `_admit` hands work
+directly via `add` (no extra `started`/`observe` probes): on SSH, stdlib
+`ssh_boot.py` writes `sources/` and `work/<attempt>.json` without loading or
+installing the remote environment (2 SSH RPCs total, with no exit-97 retry on
+fresh hosts) and sets `finish` on 1-slot owned hosts so the session exits,
+writes `ended`, and runs final disk cleanup without a later scheduler pass
+(bucket-backed owned hosts write work and `finish` in one `inbox.json`). Local `ProcessStart` pools stay
+post-commit. Attempts ending as `capacity_refused` remain in the history, with their
 original numbers, but do not count toward `max_attempts` or the status attempt
 count. Scheduling, status and explicit resume use that same budget rule.
 Timeouts, no reply, 408, 5xx and unreadable or mismatched replies stay unknown.
 A remote start has an exclusive claim; a lost SSH reply cannot start another
-process. On an owned SSH host, the host itself (`control`) settles an
-unconfirmed start: if `boot-claim` or `pid` exists, the session is confirmed
-and tracked; if neither exists, it is fenced (`cancel-start` and `ended`) and
-settled at once as `machine_lost_before_start` even when `startup_seconds` is
-`None`; if the host is unreachable, it waits safely. Cancelling all open
-attempts while an owned host is still booting also writes `cancel-start`.
-Installation and courier setup check it via `startup_timeout`,
-including immediately after the start receipt upload and before spawning the
-worker. `boot-claim` names the boot process until it hands off to a worker
-(`pid`) or, on a bucket-backed host, a courier (`courier-pid`). Before `pid`
-exists, `end` signals the courier and records `ended` once setup has stopped.
-It closes every slot in the session as soon as shutdown is requested. A setup
-that was stopped still publishes its diagnostics if storage is available.
+process. Start forks first and the child writes its own PID into `boot-claim`
+exclusively in one write, unlinking the claim if the write fails. Any
+pre-claim failure (such as `mkdir` or `boot-claim` failing on a full disk)
+returns a structured `refused` reply, `SSHStart` raises `Refused` with the
+sanitized text, and `Scheduler._create` settles the session as refused in that
+single SSH call without sending `end`. The `cancel-start` fence remains strict
+for real transport drops. On an owned SSH host, the host
+itself (`control`) settles an unconfirmed start: if `boot-claim` or `pid`
+exists, the session is confirmed and tracked (an empty `boot-claim`, as from a
+prior release, counts as booting only while younger than 60 seconds); if
+neither exists, it is fenced (`cancel-start` and `ended`) and settled at once
+as `machine_lost_before_start` even when `startup_seconds` is `None`; if the
+host is unreachable, it waits safely. Failed SSH calls retain the last line of
+remote stderr through `etude.errors`' sanitizer. `SSH.call` builds the program
+archive only for `.venv` actions (`start`, `fetch`, `held`, `hold`), never for
+stdlib actions, and ships it only on `start` or when the remote bootstrap
+reports it missing (exit 97). Cancelling all open attempts while an owned host is still booting also
+writes `cancel-start`. Installation and courier setup check it via
+`startup_timeout`, including immediately after the start receipt upload and
+before spawning the worker. `boot-claim` names the boot process until it hands
+off to a worker (`pid`) or, on a bucket-backed host, a courier (`courier-pid`).
+SSH `started`, `claimed`, `add`, `observe`, `stop`, `finish`, `logs`, `ended` and `end` run wholly in the standard-library module `ssh_boot.py` without loading or
+installing the remote client environment (`worker/remote.py` dispatches none of
+them). `observe` is read-only on every owned host, sending raw `attempts/*/claim`, `finished.json`, `etude-result.json` and `usage.jsonl` text back for client validation so a corrupt job file never turns into `Unreachable` and a finished job on a full-disk or upgraded pure-SSH host still settles `succeeded`. `add` and `stop` reply with a structured `refused` error on local `OSError` (such as full disk), which `SSHJournal.add`/`stop` (and local `DirectoryJournal.add`/`stop`) raise as `Refused`; `_observe` ends an owned session on `Refused` from `add` when no open attempt has started (settling unstarted attempts as `capacity_refused` and recording a 60 s machine refusal cooldown once shutdown is confirmed, so an almost-full-disk host frees itself and spills to a healthy sibling without spending a try) and on `Refused` from `stop` when all open attempts are cancelled, while transport or storage errors during `observe` remain uncertain without touching `finish_requested_at` or signalling the host. On pools, `_confirm_ends` retries `_end_session` directly without sending `finish` (including when `started_at` is `None`). Before `pid` exists, `end` signals any
+live `boot-claim` or `courier-pid`; once `pid` exists, it sends `SIGTERM` to
+the worker `pid` and waits up to 10 seconds for exit or `ended`, leaving any
+live `courier-pid` to `Executor.end`'s observe wait (`DirectoryJournal.end`
+stays for local pools, matching `ssh_boot.py`'s PID parsing and Linux zombie check). Once stopped, it records `ended` atomically
+(`ended.partial` + `os.replace`, unlinking the partial on error); every reader
+treats an empty `ended` file as absent. If `boot-claim` or `pid` already exists
+(fencing any duplicate start) and the disk is full, `end` tolerates unwritable
+`cancel-start` and `ended` files and still answers `ended_at` once nothing is
+running so the session settles (as `cancelled` if cancel was requested, else `lost`, while `Executor.end` still waits for any
+live courier), staying strict when neither file exists. Other post-pid SSH RPCs
+(`held`, `hold`, `fetch`) pipe their JSON payload in memory (no temp file) to `remote.py`. It closes every slot in the session
+as soon as shutdown is requested. A setup that was stopped still publishes its
+diagnostics if storage is available.
 
 On a bucket-backed SSH host, storage supplies attempt progress and `out/receipt`
 records start intent. Until `out/ended` arrives, SSH checks `courier-pid`
@@ -893,6 +932,15 @@ courier dies, host cleanup stops any remaining worker before releasing the
 machine. For sessions started by v0.4.6, `courier-claim` and `pid` identify
 a bucket session whose courier PID is unknown. Etude waits for its bucket end
 receipt.
+
+Disk cleanup on hosts has two owners. Just before writing `finished.json`
+on every host, `attempts.py` deletes the attempt's working trees (`src/`,
+`prepared-source/`, `prepared-inputs/` and `inputs/`), so a full disk still
+leaves room for the outcome, keeping outputs, logs and journal files, and removes the session's `sources/` on pure-SSH hosts (no
+`courier-claim`) when the session's attempts finish. On bucket-backed hosts, `courier.py` removes an attempt's
+`outputs/` once its delivery is confirmed and removes the session's `sources/`,
+`inputs/` and remaining attempt directories after confirmed final delivery,
+keeping only the small control files; unconfirmed delivery keeps local files.
 
 A lost attempt requires evidence that its process or provider machine is gone.
 Infrastructure losses retry up to `max_attempts`,
@@ -940,7 +988,7 @@ etude/
   launch/
     client.py  server.py  cli.py  commands.py
     records.py  schemas.py  database.py  executor.py  source.py
-    ssh.py  startup.py  environment.py  errors.py
+    openssh.py  ssh.py  ssh_boot.py  startup.py  environment.py  errors.py
     scheduler/    loop.py  costs.py  placement.py
     provisioner/  machines.py  images.py  providers/
     worker/       main.py  attempts.py  courier.py  remote.py
@@ -1444,8 +1492,12 @@ Startup and log retrieval default to no total timeout. `None` adds no operation 
 operations still obey an existing caller deadline and rental limits. Positive
 values are seconds; CLI `--timeout 0` and `--startup-seconds 0` select no timeout.
 A finite allowance is shared across requests and is never reset by a retry.
-SSH connection options can be set explicitly in the customer's SSH configuration;
-Etude supplies no hidden SSH connection timeout. Provider HTTP uses the enclosing
+SSH calls read the host's effective configuration with `ssh -G` once per
+address per process and add `ConnectTimeout=30` where `none` and
+`ServerAliveInterval=20` where `0`, leaving `ServerAliveCountMax` to the
+configuration (OpenSSH defaults to 3). These detect a dead peer without capping
+a live call; set positive values in `~/.ssh/config` to override them. Provider
+HTTP uses the enclosing
 operation allowance. Storage HTTP also has finite socket limits so a dead
 connection cannot hold delivery indefinitely, even without an operation deadline.
 

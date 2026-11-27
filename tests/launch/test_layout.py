@@ -116,6 +116,7 @@ def test_folder_rules() -> None:
         "etude.launch.provisioner.providers.bootstrap",
         "etude.launch.provisioner.providers.package",
         "etude.launch.environment",
+        "etude.launch.ssh_boot",
     ):
         for module in reachable(entry):
             assert module in modules or module.split(".")[0] in sys.stdlib_module_names, module

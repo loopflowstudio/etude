@@ -14,8 +14,7 @@ from typing import Any
 from pydantic import Field
 
 from etude.errors import LauncherError
-from etude.launch.errors import ProviderRejected, ProviderUnavailable
-from etude.launch.provisioner.machines import Refused
+from etude.launch.errors import ProviderRejected, ProviderUnavailable, Refused
 from etude.launch.provisioner.providers.runpod.http import _ID, PodHTTP
 from etude.launch.records import CPU, GPU, Hardware, Offer
 from etude.spec import Record

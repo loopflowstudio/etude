@@ -11,6 +11,10 @@ class LaunchError(LauncherError):
         )
 
 
+class Refused(Exception):
+    """The provider or host definitely refused the request; other errors mean unknown."""
+
+
 class ProviderUnavailable(LauncherError):
     """No usable provider answer. This never means the requested thing is absent."""
 
