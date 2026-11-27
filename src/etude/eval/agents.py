@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from etude.errors import RetryRequested, explain
 from etude.eval.bus import BusReport, Flight, ForwardCall, arrays, normalize_inputs
-from etude.eval.resources import Cpus, Resources, agent_bytes, seconds_left
+from etude.eval.resources import Placement, Resources, agent_bytes, seconds_left
 
 __all__ = ("Forward", "ModelForward", "ForwardError")
 
@@ -385,7 +385,7 @@ def running_agents(
     checkout: str | None,
     resources: Resources,
     tournaments: Sequence[str],
-    cpus: Cpus,
+    placement: Placement,
     *,
     streaming: bool = False,
 ) -> Iterator[AgentProcess]:
@@ -402,7 +402,7 @@ def running_agents(
             checkout,
             definition.max_batch,
             agent_bytes(definition.memory_gb),
-            cpus.threads,
+            placement.threads,
             child,
             resources,
         ),
@@ -418,10 +418,11 @@ def running_agents(
             parent.recv()
         except EOFError as error:
             raise RetryRequested("agent process exited during startup") from error
+        games = placement.games(definition.max_batch)
         print(
             f"etude: agents: started for {', '.join(tournaments)}; "
-            + ("" if streaming else f"{cpus.processes} processes, {cpus.games} games each; ")
-            + f"{cpus.threads} inference threads",
+            + ("" if streaming else f"{placement.processes} processes, {games} games each; ")
+            + f"{placement.threads} inference threads",
             file=sys.stderr,
             flush=True,
         )

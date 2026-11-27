@@ -98,8 +98,18 @@ class CheckpointFailure:
 
 
 @dataclass(frozen=True)
+class Stream:
+    """One tournament stream executed by a game process."""
+
+    tournament: str
+    function: Function
+    concurrency: int | None
+
+
+@dataclass(frozen=True)
 class Take:
     count: int
+    stream: int = 0
 
 
 @dataclass(frozen=True)
@@ -112,6 +122,15 @@ class Outcome:
     match_key: str
     result: Tables | Result | None
     seconds: float
+    error: BaseException | None = None
+    loading_failures: tuple[CheckpointFailure, ...] = ()
+    stream: int = 0
+
+
+@dataclass(frozen=True)
+class StreamEnd:
+    stream: int
+    matches: int
     error: BaseException | None = None
     loading_failures: tuple[CheckpointFailure, ...] = ()
 
@@ -436,10 +455,8 @@ class _TakenMatch:
 
 async def _serve_stream(
     pipe: Connection,
-    function: Function,
+    streams: Sequence[Stream],
     *,
-    tournament: str,
-    concurrency: int | None,
     agents: str | None,
     checkout: str | None,
     build: Function | None,
@@ -457,7 +474,7 @@ async def _serve_stream(
     played_count = 0
     pending_grant: asyncio.Future[tuple[Match, ...]] | None = None
     take_lock = asyncio.Lock()
-    held: dict[int, _TakenMatch] = {}
+    tournament_label = ", ".join(spec.tournament for spec in streams)
 
     async def close_bus() -> BusReport:
         nonlocal bus, bus_report
@@ -469,7 +486,7 @@ async def _serve_stream(
     def make_report() -> GameReport:
         return GameReport(
             pid=os.getpid(),
-            tournament=tournament,
+            tournament=tournament_label,
             imports=observe_imports(),
             matches=played_count,
             wall_seconds=time.monotonic() - started,
@@ -490,8 +507,6 @@ async def _serve_stream(
 
     loop.add_reader(pipe.fileno(), on_pipe_readable)
     try:
-        play = function.load(checkout)
-        kind = _match_type(play, streaming=concurrency is None)
         build_hook = (
             None
             if build is None
@@ -512,80 +527,132 @@ async def _serve_stream(
         elif agents is not None:
             bus = await SocketForwardBus.connect(agents)
         if bus is not None:
-            forwarder = _Forwarder(bus, max_batch=max_batch, eager=concurrency is None)
+            forwarder = _Forwarder(
+                bus,
+                max_batch=max_batch,
+                eager=all(spec.concurrency is None for spec in streams),
+            )
 
         bind: Callable[[CheckpointRef], Forward] | None = (
             forwarder.bind if forwarder is not None else None
         )
 
-        def validate(match: Match) -> Match:
-            authored = (
-                kind.model_validate_json(match.model_dump_json()) if kind is not Match else match
-            )
-            # The author's config type may fill defaults. Keep the scheduled key.
-            held[id(authored)] = _TakenMatch(authored, match.key, time.monotonic())
-            return authored
-
         def build_seats(match: Match) -> Sequence[object]:
             return build_agents(match.players, bind, build_hook)
 
-        async def take_raw(count: int) -> Sequence[Match]:
-            nonlocal pending_grant
-            async with take_lock:
-                future: asyncio.Future[tuple[Match, ...]] = loop.create_future()
-                pending_grant = future
-                try:
-                    pipe.send(Take(count))
-                except (EOFError, OSError):
-                    pending_grant = None
-                    return ()
-                try:
-                    return await future
-                finally:
-                    pending_grant = None
+        for stream_index, spec in enumerate(streams):
+            held: dict[int, _TakenMatch] = {}
+            stream_matches = 0
+            try:
+                play = spec.function.load(checkout)
+                kind = _match_type(play, streaming=spec.concurrency is None)
 
-        source: Matches = Matches(take_raw, validate, build_seats)
-        stream = (
-            cast(
-                Callable[[Matches], AsyncGenerator[tuple[Match, Tables | Result | Exception]]], play
-            )(source)
-            if concurrency is None
-            else _drive_play(cast(Play, play), source, concurrency)
-        )
-        async with aclosing(stream):
-            async for match, outcome in stream:
-                taken = held.pop(id(match), None)
-                if taken is None:
-                    identity = match.key if isinstance(match, Match) else type(match).__name__
-                    raise ValueError(
-                        f"play_many yielded an unknown or already-yielded match: {identity}"
+                def validate(
+                    match: Match,
+                    *,
+                    target_kind: type[Match] = kind,
+                    target_held: dict[int, _TakenMatch] = held,
+                ) -> Match:
+                    authored = (
+                        target_kind.model_validate_json(match.model_dump_json())
+                        if target_kind is not Match
+                        else match
                     )
-                elapsed = time.monotonic() - taken.started
-                played_count += 1
-                result: Tables | Result | None = None
-                error: BaseException | None = None
-                if isinstance(outcome, BaseException):
-                    error = outcome
-                elif isinstance(outcome, (Result, Mapping)):
-                    result = outcome
-                else:
-                    raise TypeError("game outcomes must be tables, a Result or an exception")
+                    # The author's config type may fill defaults. Keep the scheduled key.
+                    target_held[id(authored)] = _TakenMatch(authored, match.key, time.monotonic())
+                    return authored
+
+                async def take_raw(
+                    count: int, *, current_stream: int = stream_index
+                ) -> Sequence[Match]:
+                    nonlocal pending_grant
+                    async with take_lock:
+                        future: asyncio.Future[tuple[Match, ...]] = loop.create_future()
+                        pending_grant = future
+                        try:
+                            pipe.send(Take(count, stream=current_stream))
+                        except (EOFError, OSError):
+                            pending_grant = None
+                            return ()
+                        try:
+                            return await future
+                        finally:
+                            pending_grant = None
+
+                source: Matches = Matches(take_raw, validate, build_seats)
+                stream = (
+                    cast(
+                        Callable[
+                            [Matches], AsyncGenerator[tuple[Match, Tables | Result | Exception]]
+                        ],
+                        play,
+                    )(source)
+                    if spec.concurrency is None
+                    else _drive_play(cast(Play, play), source, spec.concurrency)
+                )
+                async with aclosing(stream):
+                    async for match, outcome in stream:
+                        taken = held.pop(id(match), None)
+                        if taken is None:
+                            identity = (
+                                match.key if isinstance(match, Match) else type(match).__name__
+                            )
+                            raise ValueError(
+                                f"play_many yielded an unknown or already-yielded match: {identity}"
+                            )
+                        elapsed = time.monotonic() - taken.started
+                        played_count += 1
+                        stream_matches += 1
+                        result: Tables | Result | None = None
+                        error: BaseException | None = None
+                        if isinstance(outcome, BaseException):
+                            error = outcome
+                        elif isinstance(outcome, (Result, Mapping)):
+                            result = outcome
+                        else:
+                            raise TypeError(
+                                "game outcomes must be tables, a Result or an exception"
+                            )
+                        drained = forwarder.drain_loading_failures() if forwarder else ()
+                        if (
+                            isinstance(error, ForwardError)
+                            and error.loading
+                            and not any(
+                                failure.checkpoint == error.checkpoint for failure in drained
+                            )
+                        ):
+                            drained = (
+                                *drained,
+                                CheckpointFailure(error.checkpoint, str(error), error.retry),
+                            )
+                        pipe.send(
+                            Outcome(
+                                match_key=taken.key,
+                                result=result,
+                                seconds=elapsed,
+                                error=_portable_error(error) if error is not None else None,
+                                loading_failures=drained,
+                                stream=stream_index,
+                            )
+                        )
+            except RetryRequested:
+                raise
+            except Exception as error:
                 drained = forwarder.drain_loading_failures() if forwarder else ()
-                if (
-                    isinstance(error, ForwardError)
-                    and error.loading
-                    and not any(failure.checkpoint == error.checkpoint for failure in drained)
-                ):
-                    drained = (
-                        *drained,
-                        CheckpointFailure(error.checkpoint, str(error), error.retry),
-                    )
                 pipe.send(
-                    Outcome(
-                        match_key=taken.key,
-                        result=result,
-                        seconds=elapsed,
-                        error=_portable_error(error) if error is not None else None,
+                    StreamEnd(
+                        stream=stream_index,
+                        matches=stream_matches,
+                        error=_portable_error(error),
+                        loading_failures=drained,
+                    )
+                )
+            else:
+                drained = forwarder.drain_loading_failures() if forwarder else ()
+                pipe.send(
+                    StreamEnd(
+                        stream=stream_index,
+                        matches=stream_matches,
                         loading_failures=drained,
                     )
                 )
@@ -615,9 +682,9 @@ async def _serve_stream(
 def run_game_process(
     pipe: Connection,
     resources: Resources,
-    function: Function,
-    tournament: str,
-    concurrency: int | None,
+    streams: Sequence[Stream],
+    *,
+    threads: int = 1,
     agents: str | None = None,
     checkout: str | None = None,
     build: Function | None = None,
@@ -626,7 +693,7 @@ def run_game_process(
     max_batch: int = 32,
 ) -> None:
     """Spawn target for one game process; configures child environment before author imports."""
-    resources.configure(1)
+    resources.configure(threads)
     before = frozenset(sys.modules)
     first_importer: str | None = None
     original = builtins.__import__
@@ -644,11 +711,12 @@ def run_game_process(
         return original(name, globals, locals, fromlist, level)
 
     builtins.__import__ = importing
+    module_label = ", ".join(dict.fromkeys(spec.function.module for spec in streams))
 
     def observe_imports() -> Imports:
         return Imports(
             pid=os.getpid(),
-            module=function.module,
+            module=module_label,
             count=len(set(sys.modules) - before),
             total=len(sys.modules),
             heavy=tuple(sorted(_HEAVY.intersection(sys.modules))),
@@ -659,9 +727,7 @@ def run_game_process(
         asyncio.run(
             _serve_stream(
                 pipe,
-                function,
-                tournament=tournament,
-                concurrency=concurrency,
+                streams,
                 agents=agents,
                 checkout=checkout,
                 build=build,

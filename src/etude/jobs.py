@@ -48,7 +48,6 @@ from etude.checkpoints import (
     qualified,
 )
 from etude.errors import EtudeError, LauncherError, RetryRequested
-from etude.eval.agents import AgentProcess, running_agents
 from etude.eval.game import Play, PlayMany, _match_type
 from etude.eval.records import (
     Benchmark,
@@ -67,7 +66,7 @@ from etude.eval.records import (
     relocate_player,
     select_policy,
 )
-from etude.eval.resources import agent_bytes, divide_cpus, resources
+from etude.eval.resources import resources
 from etude.eval.result import EvalResult
 from etude.eval.run import (
     EvalRun,
@@ -921,64 +920,21 @@ def hold_group(
         definition = pending[0][0].agents if pending else None
         if any(spec.agents != definition for spec, _ in pending):
             raise EtudeError("incompatible_eval_agents", 422)
-        has_checkpoints = any(
-            player_checkpoints(player)
-            for _, active in pending
-            for match in active.matches
-            if match.key not in active.done
-            for player in match.players
-        )
-        needs_loading = definition is not None and definition.load is not None and has_checkpoints
-        agent_process: AgentProcess | None = None
-        cpus = divide_cpus(
-            sum(match.key not in active.done for _, active in pending for match in active.matches),
-            agents=needs_loading,
-            memory_gb=definition.memory_gb if definition else None,
-            batch_inputs=definition.max_batch if definition else 32,
-        )
-        agent_lifetime = lifetime.enter_context(ExitStack())
-        try:
-            if needs_loading and definition is not None and cpus.threads:
-                agent_process = agent_lifetime.enter_context(
-                    running_agents(
-                        definition,
-                        checkout,
-                        owned,
-                        [spec.definition.name for spec, _ in pending],
-                        cpus,
-                        streaming=any(spec.streaming for spec, _ in pending),
-                    )
-                )
-            plays = [
-                Playing(
-                    run=active,
-                    play=spec.play,
-                    streaming=spec.streaming,
-                    checkout=checkout,
-                    tournament=spec.definition.name,
-                    agents=agent_process.address if agent_process else None,
-                    build=spec.agents.build,
-                    load=spec.agents.load if needs_loading and agent_process is None else None,
-                    memory=agent_bytes(spec.agents.memory_gb) // max(1, cpus.processes),
-                    max_batch=spec.agents.max_batch,
-                )
-                for spec, active, _ in opened
-            ]
-            outcomes = play_together(
-                plays,
-                resources=owned,
-                cpus=cpus,
-                agent_process=agent_process,
+        plays = [
+            Playing(
+                run=active,
+                play=spec.play,
+                streaming=spec.streaming,
+                tournament=spec.definition.name,
             )
-            if agent_process is not None:
-                agent_process.check()
-            agent_lifetime.close()
-        except RetryRequested as error:
-            for _, active, _ in opened:
-                active.fail_pending(error)
-            report.failed = sum(active.failed for _, active, _ in opened)
-            report.write()
-            raise
+            for spec, active, _ in opened
+        ]
+        outcomes = play_together(
+            plays,
+            resources=owned,
+            agents=definition,
+            checkout=checkout,
+        )
         for (_, _, member), outcome in zip(opened, outcomes, strict=True):
             if isinstance(outcome, (EtudeError, RetryRequested)):
                 member.__exit__(type(outcome), outcome, outcome.__traceback__)

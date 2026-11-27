@@ -1,9 +1,10 @@
 """Process environment for game and agent processes.
 
-`divide_cpus` returns game and inference-thread budgets for startup and dispatch.
-`resources` owns temporary fast scratch; `Resources.configure` sets child-only
-environment before author imports, leaving the calling process untouched.
-Observations are kept in the run's durable artifact folder by the group owner.
+`place` returns `Placement`, choosing the inference bus, game processes and
+inference thread budget. `resources` owns temporary fast scratch;
+`Resources.configure` sets child-only environment before author imports,
+leaving the calling process untouched. Observations are kept in the run's
+durable artifact folder by the group owner.
 """
 
 import math
@@ -18,6 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 THREAD_VARIABLES = (
     "OMP_NUM_THREADS",
@@ -120,36 +122,52 @@ def _has_gpu() -> bool:
 
 
 @dataclass(frozen=True)
-class Cpus:
-    """Game processes, concurrent games per process and shared inference threads.
+class Placement:
+    """Inference transport, game-process budget and inference-thread budget."""
 
-    Zero threads means no shared agent process (CPU-local forwards or no loader).
-    """
-
+    bus: Literal["local", "socket"] | None
     processes: int
-    games: int
     threads: int
 
+    def games(self, max_batch: int) -> int:
+        """Concurrent `play` matches per game process."""
+        if self.processes <= 0:
+            return 0
+        return math.ceil(max_batch / self.processes) if self.bus is not None else 1
 
-def divide_cpus(
-    pending: int, *, agents: bool, memory_gb: float | None = None, batch_inputs: int = 32
-) -> Cpus:
-    """Size game processes by CPUs and memory; each process batches games up to the declared batch.
 
-    A single CPU is shared by one game process and inference. Code-only games
-    (no loader) keep one game per process. Pending work never gets zero capacity.
+def place(
+    pending: int,
+    *,
+    agents: bool,
+    streaming: bool = False,
+    memory_gb: float | None = None,
+) -> Placement:
+    """Choose inference transport, game processes and inference threads.
+
+    Code-only runs (`agents=False`) skip the GPU probe. On a visible GPU, an
+    all-`play_many` run (`streaming=True`) keeps one direct-inference process
+    with the host inference thread budget; any `play` tournament uses the
+    shared agent process. Without a visible GPU, each game process runs direct
+    inference with one model-library thread.
     """
     if pending <= 0:
-        return Cpus(processes=0, games=0, threads=0)
+        return Placement(bus=None, processes=0, threads=0)
     cpus = available_cpus()
-    shared = agents and _has_gpu()
-    held = agent_bytes(memory_gb) if agents else 0
-    cpu_processes = max(1, cpus - 1) if shared else cpus
+    if not agents:
+        memory_processes = max(1, memory_bytes() // GAME_BYTES)
+        return Placement(bus=None, processes=min(pending, cpus, memory_processes), threads=0)
+    gpu = _has_gpu()
+    if gpu and streaming:
+        return Placement(bus="local", processes=1, threads=max(1, cpus - 1))
+    held = agent_bytes(memory_gb)
     memory_processes = max(1, (memory_bytes() - held) // GAME_BYTES)
-    processes = min(pending, cpu_processes, memory_processes)
-    games = math.ceil(batch_inputs / processes) if agents else 1
-    threads = max(1, cpus - processes) if shared else 0
-    return Cpus(processes=processes, games=games, threads=threads)
+    if gpu:
+        cpu_processes = max(1, cpus - 1)
+        processes = min(pending, cpu_processes, memory_processes)
+        return Placement(bus="socket", processes=processes, threads=max(1, cpus - processes))
+    processes = min(pending, cpus, memory_processes)
+    return Placement(bus="local", processes=processes, threads=1)
 
 
 @dataclass(frozen=True)

@@ -153,7 +153,8 @@ with evaluating(
   process pulls whatever `matches.take(n)` requests from pending matches.
   Per-process diagnostics go to `artifacts/agents/game-{pid}.json`, embedding a
   frozen `BusReport` (`calls`, `answers`, `arrays`, `arrays_copied`, `pickled`,
-  `copied_bytes`, `wire_bytes`, `handoff_seconds`, `round_trip_seconds`).
+  `pickled_bytes`, `copied_bytes`, `wire_bytes`, `handoff_seconds`,
+  `round_trip_seconds`).
   Batch row counts and stage timings use one `Batch` record:
   `artifacts/agents/batches-{pid}.json` per direct game process and
   `artifacts/agents/batches.json` for the shared agent process. `evaluating`
