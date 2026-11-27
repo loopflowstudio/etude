@@ -657,6 +657,23 @@ def test_gpu_games_fill_a_batch_with_pending_and_memory_bounds(
     assert plan.gpu == ("nvidia" if expected_shared else None)
 
 
+def test_a_failing_nvidia_driver_plays_direct(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "_gpu", _gpu)
+    monkeypatch.setattr("etude.eval.resources.sys.platform", "linux")
+    monkeypatch.setattr("etude.eval.resources.platform.machine", lambda: "x86_64")
+    probe = tmp_path / "nvidia-smi"
+    probe.write_text("#!/bin/sh\necho 'driver/library version mismatch' >&2\nexit 9\n")
+    probe.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    plan = plan_execution(64, agents=True)
+    assert (plan.shared, plan.gpu, plan.games) == (False, None, 4)
+
+
 @pytest.mark.parametrize(
     (
         "plat",

@@ -550,7 +550,7 @@ def play_together(
                 # The block is already sealed locally. Keep recording the other runs.
                 delivery_failure = undelivered
         if delivery_failure is not None:
-            raise delivery_failure
+            raise delivery_failure from error
         raise
     finally:
         for each in plays:

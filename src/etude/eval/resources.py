@@ -112,13 +112,16 @@ def _gpu() -> Gpu | None:
     command = shutil.which("nvidia-smi")
     if command is None:
         return None
-    if subprocess.check_output(
-        [command, "--query-gpu=index", "--format=csv,noheader"],
-        text=True,
-        timeout=seconds_left(),
-    ).strip():
-        return "nvidia"
-    return None
+    try:
+        listed = subprocess.check_output(
+            [command, "--query-gpu=index", "--format=csv,noheader"],
+            text=True,
+            timeout=seconds_left(),
+        )
+    except subprocess.CalledProcessError:
+        # nvidia-smi on PATH but failing (driver unloaded or mismatched): no usable GPU.
+        return None
+    return "nvidia" if listed.strip() else None
 
 
 @dataclass(frozen=True)
