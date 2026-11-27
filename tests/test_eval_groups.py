@@ -8,13 +8,14 @@ import socket
 import subprocess
 import sys
 import tempfile
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import nullcontext
 from decimal import Decimal
 from multiprocessing import active_children
 from multiprocessing.connection import Connection, wait
 from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
+from typing import cast
 
 import duckdb
 import pytest
@@ -39,7 +40,7 @@ from etude.eval.agents import (
     send_frame,
 )
 from etude.eval.batching import _Batches
-from etude.eval.game import GameReport
+from etude.eval.game import GameReport, Matches
 from etude.eval.match import environment
 from etude.eval.query import _kept_path, statsdb
 from etude.eval.records import Code, Config, Match, RoundRobin, checkpoint_player
@@ -50,7 +51,7 @@ from etude.eval.resources import (
     memory_bytes,
     resources,
 )
-from etude.eval.result import Tables
+from etude.eval.result import Result, Tables
 from etude.eval.run import Terminated
 from etude.eval.tournament import evaluating, played
 from etude.experiment import observe, state_of
@@ -68,6 +69,7 @@ from etude.launch.records import Pool, Standing, Status
 from etude.page import build as build_page
 from etude.records import (
     ArtifactRef,
+    Record,
     RunCounters,
     RunOutcome,
     RunProgress,
@@ -781,30 +783,28 @@ def echo(checkpoint: CheckpointRef) -> ModelForward:
 
 
 def test_batch_merges_rows_up_to_max_batch_and_runs_oversized_alone() -> None:
-    parent, child = socket.socketpair()
+    first_game, first_agent = socket.socketpair()
+    second_game, second_agent = socket.socketpair()
     player = checkpoint("one")
     batches = _Batches(echo, 4, 1024)
-    try:
-        batches.add(child, CheckpointRequest(1, player.checkpoint, ["a", "b"], 2))
-        batches.add(child, CheckpointRequest(2, player.checkpoint, ["c", "d"], 2))
-        batches.add(child, CheckpointRequest(3, player.checkpoint, ["e"], 1))
+    with first_game, first_agent, second_game, second_agent:
+        batches.add(first_agent, CheckpointRequest(1, player.checkpoint, [("a", "b")], 2))
+        batches.add(second_agent, CheckpointRequest(2, player.checkpoint, [("c", "d")], 2))
+        batches.add(second_agent, CheckpointRequest(3, player.checkpoint, ["e"], 1))
         first = batches.flush()
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(1, "one", ["a", "b"])
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(2, "one", ["c", "d"])
+        assert ForkingPickler.loads(recv_frame(first_game)) == Answer(1, "one", [("a", "b")])
+        assert ForkingPickler.loads(recv_frame(second_game)) == Answer(2, "one", [("c", "d")])
         assert [b.rows for b in first] == [4]
         assert [b.requests for b in first] == [2]
         assert batches.loads == 1
         second = batches.flush()
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(3, "one", ["e"])
+        assert ForkingPickler.loads(recv_frame(second_game)) == Answer(3, "one", ["e"])
         assert [b.rows for b in second] == [1]
         # A single pre-collated call above max_batch runs alone and reports real rows.
-        batches.add(child, CheckpointRequest(4, player.checkpoint, ["big"], 6))
+        batches.add(first_agent, CheckpointRequest(4, player.checkpoint, ["big"], 6))
         oversized = batches.flush()
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(4, "one", ["big"])
+        assert ForkingPickler.loads(recv_frame(first_game)) == Answer(4, "one", ["big"])
         assert [b.rows for b in oversized] == [6]
-    finally:
-        child.close()
-        parent.close()
 
 
 def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_inputs() -> None:
@@ -1650,6 +1650,226 @@ def test_barrier_batches_across_multiple_processes(
     batches = json.loads((artifacts / "batches.json").read_text())
     assert sum(batch["rows"] for batch in batches) == 24
     assert all(batch["rows"] <= 8 for batch in batches)
+
+
+class VectorRules(Record):
+    turns: int = 1
+    error: str = ""
+
+
+class VectorForward:
+    def __call__(self, inputs: list[object]) -> list[object]:
+        return [
+            [int(str(row)) + 1 for row in batch]
+            if isinstance(batch, tuple)
+            else int(str(batch)) + 1
+            for batch in inputs
+        ]
+
+
+def load_vector(checkpoint: CheckpointRef) -> ModelForward:
+    return VectorForward()
+
+
+async def vector_slots(
+    matches: Matches[VectorRules],
+) -> AsyncIterator[tuple[Match[VectorRules], Result | Exception]]:
+    active: list[tuple[Match[VectorRules], Forward, int]] = []
+    while True:
+        for match, agents in await matches.take(2 - len(active)):
+            forward = cast(Forward, agents[0])
+            active.append((match, forward, match.config.turns))
+        if not active:
+            return
+        forward = active[0][1]
+        assert all(agent is forward for _, agent, _ in active)
+        [outputs] = await forward([tuple(left for _, _, left in active)], rows=len(active))
+        assert isinstance(outputs, list)
+        ready = active
+        active = []
+        for (match, agent, left), score in zip(ready, outputs, strict=True):
+            if left > 1:
+                active.append((match, agent, left - 1))
+            elif match.config.error == "retry":
+                yield match, RetryRequested("fixture slot retry")
+            elif match.config.error:
+                yield match, ValueError("fixture slot failure")
+            else:
+                yield match, Result(tables={"vector_scores": [{"seat": 0, "score": score}]})
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_play_many_backfills_after_a_yielded_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry: bool
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
+    cp = checkpoint("one")
+    # Empty configs acquire the typed defaults inside the process. Retention
+    # must still use the scheduled keys, and a failed first slot must backfill.
+    configs: tuple[Config, ...] = (
+        {"error": "retry" if retry else "fail"},
+        {"turns": 4},
+        {},
+        {},
+        {},
+    )
+    matches = [
+        Match(players=(cp,), config=config, index=index) for index, config in enumerate(configs)
+    ]
+    with (
+        pytest.raises(RetryRequested if retry else EtudeError, match="fixture slot"),
+        evaluating(
+            environment("vector"),
+            experiment="vector",
+            matches=matches,
+            run="slots",
+            directory=tmp_path,
+        ) as active,
+    ):
+        active.play_many(vector_slots, agents=Agents(load=load_vector, max_batch=1))
+    artifacts = tmp_path / "vector/slots/artifacts/agents"
+    batches = json.loads((artifacts / "batches.json").read_text())
+    assert [batch["rows"] for batch in batches] == [2, 2, 2, 2]
+    db = statsdb("vector", tmp_path)
+    try:
+        assert db.sql("select match, retry from matches where state = 'failed'").fetchall() == [
+            (matches[0].key, retry)
+        ]
+        assert set(db.sql("select match, score from vector_scores").fetchall()) == {
+            (match.key, 2) for match in matches[1:]
+        }
+    finally:
+        db.close()
+
+
+def test_play_many_shares_one_agent_process_with_play(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
+    agents = Agents(load=load_vector, max_batch=3)
+    jobs = [
+        EvalJob(
+            tournament=RoundRobin(
+                name=name,
+                environment=environment("grouped"),
+                config=VectorRules(),
+                games=2,
+                base_seed=seed,
+            ),
+            enter=(checkpoint("left"), checkpoint("right")),
+            play_many=vector_slots,
+            agents=agents,
+            repo=None,
+            max_hours=0.1,
+        )
+        for seed, name in enumerate(("first", "second"), start=1)
+    ]
+    selected = group(*jobs, job("ordinary", agents))
+    assert [spec.streaming for spec in selected.evaluations] == [True, True, False]
+    results = hold_group(selected, directory=tmp_path)
+    assert [result.played for result in results] == [2, 2, 1]
+    artifacts = tmp_path / "grouped/artifacts/agents"
+    reports = [
+        GameReport.model_validate_json(path.read_bytes()) for path in artifacts.glob("game-*.json")
+    ]
+    assert sorted((report.tournament, report.matches) for report in reports if report.matches) == [
+        ("first", 2),
+        ("ordinary", 1),
+        ("second", 2),
+    ]
+    batches = json.loads((artifacts / "batches.json").read_text())
+    assert sum(batch["rows"] for batch in batches) == 6
+    assert max(batch["rows"] for batch in batches) <= 3
+    assert sum(batch["requests"] for batch in batches) == 4
+    db = statsdb("grouped", tmp_path)
+    try:
+        assert db.sql("select count(*) from vector_scores").fetchone() == (4,)
+        assert db.sql("select count(*) from scores").fetchone() == (2,)
+    finally:
+        db.close()
+
+
+async def invalid_stream(matches: Matches[Config]) -> AsyncIterator[tuple[Match, Tables]]:
+    taken = await matches.take(2)
+    match, agents = taken[0]
+    outcome = match.config["outcome"]
+    if outcome == "abandoned":
+        return
+    if outcome == "unknown":
+        yield match.model_copy(), await plain(match, list(agents))
+    if outcome == "escaped":
+        raise ValueError("fixture escaped the generator")
+    result = await plain(match, list(agents))
+    yield match, result
+    yield match, result
+
+
+@pytest.mark.parametrize(
+    ("outcome", "detail", "failed"),
+    [
+        ("duplicate", "unknown or already-yielded match", 1),
+        ("unknown", "unknown or already-yielded match", 2),
+        ("abandoned", "without yielding its held matches", 2),
+        ("escaped", "fixture escaped the generator", 2),
+    ],
+)
+def test_play_many_retains_held_matches_on_a_broken_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, detail: str, failed: int
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
+    matches = [
+        Match(players=(Code(name="one"),), config={"outcome": outcome}, index=index)
+        for index in range(3)
+    ]
+    with (
+        pytest.raises(EtudeError, match=detail),
+        evaluating(
+            environment("vector"),
+            experiment="vector",
+            matches=matches,
+            run="broken",
+            directory=tmp_path,
+        ) as active,
+    ):
+        active.play_many(invalid_stream)
+    db = statsdb("vector", tmp_path)
+    try:
+        records = db.sql("select match, state, error from matches").fetchall()
+        assert {key for key, _, _ in records} == {match.key for match in matches[:2]}
+        errors = [error for _, state, error in records if state == "failed"]
+        assert len(errors) == failed
+        assert all(detail in error for error in errors)
+    finally:
+        db.close()
+
+
+def test_play_many_requires_one_async_generator_with_a_match_source(tmp_path: Path) -> None:
+    async def wrong_source(match: Match) -> AsyncIterator[tuple[Match, Tables]]:
+        yield match, {}
+
+    with pytest.raises(LauncherError, match="either async def play or async def play_many"):
+        EvalJob(
+            tournament=tournament("both"),
+            enter=(checkpoint("left"), checkpoint("right")),
+            play=plain,
+            play_many=vector_slots,
+            max_hours=0.1,
+        )
+    with pytest.raises(LauncherError, match="either async def play or async def play_many"):
+        EvalJob(
+            tournament=tournament("neither"),
+            enter=(checkpoint("left"), checkpoint("right")),
+            max_hours=0.1,
+        )
+    with evaluating(
+        environment("vector"), experiment="vector", matches=[], run="signature", directory=tmp_path
+    ) as active:
+        with pytest.raises(TypeError, match="async def generator"):
+            active.play_many(plain)  # type: ignore[arg-type]
+        with pytest.raises(TypeError, match=r"Matches\[YourConfig\]"):
+            active.play_many(wrong_source)
 
 
 def test_launched_group_recovers_both_tournaments_with_their_scores(

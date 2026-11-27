@@ -141,8 +141,9 @@ with evaluating(
   sharing one GPU agent process. Process count is bounded by pending matches,
   CPUs (leaving one core for the shared agent process when present) and memory.
   For `play` with a loader, each process keeps `ceil(max_batch / processes)`
-  matches in flight and flushes pending forwards on a zero-delay loop barrier;
-  code-only games run one match per process. For `play_many`, each process pulls
+  matches in flight and flushes pending forwards on a zero-delay loop barrier.
+  For `play` without a loader, each process handles one match at a time.
+  For `play_many`, each process pulls
   whatever `matches.take(n)` requests from pending matches. Per-process
   diagnostics are written to `game-{pid}.json`, and shared agent runs record
   batch row counts and stage timings in `batches.json`. `evaluating` has no
@@ -207,18 +208,19 @@ with evaluating(
   `seat` and `group`, a seat or group the match lacks, a column named
   `player`, or a column whose type changes during a run is refused. A refused
   or raising match is recorded as failed with its error, nothing else of it
-  is stored. The run stops starting matches, retains in-flight outcomes and
-  ends failed. When a match cannot be played, let `play` raise (or yield
-  `(match, error)` from `play_many`): an error caught and returned as empty
-  tables is still refused (`match_has_no_rows`), never stored as a result. In
-  `play_many`, yielding an unknown or already-yielded match fails every held
-  match, and returning with held matches unyielded fails each unyielded match.
+  is stored. A raised `play` error or refused table stops new grants for the
+  tournament. In-flight outcomes are retained. In `play_many`, yield
+  `(match, error)` to fail one slot and keep taking pending matches. A raised
+  error or an unknown or duplicate yield fails every held match. Returning with
+  held matches unyielded fails each unyielded match. A run with failed matches
+  ends failed.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each drawn value from the
   environment whose latest match is newest, noting only overlaps on values
   reachable panels draw.
 - **Resume.** Outside a launch, reopen the same eval run with
-  `evaluating(..., resume=True)` and call `run.play(play)` to carry on.
+  `evaluating(..., resume=True)` and call `run.play(play)` or
+  `run.play_many(play_many)` to carry on.
   A launched retry resumes automatically. Matches already delivered to any
   of `storages` are skipped, even on a machine with an empty disk.
 - **Progress.** Each stored match prints one line to stderr:

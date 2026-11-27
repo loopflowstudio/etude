@@ -19,7 +19,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from hashlib import sha256
@@ -47,6 +47,8 @@ from etude.eval.game import (
     GameReport,
     Grant,
     Outcome,
+    Play,
+    PlayMany,
     Take,
     _match_type,
     run_game_process,
@@ -147,12 +149,19 @@ class EvalRun(Run):
 
     def play(
         self,
-        play: Callable[..., Awaitable[Tables | Result]],
+        play: Play,
         *,
         agents: Agents | None = None,
     ) -> EvalResult:
         """Play selected matches with constructed seats, skipping durable results on resume."""
-        _match_type(play)
+        return self._play(play, agents, streaming=False)
+
+    def play_many(self, play_many: PlayMany, *, agents: Agents | None = None) -> EvalResult:
+        """Play selected matches with a streaming generator that owns its slots."""
+        return self._play(play_many, agents, streaming=True)
+
+    def _play(self, play: Play | PlayMany, agents: Agents | None, *, streaming: bool) -> EvalResult:
+        _match_type(play, streaming=streaming)
         authored = inspect.unwrap(play)
         function = Function(module=authored.__module__, name=authored.__qualname__)
         definition = agents.plain(None) if agents is not None else None
@@ -175,7 +184,9 @@ class EvalRun(Run):
                 batch_inputs=definition.max_batch if definition else 32,
             )
             process = (
-                lifetime.enter_context(running_agents(definition, None, owned, (self.name,), cpus))
+                lifetime.enter_context(
+                    running_agents(definition, None, owned, (self.name,), cpus, streaming=streaming)
+                )
                 if needs_loading and definition is not None and cpus.processes and cpus.threads
                 else None
             )
@@ -184,6 +195,7 @@ class EvalRun(Run):
                     Playing(
                         run=self,
                         play=function,
+                        streaming=streaming,
                         agents=process.address if process else None,
                         build=definition.build if definition else None,
                         load=definition.load
@@ -199,10 +211,10 @@ class EvalRun(Run):
                 cpus=cpus,
                 agent_process=process,
             )
-            result = results[0]
-            if isinstance(result, (EtudeError, RetryRequested)):
-                raise result
-            return result
+        result = results[0]
+        if isinstance(result, (EtudeError, RetryRequested)):
+            raise result
+        return result
 
     def _store_played(
         self, scheduled: Match, outcome: Tables | Result | BaseException, *, seconds: float = 0.0
@@ -265,14 +277,26 @@ class EvalRun(Run):
         )
 
     def fail(self, scheduled: Match, error: BaseException) -> NoReturn:
+        raise self._record_failure((scheduled,), error) from error
+
+    def _record_failure(
+        self, scheduled: Sequence[Match], error: BaseException
+    ) -> EtudeError | RetryRequested:
         detail = (
             explain(error)
             if isinstance(error, subprocess.SubprocessError)
             else f"{type(error).__name__}: {error}"
         )
-        self._stage_failure(scheduled, detail)
-        self._seal()
-        raise EtudeError("match_failed", 500, detail=sanitize(detail)) from error
+        retry = isinstance(error, RetryRequested) or isinstance(error, ForwardError) and error.retry
+        for match in scheduled:
+            self._stage_failure(match, detail, retry=retry)
+        if scheduled:
+            self._seal()
+        return (
+            RetryRequested(sanitize(detail))
+            if retry
+            else EtudeError("match_failed", 500, detail=sanitize(detail))
+        )
 
     def store(
         self, scheduled: Match, outcome: Tables | Result, *, seconds: float | None = None
@@ -540,6 +564,7 @@ class Playing:
 
     run: EvalRun
     play: Function
+    streaming: bool = False
     checkout: str | None = None
     tournament: str | None = None
     agents: str | None = None
@@ -582,12 +607,7 @@ def play_together(
     cpus: Cpus | None = None,
     agent_process: AgentProcess | None = None,
 ) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
-    """Play tournaments across spawned game processes; loader failures follow every seated checkpoint.
-
-    Each game process runs one tournament stream on its own event loop. Match
-    failures stop granting matches for their tournament; in-flight outcomes are
-    still delivered. Storage and reporting stay on the invoking thread.
-    """
+    """Play tournament streams in spawned processes and retain outcomes on the invoking thread."""
     started = time.monotonic()
     stopping = False
     warned_imports = False
@@ -639,6 +659,10 @@ def play_together(
             return
         payload: Tables | Result | BaseException
         if outcome.error is not None:
+            if each.streaming:
+                # The author finished this slot explicitly. Later grants can still succeed.
+                remember_failure(each, each.run._record_failure((match,), outcome.error))
+                return
             payload = outcome.error
         elif outcome.result is not None:
             payload = outcome.result
@@ -649,7 +673,7 @@ def play_together(
         except EtudeError as error:
             if error.code != "match_failed":
                 raise
-            each.failure = error
+            remember_failure(each, error)
             # Stop granting new matches; already-running matches still reach accept.
             each.pending.clear()
         else:
@@ -661,18 +685,32 @@ def play_together(
                 flush=True,
             )
 
+    def remember_failure(each: Playing, error: EtudeError | RetryRequested) -> None:
+        if each.failure is None or (
+            isinstance(error, RetryRequested) and not isinstance(each.failure, RetryRequested)
+        ):
+            each.failure = error
+
     def fail_held(child: _GameProcess, error: BaseException) -> None:
         each = child.playing
         matches = list(child.held.values())
         child.held.clear()
-        if not matches:
+        if not matches and not each.streaming:
             if each.pending:
                 matches = [each.pending.popleft()]
             else:
                 return
+        matches = [
+            match
+            for match in matches
+            if match.key not in each.run._failed and match.key not in each.run.done
+        ]
+        if each.streaming:
+            each.pending.clear()
+            # A broken stream fails the tournament even after releasing its last match.
+            remember_failure(each, each.run._record_failure(matches, error))
+            return
         for match in matches:
-            if match.key in each.run._failed or match.key in each.run.done:
-                continue
             try:
                 each.run._store_played(match, error)
             except EtudeError as match_error:
@@ -706,7 +744,7 @@ def play_together(
                                 resources,
                                 each.play,
                                 each.tournament or each.run.name,
-                                concurrency_for(each),
+                                None if each.streaming else concurrency_for(each),
                                 each.agents,
                                 each.checkout,
                                 each.build,
@@ -728,7 +766,9 @@ def play_together(
                                 if not each.pending:
                                     continue
                                 active = sum(1 for child in live if child.playing is each)
-                                needed = math.ceil(len(each.pending) / concurrency_for(each))
+                                needed = len(each.pending)
+                                if not each.streaming:
+                                    needed = math.ceil(needed / concurrency_for(each))
                                 if active >= needed:
                                     continue
                                 live.append(spawn_one(each))
@@ -760,7 +800,21 @@ def play_together(
                             if child.held:
                                 fail_held(
                                     child,
-                                    RuntimeError("game stream ended without yielding held matches"),
+                                    RuntimeError(
+                                        "play_many returned without yielding its held matches"
+                                    ),
+                                )
+                            elif (
+                                each.streaming
+                                and not stopping
+                                and each.pending
+                                and not message.report.matches
+                            ):
+                                fail_held(
+                                    child,
+                                    RuntimeError(
+                                        "play_many returned without taking pending matches"
+                                    ),
                                 )
                             child.done = True
                             child.pipe.close()
@@ -777,10 +831,18 @@ def play_together(
 
                     try:
                         spawn_ready()
-                        if live and any(each.load is not None for each in plays):
+                        streaming = any(each.streaming and each.pending for each in plays)
+                        cpu_inference = any(each.load is not None for each in plays)
+                        if live and (streaming or cpu_inference):
+                            capacity = f"{cpus.games} games each"
+                            if streaming:
+                                capacity = "slots requested by play_many"
+                                if any(not each.streaming and each.pending for each in plays):
+                                    capacity += f"; play holds up to {cpus.games} games each"
+                            prefix = "agents: CPU inference in " if cpu_inference else ""
+                            threads = "; 1 thread each" if cpu_inference else ""
                             print(
-                                f"etude: agents: CPU inference in {len(live)} game processes, "
-                                f"{cpus.games} games each; 1 thread each",
+                                f"etude: {prefix}{len(live)} game processes, {capacity}{threads}",
                                 file=sys.stderr,
                                 flush=True,
                             )

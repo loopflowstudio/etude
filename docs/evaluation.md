@@ -187,6 +187,9 @@ author code keeps `load`'s forward deterministic for every batch size.
 
 ## Vectorized engines
 
+Run the [vectorized example](../examples/vectorized.py) with
+`uv run etude eval examples/vectorized.py --source /tmp/vectorized`.
+
 For engines that step many games together and collate observations themselves,
 write an async generator `play_many(matches)` instead of `play(match, agents)`:
 
@@ -231,7 +234,7 @@ job = EvalJob(
 
 Give `EvalJob` either `play=` or `play_many=`, never both. Etude still owns
 scheduling, checkpoint caching and eviction, durable match storage and failure
-retention:
+retention.
 
 - `await matches.take(n)` pulls up to `n` pending `(match, agents)` pairs in one
   step. Returning `[]` for `n > 0` means no pending matches remain (or the run
@@ -241,10 +244,12 @@ retention:
   `max_batch` rows and reports real row counts. A single call above `max_batch`
   rows runs alone. Because every match in the process shares one `Forward`
   object per checkpoint, engines can group ready rows by forward identity.
-- Yield `(match, tables)` or `(match, Result(...))` as each slot finishes so
-  finished slots backfill immediately without waiting for stragglers.
-- Yield `(match, error)` to fail one match while the remaining slots keep
-  stepping. An uncaught exception fails every match the generator holds.
+- Yield `(match, tables)` or `(match, Result(...))` with the match object
+  returned by `take`. Yield as each slot finishes so it can backfill
+  without waiting for stragglers.
+- Yield `(match, error)` to fail one match. The remaining slots keep stepping
+  and can take pending matches. An uncaught exception fails every match the
+  generator holds and stops new grants for that tournament.
   Yielding an unknown or already-yielded match fails the generator and its held
   matches; returning with held matches unyielded fails each unyielded match.
 

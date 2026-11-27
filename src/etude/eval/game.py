@@ -1,9 +1,9 @@
 """Game-process event loop, zero-delay forward barrier and match streaming.
 
 Each spawned game process runs one `asyncio` event loop consuming a match stream
-(`Matches[Rules]`) over its parent pipe. `async def play` runs through Etude's
-own stream driver, keeping up to `concurrency` match tasks in flight and flushing
-all waiting checkpoint forwards together on a zero-delay `call_soon` barrier.
+(`Matches[Rules]`) over its parent pipe. `play_many` consumes it directly;
+Etude drives `async def play` as bounded match tasks. Both share the zero-delay
+forward barrier and send each finished match to the parent for storage.
 """
 
 from __future__ import annotations
@@ -15,7 +15,8 @@ import os
 import sys
 import time
 import typing
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import aclosing
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import lru_cache
@@ -63,7 +64,7 @@ class Imports(Record):
         )
         return (
             f"etude: game module {self.module}: {reason} via {self.importer or self.module}; "
-            "define play in a lightweight module and move the import to load's module"
+            "define your game function in a lightweight module and move the import to load's module"
         )
 
 
@@ -148,17 +149,37 @@ class Matches(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PEP 69
         return [(self._validate(match), self._build(match)) for match in granted]
 
 
+type Play = Callable[..., Awaitable[Tables | Result]]
+type PlayMany = Callable[..., AsyncIterator[tuple[Match, Tables | Result | Exception]]]
+type _Outcomes = AsyncGenerator[tuple[Match, Tables | Result | BaseException]]
+
+
 @lru_cache(maxsize=128)
-def _match_type(play: Callable[..., object]) -> type[Match]:
-    if not inspect.iscoroutinefunction(inspect.unwrap(play)):
+def _match_type(play: Callable[..., object], *, streaming: bool = False) -> type[Match]:
+    authored = inspect.unwrap(play)
+    if streaming:
+        if not inspect.isasyncgenfunction(authored):
+            raise TypeError("play_many must be an async def generator that yields outcomes")
+    elif not inspect.iscoroutinefunction(authored):
         raise TypeError("play must be an async def function")
     parameters = list(inspect.signature(play).parameters.values())
-    if len(parameters) != 2 or any(
+    if len(parameters) != (1 if streaming else 2) or any(
         p.kind not in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
         for p in parameters
     ):
+        if streaming:
+            raise TypeError("play_many must take matches")
         raise TypeError("play must take match and agents")
-    kind = typing.get_type_hints(play).get(parameters[0].name, Match)
+    hints = typing.get_type_hints(authored)
+    if streaming:
+        source = hints.get(parameters[0].name, Matches)
+        if source is Matches:
+            return Match
+        if typing.get_origin(source) is not Matches:
+            raise TypeError("play_many's parameter must be annotated with Matches[YourConfig]")
+        (config,) = typing.get_args(source)
+        return Match[config]  # type: ignore[valid-type]  # Specialize from the author's annotation.
+    kind = hints.get(parameters[0].name, Match)
     if not isinstance(kind, type) or not issubclass(kind, Match):
         raise TypeError("play's parameter must be annotated with Match[YourConfig]")
     return kind
@@ -350,14 +371,13 @@ async def _drive_play(
     play: Callable[[Match, Sequence[object]], Awaitable[Tables | Result]],
     matches: Matches,
     concurrency: int,
-) -> AsyncIterator[tuple[Match, Tables | Result | BaseException, float]]:
+) -> _Outcomes:
     """Run up to `concurrency` async `play` tasks at once, backfilling each slot."""
-    active: dict[asyncio.Task[tuple[Tables | Result, float]], Match] = {}
+    active: dict[asyncio.Task[Tables | Result], Match] = {}
 
-    async def run_one(match: Match, agents: Sequence[object]) -> tuple[Tables | Result, float]:
+    async def run_one(match: Match, agents: Sequence[object]) -> Tables | Result:
         errors: list[ForwardError] = []
         token = _match_errors.set(errors)
-        started = time.monotonic()
         try:
             result = await play(match, agents)
         except BaseException:
@@ -368,7 +388,7 @@ async def _drive_play(
             _match_errors.reset(token)
         if errors:
             raise errors[0]
-        return result, time.monotonic() - started
+        return result
 
     exhausted = False
     try:
@@ -385,11 +405,7 @@ async def _drive_play(
             for task in [t for t in active if t in done]:
                 match = active.pop(task)
                 error = task.exception()
-                if error is not None:
-                    yield match, error, 0.0
-                else:
-                    result, elapsed = task.result()
-                    yield match, result, elapsed
+                yield match, task.result() if error is None else error
     finally:
         for task in active:
             task.cancel()
@@ -397,12 +413,19 @@ async def _drive_play(
             await asyncio.gather(*active, return_exceptions=True)
 
 
+@dataclass(frozen=True)
+class _TakenMatch:
+    match: Match  # Keep the object alive while its id identifies the grant.
+    key: str
+    started: float
+
+
 async def _serve_stream(
     pipe: Connection,
     function: Function,
     *,
     tournament: str,
-    concurrency: int,
+    concurrency: int | None,
     agents: str | None,
     checkout: str | None,
     build: Function | None,
@@ -419,6 +442,7 @@ async def _serve_stream(
     played_count = 0
     pending_grant: asyncio.Future[tuple[Match, ...]] | None = None
     take_lock = asyncio.Lock()
+    held: dict[int, _TakenMatch] = {}
 
     def make_report() -> GameReport:
         return GameReport(
@@ -454,11 +478,8 @@ async def _serve_stream(
 
     loop.add_reader(pipe.fileno(), on_pipe_readable)
     try:
-        play = cast(
-            Callable[[Match, Sequence[object]], Awaitable[Tables | Result]],
-            function.load(checkout),
-        )
-        kind = _match_type(play)
+        play = function.load(checkout)
+        kind = _match_type(play, streaming=concurrency is None)
         build_hook = (
             None
             if build is None
@@ -488,7 +509,12 @@ async def _serve_stream(
         )
 
         def validate(match: Match) -> Match:
-            return kind.model_validate_json(match.model_dump_json()) if kind is not Match else match
+            authored = (
+                kind.model_validate_json(match.model_dump_json()) if kind is not Match else match
+            )
+            # The author's config type may fill defaults. Keep the scheduled key.
+            held[id(authored)] = _TakenMatch(authored, match.key, time.monotonic())
+            return authored
 
         def build_seats(match: Match) -> Sequence[object]:
             return build_agents(match.players, bind, build_hook)
@@ -509,29 +535,42 @@ async def _serve_stream(
                     pending_grant = None
 
         source: Matches = Matches(take_raw, validate, build_seats)
-        async for match, outcome, elapsed in _drive_play(play, source, concurrency):
-            played_count += 1
-            if isinstance(outcome, BaseException):
-                match_loading: tuple[CheckpointFailure, ...] = (
-                    (CheckpointFailure(outcome.checkpoint, str(outcome), outcome.retry),)
-                    if isinstance(outcome, ForwardError) and outcome.loading
-                    else ()
-                )
-                pipe.send(
-                    Outcome(
-                        match_key=match.key,
-                        result=None,
-                        seconds=elapsed,
-                        error=_portable_error(outcome),
-                        loading_failures=match_loading,
+        stream = (
+            cast(
+                Callable[[Matches], AsyncGenerator[tuple[Match, Tables | Result | Exception]]], play
+            )(source)
+            if concurrency is None
+            else _drive_play(cast(Play, play), source, concurrency)
+        )
+        async with aclosing(stream):
+            async for match, outcome in stream:
+                taken = held.pop(id(match), None)
+                if taken is None:
+                    identity = match.key if isinstance(match, Match) else type(match).__name__
+                    raise ValueError(
+                        f"play_many yielded an unknown or already-yielded match: {identity}"
                     )
-                )
-            else:
+                elapsed = time.monotonic() - taken.started
+                played_count += 1
+                result: Tables | Result | None = None
+                error: BaseException | None = None
+                if isinstance(outcome, BaseException):
+                    error = outcome
+                elif isinstance(outcome, (Result, Mapping)):
+                    result = outcome
+                else:
+                    raise TypeError("game outcomes must be tables, a Result or an exception")
                 pipe.send(
                     Outcome(
-                        match_key=match.key,
-                        result=outcome,
+                        match_key=taken.key,
+                        result=result,
                         seconds=elapsed,
+                        error=_portable_error(error) if error is not None else None,
+                        loading_failures=(
+                            (CheckpointFailure(error.checkpoint, str(error), error.retry),)
+                            if isinstance(error, ForwardError) and error.loading
+                            else ()
+                        ),
                     )
                 )
         loading_failures = forwarder.drain_loading_failures() if forwarder else ()
@@ -559,7 +598,7 @@ def run_game_process(
     resources: Resources,
     function: Function,
     tournament: str,
-    concurrency: int,
+    concurrency: int | None,
     agents: str | None = None,
     checkout: str | None = None,
     build: Function | None = None,
