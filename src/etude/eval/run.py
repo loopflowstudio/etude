@@ -671,16 +671,20 @@ def play_together(
                 each.pending.clear()
 
     active_plays = [each for each in plays if each.pending]
-    needs_loading = (
-        agents is not None
-        and agents.load is not None
-        and any(
-            player_checkpoints(player)
-            for each in active_plays
-            for match in each.pending
-            for player in match.players
-        )
-    )
+    needs_loading = False
+    match_bytes = 0
+    if agents is not None and agents.load is not None:
+        for each in active_plays:
+            for match in each.pending:
+                sizes: dict[str, int] = {}
+                for player in match.players:
+                    for checkpoint in player_checkpoints(player):
+                        key = checkpoint.key
+                        size = checkpoint.artifact.size_bytes or 0
+                        sizes[key] = max(sizes.get(key, 0), size)
+                if sizes:
+                    needs_loading = True
+                    match_bytes = max(match_bytes, sum(sizes.values()))
     streaming = sum(each.streaming for each in active_plays)
     max_batch = agents.max_batch if agents is not None else 32
     placement = place(
@@ -689,6 +693,7 @@ def play_together(
         agents=needs_loading,
         max_batch=max_batch,
         memory_gb=agents.memory_gb if agents is not None else None,
+        match_bytes=match_bytes,
     )
     build = agents.build if agents is not None else None
     load = agents.load if placement.bus == "local" and agents is not None else None

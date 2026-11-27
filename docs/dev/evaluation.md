@@ -165,9 +165,14 @@ with evaluating(
     `share_streams=True`): one direct inference thread per game
     process, splitting unused host cores across inference threads and dividing
     checkpoint memory by `processes`. The largest `play` match queue sizes
-    the `play` processes. Each process takes matches from every active `play`
-    tournament in turn. In a mixed group, all `play_many` tournaments share
-    one separate process. Each process keeps its checkpoint cache across streams.
+    the `play` processes. The total process count is capped so each cache can
+    fit the known checkpoint bytes of the largest pending match, counting each
+    checkpoint key once per match. If those bytes exceed the full allowance,
+    only one game process runs at a time. This sizing uses artifact lengths.
+    Several in-flight matches can still contend for the same cache. Each process
+    takes matches from every active `play` tournament in turn. In a mixed group,
+    all `play_many` tournaments share one separate process. Each process keeps
+    its checkpoint cache across streams.
 
   Each game process runs one `asyncio` event loop. For `play` with a loader,
   each process keeps up to `placement.games_per_process` matches in flight and

@@ -11,6 +11,7 @@ import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import nullcontext
 from decimal import Decimal
+from hashlib import sha256
 from multiprocessing import active_children
 from multiprocessing.connection import Connection, wait
 from multiprocessing.reduction import ForkingPickler
@@ -676,6 +677,24 @@ def test_place_respects_cpu_pending_and_memory(
 
 
 @pytest.mark.parametrize(
+    ("match_mib", "processes", "games", "threads"),
+    [(200, 10, 4, 1), (300, 6, 6, 1), (2100, 1, 32, 15), (1, 16, 2, 1)],
+)
+@pytest.mark.parametrize("shared_agents", [False], indirect=True)
+def test_place_sizes_direct_caches_for_a_match(
+    monkeypatch: pytest.MonkeyPatch, match_mib: int, processes: int, games: int, threads: int
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 16)
+    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 16 * 1024**3)
+    placement = place((64,), agents=True, memory_gb=2, match_bytes=match_mib * 1024**2)
+    assert placement.bus == "local"
+    assert placement.processes == processes
+    assert placement.games_per_process == games
+    assert placement.game_threads == threads
+    assert placement.checkpoint_bytes == 2 * 1024**3 // processes
+
+
+@pytest.mark.parametrize(
     (
         "cpus",
         "play",
@@ -768,7 +787,7 @@ def test_code_only_and_streaming_placement_do_not_probe_gpu(
         checkpoint_bytes=0,
         reason="no checkpoints to load",
     )
-    assert place((), 2, agents=True) == Placement(
+    assert place((), 2, agents=True, match_bytes=16 * 1024**3) == Placement(
         bus="local",
         processes=1,
         game_threads=3,
@@ -788,8 +807,14 @@ def test_place_reserves_checkpoint_memory_once(
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     samples = iter([2 * 1024**3])
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: next(samples))
-    placement = place((6,), agents=True, max_batch=2, memory_gb=memory_gb)
     shared = bool(request.node.callspec.params["shared_agents"])
+    placement = place(
+        (6,),
+        agents=True,
+        max_batch=2,
+        memory_gb=memory_gb,
+        match_bytes=2 * 1024**3 if shared else 1,
+    )
     assert placement.bus == ("socket" if shared else "local")
     assert placement.processes > 1
     reserved = (1024 if memory_gb is None else 1536) * 1024**2
@@ -1720,9 +1745,71 @@ async def multi_round_play(match: Match[Config], agents: Sequence[Forward]) -> T
     rounds = int(str(match.config["rounds"]))
     total = 0
     for step in range(rounds):
-        [value] = await agents[0]([step])
+        [value] = await agents[step % len(agents)]([step])
         total += int(str(value))
     return {"scores": [{"seat": 0, "score": total}]}
+
+
+@pytest.mark.parametrize(
+    ("sizes", "seats", "processes", "loads"),
+    [
+        pytest.param((80, 80), (0, 1), 1, 2, id="two-checkpoints"),
+        pytest.param((300,), (0,), 1, 1, id="above-budget"),
+        pytest.param((80,), (0, 0), 2, 2, id="self-play"),
+        pytest.param((1, 1), (0, 1), 2, 3, id="tiny-checkpoints"),
+    ],
+)
+@pytest.mark.parametrize("shared_agents", [False], indirect=True)
+def test_direct_play_retains_match_checkpoints_within_its_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sizes: tuple[int, ...],
+    seats: tuple[int, ...],
+    processes: int,
+    loads: int,
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 2)
+    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 2 * 1024**3)
+    wait_for_games(monkeypatch, processes=processes)
+    players = []
+    for index, size in enumerate(sizes):
+        name = f"checkpoint-{index}"
+        path = tmp_path / name
+        data = b"1".rjust(size)
+        path.write_bytes(data)
+        artifact = ArtifactRef(uri=path.as_uri(), sha256=sha256(data).hexdigest(), size_bytes=size)
+        players.append(checkpoint_player(CheckpointRef(address=name, artifact=artifact)))
+    matches = (
+        Match(players=(players[0],), config={"rounds": 6}, index=0),
+        Match(players=tuple(players[seat] for seat in seats), config={"rounds": 6}, index=1),
+    )
+    with evaluating(
+        environment("sizing"),
+        experiment="sizing",
+        matches=matches,
+        run="direct",
+        directory=tmp_path,
+    ) as active:
+        result = active.play(
+            multi_round_play, agents=Agents(load=load, max_batch=2, memory_gb=256 / 1024**3)
+        )
+    assert result.played == 2
+    artifacts = tmp_path / "sizing/direct/artifacts/agents"
+    reports = [
+        GameReport.model_validate_json(p.read_bytes()) for p in artifacts.glob("game-*.json")
+    ]
+    assert len(reports) == processes
+    assert sum(report.matches for report in reports) == 2
+    assert (
+        sum(
+            batch["loads"]
+            for path in artifacts.glob("batches-*.json")
+            for batch in json.loads(path.read_bytes())
+        )
+        == loads
+    )
+    with statsdb("sizing", tmp_path) as db:
+        assert db.sql("select score from scores").fetchall() == [(21,), (21,)]
 
 
 @pytest.mark.parametrize("shared_agents", [False, True], indirect=True)

@@ -159,11 +159,13 @@ def place(
     agents: bool,
     max_batch: int = 32,
     memory_gb: float | None = None,
+    match_bytes: int = 0,
 ) -> Placement:
     """Choose inference transport, exact game processes, thread budgets, concurrency and grouping.
 
-    `play` gives pending match counts per active `play` tournament; `streaming`
-    counts active `play_many` tournaments.
+    `play` gives pending match counts per active `play` tournament. `streaming`
+    counts active `play_many` tournaments. `match_bytes` is the largest known
+    total of distinct checkpoints seated in a pending match.
 
     An all-`play_many` group runs sequentially in one game process on every
     host and skips the GPU probe. With a loader, it uses a direct inference
@@ -225,6 +227,9 @@ def place(
     share_streams = not gpu
     memory_processes = max(1, (host_bytes - held) // GAME_BYTES)
     cap = min(max(1, cpus - 1), memory_processes) if gpu else min(cpus, memory_processes)
+    if share_streams and match_bytes > 0:
+        # Each direct process needs room for a match in its own checkpoint cache.
+        cap = min(cap, max(1, held // match_bytes))
     largest_play = max(active_play)
     play_queues = (largest_play,) if share_streams else active_play
     streaming_slots = min(1, active_streaming) if share_streams else active_streaming
