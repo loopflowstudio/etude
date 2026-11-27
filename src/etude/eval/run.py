@@ -555,12 +555,13 @@ class _GameProcess:
 
 def _startup_banner(placement: Placement, live: int, *, streaming: bool, mixed: bool) -> str:
     """Summarize spawned game processes for direct-inference or `play_many` runs."""
+    game_noun = "game" if placement.games_per_process == 1 else "games"
     if streaming:
         capacity = "slots requested by play_many"
         if mixed:
-            capacity += f"; play holds up to {placement.games_per_process} games each"
+            capacity += f"; play holds up to {placement.games_per_process} {game_noun} each"
     else:
-        capacity = f"{placement.games_per_process} games each"
+        capacity = f"{placement.games_per_process} {game_noun} each"
     direct = placement.bus == "local"
     prefix = "agents: direct inference in " if direct else ""
     noun = "game process" if live == 1 else "game processes"
