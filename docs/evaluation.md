@@ -173,6 +173,7 @@ On CUDA, active games fill `max_batch`. On Metal, games use up to one fewer
 than the available cores, with at least one game. Pending matches and remaining
 host memory bound both counts. Each shared forward handles up to `max_batch`
 rows and records its batch composition in `artifacts/agents/batches.json`.
+Larger game requests use multiple forwards and receive one ordered reply.
 
 Without a matching accelerator, each game caches its own forwards, uses one
 model-library thread, and gets a share of the checkpoint allowance (half of

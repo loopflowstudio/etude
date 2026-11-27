@@ -962,6 +962,28 @@ def test_batch_size_and_delay_flush_with_a_controlled_clock() -> None:
         parent.close()
 
 
+def test_oversized_game_request_uses_bounded_forwards_and_one_ordered_reply() -> None:
+    parent, child = get_context("spawn").Pipe()
+    player = checkpoint("one")
+    batches = _Batches(echo, 2, 0.5, 1024)
+    inputs: list[object] = [1, 2, 3, 4, 5]
+    try:
+        batches.add(child, Request(player.checkpoint, inputs, "first", "a", player.key), 10)
+        observed = batches.flush(10)
+        assert parent.poll()
+        assert parent.recv() == Answer(inputs)
+        assert not parent.poll()
+        assert [(len(batch.inputs), batch.forward_calls) for batch in observed] == [
+            (2, 1),
+            (2, 1),
+            (1, 1),
+        ]
+        assert batches.loads == 1
+    finally:
+        child.close()
+        parent.close()
+
+
 def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_inputs() -> None:
     players = [
         checkpoint_player(
