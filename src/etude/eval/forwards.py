@@ -84,7 +84,9 @@ class Forwards:
                 retry=isinstance(error, RetryRequested),
             )
         finally:
-            self._evict(0, protected)
+            # The checkpoint that just answered stays loaded even above budget:
+            # the next load of another checkpoint evicts it before loading.
+            self._evict(0, protected | {key})
 
     def _evict(self, incoming: int, protected: Set[str]) -> None:
         used = sum(size for _, size in self.loaded.values())

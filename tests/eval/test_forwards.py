@@ -9,9 +9,11 @@ import pytest
 
 from etude.eval.batching import _Batches
 from etude.eval.bus import ForwardOutcome
+from etude.eval.forwards import Forwards
 from etude.eval.records import Code, compose
 from etude.jobs import Agents, hold_group
 from tests.eval.arithmetic import checkpoint
+from tests.eval.arithmetic import load as load_adder
 from tests.eval.mirror import Mirror, Search, async_forward, build, load, play
 from tests.test_eval_groups import group, job
 
@@ -125,3 +127,11 @@ def test_cpu_games_reuse_the_checkpoint_across_tournaments(
     assert sum(batch["forward_calls"] for batch in batch_rows) == 16
     assert report["bus"]["calls"] == 16
     assert report["bus"]["wire_bytes"] == 0
+
+
+def test_a_checkpoint_larger_than_the_budget_loads_once_per_run() -> None:
+    ref = checkpoint("large").checkpoint
+    forwards = Forwards(load_adder, memory=1)
+    outcomes = [forwards.answer(ref, [index]) for index in range(3)]
+    assert [outcome.error for outcome in outcomes] == [None, None, None]
+    assert forwards.loads == 1
