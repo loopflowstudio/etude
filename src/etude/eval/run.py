@@ -676,23 +676,22 @@ def play_together(
             for player in match.players
         )
     )
-    all_streaming = bool(active_plays) and all(each.streaming for each in active_plays)
     any_streaming = any(each.streaming for each in active_plays)
+    max_batch = agents.max_batch if agents is not None else 32
     placement = place(
-        sum(len(each.pending) for each in active_plays),
+        [len(each.pending) for each in active_plays if not each.streaming],
+        sum(1 for each in active_plays if each.streaming),
         agents=needs_loading,
-        streaming=all_streaming,
+        max_batch=max_batch,
         memory_gb=agents.memory_gb if agents is not None else None,
     )
     budget = placement.processes
-    max_batch = agents.max_batch if agents is not None else 32
-    games_per_process = placement.games(max_batch)
-    game_threads = placement.threads if placement.bus == "local" else 1
+    games_per_process = placement.games_per_process
     build = agents.build if agents is not None else None
     load = agents.load if placement.bus == "local" and agents is not None else None
     memory = (
-        agent_bytes(agents.memory_gb) // max(1, placement.processes)
-        if placement.bus == "local" and agents is not None
+        agent_bytes(agents.memory_gb) // placement.processes
+        if placement.bus == "local" and agents is not None and placement.processes > 0
         else None
     )
 
@@ -722,7 +721,7 @@ def play_together(
                 if report is None:
                     return
                 _retain(f"game-{report.pid}.json", report, resources.artifacts)
-                if agent_address is not None and report.imports.warning and not warned_imports:
+                if placement.bus is not None and report.imports.warning and not warned_imports:
                     print(report.imports.warning, file=sys.stderr, flush=True)
                     warned_imports = True
 
@@ -747,7 +746,7 @@ def play_together(
                             target=run_game_process,
                             args=(child_pipe, resources, streams),
                             kwargs={
-                                "threads": game_threads,
+                                "threads": placement.game_threads,
                                 "agents": agent_address,
                                 "checkout": checkout,
                                 "build": build,
@@ -866,8 +865,8 @@ def play_together(
                             prefix = "agents: direct inference in " if direct else ""
                             noun = "game process" if len(live) == 1 else "game processes"
                             if direct:
-                                unit = "thread" if placement.threads == 1 else "threads"
-                                threads = f"; {placement.threads} {unit}" + (
+                                unit = "thread" if placement.game_threads == 1 else "threads"
+                                threads = f"; {placement.game_threads} {unit}" + (
                                     "" if len(live) == 1 else " each"
                                 )
                             else:

@@ -36,7 +36,7 @@ from etude.eval.agents import (
 from etude.eval.batching import LocalForwardBus, _add_socket_batch, _Batches, _encode_socket
 from etude.eval.bus import BusReport, ForwardBus, ForwardCall
 from etude.eval.composition import build_agents
-from etude.eval.game import GameReport, _Forwarder
+from etude.eval.game import GameReport, Matches, _Forwarder
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Match, compose
@@ -1338,3 +1338,86 @@ def test_vectorized_example_uses_two_half_numpy_arrays_zero_copy(
     assert reports[0].bus.copied_bytes == 0
     assert reports[0].bus.pickled == 0
     assert reports[0].bus.wire_bytes == 0
+
+
+@pytest.mark.parametrize("transport", ["local", "socket"])
+def test_unawaited_play_many_future_on_early_exit_emits_no_warning_and_unlocks(
+    transport: _Transport,
+) -> None:
+    cp_bad = checkpoint("early_bad").checkpoint
+    cp_slow = checkpoint("early_slow").checkpoint
+    slow_entered = threading.Event()
+    release_slow = threading.Event()
+    loop_errors: list[dict[str, object]] = []
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        if ref.key == cp_bad.key:
+            raise ValueError("fixture early load failure")
+
+        def forward(inputs: list[object]) -> list[object]:
+            slow_entered.set()
+            release_slow.wait(timeout=5.0)
+            return ["ok" for _ in inputs]
+
+        return forward
+
+    async def run() -> None:
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, ctx: loop_errors.append(ctx))
+        arr = np.arange(4, dtype=np.float32)
+        async with _open_bus(transport, load, max_batch=8) as bus:
+            forwarder = _Forwarder(bus, max_batch=8, eager=True)
+            bad_forward = forwarder.bind(cp_bad)
+            slow_forward = forwarder.bind(cp_slow)
+
+            p1 = bad_forward([1])
+            p2 = slow_forward([arr], rows=1)
+            assert await asyncio.to_thread(slow_entered.wait, 5.0)
+            with pytest.raises(ForwardError, match="fixture early load failure"):
+                await p1
+            # Exit without awaiting p2 while p2 is still in flight; drop local reference.
+            del p2
+            forwarder.clear_pending()
+            release_slow.set()
+            await bus.close()
+            await asyncio.sleep(0)
+            forwarder.clear_pending()
+            assert arr.flags.writeable
+            assert any(f.checkpoint == cp_bad.key for f in forwarder.drain_loading_failures())
+        gc.collect()
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    assert not loop_errors
+
+
+async def _early_exit_play_many(
+    matches: Matches,
+) -> AsyncIterator[tuple[Match, Tables]]:
+    taken = await matches.take(2)
+    assert taken
+    forward = cast(Forward, taken[0][1][0])
+    p1 = forward([1])
+    _p2 = forward([2])
+    await p1  # raises ForwardError; _p2 is abandoned unawaited
+    yield taken[0][0], {"scores": [{"seat": 0, "score": 1}]}
+
+
+def test_play_many_early_exit_with_unawaited_future_has_clean_stderr(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    cp = checkpoint("boom")
+    matches = [Match(players=(cp,), index=index, games=1) for index in range(2)]
+    with (
+        pytest.raises(EtudeError, match="fixture boom"),
+        evaluating(
+            environment("early_exit"),
+            experiment="early_exit",
+            matches=matches,
+            run="clean",
+            directory=tmp_path,
+        ) as active,
+    ):
+        active.play_many(_early_exit_play_many, agents=Agents(load=_raising_load, max_batch=1))
+    stderr = capfd.readouterr().err
+    assert "Future exception was never retrieved" not in stderr

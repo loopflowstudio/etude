@@ -135,37 +135,45 @@ with evaluating(
   `Seating` makes one match per config. Seat swaps belong
   inside `play`. Group `all` holds every seat; a player may sit in two seats.
 - **Game processes and placement.** Placement is decided once per eval run or
-  group into a frozen `Placement(bus: Literal["local", "socket"] | None,
-  processes: int, threads: int, grouped: bool = False)`:
+  group from its active tournament shape (`play` pending counts, `streaming`
+  count, `max_batch`) into a frozen `Placement(bus: Literal["local", "socket"]
+  | None, processes: int, game_threads: int, agent_threads: int,
+  games_per_process: int, grouped: bool = False)`:
   - All-`play_many` with loader (`bus="local"`, `processes=1`,
-    `threads=max(1, cpus - 1)`, `grouped=True`): 1 direct game process on every
-    host (skipping the GPU probe), configuring the process's model/BLAS thread
-    environment variables to `threads` and running the group's tournaments in
-    turn on one `LocalForwardBus` so checkpoints stay loaded.
-  - Code-only `play_many` (`bus=None`, `processes=1`, `threads=0`,
-    `grouped=True`): no bus, no GPU probe, 1 game process.
-  - Code-only `play` or mixed (`bus=None`, `grouped=False`): no bus, no GPU
-    probe, one match at a time in `play` (1 process per `play_many` tournament
-    in a mixed group).
-  - Visible NVIDIA GPU, any tournament `play` (`bus="socket"`, `grouped=False`):
-    one shared agent process (reserving one core) and game processes bound to
-    one tournament each (`play` bounded by `ceil(pending / games_per_process)`;
-    each `play_many` tournament capped at 1 process).
-  - No GPU seen, any tournament `play` (`bus="local"`, `threads=1`,
-    `grouped=False`): one direct inference thread per game process, 1
-    model-library thread each (`play` bounded by `processes`; each `play_many`
-    tournament capped at 1 process).
+    `game_threads=max(1, cpus - 1)`, `agent_threads=0`, `games_per_process=0`,
+    `grouped=True`): 1 direct game process on every host (skipping the GPU
+    probe), configuring the process's model/BLAS thread environment variables
+    to `game_threads` and running the group's tournaments in turn on one
+    `LocalForwardBus` so checkpoints stay loaded.
+  - Code-only `play_many` (`bus=None`, `processes=1`, `game_threads=1`,
+    `agent_threads=0`, `games_per_process=0`, `grouped=True`): no bus, no GPU
+    probe, 1 game process.
+  - Code-only `play` or mixed (`bus=None`, `game_threads=1`, `agent_threads=0`,
+    `games_per_process=1`, `grouped=False`): no bus, no GPU probe, one match at
+    a time in `play` (1 process per `play_many` tournament in a mixed group).
+  - Visible NVIDIA GPU, any tournament `play` (`bus="socket"`,
+    `game_threads=1`, `agent_threads=max(1, cpus - processes)`,
+    `grouped=False`): one shared agent process and exact game processes bound
+    to one tournament each (`play` bounded by `ceil(pending / games_per_process)`;
+    each `play_many` tournament capped at 1 process), giving unused cores to
+    `agent_threads`.
+  - No GPU seen, any tournament `play` (`bus="local"`, `game_threads=1`,
+    `agent_threads=0`, `grouped=False`): one direct inference thread per exact
+    spawned game process, 1 model-library thread each, dividing checkpoint
+    memory by `processes`.
 
   Each game process runs one `asyncio` event loop. For `play` with a loader,
-  each process keeps `ceil(max_batch / processes)` matches in flight and
+  each process keeps `placement.games_per_process` matches in flight and
   flushes pending forwards on a zero-delay loop barrier. For `play_many`, each
   process pulls whatever `matches.take(n)` requests from pending matches.
   Per-process diagnostics go to `artifacts/agents/game-{pid}.json`
-  (`GameReport` with `tournaments: tuple[str, ...]`), snapshotting game-side
-  `Imports` (with `"mlx"` alongside `"torch"`, `"jax"`, `"tensorflow"` in
-  `_HEAVY`) and restoring `builtins.__import__` after loading `build` and
-  stream functions and before starting the bus. `GameReport` embeds a frozen
-  `BusReport` (`calls`, `answers`, `arrays`, `arrays_copied`, `pickled`,
+  (`GameReport` with `tournaments: tuple[str, ...]`), keeping a game-thread-filtered
+  `builtins.__import__` hook active from module load through player wrapper
+  loading and play until process exit (with `"mlx"` alongside `"torch"`,
+  `"jax"`, `"tensorflow"` in `_HEAVY`) so inference-thread imports are ignored
+  while wrapper and lazy game imports stay visible. Heavy-import warnings print
+  once on stderr whenever `placement.bus is not None`. `GameReport` embeds a
+  frozen `BusReport` (`calls`, `answers`, `arrays`, `arrays_copied`, `pickled`,
   `pickled_bytes`, `copied_bytes`, `wire_bytes`, `handoff_seconds`,
   `round_trip_seconds`).
   Batch row counts and stage timings use one `Batch` record:
@@ -328,7 +336,7 @@ class ForwardBus(Protocol):
   game code can step a second half of its pool while the inference thread runs
   the first. Calls arriving while a forward executes still merge per checkpoint
   in `_Batches`. On every host, an all-`play_many` group with a loader gets
-  `Placement(bus="local", processes=1, threads=max(1, cpus - 1), grouped=True)`
+  `Placement(bus="local", processes=1, game_threads=max(1, cpus - 1), agent_threads=0, games_per_process=0, grouped=True)`
   and runs each tournament's stream sequentially inside that one game process
   on one `LocalForwardBus`, keeping loaded checkpoints resident across
   tournaments. In `play`, `_BoundForward.__call__` locks inputs immediately via

@@ -608,32 +608,47 @@ def test_play_arity_and_removed_workers_are_refused(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("cpus", "pending", "agents", "memory_gb", "bus", "processes", "games", "threads"),
+    (
+        "cpus",
+        "play",
+        "streaming",
+        "agents",
+        "max_batch",
+        "memory_gb",
+        "expected",
+    ),
     [
-        (32, 64, True, None, "local", 32, 1, 1),
-        (16, 64, True, None, "local", 16, 2, 1),
-        (3, 20, True, None, "local", 3, 11, 1),
-        (2, 20, True, None, "local", 2, 16, 1),
-        (8, 20, False, None, None, 8, 1, 0),
-        (8, 20, True, None, "local", 4, 8, 1),
-        (8, 20, True, 1.5, "local", 2, 16, 1),
-        (8, 1, True, None, "local", 1, 32, 1),
-        (1, 20, True, None, "local", 1, 32, 1),
-        (1, 20, False, None, None, 1, 1, 0),
-        (8, 0, True, None, None, 0, 0, 0),
-        (8, 20, True, 2.0, "local", 1, 32, 1),
+        # Saturated play CPU: 64 pending, max_batch=32 -> 16/32 processes.
+        (32, (64,), 0, True, 32, None, Placement("local", 32, 1, 0, 1, False)),
+        (16, (64,), 0, True, 32, None, Placement("local", 16, 1, 0, 2, False)),
+        # Medium play CPU: 16 pending, max_batch=32, 16 cores -> 8 processes (2 games each).
+        (16, (16,), 0, True, 32, None, Placement("local", 8, 1, 0, 2, False)),
+        # Mixed CPU/Mac: 500 play_many (1 streaming) + 10 play, max_batch=256, 16 cores -> 2 processes.
+        (16, (10,), 1, True, 256, None, Placement("local", 2, 1, 0, 10, False)),
+        (3, (20,), 0, True, 32, None, Placement("local", 2, 1, 0, 11, False)),
+        (2, (20,), 0, True, 32, None, Placement("local", 2, 1, 0, 16, False)),
+        (8, (20,), 0, False, 32, None, Placement(None, 8, 1, 0, 1, False)),
+        # Code-only mixed: 3 play + 2 streaming -> 5 processes.
+        (8, (3,), 2, False, 32, None, Placement(None, 5, 1, 0, 1, False)),
+        (8, (20,), 0, True, 32, None, Placement("local", 3, 1, 0, 8, False)),
+        (8, (20,), 0, True, 32, 1.5, Placement("local", 2, 1, 0, 16, False)),
+        (8, (1,), 0, True, 32, None, Placement("local", 1, 1, 0, 1, False)),
+        (1, (20,), 0, True, 32, None, Placement("local", 1, 1, 0, 20, False)),
+        (1, (20,), 0, False, 32, None, Placement(None, 1, 1, 0, 1, False)),
+        (8, (), 0, True, 32, None, Placement(None, 0, 1, 0, 0, False)),
+        (8, (0,), 0, True, 32, None, Placement(None, 0, 1, 0, 0, False)),
+        (8, (20,), 0, True, 32, 2.0, Placement("local", 1, 1, 0, 20, False)),
     ],
 )
 def test_place_respects_cpu_pending_and_memory(
     monkeypatch: pytest.MonkeyPatch,
     cpus: int,
-    pending: int,
+    play: tuple[int, ...],
+    streaming: int,
     agents: bool,
+    max_batch: int,
     memory_gb: float | None,
-    bus: str | None,
-    processes: int,
-    games: int,
-    threads: int,
+    expected: Placement,
 ) -> None:
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
     monkeypatch.setattr(eval_resources, "_has_gpu", lambda: False)
@@ -641,51 +656,53 @@ def test_place_respects_cpu_pending_and_memory(
     monkeypatch.setattr(
         "etude.eval.resources.memory_bytes", lambda: 16 * 1024**3 if cpus >= 16 else 2 * 1024**3
     )
-    chosen = place(pending, agents=agents, memory_gb=memory_gb)
-    assert chosen == Placement(bus=bus, processes=processes, threads=threads)  # type: ignore[arg-type]
-    assert chosen.games(32) == games
+    chosen = place(play, streaming, agents=agents, max_batch=max_batch, memory_gb=memory_gb)
+    assert chosen == expected
 
 
 @pytest.mark.parametrize(
     (
-        "pending",
-        "batch_inputs",
+        "cpus",
+        "play",
+        "streaming",
+        "max_batch",
         "memory_gb",
         "agents",
-        "streaming",
         "visible",
-        "bus",
-        "processes",
-        "games",
-        "threads",
-        "grouped",
+        "expected",
     ),
     [
-        (64, 32, None, True, False, "0", "socket", 3, 11, 1, False),
-        (3, 32, None, True, False, "0", "socket", 3, 11, 1, False),
-        (64, 8, None, True, False, "0", "socket", 3, 3, 1, False),
-        (64, 32, 15.5, True, False, "0", "socket", 2, 16, 2, False),
-        (64, 32, None, True, True, "0", "local", 1, 32, 3, True),
-        (64, 32, None, False, False, "0", None, 4, 1, 0, False),
-        (64, 32, None, False, True, "0", None, 1, 1, 0, True),
-        (64, 32, None, True, False, "", "local", 4, 8, 1, False),
-        (64, 32, None, True, True, "", "local", 1, 32, 3, True),
+        # Saturated play GPU (4 cores).
+        (4, (64,), 0, 32, None, True, "0", Placement("socket", 3, 1, 1, 11, False)),
+        # Small play GPU (3 pending, max_batch=32, 4 cores) -> 1 process, 3 games, 3 agent threads.
+        (4, (3,), 0, 32, None, True, "0", Placement("socket", 1, 1, 3, 3, False)),
+        # Small play GPU (5 pending, max_batch=32, 16 cores) -> 1 process, 5 games, 15 agent threads.
+        (16, (5,), 0, 32, None, True, "0", Placement("socket", 1, 1, 15, 5, False)),
+        # Mixed GPU (500 play_many + 10 play, max_batch=256, 16 cores) -> 2 processes, 14 agent threads.
+        (16, (10,), 1, 256, None, True, "0", Placement("socket", 2, 1, 14, 10, False)),
+        # Three 1-match play tournaments on 4 cores -> 3 processes, 1 game each, 1 agent thread.
+        (4, (1, 1, 1), 0, 32, None, True, "0", Placement("socket", 3, 1, 1, 1, False)),
+        (4, (64,), 0, 8, None, True, "0", Placement("socket", 3, 1, 1, 3, False)),
+        (4, (64,), 0, 32, 15.5, True, "0", Placement("socket", 2, 1, 2, 16, False)),
+        # All-play_many routes direct with grouped=True on GPU and non-GPU.
+        (4, (), 2, 32, None, True, "0", Placement("local", 1, 3, 0, 0, True)),
+        (4, (64,), 0, 32, None, False, "0", Placement(None, 4, 1, 0, 1, False)),
+        (4, (), 2, 32, None, False, "0", Placement(None, 1, 1, 0, 0, True)),
+        (4, (64,), 0, 32, None, True, "", Placement("local", 4, 1, 0, 8, False)),
+        (4, (), 2, 32, None, True, "", Placement("local", 1, 3, 0, 0, True)),
     ],
 )
 def test_gpu_placement_fills_batches_and_routes_streaming_direct(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    pending: int,
-    batch_inputs: int,
+    cpus: int,
+    play: tuple[int, ...],
+    streaming: int,
+    max_batch: int,
     memory_gb: float | None,
     agents: bool,
-    streaming: bool,
     visible: str,
-    bus: str | None,
-    processes: int,
-    games: int,
-    threads: int,
-    grouped: bool,
+    expected: Placement,
 ) -> None:
     monkeypatch.setattr(eval_resources, "_has_gpu", _has_gpu)
     # Controlled hardware output, without importing or executing a model library.
@@ -694,11 +711,10 @@ def test_gpu_placement_fills_batches_and_routes_streaming_direct(
     probe.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
-    chosen = place(pending, agents=agents, streaming=streaming, memory_gb=memory_gb)
-    assert chosen == Placement(bus=bus, processes=processes, threads=threads, grouped=grouped)  # type: ignore[arg-type]
-    assert chosen.games(batch_inputs) == games
+    chosen = place(play, streaming, agents=agents, max_batch=max_batch, memory_gb=memory_gb)
+    assert chosen == expected
 
 
 def test_code_only_and_streaming_placement_do_not_probe_gpu(
@@ -710,12 +726,19 @@ def test_code_only_and_streaming_placement_do_not_probe_gpu(
     monkeypatch.setattr(eval_resources, "_has_gpu", fail_probe)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
-    assert place(6, agents=False) == Placement(bus=None, processes=4, threads=0, grouped=False)
-    assert place(6, agents=False, streaming=True) == Placement(
-        bus=None, processes=1, threads=0, grouped=True
+    assert place((6,), 0, agents=False) == Placement(
+        bus=None, processes=4, game_threads=1, agent_threads=0, games_per_process=1, grouped=False
     )
-    assert place(6, agents=True, streaming=True) == Placement(
-        bus="local", processes=1, threads=3, grouped=True
+    assert place((), 2, agents=False) == Placement(
+        bus=None, processes=1, game_threads=1, agent_threads=0, games_per_process=0, grouped=True
+    )
+    assert place((), 2, agents=True) == Placement(
+        bus="local",
+        processes=1,
+        game_threads=3,
+        agent_threads=0,
+        games_per_process=0,
+        grouped=True,
     )
 
 
@@ -745,7 +768,7 @@ def test_temporary_files_work_after_game_scratch_is_removed(
 
 @pytest.mark.parametrize(
     ("cpus", "memory_gb", "expected_processes", "expected_games"),
-    [(1, None, 1, 32), (4, None, 3, 11), (4, 1.75, 1, 32), (8, None, 3, 11)],
+    [(1, None, 1, 1), (4, None, 3, 1), (4, 1.75, 1, 1), (8, None, 3, 1)],
 )
 def test_group_execution_respects_declared_agent_memory(
     tmp_path: Path,
@@ -1237,8 +1260,9 @@ def test_a_game_failure_stops_only_its_tournament(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("with_agents", [False, True])
+@pytest.mark.parametrize("gpu", [False, True])
 def test_heavy_import_warning_is_once_and_only_for_games_with_agents(
-    tmp_path: Path, with_agents: bool
+    tmp_path: Path, with_agents: bool, gpu: bool
 ) -> None:
     (tmp_path / "torch.py").write_text("# Controlled framework fixture.\n")
     (tmp_path / "heavy_fixture_game.py").write_text(
@@ -1257,7 +1281,7 @@ from etude.jobs import Agents, EvalGroup, EvalJob, evaluation_group, hold_group,
 from tests.eval.arithmetic import load
 from tests.eval.arithmetic import checkpoint
 import etude.eval.resources
-etude.eval.resources._has_gpu = lambda: True
+etude.eval.resources._has_gpu = lambda: sys.argv[3] == "True"
 agents = Agents(load=load) if sys.argv[2] == "True" else Agents()
 jobs = [EvalJob(tournament=RoundRobin(name=name, environment=environment("heavy"), configs=({},), games=1),
                enter=(checkpoint("one"), checkpoint("two")), play=play,
@@ -1266,7 +1290,7 @@ hold_group(EvalGroup(evaluations=tuple(evaluation_group(job.lower(ExperimentStat
            directory=sys.argv[1])
 """
     result = subprocess.run(
-        [sys.executable, "-c", program, str(tmp_path), str(with_agents)],
+        [sys.executable, "-c", program, str(tmp_path), str(with_agents), str(gpu)],
         capture_output=True,
         text=True,
         check=False,
@@ -1285,32 +1309,79 @@ def test_agent_startup_failure_reports_retryable_matches(
     outputs.mkdir()
     monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
     monkeypatch.setenv("ETUDE_FIXTURE_TOKEN", "synthetic-fixture-credential")
-    (tmp_path / "bad_agent_import_fixture.py").write_text(
-        "import os\nraise RuntimeError('startup: ' + os.environ['ETUDE_FIXTURE_TOKEN'])\n"
-    )
+    # Put the secret in the artifacts path and block batches.json with a directory
+    # so the agent process fails during startup before control.send(None).
+    root = tmp_path / "synthetic-fixture-credential"
+    (root / "grouped/artifacts/agents/batches.json").mkdir(parents=True)
     selected = group(job("startup", Agents(load=load)))
+    spec = selected.evaluations[0]
+    with pytest.raises(RetryRequested, match="startup"):
+        hold_group(EvalGroup(evaluations=(spec,)), directory=root)
+    log = capfd.readouterr().err
+    assert "[redacted]" in log and "synthetic-fixture-credential" not in log
+    assert json.loads((outputs / "etude-result.json").read_text())["tally"]["failed"] == 1
+    found = played(
+        spec.definition, experiment="grouped", enter=spec.tournament.entrants, directory=root
+    )
+    assert len(found.new) == len(found.retry) == len(found.failed) == 1
+
+
+@pytest.mark.parametrize(
+    ("kind", "module_source", "expected_error"),
+    [
+        ("missing_module", None, "ModuleNotFoundError"),
+        ("syntax_error", "def load(\n", "SyntaxError"),
+        (
+            "runtime_secret",
+            "import os\nraise RuntimeError('import boom: ' + os.environ['ETUDE_FIXTURE_TOKEN'])\n",
+            "import boom: [redacted]",
+        ),
+    ],
+)
+@pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
+def test_broken_load_module_fails_permanently_on_both_transports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    module_source: str | None,
+    expected_error: str,
+) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
+    monkeypatch.setenv("ETUDE_FIXTURE_TOKEN", "synthetic-fixture-credential")
+    module_name = f"broken_loader_{kind}_fixture"
+    if module_source is not None:
+        (tmp_path / f"{module_name}.py").write_text(module_source)
+    selected = group(job("broken_loader", Agents(load=load)))
     spec = selected.evaluations[0]
     assert spec.agents is not None
     spec = spec.model_copy(
         update={
             "agents": spec.agents.model_copy(
-                update={
-                    "load": Function(
-                        module="bad_agent_import_fixture", name="load", path=str(tmp_path)
-                    )
-                }
+                update={"load": Function(module=module_name, name="load", path=str(tmp_path))}
             )
         }
     )
-    with pytest.raises(RetryRequested, match="startup"):
+    with pytest.raises(EtudeError, match="match_failed") as info:
         hold_group(EvalGroup(evaluations=(spec,)), directory=tmp_path)
-    log = capfd.readouterr().err
-    assert "[redacted]" in log and "synthetic-fixture-credential" not in log
+    assert expected_error in str(info.value)
+    assert "synthetic-fixture-credential" not in str(info.value)
     assert json.loads((outputs / "etude-result.json").read_text())["tally"]["failed"] == 1
     found = played(
         spec.definition, experiment="grouped", enter=spec.tournament.entrants, directory=tmp_path
     )
-    assert len(found.new) == len(found.retry) == len(found.failed) == 1
+    assert len(found.failed) == 1 and not found.retry and not found.new
+    db = statsdb("grouped", tmp_path)
+    try:
+        rows = db.sql("select state, retry, error from matches").fetchall()
+        assert len(rows) == 1
+        state, retry, error = rows[0]
+        assert state == "failed" and retry is False
+        assert expected_error in error
+        assert "synthetic-fixture-credential" not in error
+    finally:
+        db.close()
 
 
 async def catches_agent_error(match: Match, agents: Sequence[Forward]) -> Tables:
@@ -2201,6 +2272,197 @@ assert "imported mlx" in shared_report.imports.warning
     )
     assert result.returncode == 0, result.stderr
     assert result.stderr.count("game module mlx_game_fixture: imported mlx") == 1
+
+
+@pytest.mark.parametrize("gpu", [False, True])
+def test_import_hygiene_catches_wrapper_and_lazy_play_imports_on_both_transports(
+    tmp_path: Path, gpu: bool
+) -> None:
+    (tmp_path / "torch.py").write_text("# Synthetic torch fixture.\n")
+    (tmp_path / "mlx.py").write_text("# Synthetic mlx fixture.\n")
+    (tmp_path / "clean_loader_fixture.py").write_text(
+        "import mlx\nimport torch\n"
+        "from etude.checkpoints import CheckpointRef\n"
+        "from etude.eval.agents import ModelForward\n"
+        "def load(checkpoint: CheckpointRef) -> ModelForward:\n"
+        "    return lambda inputs: [1 for _ in inputs]\n"
+    )
+    (tmp_path / "heavy_wrapper_fixture.py").write_text(
+        "import torch\n"
+        "from etude.eval.records import Seat\n"
+        "from etude.records import Record\n"
+        "class HeavyWrapper(Record):\n"
+        "    over: Seat\n"
+    )
+    (tmp_path / "wrapper_game_fixture.py").write_text(
+        "from collections.abc import Mapping, Sequence\n"
+        "from etude.eval.agents import Forward\n"
+        "from etude.eval.records import Match\n"
+        "from etude.eval.result import Tables\n"
+        "def build(player: object, leaves: Mapping[str, Forward]) -> object:\n"
+        "    return player\n"
+        "async def play(match: Match, agents: Sequence[object]) -> Tables:\n"
+        "    return {'scores': [{'seat': 0, 'score': 1}]}\n"
+    )
+    (tmp_path / "lazy_mlx_game_fixture.py").write_text(
+        "from collections.abc import Sequence\n"
+        "from etude.eval.agents import Forward\n"
+        "from etude.eval.records import Match\n"
+        "from etude.eval.result import Tables\n"
+        "async def play(match: Match, agents: Sequence[Forward]) -> Tables:\n"
+        "    # Call forward first so direct mode has already imported mlx on the inference thread.\n"
+        "    [score] = await agents[0]([0])\n"
+        "    import mlx\n"
+        "    assert mlx is not None\n"
+        "    return {'scores': [{'seat': 0, 'score': int(str(score))}]}\n"
+    )
+    program = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import etude.eval.resources
+from etude.eval.game import GameReport
+from etude.eval.match import environment
+from etude.eval.records import RoundRobin, compose
+from etude.jobs import Agents, EvalJob, ExperimentState, evaluation_group, hold_group
+from tests.eval.arithmetic import checkpoint
+from clean_loader_fixture import load
+from heavy_wrapper_fixture import HeavyWrapper
+from wrapper_game_fixture import build as wrapper_build
+from wrapper_game_fixture import play as wrapper_play
+from lazy_mlx_game_fixture import play as lazy_play
+
+etude.eval.resources._has_gpu = lambda: sys.argv[2] == "True"
+
+# 1. Player wrapper module importing torch is caught during build_agents on both transports.
+wrap_root = Path(sys.argv[1]) / "wrap"
+wrap_job = EvalJob(
+    tournament=RoundRobin(name="wrap", environment=environment("w"), configs=({},), games=1),
+    enter=(compose(HeavyWrapper(over=checkpoint("one"))), checkpoint("two")),
+    play=wrapper_play,
+    agents=Agents(load=load, build=wrapper_build),
+    repo=None,
+    max_hours=0.1,
+)
+hold_group(evaluation_group(wrap_job.lower(ExperimentState(experiment="w"))), directory=wrap_root)
+[wrap_path] = list((wrap_root / "w/artifacts/agents").glob("game-*.json"))
+wrap_report = GameReport.model_validate_json(wrap_path.read_bytes())
+assert wrap_report.imports.heavy == ("torch",)
+assert wrap_report.imports.importer == "heavy_wrapper_fixture"
+assert wrap_report.imports.warning is not None
+
+# 2. Lazy import inside play() after the inference thread already loaded mlx is caught too.
+lazy_root = Path(sys.argv[1]) / "lazy"
+lazy_job = EvalJob(
+    tournament=RoundRobin(name="lazy", environment=environment("l"), configs=({},), games=1),
+    enter=(checkpoint("one"), checkpoint("two")),
+    play=lazy_play,
+    agents=Agents(load=load),
+    repo=None,
+    max_hours=0.1,
+)
+hold_group(evaluation_group(lazy_job.lower(ExperimentState(experiment="l"))), directory=lazy_root)
+[lazy_path] = list((lazy_root / "l/artifacts/agents").glob("game-*.json"))
+lazy_report = GameReport.model_validate_json(lazy_path.read_bytes())
+assert lazy_report.imports.heavy == ("mlx",)
+assert lazy_report.imports.importer == "lazy_mlx_game_fixture"
+assert lazy_report.imports.warning is not None
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(tmp_path), str(gpu)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("game module wrapper_game_fixture: imported torch") == 1
+    assert result.stderr.count("game module lazy_mlx_game_fixture: imported mlx") == 1
+
+
+async def scalar_vector_slots(
+    matches: Matches[VectorRules],
+) -> AsyncIterator[tuple[Match[VectorRules], Result]]:
+    while True:
+        taken = await matches.take(4)
+        if not taken:
+            return
+        forward = cast(Forward, taken[0][1][0])
+        outputs = await forward([match.config.turns for match, _ in taken])
+        for (match, _), score in zip(taken, outputs, strict=True):
+            yield match, Result(tables={"vector_scores": [{"seat": 0, "score": int(str(score))}]})
+
+
+def test_mixed_and_small_gpu_groups_match_exact_spawned_processes_and_threads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 16)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    # 1. Small play GPU (5 pending, max_batch=32, 16 cores): 1 process, 5 games, 15 agent threads.
+    small_root = tmp_path / "small"
+    agents = Agents(load=load_checkpoint, max_batch=32)
+    small_job = EvalJob(
+        tournament=RoundRobin(
+            name="small",
+            environment=environment("grouped"),
+            config={"lane": "small"},
+            games=5,
+        ),
+        enter=(checkpoint("left"), checkpoint("right")),
+        play=play,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    assert [r.played for r in hold_group(group(small_job), directory=small_root)] == [5]
+    small_err = capfd.readouterr().err
+    assert "1 processes, 5 games each; 15 inference threads" in small_err
+    small_reports = list((small_root / "grouped/artifacts/agents").glob("game-*.json"))
+    assert len(small_reports) == 1
+    small_threads = json.loads((small_root / "grouped/artifacts/agents/threads.json").read_text())
+    assert set(small_threads.values()) == {"15"}
+
+    # 2. Mixed GPU (play_many + play, max_batch=256, 16 cores): 2 processes, 14 agent threads.
+    mixed_root = tmp_path / "mixed"
+    mixed_agents = Agents(load=load_checkpoint, max_batch=256)
+    stream_job = EvalJob(
+        tournament=RoundRobin(
+            name="stream",
+            environment=environment("grouped"),
+            config=VectorRules(),
+            games=2,
+            base_seed=1,
+        ),
+        enter=(checkpoint("left"), checkpoint("right")),
+        play_many=scalar_vector_slots,
+        agents=mixed_agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    play_job = EvalJob(
+        tournament=RoundRobin(
+            name="ordinary",
+            environment=environment("grouped"),
+            config={"lane": "ordinary"},
+            games=3,
+            base_seed=2,
+        ),
+        enter=(checkpoint("left"), checkpoint("right")),
+        play=play,
+        agents=mixed_agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    assert [r.played for r in hold_group(group(stream_job, play_job), directory=mixed_root)] == [
+        2,
+        3,
+    ]
+    mixed_err = capfd.readouterr().err
+    assert "14 inference threads" in mixed_err
+    mixed_reports = list((mixed_root / "grouped/artifacts/agents").glob("game-*.json"))
+    assert len(mixed_reports) == 2
+    mixed_threads = json.loads((mixed_root / "grouped/artifacts/agents/threads.json").read_text())
+    assert set(mixed_threads.values()) == {"14"}
 
 
 async def invalid_stream(matches: Matches[Config]) -> AsyncIterator[tuple[Match, Tables]]:

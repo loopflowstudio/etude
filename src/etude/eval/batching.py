@@ -448,6 +448,36 @@ def _write_batches(report: TextIO | None, flushed: Sequence[Batch]) -> None:
     report.flush()
 
 
+def _lazy_loader(
+    load: Function | Callable[..., object], checkout: str | None
+) -> Callable[[CheckpointRef], object]:
+    """Resolve an authored `Function` loader inside `Forwards.answer` on first use.
+
+    Keeping module resolution inside `Forwards.answer` ensures broken `load`
+    modules fail permanently (`loading=True, retry=False`) with redacted errors
+    on both local and socket transports, while true agent-process startup
+    crashes still raise `RetryRequested`.
+    """
+    if not isinstance(load, Function):
+        return load
+    resolved: Callable[..., object] | None = None
+    failed: Exception | None = None
+
+    def load_checkpoint(checkpoint: CheckpointRef) -> object:
+        nonlocal resolved, failed
+        if failed is not None:
+            raise failed
+        if resolved is None:
+            try:
+                resolved = load.load(checkout)
+            except Exception as error:
+                failed = error
+                raise
+        return resolved(checkpoint)
+
+    return load_checkpoint
+
+
 def _inference_loop(
     inbox: queue.SimpleQueue[_LocalMessage],
     load: Function | Callable[..., object],
@@ -460,17 +490,8 @@ def _inference_loop(
     on_exit: Callable[[BaseException], None],
 ) -> None:
     """Dedicated inference thread body; owns `Forwards`, loader and all loaded models."""
-    resolved: Callable[..., object] | None = None if isinstance(load, Function) else load
-
-    def load_checkpoint(checkpoint: CheckpointRef) -> object:
-        nonlocal resolved
-        if resolved is None:
-            assert isinstance(load, Function)
-            resolved = load.load(checkout)
-        return resolved(checkpoint)
-
     batches: _Batches[_LocalReply] = _Batches(
-        load_checkpoint, max_batch, memory, encode=_encode_local, copy_outputs=True
+        _lazy_loader(load, checkout), max_batch, memory, encode=_encode_local, copy_outputs=True
     )
     bound: dict[str, CheckpointRef] = {}
     report: TextIO | None = None
@@ -774,7 +795,7 @@ def _run_agents(
     artifacts: str,
 ) -> None:
     batches: _Batches[memoryview] = _Batches(
-        load.load(checkout), max_batch, memory, encode=_encode_socket, copy_outputs=False
+        _lazy_loader(load, checkout), max_batch, memory, encode=_encode_socket, copy_outputs=False
     )
     peers: list[socket.socket] = []
     report = Path(artifacts, "batches.json").open("w")

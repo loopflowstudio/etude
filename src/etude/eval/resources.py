@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -123,56 +123,93 @@ def _has_gpu() -> bool:
 
 @dataclass(frozen=True)
 class Placement:
-    """Inference transport, game-process budget, inference threads and grouping."""
+    """Inference transport, game-process budget, thread budgets, concurrency and grouping."""
 
     bus: Literal["local", "socket"] | None
     processes: int
-    threads: int
+    game_threads: int
+    agent_threads: int
+    games_per_process: int
     grouped: bool = False
-
-    def games(self, max_batch: int) -> int:
-        """Concurrent `play` matches per game process."""
-        if self.processes <= 0:
-            return 0
-        return math.ceil(max_batch / self.processes) if self.bus is not None else 1
 
 
 def place(
-    pending: int,
+    play: Sequence[int] = (),
+    streaming: int = 0,
     *,
     agents: bool,
-    streaming: bool = False,
+    max_batch: int = 32,
     memory_gb: float | None = None,
 ) -> Placement:
-    """Choose inference transport, game processes, inference threads and grouping.
+    """Choose inference transport, exact game processes, thread budgets, concurrency and grouping.
 
-    An all-`play_many` group (`streaming=True`) runs sequentially in one game
-    process (`grouped=True`) on every host without probing GPU hardware: with a
-    loader it uses a direct inference thread with the host inference thread
-    budget (`max(1, cpus - 1)`); code-only runs use no bus. Any group with
-    `play` skips the GPU probe when code-only, uses the shared agent process on
+    `play` gives pending match counts per active `play` tournament; `streaming`
+    counts active `play_many` tournaments.
+
+    An all-`play_many` group runs sequentially in one game process
+    (`grouped=True`) on every host without probing GPU hardware: with a loader
+    it uses a direct inference thread with the host inference thread budget
+    (`max(1, cpus - 1)`); code-only runs use no bus. Any group with `play`
+    skips the GPU probe when code-only, uses the shared agent process on
     visible NVIDIA hardware, and otherwise runs direct inference with one
     model-library thread per game process.
     """
-    if pending <= 0:
-        return Placement(bus=None, processes=0, threads=0)
+    active_play = tuple(count for count in play if count > 0)
+    active_streaming = max(0, streaming)
+    if not active_play and active_streaming <= 0:
+        return Placement(
+            bus=None,
+            processes=0,
+            game_threads=1,
+            agent_threads=0,
+            games_per_process=0,
+            grouped=False,
+        )
     cpus = available_cpus()
-    if streaming:
-        if not agents:
-            return Placement(bus=None, processes=1, threads=0, grouped=True)
-        return Placement(bus="local", processes=1, threads=max(1, cpus - 1), grouped=True)
+    if not active_play:
+        return Placement(
+            bus="local" if agents else None,
+            processes=1,
+            game_threads=max(1, cpus - 1) if agents else 1,
+            agent_threads=0,
+            games_per_process=0,
+            grouped=True,
+        )
     if not agents:
-        memory_processes = max(1, memory_bytes() // GAME_BYTES)
-        return Placement(bus=None, processes=min(pending, cpus, memory_processes), threads=0)
+        cap = min(cpus, max(1, memory_bytes() // GAME_BYTES))
+        return Placement(
+            bus=None,
+            processes=min(cap, active_streaming + sum(active_play)),
+            game_threads=1,
+            agent_threads=0,
+            games_per_process=1,
+            grouped=False,
+        )
     gpu = _has_gpu()
     held = agent_bytes(memory_gb)
     memory_processes = max(1, (memory_bytes() - held) // GAME_BYTES)
+    cap = min(max(1, cpus - 1), memory_processes) if gpu else min(cpus, memory_processes)
+    play_cap = min(max(1, cap - active_streaming), sum(active_play))
+    games_per_process = min(math.ceil(max_batch / play_cap), max(active_play))
+    play_needed = sum(math.ceil(count / games_per_process) for count in active_play)
+    processes = min(cap, active_streaming + play_needed)
     if gpu:
-        cpu_processes = max(1, cpus - 1)
-        processes = min(pending, cpu_processes, memory_processes)
-        return Placement(bus="socket", processes=processes, threads=max(1, cpus - processes))
-    processes = min(pending, cpus, memory_processes)
-    return Placement(bus="local", processes=processes, threads=1)
+        return Placement(
+            bus="socket",
+            processes=processes,
+            game_threads=1,
+            agent_threads=max(1, cpus - processes),
+            games_per_process=games_per_process,
+            grouped=False,
+        )
+    return Placement(
+        bus="local",
+        processes=processes,
+        game_threads=1,
+        agent_threads=0,
+        games_per_process=games_per_process,
+        grouped=False,
+    )
 
 
 @dataclass(frozen=True)

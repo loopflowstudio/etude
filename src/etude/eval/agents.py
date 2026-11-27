@@ -368,7 +368,7 @@ def running_agents(
             checkout,
             definition.max_batch,
             agent_bytes(definition.memory_gb),
-            placement.threads,
+            placement.agent_threads,
             child,
             resources,
         ),
@@ -384,11 +384,14 @@ def running_agents(
             parent.recv()
         except EOFError as error:
             raise RetryRequested("agent process exited during startup") from error
-        games = placement.games(definition.max_batch)
         print(
             f"etude: agents: started for {', '.join(tournaments)}; "
-            + ("" if streaming else f"{placement.processes} processes, {games} games each; ")
-            + f"{placement.threads} inference threads",
+            + (
+                ""
+                if streaming
+                else f"{placement.processes} processes, {placement.games_per_process} games each; "
+            )
+            + f"{placement.agent_threads} inference threads",
             file=sys.stderr,
             flush=True,
         )

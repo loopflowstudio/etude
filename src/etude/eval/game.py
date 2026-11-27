@@ -15,6 +15,7 @@ import builtins
 import inspect
 import os
 import sys
+import threading
 import time
 import typing
 from collections.abc import (
@@ -23,10 +24,11 @@ from collections.abc import (
     Awaitable,
     Callable,
     Generator,
+    Iterator,
     Mapping,
     Sequence,
 )
-from contextlib import aclosing, suppress
+from contextlib import aclosing, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -220,8 +222,13 @@ class _PendingCall:
 class _PendingAnswer:
     """Awaitable returned by `_BoundForward.__call__` without creating an unawaited coroutine."""
 
-    def __init__(self, future: asyncio.Future[list[object]] | None) -> None:
+    def __init__(
+        self,
+        future: asyncio.Future[list[object]] | None,
+        on_awaited: Callable[[asyncio.Future[list[object]]], None] | None = None,
+    ) -> None:
         self._future = future
+        self._on_awaited = on_awaited
 
     async def _resolve(self) -> list[object]:
         if self._future is None:
@@ -235,6 +242,9 @@ class _PendingAnswer:
             if tracker is not None:
                 tracker.append(error)
             raise
+        finally:
+            if self._on_awaited is not None:
+                self._on_awaited(self._future)
 
     def __await__(self) -> Generator[object, None, list[object]]:
         return self._resolve().__await__()
@@ -256,7 +266,7 @@ class _BoundForward:
         if count < 1:
             raise ValueError("rows must be positive for non-empty inputs")
         future = self._owner.call(self._checkpoint, list(inputs), count)
-        return _PendingAnswer(future)
+        return _PendingAnswer(future, self._owner.release_future)
 
 
 class _Forwarder:
@@ -269,6 +279,8 @@ class _Forwarder:
         self._handles: dict[str, _BoundForward] = {}
         self._pending: dict[str, list[_PendingCall]] = {}
         self._flush_scheduled = False
+        self._closing = False
+        self._active_futures: set[asyncio.Future[list[object]]] = set()
         self._loading_failures: dict[str, CheckpointFailure] = {}
         self._reported_failures: set[str] = set()
 
@@ -279,6 +291,9 @@ class _Forwarder:
             handle = _BoundForward(self, checkpoint.key)
             self._handles[checkpoint.key] = handle
         return handle
+
+    def release_future(self, future: asyncio.Future[list[object]]) -> None:
+        self._active_futures.discard(future)
 
     def call(
         self, checkpoint: str, inputs: list[object], rows: int
@@ -292,6 +307,7 @@ class _Forwarder:
     ) -> asyncio.Future[list[object]]:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[list[object]] = loop.create_future()
+        self._active_futures.add(future)
         pending = _PendingCall(inputs, rows, future)
         try:
             (bus_future,) = self._bus.submit([ForwardCall(checkpoint, inputs, rows)])
@@ -306,6 +322,7 @@ class _Forwarder:
     ) -> asyncio.Future[list[object]]:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[list[object]] = loop.create_future()
+        self._active_futures.add(future)
         # Lock inputs immediately on the forward() call using the bus's shared
         # flight table so `play` matches `play_many` with zero unlock gap across
         # `_flush` handoff into `bus.submit`.
@@ -317,13 +334,20 @@ class _Forwarder:
         return future
 
     def clear_pending(self) -> None:
-        """Release any staged barrier locks if the process shuts down before `_flush` runs."""
+        """Release staged barrier locks and silence unawaited exceptions on bus shutdown."""
+        self._closing = True
         pending = self._pending
         self._pending = {}
         self._flush_scheduled = False
         for calls in pending.values():
             for call in calls:
                 self._bus.flight.unlock(call.locked)
+                self._active_futures.discard(call.future)
+        for future in list(self._active_futures):
+            if future.done():
+                if not future.cancelled():
+                    future.exception()
+                self._active_futures.discard(future)
 
     def _chunks(self, calls: list[_PendingCall]) -> list[list[_PendingCall]]:
         chunks: list[list[_PendingCall]] = []
@@ -359,6 +383,9 @@ class _Forwarder:
                 for call in chunk:
                     if not call.future.done():
                         call.future.set_exception(error)
+                        if self._closing:
+                            call.future.exception()
+                            self._active_futures.discard(call.future)
             return
         finally:
             for chunk, _ in grouped:
@@ -395,6 +422,9 @@ class _Forwarder:
             for call in chunk:
                 if not call.future.done():
                     call.future.set_exception(raised)
+                    if self._closing:
+                        call.future.exception()
+                        self._active_futures.discard(call.future)
             return
         outputs = bus_future.result()
         offset = 0
@@ -402,6 +432,7 @@ class _Forwarder:
             size = len(call.inputs)
             if not call.future.done():
                 call.future.set_result(outputs[offset : offset + size])
+            self._active_futures.discard(call.future)
             offset += size
 
     def drain_loading_failures(self) -> tuple[CheckpointFailure, ...]:
@@ -475,6 +506,88 @@ class _TakenMatch:
     started: float
 
 
+class _ImportTracker:
+    """Thread-filtered game import observer spanning module load, wrappers and play."""
+
+    def __init__(self, module_label: str) -> None:
+        self._module_label = module_label
+        self._game_thread = threading.current_thread()
+        self._before = frozenset(sys.modules)
+        self._game_modules: set[str] = set()
+        self._game_heavy: set[str] = set()
+        self._first_importer: str | None = None
+        self._paused = False
+        self._original = builtins.__import__
+        self._snapshot: Imports | None = None
+
+    def __enter__(self) -> _ImportTracker:
+        builtins.__import__ = self._importing
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        builtins.__import__ = self._original
+
+    @contextmanager
+    def paused(self) -> Iterator[None]:
+        """Exclude Etude's own lazy internal imports from game-side counts."""
+        previous = self._paused
+        self._paused = True
+        try:
+            yield
+        finally:
+            self._paused = previous
+
+    def capture_pre_bus(self) -> None:
+        """Record modules loaded on the game thread before starting the bus."""
+        self._game_modules.update(set(sys.modules) - self._before)
+        self._game_heavy.update(_HEAVY.intersection(sys.modules))
+
+    def _importing(
+        self,
+        name: str,
+        globals: Mapping[str, object] | None = None,
+        locals: Mapping[str, object] | None = None,
+        fromlist: Sequence[str] | None = (),
+        level: int = 0,
+    ) -> ModuleType:
+        if self._paused or threading.current_thread() is not self._game_thread:
+            return self._original(name, globals, locals, fromlist, level)
+        top = name.split(".", 1)[0] if level == 0 else ""
+        set_importer = top in _HEAVY and self._first_importer is None
+        if set_importer:
+            self._first_importer = str((globals or {}).get("__name__", "__main__"))
+        try:
+            module = self._original(name, globals, locals, fromlist, level)
+        except BaseException:
+            if set_importer:
+                self._first_importer = None
+            raise
+        if top in _HEAVY:
+            self._game_heavy.add(top)
+        if module.__name__ not in self._before:
+            self._game_modules.add(module.__name__)
+        if fromlist:
+            for item in fromlist:
+                sub = f"{module.__name__}.{item}"
+                if sub in sys.modules and sub not in self._before:
+                    self._game_modules.add(sub)
+        return module
+
+    def finish(self) -> Imports:
+        """Restore `builtins.__import__` and build the process-exit `Imports` report."""
+        if self._snapshot is None:
+            builtins.__import__ = self._original
+            self._snapshot = Imports(
+                pid=os.getpid(),
+                module=self._module_label,
+                count=len(self._game_modules),
+                total=len(sys.modules),
+                heavy=tuple(sorted(self._game_heavy)),
+                importer=self._first_importer,
+            )
+        return self._snapshot
+
+
 async def _serve_stream(
     pipe: Connection,
     streams: Sequence[Stream],
@@ -486,7 +599,7 @@ async def _serve_stream(
     memory: int | None,
     max_batch: int,
     artifacts: Path | None,
-    observe_imports: Callable[[], Imports],
+    imports: _ImportTracker,
 ) -> None:
     started = time.monotonic()
     loop = asyncio.get_running_loop()
@@ -505,13 +618,18 @@ async def _serve_stream(
         if bus is not None:
             active, bus = bus, None
             bus_report = await active.close()
+            # Let `fail_all` callbacks run so loading failures drain and unawaited
+            # futures settle before process exit.
+            await asyncio.sleep(0)
+        if forwarder is not None:
+            forwarder.clear_pending()
         return bus_report
 
     def make_report() -> GameReport:
         return GameReport(
             pid=os.getpid(),
             tournaments=tournaments,
-            imports=observe_imports(),
+            imports=imports.finish(),
             matches=played_count,
             wall_seconds=time.monotonic() - started,
             bus=bus_report,
@@ -547,14 +665,15 @@ async def _serve_stream(
                 loaded_streams.append(load_error)
             else:
                 loaded_streams.append((play_fn, kind))
-        # Snapshot game-side imports and restore `builtins.__import__` before
-        # starting the inference bus so direct-mode model imports on the
-        # inference thread are never attributed to the game module.
-        observe_imports()
+        # Capture pre-bus top-level imports, then keep the thread-filtered hook
+        # active through wrapper loading and play so direct-mode inference-thread
+        # imports are ignored while wrapper and lazy game imports stay visible.
+        imports.capture_pre_bus()
         if any(not isinstance(entry, Exception) for entry in loaded_streams):
             if load is not None:
-                # Process entry point: only direct-inference games import the local bus.
-                from etude.eval.batching import LocalForwardBus  # noqa: PLC0415
+                with imports.paused():
+                    # Process entry point: only direct-inference games import the local bus.
+                    from etude.eval.batching import LocalForwardBus  # noqa: PLC0415
 
                 allowance = agent_bytes(None) if memory is None else memory
                 bus = LocalForwardBus(
@@ -744,55 +863,22 @@ def run_game_process(
 ) -> None:
     """Spawn target for one game process; configures child environment before author imports."""
     resources.configure(threads)
-    before = frozenset(sys.modules)
-    first_importer: str | None = None
-    original = builtins.__import__
-
-    def importing(
-        name: str,
-        globals: Mapping[str, object] | None = None,
-        locals: Mapping[str, object] | None = None,
-        fromlist: Sequence[str] | None = (),
-        level: int = 0,
-    ) -> ModuleType:
-        nonlocal first_importer
-        if first_importer is None and name.split(".", 1)[0] in _HEAVY:
-            first_importer = str((globals or {}).get("__name__", "__main__"))
-        return original(name, globals, locals, fromlist, level)
-
-    builtins.__import__ = importing
     module_label = ", ".join(dict.fromkeys(spec.function.module for spec in streams))
-    snapshot: Imports | None = None
-
-    def observe_imports() -> Imports:
-        nonlocal snapshot
-        if snapshot is None:
-            builtins.__import__ = original
-            snapshot = Imports(
-                pid=os.getpid(),
-                module=module_label,
-                count=len(set(sys.modules) - before),
-                total=len(sys.modules),
-                heavy=tuple(sorted(_HEAVY.intersection(sys.modules))),
-                importer=first_importer,
-            )
-        return snapshot
-
     try:
-        asyncio.run(
-            _serve_stream(
-                pipe,
-                streams,
-                agents=agents,
-                checkout=checkout,
-                build=build,
-                load=load,
-                memory=memory,
-                max_batch=max_batch,
-                artifacts=resources.artifacts,
-                observe_imports=observe_imports,
+        with _ImportTracker(module_label) as imports:
+            asyncio.run(
+                _serve_stream(
+                    pipe,
+                    streams,
+                    agents=agents,
+                    checkout=checkout,
+                    build=build,
+                    load=load,
+                    memory=memory,
+                    max_batch=max_batch,
+                    artifacts=resources.artifacts,
+                    imports=imports,
+                )
             )
-        )
     finally:
-        builtins.__import__ = original
         pipe.close()

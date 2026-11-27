@@ -38,7 +38,10 @@ failure recovery requires.
   module that defines `load` (or imports the same stateful module) still shares
   Python module globals with it inside one interpreter. The in-flight read-only
   lock covers the `numpy.ndarray` object handed to `forward(...)`, not slices
-  taken earlier from the same buffer or native pointers.
+  taken earlier from the same buffer or native pointers. In `play`, call-time
+  locking covers `numpy.ndarray` objects immediately while mutable containers
+  (`dict`, `list`, `bytearray`) snapshot when the zero-delay barrier flushes
+  (versus on call in `play_many`).
 - A match must return rows to count as done. In `play`, caught `ForwardError`s
   still fail the match; in `play_many`, yield `(match, error)` for failed slots
   or let the error escape to fail held matches. Ordinary game failures need
