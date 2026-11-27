@@ -282,16 +282,16 @@ Etude sets the model-library thread environment before importing the checkpoint
 loading module. Direct game processes load through the same cache/eviction owner
 as shared inference and report failures to the parent even when play catches them. Loaders must honor that inference budget when configuring
 their library; each game process keeps one thread.
-With a visible CUDA GPU and `"cuda"` in `Agents.devices`, active games fill
-the declared batch. With native arm64 Apple Silicon and `"metal"` declared,
-they fill `cpus - 1`, with at least one game. Pending matches and remaining
-host memory bound active games. Each shared forward stays capped at
-`max_batch`. Devices default to `("cuda", "metal")`. An absent or undeclared
-accelerator plays direct. Plays without a loader or checkpoints and
-`devices=("cpu",)` keep direct capacity and skip the probe.
-`play_together` prints one startup line for checkpoint inference, with its mode,
-reason and sizing. Probe hardware without importing the loader. The loader
-selects its own device and owns GPU memory residency.
+`Agents.devices` declares loader capabilities in hardware terms (default
+`("cuda", "metal")`). Derive shared or direct inference from that declaration
+and detected hardware, without a separate topology switch. Probe without
+importing the loader or its framework. The loader owns placement and GPU memory.
+Shared CUDA fills the declared batch. Shared Metal on native arm64 macOS uses
+`max(1, cpus - 1)` games. Pending matches and remaining host memory bound both.
+Cap each shared forward at `max_batch`. An absent or undeclared accelerator plays
+direct. Skip the probe for CPU-only loaders and plays without a loader or
+checkpoints. For checkpoint inference, `play_together` logs mode, reason and
+sizing in one startup line.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any
