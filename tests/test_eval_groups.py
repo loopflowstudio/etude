@@ -2180,9 +2180,9 @@ async def code_only_vector_slots(
                 )
 
 
-@pytest.mark.parametrize("stop", [False, True], ids=["crash", "sigterm"])
+@pytest.mark.parametrize("interruption", ["exit", "stop", "teardown"])
 def test_interrupted_phase_keeps_completed_tournament_finished(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: str
 ) -> None:
     monkeypatch.setattr(eval_resources, "available_cpus", lambda: 2)
     ordinary = job("ordinary", None)
@@ -2201,16 +2201,32 @@ def test_interrupted_phase_keeps_completed_tournament_finished(
             max_hours=0.1,
         )
 
-    stream = streaming_job("stream", "stop" if stop else "exit", 3)
+    stop = interruption == "stop"
+    stream = streaming_job("stream", "" if interruption == "teardown" else interruption, 3)
     members = [stream, ordinary]
     if stop:
         # A retry from an earlier stream must not mask the group's stop.
         members.insert(0, streaming_job("earlier-retry", "retry", 1))
+    if interruption == "teardown":
+        # Every stream match is stored before the final report fails to write.
+        put = DirectoryStorage.put
+
+        def fail_stream_report(storage: DirectoryStorage, key: str, data: bytes) -> None:
+            if key.startswith("game-") and GameReport.model_validate_json(data).tournaments == (
+                "stream",
+            ):
+                raise OSError("fixture could not write the final report")
+            put(storage, key, data)
+
+        monkeypatch.setattr(DirectoryStorage, "put", fail_stream_report)
     selected = group(*members)
     address = "grouped/mixed"
     monkeypatch.setenv("ETUDE_RUN_ADDRESS", address)
-    error = Terminated if stop else RetryRequested
-    detail = "received SIGTERM" if stop else "game process exited"
+    error, detail = {
+        "exit": (RetryRequested, "game process exited"),
+        "stop": (Terminated, "received SIGTERM"),
+        "teardown": (RetryRequested, "game report .* could not be retained"),
+    }[interruption]
     with pytest.raises(error, match=detail):
         hold_group(selected, directory=tmp_path)
 
@@ -2230,7 +2246,10 @@ def test_interrupted_phase_keeps_completed_tournament_finished(
     interrupted = played(
         stream.tournament, experiment="grouped", enter=stream.enter, directory=tmp_path
     )
-    assert len(interrupted.new) == len(interrupted.failed) == len(interrupted.retry) == 3
+    if interruption == "teardown":
+        assert len(interrupted.delivered) == 3 and not interrupted.failed
+    else:
+        assert len(interrupted.new) == len(interrupted.failed) == len(interrupted.retry) == 3
 
 
 async def fail_first_stream_match(

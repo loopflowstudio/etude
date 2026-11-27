@@ -6,11 +6,12 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 
-from etude.errors import EtudeError, RetryRequested
+from etude.errors import EtudeError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Match, Rollup, Seating
 from etude.eval.result import Tables
+from etude.eval.run import Terminated
 from etude.eval.tournament import evaluating
 from etude.records import RunOutcome
 
@@ -47,12 +48,12 @@ def test_evaluation_stop_resume_and_refused_attempt_preserve_results(
     )
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     with (
-        pytest.raises(RetryRequested),
+        pytest.raises(Terminated),
         evaluating(tournament, experiment="pilot", run="arena", directory=tmp_path) as active,
     ):
         active.play(play_until_stopped)
     outcome = tmp_path / "pilot/arena/outcome.json"
-    assert RunOutcome.model_validate_json(outcome.read_bytes()).state == "failed"
+    assert RunOutcome.model_validate_json(outcome.read_bytes()).state == "stopped"
     partial = statsdb("pilot", tmp_path)
     assert partial.sql("select count(*) from scores").fetchone() == (1,)
     partial.close()

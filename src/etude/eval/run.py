@@ -907,6 +907,7 @@ def play_together(
             if stopping:
                 raise Terminated("evaluation stopped before its execution deadline")
 
+    active_phase: tuple[Playing, ...] = ()
     try:
         with _terminable():
             for streaming in (False, True):
@@ -914,6 +915,7 @@ def play_together(
                     each for each in plays if each.streaming == streaming and each.pending
                 )
                 if active_plays:
+                    active_phase = active_plays
                     run_phase(active_plays, streaming=streaming)
     except RetryRequested as error:
         affected = False
@@ -922,9 +924,13 @@ def play_together(
                 each.failure = error
                 affected = True
             each.pending.clear()
-        # A teardown error can have no match to attach to.
         if not affected:
-            raise
+            # A teardown error after a phase's last match belongs to that phase,
+            # so tournaments in earlier phases keep their own outcomes.
+            if not active_phase:
+                raise
+            for each in active_phase:
+                each.failure = error
     finally:
         for each in plays:
             each.run._report.failed += each.run.failed
