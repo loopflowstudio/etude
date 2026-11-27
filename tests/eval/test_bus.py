@@ -10,6 +10,7 @@ import threading
 import weakref
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from multiprocessing import Pipe
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -29,7 +30,7 @@ from etude.eval.agents import (
     running_agents,
 )
 from etude.eval.batching import LocalForwardBus, _run_agents
-from etude.eval.bus import BusReport, ForwardBus, ForwardCall
+from etude.eval.bus import BusReport, ForwardBus, ForwardCall, arrays, normalize_inputs
 from etude.eval.composition import build_agents
 from etude.eval.game import GameReport, Matches, _Forwarder
 from etude.eval.match import environment
@@ -137,6 +138,39 @@ class _CudaArrayOnly:
         "data": (0, False),
         "version": 3,
     }
+
+
+@dataclass(frozen=True)
+class _Action:
+    mask: np.ndarray
+    ids: np.ndarray
+
+
+@dataclass
+class _Prepared:
+    """Shaped like a game's prepared step: nested dataclasses, dicts and lists of arrays."""
+
+    observation: dict[str, np.ndarray]
+    action: _Action
+    rows: list[np.ndarray]
+    count: int
+    totals: dict[str, float] = field(init=False, default_factory=dict)
+
+
+def _prepared(rows: int) -> _Prepared:
+    return _Prepared(
+        observation={"cards": np.ones((rows, 64), dtype=np.float32)},
+        action=_Action(
+            mask=np.ones((rows, 8), dtype=np.bool_), ids=np.zeros((rows, 8), dtype=np.int64)
+        ),
+        rows=[np.full(16, float(row), dtype=np.float32) for row in range(2)],
+        count=rows,
+    )
+
+
+def _prepared_arrays(prepared: _Prepared) -> list[np.ndarray]:
+    action = prepared.action
+    return [prepared.observation["cards"], action.mask, action.ids, *prepared.rows]
 
 
 def _has_no_external_owner(array: np.ndarray) -> bool:
@@ -1054,6 +1088,114 @@ def test_local_bus_counts_dict_of_arrays_with_small_pickle_and_zero_array_copies
     assert report.copied_bytes == 0
     assert report.wire_bytes == 0
     assert report.handoff_seconds > 0.0
+
+
+def test_local_bus_passes_dataclass_arrays_by_pointer_and_locks_them_in_flight() -> None:
+    cp = checkpoint("prepared").checkpoint
+    entered = threading.Event()
+    release = threading.Event()
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        def forward(inputs: list[object]) -> list[object]:
+            entered.set()
+            release.wait(timeout=5.0)
+            prepared = cast(_Prepared, inputs[0])
+            leaves = _prepared_arrays(prepared)
+            assert not any(leaf.flags.writeable for leaf in leaves)
+            return [float(sum(leaf.sum() for leaf in leaves))]
+
+        return forward
+
+    async def run() -> BusReport:
+        bus = LocalForwardBus(load, max_batch=8, memory=1024 * 1024)
+        bus.bind(cp)
+        prepared = _prepared(128)
+        leaves = _prepared_arrays(prepared)
+        try:
+            [fut] = bus.submit([ForwardCall(cp.key, [prepared], rows=128)])
+            assert await asyncio.to_thread(entered.wait, 5.0)
+            for leaf in leaves:
+                with pytest.raises(ValueError, match="read-only"):
+                    leaf[0] = 0
+            release.set()
+            assert await fut == [float(128 * 64 + 128 * 8 + 16)]
+            assert all(leaf.flags.writeable for leaf in leaves)
+        finally:
+            release.set()
+            report = await bus.close()
+        return report
+
+    report = asyncio.run(run())
+    assert report.calls == report.answers == 1
+    assert report.arrays == 5
+    assert report.arrays_copied == 0
+    assert report.copied_bytes == 0
+    assert report.pickled == 1
+    # Field names and class references only; the arrays alone are 41 KB.
+    assert 0 < report.pickled_bytes < 1000
+    assert report.wire_bytes == 0
+
+
+@pytest.mark.parametrize("transport", ["local", "socket"])
+def test_dataclass_inputs_are_read_only_to_the_model_and_outputs_are_owned(
+    transport: _Transport,
+) -> None:
+    cp_write = checkpoint("dataclass_write").checkpoint
+    cp_echo = checkpoint("dataclass_echo").checkpoint
+    backing = np.zeros(8, dtype=np.bool_)
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        def forward(inputs: list[object]) -> list[object]:
+            prepared = cast(_Prepared, inputs[0])
+            if ref.key == cp_write.key:
+                np.add(prepared.action.ids, 1, out=prepared.action.ids)
+            backing[:] = True
+            return [_Action(mask=backing, ids=prepared.action.ids)]
+
+        return forward
+
+    async def run() -> None:
+        async with _open_bus(transport, load) as bus:
+            bus.bind(cp_write)
+            bus.bind(cp_echo)
+            prepared = _prepared(4)
+            [written] = bus.submit([ForwardCall(cp_write.key, [prepared], 4)])
+            with pytest.raises(ForwardError, match="read-only"):
+                await written
+            assert not prepared.action.ids.any()
+            assert prepared.action.ids.flags.writeable
+
+            [echoed] = bus.submit([ForwardCall(cp_echo.key, [prepared], 4)])
+            [answer] = await echoed
+            assert isinstance(answer, _Action)
+            backing[:] = False
+            assert answer.mask.all() and answer.mask.flags.writeable
+            assert not np.shares_memory(answer.mask, backing)
+            assert not np.shares_memory(answer.ids, prepared.action.ids)
+            answer.ids[0, 0] = 7
+            assert prepared.action.ids[0, 0] == 0
+
+    asyncio.run(run())
+
+
+def test_dataclass_buffer_leaves_normalize_into_a_copy_and_cycles_terminate() -> None:
+    @dataclass
+    class Node:
+        data: object
+        parent: Node | None = None
+
+    source = np.arange(4, dtype=np.float32)
+    root = Node(data=np.arange(2, dtype=np.float32))
+    root.parent = root
+    child = Node(data=_LazyBuffer(source), parent=root)
+
+    normalized = normalize_inputs([child, root])
+    copied, kept = cast(list[Node], normalized.values)
+    assert copied is not child and kept is root
+    assert isinstance(copied.data, np.ndarray) and np.array_equal(copied.data, source)
+    assert copied.parent is root
+    assert normalized.copied_bytes == source.nbytes
+    assert len(list(arrays(normalized.values))) == 2
 
 
 def test_local_bus_counts_fortran_contiguous_consistently_at_top_level_and_nested() -> None:

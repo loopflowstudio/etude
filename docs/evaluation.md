@@ -310,8 +310,8 @@ the end of the event-loop turn.
   Etude imports no model library.
 - **Zero-copy inputs on direct inference.** A top-level C-contiguous non-object
   `numpy.ndarray` passes to the inference thread by pointer with no copy and no
-  pickle; nested C-contiguous NumPy leaves inside containers also move without
-  copying their payload bytes. Non-C-contiguous arrays, non-NumPy array leaves,
+  pickle; nested C-contiguous NumPy leaves inside lists, tuples, dicts and
+  dataclass instances also move without copying their payload bytes. Non-C-contiguous arrays, non-NumPy array leaves,
   mutable `bytearray`s and plain Python containers are copied; unpicklable
   inputs fail that call with `ForwardError`.
 - **Read-only in flight, no aliasing.** In both `play` and `play_many`, a

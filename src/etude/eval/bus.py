@@ -6,7 +6,7 @@ per call with its outputs, or with `ForwardError`. Two transports implement it:
 process) and `SocketForwardBus` (`etude.eval.agents`, the shared agent process).
 
 Both transports normalize buffer and CPU DLPack leaves on the producing
-thread. NumPy inputs can travel by pointer. `Flight` holds them read-only
+thread. Leaves are found inside lists, tuples, dicts and dataclass instances. NumPy inputs can travel by pointer. `Flight` holds them read-only
 through the reply and `freeze` protects the model's inputs. `_FlightBook`
 owns request IDs, lock rollback and the transfer counts in `BusReport`.
 Games exchanging plain values can run without importing NumPy.
@@ -15,11 +15,12 @@ Games exchanging plain values can run without importing NumPy.
 from __future__ import annotations
 
 import asyncio
+import copy
 import importlib
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from types import ModuleType
 from typing import TYPE_CHECKING, Literal, Protocol
 
@@ -143,18 +144,22 @@ def _as_array(
     return owned
 
 
-def _normalize(value: object, copy_arrays: bool, copied: list[ndarray] | None) -> object:
+def _normalize(
+    value: object, copy_arrays: bool, copied: list[ndarray] | None, active: set[int]
+) -> object:
     if type(value) in _PLAIN:
         return value
     if type(value) is list:
-        return [_normalize(item, copy_arrays, copied) for item in value]
+        return [_normalize(item, copy_arrays, copied, active) for item in value]
     if type(value) is tuple:
-        return tuple(_normalize(item, copy_arrays, copied) for item in value)
+        return tuple(_normalize(item, copy_arrays, copied, active) for item in value)
     if type(value) is dict:
-        return {key: _normalize(item, copy_arrays, copied) for key, item in value.items()}
+        return {key: _normalize(item, copy_arrays, copied, active) for key, item in value.items()}
     np = _numpy()
     if np is not None and isinstance(value, np.ndarray):
         return np.array(value, copy=True, order="C") if copy_arrays else value
+    if is_dataclass(value) and not isinstance(value, type):
+        return _normalize_dataclass(value, copy_arrays, copied, active)
     array = _as_array(value, "output" if copied is None else "input")
     if array is None:
         return value
@@ -163,10 +168,39 @@ def _normalize(value: object, copy_arrays: bool, copied: list[ndarray] | None) -
     return array
 
 
+def _normalize_dataclass(
+    value: object, copy_arrays: bool, copied: list[ndarray] | None, active: set[int]
+) -> object:
+    """The instance itself when no leaf changed, else a shallow copy with the changed fields.
+
+    Copying rather than calling the constructor keeps frozen, slotted and
+    `init=False` fields and skips `__post_init__`. A cycle back to an instance
+    being normalized keeps the original reference.
+    """
+    if id(value) in active:
+        return value
+    active.add(id(value))
+    try:
+        changed: dict[str, object] = {}
+        for each in fields(value):  # type: ignore[arg-type]  # is_dataclass checked an instance.
+            item = getattr(value, each.name)
+            normalized = _normalize(item, copy_arrays, copied, active)
+            if normalized is not item:
+                changed[each.name] = normalized
+    finally:
+        active.discard(id(value))
+    if not changed:
+        return value
+    replaced = copy.copy(value)
+    for name, item in changed.items():
+        object.__setattr__(replaced, name, item)
+    return replaced
+
+
 def normalize_inputs(values: list[object]) -> Normalized:
     """Convert non-NumPy inputs on the game thread and account for their copies."""
     copied: list[ndarray] = []
-    normalized = [_normalize(item, copy_arrays=False, copied=copied) for item in values]
+    normalized = [_normalize(item, False, copied, set()) for item in values]
     return Normalized(
         values=normalized,
         copied_bytes=sum(array.nbytes for array in copied),
@@ -176,23 +210,32 @@ def normalize_inputs(values: list[object]) -> Normalized:
 
 def normalize_outputs(values: list[object], *, copy_arrays: bool = False) -> list[object]:
     """Materialize model outputs on the producing thread, copying ndarrays for local delivery."""
-    return [_normalize(item, copy_arrays=copy_arrays, copied=None) for item in values]
+    return [_normalize(item, copy_arrays, None, set()) for item in values]
 
 
 def arrays(value: object) -> Iterator[ndarray]:
-    """Every ndarray leaf of a normalized value."""
+    """Every ndarray leaf of a normalized value, visiting each container or dataclass once."""
     np = _numpy()
     if np is None:
         return
     pending = [value]
+    visited: set[int] = set()
     while pending:
         item = pending.pop()
         if isinstance(item, np.ndarray):
             yield item
-        elif type(item) in (list, tuple):
+            continue
+        if type(item) in _PLAIN or id(item) in visited:
+            continue
+        if type(item) in (list, tuple):
+            visited.add(id(item))
             pending.extend(item)  # type: ignore[arg-type]
         elif type(item) is dict:
+            visited.add(id(item))
             pending.extend(item.values())
+        elif is_dataclass(item) and not isinstance(item, type):
+            visited.add(id(item))
+            pending.extend(getattr(item, each.name) for each in fields(item))
 
 
 def freeze(inputs: list[object]) -> None:
