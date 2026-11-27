@@ -15,7 +15,7 @@ import runpy
 import shlex
 import sys
 import tomllib
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -431,7 +431,6 @@ class AgentLoader(Record):
     load: Function | None = None
     build: Function | None = None
     max_batch: int = Field(default=32, ge=1)
-    max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
     memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 
@@ -442,7 +441,6 @@ class Agents(BaseModel):
     load: Callable[..., object] | None = None
     build: Callable[..., object] | None = None
     max_batch: int = Field(default=32, ge=1)
-    max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
     memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
     @model_validator(mode="after")
@@ -458,7 +456,6 @@ class Agents(BaseModel):
             load=None if self.load is None else _function(self.load, repo),
             build=None if self.build is None else _function(self.build, repo),
             max_batch=self.max_batch,
-            max_delay_seconds=self.max_delay_seconds,
             memory_gb=self.memory_gb,
         )
 
@@ -483,6 +480,12 @@ class Evaluation(Record):
     def _released(cls, value: object) -> object:
         if not isinstance(value, dict):
             return value
+        agents = value.get("agents")
+        if isinstance(agents, dict) and "max_delay_seconds" in agents:
+            value = {
+                **value,
+                "agents": {k: v for k, v in agents.items() if k != "max_delay_seconds"},
+            }
         definition = value.get("tournament")
         if (
             isinstance(definition, dict)
@@ -650,7 +653,7 @@ class EvalJob(Job):
     """Declare matches through a generator, with their play, loading and machine needs."""
 
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
-    play: Callable[..., Tables | Result] = Field(exclude=True)
+    play: Callable[..., Awaitable[Tables | Result]] = Field(exclude=True)
     tournament: Benchmark | RoundRobin = Field(exclude=True)
     checkpoint: CheckpointRecord | Input | None = Field(default=None, exclude=True)
     checkpoints: Sequence[CheckpointRecord] = Field(default=(), exclude=True)
@@ -943,7 +946,8 @@ def hold_group(
                     agents=agent_process.address if agent_process else None,
                     build=spec.agents.build,
                     load=spec.agents.load if needs_loading and agent_process is None else None,
-                    memory=agent_bytes(spec.agents.memory_gb) // max(1, cpus.games),
+                    memory=agent_bytes(spec.agents.memory_gb) // max(1, cpus.processes),
+                    max_batch=spec.agents.max_batch,
                 )
                 for spec, active, _ in opened
             ]

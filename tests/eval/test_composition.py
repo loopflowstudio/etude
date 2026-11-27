@@ -1,14 +1,15 @@
 """Player trees share checkpoint loading while retaining independent results."""
 
 import json
-from multiprocessing import get_context
+import socket
+from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 
 import pytest
 
 from etude.checkpoints import CheckpointRef, PolicyKey
 from etude.errors import EtudeError, LauncherError, RetryRequested
-from etude.eval.agents import Answer, Request
+from etude.eval.agents import Answer, CheckpointRequest, recv_frame
 from etude.eval.batching import _Batches
 from etude.eval.composition import _restore
 from etude.eval.query import statsdb
@@ -178,18 +179,18 @@ def test_same_named_author_types_have_distinct_labels_and_keys() -> None:
 
 def test_distinct_players_share_a_checkpoint_batch() -> None:
     small = checkpoint("small")
-    shifted = compose(Shift(over=small))
-    parent, child = get_context("spawn").Pipe()
-    batches = _Batches(echo, 2, 1, 1024)
+    parent, child = socket.socketpair()
+    batches = _Batches(echo, 2, 1024)
     try:
-        for player, name in ((small, "bare"), (shifted, "composed")):
-            batches.add(child, Request(small.checkpoint, [name], "ladder", name, player.key), 0)
-        observations = batches.flush(0)
-        assert parent.recv() == Answer(["bare"])
-        assert parent.recv() == Answer(["composed"])
+        for req_id, name in ((1, "bare"), (2, "composed")):
+            batches.add(child, CheckpointRequest(req_id, small.checkpoint, [name], 1))
+        observations = batches.flush()
+        assert ForkingPickler.loads(recv_frame(parent)) == Answer(1, "small", ["bare"])
+        assert ForkingPickler.loads(recv_frame(parent)) == Answer(2, "small", ["composed"])
         assert batches.loads == batches.batches == 1
         assert observations[0].checkpoint == "small"
-        assert {row.player for row in observations[0].inputs} == {small.key, shifted.key}
+        assert observations[0].rows == 2
+        assert observations[0].requests == 2
     finally:
         parent.close()
         child.close()
@@ -214,11 +215,7 @@ def test_group_builds_nested_players_and_loads_the_shared_leaf_once(
     assert capfd.readouterr().err.count("agents: loaded") == 1
     batches = json.loads((tmp_path / "grouped/artifacts/agents/batches.json").read_text())
     assert {b["checkpoint"] for b in batches} == {"small"}
-    assert {r["player"] for b in batches for r in b["inputs"]} == {
-        small.key,
-        shifted.key,
-        deeper.key,
-    }
+    assert sum(b["rows"] for b in batches) == 12
     db = statsdb("grouped", tmp_path)
     try:
         assert {row[0] for row in db.sql("select name from players").fetchall()} == {

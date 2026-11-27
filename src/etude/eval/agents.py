@@ -1,30 +1,30 @@
 """Direct game-to-agent transport and one process owning loaded checkpoints.
 
-Games send picklable inputs over a private Unix socket. The agent process groups
-requests by checkpoint, using the common forward cache, and retains batch reports.
-This module's game-side imports are standard library only.
+Games send batched requests over a private Unix socket. The agent process merges
+ready requests by checkpoint up to `max_batch` rows without a timer, using the
+common forward cache, and retains batch reports. This module's game-side imports
+are standard library only.
 """
 
 from __future__ import annotations
 
+import asyncio
 import multiprocessing
 import socket
+import struct
 import sys
-import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
-from concurrent.futures import Future
-from contextlib import contextmanager
-from dataclasses import dataclass, field
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from multiprocessing.connection import Connection, wait
 from multiprocessing.reduction import ForkingPickler
-from queue import SimpleQueue
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from etude.errors import RetryRequested, explain
 from etude.eval.resources import Cpus, Resources, agent_bytes, seconds_left
 
-__all__ = ("Forward",)
+__all__ = ("Forward", "ModelForward", "ForwardError")
 
 
 if TYPE_CHECKING:
@@ -33,134 +33,233 @@ if TYPE_CHECKING:
     from etude.jobs import AgentLoader
 
 
-type Forward = Callable[[list[object]], list[object]]
+type ModelForward = Callable[[list[object]], list[object]]
+
+
+class Forward(Protocol):
+    """Awaitable game-side handle for one checkpoint's batched forward."""
+
+    def __call__(
+        self, inputs: list[object], *, rows: int | None = None
+    ) -> Awaitable[list[object]]: ...
+
+
+def _unpickle_forward_error(
+    checkpoint: str, message: str, retry: bool, loading: bool
+) -> ForwardError:
+    return ForwardError(checkpoint, message, retry=retry, loading=loading)
+
+
+class ForwardError(RuntimeError):
+    """A checkpoint load or forward call failed."""
+
+    def __init__(
+        self,
+        checkpoint: str,
+        message: str,
+        *,
+        retry: bool = False,
+        loading: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.checkpoint = checkpoint
+        self.retry = retry
+        self.loading = loading
+
+    def __reduce__(
+        self,
+    ) -> tuple[Callable[[str, str, bool, bool], ForwardError], tuple[str, str, bool, bool]]:
+        return _unpickle_forward_error, (self.checkpoint, str(self), self.retry, self.loading)
 
 
 @dataclass(frozen=True)
-class Request:
+class CheckpointRequest:
+    id: int
     checkpoint: CheckpointRef
     inputs: list[object]
-    tournament: str
-    match: str
-    player: str
+    rows: int
+
+
+@dataclass(frozen=True)
+class BatchRequest:
+    requests: tuple[CheckpointRequest, ...]
 
 
 @dataclass(frozen=True)
 class Answer:
+    id: int
+    checkpoint: str
     outputs: list[object]
     error: str | None = None
     retry: bool = False
+    loading: bool = False
 
     def result(self) -> list[object]:
         if self.error is not None:
-            if self.retry:
-                raise RetryRequested(self.error)
-            raise RuntimeError(self.error)
+            raise ForwardError(
+                self.checkpoint,
+                self.error,
+                retry=self.retry,
+                loading=self.loading,
+            )
         return self.outputs
 
 
-@dataclass(frozen=True)
-class AgentFailure:
-    checkpoint: str
-    tournament: str
-    match: str
-    error: str
-    retry: bool
-    loading: bool = False
+_HEADER = struct.Struct("!Q")
 
 
-LATENCY_BUCKETS = 64
+def send_frame(sock: socket.socket, payload: bytes | memoryview) -> None:
+    """Write one length-prefixed payload to a blocking stream socket."""
+    sock.sendall(_HEADER.pack(len(payload)))
+    sock.sendall(payload)
 
 
-class AgentConnection(Connection):
-    """One game's direct channel; counters exclude the four-byte framing header.
+def _recv_exact(sock: socket.socket, size: int) -> bytes:
+    buf = bytearray(size)
+    view = memoryview(buf)
+    offset = 0
+    while offset < size:
+        read = sock.recv_into(view[offset:])
+        if read == 0:
+            raise EOFError("peer closed connection")
+        offset += read
+    return bytes(buf)
 
-    Latencies use 64 power-of-two microsecond buckets, bounded regardless of
-    game length. Each bucket's upper bound is used for reported percentiles.
-    """
 
-    def __init__(self, handle: int) -> None:
-        super().__init__(handle)
+def recv_frame(sock: socket.socket) -> bytes:
+    """Read one length-prefixed payload from a blocking stream socket."""
+    (size,) = _HEADER.unpack(_recv_exact(sock, _HEADER.size))
+    return _recv_exact(sock, size)
+
+
+class _FrameProtocol(asyncio.Protocol):
+    def __init__(self, on_frame: Callable[[bytes], None], on_eof: Callable[[], None]) -> None:
+        self._on_frame = on_frame
+        self._on_eof = on_eof
+        self._buffer = bytearray()
+        self._expected: int | None = None
+
+    def data_received(self, data: bytes) -> None:
+        self._buffer.extend(data)
+        while True:
+            if self._expected is None:
+                if len(self._buffer) < _HEADER.size:
+                    return
+                (self._expected,) = _HEADER.unpack(self._buffer[: _HEADER.size])
+                del self._buffer[: _HEADER.size]
+            if len(self._buffer) < self._expected:
+                return
+            payload = bytes(self._buffer[: self._expected])
+            del self._buffer[: self._expected]
+            self._expected = None
+            self._on_frame(payload)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        self._on_eof()
+
+
+class AgentClient:
+    """Async Unix-socket channel from one game process to the shared agent process."""
+
+    def __init__(self, transport: asyncio.Transport) -> None:
+        self._transport = transport
+        self._next_id = 0
+        self._in_flight: dict[int, tuple[asyncio.Future[Answer], float]] = {}
+        self._closed_error: BaseException | None = None
         self.requests = 0
         self.answers = 0
         self.request_bytes = 0
         self.answer_bytes = 0
         self.round_trip_seconds = 0.0
         self.transport_seconds = 0.0
-        self.latencies = [0] * LATENCY_BUCKETS
 
-    def send(self, obj: object) -> None:
-        started = time.monotonic()
+    @classmethod
+    async def connect(cls, address: str) -> AgentClient:
+        loop = asyncio.get_running_loop()
+        client: AgentClient | None = None
+
+        def on_frame(payload: bytes) -> None:
+            assert client is not None
+            client._receive(payload)
+
+        def on_eof() -> None:
+            if client is not None:
+                client._fail_all(RetryRequested("agent process exited before answering"))
+
         try:
-            payload = ForkingPickler.dumps(obj)
-            self.send_bytes(payload)
-            self.requests += 1
-            self.request_bytes += len(payload)
-        finally:
-            self.transport_seconds += time.monotonic() - started
-
-    def recv(self) -> object:
-        started = time.monotonic()
-        try:
-            payload = self.recv_bytes()
-            self.answers += 1
-            self.answer_bytes += len(payload)
-            return ForkingPickler.loads(payload)
-        finally:
-            self.transport_seconds += time.monotonic() - started
-
-    def observe(self, seconds: float) -> None:
-        self.round_trip_seconds += seconds
-        bucket = min(LATENCY_BUCKETS - 1, max(0, int(seconds * 1_000_000).bit_length()))
-        self.latencies[bucket] += 1
-
-
-@dataclass(frozen=True)
-class _RemoteForward:
-    connection: AgentConnection
-    checkpoint: CheckpointRef
-    tournament: str
-    match: str
-    player: str
-
-    def __call__(self, inputs: list[object]) -> list[object]:
-        if not inputs:
-            return []
-        started = time.monotonic()
-        try:
-            self.connection.send(
-                Request(self.checkpoint, list(inputs), self.tournament, self.match, self.player)
+            transport, _ = await asyncio.wait_for(
+                loop.create_unix_connection(lambda: _FrameProtocol(on_frame, on_eof), address),
+                timeout=seconds_left(),
             )
-            if not self.connection.poll(seconds_left()):
-                raise RetryRequested("agent response exceeded the evaluation deadline")
-            answer = cast(Answer, self.connection.recv())
-        except (EOFError, OSError) as error:
-            raise RetryRequested("agent process exited before answering") from error
-        finally:
-            self.connection.observe(time.monotonic() - started)
-        return answer.result()
-
-
-@contextmanager
-def connect_agents(address: str) -> Iterator[AgentConnection]:
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as peer:
-        peer.settimeout(seconds_left())
-        try:
-            peer.connect(address)
+        except TimeoutError as error:
+            raise RetryRequested("agent connection exceeded the evaluation deadline") from error
         except OSError as error:
             raise RetryRequested("agent process is unavailable") from error
-        peer.settimeout(None)
-        with AgentConnection(peer.detach()) as connection:
-            yield connection
+        client = cls(transport)
+        return client
+
+    def send_batch(
+        self, calls: Sequence[tuple[CheckpointRef, list[object], int]]
+    ) -> list[asyncio.Future[Answer]]:
+        if self._closed_error is not None:
+            raise self._closed_error
+        loop = asyncio.get_running_loop()
+        now = time.monotonic()
+        items: list[CheckpointRequest] = []
+        futures: list[asyncio.Future[Answer]] = []
+        for checkpoint, inputs, rows in calls:
+            self._next_id += 1
+            request_id = self._next_id
+            future: asyncio.Future[Answer] = loop.create_future()
+            self._in_flight[request_id] = (future, now)
+            items.append(CheckpointRequest(request_id, checkpoint, inputs, rows))
+            futures.append(future)
+        started = time.monotonic()
+        try:
+            payload = ForkingPickler.dumps(BatchRequest(tuple(items)))
+            self._transport.write(_HEADER.pack(len(payload)))
+            self._transport.write(payload)
+            self.requests += 1
+            self.request_bytes += len(payload)
+        except OSError as error:
+            failure = RetryRequested("agent process exited before answering")
+            self._fail_all(failure)
+            raise failure from error
+        finally:
+            self.transport_seconds += time.monotonic() - started
+        return futures
+
+    def _receive(self, payload: bytes) -> None:
+        started = time.monotonic()
+        answer = cast(Answer, ForkingPickler.loads(payload))
+        now = time.monotonic()
+        self.answers += 1
+        self.answer_bytes += len(payload)
+        self.transport_seconds += now - started
+        entry = self._in_flight.pop(answer.id, None)
+        if entry is not None:
+            future, sent = entry
+            self.round_trip_seconds += now - sent
+            if not future.done():
+                future.set_result(answer)
+
+    def _fail_all(self, error: BaseException) -> None:
+        if self._closed_error is None:
+            self._closed_error = error
+        for future, _ in self._in_flight.values():
+            if not future.done():
+                future.set_exception(error)
+        self._in_flight.clear()
+
+    def close(self) -> None:
+        with suppress(OSError):
+            self._transport.close()
 
 
 @dataclass(frozen=True)
 class AgentProcess:
     address: str
     process: multiprocessing.context.SpawnProcess
-    exited: Future[None]
-    failures: dict[tuple[str, str], AgentFailure] = field(default_factory=dict)
-    checkpoint_failures: SimpleQueue[AgentFailure] = field(default_factory=SimpleQueue)
 
     def check(self) -> None:
         if self.process.exitcode is not None:
@@ -172,7 +271,6 @@ def _run(
     load: Function,
     checkout: str | None,
     max_batch: int,
-    max_delay: float,
     memory: int,
     threads: int,
     control: Connection,
@@ -188,7 +286,6 @@ def _run(
             load,
             checkout,
             max_batch,
-            max_delay,
             memory,
             control,
             str(resources.artifacts),
@@ -218,7 +315,6 @@ def running_agents(
             definition.load,
             checkout,
             definition.max_batch,
-            definition.max_delay_seconds,
             agent_bytes(definition.memory_gb),
             cpus.threads,
             child,
@@ -227,29 +323,7 @@ def running_agents(
     )
     process.start()
     child.close()
-    agent = AgentProcess(address=address, process=process, exited=Future())
-    sentinel = process.sentinel
-
-    def observe_exit() -> None:
-        try:
-            while True:
-                ready = wait([parent, sentinel])
-                if parent in ready:
-                    for failure in cast(list[AgentFailure], parent.recv()):
-                        if failure.loading:
-                            agent.checkpoint_failures.put(failure)
-                        else:
-                            agent.failures.setdefault((failure.tournament, failure.match), failure)
-                    # Register failures before a game can catch its exception and return.
-                    parent.send(None)
-                if sentinel in ready:
-                    break
-        except (EOFError, OSError):
-            wait([sentinel])
-        finally:
-            agent.exited.set_result(None)
-
-    observer = threading.Thread(target=observe_exit, name="etude-agents")
+    agent = AgentProcess(address=address, process=process)
     try:
         ready = wait([parent, process.sentinel], timeout=seconds_left())
         if parent not in ready:
@@ -258,9 +332,9 @@ def running_agents(
             parent.recv()
         except EOFError as error:
             raise RetryRequested("agent process exited during startup") from error
-        observer.start()
         print(
-            f"etude: agents: started for {', '.join(tournaments)}; {cpus.games} games at a time; {cpus.threads} inference threads",
+            f"etude: agents: started for {', '.join(tournaments)}; "
+            f"{cpus.processes} processes, {cpus.games} games each; {cpus.threads} inference threads",
             file=sys.stderr,
             flush=True,
         )
@@ -278,8 +352,6 @@ def running_agents(
         if process.is_alive():
             process.terminate()
             process.join()
-        if observer.ident is not None:
-            observer.join()
         parent.close()
         exitcode = process.exitcode
         process.close()
