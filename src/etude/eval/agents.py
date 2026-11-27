@@ -1,9 +1,9 @@
-"""Direct game-to-agent transport and one process owning loaded checkpoints.
+"""Shared game-to-agent transport and one process owning loaded checkpoints.
 
 Games send batched requests over a private Unix socket. The agent process merges
 ready requests by checkpoint up to `max_batch` rows without a timer, using the
-common forward cache, and retains batch reports. This module's game-side imports
-are standard library only.
+common forward cache, and retains batch reports. Game-side imports stay free of
+NumPy (until an array is first seen), model libraries and batching code.
 """
 
 from __future__ import annotations

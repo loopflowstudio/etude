@@ -291,9 +291,9 @@ with evaluating(
 ## Forward bus
 
 `etude.eval.bus` defines the single transport boundary between game code and
-loaded checkpoints (`ForwardBus` and `ForwardCall`). It imports standard
-library modules only; NumPy is imported when an array is first seen, and Etude
-never imports a model library.
+loaded checkpoints (`ForwardBus` and `ForwardCall`). It imports no
+batching or loader code; NumPy is imported when an array is first seen, and
+Etude never imports a model library.
 
 <!-- implementation-reference -->
 ```python
