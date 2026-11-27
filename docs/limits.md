@@ -25,11 +25,12 @@ failure recovery requires.
   must be importable top-level definitions. Games run in spawned processes.
   Multiple `async def play` matches share one `asyncio` event loop per game
   process; blocking the loop without awaiting stalls the other games in that
-  process until the run deadline. CPU games use one model-library thread per
-  process; GPU inference batches through a shared process. Your loader must
-  honor the thread environment and choose its device. A batch allowance does not
-  guarantee GPU memory residency. If a game process crashes, every match it
-  holds fails with retry while already-sealed matches survive.
+  process until the run deadline. Shared inference uses a declared, detected
+  accelerator (`cuda` or `metal` on native arm64 macOS). A CPU-only loader
+  can declare `devices=("cpu",)` to skip the probe. Direct game processes use
+  one model-library thread each. Your loader must honor the thread environment
+  and owns device selection and GPU memory residency. A game-process crash
+  makes held matches retryable while already-sealed matches survive.
 - A match must return rows to count as done. In `play`, caught `ForwardError`s
   still fail the match; in `play_many`, yield `(match, error)` for failed slots
   or let the error escape to fail held matches. Ordinary game failures need

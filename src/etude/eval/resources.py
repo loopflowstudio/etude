@@ -1,13 +1,15 @@
 """Process environment for game and agent processes.
 
-`divide_cpus` returns game and inference-thread budgets for startup and dispatch.
-`resources` owns temporary fast scratch; `Resources.configure` sets child-only
-environment before author imports, leaving the calling process untouched.
-Observations are kept in the run's durable artifact folder by the group owner.
+`plan_execution` chooses shared or direct inference and returns game, thread
+and per-owner checkpoint-byte budgets for startup and dispatch. `resources`
+owns temporary fast scratch; `Resources.configure` sets child-only environment
+before author imports, leaving the calling process untouched. Observations are
+kept in the run's durable artifact folder by the group owner.
 """
 
 import math
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -18,6 +20,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
+
+from etude.errors import RetryRequested
+
+if TYPE_CHECKING:
+    from etude.eval.loader import AgentLoader
 
 THREAD_VARIABLES = (
     "OMP_NUM_THREADS",
@@ -90,11 +98,6 @@ def memory_bytes() -> int:
     return physical
 
 
-def agent_bytes(memory_gb: float | None) -> int:
-    """Loaded-checkpoint bytes the agent process may hold: declared, or half of memory."""
-    return int(memory_gb * 1024**3) if memory_gb is not None else memory_bytes() // 2
-
-
 def seconds_left() -> float | None:
     """Seconds before the run's `ETUDE_DEADLINE`, never negative; None without one."""
     deadline = os.environ.get("ETUDE_DEADLINE")
@@ -103,53 +106,117 @@ def seconds_left() -> float | None:
     return max(0.0, datetime.fromisoformat(deadline).timestamp() - time.time())
 
 
-def _has_gpu() -> bool:
-    """Read visible NVIDIA hardware without importing the author's model library."""
-    if os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1"):
-        return False
+type Accelerator = Literal["cuda", "metal"]
+type Device = Literal["cuda", "metal", "cpu"]
+type _Unavailable = Literal[
+    "no accelerator detected", "CUDA_VISIBLE_DEVICES hides GPUs", "nvidia-smi failed"
+]
+type Inference = (
+    Accelerator
+    | _Unavailable
+    | Literal[
+        "no loader",
+        "no checkpoints",
+        "cpu-only loader",
+        "loader does not declare cuda",
+        "loader does not declare metal",
+    ]
+)
+
+
+def _detect_accelerator() -> Accelerator | _Unavailable:
+    """Find visible hardware or explain its absence without importing a model library."""
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        return "metal"
     command = shutil.which("nvidia-smi")
     if command is None:
-        return False
-    return bool(
-        subprocess.check_output(
+        return "no accelerator detected"
+    if os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1"):
+        return "CUDA_VISIBLE_DEVICES hides GPUs"
+    try:
+        listed = subprocess.check_output(
             [command, "--query-gpu=index", "--format=csv,noheader"],
             text=True,
             timeout=seconds_left(),
-        ).strip()
-    )
+        )
+    except subprocess.CalledProcessError:
+        # Driver unloaded or mismatched: play direct, but name the fault at startup.
+        return "nvidia-smi failed"
+    except subprocess.TimeoutExpired as error:
+        raise RetryRequested("nvidia-smi did not answer before the deadline") from error
+    return "cuda" if listed.strip() else "no accelerator detected"
 
 
 @dataclass(frozen=True)
-class Cpus:
-    """Game processes, concurrent games per process and shared inference threads.
+class ExecutionPlan:
+    """Process topology and per-owner checkpoint-byte budget for one eval group.
 
-    Zero threads means no shared agent process (CPU-local forwards or no loader).
+    `threads` is each inference owner's thread budget: the shared agent process's
+    in shared mode, and each game process's (always one) in direct mode.
+    `inference` names the shared accelerator or explains direct play.
+    `games` is the per-process concurrency for async `play`. Streaming authors
+    choose their own slot count.
     """
 
     processes: int
     games: int
     threads: int
+    inference: Inference
+    checkpoint_bytes: int
+
+    @property
+    def shared(self) -> bool:
+        return self.inference in ("cuda", "metal")
 
 
-def divide_cpus(
-    pending: int, *, agents: bool, memory_gb: float | None = None, batch_inputs: int = 32
-) -> Cpus:
-    """Size game processes by CPUs and memory; each process batches games up to the declared batch.
+def _select_inference(loader: "AgentLoader", checkpoints: bool) -> Inference:
+    if loader.load is None:
+        return "no loader"
+    if not checkpoints:
+        return "no checkpoints"
+    if loader.devices == ("cpu",):
+        return "cpu-only loader"
+    match _detect_accelerator():
+        case "cuda":
+            return "cuda" if "cuda" in loader.devices else "loader does not declare cuda"
+        case "metal":
+            return "metal" if "metal" in loader.devices else "loader does not declare metal"
+        case unavailable:
+            return unavailable
 
-    A single CPU is shared by one game process and inference. Code-only games
-    (no loader) keep one game per process. Pending work never gets zero capacity.
+
+def plan_execution(
+    pending: int,
+    loader: "AgentLoader",
+    *,
+    checkpoints: bool,
+) -> ExecutionPlan:
+    """Choose shared or direct inference and size games, threads and checkpoint bytes.
+
+    Shared inference leaves a core for the agent process when possible.
+    Async CUDA and direct checkpoint games divide the batch allowance across
+    game processes. Metal schedules one async match per game process.
     """
-    if pending <= 0:
-        return Cpus(processes=0, games=0, threads=0)
+    if pending < 1:
+        raise ValueError("an execution plan needs pending matches")
+    inference = _select_inference(loader, checkpoints)
     cpus = available_cpus()
-    shared = agents and _has_gpu()
-    held = agent_bytes(memory_gb) if agents else 0
-    cpu_processes = max(1, cpus - 1) if shared else cpus
-    memory_processes = max(1, (memory_bytes() - held) // GAME_BYTES)
-    processes = min(pending, cpu_processes, memory_processes)
-    games = math.ceil(batch_inputs / processes) if agents else 1
-    threads = max(1, cpus - processes) if shared else 0
-    return Cpus(processes=processes, games=games, threads=threads)
+    total_memory = memory_bytes()
+    loading = loader.load is not None and checkpoints
+    held = 0
+    if loading:
+        held = total_memory // 2 if loader.memory_gb is None else int(loader.memory_gb * 1024**3)
+
+    shared = inference in ("cuda", "metal")
+    capacity = max(1, cpus - 1) if shared else cpus
+    processes = min(pending, capacity, max(1, (total_memory - held) // GAME_BYTES))
+    return ExecutionPlan(
+        inference=inference,
+        processes=processes,
+        games=math.ceil(loader.max_batch / processes) if loading and inference != "metal" else 1,
+        threads=max(1, cpus - processes) if shared else 1,
+        checkpoint_bytes=held if shared else held // processes,
+    )
 
 
 @dataclass(frozen=True)

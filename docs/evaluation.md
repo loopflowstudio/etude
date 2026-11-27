@@ -174,16 +174,31 @@ by the runnable [`agents.py`](../examples/agents.py) experiment.
 
 Each game process runs many `play` tasks on one `asyncio` event loop. When no
 running game in the process can add another input, pending calls flush together
-with no timer. On CPU, each game process caches and calls forwards directly with
-one model-library thread per process and a share of the host checkpoint-byte
-allowance. On visible NVIDIA hardware, each game process sends its pending rows
-per checkpoint in one message to a shared agent process, which merges ready
-calls up to `max_batch` rows without waiting. Honor Etude's thread environment
-in the loader and choose the model's device there: hardware capacity does not
-place tensors for you. Keep model imports in the loading module so GPU game
-processes remain light, and avoid blocking the event loop between `await`s.
-`Agents(max_batch=..., memory_gb=...)` tunes batch rows and checkpoint memory;
-author code keeps `load`'s forward deterministic for every batch size.
+with no timer. Avoid blocking the event loop between `await`s.
+
+`Agents(load=load, devices=("cuda", "metal"))` shares inference on a visible
+NVIDIA GPU or an Apple Silicon Mac running native arm64 Python. This is the
+default. Use `("cuda",)` for a CUDA-only loader, `("metal",)` for an Apple GPU
+loader, or `("cpu",)` for direct inference without a probe. Etude drops
+`"cpu"` from mixed declarations.
+
+With a matching accelerator, game processes send their pending calls in one
+message to a shared agent process, which merges ready requests by checkpoint
+up to `max_batch` rows and writes observations to `artifacts/agents/batches.json`.
+An oversized request with one input per row uses multiple forwards and gets
+one ordered reply. Without a matching accelerator, each game process caches
+its own checkpoints, uses one model-library thread, and gets a share of the
+checkpoint allowance (half of host memory by default).
+
+Pending matches, CPUs and available host memory bound the game process count.
+For `play`, CUDA and direct checkpoint inference divide `max_batch` across
+game processes, rounding up. Metal uses one match per game process and leaves
+a core for shared inference when possible. The startup line gives the mode,
+its reason, and the process, slot and thread counts.
+
+Choose tensor placement in `load` and honor Etude's thread environment there.
+Keep model imports in the loading module so shared game processes stay light.
+`devices`, `max_batch` and `memory_gb` require a checkpoint loader.
 
 ## Vectorized engines
 
@@ -241,8 +256,9 @@ retention.
   is stopping).
 - `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
   `rows=` for a pre-collated batch so the agent process never merges calls past
-  `max_batch` rows and reports real row counts. A single call above `max_batch`
-  rows runs alone. Because every match in the process shares one `Forward`
+  `max_batch` rows and reports real row counts. A single pre-collated call
+  above `max_batch` rows runs alone. An engine can choose smaller batches
+  when its model needs a hard limit. Every match in the process shares one `Forward`
   object per checkpoint, engines can group ready rows by forward identity.
 - Yield `(match, tables)` or `(match, Result(...))` with the match object
   returned by `take`. Yield as each slot finishes so it can backfill

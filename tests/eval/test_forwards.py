@@ -23,7 +23,10 @@ def test_mirror_sends_all_branches_once_per_ply_and_builds_author_objects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shared: bool
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
-    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: shared)
+    monkeypatch.setattr(
+        "etude.eval.resources._detect_accelerator",
+        lambda: "cuda" if shared else "no accelerator detected",
+    )
     small = checkpoint("small")
     mirror = Mirror(over=small)
     greedy = mirror.model_copy(update={"choice": "greedy"})
@@ -99,14 +102,16 @@ def test_code_players_build_author_objects_without_an_agent_process(
         }
     )
     assert hold_group(group(selected), directory=tmp_path)[0].played == 1
-    assert "agents: started" not in capfd.readouterr().err
+    assert "agents: shared inference" not in capfd.readouterr().err
     assert not (tmp_path / "grouped/artifacts/agents/batches.json").exists()
 
 
-def test_cpu_games_reuse_the_checkpoint_across_tournaments(
+def test_cpu_games_in_a_group_load_checkpoints_in_each_game_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: False)
+    monkeypatch.setattr(
+        "etude.eval.resources._detect_accelerator", lambda: "no accelerator detected"
+    )
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     small = checkpoint("small")
     players = (compose(Mirror(over=small)), compose(Mirror(over=small, choice="greedy")))
@@ -127,4 +132,5 @@ def test_cpu_games_reuse_the_checkpoint_across_tournaments(
     assert len(reports) == 2
     assert sum(report["matches"] for report in reports) == 2
     assert sum(report["local_forward_calls"] for report in reports) == 16
+    assert all(report["local_loads"] == 1 for report in reports)
     assert all(report["requests"] == report["answers"] == 0 for report in reports)

@@ -22,7 +22,7 @@ from multiprocessing.reduction import ForkingPickler
 from typing import TYPE_CHECKING, Protocol, cast
 
 from etude.errors import RetryRequested, explain
-from etude.eval.resources import Cpus, Resources, agent_bytes, seconds_left
+from etude.eval.resources import ExecutionPlan, Resources, seconds_left
 
 __all__ = ("Forward", "ModelForward", "ForwardError")
 
@@ -30,7 +30,7 @@ __all__ = ("Forward", "ModelForward", "ForwardError")
 if TYPE_CHECKING:
     from etude.call import Function
     from etude.checkpoints import CheckpointRef
-    from etude.jobs import AgentLoader
+    from etude.eval.loader import AgentLoader
 
 
 type ModelForward = Callable[[list[object]], list[object]]
@@ -300,10 +300,7 @@ def running_agents(
     definition: AgentLoader,
     checkout: str | None,
     resources: Resources,
-    tournaments: Sequence[str],
-    cpus: Cpus,
-    *,
-    streaming: bool = False,
+    plan: ExecutionPlan,
 ) -> Iterator[AgentProcess]:
     if definition.load is None:
         raise ValueError("an agent process needs a checkpoint loader")
@@ -317,8 +314,8 @@ def running_agents(
             definition.load,
             checkout,
             definition.max_batch,
-            agent_bytes(definition.memory_gb),
-            cpus.threads,
+            plan.checkpoint_bytes,
+            plan.threads,
             child,
             resources,
         ),
@@ -334,13 +331,6 @@ def running_agents(
             parent.recv()
         except EOFError as error:
             raise RetryRequested("agent process exited during startup") from error
-        print(
-            f"etude: agents: started for {', '.join(tournaments)}; "
-            + ("" if streaming else f"{cpus.processes} processes, {cpus.games} games each; ")
-            + f"{cpus.threads} inference threads",
-            file=sys.stderr,
-            flush=True,
-        )
         yield agent
     finally:
         failed = sys.exc_info()[0] is not None

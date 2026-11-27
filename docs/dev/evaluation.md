@@ -140,9 +140,10 @@ with evaluating(
   functions or rule types binds each game process to one tournament while
   sharing one GPU agent process. Process count is bounded by pending matches,
   CPUs (leaving one core for the shared agent process when present) and memory.
-  For `play` with a loader, each process keeps `ceil(max_batch / processes)`
-  matches in flight and flushes pending forwards on a zero-delay loop barrier.
-  For `play` without a loader, each process handles one match at a time.
+  For `play` with CUDA or direct checkpoint inference, each process keeps up
+  to `ceil(max_batch / processes)` matches in flight. Metal and code-only
+  games use one match per process. Pending forwards flush on a zero-delay
+  loop barrier.
   For `play_many`, each process pulls
   whatever `matches.take(n)` requests from pending matches. Per-process
   diagnostics are written to `game-{pid}.json`, and shared agent runs record

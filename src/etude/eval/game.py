@@ -30,7 +30,7 @@ from etude.errors import RetryRequested
 from etude.eval.agents import AgentClient, Answer, Forward, ForwardError
 from etude.eval.composition import build_agents
 from etude.eval.records import Match, _MatchConfig
-from etude.eval.resources import Resources, agent_bytes, seconds_left
+from etude.eval.resources import Resources, seconds_left
 from etude.eval.result import Result, Tables
 from etude.records import Record
 
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from etude.eval.forwards import Forwards
 
 MAX_GAME_IMPORTS = 256
-_HEAVY = frozenset({"torch", "jax", "tensorflow"})
+_HEAVY = frozenset({"torch", "jax", "tensorflow", "mlx"})
 
 # Per-match ForwardError tracker for `play` tasks so caught forward errors still fail the match.
 _match_errors: ContextVar[list[ForwardError] | None] = ContextVar("_match_errors", default=None)
@@ -430,7 +430,7 @@ async def _serve_stream(
     checkout: str | None,
     build: Function | None,
     load: Function | None,
-    memory: int | None,
+    memory: int,
     max_batch: int,
     observe_imports: Callable[[], Imports],
 ) -> None:
@@ -497,8 +497,7 @@ async def _serve_stream(
                     loaded_fn = load.load(checkout)
                 return loaded_fn(checkpoint)
 
-            allowance = agent_bytes(None) if memory is None else memory
-            local = Forwards(load_checkpoint, allowance)
+            local = Forwards(load_checkpoint, memory)
         elif agents is not None:
             client = await AgentClient.connect(agents)
         if client is not None or local is not None:
@@ -603,7 +602,7 @@ def run_game_process(
     checkout: str | None = None,
     build: Function | None = None,
     load: Function | None = None,
-    memory: int | None = None,
+    memory: int = 0,
     max_batch: int = 32,
 ) -> None:
     """Spawn target for one game process; configures child environment before author imports."""

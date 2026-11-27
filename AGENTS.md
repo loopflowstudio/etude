@@ -278,19 +278,26 @@ count. `play` is an async match function. `play_many` is an async generator
 that takes matches for free slots and yields each outcome with its match object.
 Sampling belongs in game code, seeded from `match.seed`. Player
 wrappers are frozen author records; checkpoint leaves share loading and batches.
-The shared agent process or each CPU game process holds checkpoint forwards;
+The shared agent process or each direct game process holds checkpoint forwards;
 game processes build wrappers and play; say neither "server", "worker" nor "policy"
 for any of these ("policy" is reserved for policy keys).
 Etude sets the model-library thread environment before importing the checkpoint
-loading module. CPU game processes load through the same cache/eviction owner
-as shared GPU inference and report failures to the parent even when play catches them. Loaders must honor that inference budget when configuring
+loading module. Direct game processes load through the same cache/eviction owner
+as shared inference and report failures to the parent even when play catches them. Loaders must honor that inference budget when configuring
 their library; each game process keeps one thread.
-For `play`, Etude sizes concurrent matches from the batch allowance when
-there is a loader. For `play_many`, the author sizes the slots and Etude grants
-up to the pending count. Forward merges respect the declared batch rows.
-Probe hardware without importing the loader;
-code-only games keep CPU capacity and perform no GPU probe. Hardware capacity
-does not select the author's model device or promise GPU memory residency.
+`Agents.devices` declares loader capabilities in hardware terms (default
+`("cuda", "metal")`). Derive shared or direct inference from that declaration
+and detected hardware, without a separate topology switch. Probe without
+importing the loader or its framework. The loader owns placement and GPU memory.
+Shared inference leaves a core for the agent process when possible. Pending
+matches and remaining host memory bound the process count. CUDA and direct
+checkpoint inference divide `max_batch` across processes for `play`. Metal
+and code-only games use one match per process. `play_many` sizes its slots.
+Cap merged shared forwards at `max_batch`. Split oversized requests with one
+input per row and preserve their reply order. Opaque oversized inputs run
+alone. An absent or undeclared accelerator plays direct. Skip the probe for
+CPU-only loaders and plays without a loader or checkpoints. Log the mode,
+reason and sizing in one startup line.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any

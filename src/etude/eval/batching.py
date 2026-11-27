@@ -11,7 +11,7 @@ import selectors
 import socket
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Set
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.reduction import ForkingPickler
@@ -108,8 +108,47 @@ class _Batches:
         for request in batch.requests:
             self.add(peer, request, share)
 
+    def _forward(self, key: str, batch: list[_Pending], rows: int) -> tuple[Answer, list[Batch]]:
+        checkpoint = batch[0].request.checkpoint
+        inputs = [item for pending in batch for item in pending.request.inputs]
+        # Opaque pre-collated inputs have no Etude-owned row slicing operation.
+        size = self.max_batch if rows == len(inputs) else len(inputs)
+        outputs: list[object] = []
+        observations: list[Batch] = []
+        for start in range(0, len(inputs), size):
+            chunk = inputs[start : start + size]
+            count = len(chunk) if rows == len(inputs) else rows
+            protected: Set[str] = self.pending.keys()
+            if start + size < len(inputs):
+                protected = protected | {key}
+            before_calls, before_loads = self.forwards.calls, self.forwards.loads
+            before_forward, before_load = self.forwards.forward_seconds, self.forwards.load_seconds
+            answer = self.forwards.answer(checkpoint, chunk, protected, rows=count)
+            loads = self.forwards.loads - before_loads
+            if loads:
+                print(f"etude: agents: loaded {key}", file=sys.stderr, flush=True)
+            observations.append(
+                Batch(
+                    checkpoint=key,
+                    rows=count,
+                    requests=len(batch) if start == 0 else 0,
+                    queue_wait_seconds=0.0,
+                    receive_seconds=0.0,
+                    load_seconds=self.forwards.load_seconds - before_load,
+                    forward_seconds=self.forwards.forward_seconds - before_forward,
+                    encode_seconds=0.0,
+                    send_seconds=0.0,
+                    forward_calls=self.forwards.calls - before_calls,
+                    loads=loads,
+                )
+            )
+            if answer.error is not None:
+                return answer, observations
+            outputs.extend(answer.outputs)
+        return Answer(id=0, checkpoint=key, outputs=outputs), observations
+
     def flush(self, queue_wait_seconds: float = 0.0) -> list[Batch]:
-        """Forward one chunk per pending checkpoint, up to `max_batch` rows each."""
+        """Flush ready requests by checkpoint, batching up to `max_batch` rows."""
         observations: list[Batch] = []
         remaining_wait = queue_wait_seconds
         for key, items in list(self.pending.items()):
@@ -123,20 +162,7 @@ class _Batches:
             del items[: len(batch)]
             if not items:
                 del self.pending[key]
-            before_calls, before_loads = self.forwards.calls, self.forwards.loads
-            before_forward, before_load = self.forwards.forward_seconds, self.forwards.load_seconds
-            answer = self.forwards.answer(
-                batch[0].request.checkpoint,
-                [item for pending in batch for item in pending.request.inputs],
-                self.pending.keys(),
-                rows=rows,
-            )
-            forward_seconds = self.forwards.forward_seconds - before_forward
-            load_seconds = self.forwards.load_seconds - before_load
-            forward_calls = self.forwards.calls - before_calls
-            loads = self.forwards.loads - before_loads
-            if loads:
-                print(f"etude: agents: loaded {key}", file=sys.stderr, flush=True)
+            answer, forwarded = self._forward(key, batch, rows)
             # Serialize every reply before delivery: an unpicklable answer fails
             # the whole batch, while successful payloads are encoded only once.
             started = time.monotonic()
@@ -160,23 +186,17 @@ class _Batches:
                 except (OSError, EOFError):
                     pass  # The game may have been cancelled at its deadline.
             send_seconds = time.monotonic() - started
-            self.rows += rows
-            self.batches += 1
-            observations.append(
-                Batch(
-                    checkpoint=key,
-                    rows=rows,
-                    requests=len(batch),
-                    queue_wait_seconds=remaining_wait,
-                    receive_seconds=receive_seconds,
-                    load_seconds=load_seconds,
-                    forward_seconds=forward_seconds,
-                    encode_seconds=encode_seconds,
-                    send_seconds=send_seconds,
-                    forward_calls=forward_calls,
-                    loads=loads,
-                )
+            forwarded[0] = forwarded[0].model_copy(
+                update={
+                    "queue_wait_seconds": remaining_wait,
+                    "receive_seconds": receive_seconds,
+                    "encode_seconds": encode_seconds,
+                    "send_seconds": send_seconds,
+                }
             )
+            self.rows += sum(batch.rows for batch in forwarded)
+            self.batches += len(forwarded)
+            observations.extend(forwarded)
             remaining_wait = 0.0
         return observations
 
