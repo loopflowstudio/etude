@@ -48,7 +48,7 @@ from etude.checkpoints import (
     qualified,
 )
 from etude.errors import EtudeError, LauncherError, RetryRequested
-from etude.eval.game import _match_type
+from etude.eval.game import Play, PlayMany, _match_type
 from etude.eval.loader import AgentLoader, LoaderDeclaration
 from etude.eval.records import (
     Benchmark,
@@ -67,7 +67,7 @@ from etude.eval.records import (
     relocate_player,
     select_policy,
 )
-from etude.eval.result import EvalResult, Result, Tables
+from etude.eval.result import EvalResult
 from etude.eval.run import (
     Playing,
     _group_progress,
@@ -435,14 +435,10 @@ class Agents(LoaderDeclaration[Callable[..., object]]):
         if self.build is not None and len(inspect.signature(self.build).parameters) != 2:
             raise TypeError("build must take player and leaves")
         # Unused settings would still split the group key.
-        fields = self.model_fields_set
-        batching = fields & {"max_batch", "max_delay_seconds"}
         if self.load is None:
-            unused = sorted(batching | (fields & {"devices", "memory_gb"}))
+            unused = sorted(self.model_fields_set & {"devices", "max_batch", "memory_gb"})
             if unused:
                 raise ValueError(f"{', '.join(unused)} requires a checkpoint loader")
-        elif self.devices == ("cpu",) and batching:
-            raise ValueError(f"{', '.join(sorted(batching))} requires an accelerator in devices")
         return self
 
     def plain(self, repo: Path | None) -> AgentLoader:
@@ -454,7 +450,6 @@ class Agents(LoaderDeclaration[Callable[..., object]]):
             build=build,
             devices=self.devices,
             max_batch=self.max_batch,
-            max_delay_seconds=self.max_delay_seconds,
             memory_gb=self.memory_gb,
         )
 
@@ -469,6 +464,7 @@ class Evaluation(Record):
     tournament: TournamentRun
     experiment: str | None
     play: Function
+    streaming: bool = Field(default=False, exclude_if=lambda value: not value)
     matches: tuple[Match, ...]
     files: dict[str, str] = {}
     run: str | None = None
@@ -479,6 +475,12 @@ class Evaluation(Record):
     def _released(cls, value: object) -> object:
         if not isinstance(value, dict):
             return value
+        agents = value.get("agents")
+        if isinstance(agents, dict) and "max_delay_seconds" in agents:
+            value = {
+                **value,
+                "agents": {k: v for k, v in agents.items() if k != "max_delay_seconds"},
+            }
         definition = value.get("tournament")
         if (
             isinstance(definition, dict)
@@ -646,7 +648,8 @@ class EvalJob(Job):
     """Declare matches through a generator, with their play, loading and machine needs."""
 
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
-    play: Callable[..., Tables | Result] = Field(exclude=True)
+    play: Play | None = Field(default=None, exclude=True)
+    play_many: PlayMany | None = Field(default=None, exclude=True)
     tournament: Benchmark | RoundRobin = Field(exclude=True)
     checkpoint: CheckpointRecord | Input | None = Field(default=None, exclude=True)
     checkpoints: Sequence[CheckpointRecord] = Field(default=(), exclude=True)
@@ -692,7 +695,7 @@ class EvalJob(Job):
                 f"{self.tournament.name} is a round robin: give it entrants, no checkpoint"
             )
         try:
-            _match_type(self.play)
+            _match_type(self._game(), streaming=self.play_many is not None)
         except TypeError as error:
             raise LauncherError(str(error)) from None
         players = list(self.enter)
@@ -713,6 +716,13 @@ class EvalJob(Job):
         ):
             raise LauncherError("composed and code players need Agents(build=)")
         return self
+
+    def _game(self) -> Play | PlayMany:
+        if self.play is not None and self.play_many is None:
+            return self.play
+        if self.play_many is not None and self.play is None:
+            return self.play_many
+        raise LauncherError("give either async def play or async def play_many")
 
     def recorded(self) -> TournamentRun:
         """The author's selection; no scheduling, source lookup or executable payload."""
@@ -743,7 +753,8 @@ class EvalJob(Job):
             )
         options = _options(self)
         options["name"] = self.tournament.name
-        repo = _repo(self.play, options)
+        game = self._game()
+        repo = _repo(game, options)
         recorded = self.recorded()
         experiment = state.experiment or None
         bound = recorded.bind(lines, experiment=experiment) if experiment is not None else recorded
@@ -772,7 +783,8 @@ class EvalJob(Job):
         spec = Evaluation(
             tournament=bound.model_copy(update={"seated": resolved.seated}),
             experiment=experiment,
-            play=_function(self.play, repo),
+            play=_function(game, repo),
+            streaming=self.play_many is not None,
             matches=selected,
             files=files,
             agents=self.agents.plain(repo),
@@ -781,7 +793,7 @@ class EvalJob(Job):
         return _job(
             _hold,
             EvalGroup(evaluations=(spec,)),
-            origin=self.play,
+            origin=game,
             options=options,
             experiment=experiment,
             extras=self.extras,
@@ -891,6 +903,7 @@ def hold_group(
                 Playing(
                     run=active,
                     play=spec.play,
+                    streaming=spec.streaming,
                     tournament=spec.definition.name,
                     agent_loader=spec.agents,
                 )

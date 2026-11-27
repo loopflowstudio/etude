@@ -306,7 +306,7 @@ from etude.jobs import EvalJob
 from etude.eval.records import CheckpointSlot, RoundRobin, Code, checkpoint_player
 from etude.eval.match import environment
 
-def play(match, agents):
+async def play(match, agents):
     assert os.environ["EVAL_TEST_KEY"] == "local fixture credential"
     model = next(p for p in match.players if hasattr(p, "checkpoint"))
     assert model.checkpoint.path.read_bytes() == b"outside weights"

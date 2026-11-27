@@ -7,6 +7,7 @@ before author imports, leaving the calling process untouched. Observations are
 kept in the run's durable artifact folder by the group owner.
 """
 
+import math
 import os
 import platform
 import shutil
@@ -14,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -153,8 +154,11 @@ class ExecutionPlan:
     `threads` is each inference owner's thread budget: the shared agent process's
     in shared mode, and each game process's (always one) in direct mode.
     `inference` names the shared accelerator or explains direct play.
+    `games` is the per-process concurrency for async `play`. Streaming authors
+    choose their own slot count.
     """
 
+    processes: int
     games: int
     threads: int
     inference: Inference
@@ -163,22 +167,6 @@ class ExecutionPlan:
     @property
     def shared(self) -> bool:
         return self.inference in ("cuda", "metal")
-
-    def describe(self, tournaments: Sequence[str]) -> str | None:
-        """One startup line naming the mode, why it was chosen, and its sizing; None without loading."""
-        if self.inference in ("no loader", "no checkpoints"):
-            return None
-        games = "game" if self.games == 1 else "games"
-        mode = "shared" if self.shared else "direct"
-        line = (
-            f"etude: agents: {mode} inference for {', '.join(tournaments)} "
-            f"({self.inference}); "
-            f"{self.games} {games} at a time"
-        )
-        if not self.shared:
-            return f"{line}; 1 inference thread each"
-        unit = "thread" if self.threads == 1 else "threads"
-        return f"{line}; {self.threads} inference {unit}"
 
 
 def _select_inference(loader: "AgentLoader", checkpoints: bool) -> Inference:
@@ -205,34 +193,29 @@ def plan_execution(
 ) -> ExecutionPlan:
     """Choose shared or direct inference and size games, threads and checkpoint bytes.
 
-    A declared, detected accelerator enables sharing. CUDA games fill one
-    shared batch, and Metal games leave a core for the shared agent process.
-    Direct games split the checkpoint-byte allowance across game processes.
-    Memory and pending work may reduce games further.
+    Shared inference leaves a core for the agent process when possible.
+    Async CUDA and direct checkpoint games divide the batch allowance across
+    game processes. Metal schedules one async match per game process.
     """
     if pending < 1:
         raise ValueError("an execution plan needs pending matches")
     inference = _select_inference(loader, checkpoints)
     cpus = available_cpus()
     total_memory = memory_bytes()
+    loading = loader.load is not None and checkpoints
     held = 0
-    if loader.load is not None and checkpoints:
+    if loading:
         held = total_memory // 2 if loader.memory_gb is None else int(loader.memory_gb * 1024**3)
 
-    match inference:
-        case "cuda":
-            capacity = loader.max_batch
-        case "metal":
-            capacity = max(1, cpus - 1)
-        case _:
-            capacity = cpus
-    games = min(pending, capacity, max(1, (total_memory - held) // GAME_BYTES))
     shared = inference in ("cuda", "metal")
+    capacity = max(1, cpus - 1) if shared else cpus
+    processes = min(pending, capacity, max(1, (total_memory - held) // GAME_BYTES))
     return ExecutionPlan(
         inference=inference,
-        games=games,
-        threads=max(1, cpus - games) if shared else 1,
-        checkpoint_bytes=held if shared else held // games,
+        processes=processes,
+        games=math.ceil(loader.max_batch / processes) if loading and inference != "metal" else 1,
+        threads=max(1, cpus - processes) if shared else 1,
+        checkpoint_bytes=held if shared else held // processes,
     )
 
 
