@@ -1873,8 +1873,8 @@ def test_reports_index_and_poll_show_the_last_served_build_without_source_reads(
         assert "<td>Working tree</td>" in refreshed and refreshed.endswith("<td>3</td>")
 
 
-def _score_duel(match: Match, agents: list[object]) -> Tables:
-    return {"scores": play(match, agents)["plays"]}
+async def _score_duel(match: Match, agents: list[object]) -> Tables:
+    return {"scores": (await play(match, agents))["plays"]}
 
 
 def test_reports_headline_follows_the_eval_curve_with_or_without_training(tmp_path: Path) -> None:

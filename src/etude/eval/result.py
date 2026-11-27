@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from etude.eval.records import Config, Environment
 from etude.records import Record
 
-__all__ = ("Tables", "Row", "Value")
+__all__ = ("Tables", "Row", "Value", "Result")
 
 
 type Value = bool | int | float | str | None

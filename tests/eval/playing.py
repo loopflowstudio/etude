@@ -1,6 +1,6 @@
 """Small test panels executed through the public EvalRun lifetime."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
 from etude.checkpoints import CheckpointRef
@@ -24,7 +24,7 @@ def play_matches(
     experiment: str,
     environment: Environment,
     matches: Sequence[Match],
-    play: Callable[..., Tables | Result],
+    play: Callable[..., Awaitable[Tables | Result]],
     agents: Agents | None = None,
     run: str | None = None,
     directory: Path | str | None = None,
@@ -49,7 +49,7 @@ def play_tournament(
     tournament: Benchmark | RoundRobin,
     *,
     experiment: str,
-    play: Callable[..., Tables | Result],
+    play: Callable[..., Awaitable[Tables | Result]],
     agents: Agents | None = None,
     checkpoint: CheckpointRef | None = None,
     checkpoints: Sequence[CheckpointRef] = (),

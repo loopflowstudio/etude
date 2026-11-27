@@ -26,13 +26,14 @@ SURFACE: dict[str, tuple[str, ...]] = {
     "etude.stopping": ("Stopped",),
     "etude.errors": tuple("EtudeError LauncherError".split()),
     "etude.deadline": ("limit_time",),
-    "etude.eval.agents": ("Forward",),
+    "etude.eval.agents": ("Forward", "ModelForward", "ForwardError"),
+    "etude.eval.game": ("Matches",),
     "etude.eval.records": tuple(
         "CheckpointPlayer Code CheckpointSlot checkpoint_player Composition compose Benchmark RoundRobin Seating Seat Earlier "
         "Fraction At Final Aligned Match Environment Player Rollup".split()
     ),
     "etude.eval.match": ("environment",),
-    "etude.eval.result": tuple("Tables Row Value".split()),
+    "etude.eval.result": tuple("Tables Row Value Result".split()),
     "etude.eval.tournament": tuple("evaluating scores ScorePoint Scores".split()),
     "etude.eval.query": tuple("statsdb read_blobs estimate compare Estimate Comparison".split()),
     "etude.report": tuple(
