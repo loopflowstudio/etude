@@ -5,23 +5,12 @@ from typing import cast
 
 import numpy as np
 
-from etude.checkpoints import CheckpointRef
-from etude.eval.agents import Forward, ForwardError, ModelForward
+from etude.eval.agents import Forward, ForwardError
 from etude.eval.game import Matches
 from etude.eval.records import Match
 from etude.eval.result import Tables
 
 type _Slot = tuple[Match, Forward, int]
-
-
-def load(saved: CheckpointRef) -> ModelForward:
-    bias = int(saved.path.read_text())
-
-    def forward(inputs: list[object]) -> list[object]:
-        # Each input is a pre-collated 1-D NumPy array, with one output per input.
-        return [cast(np.ndarray, batch) + bias for batch in inputs]
-
-    return forward
 
 
 def _submit_half(half: list[_Slot]) -> Awaitable[list[object]] | None:

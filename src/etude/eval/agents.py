@@ -20,7 +20,7 @@ from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from multiprocessing.connection import Connection, wait
 from multiprocessing.reduction import ForkingPickler
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Protocol
 
 from etude.errors import RetryRequested, explain
 from etude.eval.bus import (
@@ -286,7 +286,16 @@ class SocketForwardBus:
 
     def _receive(self, payload: bytes) -> None:
         started = time.monotonic()
-        answer = cast(Answer, ForkingPickler.loads(payload))
+        try:
+            answer = ForkingPickler.loads(payload)
+            if not isinstance(answer, Answer):
+                raise TypeError(f"expected Answer, got {type(answer).__name__}")
+        except Exception as error:
+            self._book.add_handoff(time.monotonic() - started, wire_bytes=len(payload))
+            self._book.fail_all(RetryRequested(f"agent reply failed to decode: {explain(error)}"))
+            with suppress(OSError):
+                self._transport.close()
+            return
         self._book.add_handoff(time.monotonic() - started, wire_bytes=len(payload))
         self._book.deliver(
             answer.id,

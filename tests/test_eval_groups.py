@@ -621,23 +621,27 @@ def test_play_arity_and_removed_workers_are_refused(tmp_path: Path) -> None:
         # Saturated play CPU: 64 pending, max_batch=32 -> 16/32 processes.
         (32, (64,), 0, True, 32, None, Placement("local", 32, 1, 0, 1, False)),
         (16, (64,), 0, True, 32, None, Placement("local", 16, 1, 0, 2, False)),
-        # Medium play CPU: 16 pending, max_batch=32, 16 cores -> 8 processes (2 games each).
+        # Small play CPU: 5 pending, max_batch=32, 16 cores -> 1 process, 15 inference threads.
+        (16, (5,), 0, True, 32, None, Placement("local", 1, 15, 0, 5, False)),
+        # Medium play CPU: 30 pending, max_batch=256, 16 cores -> 2 processes, 7 threads each.
+        (16, (30,), 0, True, 256, None, Placement("local", 2, 7, 0, 16, False)),
+        # Medium play CPU: 16 pending, max_batch=32, 16 cores -> 8 processes (2 games each, 1 thread).
         (16, (16,), 0, True, 32, None, Placement("local", 8, 1, 0, 2, False)),
-        # Mixed CPU/Mac: 500 play_many (1 streaming) + 10 play, max_batch=256, 16 cores -> 2 processes.
-        (16, (10,), 1, True, 256, None, Placement("local", 2, 1, 0, 10, False)),
+        # Mixed CPU/Mac: 500 play_many (1 streaming) + 10 play, max_batch=256, 16 cores -> 2 procs, 7 threads.
+        (16, (10,), 1, True, 256, None, Placement("local", 2, 7, 0, 10, False)),
         (3, (20,), 0, True, 32, None, Placement("local", 2, 1, 0, 11, False)),
         (2, (20,), 0, True, 32, None, Placement("local", 2, 1, 0, 16, False)),
         (8, (20,), 0, False, 32, None, Placement(None, 8, 1, 0, 1, False)),
         # Code-only mixed: 3 play + 2 streaming -> 5 processes.
         (8, (3,), 2, False, 32, None, Placement(None, 5, 1, 0, 1, False)),
         (8, (20,), 0, True, 32, None, Placement("local", 3, 1, 0, 8, False)),
-        (8, (20,), 0, True, 32, 1.5, Placement("local", 2, 1, 0, 16, False)),
-        (8, (1,), 0, True, 32, None, Placement("local", 1, 1, 0, 1, False)),
+        (8, (20,), 0, True, 32, 1.5, Placement("local", 2, 3, 0, 16, False)),
+        (8, (1,), 0, True, 32, None, Placement("local", 1, 7, 0, 1, False)),
         (1, (20,), 0, True, 32, None, Placement("local", 1, 1, 0, 20, False)),
         (1, (20,), 0, False, 32, None, Placement(None, 1, 1, 0, 1, False)),
         (8, (), 0, True, 32, None, Placement(None, 0, 1, 0, 0, False)),
         (8, (0,), 0, True, 32, None, Placement(None, 0, 1, 0, 0, False)),
-        (8, (20,), 0, True, 32, 2.0, Placement("local", 1, 1, 0, 20, False)),
+        (8, (20,), 0, True, 32, 2.0, Placement("local", 1, 7, 0, 20, False)),
     ],
 )
 def test_place_respects_cpu_pending_and_memory(
@@ -687,7 +691,7 @@ def test_place_respects_cpu_pending_and_memory(
         # All-play_many routes direct with grouped=True on GPU and non-GPU.
         (4, (), 2, 32, None, True, "0", Placement("local", 1, 3, 0, 0, True)),
         (4, (64,), 0, 32, None, False, "0", Placement(None, 4, 1, 0, 1, False)),
-        (4, (), 2, 32, None, False, "0", Placement(None, 1, 1, 0, 0, True)),
+        (4, (), 2, 32, None, False, "0", Placement(None, 1, 4, 0, 0, True)),
         (4, (64,), 0, 32, None, True, "", Placement("local", 4, 1, 0, 8, False)),
         (4, (), 2, 32, None, True, "", Placement("local", 1, 3, 0, 0, True)),
     ],
@@ -730,7 +734,7 @@ def test_code_only_and_streaming_placement_do_not_probe_gpu(
         bus=None, processes=4, game_threads=1, agent_threads=0, games_per_process=1, grouped=False
     )
     assert place((), 2, agents=False) == Placement(
-        bus=None, processes=1, game_threads=1, agent_threads=0, games_per_process=0, grouped=True
+        bus=None, processes=1, game_threads=4, agent_threads=0, games_per_process=0, grouped=True
     )
     assert place((), 2, agents=True) == Placement(
         bus="local",
@@ -2378,6 +2382,75 @@ assert lazy_report.imports.warning is not None
     assert result.returncode == 0, result.stderr
     assert result.stderr.count("game module wrapper_game_fixture: imported torch") == 1
     assert result.stderr.count("game module lazy_mlx_game_fixture: imported mlx") == 1
+
+
+@pytest.mark.parametrize("gpu", [False, True])
+def test_local_import_warning_ignores_module_count_while_socket_warns(
+    tmp_path: Path, gpu: bool
+) -> None:
+    package = tmp_path / "many_mods_pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    imports = []
+    for index in range(270):
+        (package / f"m{index}.py").write_text(f"VALUE = {index}\n")
+        imports.append(f"import many_mods_pkg.m{index}")
+    (tmp_path / "many_mods_loader.py").write_text(
+        "from etude.checkpoints import CheckpointRef\n"
+        "from etude.eval.agents import ModelForward\n"
+        "def load(checkpoint: CheckpointRef) -> ModelForward:\n"
+        "    return lambda inputs: [1 for _ in inputs]\n"
+    )
+    (tmp_path / "many_mods_game.py").write_text(
+        "\n".join(imports) + "\nfrom collections.abc import Sequence\n"
+        "from etude.eval.agents import Forward\n"
+        "from etude.eval.records import Match\n"
+        "from etude.eval.result import Tables\n"
+        "async def play(match: Match, agents: Sequence[Forward]) -> Tables:\n"
+        "    [score] = await agents[0]([0])\n"
+        "    return {'scores': [{'seat': 0, 'score': int(str(score))}]}\n"
+    )
+    program = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import etude.eval.resources
+from etude.eval.game import MAX_GAME_IMPORTS, GameReport
+from etude.eval.match import environment
+from etude.eval.records import RoundRobin
+from etude.jobs import Agents, EvalJob, ExperimentState, evaluation_group, hold_group
+from tests.eval.arithmetic import checkpoint
+from many_mods_game import play
+from many_mods_loader import load
+
+etude.eval.resources._has_gpu = lambda: sys.argv[2] == "True"
+root = Path(sys.argv[1]) / "run"
+job = EvalJob(
+    tournament=RoundRobin(name="many", environment=environment("many"), configs=({},), games=1),
+    enter=(checkpoint("one"), checkpoint("two")),
+    play=play,
+    agents=Agents(load=load),
+    repo=None,
+    max_hours=0.1,
+)
+hold_group(evaluation_group(job.lower(ExperimentState(experiment="many"))), directory=root)
+[path] = list((root / "many/artifacts/agents").glob("game-*.json"))
+report = GameReport.model_validate_json(path.read_bytes())
+assert report.imports.heavy == ()
+assert report.imports.count > MAX_GAME_IMPORTS
+assert report.imports.warning_for(count_limit=False) is None
+assert report.imports.warning_for(count_limit=True) is not None
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(tmp_path), str(gpu)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    expected = 1 if gpu else 0
+    assert result.stderr.count("game module many_mods_game: loaded ") == expected
 
 
 async def scalar_vector_slots(

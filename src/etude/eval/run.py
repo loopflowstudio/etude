@@ -721,8 +721,9 @@ def play_together(
                 if report is None:
                     return
                 _retain(f"game-{report.pid}.json", report, resources.artifacts)
-                if placement.bus is not None and report.imports.warning and not warned_imports:
-                    print(report.imports.warning, file=sys.stderr, flush=True)
+                warning = report.imports.warning_for(count_limit=placement.bus == "socket")
+                if placement.bus is not None and warning and not warned_imports:
+                    print(warning, file=sys.stderr, flush=True)
                     warned_imports = True
 
             if budget > 0:

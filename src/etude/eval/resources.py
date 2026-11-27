@@ -149,10 +149,12 @@ def place(
     An all-`play_many` group runs sequentially in one game process
     (`grouped=True`) on every host without probing GPU hardware: with a loader
     it uses a direct inference thread with the host inference thread budget
-    (`max(1, cpus - 1)`); code-only runs use no bus. Any group with `play`
-    skips the GPU probe when code-only, uses the shared agent process on
-    visible NVIDIA hardware, and otherwise runs direct inference with one
-    model-library thread per game process.
+    (`max(1, cpus - 1)`); code-only runs use no bus and give the single process
+    the host's `cpus` BLAS budget. Any group with `play` skips the GPU probe
+    when code-only, uses the shared agent process on visible NVIDIA hardware
+    (`agent_threads = max(1, cpus - processes)`), and otherwise runs direct
+    inference splitting remaining host cores across game processes
+    (`game_threads = max(1, (cpus - processes) // processes)`).
     """
     active_play = tuple(count for count in play if count > 0)
     active_streaming = max(0, streaming)
@@ -170,7 +172,7 @@ def place(
         return Placement(
             bus="local" if agents else None,
             processes=1,
-            game_threads=max(1, cpus - 1) if agents else 1,
+            game_threads=max(1, cpus - 1) if agents else cpus,
             agent_threads=0,
             games_per_process=0,
             grouped=True,
@@ -205,7 +207,7 @@ def place(
     return Placement(
         bus="local",
         processes=processes,
-        game_threads=1,
+        game_threads=max(1, (cpus - processes) // processes),
         agent_threads=0,
         games_per_process=games_per_process,
         grouped=False,

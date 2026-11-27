@@ -4,7 +4,8 @@ uv run etude eval examples/vectorized.py --source /tmp/vectorized
 """
 
 from agent_game import checkpoint
-from vector_game import load, play_many
+from vector_game import play_many
+from vector_models import load
 
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, Seating

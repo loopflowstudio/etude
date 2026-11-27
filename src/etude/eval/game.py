@@ -74,7 +74,10 @@ class Imports(Record):
 
     @property
     def warning(self) -> str | None:
-        if not self.heavy and self.count <= MAX_GAME_IMPORTS:
+        return self.warning_for(count_limit=True)
+
+    def warning_for(self, *, count_limit: bool) -> str | None:
+        if not self.heavy and (not count_limit or self.count <= MAX_GAME_IMPORTS):
             return None
         reason = (
             f"imported {', '.join(self.heavy)}" if self.heavy else f"loaded {self.count} modules"

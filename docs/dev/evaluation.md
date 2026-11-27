@@ -145,9 +145,9 @@ with evaluating(
     probe), configuring the process's model/BLAS thread environment variables
     to `game_threads` and running the group's tournaments in turn on one
     `LocalForwardBus` so checkpoints stay loaded.
-  - Code-only `play_many` (`bus=None`, `processes=1`, `game_threads=1`,
+  - Code-only `play_many` (`bus=None`, `processes=1`, `game_threads=cpus`,
     `agent_threads=0`, `games_per_process=0`, `grouped=True`): no bus, no GPU
-    probe, 1 game process.
+    probe, 1 game process owning the host's BLAS thread budget.
   - Code-only `play` or mixed (`bus=None`, `game_threads=1`, `agent_threads=0`,
     `games_per_process=1`, `grouped=False`): no bus, no GPU probe, one match at
     a time in `play` (1 process per `play_many` tournament in a mixed group).
@@ -157,10 +157,11 @@ with evaluating(
     to one tournament each (`play` bounded by `ceil(pending / games_per_process)`;
     each `play_many` tournament capped at 1 process), giving unused cores to
     `agent_threads`.
-  - No GPU seen, any tournament `play` (`bus="local"`, `game_threads=1`,
-    `agent_threads=0`, `grouped=False`): one direct inference thread per exact
-    spawned game process, 1 model-library thread each, dividing checkpoint
-    memory by `processes`.
+  - No GPU seen, any tournament `play` (`bus="local"`,
+    `game_threads=max(1, (cpus - processes) // processes)`, `agent_threads=0`,
+    `grouped=False`): one direct inference thread per exact spawned game
+    process, splitting unused host cores across inference threads and dividing
+    checkpoint memory by `processes`.
 
   Each game process runs one `asyncio` event loop. For `play` with a loader,
   each process keeps `placement.games_per_process` matches in flight and
@@ -171,8 +172,10 @@ with evaluating(
   `builtins.__import__` hook active from module load through player wrapper
   loading and play until process exit (with `"mlx"` alongside `"torch"`,
   `"jax"`, `"tensorflow"` in `_HEAVY`) so inference-thread imports are ignored
-  while wrapper and lazy game imports stay visible. Heavy-import warnings print
-  once on stderr whenever `placement.bus is not None`. `GameReport` embeds a
+  while wrapper and lazy game imports stay visible. Import warnings print once
+  on stderr whenever `placement.bus is not None`—for heavy ML libraries on
+  `local`, and for heavy libraries or module count above `MAX_GAME_IMPORTS` on
+  `socket`. `GameReport` embeds a
   frozen `BusReport` (`calls`, `answers`, `arrays`, `arrays_copied`, `pickled`,
   `pickled_bytes`, `copied_bytes`, `wire_bytes`, `handoff_seconds`,
   `round_trip_seconds`).

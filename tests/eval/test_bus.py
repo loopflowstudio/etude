@@ -1421,3 +1421,36 @@ def test_play_many_early_exit_with_unawaited_future_has_clean_stderr(
         active.play_many(_early_exit_play_many, agents=Agents(load=_raising_load, max_batch=1))
     stderr = capfd.readouterr().err
     assert "Future exception was never retrieved" not in stderr
+
+
+class _ExplodingUnpickle:
+    def __getstate__(self) -> dict[str, bool]:
+        return {"trigger": True}
+
+    def __setstate__(self, state: dict[str, bool]) -> None:
+        raise RuntimeError("corrupt output https://user:topsecret@example.com")
+
+
+@pytest.mark.parametrize("transport", ["local", "socket"])
+def test_unpicklable_reply_fails_fast_redacts_secrets_and_unlocks_arrays(
+    transport: _Transport,
+) -> None:
+    cp = checkpoint("bad_reply").checkpoint
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        return lambda inputs: [_ExplodingUnpickle() for _ in inputs]
+
+    async def run() -> None:
+        async with _open_bus(transport, load) as bus:
+            bus.bind(cp)
+            arr = np.arange(4, dtype=np.float32)
+            [fut] = bus.submit([ForwardCall(cp.key, [arr], 1)])
+            expected = ForwardError if transport == "local" else RetryRequested
+            with pytest.raises(expected) as info:
+                await asyncio.wait_for(fut, timeout=5.0)
+            message = str(info.value)
+            assert "corrupt output" in message
+            assert "topsecret" not in message
+            assert arr.flags.writeable
+
+    asyncio.run(run())
