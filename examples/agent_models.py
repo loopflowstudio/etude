@@ -1,7 +1,7 @@
 """A minimal two-action model returning logits; a real loader may import Torch."""
 
 from etude.checkpoints import CheckpointRef
-from etude.eval.agents import ModelForward
+from etude.eval.agents import Forward
 
 
 class Network:
@@ -12,5 +12,5 @@ class Network:
         return [[0.0, self.bias] for _ in inputs]
 
 
-def load(checkpoint: CheckpointRef) -> ModelForward:
+def load(checkpoint: CheckpointRef) -> Forward:
     return Network(float(checkpoint.path.read_text()))

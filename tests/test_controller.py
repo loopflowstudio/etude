@@ -564,7 +564,7 @@ from etude.eval.records import CheckpointSlot, Benchmark, RoundRobin, Seating, C
 from etude.eval.result import Tables
 
 
-async def play(match: Match, agents: list[object]) -> Tables:
+def play(match: Match, agents: list[object]) -> Tables:
     players = [p for p in match.players if isinstance(p, CheckpointPlayer)]
     assert players
     if {command!r} == "eval":

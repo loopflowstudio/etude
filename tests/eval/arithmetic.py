@@ -5,7 +5,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from etude.checkpoints import CheckpointRef
-from etude.eval.agents import Forward, ModelForward
+from etude.eval.agents import Forward
 from etude.eval.records import CheckpointPlayer, Match, Seat, checkpoint_player
 from etude.eval.result import Tables
 from etude.records import ArtifactRef, Record
@@ -21,8 +21,8 @@ class Shifted:
         self.over = over
         self.amount = amount
 
-    async def __call__(self, inputs: list[object], *, rows: int | None = None) -> list[object]:
-        return [int(str(value)) + self.amount for value in await self.over(inputs, rows=rows)]
+    def __call__(self, inputs: list[object]) -> list[object]:
+        return [int(str(value)) + self.amount for value in self.over(inputs)]
 
 
 def build(player: object, leaves: Mapping[str, Forward]) -> Forward:
@@ -33,10 +33,10 @@ def build(player: object, leaves: Mapping[str, Forward]) -> Forward:
     raise TypeError(f"unknown player {type(player).__name__}")
 
 
-async def play(match: Match, agents: Sequence[Forward]) -> Tables:
+def play(match: Match, agents: Sequence[Forward]) -> Tables:
     return {
         "scores": [
-            {"seat": seat, "score": int(str((await agents[seat]([match.games]))[0]))}
+            {"seat": seat, "score": int(str(agents[seat]([match.games])[0]))}
             for seat in range(len(match.players))
         ]
     }
@@ -63,5 +63,5 @@ class Adder:
         return [int(str(item)) + self.bias for item in inputs]
 
 
-def load(checkpoint: CheckpointRef) -> ModelForward:
+def load(checkpoint: CheckpointRef) -> Forward:
     return Adder(int(checkpoint.path.read_text()))

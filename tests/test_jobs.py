@@ -21,7 +21,6 @@ from etude.errors import LauncherError
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Benchmark, Code, Match, RoundRobin, checkpoint_player
-from etude.eval.result import Tables
 from etude.experiment import observe
 from etude.jobs import EvalJob, ExperimentState, JobOptions, TrainingJob, checkpoint_inputs
 from etude.launch.smoke import tiny
@@ -80,7 +79,7 @@ def weights(checkpoint: Path) -> bytes:
     return checkpoint.read_bytes()
 
 
-async def play(match: Match, agents: list[object]) -> Tables:
+def play(match: Match, agents: list[object]) -> Tables:
     # A model's checkpoint is on this machine; the row says how big its weights are.
     sizes = [
         len(weights(seated.checkpoint.path)) if isinstance(seated, CheckpointPlayer) else 0
@@ -437,15 +436,12 @@ def arena(config: ArenaConfig) -> Benchmark:
 
 
 def test_an_evaluation_holds_what_its_tournament_takes() -> None:
-    async def noop(match: Match, agents: list[object]) -> Tables:
-        return {}
-
     progress = Benchmark(name="anchors", environment=environment("duel"))
     entrant = Code(name="fixed", source=[Path(__file__)])
     with pytest.raises(LauncherError, match="give it checkpoints, no entrants"):
         EvalJob(
             tournament=progress,
-            play=noop,
+            play=lambda match: {},
             enter=[entrant],
             max_hours=0.1,
             repo=None,
@@ -457,7 +453,7 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
         # The omission under test.
         EvalJob(
             tournament=progress,
-            play=noop,
+            play=lambda match: {},
             checkpoint=weights,
             repo=None,
         )
@@ -465,7 +461,7 @@ def test_an_evaluation_holds_what_its_tournament_takes() -> None:
         name="league", environment=environment("duel"), configs=({},), games=1
     )
     with pytest.raises(LauncherError, match="give it entrants"):
-        EvalJob(tournament=league, play=noop, max_hours=0.1, repo=None)
+        EvalJob(tournament=league, play=lambda match: {}, max_hours=0.1, repo=None)
 
 
 def test_the_job_command_starts_by_importing_no_other_part_of_etude() -> None:

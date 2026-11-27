@@ -12,7 +12,7 @@ from random import Random
 from pydantic import BaseModel, Field
 
 from etude.checkpoints import CheckpointRef
-from etude.eval.agents import Forward, ModelForward
+from etude.eval.agents import Forward
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, CheckpointPlayer, CheckpointSlot, Code, Match, Seating
 from etude.eval.result import Tables
@@ -48,7 +48,7 @@ def train(config: Config) -> None:
         run.checkpoint(path)
 
 
-def load(checkpoint: CheckpointRef) -> ModelForward:
+def load(checkpoint: CheckpointRef) -> Forward:
     counts = Counts.model_validate_json(checkpoint.path.read_text())
     probability = counts.heads / counts.tosses
 
@@ -58,24 +58,20 @@ def load(checkpoint: CheckpointRef) -> ModelForward:
     return forward
 
 
-async def _fair(inputs: list[object], *, rows: int | None = None) -> list[object]:
-    return [0.5 for _ in inputs]
-
-
 def build(player: object, leaves: Mapping[str, Forward]) -> Forward:
     if isinstance(player, CheckpointPlayer):
         return leaves[player.checkpoint.key]
     if isinstance(player, Code):
-        return _fair
+        return lambda inputs: [0.5 for _ in inputs]
     raise TypeError(f"unknown player {type(player).__name__}")
 
 
-async def play(match: Match[Rules], agents: Sequence[Forward]) -> Tables:
+def play(match: Match[Rules], agents: Sequence[Forward]) -> Tables:
     # Keep game randomness separate from every player's action stream.
     target = Random(f"{match.seed}:game").random() < match.config.heads
     scores: list[dict[str, bool | int | float | str | None]] = []
     for seat, agent in enumerate(agents):
-        [probability] = await agent([None])
+        [probability] = agent([None])
         action = Random(f"{match.seed}:player:{seat}").random() < float(str(probability))
         scores.append({"seat": seat, "won": action == target})
     return {"scores": scores}

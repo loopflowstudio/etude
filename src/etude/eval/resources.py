@@ -6,7 +6,6 @@ environment before author imports, leaving the calling process untouched.
 Observations are kept in the run's durable artifact folder by the group owner.
 """
 
-import math
 import os
 import shutil
 import subprocess
@@ -121,12 +120,8 @@ def _has_gpu() -> bool:
 
 @dataclass(frozen=True)
 class Cpus:
-    """Game processes, concurrent games per process and shared inference threads.
+    """Active games and shared inference threads; zero threads means direct calls."""
 
-    Zero threads means no shared agent process (CPU-local forwards or no loader).
-    """
-
-    processes: int
     games: int
     threads: int
 
@@ -134,22 +129,23 @@ class Cpus:
 def divide_cpus(
     pending: int, *, agents: bool, memory_gb: float | None = None, batch_inputs: int = 32
 ) -> Cpus:
-    """Size game processes by CPUs and memory; each process batches games up to the declared batch.
+    """GPU games fill one shared batch; CPU games own their checkpoint forwards.
 
-    A single CPU is shared by one game process and inference. Code-only games
-    (no loader) keep one game per process. Pending work never gets zero capacity.
+    A single CPU is shared by one game and inference. Memory and pending work
+    may reduce games further, but never leave queued work with zero capacity.
     """
-    if pending <= 0:
-        return Cpus(processes=0, games=0, threads=0)
     cpus = available_cpus()
-    shared = agents and _has_gpu()
+    shared = agents and pending > 0 and _has_gpu()
     held = agent_bytes(memory_gb) if agents else 0
-    cpu_processes = max(1, cpus - 1) if shared else cpus
-    memory_processes = max(1, (memory_bytes() - held) // GAME_BYTES)
-    processes = min(pending, cpu_processes, memory_processes)
-    games = math.ceil(batch_inputs / processes) if agents else 1
-    threads = max(1, cpus - processes) if shared else 0
-    return Cpus(processes=processes, games=games, threads=threads)
+    capacity = cpus
+    if shared:
+        capacity = batch_inputs
+    games = min(
+        pending,
+        capacity,
+        max(1, (memory_bytes() - held) // GAME_BYTES),
+    )
+    return Cpus(games=games, threads=max(1, cpus - games) if shared else 0)
 
 
 @dataclass(frozen=True)

@@ -7,7 +7,7 @@ See docs/hanabi.md. The SDK and its offline tests never import OpenSpiel.
 from __future__ import annotations
 
 import random
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 import pyspiel
@@ -15,7 +15,7 @@ import torch
 from pydantic import BaseModel, Field
 
 from etude.checkpoints import CheckpointRef
-from etude.eval.agents import Forward, ModelForward
+from etude.eval.agents import Forward
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, CheckpointPlayer, CheckpointSlot, Code, Match, Seating
 from etude.eval.result import Tables
@@ -167,7 +167,7 @@ def arena(config: ArenaConfig) -> Benchmark:
     )
 
 
-def load(checkpoint: CheckpointRef) -> ModelForward:
+def load(checkpoint: CheckpointRef) -> Forward:
     torch.set_num_threads(1)
     policy = _policy(_game())
     policy.load_state_dict(
@@ -190,55 +190,20 @@ def build(player: object, leaves: Mapping[str, Forward]) -> Forward | None:
     raise TypeError(f"unknown player {type(player).__name__}")
 
 
-async def _eval_episode(
-    game: pyspiel.Game,
-    policies: Sequence[Callable[[torch.Tensor], Awaitable[torch.Tensor]] | None],
-    *,
-    seed: int,
-) -> Episode:
-    chance = random.Random(seed)
-    generator = torch.Generator().manual_seed(seed)
-    state = game.new_initial_state()
-    transitions = 0
-    while not state.is_terminal():
-        if state.is_chance_node():
-            outcomes = state.chance_outcomes()
-            state.apply_action(
-                chance.choices([a for a, _ in outcomes], [p for _, p in outcomes])[0]
-            )
-            continue
-        player = state.current_player()
-        legal = state.legal_actions()
-        policy = policies[player]
-        if policy is None:
-            action = chance.choice(legal)
-        else:
-            observation = torch.tensor(state.observation_tensor(player), dtype=torch.float32)
-            logits = await policy(observation)
-            mask = torch.full_like(logits, -torch.inf)
-            mask[legal] = 0
-            distribution = torch.distributions.Categorical(logits=logits + mask)
-            selected = torch.multinomial(distribution.probs, 1, generator=generator).squeeze(0)
-            action = int(selected.item())
-        state.apply_action(action)
-        transitions += 1
-    return Episode(score=float(state.returns()[0]), transitions=transitions, loss=None)
-
-
 class Policy:
     def __init__(self, forward: Forward) -> None:
         self.forward = forward
 
-    async def __call__(self, observation: torch.Tensor) -> torch.Tensor:
-        return torch.tensor((await self.forward([observation.tolist()]))[0])
+    def __call__(self, observation: torch.Tensor) -> torch.Tensor:
+        return torch.tensor(self.forward([observation.tolist()])[0])
 
 
-async def play(match: Match, agents: Sequence[Forward | None]) -> Tables:
+def play(match: Match, agents: Sequence[Forward | None]) -> Tables:
     torch.set_num_threads(1)
     game = _game()
     policies = [Policy(agent) if agent is not None else None for agent in agents]
     with torch.no_grad():
-        episode = await _eval_episode(game, policies, seed=match.seed)
+        episode = _episode(game, policies, seed=match.seed)
     return {"teams": [{"group": "all", "score": episode.score, "transitions": episode.transitions}]}
 
 

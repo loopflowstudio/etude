@@ -27,7 +27,7 @@ def strength(player: Player) -> int:
     return updates // 50 - 1 + int(str(config.get("search", 0)))
 
 
-async def play(match: Match, agents: list[object]) -> Tables:
+def play(match: Match, agents: list[object]) -> Tables:
     """A duel: the stronger player wins, except the game's first player wins every third game."""
     strengths = [strength(player) for player in match.players]
     plays: Rows = []
@@ -50,9 +50,9 @@ async def play(match: Match, agents: list[object]) -> Tables:
     return {"plays": plays, "games": games}
 
 
-async def play_game_seats(match: Match, agents: list[object]) -> Tables:
+def play_game_seats(match: Match, agents: list[object]) -> Tables:
     """`play`, with the game's own seat: the players sit the other way round in odd games."""
-    tables = await play(match, agents)
+    tables = play(match, agents)
     plays = [
         {**row, "game_seat": (int(str(row["seat"])) + int(str(row["game"]))) % 2}
         for row in tables["plays"]
@@ -60,21 +60,21 @@ async def play_game_seats(match: Match, agents: list[object]) -> Tables:
     return {**tables, "plays": plays}
 
 
-async def play_unkeyed(match: Match, agents: list[object]) -> Tables:
+def play_unkeyed(match: Match, agents: list[object]) -> Tables:
     """A row naming its seat as published etude-sdk did, `player`, names no seat."""
     return {"plays": [{"game": 0, "seat": 0, "won": True}, {"game": 0, "player": 1, "won": False}]}
 
 
-async def play_seat_and_player(match: Match, agents: list[object]) -> Tables:
+def play_seat_and_player(match: Match, agents: list[object]) -> Tables:
     """A row with a column `player`, the seat's name in older stored tables."""
     return {"plays": [{"game": 0, "seat": 0, "player": 1, "won": True}]}
 
 
-async def play_text_hits(match: Match, agents: list[object]) -> Tables:
+def play_text_hits(match: Match, agents: list[object]) -> Tables:
     return {"plays": [{"game": 0, "seat": 0, "hits": "three"}]}
 
 
-async def play_teams(match: Match, agents: list[object]) -> Tables:
+def play_teams(match: Match, agents: list[object]) -> Tables:
     return {
         "teams": [
             {"game": game, "group": team, "won": (team == "north") == (game < 3)}
@@ -84,28 +84,28 @@ async def play_teams(match: Match, agents: list[object]) -> Tables:
     }
 
 
-async def play_failing_deal_one(match: Match[Config], agents: list[object]) -> Tables:
+def play_failing_deal_one(match: Match[Config], agents: list[object]) -> Tables:
     """`play`, except that deal 1 raises, as a game with a bug in one deal would."""
     if match.config.get("deal") == 1:
         raise RuntimeError("deal 1 crashed")
-    return await play(match, agents)
+    return play(match, agents)
 
 
-async def play_interrupted_deal_one(match: Match[Config], agents: list[object]) -> Tables:
+def play_interrupted_deal_one(match: Match[Config], agents: list[object]) -> Tables:
     """`play`, except that deal 1 asks to be played again, as a transient outage would."""
     if match.config.get("deal") == 1:
         raise RetryRequested("deal 1 lost its connection")
-    return await play(match, agents)
+    return play(match, agents)
 
 
-async def play_catching_errors(match: Match, agents: list[object]) -> Tables:
+def play_catching_errors(match: Match, agents: list[object]) -> Tables:
     """A runtime that catches its inference error and returns empty tables, as manabot's did."""
     return {"plays": [], "games": []}
 
 
-async def play_with_evidence(match: Match, agents: list[object]) -> Result:
+def play_with_evidence(match: Match, agents: list[object]) -> Result:
     """`play`, keeping each game's evidence as a blob that its `games` row names."""
-    tables = await play(match, agents)
+    tables = play(match, agents)
     evidence = [f"{match.key} game {row['game']}".encode() * 40 for row in tables["games"]]
     games = [
         {**row, "evidence_sha256": sha256(blob).hexdigest()}
@@ -114,7 +114,7 @@ async def play_with_evidence(match: Match, agents: list[object]) -> Result:
     return Result(tables={"plays": tables["plays"], "games": games}, blobs=evidence)
 
 
-async def play_cards(match: Match[Config], agents: list[object]) -> Tables:
+def play_cards(match: Match[Config], agents: list[object]) -> Tables:
     """manabot's card tables: one `card_plays` row per game and seat, `card_counts` per card.
 
     Deal 2's games have no winner, so no row of that match gives `win`.
@@ -155,7 +155,7 @@ async def play_cards(match: Match[Config], agents: list[object]) -> Tables:
     return {"card_plays": plays, "card_counts": counts}
 
 
-async def play_checkpoint_folder(match: Match, agents: list[object]) -> Tables:
+def play_checkpoint_folder(match: Match, agents: list[object]) -> Tables:
     """Read both models of a folder checkpoint as playing code would."""
     rows: Rows = []
     for seat, player in enumerate(match.players):

@@ -273,10 +273,7 @@ pool imports their defining module and cannot inherit a parent closure.
 Eval vocabulary: `load(checkpoint)` returns a deterministic callable from a list
 of inputs to a list of outputs. `Agents` declares it and an optional game-side
 `build(player, leaves)`, whose return value belongs to the author and is never
-called by Etude. Games await `Forward`; pre-collated inputs declare their row
-count. `play` is an async match function. `play_many` is an async generator
-that takes matches for free slots and yields each outcome with its match object.
-Sampling belongs in game code, seeded from `match.seed`. Player
+called by Etude. Sampling belongs in game code, seeded from `match.seed`. Player
 wrappers are frozen author records; checkpoint leaves share loading and batches.
 The shared agent process or each CPU game process holds checkpoint forwards;
 game processes build wrappers and play; say neither "server", "worker" nor "policy"
@@ -285,10 +282,8 @@ Etude sets the model-library thread environment before importing the checkpoint
 loading module. CPU game processes load through the same cache/eviction owner
 as shared GPU inference and report failures to the parent even when play catches them. Loaders must honor that inference budget when configuring
 their library; each game process keeps one thread.
-For `play`, Etude sizes concurrent matches from the batch allowance when
-there is a loader. For `play_many`, the author sizes the slots and Etude grants
-up to the pending count. Forward merges respect the declared batch rows.
-Probe hardware without importing the loader;
+On visible NVIDIA hardware, active games fill the declared batch, bounded by
+pending matches and host memory. Probe hardware without importing the loader;
 code-only games keep CPU capacity and perform no GPU probe. Hardware capacity
 does not select the author's model device or promise GPU memory residency.
 

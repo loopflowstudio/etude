@@ -10,14 +10,12 @@ provenance and tables remain readable without reinterpreting stored results.
 ## Eval runs
 
 `evaluating` opens one `EvalRun`. Pass a tournament, or an environment with
-an explicit match list; `run.play(play)` plays its unstored matches with an
-`async def play(match, agents)`, and `run.play_many(play_many)` drives a
-streaming async generator over `Matches`. Outside a launch, give `experiment=`.
-`run.should_stop` stops granting new matches; a planned stop seals completed
-tables and raises `Stopped`. Use the evaluating context and its play methods;
-one-call adapters have been removed. Games play in fresh `multiprocessing` spawn
-processes, which import the calling script again: a script keeps `run.play` and
-`run.play_many` under `if __name__ == "__main__":`.
+an explicit match list; `run.play(play)` plays its unstored matches.
+Outside a launch, give `experiment=`. `run.should_stop` checks
+stop requests between matches; a planned stop seals completed tables and
+raises `Stopped`. Use the evaluating context and its play method; one-call adapters have been removed.
+Games play in fresh `multiprocessing` spawn processes, which import the calling
+script again: a script keeps `run.play` under `if __name__ == "__main__":`.
 
 <!-- implementation-reference -->
 ```python
@@ -125,29 +123,18 @@ with evaluating(
   them as played.
 - **Match config.** Your Pydantic model, such as `Deal`, describes one
   match's settings. `Seating(configs=(Deal(deal=7), ...))` makes a match for
-  each config. Annotate `async def play(match: Match[Deal], agents: Sequence[object])`
-  or `async def play_many(matches: Matches[Deal])` to receive that type,
+  each config. Annotate `play(match: Match[Deal], agents: list[object])` to receive that type,
   including in worker processes. Etude defines no match config base class.
   The JSON values identify the match; the Python class name does not. Stored
-  `conditions` fields still decode; the old Python property is removed.
+  Stored `conditions` fields still decode; the old Python property is removed.
 - **Matches.** Players in their seats under fixed `config`, played for
   `games`: the unit Etude schedules, resumes and resamples. A tournament's
   `Seating` makes one match per config. Seat swaps belong
   inside `play`. Group `all` holds every seat; a player may sit in two seats.
-- **Game processes.** Each game process runs one `asyncio` event loop consuming
-  one tournament stream (Etude's task driver for `async def play`, or the
-  author's `play_many` async generator); a grouped run with differing play
-  functions or rule types binds each game process to one tournament while
-  sharing one GPU agent process. Process count is bounded by pending matches,
-  CPUs (leaving one core for the shared agent process when present) and memory.
-  For `play` with a loader, each process keeps `ceil(max_batch / processes)`
-  matches in flight and flushes pending forwards on a zero-delay loop barrier.
-  For `play` without a loader, each process handles one match at a time.
-  For `play_many`, each process pulls
-  whatever `matches.take(n)` requests from pending matches. Per-process
-  diagnostics are written to `game-{pid}.json`, and shared agent runs record
-  batch row counts and stage timings in `batches.json`. `evaluating` has no
-  setting for process count.
+- **Game processes.** Matches are played in fresh processes, as many at once
+  as the run has CPUs, by affinity and container quota, and never more than
+  there are matches. `evaluating` has no setting for the number; a job that
+  declares [agents](../evaluation.md#agents) has it sized for them too.
 - **Order.** Matches start in the order `etude.eval.schedule.ordered` gives,
   so consecutive matches reuse the checkpoints kept loaded: first those
   loading the fewest checkpoints not yet used, then those reusing the most
@@ -158,7 +145,7 @@ with evaluating(
   numbers, text, booleans or nulls. A game's own seat numbering, when it
   differs from the match's, goes in `game_seat`.
 - **Blobs.** Bytes a match keeps beside its rows, such as a game's replay
-  evidence: return `Result(tables=..., blobs=[...])` (`etude.eval.result`)
+  evidence: return `Result(tables=..., blobs=[...])` (`etude.eval.match`)
   and name each blob in a row by `hashlib.sha256(blob).hexdigest()`.
   `read_blobs(db, store, digests)` gives them back, verified.
 - **Rollups.** A summary you will query often is declared once and summed
@@ -208,19 +195,16 @@ with evaluating(
   `seat` and `group`, a seat or group the match lacks, a column named
   `player`, or a column whose type changes during a run is refused. A refused
   or raising match is recorded as failed with its error, nothing else of it
-  is stored. A raised `play` error or refused table stops new grants for the
-  tournament. In-flight outcomes are retained. In `play_many`, yield
-  `(match, error)` to fail one slot and keep taking pending matches. A raised
-  error or an unknown or duplicate yield fails every held match. Returning with
-  held matches unyielded fails each unyielded match. A run with failed matches
-  ends failed.
+  is stored. The run stops starting matches, retains in-flight outcomes and
+  ends failed. When a match cannot be played, let `play` raise: an error
+  caught and returned as empty tables is
+  still refused (`match_has_no_rows`), never stored as a result.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each drawn value from the
   environment whose latest match is newest, noting only overlaps on values
   reachable panels draw.
 - **Resume.** Outside a launch, reopen the same eval run with
-  `evaluating(..., resume=True)` and call `run.play(play)` or
-  `run.play_many(play_many)` to carry on.
+  `evaluating(..., resume=True)` and call `run.play(play)` to carry on.
   A launched retry resumes automatically. Matches already delivered to any
   of `storages` are skipped, even on a machine with an empty disk.
 - **Progress.** Each stored match prints one line to stderr:
