@@ -118,6 +118,31 @@ show as coverage gaps instead of fabricated scores.
 There is one game signature: `play(match, agents)`. Each seated player gets one
 author object in `agents`, in seat order.
 
+```python
+# models.py: keep model imports here so game processes stay light
+import torch
+
+from etude.checkpoints import CheckpointRef
+from etude.eval.agents import Forward
+
+
+def load(checkpoint: CheckpointRef) -> Forward:
+    device = (
+        "cuda"
+        if torch.cuda.is_available()
+        else "mps"
+        if torch.backends.mps.is_available()
+        else "cpu"
+    )
+    model = load_model(checkpoint.path).to(device).eval()
+
+    def forward(inputs: list[object]) -> list[object]:
+        with torch.inference_mode():
+            return model(torch.as_tensor(inputs, device=device)).tolist()
+
+    return forward
+```
+
 - `load(checkpoint)` returns a **deterministic** callable from a list of inputs
   to a list of outputs, preserving length and order. Load model weights from
   `checkpoint.path`; a named-object checkpoint is a folder with `checkpoint.json`.
@@ -133,13 +158,31 @@ as identity and `Sampler.choose` as the action method.
 [`agent_models.py`](../examples/agent_models.py) shows a loader. Both are used
 by the runnable [`agents.py`](../examples/agents.py) experiment.
 
-CPU games cache forwards directly with one model-library thread per game and a
-share of the host checkpoint-byte allowance. On visible NVIDIA hardware, calls
-from active games batch through a shared agent process. Honor Etude's thread
-environment in the loader and choose the model's device there: hardware capacity
-does not place tensors for you. Keep model imports in the loading module so the
-GPU game processes remain light. `Agents(max_batch=..., memory_gb=...)` tunes
-capacity; author code keeps one forward deterministic for every batch size.
+On a visible NVIDIA GPU or an Apple Silicon Mac (native arm64 Python), calls
+from active games batch through one shared agent process and
+`artifacts/agents/batches.json` records each forward's batch composition:
+
+```text
+$ uv run etude eval experiment.py
+etude: agents: started for prediction (apple); 7 games at a time; 1 inference thread
+```
+
+On NVIDIA hardware, active games fill `max_batch` (bounded by pending matches
+and host memory). On an Apple Silicon Mac, active games are sized to host cores
+minus one (leaving a core for the shared agent process), bounded by pending
+matches and remaining unified memory, while each forward is still capped at
+`max_batch`. On other hosts (Linux CPU, Intel Mac, or x86 Python under Rosetta),
+each game process caches forwards directly with one model-library thread per
+game and a share of the checkpoint-byte allowance.
+
+Honor Etude's thread environment in the loader and choose the model's device
+there (`cuda`, `mps` or MLX on Apple Silicon, `cpu` otherwise): hardware
+detection does not place tensors for you, and a loader that stays on CPU on an
+Apple Silicon Mac still runs through the shared agent process. Keep model
+imports (`torch`, `jax`, `tensorflow`, `mlx`) in the loading module so game
+processes remain light. `Agents(max_batch=..., memory_gb=...)` tunes batch size
+and checkpoint-byte allowance (default: half of host memory); author code keeps
+one forward deterministic for every batch size.
 
 ## Results and retry
 

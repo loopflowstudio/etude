@@ -22,10 +22,14 @@ failure recovery requires.
   config or names when new behavior should be a new scientific condition.
   Keep published checkpoint contents fixed under their keys.
 - Game functions and wrapper records must be importable top-level definitions.
-  Games run in spawned processes. CPU games use one model-library thread;
-  GPU inference batches through a shared process. Your loader must honor
-  the thread environment and choose its device. A batch allowance does not
-  guarantee GPU memory residency.
+  Games run in spawned processes. Direct CPU games use one model-library thread;
+  on a visible NVIDIA GPU or an Apple Silicon Mac (native arm64 Python),
+  inference batches through a shared agent process. Detection checks the host,
+  not your loader or macOS VM Metal support: a loader that stays on CPU on an
+  Apple Silicon Mac still runs through that shared process (with as few as one
+  inference thread). Your loader must honor the thread environment and choose
+  its device (`cuda`, `mps`, MLX or `cpu`). A batch or memory allowance does
+  not guarantee GPU memory residency.
 - A match must return rows to count as done. Caught forward failures still
   propagate to retention. Ordinary game failures need `--retry-failed`;
   transient infrastructure failures can retry automatically.
