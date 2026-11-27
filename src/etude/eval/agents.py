@@ -39,7 +39,7 @@ __all__ = ("Forward", "ModelForward", "ForwardError")
 if TYPE_CHECKING:
     from etude.call import Function
     from etude.checkpoints import CheckpointRef
-    from etude.jobs import AgentLoader
+    from etude.eval.loader import AgentLoader
 
 
 type ModelForward = Callable[[list[object]], list[object]]

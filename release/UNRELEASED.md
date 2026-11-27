@@ -158,13 +158,16 @@ machine, instead of one run per tournament, and their tournaments play at
 once.
 
 An eval job may declare `agents=Agents(load=..., build=...)`. You write the
-game, `play(match, agents)`, and how a checkpoint is loaded, `load(checkpoint)`, which returns a deterministic callable forward. Etude runs the rest: light
-game processes and shared checkpoint batching on visible NVIDIA hardware;
-on CPUs each game process caches and calls the same checkpoint forwards directly.
+game as `async def play(match, agents)` or as a streaming `play_many(matches)`
+async generator. `load(checkpoint)` returns a deterministic model forward.
+For `play`, Etude shares checkpoint inference on declared, detected NVIDIA or
+Apple Silicon hardware (native arm64 Python). Direct game processes cache
+their own forwards. A `play_many` phase uses one game process with a dedicated
+inference thread and passes C-contiguous NumPy input arrays without copying.
 The forward returns one output per input, in order, independently of batch
 composition. Your game owns sampling, seeded from `match.seed`; player-record
 fields describe greedy/sample choice and temperature. The build hook returns
-any author object; Etude never calls it. Every game uses `play(match, agents)`.
+any author object. Game code awaits the checkpoint forwards.
 Code and API players can declare `Agents(build=build)` without a loader; a
 code-only group starts no agent process
 ([Agents](../docs/evaluation.md#agents)).
@@ -177,19 +180,23 @@ match duration. Without a rental target, the run waits in the pool's queue
 
 ### Upgrade
 
-- **Update every game to `play(match, agents)`.** The one-argument game signature
-  is removed. `build(player, leaves)` returns whatever your game uses;
-  `load(checkpoint)` returns a callable forward, never an action sampler.
+- **Make game functions async and await checkpoint forwards.** Define
+  `async def play(match, agents)` or use `play_many(matches)` to step and
+  refill vectorized slots. Remove `max_delay_seconds` from `Agents`.
+  Ready requests flush immediately.
 - **Remove `workers=`** from `EvalJob(...)` and `evaluating(...)`; it is
-  refused. Etude owns game concurrency: CPU and memory allowances bound CPU
-  games; on a visible NVIDIA GPU, games fill the declared batch, bounded by
-  pending work and memory. The one-call `evaluate(workers=)` adapter is removed. Eval jobs already queued with `workers` still run.
+  refused. Etude sizes processes from CPU, memory and pending work. For
+  `play`, CUDA and direct checkpoint inference divide `max_batch` across
+  processes. Metal uses one match per process and leaves a core for shared
+  inference when possible. `play_many` chooses its own slot count. In a mixed
+  group, the `play_many` phase starts after `play` finishes.
 - **Guard Python scripts that play.** `evaluating(...)` without `workers=`
   played in its own process; its games now play in fresh processes, which
   import the script again. Put `run.play` under `if __name__ == "__main__":`.
 - **Existing results remain readable and are not replayed.** Results stay keyed
-  by tournament and match; eval runs already stored, queued or running are
-  read as before. Declaring, changing or removing `agents` replays nothing.
+  by tournament and match. Queued records still decode. To run a queued
+  declaration using synchronous `play`, update its game function and submit
+  the async declaration.
 - **A launched eval run is `EXPERIMENT/evals-DIGEST`**, not
   `EXPERIMENT/TOURNAMENT-DIGEST`, and every tournament it plays prints that
   one name. Each tournament's tables are in its own eval run below that
@@ -202,7 +209,7 @@ match duration. Without a rental target, the run waits in the pool's queue
 - **A run's limits are its jobs' summed.** The eval run's `max_hours` and
   `max_usd` are the totals of the eval jobs it plays, and `--max-usd` admits
   it as one run.
-- **A failed match stops its tournament.** Matches already in flight retain
+- **A failed `play` match stops its tournament.** Matches already in flight retain
   their outcomes, so successful matches are not replayed and failed ones keep
   their retry flags. The other tournaments keep playing, and the run ends
   failed. A loader failure instead fails every
@@ -210,6 +217,7 @@ match duration. Without a rental target, the run waits in the pool's queue
   tournaments, including matches never dispatched, with the load error.
   Matches without that checkpoint continue; delivered results stay unchanged.
   A load raising `RetryRequested` applies the same scope with `retry=True`.
+  `play_many` can yield an error for one slot and refill it.
 - **Some failed matches are replayed without `--retry-failed`.** A match the
   machine failed rather than the game (unfinished at the run's time limit or
   SIGTERM, a failed delivery, an agent process that exited, or code that
@@ -218,15 +226,12 @@ match duration. Without a rental target, the run waits in the pool's queue
   is `retry=False` and waits for `--retry-failed`, as before.
 - **`etude.jobs.with_matches` is removed.** The pass builds the run itself.
 
-Match records retain execution seconds for reports.
-Completed matches are sealed and offered to storage individually. Container
-CPU quotas set CPU game capacity and model thread budgets; a visible NVIDIA
-GPU selects batch-sized game capacity instead. The loader selects its device, and
-`ETUDE_SCRATCH_DIR` supplies temporary fast scratch. A run with agents keeps
-which inputs shared each batch in `artifacts/agents/batches.json`.
-Per-match protocol reports retain play intervals on the host's monotonic
-clock, including games without agents, so concurrent games and the final
-tail can be reconstructed. Killed games may leave no interval.
+Match records retain execution seconds for reports. Completed matches are
+sealed and offered to storage individually. Game processes write
+`artifacts/agents/game-{pid}.json` with imports, matches and transport counts.
+Shared inference records batch rows, request counts and stage timings in
+`artifacts/agents/batches.json`. The loader selects its device, and
+`ETUDE_SCRATCH_DIR` supplies temporary fast scratch.
 The CPU placement choice follows a frozen 64-game Small-checkpoint comparison
 on one 32-vCPU host. Direct Etude loading took 46.36 s (4,970 games/hour),
 shared loading with 2/4/7 agent processes took 89.00/72.70/66.67 s, and the raw
@@ -236,9 +241,27 @@ shared arm. This is one shuffled panel on one host; it does not establish a
 universal CPU model-size crossover. GPU placement retains the earlier fair
 Large-checkpoint results below.
 
+On an Apple Silicon Mac (native arm64 Python), `play` can batch checkpoint
+inference through one shared agent process, with up to `cpus - 1` game processes
+and merged batches up to `max_batch` rows. On a 16-core M4 Max, 128 held-out
+Manabot `w160l8` games reached 6,992 games/hour with 15 concurrent games and
+shared MPS (7.43 mean rows/forward), 6,470 games/hour with 32 concurrent
+games and shared MPS, and 6,183 games/hour with direct CPU inference. The
+single-thread shared CPU comparison reached 1,222 games/hour. These results
+measure one checkpoint and one host.
+
+`Agents(load=load, devices=("cuda", "metal"))` is the default for checkpoint
+loaders. Use `("cuda",)` or `("metal",)` to share only on the corresponding
+hardware for `play`, or `("cpu",)` for direct inference on all hosts. Undeclared or
+unavailable accelerators use direct inference. Startup output names the mode,
+its reason, the game count and the thread budget. Older queued loader records
+without a device declaration use the default.
+
 `matches.retry` distinguishes retryable infrastructure failures from ordinary
-game errors without adding another status. Older match records default it to
-false. The derived statsdb cache rebuilds from schema 14 or 15 to 16 automatically.
+game errors without adding another status. Standalone and grouped evals retain
+unfinished matches for retry when the shared agent process fails. Older match
+records default `retry` to false. The derived statsdb cache rebuilds from schema
+14 or 15 to 16 automatically.
 Game processes load play's defining module; for a job using shared inference, heavy
 imports there produce one warning per run naming their importer.
 

@@ -55,6 +55,7 @@ from etude.eval.game import (
     _match_type,
     run_game_process,
 )
+from etude.eval.loader import AgentLoader
 from etude.eval.records import (
     ADDED,
     COLUMN_TYPES,
@@ -82,7 +83,7 @@ from etude.storage import DirectoryStorage, Storage, run_prefix
 if TYPE_CHECKING:
     import duckdb
 
-    from etude.jobs import AgentLoader, Agents
+    from etude.jobs import Agents
 
 # Etude's own tables, which `etude.eval.query.statsdb` keeps beside the author's.
 ETUDE_TABLES = (
@@ -166,14 +167,15 @@ class EvalRun(Run):
         _match_type(play, streaming=streaming)
         authored = inspect.unwrap(play)
         function = Function(module=authored.__module__, name=authored.__qualname__)
-        definition = agents.plain(None) if agents is not None else None
-        artifacts = self.files.root / "artifacts" / "agents"
-        with _terminable(), resources(artifacts) as owned:
-            (result,) = play_together(
-                (Playing(run=self, play=function, streaming=streaming),),
-                resources=owned,
-                agents=definition,
-            )
+        definition = agents.plain(None) if agents is not None else AgentLoader()
+        tournament = Playing(
+            run=self,
+            play=function,
+            tournament=self.name,
+            agent_loader=definition,
+            streaming=streaming,
+        )
+        (result,) = play_together((tournament,), artifacts=self.files.root / "artifacts" / "agents")
         if isinstance(result, (EtudeError, RetryRequested)):
             raise result
         return result
@@ -531,8 +533,9 @@ class Playing:
 
     run: EvalRun
     play: Function
+    tournament: str
+    agent_loader: AgentLoader
     streaming: bool = False
-    tournament: str | None = None
     pending: deque[Match] = field(init=False)
     skipped: int = field(init=False)
     played: int = 0
@@ -563,11 +566,14 @@ def _retain(name: str, report: GameReport, directory: Path) -> None:
 def play_together(
     plays: Sequence[Playing],
     *,
-    resources: Resources,
-    agents: AgentLoader | None = None,
+    artifacts: Path,
     checkout: str | None = None,
 ) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
     """Run the play phase, then the play_many phase, sharing outcomes and progress."""
+    pending = [each for each in plays if each.pending]
+    agents = pending[0].agent_loader if pending else AgentLoader()
+    if any(each.agent_loader != agents for each in pending):
+        raise EtudeError("incompatible_eval_agents", 422)
     started = time.monotonic()
     warned_imports = False
     failed_checkpoints: set[str] = set()
@@ -665,13 +671,13 @@ def play_together(
                 remember_failure(each, match_error)
                 each.pending.clear()
 
-    def run_phase(active_plays: tuple[Playing, ...], *, streaming: bool) -> None:
+    def run_phase(active_plays: tuple[Playing, ...], owned: Resources, *, streaming: bool) -> None:
         if any(each.run.should_stop for each in active_plays):
             raise Terminated("evaluation stopped before its execution deadline")
         stopping = False
         needs_loading = False
         match_bytes = 0
-        if agents is not None and agents.load is not None:
+        if agents.load is not None:
             for each in active_plays:
                 for match in each.pending:
                     sizes: dict[str, int] = {}
@@ -683,24 +689,21 @@ def play_together(
                     if sizes:
                         needs_loading = True
                         match_bytes = max(match_bytes, sum(sizes.values()))
-        max_batch = agents.max_batch if agents is not None else 32
         placement = place(
             [len(each.pending) for each in active_plays],
             streaming=streaming,
-            agents=needs_loading,
-            max_batch=max_batch,
-            memory_gb=agents.memory_gb if agents is not None else None,
+            loader=agents,
+            checkpoints=needs_loading,
             match_bytes=match_bytes,
         )
-        build = agents.build if agents is not None else None
-        load = agents.load if placement.bus == "local" and agents is not None else None
+        load = agents.load if placement.bus == "local" else None
         games_per_process = placement.games_per_process
 
         with ExitStack() as agent_lifetime:
             agent_process: AgentProcess | None = None
-            if placement.bus == "socket" and agents is not None:
+            if placement.bus == "socket":
                 agent_process = agent_lifetime.enter_context(
-                    running_agents(agents, checkout, resources, placement)
+                    running_agents(agents, checkout, owned, placement)
                 )
             agent_address = agent_process.address if agent_process is not None else None
 
@@ -708,7 +711,7 @@ def play_together(
                 nonlocal warned_imports
                 if report is None:
                     return
-                _retain(f"game-{report.pid}.json", report, resources.artifacts)
+                _retain(f"game-{report.pid}.json", report, owned.artifacts)
                 if placement.bus is not None and not warned_imports:
                     warning = report.imports.warning(count_limit=placement.bus == "socket")
                     if warning:
@@ -725,7 +728,7 @@ def play_together(
                 parent, child_pipe = context.Pipe()
                 streams = tuple(
                     Stream(
-                        tournament=each.tournament or each.run.name,
+                        tournament=each.tournament,
                         function=each.play,
                         concurrency=games_per_process,
                     )
@@ -733,15 +736,15 @@ def play_together(
                 )
                 process = context.Process(
                     target=run_game_process,
-                    args=(child_pipe, resources, streams),
+                    args=(child_pipe, owned, streams),
                     kwargs={
                         "threads": placement.game_threads,
                         "agents": agent_address,
                         "checkout": checkout,
-                        "build": build,
+                        "build": agents.build,
                         "load": load,
                         "checkpoint_bytes": placement.checkpoint_bytes,
-                        "max_batch": max_batch,
+                        "max_batch": agents.max_batch,
                     },
                 )
                 process.start()
@@ -835,9 +838,7 @@ def play_together(
 
             try:
                 spawn_ready()
-                description = placement.describe(
-                    [each.tournament or each.run.name for each in active_plays]
-                )
+                description = placement.describe([each.tournament for each in active_plays])
                 if description is not None:
                     print(description, file=sys.stderr, flush=True)
                 while live:
@@ -897,14 +898,14 @@ def play_together(
 
     active_phase: tuple[Playing, ...] = ()
     try:
-        with _terminable():
+        with _terminable(), resources(artifacts) as owned:
             for streaming in (False, True):
                 active_plays = tuple(
                     each for each in plays if each.streaming == streaming and each.pending
                 )
                 if active_plays:
                     active_phase = active_plays
-                    run_phase(active_plays, streaming=streaming)
+                    run_phase(active_plays, owned, streaming=streaming)
     except RetryRequested as error:
         affected = False
         for each in plays:

@@ -27,11 +27,10 @@ failure recovery requires.
   process; blocking the loop without awaiting stalls the other games in that
   process until the run deadline. With a loader, a `play_many` phase runs
   direct inference in one game process with the host inference thread budget.
-  A `play` phase uses a direct inference thread in each game process when no
-  NVIDIA GPU is seen, or batches through a shared agent process on visible
-  NVIDIA hardware. Your loader must honor the thread environment and choose
-  its device. A batch allowance
-  does not guarantee GPU memory residency. If a game process crashes during
+  A `play` phase uses a shared agent process for a declared, detected CUDA or
+  Metal accelerator. Other `play` phases use a direct inference thread in each
+  game process. Your loader must honor the thread environment and owns device
+  selection and GPU memory residency. If a game process crashes during
   play, queued and in-flight matches are recorded as retryable failures.
   Tournaments that already finished or failed keep their status.
 - Direct inference isolates loaded models on the inference thread, but a game

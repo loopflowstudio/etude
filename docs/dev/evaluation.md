@@ -153,12 +153,13 @@ with evaluating(
   - Code-only `play` (`bus=None`, `game_threads=1`, `agent_threads=0`,
     `games_per_process=1`, `share_streams=False`): no bus, no GPU probe, one match at
     a time per game process.
-  - Visible NVIDIA GPU, `play` (`bus="socket"`,
+  - Declared CUDA or Metal accelerator detected, `play` (`bus="socket"`,
     `game_threads=1`, `agent_threads=max(1, cpus - processes)`,
     `share_streams=False`): one shared agent process. Each game process serves
     one tournament, which can use up to `ceil(pending / games_per_process)`
-    processes. Unused cores go to `agent_threads`.
-  - No NVIDIA GPU seen, `play` (`bus="local"`,
+    processes. CUDA bounds the process count by `max_batch`. Metal assigns
+    one match per process. Unused cores go to `agent_threads`.
+  - No declared accelerator detected, `play` (`bus="local"`,
     `game_threads=max(1, (cpus - processes) // processes)`, `agent_threads=0`,
     `share_streams=True`): one direct inference thread per game
     process, splitting unused host cores across inference threads and dividing

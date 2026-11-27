@@ -299,9 +299,14 @@ keeps the completed prefix; changing config or base seed changes match keys.
   read `arrays`, `arrays_copied` and `pickled_bytes`. Never edit Manabot's
   checkout or environment for this.
 
-CPU games load forwards directly and keep one model-library thread per game.
-On visible NVIDIA hardware, a shared agent process batches checkpoint forwards;
-only that path keeps model loading out of game imports. Code-only builds start
+Direct inference loads forwards on a dedicated thread in each game process.
+For `play`, a declared and detected NVIDIA or Apple Silicon accelerator selects
+one shared agent process. For `play_many`, one game process runs a direct
+inference thread on every host. Native arm64 macOS exercises the Metal path:
+the example labs print `shared inference … (metal)` and write
+`home/track/<experiment>/artifacts/agents/batches.json`. For the direct path on
+the same Mac, declare `devices=("cpu",)` for `play`, or use `play_many`.
+Code-only builds start
 no loading process and perform no hardware probe. Check controlled CPU/memory
 capacity, cross-tournament batching, multiple leaves, eviction and partial-batch
 drain with bounded fixtures; never create resource pressure. Keep complete

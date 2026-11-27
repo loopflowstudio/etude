@@ -24,7 +24,10 @@ def test_mirror_sends_all_branches_once_per_ply_and_builds_author_objects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shared: bool
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
-    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: shared)
+    monkeypatch.setattr(
+        "etude.eval.resources._detect_accelerator",
+        lambda: "cuda" if shared else "no accelerator detected",
+    )
     small = checkpoint("small")
     mirror = Mirror(over=small)
     greedy = mirror.model_copy(update={"choice": "greedy"})
@@ -102,10 +105,12 @@ def test_code_players_build_author_objects_without_an_agent_process(
     assert not (tmp_path / "grouped/artifacts/agents/batches.json").exists()
 
 
-def test_cpu_games_reuse_the_checkpoint_across_tournaments(
+def test_cpu_games_in_a_group_load_checkpoints_in_each_game_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: False)
+    monkeypatch.setattr(
+        "etude.eval.resources._detect_accelerator", lambda: "no accelerator detected"
+    )
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     small = checkpoint("small")

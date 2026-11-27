@@ -9,6 +9,7 @@ durable artifact folder by the group owner.
 
 import math
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -19,7 +20,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+from etude.errors import RetryRequested
+
+if TYPE_CHECKING:
+    from etude.eval.loader import AgentLoader
 
 THREAD_VARIABLES = (
     "OMP_NUM_THREADS",
@@ -100,20 +106,45 @@ def seconds_left() -> float | None:
     return max(0.0, datetime.fromisoformat(deadline).timestamp() - time.time())
 
 
-def _has_gpu() -> bool:
-    """Read visible NVIDIA hardware without importing the author's model library."""
-    if os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1"):
-        return False
+type Accelerator = Literal["cuda", "metal"]
+type Device = Literal["cuda", "metal", "cpu"]
+type _Unavailable = Literal[
+    "no accelerator detected", "CUDA_VISIBLE_DEVICES hides GPUs", "nvidia-smi failed"
+]
+type Inference = (
+    Accelerator
+    | _Unavailable
+    | Literal[
+        "no loader",
+        "no checkpoints",
+        "cpu-only loader",
+        "loader does not declare cuda",
+        "loader does not declare metal",
+    ]
+)
+
+
+def _detect_accelerator() -> Accelerator | _Unavailable:
+    """Find visible hardware or explain its absence without importing a model library."""
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        return "metal"
     command = shutil.which("nvidia-smi")
     if command is None:
-        return False
-    return bool(
-        subprocess.check_output(
+        return "no accelerator detected"
+    if os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1"):
+        return "CUDA_VISIBLE_DEVICES hides GPUs"
+    try:
+        listed = subprocess.check_output(
             [command, "--query-gpu=index", "--format=csv,noheader"],
             text=True,
             timeout=seconds_left(),
-        ).strip()
-    )
+        )
+    except subprocess.CalledProcessError:
+        # Driver unloaded or mismatched: play direct, but name the fault at startup.
+        return "nvidia-smi failed"
+    except subprocess.TimeoutExpired as error:
+        raise RetryRequested("nvidia-smi did not answer before the deadline") from error
+    return "cuda" if listed.strip() else "no accelerator detected"
 
 
 @dataclass(frozen=True)
@@ -127,7 +158,7 @@ class Placement:
     games_per_process: int | None  # `play_many` requests its own slots.
     share_streams: bool
     checkpoint_bytes: int
-    reason: str
+    reason: Inference | Literal["no pending matches", "play_many"]
 
     def describe(self, tournaments: Sequence[str]) -> str | None:
         """Describe the placement of one evaluation phase."""
@@ -153,13 +184,28 @@ class Placement:
         )
 
 
+def _select_inference(loader: "AgentLoader", checkpoints: bool) -> Inference:
+    if loader.load is None:
+        return "no loader"
+    if not checkpoints:
+        return "no checkpoints"
+    if loader.devices == ("cpu",):
+        return "cpu-only loader"
+    match _detect_accelerator():
+        case "cuda":
+            return "cuda" if "cuda" in loader.devices else "loader does not declare cuda"
+        case "metal":
+            return "metal" if "metal" in loader.devices else "loader does not declare metal"
+        case unavailable:
+            return unavailable
+
+
 def place(
     pending: Sequence[int],
     *,
     streaming: bool = False,
-    agents: bool,
-    max_batch: int = 32,
-    memory_gb: float | None = None,
+    loader: "AgentLoader",
+    checkpoints: bool,
     match_bytes: int = 0,
 ) -> Placement:
     """Allocate the host to tournaments using the same kind of play function.
@@ -180,24 +226,27 @@ def place(
             checkpoint_bytes=0,
             reason="no pending matches",
         )
+    loading = loader.load is not None and checkpoints
+    memory_gb = loader.memory_gb
     cpus = available_cpus()
     # One reservation covers the shared cache or all direct caches combined.
-    host_bytes = memory_bytes() if not streaming or (agents and memory_gb is None) else 0
+    host_bytes = memory_bytes() if not streaming or (loading and memory_gb is None) else 0
     held = 0
-    if agents:
+    if loading:
         held = int(memory_gb * 1024**3) if memory_gb is not None else host_bytes // 2
     if streaming:
         return Placement(
-            bus="local" if agents else None,
+            bus="local" if loading else None,
             processes=1,
-            game_threads=max(1, cpus - 1) if agents else cpus,
+            game_threads=max(1, cpus - 1) if loading else cpus,
             agent_threads=0,
             games_per_process=None,
             share_streams=True,
             checkpoint_bytes=held,
-            reason="play_many" if agents else "no checkpoints to load",
+            reason="play_many" if loading else _select_inference(loader, checkpoints),
         )
-    if not agents:
+    inference = _select_inference(loader, checkpoints)
+    if not loading:
         cap = min(cpus, max(1, host_bytes // GAME_BYTES))
         return Placement(
             bus=None,
@@ -207,12 +256,14 @@ def place(
             games_per_process=1,
             share_streams=False,
             checkpoint_bytes=0,
-            reason="no checkpoints to load",
+            reason=inference,
         )
-    gpu = _has_gpu()
-    share_streams = not gpu
+    shared = inference in ("cuda", "metal")
+    share_streams = not shared
     memory_processes = max(1, (host_bytes - held) // GAME_BYTES)
-    cap = min(max(1, cpus - 1), memory_processes) if gpu else min(cpus, memory_processes)
+    cap = min(max(1, cpus - 1) if shared else cpus, memory_processes)
+    if inference == "cuda":
+        cap = min(cap, loader.max_batch)
     if share_streams and match_bytes > 0:
         # Each direct process needs room for a match in its own checkpoint cache.
         cap = min(cap, max(1, held // match_bytes))
@@ -220,17 +271,21 @@ def place(
     # Direct processes share every queue and can reuse their checkpoint cache.
     if share_streams:
         queues = (largest,)
-    games_per_process = min(math.ceil(max_batch / min(cap, sum(queues))), largest)
+    games_per_process = (
+        1
+        if inference == "metal"
+        else min(math.ceil(loader.max_batch / min(cap, sum(queues))), largest)
+    )
     processes = min(cap, sum(math.ceil(count / games_per_process) for count in queues))
     return Placement(
-        bus="socket" if gpu else "local",
+        bus="socket" if shared else "local",
         processes=processes,
-        game_threads=1 if gpu else max(1, (cpus - processes) // processes),
-        agent_threads=max(1, cpus - processes) if gpu else 0,
+        game_threads=1 if shared else max(1, (cpus - processes) // processes),
+        agent_threads=max(1, cpus - processes) if shared else 0,
         games_per_process=games_per_process,
         share_streams=share_streams,
-        checkpoint_bytes=held if gpu else held // processes,
-        reason="NVIDIA GPU visible" if gpu else "no NVIDIA GPU visible",
+        checkpoint_bytes=held if shared else held // processes,
+        reason=inference,
     )
 
 

@@ -145,62 +145,79 @@ def _as_array(
 
 
 def _normalize(
-    value: object, copy_arrays: bool, copied: list[ndarray] | None, active: set[int]
-) -> object:
-    if type(value) in _PLAIN:
-        return value
-    if type(value) is list:
-        return [_normalize(item, copy_arrays, copied, active) for item in value]
-    if type(value) is tuple:
-        return tuple(_normalize(item, copy_arrays, copied, active) for item in value)
-    if type(value) is dict:
-        return {key: _normalize(item, copy_arrays, copied, active) for key, item in value.items()}
-    np = _numpy()
-    if np is not None and isinstance(value, np.ndarray):
-        return np.array(value, copy=True, order="C") if copy_arrays else value
-    if is_dataclass(value) and not isinstance(value, type):
-        return _normalize_dataclass(value, copy_arrays, copied, active)
-    array = _as_array(value, "output" if copied is None else "input")
-    if array is None:
-        return value
-    if copied is not None:
-        copied.append(array)
-    return array
+    values: list[object], *, copy_arrays: bool = False, copied: list[ndarray] | None = None
+) -> list[object]:
+    """Convert array leaves, retaining containers that have no converted descendants."""
+    active: set[int] = set()
+    leaves: dict[int, object] = {}
+    cyclic = False
 
+    def visit(item: object) -> object:
+        nonlocal cyclic
+        kind = type(item)
+        if kind in _PLAIN:
+            return item
+        key = id(item)
+        if key in active:
+            cyclic = True
+            return item
+        if kind in (list, tuple, dict) or (is_dataclass(item) and not isinstance(item, type)):
+            active.add(key)
+            try:
+                return visit_container(item)
+            finally:
+                active.remove(key)
+        if key not in leaves:
+            np = _numpy()
+            if np is not None and isinstance(item, np.ndarray):
+                leaves[key] = np.array(item, copy=True, order="C") if copy_arrays else item
+            else:
+                array = _as_array(item, "output" if copied is None else "input")
+                leaves[key] = item if array is None else array
+                if array is not None and copied is not None:
+                    copied.append(array)
+        return leaves[key]
 
-def _normalize_dataclass(
-    value: object, copy_arrays: bool, copied: list[ndarray] | None, active: set[int]
-) -> object:
-    """The instance itself when no leaf changed, else a shallow copy with the changed fields.
-
-    Copying rather than calling the constructor keeps frozen, slotted and
-    `init=False` fields and skips `__post_init__`. A cycle back to an instance
-    being normalized keeps the original reference.
-    """
-    if id(value) in active:
-        return value
-    active.add(id(value))
-    try:
+    def visit_container(item: object) -> object:
+        if type(item) is list or type(item) is tuple:
+            items = [visit(child) for child in item]
+            if all(new is old for new, old in zip(items, item, strict=True)):
+                return item
+            return items if type(item) is list else tuple(items)
+        if type(item) is dict:
+            entries = {name: visit(child) for name, child in item.items()}
+            return item if all(child is item[name] for name, child in entries.items()) else entries
         changed: dict[str, object] = {}
-        for each in fields(value):  # type: ignore[arg-type]  # is_dataclass checked an instance.
-            item = getattr(value, each.name)
-            normalized = _normalize(item, copy_arrays, copied, active)
-            if normalized is not item:
+        for each in fields(item):  # type: ignore[arg-type]  # The caller checked the dataclass.
+            original = getattr(item, each.name)
+            normalized = visit(original)
+            if normalized is not original:
                 changed[each.name] = normalized
-    finally:
-        active.discard(id(value))
-    if not changed:
-        return value
-    replaced = copy.copy(value)
-    for name, item in changed.items():
-        object.__setattr__(replaced, name, item)
-    return replaced
+        if not changed:
+            return item
+        # Preserve frozen, slotted and init=False fields without running __post_init__.
+        replaced = copy.copy(item)
+        for name, child in changed.items():
+            object.__setattr__(replaced, name, child)
+        return replaced
+
+    results = []
+    for item in values:
+        cyclic = False
+        leaves.clear()
+        normalized = visit(item)
+        # Reconnect back-edges to the normalized graph, reusing the converted array
+        # leaves. The shallow copies made during discovery can still point at originals.
+        if cyclic and normalized is not item:
+            normalized = copy.deepcopy(item, leaves.copy())
+        results.append(normalized)
+    return results
 
 
 def normalize_inputs(values: list[object]) -> Normalized:
     """Convert non-NumPy inputs on the game thread and account for their copies."""
     copied: list[ndarray] = []
-    normalized = [_normalize(item, False, copied, set()) for item in values]
+    normalized = _normalize(values, copied=copied)
     return Normalized(
         values=normalized,
         copied_bytes=sum(array.nbytes for array in copied),
@@ -210,7 +227,7 @@ def normalize_inputs(values: list[object]) -> Normalized:
 
 def normalize_outputs(values: list[object], *, copy_arrays: bool = False) -> list[object]:
     """Materialize model outputs on the producing thread, copying ndarrays for local delivery."""
-    return [_normalize(item, copy_arrays, None, set()) for item in values]
+    return _normalize(values, copy_arrays=copy_arrays)
 
 
 def arrays(value: object) -> Iterator[ndarray]:

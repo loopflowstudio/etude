@@ -147,6 +147,12 @@ class _Action:
 
 
 @dataclass
+class _Cycle:
+    values: np.ndarray
+    link: _Cycle | None = None
+
+
+@dataclass
 class _Prepared:
     """Shaped like a game's prepared step: nested dataclasses, dicts and lists of arrays."""
 
@@ -884,7 +890,10 @@ async def _catches_forward_error(match: Match, agents: Sequence[Forward]) -> Tab
 def test_raising_forward_fails_play_match_even_when_caught(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: _Transport
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: transport == "socket")
+    monkeypatch.setattr(
+        "etude.eval.resources._detect_accelerator",
+        lambda: "cuda" if transport == "socket" else "no accelerator detected",
+    )
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
     cp = checkpoint("boom")
     match = Match(players=(cp,), games=1)
@@ -922,7 +931,10 @@ async def _catches_unpicklable_input(match: Match, agents: Sequence[Forward]) ->
 def test_unpicklable_input_in_play_fails_match_even_when_caught(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: _Transport
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: transport == "socket")
+    monkeypatch.setattr(
+        "etude.eval.resources._detect_accelerator",
+        lambda: "cuda" if transport == "socket" else "no accelerator detected",
+    )
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
     cp = checkpoint("unpicklable")
     match = Match(players=(cp,), games=1)
@@ -976,7 +988,10 @@ async def _cancels_load_await(match: Match, agents: Sequence[Forward]) -> Tables
 def test_cancelled_load_failure_fails_unstarted_matches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: _Transport
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: transport == "socket")
+    monkeypatch.setattr(
+        "etude.eval.resources._detect_accelerator",
+        lambda: "cuda" if transport == "socket" else "no accelerator detected",
+    )
     monkeypatch.setattr(
         "etude.eval.resources.available_cpus", lambda: 2 if transport == "socket" else 1
     )
@@ -1110,6 +1125,7 @@ def test_local_bus_passes_dataclass_arrays_by_pointer_and_locks_them_in_flight()
         bus = LocalForwardBus(load, max_batch=8, memory=1024 * 1024)
         bus.bind(cp)
         prepared = _prepared(128)
+        assert normalize_inputs([prepared]).values[0] is prepared
         leaves = _prepared_arrays(prepared)
         try:
             [fut] = bus.submit([ForwardCall(cp.key, [prepared], rows=128)])
@@ -1187,15 +1203,45 @@ def test_dataclass_buffer_leaves_normalize_into_a_copy_and_cycles_terminate() ->
     source = np.arange(4, dtype=np.float32)
     root = Node(data=np.arange(2, dtype=np.float32))
     root.parent = root
-    child = Node(data=_LazyBuffer(source), parent=root)
+    child = Node(data=_LazyBuffer(source))
+    child.parent = child
 
     normalized = normalize_inputs([child, root])
     copied, kept = cast(list[Node], normalized.values)
     assert copied is not child and kept is root
     assert isinstance(copied.data, np.ndarray) and np.array_equal(copied.data, source)
-    assert copied.parent is root
+    assert copied.parent is copied
     assert normalized.copied_bytes == source.nbytes
     assert len(list(arrays(normalized.values))) == 2
+
+
+@pytest.mark.parametrize("transport", ["local", "socket"])
+def test_split_forward_snapshots_cyclic_outputs_before_reusing_buffers(
+    transport: _Transport,
+) -> None:
+    cp = checkpoint("cyclic_outputs").checkpoint
+    result = _Cycle(np.zeros(4, dtype=np.float32))
+    result.link = result
+
+    def load(ref: CheckpointRef) -> ModelForward:
+        def forward(inputs: list[object]) -> list[object]:
+            [step] = inputs
+            result.values.fill(cast(int, step))
+            return [result]
+
+        return forward
+
+    async def run() -> None:
+        async with _open_bus(transport, load, max_batch=1) as bus:
+            bus.bind(cp)
+            [future] = bus.submit([ForwardCall(cp.key, [1, 2], 2)])
+            first, second = cast(list[_Cycle], await future)
+            assert first.link is first and second.link is second
+            assert np.all(first.values == 1) and np.all(second.values == 2)
+            assert not np.shares_memory(first.values, result.values)
+            assert not np.shares_memory(first.values, second.values)
+
+    asyncio.run(run())
 
 
 def test_local_bus_counts_fortran_contiguous_consistently_at_top_level_and_nested() -> None:
@@ -1328,7 +1374,10 @@ def test_local_and_socket_store_identical_rows(
     mirror_results: dict[_Transport, list[tuple[object, ...]]] = {}
     transports: tuple[_Transport, ...] = ("local", "socket")
     for transport in transports:
-        monkeypatch.setattr("etude.eval.resources._has_gpu", lambda t=transport: t == "socket")
+        monkeypatch.setattr(
+            "etude.eval.resources._detect_accelerator",
+            lambda t=transport: "cuda" if t == "socket" else "no accelerator detected",
+        )
         monkeypatch.setattr(
             "etude.eval.resources.available_cpus", lambda t=transport: 2 if t == "socket" else 1
         )
@@ -1353,7 +1402,10 @@ def test_local_and_socket_store_identical_rows(
     eval_group = _load_example_group(Path("examples/agents.py"))
     example_results: dict[_Transport, list[tuple[object, ...]]] = {}
     for transport in transports:
-        monkeypatch.setattr("etude.eval.resources._has_gpu", lambda t=transport: t == "socket")
+        monkeypatch.setattr(
+            "etude.eval.resources._detect_accelerator",
+            lambda t=transport: "cuda" if t == "socket" else "no accelerator detected",
+        )
         monkeypatch.setattr(
             "etude.eval.resources.available_cpus", lambda t=transport: 3 if t == "socket" else 1
         )
@@ -1491,7 +1543,9 @@ def test_play_barrier_runs_other_match_and_accepts_second_call_while_first_is_he
 def test_vectorized_example_uses_two_half_numpy_arrays_zero_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: False)
+    monkeypatch.setattr(
+        "etude.eval.resources._detect_accelerator", lambda: "no accelerator detected"
+    )
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
     eval_group = _load_example_group(Path("examples/vectorized.py"))
     results = hold_group(eval_group, directory=tmp_path)
@@ -1632,9 +1686,9 @@ def test_unpicklable_request_disconnects_only_its_peer(
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
-    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: True)
-    placement = place((2,), agents=True)
+    monkeypatch.setattr("etude.eval.resources._detect_accelerator", lambda: "cuda")
     definition = Agents(load=_identity_load).plain(None)
+    placement = place((2,), loader=definition, checkpoints=True)
     cp = checkpoint("bad_request").checkpoint
     other = checkpoint("other_request").checkpoint
 
@@ -1685,7 +1739,7 @@ def test_socket_decode_error_stops_only_its_tournament(
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
-    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: True)
+    monkeypatch.setattr("etude.eval.resources._detect_accelerator", lambda: "cuda")
     agents = Agents(load=_identity_load)
     broken = job("broken", agents, _broken_request_play)
     healthy = job("healthy", agents)

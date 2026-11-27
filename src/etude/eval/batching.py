@@ -281,12 +281,11 @@ class _Batches[Encoded]:
         # Encode every reply before sending any. A conversion failure applies to the whole batch.
         if outcome.error is None:
             try:
-                outputs = normalize_outputs(outcome.outputs, copy_arrays=self._copy_outputs)
                 replies = []
                 offset = 0
                 for item in batch:
                     end = offset + len(item.inputs)
-                    part = ForwardOutcome(outcome.checkpoint, outputs[offset:end])
+                    part = ForwardOutcome(outcome.checkpoint, outcome.outputs[offset:end])
                     replies.append(self._encode(item.id, part))
                     offset = end
                 return replies
@@ -294,8 +293,54 @@ class _Batches[Encoded]:
                 outcome = _failed_outcome(outcome.checkpoint, error)
         return [self._encode(item.id, outcome) for item in batch]
 
+    def _forward(
+        self, key: str, batch: list[_Pending[Encoded]], rows: int
+    ) -> tuple[ForwardOutcome, list[Batch]]:
+        checkpoint = batch[0].checkpoint
+        inputs = [value for pending in batch for value in pending.inputs]
+        freeze(inputs)
+        # Opaque pre-collated inputs have no Etude-owned row slicing operation.
+        size = self.max_batch if rows == len(inputs) else len(inputs)
+        # A model may reuse staging on the next forward, before the reply is encoded.
+        copy_arrays = self._copy_outputs or size < len(inputs)
+        outputs: list[object] = []
+        observations: list[Batch] = []
+        for start in range(0, len(inputs), size):
+            chunk = inputs[start : start + size]
+            count = len(chunk) if rows == len(inputs) else rows
+            before_calls, before_loads = self.forwards.calls, self.forwards.loads
+            before_forward, before_load = self.forwards.forward_seconds, self.forwards.load_seconds
+            outcome = self.forwards.answer(checkpoint, chunk, self.pending.keys())
+            loads = self.forwards.loads - before_loads
+            if loads:
+                print(f"etude: agents: loaded {key}", file=sys.stderr, flush=True)
+            started = time.monotonic()
+            if outcome.error is None:
+                try:
+                    outputs.extend(normalize_outputs(outcome.outputs, copy_arrays=copy_arrays))
+                except Exception as error:
+                    outcome = _failed_outcome(key, error)
+            observations.append(
+                Batch(
+                    checkpoint=key,
+                    rows=count,
+                    requests=len(batch) if start == 0 else 0,
+                    queue_wait_seconds=0.0,
+                    receive_seconds=0.0,
+                    load_seconds=self.forwards.load_seconds - before_load,
+                    forward_seconds=self.forwards.forward_seconds - before_forward,
+                    encode_seconds=time.monotonic() - started,
+                    send_seconds=0.0,
+                    forward_calls=self.forwards.calls - before_calls,
+                    loads=loads,
+                )
+            )
+            if outcome.error is not None:
+                return outcome, observations
+        return ForwardOutcome(key, outputs), observations
+
     def flush(self, queue_wait_seconds: float = 0.0) -> list[Batch]:
-        """Forward one chunk per pending checkpoint, up to `max_batch` rows each."""
+        """Flush ready requests by checkpoint, batching up to `max_batch` rows."""
         observations: list[Batch] = []
         remaining_wait = queue_wait_seconds
         for key, items in list(self.pending.items()):
@@ -309,17 +354,7 @@ class _Batches[Encoded]:
             del items[: len(batch)]
             if not items:
                 del self.pending[key]
-            inputs = [value for pending in batch for value in pending.inputs]
-            freeze(inputs)
-            before_calls, before_loads = self.forwards.calls, self.forwards.loads
-            before_forward, before_load = self.forwards.forward_seconds, self.forwards.load_seconds
-            outcome = self.forwards.answer(batch[0].checkpoint, inputs, self.pending.keys())
-            forward_seconds = self.forwards.forward_seconds - before_forward
-            load_seconds = self.forwards.load_seconds - before_load
-            forward_calls = self.forwards.calls - before_calls
-            loads = self.forwards.loads - before_loads
-            if loads:
-                print(f"etude: agents: loaded {key}", file=sys.stderr, flush=True)
+            outcome, forwarded = self._forward(key, batch, rows)
             started = time.monotonic()
             encoded = self._encode_batch(outcome, batch)
             encode_seconds = time.monotonic() - started
@@ -328,23 +363,17 @@ class _Batches[Encoded]:
             for item, response in zip(batch, encoded, strict=True):
                 item.reply(response)
             send_seconds = time.monotonic() - started
-            self.rows += rows
-            self.batches += 1
-            observations.append(
-                Batch(
-                    checkpoint=key,
-                    rows=rows,
-                    requests=len(batch),
-                    queue_wait_seconds=remaining_wait,
-                    receive_seconds=receive_seconds,
-                    load_seconds=load_seconds,
-                    forward_seconds=forward_seconds,
-                    encode_seconds=encode_seconds,
-                    send_seconds=send_seconds,
-                    forward_calls=forward_calls,
-                    loads=loads,
-                )
+            forwarded[0] = forwarded[0].model_copy(
+                update={
+                    "queue_wait_seconds": remaining_wait,
+                    "receive_seconds": receive_seconds,
+                    "encode_seconds": forwarded[0].encode_seconds + encode_seconds,
+                    "send_seconds": send_seconds,
+                }
             )
+            self.rows += sum(batch.rows for batch in forwarded)
+            self.batches += len(forwarded)
+            observations.extend(forwarded)
             remaining_wait = 0.0
         return observations
 

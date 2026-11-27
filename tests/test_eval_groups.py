@@ -16,7 +16,7 @@ from multiprocessing import active_children
 from multiprocessing.connection import Connection, wait
 from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
-from typing import cast
+from typing import NoReturn, cast
 
 import duckdb
 import pytest
@@ -40,15 +40,19 @@ from etude.eval.agents import (
     recv_frame,
     send_frame,
 )
-from etude.eval.batching import Batch, _add_socket_batch, _Batches, _encode_socket
+from etude.eval.batching import Batch, _add_socket_batch, _Batches, _encode_socket, _send_peer
 from etude.eval.bus import ForwardOutcome
 from etude.eval.game import GameReport, Matches
+from etude.eval.loader import AgentLoader
 from etude.eval.match import environment
 from etude.eval.query import _kept_path, statsdb
 from etude.eval.records import Code, Config, Match, RoundRobin, checkpoint_player
 from etude.eval.resources import (
+    Accelerator,
+    Device,
+    Inference,
     Placement,
-    _has_gpu,
+    _detect_accelerator,
     available_cpus,
     memory_bytes,
     place,
@@ -64,6 +68,7 @@ from etude.jobs import (
     EvalJob,
     Evaluation,
     ExperimentState,
+    _group_key,
     evaluation_group,
     hold_group,
 )
@@ -97,7 +102,13 @@ from tests.train.tracking import open_run
 def shared_agents(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
     """Exercise shared transport with bounded, injected hardware; CPU tests opt out."""
     shared = getattr(request, "param", True)
-    monkeypatch.setattr(eval_resources, "_has_gpu", lambda: shared)
+    monkeypatch.setattr(
+        eval_resources,
+        "_detect_accelerator",
+        lambda: "cuda" if shared else "no accelerator detected",
+    )
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 4)
+    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 2 * 1024**3)
 
 
 async def plain(match: Match, agents: list[object]) -> Tables:
@@ -441,29 +452,23 @@ def test_statsdb_rebuilds_the_last_released_schema_with_retry_flags(tmp_path: Pa
 
 
 def test_delivery_failure_preserves_local_results_and_fails_the_run_for_retry(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    active = job("delivery", None)
-    active = active.model_copy(
-        update={
-            "tournament": active.tournament.model_copy(
-                update={"configs": ({"case": 0}, {"case": 1})}
-            )
-        }
-    )
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
+    first, second = job("first", None), job("second", None)
     with pytest.raises(RetryRequested, match="delivery failed"):
         hold_group(
-            group(active),
+            group(first, second),
             directory=tmp_path / "local",
             storages=[OfflineStorage(tmp_path / "offline")],
         )
     db = statsdb("grouped", tmp_path / "local")
     try:
-        assert db.sql("select state from runs").fetchall() == [("failed",)]
-        assert set(db.sql("select state, retry from matches").fetchall()) == {
+        assert db.sql("select state from runs").fetchall() == [("failed",)] * 2
+        assert db.sql("select state, retry from matches order by state").fetchall() == [
             ("done", False),
             ("failed", True),
-        }
+        ]
     finally:
         db.close()
 
@@ -652,13 +657,16 @@ def test_place_respects_cpu_pending_and_memory(
     memory_gb: float | None,
     expected: tuple[str | None, int, int, int, int | None, bool],
 ) -> None:
-    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
-    monkeypatch.setattr(eval_resources, "_has_gpu", lambda: False)
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: "no accelerator detected")
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
     monkeypatch.setattr(
         "etude.eval.resources.memory_bytes", lambda: 16 * 1024**3 if cpus >= 16 else 2 * 1024**3
     )
-    chosen = place(pending, agents=agents, max_batch=max_batch, memory_gb=memory_gb)
+    chosen = place(
+        pending,
+        loader=Agents(load=load, max_batch=max_batch, memory_gb=memory_gb).plain(None),
+        checkpoints=agents,
+    )
     assert (
         chosen.bus,
         chosen.processes,
@@ -679,7 +687,12 @@ def test_place_sizes_direct_caches_for_a_match(
 ) -> None:
     monkeypatch.setattr(eval_resources, "available_cpus", lambda: 16)
     monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 16 * 1024**3)
-    placement = place((64,), agents=True, memory_gb=2, match_bytes=match_mib * 1024**2)
+    placement = place(
+        (64,),
+        loader=Agents(load=load, memory_gb=2).plain(None),
+        checkpoints=True,
+        match_bytes=match_mib * 1024**2,
+    )
     assert placement.bus == "local"
     assert placement.processes == processes
     assert placement.games_per_process == games
@@ -708,6 +721,7 @@ def test_place_sizes_direct_caches_for_a_match(
         # Three 1-match play tournaments on 4 cores -> 3 processes, 1 game each, 1 agent thread.
         (4, (1, 1, 1), False, 32, None, True, "0", ("socket", 3, 1, 1, 1, False)),
         (4, (64,), False, 8, None, True, "0", ("socket", 3, 1, 1, 3, False)),
+        (16, (64,), False, 4, None, True, "0", ("socket", 4, 1, 12, 1, False)),
         (4, (64,), False, 32, 15.5, True, "0", ("socket", 2, 1, 2, 16, False)),
         # All-play_many shares streams on GPU and non-GPU.
         (4, (2, 3), True, 32, None, True, "0", ("local", 1, 3, 0, None, True)),
@@ -729,17 +743,21 @@ def test_gpu_placement_fills_batches_and_routes_streaming_direct(
     visible: str,
     expected: tuple[str | None, int, int, int, int | None, bool],
 ) -> None:
-    monkeypatch.setattr(eval_resources, "_has_gpu", _has_gpu)
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", _detect_accelerator)
+    monkeypatch.setattr("etude.eval.resources.sys.platform", "linux")
     # Controlled hardware output, without importing or executing a model library.
     probe = tmp_path / "nvidia-smi"
-    probe.write_text("#!/bin/sh\nprintf '0\\n'\n")
+    probe.write_text("#!/bin/sh\nprintf 'ran' > \"$0.ran\"\nprintf '0\\n'\n")
     probe.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
     chosen = place(
-        pending, streaming=streaming, agents=agents, max_batch=max_batch, memory_gb=memory_gb
+        pending,
+        streaming=streaming,
+        loader=Agents(load=load, max_batch=max_batch, memory_gb=memory_gb).plain(None),
+        checkpoints=agents,
     )
     assert (
         chosen.bus,
@@ -749,6 +767,9 @@ def test_gpu_placement_fills_batches_and_routes_streaming_direct(
         chosen.games_per_process,
         chosen.share_streams,
     ) == expected
+    assert (tmp_path / "nvidia-smi.ran").exists() is (agents and not streaming and visible == "0")
+    if agents and not streaming:
+        assert chosen.reason == ("cuda" if visible == "0" else "CUDA_VISIBLE_DEVICES hides GPUs")
 
 
 def test_code_only_and_streaming_placement_do_not_probe_gpu(
@@ -757,10 +778,10 @@ def test_code_only_and_streaming_placement_do_not_probe_gpu(
     def fail_probe() -> bool:
         raise AssertionError("code-only and all-play_many placement must not probe GPU hardware")
 
-    monkeypatch.setattr(eval_resources, "_has_gpu", fail_probe)
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", fail_probe)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
-    assert place((6,), agents=False) == Placement(
+    assert place((6,), loader=AgentLoader(), checkpoints=False) == Placement(
         bus=None,
         processes=4,
         game_threads=1,
@@ -768,9 +789,9 @@ def test_code_only_and_streaming_placement_do_not_probe_gpu(
         games_per_process=1,
         share_streams=False,
         checkpoint_bytes=0,
-        reason="no checkpoints to load",
+        reason="no loader",
     )
-    assert place((2, 3), streaming=True, agents=False) == Placement(
+    assert place((2, 3), streaming=True, loader=AgentLoader(), checkpoints=False) == Placement(
         bus=None,
         processes=1,
         game_threads=4,
@@ -778,9 +799,15 @@ def test_code_only_and_streaming_placement_do_not_probe_gpu(
         games_per_process=None,
         share_streams=True,
         checkpoint_bytes=0,
-        reason="no checkpoints to load",
+        reason="no loader",
     )
-    assert place((2, 3), streaming=True, agents=True, match_bytes=16 * 1024**3) == Placement(
+    assert place(
+        (2, 3),
+        streaming=True,
+        loader=Agents(load=load).plain(None),
+        checkpoints=True,
+        match_bytes=16 * 1024**3,
+    ) == Placement(
         bus="local",
         processes=1,
         game_threads=3,
@@ -803,9 +830,8 @@ def test_place_reserves_checkpoint_memory_once(
     shared = bool(request.node.callspec.params["shared_agents"])
     placement = place(
         (6,),
-        agents=True,
-        max_batch=2,
-        memory_gb=memory_gb,
+        loader=Agents(load=load, max_batch=2, memory_gb=memory_gb).plain(None),
+        checkpoints=True,
         match_bytes=2 * 1024**3 if shared else 1,
     )
     assert placement.bus == ("socket" if shared else "local")
@@ -813,6 +839,116 @@ def test_place_reserves_checkpoint_memory_once(
     reserved = (1024 if memory_gb is None else 1536) * 1024**2
     owners = 1 if shared else placement.processes
     assert placement.checkpoint_bytes == reserved // owners
+
+
+def test_a_failing_nvidia_driver_plays_direct(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", _detect_accelerator)
+    monkeypatch.setattr("etude.eval.resources.sys.platform", "linux")
+    probe = tmp_path / "nvidia-smi"
+    probe.write_text("#!/bin/sh\necho 'driver/library version mismatch' >&2\nexit 9\n")
+    probe.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    plan = place((64,), loader=Agents(load=load).plain(None), checkpoints=True)
+    assert (plan.reason, plan.processes, plan.games_per_process) == ("nvidia-smi failed", 4, 8)
+
+
+@pytest.mark.parametrize(
+    ("plat", "machine", "cpus", "memory_gb", "batch_inputs", "processes", "threads", "accelerator"),
+    [
+        ("darwin", "arm64", 8, None, 32, 7, 1, "metal"),
+        ("darwin", "arm64", 16, None, 8, 15, 1, "metal"),
+        ("darwin", "arm64", 1, None, 32, 1, 1, "metal"),
+        ("darwin", "arm64", 8, 15.5, 32, 2, 6, "metal"),
+        ("darwin", "x86_64", 8, None, 32, 8, 1, None),
+        ("linux", "arm64", 8, None, 32, 8, 1, None),
+    ],
+)
+def test_apple_silicon_placement_bounds_games_by_cores_and_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    plat: str,
+    machine: str,
+    cpus: int,
+    memory_gb: float | None,
+    batch_inputs: int,
+    processes: int,
+    threads: int,
+    accelerator: Accelerator | None,
+) -> None:
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", _detect_accelerator)
+    monkeypatch.setattr("etude.eval.resources.sys.platform", plat)
+    monkeypatch.setattr("etude.eval.resources.platform.machine", lambda: machine)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr("etude.eval.resources.shutil.which", lambda _: None)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    loader = Agents(load=load, memory_gb=memory_gb, max_batch=batch_inputs).plain(None)
+    plan = place((64,), loader=loader, checkpoints=True)
+    shared = accelerator is not None
+    assert (plan.processes, (plan.agent_threads or plan.game_threads), plan.reason) == (
+        processes,
+        threads,
+        accelerator or "no accelerator detected",
+    )
+    held = int(memory_gb * 1024**3) if memory_gb is not None else 8 * 1024**3
+    assert plan.games_per_process == (1 if shared else 4)
+    assert plan.checkpoint_bytes == (held if shared else held // processes)
+
+
+@pytest.mark.parametrize(
+    ("detected", "devices", "inference"),
+    [
+        ("metal", ("cuda",), "loader does not declare metal"),
+        ("metal", ("metal",), "metal"),
+        ("cuda", ("metal",), "loader does not declare cuda"),
+        ("cuda", ("cuda",), "cuda"),
+        ("no accelerator detected", ("cuda",), "no accelerator detected"),
+        ("no accelerator detected", ("metal",), "no accelerator detected"),
+    ],
+)
+def test_agent_devices_share_only_on_declared_accelerators(
+    monkeypatch: pytest.MonkeyPatch,
+    detected: Inference,
+    devices: tuple[Device, ...],
+    inference: Inference,
+) -> None:
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: detected)
+    loader = Agents(load=load, devices=devices).plain(None)
+    assert place((1,), loader=loader, checkpoints=True).reason == inference
+
+
+def test_probe_skipped_without_checkpoint_loading_or_accelerator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_probe() -> NoReturn:
+        raise AssertionError("GPU probe should not run")
+
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", fail_probe)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    for loader, checkpoints, reason in (
+        (AgentLoader(), True, "no loader"),
+        (Agents(load=load).plain(None), False, "no checkpoints"),
+    ):
+        plan = place((8,), loader=loader, checkpoints=checkpoints)
+        assert (plan.reason, plan.processes, plan.games_per_process, plan.checkpoint_bytes) == (
+            reason,
+            8,
+            1,
+            0,
+        )
+    loader = Agents(load=load, devices=("cpu",), max_batch=16).plain(None)
+    cpu = place((8,), loader=loader, checkpoints=True)
+    assert (cpu.reason, cpu.processes, cpu.games_per_process, cpu.game_threads) == (
+        "cpu-only loader",
+        4,
+        2,
+        1,
+    )
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -840,8 +976,14 @@ def test_temporary_files_work_after_game_scratch_is_removed(
 
 
 @pytest.mark.parametrize(
-    ("cpus", "memory_gb", "expected_processes", "expected_games"),
-    [(1, None, 1, 1), (4, None, 3, 1), (4, 1.75, 1, 1), (8, None, 3, 1)],
+    ("device", "cpus", "memory_gb", "expected_processes"),
+    [
+        ("cuda", 1, None, 1),
+        ("cuda", 4, None, 3),
+        ("cuda", 4, 1.75, 1),
+        ("cuda", 8, None, 3),
+        ("metal", 3, None, 2),
+    ],
 )
 def test_group_execution_respects_declared_agent_memory(
     tmp_path: Path,
@@ -850,8 +992,9 @@ def test_group_execution_respects_declared_agent_memory(
     cpus: int,
     memory_gb: float | None,
     expected_processes: int,
-    expected_games: int,
+    device: Accelerator,
 ) -> None:
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: device)
     measurements = iter([cpus])
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: next(measurements))
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
@@ -871,10 +1014,10 @@ def test_group_execution_respects_declared_agent_memory(
     assert max(outstanding) == expected_processes
     expected_threads = max(1, cpus - expected_processes)
     process = "game process" if expected_processes == 1 else "game processes"
-    game = "game" if expected_games == 1 else "games"
     thread = "thread" if expected_threads == 1 else "threads"
     assert (
-        f"{expected_processes} {process}, {expected_games} {game} each; "
+        f"shared inference for one, two, three ({device}); "
+        f"{expected_processes} {process}, 1 game each; "
         f"{expected_threads} inference {thread}" in capfd.readouterr().err
     )
     batches = json.loads((tmp_path / "grouped/artifacts/agents/batches.json").read_bytes())
@@ -889,6 +1032,73 @@ def test_group_execution_respects_declared_agent_memory(
             directory=tmp_path,
         )
         assert len(found.delivered) == 1 and not found.new and not found.failed
+
+
+def test_agent_device_declarations_validate_and_round_trip() -> None:
+    loader = Agents(load=load).plain(None)
+    for model, load_function in ((Agents, load), (AgentLoader, loader.load)):
+        for invalid in ([], ["mps"], "cuda", None):
+            with pytest.raises(ValidationError):
+                model.model_validate({"load": load_function, "devices": invalid})
+        with pytest.raises(ValidationError) as misspelled:
+            model.model_validate({"load": load_function, "devices": ["mps"]})
+        assert misspelled.value.error_count() == 1
+        assert "'cuda', 'metal' or 'cpu'" in str(misspelled.value)
+        with pytest.raises(ValidationError, match="devices requires a checkpoint loader"):
+            model.model_validate({"devices": ["cuda", "metal"]})
+    for unused in ({"max_batch": 8}, {"memory_gb": 1.0}):
+        with pytest.raises(ValidationError, match="requires a checkpoint loader"):
+            Agents.model_validate(unused)
+
+    declaration = Agents(load=load, devices=("metal", "cpu", "cuda", "metal"))
+    assert declaration.devices == ("cuda", "metal")
+    record = declaration.plain(None)
+    mixed = record.model_dump() | {"devices": ("cpu", "metal", "cuda")}
+    assert AgentLoader.model_validate(mixed) == record
+    assert AgentLoader.model_validate_json(record.model_dump_json()) == record
+
+    released = loader.model_dump_json(exclude={"devices"})
+    assert AgentLoader.model_validate_json(released).devices == ("cuda", "metal")
+    empty = Agents().plain(None)
+    assert AgentLoader.model_validate_json(empty.model_dump_json()) == empty
+
+
+def test_agent_devices_control_grouping_and_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    state = ExperimentState(experiment="grouped")
+    auto_job = job("auto", Agents(load=load))
+    auto_peer = job("auto_peer", Agents(load=load, devices=("metal", "cpu", "cuda", "metal")))
+    direct_job = job("direct", Agents(load=load, devices=("cpu",)))
+    tuned = Agents(load=load, devices=("cpu",), memory_gb=1.0)
+    tuned_job = job("tuned", tuned)
+    tuned_peer = job("tuned_peer", tuned)
+    metal_job = job("metal", Agents(load=load, devices=("metal",)))
+
+    def group_key(item: EvalJob) -> str:
+        lowered = item.lower(state)
+        return _group_key(lowered, evaluation_group(lowered).evaluations[0])
+
+    assert group_key(auto_job) == group_key(auto_peer)
+    assert group_key(tuned_job) == group_key(tuned_peer)
+    assert len({group_key(j) for j in (auto_job, direct_job, tuned_job, metal_job)}) == 4
+
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: "metal")
+    with pytest.raises(EtudeError, match="incompatible_eval_agents"):
+        hold_group(group(auto_job, direct_job), directory=tmp_path / "incompatible")
+    direct_dir = tmp_path / "direct"
+    assert [
+        result.played for result in hold_group(group(tuned_job, tuned_peer), directory=direct_dir)
+    ] == [1, 1]
+    assert (
+        "etude: agents: direct inference for tuned, tuned_peer (cpu-only loader); "
+        "1 game process, 1 game each; 1 inference thread" in capfd.readouterr().err
+    )
+    assert not (direct_dir / "grouped/artifacts/agents/batches.json").exists()
 
 
 def test_released_queued_evaluation_discards_workers_and_max_delay() -> None:
@@ -944,6 +1154,29 @@ def test_batch_merges_rows_up_to_max_batch_and_runs_oversized_alone() -> None:
     oversized = batches.flush()
     assert first_answers.pop(0) == (4, ForwardOutcome("one", ["big"]))
     assert [b.rows for b in oversized] == [6]
+
+
+def test_oversized_game_request_uses_bounded_forwards_and_one_ordered_reply() -> None:
+    game, agent = socket.socketpair()
+    player = checkpoint("one")
+    batches = _Batches(echo, 2, 1024, encode=_encode_socket)
+    inputs: list[object] = [1, 2, 3, 4, 5]
+    with game, agent:
+        _add_socket_batch(
+            batches,
+            _send_peer(agent),
+            BatchRequest((CheckpointRequest(1, player.checkpoint, inputs, len(inputs)),)),
+        )
+        observed = batches.flush()
+        assert ForkingPickler.loads(recv_frame(game)) == Answer(1, "one", inputs)
+        assert not wait([game], timeout=0)
+        assert [(batch.rows, batch.forward_calls) for batch in observed] == [
+            (2, 1),
+            (2, 1),
+            (1, 1),
+        ]
+        assert [batch.requests for batch in observed] == [1, 0, 0]
+        assert batches.loads == 1
 
 
 def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_inputs() -> None:
@@ -1027,17 +1260,17 @@ def test_launched_group_delivers_members_then_the_next_pass_plays_nothing(
 from etude.jobs import Agents, EvalJob, ExperimentState
 from etude.eval.records import Code, RoundRobin, checkpoint_player
 from etude.eval.match import environment
-from etude.spec import Runtime, Variable
+from etude.spec import Runtime
 from tests.eval.arithmetic import load
 from tests.eval.arithmetic import checkpoint
 from tests.eval.arithmetic import play
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
-    agents = Agents(load=load)
+    agents = Agents(load=load, devices=("cpu",))
     return [EvalJob(tournament=RoundRobin(name=name, environment=environment("agents"),
                    configs=({{"lane": name}},), games=1),
                    enter=(checkpoint("left"), checkpoint("right")), play=play, agents=agents,
-                   repo=None, runtime=Runtime(python={command_python!r}), environment=(Variable(name="CUDA_VISIBLE_DEVICES", value=""),), max_hours=0.05)
+                   repo=None, runtime=Runtime(python={command_python!r}), max_hours=0.05)
             for name in ("one", "two")]
 """
         },
@@ -1332,14 +1565,15 @@ def test_a_game_failure_stops_only_its_tournament(tmp_path: Path) -> None:
         db.close()
 
 
+@pytest.mark.parametrize("library", ["torch", "mlx"])
 @pytest.mark.parametrize("with_agents", [False, True])
 @pytest.mark.parametrize("gpu", [False, True])
 def test_heavy_import_warning_is_once_and_only_for_games_with_agents(
-    tmp_path: Path, with_agents: bool, gpu: bool
+    tmp_path: Path, library: str, with_agents: bool, gpu: bool
 ) -> None:
-    (tmp_path / "torch.py").write_text("# Controlled framework fixture.\n")
+    (tmp_path / f"{library}.py").write_text("# Controlled framework fixture.\n")
     (tmp_path / "heavy_fixture_game.py").write_text(
-        "import torch\nfrom collections.abc import Sequence\nfrom etude.eval.records import Match\n"
+        f"import {library}\nfrom collections.abc import Sequence\nfrom etude.eval.records import Match\n"
         "from etude.eval.agents import Forward\nfrom etude.eval.result import Tables\n"
         "async def play(match: Match" + ", agents: Sequence[Forward]" + ") -> Tables:\n"
         "    return {'scores': [{'seat': 0, 'score': 1}]}\n"
@@ -1354,7 +1588,7 @@ from etude.jobs import Agents, EvalGroup, EvalJob, evaluation_group, hold_group,
 from tests.eval.arithmetic import load
 from tests.eval.arithmetic import checkpoint
 import etude.eval.resources
-etude.eval.resources._has_gpu = lambda: sys.argv[3] == "True"
+etude.eval.resources._detect_accelerator = lambda: "cuda" if sys.argv[3] == "True" else "no accelerator detected"
 agents = Agents(load=load) if sys.argv[2] == "True" else Agents()
 jobs = [EvalJob(tournament=RoundRobin(name=name, environment=environment("heavy"), configs=({},), games=1),
                enter=(checkpoint("one"), checkpoint("two")), play=play,
@@ -1370,13 +1604,17 @@ hold_group(EvalGroup(evaluations=tuple(evaluation_group(job.lower(ExperimentStat
         timeout=15,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stderr.count("game module heavy_fixture_game: imported torch") == int(with_agents)
+    assert result.stderr.count(f"game module heavy_fixture_game: imported {library}") == int(
+        with_agents
+    )
     if with_agents:
         assert "move the import to load's module" in result.stderr
 
 
 def test_agent_startup_failure_reports_retryable_matches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
 ) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
@@ -1538,7 +1776,9 @@ def test_loader_failure_reaches_undispatched_matches_across_tournaments(
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4 if in_flight else 1)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
-    agents = Agents(load=selective_retry_load if retry else selective_load)
+    agents = Agents(
+        load=selective_retry_load if retry else selective_load, max_batch=4 if in_flight else 1
+    )
     jobs = [
         job(name, agents).model_copy(
             update={
@@ -1666,7 +1906,7 @@ def test_loader_failure_preserves_previously_delivered_matches(
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
-    agents = Agents(load=selective_load)
+    agents = Agents(load=selective_load, max_batch=1)
     active = job("one", agents).model_copy(
         update={
             "enter": (checkpoint("broken"), checkpoint("left"), checkpoint("right")),
@@ -2045,14 +2285,15 @@ def test_play_many_backfills_after_a_yielded_error(
         db.close()
 
 
-@pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
+@pytest.mark.parametrize("accelerator", ["no accelerator detected", "cuda", "metal"])
 def test_mixed_eval_group_gives_each_phase_the_host(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
+    accelerator: Inference,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    shared = bool(request.node.callspec.params["shared_agents"])
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: accelerator)
+    shared = accelerator in ("cuda", "metal")
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 4 * 1024**3)
     players = (checkpoint("left"), checkpoint("right"))
@@ -2082,7 +2323,7 @@ def test_mixed_eval_group_gives_each_phase_the_host(
     stderr = capfd.readouterr().err
     startup = [line for line in stderr.splitlines() if "inference for " in line]
     ordinary_mode = "shared" if shared else "direct"
-    reason = "NVIDIA GPU visible" if shared else "no NVIDIA GPU visible"
+    reason = accelerator
     assert startup == [
         f"etude: agents: {ordinary_mode} inference for ordinary ({reason}); "
         "1 game process, 1 game each; 7 inference threads",
@@ -2458,7 +2699,7 @@ def test_code_only_play_many_group_runs_in_one_process_without_bus(
     def fail_probe() -> bool:
         raise AssertionError("code-only play_many group must not probe GPU hardware")
 
-    monkeypatch.setattr(eval_resources, "_has_gpu", fail_probe)
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", fail_probe)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
     jobs = [
@@ -2675,7 +2916,7 @@ assert direct_report.imports.heavy == ()
 assert direct_report.imports.warning() is None
 
 # 2. Shared-agent play importing mlx in the game module warns on mlx.
-etude.eval.resources._has_gpu = lambda: True
+etude.eval.resources._detect_accelerator = lambda: "cuda"
 shared_root = Path(sys.argv[1]) / "shared"
 shared_job = EvalJob(
     tournament=RoundRobin(name="mlx-warn", environment=environment("imp2"), configs=({},), games=1),
@@ -2765,7 +3006,7 @@ from wrapper_game_fixture import build as wrapper_build
 from wrapper_game_fixture import play as wrapper_play
 from lazy_mlx_game_fixture import play as lazy_play
 
-etude.eval.resources._has_gpu = lambda: sys.argv[2] == "True"
+etude.eval.resources._detect_accelerator = lambda: "cuda" if sys.argv[2] == "True" else "no accelerator detected"
 
 # 1. Player wrapper module importing torch is caught during build_agents on both transports.
 wrap_root = Path(sys.argv[1]) / "wrap"
@@ -2852,7 +3093,7 @@ from tests.eval.arithmetic import checkpoint
 from many_mods_game import play
 from many_mods_loader import load
 
-etude.eval.resources._has_gpu = lambda: sys.argv[2] == "True"
+etude.eval.resources._detect_accelerator = lambda: "cuda" if sys.argv[2] == "True" else "no accelerator detected"
 root = Path(sys.argv[1]) / "run"
 job = EvalJob(
     tournament=RoundRobin(name="many", environment=environment("many"), configs=({},), games=1),
