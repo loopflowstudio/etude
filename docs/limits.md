@@ -25,11 +25,19 @@ failure recovery requires.
   must be importable top-level definitions. Games run in spawned processes.
   Multiple `async def play` matches share one `asyncio` event loop per game
   process; blocking the loop without awaiting stalls the other games in that
-  process until the run deadline. CPU games use one model-library thread per
-  process; GPU inference batches through a shared process. Your loader must
-  honor the thread environment and choose its device. A batch allowance does not
-  guarantee GPU memory residency. If a game process crashes, every match it
+  process until the run deadline. Without a visible GPU, each game process runs
+  a direct inference thread with one model-library thread; on visible NVIDIA
+  hardware, `play` batches through a shared agent process while an
+  all-`play_many` group runs direct inference in one game process. Your loader
+  must honor the thread environment and choose its device. A batch allowance
+  does not guarantee GPU memory residency. If a game process crashes—including
+  a native crash in the model or engine under direct inference—every match it
   holds fails with retry while already-sealed matches survive.
+- Direct inference isolates loaded models on the inference thread, but a game
+  module that defines `load` (or imports the same stateful module) still shares
+  Python module globals with it inside one interpreter. The in-flight read-only
+  lock covers the `numpy.ndarray` object handed to `forward(...)`, not slices
+  taken earlier from the same buffer or native pointers.
 - A match must return rows to count as done. In `play`, caught `ForwardError`s
   still fail the match; in `play_many`, yield `(match, error)` for failed slots
   or let the error escape to fail held matches. Ordinary game failures need

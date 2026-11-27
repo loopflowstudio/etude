@@ -174,21 +174,29 @@ by the runnable [`agents.py`](../examples/agents.py) experiment.
 
 Each game process runs many `play` tasks on one `asyncio` event loop. When no
 running game in the process can add another input, pending calls flush together
-with no timer. On CPU, each game process caches and calls forwards directly with
-one model-library thread per process and a share of the host checkpoint-byte
-allowance. On visible NVIDIA hardware, each game process sends its pending rows
-per checkpoint in one message to a shared agent process, which merges ready
-calls up to `max_batch` rows without waiting. Honor Etude's thread environment
-in the loader and choose the model's device there: hardware capacity does not
-place tensors for you. Keep model imports in the loading module so GPU game
-processes remain light, and avoid blocking the event loop between `await`s.
+with no timer. Honor Etude's thread environment in the loader and choose the
+model's device there: hardware capacity does not place tensors for you. Keep
+model imports in the loading module so shared-process GPU game processes remain
+light, and avoid blocking the event loop between `await`s.
 `Agents(max_batch=..., memory_gb=...)` tunes batch rows and checkpoint memory;
-author code keeps `load`'s forward deterministic for every batch size.
+author code keeps `load`'s forward deterministic for every batch size. See
+[How a forward travels](#how-a-forward-travels) for direct vs shared-process
+placement and array rules.
 
 ## Vectorized engines
 
-Run the [vectorized example](../examples/vectorized.py) with
-`uv run etude eval examples/vectorized.py --source /tmp/vectorized`.
+Run the [vectorized example](../examples/vectorized.py):
+
+```sh
+uv run etude eval examples/vectorized.py --source /tmp/vectorized
+```
+
+On a GPU host, an all-`play_many` group runs inference directly inside one game
+process and prints its placement to stderr:
+
+```text
+etude: agents: direct inference in 1 game process, slots requested by play_many; 15 threads
+```
 
 For engines that step many games together and collate observations themselves,
 write an async generator `play_many(matches)` instead of `play(match, agents)`:
@@ -240,7 +248,7 @@ retention.
   step. Returning `[]` for `n > 0` means no pending matches remain (or the run
   is stopping).
 - `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
-  `rows=` for a pre-collated batch so the agent process never merges calls past
+  `rows=` for a pre-collated batch so batching never merges calls past
   `max_batch` rows and reports real row counts. A single call above `max_batch`
   rows runs alone. Because every match in the process shares one `Forward`
   object per checkpoint, engines can group ready rows by forward identity.
@@ -252,6 +260,77 @@ retention.
   generator holds and stops new grants for that tournament.
   Yielding an unknown or already-yielded match fails the generator and its held
   matches; returning with held matches unyielded fails each unyielded match.
+
+## How a forward travels
+
+In `play_many`, calling `forward(...)` submits immediately without waiting for
+an event-loop barrier, so a vectorized engine can split its pool in two and
+overlap stepping one half with the other half's forward:
+
+```python
+import numpy as np
+
+from etude.eval.agents import Forward
+
+
+async def advance_halves(
+    forward: Forward,
+    half_a: np.ndarray,
+    half_b: np.ndarray,
+    rows: int,
+) -> tuple[object, object]:
+    # Calling forward(...) submits now and locks half_a read-only until awaited.
+    pending_a = forward([half_a], rows=rows)
+    step_half(half_b)  # runs while half_a's forward executes on the inference thread
+    [out_a] = await pending_a  # half_a is writable again; out_a holds NumPy leaves
+    pending_b = forward([half_b], rows=rows)
+    step_half(half_a)
+    [out_b] = await pending_b
+    return out_a, out_b
+```
+
+- **Submission timing.** In `play_many`, `forward(inputs, rows=...)` normalizes
+  and locks its inputs and submits on the call, returning an awaitable; no
+  `asyncio.create_task` or `asyncio.sleep(0)` is needed to overlap stepping
+  with inference. Calls queued while a forward is running still merge per
+  checkpoint up to `max_batch` rows. In `play`, calls stay on the game
+  process's zero-delay barrier so concurrent match tasks merge before the first
+  forward starts.
+- **NumPy boundary.** Across both direct and shared-process transports, array
+  leaves at any depth of `tuple`, `list` and `dict` values reach `load`'s
+  forward as `numpy.ndarray` and return to game code as `numpy.ndarray`.
+  Non-NumPy or lazy outputs (such as MLX, Torch or JAX arrays) exporting the
+  buffer protocol or CPU `__dlpack__` are materialized into `numpy.ndarray` on
+  the inference thread before leaving, and non-NumPy input leaves are converted
+  before submit. Etude imports no model library.
+- **Zero-copy inputs on direct inference.** A top-level C-contiguous non-object
+  `numpy.ndarray` passes to the inference thread by pointer with no copy and no
+  pickle; nested NumPy leaves inside containers also move without copying their
+  payload bytes. Non-contiguous arrays, non-NumPy array leaves and plain Python
+  containers are copied; unpicklable inputs fail that call.
+- **Read-only in flight, no aliasing.** A writeable NumPy array handed to
+  `forward(...)` is marked read-only until its answer arrives—writing to it
+  while in flight raises `ValueError`—and restored afterwards; an array already
+  read-only on entry stays read-only. Cancelling the await does not unlock the
+  array early: it unlocks once the inference thread finishes that forward. The
+  model receives a read-only view, so an in-place mutation such as `x /= 255`
+  inside `load`'s forward raises `ValueError` (delivered to the game as
+  `ForwardError`) without modifying the game's array. A loader calling
+  `torch.from_numpy(x)` on CPU sees PyTorch's one-time read-only warning;
+  copying to a device or calling `torch.tensor(x)` avoids it. Outputs never
+  alias an in-flight input array.
+
+Etude chooses between a direct inference thread inside the game process and a
+shared agent process from the host probe and the group's play functions:
+
+| Host | Group | Inference transport |
+|---|---|---|
+| No GPU seen | Any | Direct inference thread in each game process, 1 library thread each |
+| Visible NVIDIA GPU | Every tournament uses `play_many` | Direct inference thread in 1 game process running the group's tournaments in turn, with the host inference thread budget and checkpoints kept loaded across tournaments |
+| Visible NVIDIA GPU | Any tournament uses `play` | Shared agent process over a private Unix socket |
+
+Code-only players (no loader) start neither an inference thread nor an agent
+process.
 
 ## Results and retry
 
