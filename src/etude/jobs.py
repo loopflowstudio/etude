@@ -48,7 +48,6 @@ from etude.checkpoints import (
     qualified,
 )
 from etude.errors import EtudeError, LauncherError, RetryRequested
-from etude.eval.agents import AgentProcess, running_agents
 from etude.eval.game import _match_type
 from etude.eval.records import (
     Benchmark,
@@ -67,14 +66,14 @@ from etude.eval.records import (
     relocate_player,
     select_policy,
 )
-from etude.eval.resources import agent_bytes, divide_cpus, resources
+from etude.eval.resources import resources
 from etude.eval.result import EvalResult, Result, Tables
 from etude.eval.run import (
     EvalRun,
-    Playing,
     _group_progress,
     _terminable,
     play_together,
+    start_agents,
 )
 from etude.eval.tournament import _open_evaluation
 from etude.identity import run_address, stored_owner
@@ -430,6 +429,7 @@ class AgentLoader(Record):
 
     load: Function | None = None
     build: Function | None = None
+    shared: bool | None = None
     max_batch: int = Field(default=32, ge=1)
     max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
     memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
@@ -441,6 +441,7 @@ class Agents(BaseModel):
     model_config = {"arbitrary_types_allowed": True, "frozen": True, "extra": "forbid"}
     load: Callable[..., object] | None = None
     build: Callable[..., object] | None = None
+    shared: bool | None = None
     max_batch: int = Field(default=32, ge=1)
     max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
     memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
@@ -451,12 +452,15 @@ class Agents(BaseModel):
             raise TypeError("load must take one checkpoint")
         if self.build is not None and len(inspect.signature(self.build).parameters) != 2:
             raise TypeError("build must take player and leaves")
+        if self.shared is True and self.load is None:
+            raise ValueError("shared=True requires a checkpoint loader")
         return self
 
     def plain(self, repo: Path | None) -> AgentLoader:
         return AgentLoader(
             load=None if self.load is None else _function(self.load, repo),
             build=None if self.build is None else _function(self.build, repo),
+            shared=self.shared,
             max_batch=self.max_batch,
             max_delay_seconds=self.max_delay_seconds,
             memory_gb=self.memory_gb,
@@ -907,55 +911,32 @@ def hold_group(
         definition = pending[0][0].agents if pending else None
         if any(spec.agents != definition for spec, _ in pending):
             raise EtudeError("incompatible_eval_agents", 422)
-        has_checkpoints = any(
-            player_checkpoints(player)
-            for _, active in pending
-            for match in active.matches
-            if match.key not in active.done
-            for player in match.players
-        )
-        needs_loading = definition is not None and definition.load is not None and has_checkpoints
-        agent_process: AgentProcess | None = None
-        cpus = divide_cpus(
-            sum(match.key not in active.done for _, active in pending for match in active.matches),
-            agents=needs_loading,
-            memory_gb=definition.memory_gb if definition else None,
-            batch_inputs=definition.max_batch if definition else 32,
-        )
-        agent_lifetime = lifetime.enter_context(ExitStack())
         try:
-            if needs_loading and definition is not None and cpus.threads:
-                agent_process = agent_lifetime.enter_context(
-                    running_agents(
-                        definition,
-                        checkout,
-                        owned,
-                        [spec.definition.name for spec, _ in pending],
-                        cpus,
-                    )
-                )
-            plays = [
-                Playing(
-                    run=active,
-                    play=spec.play,
-                    checkout=checkout,
-                    tournament=spec.definition.name,
-                    agents=agent_process.address if agent_process else None,
-                    build=spec.agents.build,
-                    load=spec.agents.load if needs_loading and agent_process is None else None,
-                    memory=agent_bytes(spec.agents.memory_gb) // max(1, cpus.games),
-                )
-                for spec, active, _ in opened
-            ]
-            outcomes = play_together(
-                plays,
+            with start_agents(
+                definition,
+                runs=[active for _, active in pending],
+                tournaments=[spec.definition.name for spec, _ in pending],
+                checkout=checkout,
                 resources=owned,
-                cpus=cpus,
-                agent_process=agent_process,
-            )
-            if agent_process is not None:
-                agent_process.check()
-            agent_lifetime.close()
+            ) as execution:
+                plays = [
+                    execution.playing(
+                        active,
+                        spec.play,
+                        checkout=checkout,
+                        tournament=spec.definition.name,
+                        build=spec.agents.build,
+                    )
+                    for spec, active, _ in opened
+                ]
+                outcomes = play_together(
+                    plays,
+                    resources=owned,
+                    plan=execution.plan,
+                    agent_process=execution.process,
+                )
+                if execution.process is not None:
+                    execution.process.check()
         except RetryRequested as error:
             for _, active, _ in opened:
                 active.fail_pending(error)

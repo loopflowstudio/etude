@@ -36,18 +36,27 @@ from etude.eval.match import environment
 from etude.eval.query import _kept_path, statsdb
 from etude.eval.records import Code, Config, Match, RoundRobin, checkpoint_player
 from etude.eval.resources import (
-    Cpus,
-    _has_gpu,
+    ExecutionPlan,
+    _gpu,
     available_cpus,
-    divide_cpus,
     memory_bytes,
+    plan_execution,
     resources,
 )
 from etude.eval.result import Tables
 from etude.eval.run import Terminated
 from etude.eval.tournament import evaluating, played
 from etude.experiment import observe, state_of
-from etude.jobs import Agents, EvalGroup, EvalJob, ExperimentState, evaluation_group, hold_group
+from etude.jobs import (
+    AgentLoader,
+    Agents,
+    EvalGroup,
+    EvalJob,
+    ExperimentState,
+    _group_key,
+    evaluation_group,
+    hold_group,
+)
 from etude.launch import client
 from etude.launch.records import Pool, Standing, Status
 from etude.page import build as build_page
@@ -76,18 +85,27 @@ from tests.train.tracking import open_run
 def shared_agents(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
     """Exercise shared transport with bounded, injected hardware; CPU tests opt out."""
     shared = getattr(request, "param", True)
-    monkeypatch.setattr(eval_resources, "_has_gpu", lambda: shared)
+    monkeypatch.setattr(eval_resources, "_gpu", lambda: "nvidia" if shared else None)
     if shared:
 
         def capacity(
-            pending: int, *, agents: bool, memory_gb: float | None = None, batch_inputs: int = 32
-        ) -> Cpus:
-            chosen = divide_cpus(
-                pending, agents=agents, memory_gb=memory_gb, batch_inputs=batch_inputs
+            pending: int,
+            *,
+            agents: bool,
+            memory_gb: float | None = None,
+            batch_inputs: int = 32,
+            shared: bool | None = None,
+        ) -> ExecutionPlan:
+            chosen = plan_execution(
+                pending,
+                agents=agents,
+                memory_gb=memory_gb,
+                batch_inputs=batch_inputs,
+                shared=shared,
             )
             return replace(chosen, games=min(chosen.games, eval_resources.available_cpus()))
 
-        monkeypatch.setattr("etude.jobs.divide_cpus", capacity)
+        monkeypatch.setattr("etude.eval.run.plan_execution", capacity)
 
 
 def plain(match: Match, agents: list[object]) -> Tables:
@@ -585,7 +603,7 @@ def test_play_arity_and_removed_workers_are_refused() -> None:
         (8, 20, True, 2.0, 1, 0),
     ],
 )
-def test_divide_cpus_respects_cpu_pending_and_memory(
+def test_plan_execution_respects_cpu_pending_and_memory(
     monkeypatch: pytest.MonkeyPatch,
     cpus: int,
     pending: int,
@@ -595,13 +613,13 @@ def test_divide_cpus_respects_cpu_pending_and_memory(
     threads: int,
 ) -> None:
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
-    monkeypatch.setattr(eval_resources, "_has_gpu", lambda: False)
+    monkeypatch.setattr(eval_resources, "_gpu", lambda: None)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
     monkeypatch.setattr(
         "etude.eval.resources.memory_bytes", lambda: 16 * 1024**3 if cpus >= 16 else 2 * 1024**3
     )
-    split = divide_cpus(pending, agents=agents, memory_gb=memory_gb)
-    assert (split.games, split.threads) == (games, threads)
+    plan = plan_execution(pending, agents=agents, memory_gb=memory_gb)
+    assert (plan.games, plan.threads, plan.shared, plan.gpu) == (games, threads, False, None)
 
 
 @pytest.mark.parametrize(
@@ -625,7 +643,9 @@ def test_gpu_games_fill_a_batch_with_pending_and_memory_bounds(
     visible: str,
     games: int,
 ) -> None:
-    monkeypatch.setattr(eval_resources, "_has_gpu", _has_gpu)
+    monkeypatch.setattr(eval_resources, "_gpu", _gpu)
+    monkeypatch.setattr("etude.eval.resources.sys.platform", "linux")
+    monkeypatch.setattr("etude.eval.resources.platform.machine", lambda: "x86_64")
     # Controlled hardware output, without importing or executing a model library.
     probe = tmp_path / "nvidia-smi"
     probe.write_text("#!/bin/sh\nprintf '0\\n'\n")
@@ -634,9 +654,97 @@ def test_gpu_games_fill_a_batch_with_pending_and_memory_bounds(
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
-    split = divide_cpus(pending, agents=agents, memory_gb=memory_gb, batch_inputs=batch_inputs)
-    assert split.games == games
-    assert split.threads == (max(1, 4 - games) if agents and visible else 0)
+    plan = plan_execution(pending, agents=agents, memory_gb=memory_gb, batch_inputs=batch_inputs)
+    expected_shared = agents and bool(visible)
+    assert plan.games == games
+    assert plan.threads == (max(1, 4 - games) if expected_shared else 0)
+    assert plan.shared is expected_shared
+    assert plan.gpu == ("nvidia" if expected_shared else None)
+
+
+@pytest.mark.parametrize(
+    (
+        "plat",
+        "machine",
+        "cpus",
+        "pending",
+        "agents",
+        "memory_gb",
+        "batch_inputs",
+        "shared",
+        "games",
+        "threads",
+        "expected_shared",
+        "expected_gpu",
+    ),
+    [
+        ("darwin", "arm64", 8, 64, True, None, 32, None, 7, 1, True, "apple"),
+        ("darwin", "arm64", 16, 64, True, None, 8, None, 15, 1, True, "apple"),
+        ("darwin", "arm64", 1, 64, True, None, 32, None, 1, 1, True, "apple"),
+        ("darwin", "arm64", 8, 64, True, 15.5, 32, None, 2, 6, True, "apple"),
+        ("darwin", "arm64", 8, 64, False, None, 32, None, 8, 0, False, None),
+        ("darwin", "x86_64", 8, 64, True, None, 32, None, 8, 0, False, None),
+        ("linux", "arm64", 8, 64, True, None, 32, None, 8, 0, False, None),
+        ("darwin", "arm64", 8, 64, True, None, 32, False, 8, 0, False, None),
+        ("linux", "x86_64", 8, 64, True, None, 32, True, 7, 1, True, None),
+    ],
+)
+def test_apple_silicon_plan_execution_bounds_games_by_cores_and_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    plat: str,
+    machine: str,
+    cpus: int,
+    pending: int,
+    agents: bool,
+    memory_gb: float | None,
+    batch_inputs: int,
+    shared: bool | None,
+    games: int,
+    threads: int,
+    expected_shared: bool,
+    expected_gpu: str | None,
+) -> None:
+    monkeypatch.setattr(eval_resources, "_gpu", _gpu)
+    monkeypatch.setattr("etude.eval.resources.sys.platform", plat)
+    monkeypatch.setattr("etude.eval.resources.platform.machine", lambda: machine)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    plan = plan_execution(
+        pending,
+        agents=agents,
+        memory_gb=memory_gb,
+        batch_inputs=batch_inputs,
+        shared=shared,
+    )
+    assert (plan.games, plan.threads, plan.shared, plan.gpu) == (
+        games,
+        threads,
+        expected_shared,
+        expected_gpu,
+    )
+    expected_held = int(memory_gb * 1024**3) if memory_gb is not None else 8 * 1024**3
+    expected_budget = (
+        0 if not agents else expected_held if expected_shared else expected_held // max(1, games)
+    )
+    assert plan.checkpoint_bytes == expected_budget
+
+
+def test_probe_skipped_for_code_only_and_shared_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    probed = 0
+
+    def fail_probe() -> None:
+        nonlocal probed
+        probed += 1
+        raise AssertionError("GPU probe should not run")
+
+    monkeypatch.setattr(eval_resources, "_gpu", fail_probe)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    assert plan_execution(8, agents=False).shared is False
+    assert plan_execution(0, agents=True).shared is False
+    assert plan_execution(8, agents=True, shared=False).shared is False
+    assert probed == 0
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -675,7 +783,7 @@ def test_group_execution_respects_declared_agent_memory(
     memory_gb: float | None,
     concurrent: int,
 ) -> None:
-    monkeypatch.setattr("etude.jobs.divide_cpus", divide_cpus)
+    monkeypatch.setattr("etude.eval.run.plan_execution", plan_execution)
     measurements = iter([cpus])
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: next(measurements))
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
@@ -696,8 +804,10 @@ def test_group_execution_respects_declared_agent_memory(
     selected = group(*(job(name, agents) for name in ("one", "two", "three")))
     assert [result.played for result in hold_group(selected, directory=tmp_path)] == [1, 1, 1]
     assert max(outstanding) == concurrent
+    threads = max(1, cpus - concurrent)
+    unit = "thread" if threads == 1 else "threads"
     assert (
-        f"{concurrent} games at a time; {max(1, cpus - concurrent)} inference threads"
+        f"(nvidia); {concurrent} games at a time; {threads} inference {unit}"
         in capfd.readouterr().err
     )
     batches = json.loads((tmp_path / "grouped/artifacts/agents/batches.json").read_bytes())
@@ -712,6 +822,77 @@ def test_group_execution_respects_declared_agent_memory(
             directory=tmp_path,
         )
         assert len(found.delivered) == 1 and not found.new and not found.failed
+
+
+def test_apple_grouped_eval_uses_shared_agents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr("etude.eval.run.plan_execution", plan_execution)
+    monkeypatch.setattr(eval_resources, "_gpu", lambda: "apple")
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    selected = group(*(job(name, Agents(load=load)) for name in ("one", "two", "three")))
+    assert [result.played for result in hold_group(selected, directory=tmp_path)] == [1, 1, 1]
+    err = capfd.readouterr().err
+    assert (
+        "etude: agents: started for one, two, three (apple); 2 games at a time; 1 inference thread"
+        in err
+    )
+    batches = json.loads((tmp_path / "grouped/artifacts/agents/batches.json").read_bytes())
+    assert sum(batch["loads"] for batch in batches) == 2
+    for spec in selected.evaluations:
+        found = played(
+            spec.definition,
+            experiment="grouped",
+            enter=spec.tournament.entrants,
+            directory=tmp_path,
+        )
+        assert len(found.delivered) == 1 and not found.new and not found.failed
+
+
+def test_agents_shared_override_controls_mode_and_grouping(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(ValidationError, match="shared=True requires a checkpoint loader"):
+        Agents(shared=True)
+    assert AgentLoader.model_validate_json('{"max_batch": 16}').shared is None
+
+    state = ExperimentState(experiment="grouped")
+    auto_job = job("auto", Agents(load=load))
+    direct_job = job("direct", Agents(load=load, shared=False))
+    forced_job = job("forced", Agents(load=load, shared=True))
+    auto_lowered = auto_job.lower(state)
+    direct_lowered = direct_job.lower(state)
+    forced_lowered = forced_job.lower(state)
+    keys = {
+        _group_key(lowered, evaluation_group(lowered).evaluations[0])
+        for lowered in (auto_lowered, direct_lowered, forced_lowered)
+    }
+    assert len(keys) == 3
+
+    monkeypatch.setattr("etude.eval.run.plan_execution", plan_execution)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+
+    # shared=False plays direct even on Apple Silicon, without probing the GPU.
+    monkeypatch.setattr(eval_resources, "_gpu", lambda: "apple")
+    direct_dir = tmp_path / "direct"
+    assert [result.played for result in hold_group(group(direct_job), directory=direct_dir)] == [1]
+    err = capfd.readouterr().err
+    assert "etude: agents: direct inference in 1 game processes; 1 thread each" in err
+    assert not (direct_dir / "grouped/artifacts/agents/batches.json").exists()
+
+    # shared=True forces the shared agent process even when no GPU is detected.
+    monkeypatch.setattr(eval_resources, "_gpu", lambda: None)
+    forced_dir = tmp_path / "forced"
+    assert [result.played for result in hold_group(group(forced_job), directory=forced_dir)] == [1]
+    err = capfd.readouterr().err
+    assert "etude: agents: started for forced (cpu); 1 games at a time; 1 inference thread" in err
+    assert (forced_dir / "grouped/artifacts/agents/batches.json").is_file()
 
 
 def test_released_queued_evaluation_discards_workers() -> None:
@@ -847,17 +1028,17 @@ def test_launched_group_delivers_members_then_the_next_pass_plays_nothing(
 from etude.jobs import Agents, EvalJob, ExperimentState
 from etude.eval.records import Code, RoundRobin, checkpoint_player
 from etude.eval.match import environment
-from etude.spec import Runtime, Variable
+from etude.spec import Runtime
 from tests.eval.arithmetic import load
 from tests.eval.arithmetic import checkpoint
 from tests.eval.arithmetic import play
 
 def eval_jobs(state: ExperimentState) -> list[EvalJob]:
-    agents = Agents(load=load)
+    agents = Agents(load=load, shared=False)
     return [EvalJob(tournament=RoundRobin(name=name, environment=environment("agents"),
                    configs=({{"lane": name}},), games=1),
                    enter=(checkpoint("left"), checkpoint("right")), play=play, agents=agents,
-                   repo=None, runtime=Runtime(python={command_python!r}), environment=(Variable(name="CUDA_VISIBLE_DEVICES", value=""),), max_hours=0.05)
+                   repo=None, runtime=Runtime(python={command_python!r}), max_hours=0.05)
             for name in ("one", "two")]
 """
         },
@@ -1127,13 +1308,14 @@ def test_a_game_failure_stops_only_its_tournament(tmp_path: Path) -> None:
         db.close()
 
 
+@pytest.mark.parametrize("library", ["torch", "mlx"])
 @pytest.mark.parametrize("with_agents", [False, True])
 def test_heavy_import_warning_is_once_and_only_for_games_with_agents(
-    tmp_path: Path, with_agents: bool
+    tmp_path: Path, library: str, with_agents: bool
 ) -> None:
-    (tmp_path / "torch.py").write_text("# Controlled framework fixture.\n")
+    (tmp_path / f"{library}.py").write_text("# Controlled framework fixture.\n")
     (tmp_path / "heavy_fixture_game.py").write_text(
-        "import torch\nfrom collections.abc import Sequence\nfrom etude.eval.records import Match\n"
+        f"import {library}\nfrom collections.abc import Sequence\nfrom etude.eval.records import Match\n"
         "from etude.eval.agents import Forward\nfrom etude.eval.result import Tables\n"
         "def play(match: Match" + ", agents: Sequence[Forward]" + ") -> Tables:\n"
         "    return {'scores': [{'seat': 0, 'score': 1}]}\n"
@@ -1148,7 +1330,7 @@ from etude.jobs import Agents, EvalGroup, EvalJob, evaluation_group, hold_group,
 from tests.eval.arithmetic import load
 from tests.eval.arithmetic import checkpoint
 import etude.eval.resources
-etude.eval.resources._has_gpu = lambda: True
+etude.eval.resources._gpu = lambda: "nvidia"
 agents = Agents(load=load) if sys.argv[2] == "True" else Agents()
 jobs = [EvalJob(tournament=RoundRobin(name=name, environment=environment("heavy"), configs=({},), games=1),
                enter=(checkpoint("one"), checkpoint("two")), play=play,
@@ -1164,7 +1346,9 @@ hold_group(EvalGroup(evaluations=tuple(evaluation_group(job.lower(ExperimentStat
         timeout=15,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stderr.count("game module heavy_fixture_game: imported torch") == int(with_agents)
+    assert result.stderr.count(f"game module heavy_fixture_game: imported {library}") == int(
+        with_agents
+    )
     if with_agents:
         assert "move the import to load's module" in result.stderr
 

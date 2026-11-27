@@ -22,7 +22,7 @@ from queue import SimpleQueue
 from typing import TYPE_CHECKING, cast
 
 from etude.errors import RetryRequested, explain
-from etude.eval.resources import Cpus, Resources, agent_bytes, seconds_left
+from etude.eval.resources import ExecutionPlan, Resources, seconds_left
 
 __all__ = ("Forward",)
 
@@ -204,7 +204,7 @@ def running_agents(
     checkout: str | None,
     resources: Resources,
     tournaments: Sequence[str],
-    cpus: Cpus,
+    plan: ExecutionPlan,
 ) -> Iterator[AgentProcess]:
     if definition.load is None:
         raise ValueError("an agent process needs a checkpoint loader")
@@ -219,8 +219,8 @@ def running_agents(
             checkout,
             definition.max_batch,
             definition.max_delay_seconds,
-            agent_bytes(definition.memory_gb),
-            cpus.threads,
+            plan.checkpoint_bytes,
+            plan.threads,
             child,
             resources,
         ),
@@ -259,8 +259,11 @@ def running_agents(
         except EOFError as error:
             raise RetryRequested("agent process exited during startup") from error
         observer.start()
+        label = plan.gpu or "cpu"
+        unit = "thread" if plan.threads == 1 else "threads"
         print(
-            f"etude: agents: started for {', '.join(tournaments)}; {cpus.games} games at a time; {cpus.threads} inference threads",
+            f"etude: agents: started for {', '.join(tournaments)} ({label}); "
+            f"{plan.games} games at a time; {plan.threads} inference {unit}",
             file=sys.stderr,
             flush=True,
         )

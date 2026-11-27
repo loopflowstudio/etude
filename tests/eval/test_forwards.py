@@ -21,7 +21,7 @@ def test_mirror_sends_all_branches_once_per_ply_and_builds_author_objects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shared: bool
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
-    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: shared)
+    monkeypatch.setattr("etude.eval.resources._gpu", lambda: "nvidia" if shared else None)
     small = checkpoint("small")
     mirror = Mirror(over=small)
     greedy = mirror.model_copy(update={"choice": "greedy"})
@@ -91,7 +91,7 @@ def test_code_players_build_author_objects_without_an_agent_process(
 def test_cpu_games_reuse_the_checkpoint_across_tournaments(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: False)
+    monkeypatch.setattr("etude.eval.resources._gpu", lambda: None)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     small = checkpoint("small")
     players = (compose(Mirror(over=small)), compose(Mirror(over=small, choice="greedy")))

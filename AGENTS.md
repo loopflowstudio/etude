@@ -275,17 +275,21 @@ of inputs to a list of outputs. `Agents` declares it and an optional game-side
 `build(player, leaves)`, whose return value belongs to the author and is never
 called by Etude. Sampling belongs in game code, seeded from `match.seed`. Player
 wrappers are frozen author records; checkpoint leaves share loading and batches.
-The shared agent process or each CPU game process holds checkpoint forwards;
+The shared agent process or each direct game process holds checkpoint forwards;
 game processes build wrappers and play; say neither "server", "worker" nor "policy"
 for any of these ("policy" is reserved for policy keys).
 Etude sets the model-library thread environment before importing the checkpoint
-loading module. CPU game processes load through the same cache/eviction owner
-as shared GPU inference and report failures to the parent even when play catches them. Loaders must honor that inference budget when configuring
+loading module. Direct game processes load through the same cache/eviction owner
+as shared inference and report failures to the parent even when play catches them. Loaders must honor that inference budget when configuring
 their library; each game process keeps one thread.
 On visible NVIDIA hardware, active games fill the declared batch, bounded by
-pending matches and host memory. Probe hardware without importing the loader;
-code-only games keep CPU capacity and perform no GPU probe. Hardware capacity
-does not select the author's model device or promise GPU memory residency.
+pending matches and host memory; on native arm64 Apple Silicon (and forced-shared
+CPU runs), active games fill `cpus - 1` (at least 1), bounded by pending matches
+and remaining memory, while each forward stays capped at `max_batch`. `Agents(shared=...)`
+overrides automatic selection (`False` skips the probe and plays direct; `True` forces
+shared). Probe hardware without importing the loader; code-only games and `shared=False`
+keep direct capacity and perform no GPU probe. Hardware capacity does not select the
+author's model device or promise GPU memory residency.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any

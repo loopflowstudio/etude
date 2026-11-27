@@ -56,7 +56,7 @@ from etude.eval.records import (
     outcomes,
     player_checkpoints,
 )
-from etude.eval.resources import Cpus, Resources, agent_bytes, divide_cpus, resources, seconds_left
+from etude.eval.resources import ExecutionPlan, Resources, plan_execution, resources, seconds_left
 from etude.eval.result import EvalResult as EvalResult
 from etude.eval.result import Result as Result
 from etude.eval.result import Row
@@ -69,7 +69,7 @@ from etude.storage import DirectoryStorage, Storage, run_prefix
 if TYPE_CHECKING:
     import duckdb
 
-    from etude.jobs import Agents
+    from etude.jobs import AgentLoader, Agents
 
 # Etude's own tables, which `etude.eval.query.statsdb` keeps beside the author's.
 ETUDE_TABLES = (
@@ -144,46 +144,22 @@ class EvalRun(Run):
         function = Function(module=authored.__module__, name=authored.__qualname__)
         definition = agents.plain(None) if agents is not None else None
         artifacts = self.files.root / "artifacts" / "agents"
-        needs_loading = (
-            definition is not None
-            and definition.load is not None
-            and any(
-                player_checkpoints(player)
-                for match in self.matches
-                if match.key not in self.done
-                for player in match.players
-            )
-        )
-        with _terminable(), resources(artifacts) as owned, ExitStack() as lifetime:
-            cpus = divide_cpus(
-                sum(match.key not in self.done for match in self.matches),
-                agents=needs_loading,
-                memory_gb=definition.memory_gb if definition else None,
-                batch_inputs=definition.max_batch if definition else 32,
-            )
-            process = (
-                lifetime.enter_context(running_agents(definition, None, owned, (self.name,), cpus))
-                if needs_loading and definition is not None and cpus.games and cpus.threads
-                else None
-            )
-            results = play_together(
-                (
-                    Playing(
-                        run=self,
-                        play=function,
-                        agents=process.address if process else None,
-                        build=definition.build if definition else None,
-                        load=definition.load
-                        if definition and needs_loading and not process
-                        else None,
-                        memory=agent_bytes(definition.memory_gb) // max(1, cpus.games)
-                        if definition
-                        else None,
-                    ),
-                ),
+        with (
+            _terminable(),
+            resources(artifacts) as owned,
+            start_agents(
+                definition,
+                runs=(self,),
+                tournaments=(self.name,),
+                checkout=None,
                 resources=owned,
-                cpus=cpus,
-                agent_process=process,
+            ) as execution,
+        ):
+            results = play_together(
+                (execution.playing(self, function),),
+                resources=owned,
+                plan=execution.plan,
+                agent_process=execution.process,
             )
             result = results[0]
             if isinstance(result, (EtudeError, RetryRequested)):
@@ -538,6 +514,86 @@ class Playing:
         self.skipped = len(self.run.matches) - len(self.pending)
 
 
+@dataclass(frozen=True)
+class EvalAgents:
+    """Planned inference topology and optional live shared agent process."""
+
+    plan: ExecutionPlan
+    process: AgentProcess | None
+    definition: AgentLoader | None
+    needs_loading: bool
+
+    def playing(
+        self,
+        run: EvalRun,
+        play: Function,
+        *,
+        checkout: str | None = None,
+        tournament: str | None = None,
+        build: Function | None = None,
+    ) -> Playing:
+        """Build a tournament's Playing record from this inference topology."""
+        resolved_build = (
+            build if build is not None else (self.definition.build if self.definition else None)
+        )
+        direct = self.needs_loading and self.process is None and self.definition is not None
+        return Playing(
+            run=run,
+            play=play,
+            checkout=checkout,
+            tournament=tournament,
+            agents=self.process.address if self.process is not None else None,
+            build=resolved_build,
+            load=self.definition.load if direct and self.definition is not None else None,
+            memory=self.plan.checkpoint_bytes if direct else None,
+        )
+
+
+@contextmanager
+def start_agents(
+    definition: AgentLoader | None,
+    *,
+    runs: Sequence[EvalRun],
+    tournaments: Sequence[str],
+    checkout: str | None,
+    resources: Resources,
+) -> Iterator[EvalAgents]:
+    """Size the eval group and own the shared agent process when selected."""
+    pending = sum(match.key not in run.done for run in runs for match in run.matches)
+    needs_loading = (
+        definition is not None
+        and definition.load is not None
+        and any(
+            player_checkpoints(player)
+            for run in runs
+            for match in run.matches
+            if match.key not in run.done
+            for player in match.players
+        )
+    )
+    plan = plan_execution(
+        pending,
+        agents=needs_loading,
+        memory_gb=definition.memory_gb if definition is not None else None,
+        batch_inputs=definition.max_batch if definition is not None else 32,
+        shared=definition.shared if definition is not None else None,
+    )
+    with ExitStack() as lifetime:
+        process = (
+            lifetime.enter_context(
+                running_agents(definition, checkout, resources, tournaments, plan)
+            )
+            if plan.shared and definition is not None
+            else None
+        )
+        yield EvalAgents(
+            plan=plan,
+            process=process,
+            definition=definition,
+            needs_loading=needs_loading,
+        )
+
+
 def _retain(name: str, report: Imports | Performance, directory: Path) -> None:
     """Keep reports beside group batches, or under a standalone run's artifacts."""
     try:
@@ -550,7 +606,7 @@ def play_together(
     plays: Sequence[Playing],
     *,
     resources: Resources,
-    cpus: Cpus | None = None,
+    plan: ExecutionPlan | None = None,
     agent_process: AgentProcess | None = None,
 ) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
     """Play tournaments on one pool; loader failures follow every seated checkpoint.
@@ -663,12 +719,12 @@ def play_together(
                 flush=True,
             )
 
-    if cpus is None:
-        cpus = divide_cpus(sum(len(each.pending) for each in plays), agents=False)
-    workers = cpus.games
+    if plan is None:
+        plan = plan_execution(sum(len(each.pending) for each in plays), agents=False)
+    workers = plan.games
     if workers and any(each.load is not None for each in plays):
         print(
-            f"etude: agents: CPU inference in {workers} game processes; 1 thread each",
+            f"etude: agents: direct inference in {workers} game processes; 1 thread each",
             file=sys.stderr,
             flush=True,
         )

@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 _local_agents: LocalAgents | None = None
 
 MAX_GAME_IMPORTS = 256
-_HEAVY = frozenset({"torch", "jax", "tensorflow"})
+_HEAVY = frozenset({"torch", "jax", "tensorflow", "mlx"})
 
 
 _startup_modules: frozenset[str] | None = None

@@ -177,12 +177,14 @@ game and a share of the checkpoint-byte allowance.
 
 Honor Etude's thread environment in the loader and choose the model's device
 there (`cuda`, `mps` or MLX on Apple Silicon, `cpu` otherwise): hardware
-detection does not place tensors for you, and a loader that stays on CPU on an
-Apple Silicon Mac still runs through the shared agent process. Keep model
-imports (`torch`, `jax`, `tensorflow`, `mlx`) in the loading module so game
-processes remain light. `Agents(max_batch=..., memory_gb=...)` tunes batch size
-and checkpoint-byte allowance (default: half of host memory); author code keeps
-one forward deterministic for every batch size.
+detection does not place tensors for you. Pass `Agents(shared=False)` to skip
+the GPU probe and run direct per-game inference (for example with a CPU-only
+loader or a Metal-less macOS VM), or `Agents(shared=True)` to force one shared
+agent process on any host. Keep model imports (`torch`, `jax`, `tensorflow`,
+`mlx`) in the loading module so game processes remain light.
+`Agents(max_batch=..., memory_gb=..., shared=...)` tunes batch size,
+checkpoint-byte allowance (default: half of host memory) and inference mode;
+author code keeps one forward deterministic for every batch size.
 
 ## Results and retry
 

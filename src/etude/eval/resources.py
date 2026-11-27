@@ -1,12 +1,14 @@
 """Process environment for game and agent processes.
 
-`divide_cpus` returns game and inference-thread budgets for startup and dispatch.
-`resources` owns temporary fast scratch; `Resources.configure` sets child-only
-environment before author imports, leaving the calling process untouched.
-Observations are kept in the run's durable artifact folder by the group owner.
+`plan_execution` chooses shared or direct inference and returns game, thread
+and per-owner checkpoint-byte budgets for startup and dispatch. `resources`
+owns temporary fast scratch; `Resources.configure` sets child-only environment
+before author imports, leaving the calling process untouched. Observations are
+kept in the run's durable artifact folder by the group owner.
 """
 
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -17,6 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 THREAD_VARIABLES = (
     "OMP_NUM_THREADS",
@@ -102,50 +105,83 @@ def seconds_left() -> float | None:
     return max(0.0, datetime.fromisoformat(deadline).timestamp() - time.time())
 
 
-def _has_gpu() -> bool:
-    """Read visible NVIDIA hardware without importing the author's model library."""
+type Gpu = Literal["nvidia", "apple"]
+
+
+def _gpu() -> Gpu | None:
+    """Read visible NVIDIA or Apple Silicon hardware without importing a model library."""
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        return "apple"
     if os.environ.get("CUDA_VISIBLE_DEVICES") in ("", "-1"):
-        return False
+        return None
     command = shutil.which("nvidia-smi")
     if command is None:
-        return False
-    return bool(
-        subprocess.check_output(
-            [command, "--query-gpu=index", "--format=csv,noheader"],
-            text=True,
-            timeout=seconds_left(),
-        ).strip()
-    )
+        return None
+    if subprocess.check_output(
+        [command, "--query-gpu=index", "--format=csv,noheader"],
+        text=True,
+        timeout=seconds_left(),
+    ).strip():
+        return "nvidia"
+    return None
 
 
 @dataclass(frozen=True)
-class Cpus:
-    """Active games and shared inference threads; zero threads means direct calls."""
+class ExecutionPlan:
+    """Process topology and per-owner checkpoint-byte budget for one eval group."""
 
     games: int
     threads: int
+    shared: bool
+    gpu: Gpu | None
+    checkpoint_bytes: int
 
 
-def divide_cpus(
-    pending: int, *, agents: bool, memory_gb: float | None = None, batch_inputs: int = 32
-) -> Cpus:
-    """GPU games fill one shared batch; CPU games own their checkpoint forwards.
+def plan_execution(
+    pending: int,
+    *,
+    agents: bool,
+    memory_gb: float | None = None,
+    batch_inputs: int = 32,
+    shared: bool | None = None,
+) -> ExecutionPlan:
+    """Choose shared or direct inference and size games, threads and checkpoint bytes.
 
-    A single CPU is shared by one game and inference. Memory and pending work
-    may reduce games further, but never leave queued work with zero capacity.
+    NVIDIA games fill one shared batch; Apple Silicon and forced-shared CPU games
+    leave at least one core for the shared agent process. Direct games own their
+    checkpoint forwards and split the checkpoint-byte allowance across game
+    processes. Memory and pending work may reduce games further, but never leave
+    queued work with zero capacity.
     """
     cpus = available_cpus()
-    shared = agents and pending > 0 and _has_gpu()
-    held = agent_bytes(memory_gb) if agents else 0
-    capacity = cpus
-    if shared:
+    probe = agents and pending > 0 and shared is not False
+    gpu = _gpu() if probe else None
+    use_shared = agents and pending > 0 and (shared is True or (shared is None and gpu is not None))
+    total_memory = memory_bytes()
+    held = (
+        (int(memory_gb * 1024**3) if memory_gb is not None else total_memory // 2) if agents else 0
+    )
+    if not use_shared:
+        capacity = cpus
+    elif gpu == "nvidia":
         capacity = batch_inputs
+    else:
+        # The GPU shares cores and memory with the games; a core stays for inference.
+        capacity = max(1, cpus - 1)
     games = min(
         pending,
         capacity,
-        max(1, (memory_bytes() - held) // GAME_BYTES),
+        max(1, (total_memory - held) // GAME_BYTES),
     )
-    return Cpus(games=games, threads=max(1, cpus - games) if shared else 0)
+    threads = max(1, cpus - games) if use_shared else 0
+    checkpoint_bytes = 0 if not agents else held if use_shared else held // max(1, games)
+    return ExecutionPlan(
+        games=games,
+        threads=threads,
+        shared=use_shared,
+        gpu=gpu,
+        checkpoint_bytes=checkpoint_bytes,
+    )
 
 
 @dataclass(frozen=True)
