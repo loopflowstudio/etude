@@ -295,26 +295,32 @@ class Flight:
 
 
 @dataclass(frozen=True)
-class _StagedFlight:
+class _Flight:
     id: int
+    checkpoint: str
     future: asyncio.Future[list[object]]
     locked: list[ndarray]
+    sent_at: float
+
+
+type _FlightError = BaseException | Callable[[str], BaseException]
 
 
 class _FlightStage:
     """Transactional staging handle for one `ForwardBus.submit` call."""
 
-    def __init__(self, book: _FlightBook, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, book: _FlightBook, loop: asyncio.AbstractEventLoop, sent_at: float) -> None:
         self._book = book
         self._loop = loop
-        self._entries: list[_StagedFlight] = []
+        self._sent_at = sent_at
+        self._entries: list[_Flight] = []
 
-    def add(self, inputs: list[object]) -> tuple[int, asyncio.Future[list[object]]]:
+    def add(self, call: ForwardCall) -> tuple[int, asyncio.Future[list[object]]]:
         """Lock `inputs`, reserve a request id and future, and record for commit/rollback."""
-        locked = self._book.flight.lock(inputs)
+        locked = self._book.flight.lock(call.inputs)
         request_id = self._book._reserve_id()
         future: asyncio.Future[list[object]] = self._loop.create_future()
-        self._entries.append(_StagedFlight(request_id, future, locked))
+        self._entries.append(_Flight(request_id, call.checkpoint, future, locked, self._sent_at))
         return request_id, future
 
     def rollback_last(self) -> None:
@@ -331,7 +337,6 @@ class _FlightStage:
     def commit(
         self,
         *,
-        sent_at: float,
         arrays: int = 0,
         arrays_copied: int = 0,
         copied_bytes: int = 0,
@@ -341,7 +346,7 @@ class _FlightStage:
     ) -> None:
         """Register all staged calls in flight and record their transfer counts."""
         for entry in self._entries:
-            self._book._in_flight[entry.id] = (entry.future, sent_at, entry.locked)
+            self._book._in_flight[entry.id] = entry
         self._book._calls += len(self._entries)
         self._book._arrays += arrays
         self._book._arrays_copied += arrays_copied
@@ -364,8 +369,8 @@ class _FlightBook:
         self._make_error = make_error
         self.flight = Flight()
         self._next_id = 0
-        self._in_flight: dict[int, tuple[asyncio.Future[list[object]], float, list[ndarray]]] = {}
-        self.closed_error: BaseException | None = None
+        self._in_flight: dict[int, _Flight] = {}
+        self.closed_error: _FlightError | None = None
         self._calls = 0
         self._answers = 0
         self._arrays = 0
@@ -381,8 +386,8 @@ class _FlightBook:
         self._next_id += 1
         return self._next_id
 
-    def stage(self, loop: asyncio.AbstractEventLoop) -> _FlightStage:
-        return _FlightStage(self, loop)
+    def stage(self, loop: asyncio.AbstractEventLoop, sent_at: float) -> _FlightStage:
+        return _FlightStage(self, loop, sent_at)
 
     def failed(
         self, loop: asyncio.AbstractEventLoop, error: BaseException
@@ -390,6 +395,13 @@ class _FlightBook:
         future: asyncio.Future[list[object]] = loop.create_future()
         future.set_exception(error)
         return future
+
+    def rejected(
+        self, loop: asyncio.AbstractEventLoop, checkpoint: str
+    ) -> asyncio.Future[list[object]]:
+        error = self.closed_error
+        assert error is not None
+        return self.failed(loop, error if isinstance(error, BaseException) else error(checkpoint))
 
     def add_handoff(self, seconds: float, *, wire_bytes: int = 0) -> None:
         self._handoff_seconds += seconds
@@ -399,10 +411,10 @@ class _FlightBook:
         entry = self._in_flight.pop(request_id, None)
         if entry is None:
             return
-        future, sent, locked = entry
-        self.flight.unlock(locked)
+        self.flight.unlock(entry.locked)
         self._answers += 1
-        self._round_trip_seconds += time.monotonic() - sent
+        self._round_trip_seconds += time.monotonic() - entry.sent_at
+        future = entry.future
         if future.done():
             return
         if outcome.error is not None:
@@ -410,13 +422,15 @@ class _FlightBook:
         else:
             future.set_result(outcome.outputs)
 
-    def fail_all(self, error: BaseException) -> None:
+    def fail_all(self, error: _FlightError) -> None:
         if self.closed_error is None:
             self.closed_error = error
-        for future, _, locked in self._in_flight.values():
-            self.flight.unlock(locked)
-            if not future.done():
-                future.set_exception(error)
+        for entry in self._in_flight.values():
+            self.flight.unlock(entry.locked)
+            if not entry.future.done():
+                entry.future.set_exception(
+                    error if isinstance(error, BaseException) else error(entry.checkpoint)
+                )
         self._in_flight.clear()
 
     def report(self) -> BusReport:

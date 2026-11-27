@@ -1417,7 +1417,7 @@ class _ExplodingUnpickle:
         return {"trigger": True}
 
     def __setstate__(self, state: dict[str, bool]) -> None:
-        raise RuntimeError("corrupt output https://user:topsecret@example.com")
+        raise RuntimeError("fixture decode error https://user:topsecret@example.com")
 
 
 @pytest.mark.parametrize("transport", ["local", "socket"])
@@ -1434,11 +1434,12 @@ def test_unpicklable_reply_fails_fast_redacts_secrets_and_unlocks_arrays(
             bus.bind(cp)
             arr = np.arange(4, dtype=np.float32)
             [fut] = bus.submit([ForwardCall(cp.key, [arr], 1)])
-            expected = ForwardError if transport == "local" else RetryRequested
-            with pytest.raises(expected) as info:
+            with pytest.raises(ForwardError) as info:
                 await asyncio.wait_for(fut, timeout=5.0)
+            assert info.value.checkpoint == cp.key
+            assert not info.value.retry
             message = str(info.value)
-            assert "corrupt output" in message
+            assert "fixture decode error" in message
             assert "topsecret" not in message
             assert arr.flags.writeable
 
@@ -1454,6 +1455,7 @@ def test_unpicklable_request_disconnects_only_its_peer(
     placement = place((2,), agents=True)
     definition = Agents(load=_identity_load).plain(None)
     cp = checkpoint("bad_request").checkpoint
+    other = checkpoint("other_request").checkpoint
 
     async def run(address: str) -> None:
         healthy = await SocketForwardBus.connect(address)
@@ -1461,11 +1463,23 @@ def test_unpicklable_request_disconnects_only_its_peer(
         try:
             healthy.bind(cp)
             broken.bind(cp)
+            broken.bind(other)
             [before] = healthy.submit([ForwardCall(cp.key, [1], 1)])
             assert await asyncio.wait_for(before, timeout=5) == [1]
-            [bad] = broken.submit([ForwardCall(cp.key, [_ExplodingUnpickle()], 1)])
-            with pytest.raises(RetryRequested, match="agent process exited before answering"):
-                await asyncio.wait_for(bad, timeout=5)
+            arr = np.arange(4, dtype=np.float32)
+            bad, pending = broken.submit(
+                [ForwardCall(cp.key, [_ExplodingUnpickle()], 1), ForwardCall(other.key, [arr], 1)]
+            )
+            for key, future in ((cp.key, bad), (other.key, pending)):
+                with pytest.raises(ForwardError, match="agent request failed to decode") as info:
+                    await asyncio.wait_for(future, timeout=5)
+                assert info.value.checkpoint == key and not info.value.retry
+                assert "topsecret" not in str(info.value)
+            assert arr.flags.writeable
+            [later] = broken.submit([ForwardCall(other.key, [3], 1)])
+            with pytest.raises(ForwardError, match="agent request failed to decode") as info:
+                await later
+            assert info.value.checkpoint == other.key and not info.value.retry
             [after] = healthy.submit([ForwardCall(cp.key, [2], 1)])
             assert await asyncio.wait_for(after, timeout=5) == [2]
         finally:
@@ -1476,5 +1490,34 @@ def test_unpicklable_request_disconnects_only_its_peer(
         asyncio.run(run(agent.address))
     stderr = capfd.readouterr().err
     assert "agent request failed to decode: " in stderr
-    assert "corrupt output" in stderr
+    assert "fixture decode error" in stderr
     assert "topsecret" not in stderr
+
+
+async def _broken_request_play(match: Match, agents: Sequence[Forward]) -> Tables:
+    await agents[0]([_ExplodingUnpickle()])
+    return {"scores": [{"seat": 0, "score": 0}]}
+
+
+def test_socket_decode_error_stops_only_its_tournament(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
+    monkeypatch.setattr("etude.eval.resources._has_gpu", lambda: True)
+    agents = Agents(load=_identity_load)
+    broken = job("broken", agents, _broken_request_play)
+    healthy = job("healthy", agents)
+    with pytest.raises(EtudeError, match="agent request failed to decode"):
+        hold_group(group(broken, healthy), directory=tmp_path)
+
+    db = statsdb("grouped", tmp_path)
+    try:
+        assert db.sql("select state from runs order by state").fetchall() == [
+            ("failed",),
+            ("finished",),
+        ]
+        assert db.sql("select retry from matches where state = 'failed'").fetchall() == [(False,)]
+        assert db.sql("select score from scores").fetchall() == [(1,), (1,)]
+    finally:
+        db.close()

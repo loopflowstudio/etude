@@ -333,7 +333,11 @@ class ForwardBus(Protocol):
   fail with `RetryRequested` and held matches retry.
 - **`SocketForwardBus` (shared-process transport).** Wraps the private Unix
   socket to the shared agent process under the same `ForwardBus` protocol,
-  keeping the length-prefixed `Answer` wire format.
+  keeping the length-prefixed `Answer` wire format. An undecodable request
+  receives an error `Answer` with reserved id `0` before the agent closes
+  that peer. This answer and an undecodable reply fail pending and future
+  calls on the connection with `ForwardError(retry=False)`, attributed to
+  each call's checkpoint. An unexpected disconnect still requests a retry.
 - **How `play_many` lowers to `LocalForwardBus`.** In `play_many`,
   `_BoundForward.__call__` bypasses `_Forwarder`'s zero-delay barrier and calls
   `bus.submit([ForwardCall(...)])` eagerly on call, returning the awaitable so

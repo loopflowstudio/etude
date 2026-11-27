@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, TextIO, cast
 from etude.call import Function
 from etude.errors import RetryRequested, explain
 from etude.eval.agents import (
+    _PEER_ERROR_ID,
     Answer,
     BatchRequest,
     ForwardError,
@@ -601,14 +602,14 @@ class LocalForwardBus:
         if not calls:
             return []
         if self._book.closed_error is not None:
-            return [self._book.failed(self._loop, self._book.closed_error) for _ in calls]
+            return [self._book.rejected(self._loop, call.checkpoint) for call in calls]
 
         for call in calls:
             if call.checkpoint not in self._bound:
                 raise KeyError(f"checkpoint {call.checkpoint} is not bound")
 
         started = time.monotonic()
-        stage = self._book.stage(self._loop)
+        stage = self._book.stage(self._loop, started)
         queued: list[_LocalCall] = []
         futures: list[asyncio.Future[list[object]]] = []
         arrays_count = 0
@@ -618,7 +619,7 @@ class LocalForwardBus:
         pickled_bytes = 0
         try:
             for call in calls:
-                request_id, future = stage.add(call.inputs)
+                request_id, future = stage.add(call)
                 try:
                     packed = pack_local_inputs(normalize_inputs(call.inputs))
                 except (pickle.PicklingError, TypeError, AttributeError, ValueError) as error:
@@ -641,7 +642,6 @@ class LocalForwardBus:
                 pickled_bytes += packed.pickled_bytes
             if queued:
                 stage.commit(
-                    sent_at=started,
                     arrays=arrays_count,
                     arrays_copied=arrays_copied,
                     copied_bytes=copied_bytes,
@@ -778,6 +778,12 @@ def _run_agents(
                             except (EOFError, OSError, ValueError) as error:
                                 if isinstance(error, ValueError):
                                     print(f"etude: agents: {error}", file=sys.stderr, flush=True)
+                                    _send_peer(peer)(
+                                        _encode_socket(
+                                            _PEER_ERROR_ID,
+                                            ForwardOutcome("", [], error=str(error)),
+                                        )
+                                    )
                                 selector.unregister(peer)
                                 peer.close()
                                 peers.remove(peer)

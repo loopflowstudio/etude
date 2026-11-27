@@ -358,7 +358,9 @@ return {"scores": [{"seat": 0, "won": True}, {"seat": 1, "won": False}]}
 
 A successful match is reused across an experiment's tournaments in the same
 environment. Errors retain completed results; infrastructure failures retry,
-ordinary game failures require `--retry-failed`. A forward failure raises
+ordinary game failures require `--retry-failed`. An undecodable request or
+reply on shared inference closes that game process's connection and fails
+its pending forwards. Other game processes keep playing. A forward failure raises
 `ForwardError` (with `.checkpoint` naming the checkpoint key) at the awaiting
 call. In `play`, catching `ForwardError` does not hide it from Etude's failure
 retention: the match still fails. In `play_many`, catching `ForwardError` lets

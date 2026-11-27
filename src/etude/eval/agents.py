@@ -116,6 +116,7 @@ class Answer:
 
 
 _HEADER = struct.Struct("!Q")
+_PEER_ERROR_ID = 0  # Flight ids start at one. This answer closes the peer.
 
 
 def send_frame(sock: socket.socket, payload: bytes | memoryview) -> None:
@@ -213,14 +214,14 @@ class SocketForwardBus:
         if not calls:
             return []
         if self._book.closed_error is not None:
-            return [self._book.failed(loop, self._book.closed_error) for _ in calls]
+            return [self._book.rejected(loop, call.checkpoint) for call in calls]
 
         for call in calls:
             if call.checkpoint not in self._checkpoints:
                 raise KeyError(f"checkpoint {call.checkpoint} is not bound")
 
         started = time.monotonic()
-        stage = self._book.stage(loop)
+        stage = self._book.stage(loop, started)
         requests: list[CheckpointRequest] = []
         futures: list[asyncio.Future[list[object]]] = []
         arrays_copied = 0
@@ -232,7 +233,7 @@ class SocketForwardBus:
                 for array in arrays(normalized.values):
                     arrays_copied += 1
                     copied_bytes += int(array.nbytes)
-                request_id, future = stage.add(call.inputs)
+                request_id, future = stage.add(call)
                 requests.append(
                     CheckpointRequest(request_id, checkpoint, normalized.values, call.rows)
                 )
@@ -258,7 +259,6 @@ class SocketForwardBus:
             raise
 
         stage.commit(
-            sent_at=started,
             arrays_copied=arrays_copied,
             copied_bytes=copied_bytes,
             pickled=len(calls),
@@ -275,18 +275,21 @@ class SocketForwardBus:
         return futures
 
     def _receive(self, payload: bytes) -> None:
+        if self._book.closed_error is not None:
+            return
         started = time.monotonic()
         try:
             answer = ForkingPickler.loads(payload)
             if not isinstance(answer, Answer):
                 raise TypeError(f"expected Answer, got {type(answer).__name__}")
         except Exception as error:
-            self._book.fail_all(RetryRequested(f"agent reply failed to decode: {explain(error)}"))
-            with suppress(OSError):
-                self._transport.close()
+            self._fail_peer(f"agent reply failed to decode: {explain(error)}")
             return
         finally:
             self._book.add_handoff(time.monotonic() - started, wire_bytes=len(payload))
+        if answer.id == _PEER_ERROR_ID:
+            self._fail_peer(answer.error or "agent peer failed")
+            return
         self._book.deliver(
             answer.id,
             ForwardOutcome(
@@ -297,6 +300,11 @@ class SocketForwardBus:
                 loading=answer.loading,
             ),
         )
+
+    def _fail_peer(self, message: str) -> None:
+        self._book.fail_all(lambda checkpoint: ForwardError(checkpoint, message))
+        with suppress(OSError):
+            self._transport.close()
 
     async def close(self) -> BusReport:
         with suppress(OSError):
