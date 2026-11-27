@@ -441,6 +441,31 @@ their windows and costs, and which runs occupy their slots.
 need `etude database upgrade` for the new machine inventory indexes.
 See the [live view guide](../docs/tracking.md#live-view).
 
+## Offline validation and guide
+
+```sh
+uv run etude check experiment.py
+uv run etude guide
+```
+
+`etude check FILE` validates an experiment file offline before launching or
+spending money, running the runtime's own checks across `training_jobs()`,
+`eval_jobs(state)`, `report()`, local `train(config)` recipes and game-module
+imports (warning when a shared-inference game module pulls in heavy model
+libraries). It reports errors as `FILE:LINE: error: ...` with inline `fix:`
+lines (exit `1`), or prints the planned runs, budgets and tournaments as a
+first launch sees them (exit `0`). Pass `--source DIR` to read a local runs
+directory or `--format json` for machine-readable output; exit `2` means
+nothing was checked.
+
+`etude launch`, `queue`, `eval` and `smoke` print the same `FILE:LINE` and
+`fix:` lines on declaration refusals. Job-intrinsic limits (`max_hours > 0`,
+`max_usd > 0`, `max_attempts >= 1`) are now enforced on `Job` at declaration
+time rather than waiting until submission. `etude guide` prints Etude's
+conventions, workflow, a minimal experiment file and the generated command list
+without touching a database or network. See
+[Checking an experiment](../docs/launcher.md#checking-an-experiment).
+
 ## Removed commands, options and helpers
 
 These had no caller in Etude and are outside what the guides teach. Each line

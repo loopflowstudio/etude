@@ -7,6 +7,7 @@ From this repository checkout, run:
 
 ```sh
 uv sync
+uv run etude check examples/prototype.py
 uv run etude train examples/prototype.py
 uv run etude eval examples/prototype.py
 uv run etude report examples/prototype.py --open
@@ -17,6 +18,11 @@ It learns a coin's bias, publishes a JSON checkpoint, compares its predictions
 with a fair-coin baseline, and reports the success rate. It needs no model
 library. For a separate project, copy it as `experiment.py`, run
 `uv init` if needed, then `uv add 'etude-sdk[eval]'`.
+
+`etude check` validates the experiment offline before anything runs or spends
+money: it prints the planned runs and matches, or the file, line and fix for
+any mistake. Run `uv run etude guide` anytime for Etude's conventions, a
+minimal experiment file and the full command list.
 
 The file defines `training_jobs()` (training config and independent run seeds),
 `eval_jobs(state)` (checkpoint selection and match generator), and `report()`
@@ -70,9 +76,11 @@ Each `wait` returns once its runs are done and the machine rented for them is
 deleted, so the next launch can rent again under `--max 1`. `fetch` copies the
 checkpoint the training run published to `fetched/coin.json`.
 
-A quote rents nothing. Dollar and time caps bound admission, not the provider's
-final bill. [The launcher guide](launcher.md) explains storage, credentials,
-owned machines and cancellation; [limits](limits.md) lists the sharp edges.
+A quote rents nothing: check offline first (`etude check`), quote before
+spending (`--quote`), then launch and wait. Dollar and time caps bound
+admission, not the provider's final bill. [The launcher guide](launcher.md)
+explains `check`, storage, credentials, owned machines and cancellation;
+[limits](limits.md) lists the sharp edges.
 
 For a bounded wait from Python, call `etude.launch.client.wait(timeout=120)`;
 the CLI `etude wait` waits until its selected runs finish and their rented

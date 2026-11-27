@@ -5,6 +5,7 @@ This guide is for authors submitting work to local, SSH or rented machines;
 
 ```sh
 uv run etude database upgrade
+uv run etude check experiment.py
 uv run etude launch experiment.py --smoke
 uv run etude status
 uv run etude logs --run experiment/base@0
@@ -40,6 +41,68 @@ used by the launcher or the stored declaration.
 control execution. Typed jobs derive their command from an importable Python
 function and validated Pydantic config; do not specify another command. Their
 `extras` select project dependency extras for that function's environment.
+
+## Checking an experiment
+
+```text
+$ uv run etude check exp.py
+game.py:6: error: play must be an async def function
+  fix: async def play(match: Match[Rules], agents: Sequence[Forward]) -> Tables:
+exp.py:12: error: seeds must be nonempty and distinct
+  fix: seeds=(1, 2, 3)
+models.py:3: warning: game module game imports torch via models
+  fix: define play in a lightweight module and move the import to load's module
+exp.py: 2 errors, 1 warning
+$ echo $?
+1
+```
+
+Once the reported lines are fixed, `check` prints the runs and matches a first
+launch would plan:
+
+```text
+$ uv run etude check exp.py
+exp.py: ok, as a first launch sees it (no stored runs)
+training  3 runs, up to 3 machine-hours, $15.00
+  exp/base@1  max_hours 1  max_usd 5.00
+  exp/base@2  max_hours 1  max_usd 5.00
+  exp/base@3  max_hours 1  max_usd 5.00
+eval
+  ladder   round robin  3 entrants     3 matches  3 games
+  panel    benchmark    0 checkpoints  0 matches  (none stored yet)
+next: etude launch exp.py --quote
+```
+
+`etude check FILE [--experiment NAME] [--source DIR] [--format text|json]`
+runs offline on this computer—with no provider key, bucket, database, git or
+SSH call—and shares the runtime's own validation rules across syntax and
+renamed declarations, `training_jobs()`, `eval_jobs(state)`, `report()`, and
+(for shared-inference eval jobs) a child-process check that the game module
+does not import heavy model libraries. Pass any of the experiment file's own
+flags after `FILE`. A plain file defining only `train(config)` checks its
+signature and default config as a local recipe (`etude train FILE`; nothing to
+launch).
+
+- **Offline state.** By default `check` evaluates declarations as a first
+  launch sees them (no stored runs, declared training runs queued). Pass
+  `--source DIR` to read a local runs directory instead. Bucket URIs are
+  refused: use `etude launch FILE --quote` to check against a bucket and price
+  capacity.
+- **Budgets and warnings.** Jobs without `max_usd` are noted as
+  `no max_usd: owned pools only` (owned pools and local runs accept them;
+  renting refuses them). Heavy game-module imports are reported as warnings and
+  keep exit status `0`.
+- **JSON and exit codes.** `--format json` prints one JSON object (`file`,
+  `experiment`, `ok`, `issues`, `training`, `evals`, `source`) on stdout.
+  Exit status is `0` when there are no errors, `1` when the file has errors,
+  and `2` when nothing was checked (missing file, non-`.py` path, bucket
+  `--source`, or invalid flag).
+- **Same fixes at runtime.** `launch`, `queue`, `eval` and `smoke` print the
+  same `FILE:LINE` location and `fix:` line when they refuse a declaration.
+
+Run `uv run etude guide` for an offline summary of Etude's conventions, the
+`check` → `launch --quote` → `launch` → `wait` workflow, a minimal experiment
+file and the current command list.
 
 ## Pools and owned machines
 
@@ -284,6 +347,8 @@ explicitly lists that whole prefix so experiment-folder sources
 
 | Command | What it does |
 | --- | --- |
+| `check FILE.py` | Validates declarations offline and prints planned runs, matches or fixes. |
+| `guide` | Prints conventions, workflow, a minimal experiment file and all commands. |
 | `queue FILE.py` | Records intent and returns ids; waits for no provider (`--watch SECONDS` loops passes). |
 | `launch FILE.py` | Acquires capacity, starts what fits and queues the rest; fails with no runs recorded if none fit. |
 | `launch FILE.py --quote` | Plans without submitting or renting. |
