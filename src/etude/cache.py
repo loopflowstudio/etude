@@ -57,6 +57,7 @@ import os
 import re
 import stat
 import tempfile
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -287,6 +288,7 @@ class Cache:
         self.root = root or home() / "cache"
         self.max_bytes = max_bytes
         self._stamps: dict[tuple[Path, Content], _Stamp] = {}
+        self._stamps_lock = threading.Lock()
 
     def read(
         self, artifact: Artifact, source: Source, *, start: int = 0, length: int | None = None
@@ -541,7 +543,8 @@ class Cache:
         A destination outside the cache is verified without being changed.
         """
         stamp = _Stamp.of(path)
-        trusted = self._stamps.pop((path, content), None)
+        with self._stamps_lock:
+            trusted = self._stamps.pop((path, content), None)
         if stamp is None or stamp.size_bytes != content.size_bytes:
             return False
         if trusted != stamp:
@@ -553,7 +556,8 @@ class Cache:
             path.touch()
             stamp = _Stamp.of(path)
         if stamp is not None:
-            self._stamps[(path, content)] = stamp
+            with self._stamps_lock:
+                self._stamps[(path, content)] = stamp
         return True
 
     def _hold_body(self, content: Content, body: bytes) -> bool:

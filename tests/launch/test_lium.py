@@ -19,10 +19,10 @@ from etude.errors import LauncherError
 from etude.launch.aws import Keys
 from etude.launch.client import _open
 from etude.launch.database import Database, launcher_file, upgrade
-from etude.launch.errors import ProviderUnavailable
+from etude.launch.errors import ProviderUnavailable, Refused
 from etude.launch.executor import Execution, Executor
 from etude.launch.listing import show_machines
-from etude.launch.provisioner.machines import MachineRequest, Refused
+from etude.launch.provisioner.machines import MachineRequest
 from etude.launch.provisioner.providers import bootstrap as bootstrap_module
 from etude.launch.provisioner.providers.bootstrap import guard
 from etude.launch.provisioner.providers.lium.api import Create, LiumAPI, Pod

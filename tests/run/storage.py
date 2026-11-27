@@ -14,6 +14,7 @@ class MeasuredStorage:
     def __init__(self, storage: Storage) -> None:
         self.storage = storage
         self.name = storage.name
+        self._lock = Lock()
         self.bytes = 0
         self.requests = 0
         self.ranges = 0
@@ -26,42 +27,49 @@ class MeasuredStorage:
 
     def put(self, key: str, data: bytes) -> None:
         self.storage.put(key, data)
-        self.uploaded.append(key)
-        self.uploads += 1
-        self.written += len(data)
+        with self._lock:
+            self.uploaded.append(key)
+            self.uploads += 1
+            self.written += len(data)
 
     def put_file(self, key: str, path: Path) -> None:
         size = path.stat().st_size
         self.storage.put_file(key, path)
-        self.uploaded.append(key)
-        self.uploads += 1
-        self.written += size
+        with self._lock:
+            self.uploaded.append(key)
+            self.uploads += 1
+            self.written += size
 
     def delete(self, key: str) -> bool:
         return self.storage.delete(key)
 
     def get(self, key: str) -> bytes:
-        self.got.append(key)
+        with self._lock:
+            self.got.append(key)
         body = self.storage.get(key)
-        self.bytes += len(body)
-        self.requests += 1
+        with self._lock:
+            self.bytes += len(body)
+            self.requests += 1
         return body
 
     def get_range(self, key: str, start: int, length: int) -> bytes:
         body = self.storage.get_range(key, start, length)
-        self.bytes += len(body)
-        self.requests += 1
-        self.ranges += 1
+        with self._lock:
+            self.bytes += len(body)
+            self.requests += 1
+            self.ranges += 1
         return body
 
     def keys(self, prefix: str) -> list[str]:
-        self.listings += 1
-        self.listed.append(prefix)
+        with self._lock:
+            self.listings += 1
+            self.listed.append(prefix)
         return self.storage.keys(prefix)
 
     def versions(self, prefix: str) -> dict[str, str]:
-        self.listings += 1
-        self.listed.append(prefix)
+        with self._lock:
+            self.listings += 1
+            self.listed.append(prefix)
         return self.storage.versions(prefix)
 
     def uri(self, key: str) -> str:

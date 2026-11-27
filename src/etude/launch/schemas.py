@@ -7,10 +7,11 @@ arguments identify one working session, on added and rented machines alike.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from etude.launch.records import Cause, Limit, Outcome, Output, Prepared
 from etude.launch.storage.download import Download
@@ -51,6 +52,15 @@ class Work(Record):
     inputs: tuple[Input, ...] = ()  # delivered to SESSION/inputs/SHA256
     environment: tuple[Variable, ...] = ()
 
+    @field_validator("commit")
+    @classmethod
+    def _valid_commit(cls, value: str | None) -> str | None:
+        if value is not None and (
+            not re.fullmatch(r"[A-Za-z0-9._-]+", value) or value in (".", "..")
+        ):
+            raise ValueError(f"invalid commit {value!r}")
+        return value
+
 
 class Packet(Record):
     delivery_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
@@ -86,6 +96,30 @@ class Progress(Record):
     delivered: bool = True
     # Bytes of the job's log stored so far, so a reader fetches only when it grew.
     log_bytes: int = 0
+
+    @classmethod
+    def running(
+        cls,
+        attempt: str,
+        started_at: datetime | None,
+        result: RunProgress,
+        *,
+        log_bytes: int = 0,
+    ) -> Progress:
+        """An unfinished attempt's progress from its claim, job-owned result and log size."""
+        return cls(
+            attempt=attempt,
+            started_at=started_at,
+            finished_at=None,
+            outcome=None,
+            cause=None,
+            clocks=result.clocks,
+            outputs=(),
+            exit_code=None,
+            tally=result.tally,
+            writers=result.writers,
+            log_bytes=log_bytes,
+        )
 
 
 class Observation(Record):

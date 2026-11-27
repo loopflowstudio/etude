@@ -242,6 +242,21 @@ environment, with outside checkpoints given `at` and `line`. A report-only
 Manabot report from `r2://manabot/jobs` with a cold `ETUDE_HOME` took over 30
 minutes, so prefer a lab.
 
+## Etude: seated curves and long captions
+
+For a seated report, save a checkpoint every 2 updates (inside `run.steps`,
+`run.checkpoint` records the pre-increment step: save at `update % 2 == 0`) and
+seat `(CheckpointSlot(), Fraction(clock="updates", value=0.5))` on checkpoints
+at multiples of 4, so 2, 6 and 10 sit only in the second seat. Add a 170-seating
+tournament drawn as `Curve(matches=tuple(Matches(seating=...) ...))` for the
+caption. Put `time.sleep(float(os.environ.get("QA_PAUSE", "0")))` in `play`, and
+interrupt `etude eval` from a Python driver that reads output on a thread. Serve
+`home/track/reports` with `uv run python -m http.server PORT`, since the browse
+extension does not open `file://`. Hover the columns between points: a stub
+toward a break, or `not in these matches` drawn as a line end, is a defect.
+To compare with main, `git archive main | tar -x -C DIR`, copy the lab and point
+its `etude-sdk` path at `DIR`, then `etude report FILE --out OUT`.
+
 ## Etude: evaluation recovery and placement
 
 Copy `examples/{agents.py,agent_game.py,agent_models.py,agent.txt}` into another
@@ -303,6 +318,12 @@ same archive again. Preserve source-free output fetch and launch-failure evidenc
 The controlled stand-in SSH scenario is
 `tests/launch/test_server.py::test_remote_launch_freezes_sources_config_and_returns_outputs`.
 
+An unreachable owned host: `etude machine add dead qa@10.255.255.1 --pool lab`
+times out in ConnectTimeout (30 s) with the ssh reason. The failed launch must
+not lock the run's address: relaunch with `--pool local` should admit it.
+A run's `max_hours` covers its whole attempt; a sleep per update that is longer
+than that settles `out_of_time` and retries. Time the steady state of `wait` by
+sampling `ps -o time=` of the child of `uv run` (`pgrep -P`).
 Placement errors need pending work: an empty owned pool quotes no free machine;
 a disabled pool refuses placement. Cancel lab work and wait for cleanup before
 finishing. Credentials for explicitly authorized bucket/remote scenarios come

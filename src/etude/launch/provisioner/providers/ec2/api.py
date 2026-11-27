@@ -15,8 +15,7 @@ from pydantic import AliasPath, Field, ValidationError
 
 from etude.errors import sanitize
 from etude.launch.aws import Keys, Signer
-from etude.launch.errors import ProviderUnavailable
-from etude.launch.provisioner.machines import Refused
+from etude.launch.errors import ProviderUnavailable, Refused
 from etude.launch.records import GPU, MachineTemplate, Offer
 from etude.launch.storage.transport import HTTPReply, Send
 from etude.spec import Record

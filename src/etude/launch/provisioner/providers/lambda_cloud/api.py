@@ -9,8 +9,7 @@ from pydantic import Field, ValidationError
 
 from etude.deadline import call
 from etude.errors import sanitize
-from etude.launch.errors import ProviderRejected, ProviderUnavailable
-from etude.launch.provisioner.machines import Refused
+from etude.launch.errors import ProviderRejected, ProviderUnavailable, Refused
 from etude.launch.provisioner.providers.http import MAX_REPLY_BYTES, send_to_provider
 from etude.launch.records import GPU, MachineTemplate, Offer
 from etude.launch.storage.transport import Send

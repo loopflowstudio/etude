@@ -9,8 +9,8 @@ from urllib.parse import urlsplit
 import pytest
 
 from etude.launch.aws import Keys
-from etude.launch.errors import ProviderUnavailable
-from etude.launch.provisioner.machines import MachineRequest, Refused
+from etude.launch.errors import ProviderUnavailable, Refused
+from etude.launch.provisioner.machines import MachineRequest
 from etude.launch.provisioner.providers.lambda_cloud.api import LambdaAPI
 from etude.launch.provisioner.providers.lambda_cloud.machines import LambdaMachines
 from etude.launch.records import BootstrapLinks, MachineTemplate

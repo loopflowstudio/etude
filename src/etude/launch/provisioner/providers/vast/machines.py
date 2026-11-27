@@ -19,12 +19,11 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from etude.deadline import limit_time
-from etude.launch.errors import ProviderUnavailable
+from etude.launch.errors import ProviderUnavailable, Refused
 from etude.launch.provisioner.machines import (
     Allocation,
     Bill,
     MachineRequest,
-    Refused,
     Safeguards,
     check_creation,
 )

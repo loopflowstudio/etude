@@ -276,6 +276,10 @@ test("selections are named for what they count", () => {
   assert.equal(m.selName({tournament: "played", tag: "anchor"}), "played · tagged anchor");
   assert.equal(m.selName({kind: "outside"}), "matches outside a tournament");
   assert.equal(m.selName({tournament: null, seating: null, tag: "anchor"}), "tagged anchor");
+  const many = Array.from({length: 160}, (_, i) => ({tournament: "half", seating: `s-${i + 1}`}));
+  assert.equal(m.selName(many), "half · s-1 … half · s-160 (160 seatings)");
+  const mixed = [{seating: "s-1"}, {tag: "anchor"}, {seating: "s-3"}, {kind: "outside"}];
+  assert.equal(m.selName(mixed), "s-1 … matches outside a tournament (4 selections)");
 });
 
 test("a panel draws the selection the page resolved for it, or the control's", () => {
@@ -453,6 +457,159 @@ test("a point is its own view's: another score or split of the same checkpoint i
   assert.equal(view.plots[0].values[1].at(-1), 0.9);
 });
 
+test("a seated curve skips checkpoints only in the second seat and marks only held checkpoints pending or failed", () => {
+  const training = {
+    jobs: [{name: "a", launch: "a", label: "A", runs: ["a"]}],
+    runs: [{name: "a"}],
+    clocks: [{name: "updates", kind: "step"}],
+    checkpoints: [400, 500, 600, 1000].map((u, i) => ({
+      run: "a", ordinal: i + 1, align: u, at: {updates: u},
+    })),
+  };
+  const data = page(
+    [400, 500, 600, 1000].map((u, i) => player(`u${u}`, "a", u, "a", i + 1)),
+    [],
+    training,
+  );
+  data.selections = [{tournament: "half", seating: "vs half"}];
+  data.drawn = [{seated: true, tournaments: ["half"]}];
+  // Tournament coverage marks BOTH u500 (seat 2) and u1000 (seat 1) unplayed for u1000 vs u500.
+  data.coverage = [
+    {run: "a", ordinal: 1, tournament: "half", played: 1, failed: 0, unplayed: 0},
+    {run: "a", ordinal: 2, tournament: "half", played: 0, failed: 0, unplayed: 1},
+    {run: "a", ordinal: 3, tournament: "half", played: 1, failed: 0, unplayed: 0},
+    {run: "a", ordinal: 4, tournament: "half", played: 0, failed: 0, unplayed: 1},
+  ];
+  // Only held checkpoints (u400, u600, u1000) get Points; u500 has none.
+  data.points = [
+    {selection: 0, run: "a", ordinal: 1, line: "a", at: {updates: 400}, whole: false, commit: null, score: 0, split: {}, value: 0.6, interval: null, rows: 4, matches: 1, opponents: [0]},
+    {selection: 0, run: "a", ordinal: 3, line: "a", at: {updates: 600}, whole: false, commit: null, score: 0, split: {}, value: 0.7, interval: null, rows: 4, matches: 1, opponents: [0]},
+    {selection: 0, run: "a", ordinal: 4, line: "a", at: {updates: 1000}, whole: false, commit: null, score: null, split: {}, value: null, interval: null, rows: 0, matches: 0, opponents: [], gap: null, failed: 0, unplayed: 1},
+  ];
+  data.report = {clock: "updates", evals: [{kind: "curve", title: "Half", matches: {tournament: "half", seating: "vs half"}}]};
+  data.panel_selections = [{selection: 0, control: false}];
+
+  const m = context.model(data);
+  const at = Object.fromEntries(points(m, m.JOBS[0]).map(p => [p.x, p]));
+  assert.equal(at[400].y, 0.6);
+  assert.equal(at[500].skip, true);
+  assert.equal(at[500].gap, undefined);
+  assert.equal(at[600].y, 0.7);
+  assert.equal(at[1000].missing, true);
+  assert.equal(at[1000].gap, "pending");
+
+  // Plotted column: u400=0.6, u500=undefined (bridges unbroken!), u600=0.7, u1000=null (pending).
+  const rendered = renderPage(data);
+  assert.deepEqual([...rendered.plots[0].values[0]], [400, 500, 600, 1000]);
+  assert.deepEqual([...rendered.plots[0].values[1]], [0.6, undefined, 0.7, null]);
+
+  // If u1000 fails instead of pending, u1000 is failed and u500 is still skipped.
+  data.points[2].unplayed = 0;
+  data.points[2].failed = 1;
+  data.coverage[1].unplayed = 0;
+  data.coverage[1].failed = 1;
+  const m2 = context.model(data);
+  const at2 = Object.fromEntries(points(m2, m2.JOBS[0]).map(p => [p.x, p]));
+  assert.equal(at2[500].skip, true);
+  assert.equal(at2[500].gap, undefined);
+  assert.equal(at2[1000].missing, true);
+  assert.equal(at2[1000].gap, "failed");
+
+  // With u600 unheld too, nothing lies between u400 and the break at u1000: the line stops at
+  // u400 rather than joining toward u1000 and drawing a stub up to the column beside the break.
+  data.points.splice(1, 1);
+  data.coverage[2].played = 0;
+  assert.deepEqual([...renderPage(data).plots[0].values[1]], [0.6, null, null, null]);
+});
+
+test("partially scored seated points keep the line unbroken while surfacing failed and unplayed counts", () => {
+  const data = seated([
+    {at: {updates: 200}, value: 0.5, opponents: [0], failed: 0, unplayed: 3},
+    {at: {updates: 400}, value: 0.7, opponents: [0], failed: 2, unplayed: 5},
+    {at: {updates: 600}, value: 0.8, opponents: [0], failed: 0, unplayed: 0},
+  ]);
+  const m = context.model(data);
+  const at = Object.fromEntries(points(m, m.JOBS[0]).map(p => [p.x, p]));
+  assert.equal(at[200].y, 0.5);
+  assert.equal(at[200].missing, undefined);
+  assert.equal(at[200].gap, undefined);
+  assert.match(at[200].meta, /3 not yet played/);
+  assert.equal(at[400].y, 0.7);
+  assert.equal(at[400].missing, undefined);
+  assert.equal(at[400].gap, "failed");
+  assert.match(at[400].meta, /2 matches failed, 5 not yet played/);
+
+  // Line stays unbroken across all three points, and u400 draws a red × failure marker.
+  const rendered = renderPage({...data, report: {clock: "updates", evals: [{kind: "curve", title: "Half", matches: {seating: "half"}}]}, panel_selections: [{selection: 0, control: false}]});
+  assert.deepEqual([...rendered.plots[0].values[1]], [undefined, 0.5, 0.7, 0.8]);
+  const strokes = [], ctx = {
+    save() {}, restore() {}, setLineDash() {}, beginPath() {},
+    arc() {}, moveTo() {}, lineTo() {},
+    stroke() { strokes.push(this.strokeStyle); },
+    measureText: () => ({width: 10}), fillRect() {}, fillText() {},
+  };
+  rendered.plots[0].options.hooks.draw[0]({ctx, bbox: {top: 0, left: 0, width: 700, height: 200}, valToPos: x => x});
+  assert.ok(strokes.length >= 1);
+
+  // Multi-seed job points aggregate failed/unplayed notes and keep gap="failed".
+  const twoSeed = page(
+    [player("a400", "a", 400, "a", 1), player("b400", "b", 400, "b", 1)],
+    [],
+    {
+      jobs: [{name: "j", launch: "j", label: "J", runs: ["a", "b"]}],
+      runs: [{name: "a"}, {name: "b"}],
+      clocks: [{name: "updates", kind: "step"}],
+      checkpoints: [
+        {run: "a", ordinal: 1, align: 400, at: {updates: 400}},
+        {run: "b", ordinal: 1, align: 400, at: {updates: 400}},
+      ],
+    },
+  );
+  twoSeed.selections = [{tournament: "half", seating: "half"}];
+  twoSeed.drawn = [{seated: true, tournaments: ["half"]}];
+  twoSeed.points = [
+    {selection: 0, run: "a", ordinal: 1, line: "a", at: {updates: 400}, whole: false, commit: null, score: 0, split: {}, value: 0.6, interval: null, rows: 2, matches: 1, opponents: [0], failed: 1, unplayed: 2},
+    {selection: 0, run: "b", ordinal: 1, line: "b", at: {updates: 400}, whole: false, commit: null, score: 0, split: {}, value: 0.8, interval: null, rows: 2, matches: 1, opponents: [1], failed: 0, unplayed: 3},
+  ];
+  const m2 = context.model(twoSeed);
+  const [combined] = points(m2, m2.JOBS[0]);
+  assert.equal(combined.y, 0.7);
+  assert.equal(combined.gap, "failed");
+  assert.match(context.pointMeta(combined), /mean of 2 seeds:.*1 match failed, 5 not yet played/);
+});
+
+test("seated status points surface failures under split filters and take precedence over gaps", () => {
+  // Split A scored at u400, while split B had 0 scored and 50 failed matches; u200 and u600 scored on both.
+  const data = seated([
+    {at: {updates: 200}, value: 0.5, split: {mode: "A"}, opponents: [0]},
+    {at: {updates: 200}, value: 0.4, split: {mode: "B"}, opponents: [0]},
+    {at: {updates: 400}, value: 0.7, split: {mode: "A"}, opponents: [0], failed: 50, unplayed: 0},
+    {at: {updates: 400}, value: null, gap: null, failed: 50, unplayed: 0},
+    {at: {updates: 600}, value: 0.8, split: {mode: "A"}, opponents: [0]},
+    {at: {updates: 600}, value: 0.6, split: {mode: "B"}, opponents: [0]},
+    // A checkpoint with both a relative-seat gap and failed matches reports failed first.
+    {at: {updates: 100}, value: null, gap: NEVER, failed: 3, unplayed: 1},
+  ]);
+  const m = context.model(data);
+  const splitA = Object.fromEntries(m.jobPoints(m.JOBS[0], "updates", m.evalValue(0, 0, {mode: "A"}, "")).map(p => [p.x, p]));
+  const splitB = Object.fromEntries(m.jobPoints(m.JOBS[0], "updates", m.evalValue(0, 0, {mode: "B"}, "")).map(p => [p.x, p]));
+  assert.equal(splitA[400].y, 0.7);
+  assert.equal(splitA[400].gap, "failed");
+  assert.equal(splitB[400].missing, true);
+  assert.equal(splitB[400].skip, undefined);
+  assert.equal(splitB[400].gap, "failed");
+  assert.match(splitB[400].meta, /50 matches failed/);
+  assert.equal(splitB[100].missing, true);
+  assert.equal(splitB[100].gap, "failed");
+  assert.match(splitB[100].meta, /3 matches failed, 1 not yet played/);
+
+  // Split B renders u400 as null (line break + × failed), never undefined (bridge).
+  const rendered = renderPage({...data, report: {clock: "updates", evals: [{kind: "curve", title: "Half", split: "mode", matches: {seating: "half"}}]}, panel_selections: [{selection: 0, control: false}]});
+  assert.equal(rendered.plots.length, 2);
+  assert.deepEqual([...rendered.plots[0].values[1]], [null, 0.5, 0.7, 0.8]);
+  assert.deepEqual([...rendered.plots[1].values[1]], [null, 0.4, null, 0.6]);
+});
+
 test("ticks a narrow range would label alike are written with the decimals their step needs", () => {
   const two = v => v.toFixed(2);
   assert.deepEqual([...context.tickLabels([0.5, 0.55, 0.6], two, 0.05)], ["0.50", "0.55", "0.60"]);
@@ -478,6 +635,15 @@ test("a one-seed seating draws a job's point from the seed that played it, and w
   const every = points(context.model(data), context.model(data).JOBS[0])[0];
   assert.equal(every.missing, true);
   assert.match(every.meta, /1 of 2 seeds evaluated/);
+  // Still unplayed for its seed while seed a has no such checkpoint yet: the job's status,
+  // not a partial count of seeds.
+  data.training.checkpoints = data.training.checkpoints.filter(c => c.run === "b");
+  data.players = data.players.filter(p => p.run !== "a");
+  data.points[0] = {...data.points[0], whole: true, score: null, value: null, rows: 0, matches: 0, opponents: [], gap: null, failed: 0, unplayed: 1};
+  const pending = points(context.model(data), context.model(data).JOBS[0])[0];
+  assert.equal(pending.missing, true);
+  assert.equal(pending.gap, "pending");
+  assert.doesNotMatch(pending.meta, /seeds evaluated/);
 });
 
 

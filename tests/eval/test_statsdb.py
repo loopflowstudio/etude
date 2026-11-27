@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -13,10 +14,12 @@ from pathlib import Path
 import duckdb
 import pytest
 
+from etude.cache import Artifact, Cache, Fetched
 from etude.call import Function
 from etude.checkpoints import CheckpointRecord, CheckpointRef
+from etude.deadline import limit_time, remaining
 from etude.errors import EtudeError
-from etude.eval import query
+from etude.eval import block, query
 from etude.eval.convert import convert
 from etude.eval.match import environment
 from etude.eval.query import compare, statsdb
@@ -510,3 +513,384 @@ def test_statsdb_allows_concurrent_readers_and_catches_up_while_a_reader_is_open
     with statsdb("cards", bucket) as swept:
         assert swept.sql("select count(*) from matches").fetchone() == (4,)
     assert not stale.exists()
+
+
+class _TrackedConnection:
+    """Wrap a DuckDB connection to count commits/checkpoints and optionally interrupt after N."""
+
+    def __init__(
+        self,
+        db: duckdb.DuckDBPyConnection,
+        *,
+        interrupt_after_checkpoints: int | None = None,
+    ) -> None:
+        self.db = db
+        self.commits = 0
+        self.checkpoints = 0
+        self._interrupt_after = interrupt_after_checkpoints
+
+    def execute(self, statement: str, parameters: object = None) -> duckdb.DuckDBPyConnection:
+        lower = statement.strip().lower()
+        if lower == "commit":
+            self.commits += 1
+        elif lower == "checkpoint":
+            self.checkpoints += 1
+        result = (
+            self.db.execute(statement)
+            if parameters is None
+            else self.db.execute(statement, parameters)
+        )
+        if lower == "checkpoint" and self._interrupt_after is not None:
+            if self.checkpoints >= self._interrupt_after:
+                raise RuntimeError("interrupted after chunk")
+        return result
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self.db, name)
+
+
+def test_catch_up_commits_in_chunks_and_resumes_in_place_after_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(block, "SEAL_SECONDS", 0.0)
+    monkeypatch.setattr(query, "_CATCH_UP_CHUNK", 3)
+
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    players = pair(tmp_path)
+    # Seed an existing database so subsequent catch-up runs in place.
+    play_matches(
+        experiment="cards",
+        environment=DUEL,
+        play=play,
+        matches=deals(players, 0),
+        run="seed",
+        directory=tmp_path / "seed",
+        storages=[bucket],
+    )
+    statsdb("cards", bucket).close()
+
+    # Add 8 new blocks across two runs (5 + 3): ceil(8 / 3) = 3 chunks.
+    play_matches(
+        experiment="cards",
+        environment=DUEL,
+        play=play,
+        matches=deals(players, 1, 2, 3, 4, 5),
+        run="a",
+        directory=tmp_path / "a",
+        storages=[bucket],
+    )
+    play_matches(
+        experiment="cards",
+        environment=DUEL,
+        play=play,
+        matches=deals(players, 6, 7, 8),
+        run="b",
+        directory=tmp_path / "b",
+        storages=[bucket],
+    )
+
+    connect = duckdb.connect
+    opened: list[_TrackedConnection] = []
+
+    def interrupting(
+        path: Path, *, read_only: bool = False
+    ) -> duckdb.DuckDBPyConnection | _TrackedConnection:
+        conn = connect(path, read_only=read_only)
+        if read_only:
+            return conn
+        tracked = _TrackedConnection(conn, interrupt_after_checkpoints=1)
+        opened.append(tracked)
+        return tracked
+
+    first_pass = MeasuredStorage(bucket)
+    with monkeypatch.context() as patched:
+        patched.setattr(duckdb, "connect", interrupting)
+        with pytest.raises(RuntimeError, match="interrupted after chunk"):
+            statsdb("cards", first_pass)
+    assert sum(conn.commits for conn in opened) == 1
+    assert sum(conn.checkpoints for conn in opened) == 1
+
+    # The committed first chunk left a complete, readable database holding 1 + 3 = 4 matches.
+    kept = query._kept_path("cards", bucket)
+    with connect(kept.resolve(), read_only=True) as partial:
+        assert partial.sql("select count(*) from matches").fetchone() == (4,)
+        assert partial.sql("select run, state from runs where run = 'a'").fetchall() == [
+            ("a", None)
+        ]
+
+    # Resuming reads only the remaining blocks and finishes in the remaining chunks.
+    resumed_conns: list[_TrackedConnection] = []
+
+    def counting(
+        path: Path, *, read_only: bool = False
+    ) -> duckdb.DuckDBPyConnection | _TrackedConnection:
+        conn = connect(path, read_only=read_only)
+        if read_only:
+            return conn
+        tracked = _TrackedConnection(conn)
+        resumed_conns.append(tracked)
+        return tracked
+
+    second_pass = MeasuredStorage(bucket)
+    with monkeypatch.context() as patched:
+        patched.setattr(duckdb, "connect", counting)
+        db = statsdb("cards", second_pass)
+    try:
+        assert db.sql("select count(*) from matches").fetchone() == (9,)
+        assert db.sql("select count(*) from plays").fetchone() == (9 * 4,)
+        assert db.sql("select run, state from runs order by run").fetchall() == [
+            ("a", "finished"),
+            ("b", "finished"),
+            ("seed", "finished"),
+        ]
+    finally:
+        db.close()
+
+    total_commits = sum(conn.commits for conn in [*opened, *resumed_conns])
+    assert total_commits >= 8 // 3 + 1
+    # Every object was fetched at most once across the interrupted and resumed passes combined.
+    combined_got = [*first_pass.got, *second_pass.got]
+    assert len(combined_got) == len(set(combined_got))
+    # 2 runs x (run.json + environment.json + outcome.json) + 8 blocks x (block.json + 2 tables).
+    assert first_pass.requests + second_pass.requests == 2 * 3 + 8 * 3
+    assert second_pass.requests < first_pass.requests + second_pass.requests
+
+    # Reopening once caught up reads nothing.
+    steady = MeasuredStorage(bucket)
+    statsdb("cards", steady).close()
+    assert (steady.listings, steady.requests) == (1, 0)
+
+
+def test_new_generation_catch_up_publishes_only_after_completing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(block, "SEAL_SECONDS", 0.0)
+    monkeypatch.setattr(query, "_CATCH_UP_CHUNK", 2)
+
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    players = pair(tmp_path)
+    play_matches(
+        experiment="cards",
+        environment=DUEL,
+        play=play,
+        matches=deals(players, 0),
+        run="seed",
+        directory=tmp_path / "seed",
+        storages=[bucket],
+    )
+    connect = duckdb.connect
+
+    def interrupting(
+        path: Path, *, read_only: bool = False
+    ) -> duckdb.DuckDBPyConnection | _TrackedConnection:
+        conn = connect(path, read_only=read_only)
+        if read_only:
+            return conn
+        return _TrackedConnection(conn, interrupt_after_checkpoints=1)
+
+    # Holding an open reader forces catch-up into a new snapshot generation.
+    with statsdb("cards", bucket) as reader:
+        play_matches(
+            experiment="cards",
+            environment=DUEL,
+            play=play,
+            matches=deals(players, 1, 2, 3, 4),
+            run="a",
+            directory=tmp_path / "a",
+            storages=[bucket],
+        )
+        with monkeypatch.context() as patched:
+            patched.setattr(duckdb, "connect", interrupting)
+            with pytest.raises(RuntimeError, match="interrupted after chunk"):
+                statsdb("cards", bucket)
+        assert reader.sql("select count(*) from matches").fetchone() == (1,)
+        kept = query._kept_path("cards", bucket)
+        with connect(kept.resolve(), read_only=True) as still_old:
+            assert still_old.sql("select count(*) from matches").fetchone() == (1,)
+
+
+def test_catch_up_fetches_concurrently_with_deadline_context_and_thread_safe_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(block, "SEAL_SECONDS", 0.0)
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    players = pair(tmp_path)
+    play_matches(
+        experiment="cards",
+        environment=DUEL,
+        play=play,
+        matches=deals(players, *range(6)),
+        run="a",
+        directory=tmp_path / "a",
+        storages=[bucket],
+    )
+
+    cache = Cache(tmp_path / "cache")
+    seen_threads: set[int] = set()
+    deadline_propagated: list[bool] = []
+    lock = threading.Lock()
+    barrier = threading.Barrier(2)
+    barrier_hit = False
+
+    class _CachedStorage(MeasuredStorage):
+        def get(self, key: str) -> bytes:
+            nonlocal barrier_hit
+
+            with lock:
+                seen_threads.add(threading.get_ident())
+                deadline_propagated.append(remaining() is not None)
+                wait_for_peer = key.endswith("/block.json") and not barrier_hit
+            if wait_for_peer:
+                try:
+                    barrier.wait(timeout=2.0)
+                    with lock:
+                        barrier_hit = True
+                except threading.BrokenBarrierError:
+                    pass
+            body = super().get(key)
+            artifact = Artifact(location=self.uri(key), immutable=True)
+
+            class _Source:
+                def read(self, start: int, end: int | None, etag: str | None) -> Fetched:
+                    return Fetched(body=body, etag="v1")
+
+                def changed(self, etag: str) -> Fetched | None:
+                    return None
+
+                def reused(self, size_bytes: int, start: int | None, end: int | None) -> None:
+                    pass
+
+            return cache.read(artifact, _Source())
+
+    measured = _CachedStorage(bucket)
+    with limit_time(60.0):
+        db = statsdb("cards", measured)
+    try:
+        assert db.sql("select count(*) from matches").fetchone() == (6,)
+    finally:
+        db.close()
+    assert len(seen_threads) >= 2
+    assert all(deadline_propagated)
+    # Re-reading all cached entries verifies `_stamps` survived concurrent updates cleanly.
+    assert len(measured.got) == len(set(measured.got))
+
+
+def test_cold_start_catch_up_resumes_from_committed_chunks_after_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(block, "SEAL_SECONDS", 0.0)
+    monkeypatch.setattr(query, "_CATCH_UP_CHUNK", 3)
+
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    players = pair(tmp_path)
+    play_matches(
+        experiment="cards",
+        environment=DUEL,
+        play=play,
+        matches=deals(players, *range(7)),
+        run="a",
+        directory=tmp_path / "a",
+        storages=[bucket],
+    )
+
+    kept = query._kept_path("cards", bucket)
+    assert not kept.exists()
+    connect = duckdb.connect
+    write_opens = 0
+
+    def interrupting(
+        path: Path, *, read_only: bool = False
+    ) -> duckdb.DuckDBPyConnection | _TrackedConnection:
+        nonlocal write_opens
+        conn = connect(path, read_only=read_only)
+        if read_only:
+            return conn
+        write_opens += 1
+        # Write open 1 publishes the empty schema; write open 2 catches up in place.
+        if write_opens == 2:
+            return _TrackedConnection(conn, interrupt_after_checkpoints=1)
+        return _TrackedConnection(conn)
+
+    first_pass = MeasuredStorage(bucket)
+    with monkeypatch.context() as patched:
+        patched.setattr(duckdb, "connect", interrupting)
+        with pytest.raises(RuntimeError, match="interrupted after chunk"):
+            statsdb("cards", first_pass)
+
+    # The first chunk of the cold start stayed committed on disk.
+    assert kept.exists()
+    with connect(kept.resolve(), read_only=True) as partial:
+        assert partial.sql("select count(*) from matches").fetchone() == (3,)
+        assert partial.sql("select run, state from runs").fetchall() == [("a", None)]
+
+    # Reopening catches up only the remaining 4 blocks without re-fetching the first 3.
+    second_pass = MeasuredStorage(bucket)
+    with statsdb("cards", second_pass) as db:
+        assert db.sql("select count(*) from matches").fetchone() == (7,)
+        assert db.sql("select run, state from runs").fetchall() == [("a", "finished")]
+
+    first_blocks = [key for key in first_pass.got if key.endswith("/block.json")]
+    second_blocks = [key for key in second_pass.got if key.endswith("/block.json")]
+    assert len(first_blocks) == 3
+    assert len(second_blocks) == 4
+    assert set(first_blocks).isdisjoint(second_blocks)
+    combined = [*first_pass.got, *second_pass.got]
+    assert len(combined) == len(set(combined))
+
+
+def test_private_generation_runs_summaries_once_at_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(block, "SEAL_SECONDS", 0.0)
+    monkeypatch.setattr(query, "_CATCH_UP_CHUNK", 2)
+
+    bucket = DirectoryStorage(tmp_path / "bucket")
+    players = pair(tmp_path)
+    play_matches(
+        experiment="cards",
+        environment=DUEL,
+        play=play,
+        matches=deals(players, *range(6)),
+        run="a",
+        directory=tmp_path / "a",
+        storages=[bucket],
+    )
+
+    real_summaries = query._summaries
+    calls = 0
+
+    def counted_summaries(db: duckdb.DuckDBPyConnection) -> None:
+        nonlocal calls
+        calls += 1
+        real_summaries(db)
+
+    monkeypatch.setattr(query, "_summaries", counted_summaries)
+
+    # Cold start catches up in place (empty init + 3 chunks -> 4 summary builds).
+    with statsdb("cards", bucket) as db:
+        assert db.sql("select count(*) from matches").fetchone() == (6,)
+    assert calls == 4
+
+    # Private rebuild runs summaries once at the end across all 3 chunks.
+    calls = 0
+    with statsdb("cards", bucket, rebuild=True) as db:
+        assert db.sql("select count(*) from matches").fetchone() == (6,)
+        assert db.sql("select run, state from runs").fetchall() == [("a", "finished")]
+    assert calls == 1
+
+    # Held-reader catch-up also uses a private generation and runs summaries once.
+    calls = 0
+    with statsdb("cards", bucket) as reader:
+        play_matches(
+            experiment="cards",
+            environment=DUEL,
+            play=play,
+            matches=deals(players, 6, 7, 8, 9),
+            run="b",
+            directory=tmp_path / "b",
+            storages=[bucket],
+        )
+        with statsdb("cards", bucket) as updated:
+            assert updated.sql("select count(*) from matches").fetchone() == (10,)
+            assert reader.sql("select count(*) from matches").fetchone() == (6,)
+    assert calls == 1

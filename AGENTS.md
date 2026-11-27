@@ -130,12 +130,12 @@ while runtime validation expects JSON text. Keep `provisioner/providers/runpod/h
 `provisioner/providers/vast/instance.py`,
 `provisioner/providers/watchdog.py`,
 `provisioner/providers/http.py`, `provisioner/providers/bootstrap.py`,
-`provisioner/providers/package.py` and `environment.py`
+`provisioner/providers/package.py`, `environment.py` and `ssh_boot.py`
 standard-library-only: each rental guardian must start before
 client dependency installation. The client and each job use separate environments.
 `logging.py` and top-level `storage_timeout.py` are also in the standard-library
 bootstrap subset. New bootstrap imports must be present in both the guardian
-archive (`provisioner/providers/package.py`) and SSH's pre-install loader (`ssh.py`).
+archive (`provisioner/providers/package.py`) and SSH's pre-install loader (`ssh_boot.py`).
 Vast validates the total size of the create request's `env` field. Keep the
 guardian and signed URLs in one compressed environment. Exercise this path
 with session-token URLs, which can each approach 2 KB.
