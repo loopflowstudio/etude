@@ -15,16 +15,16 @@ from etude.eval.tournament import evaluating
 from etude.records import RunOutcome
 
 
-def play_until_stopped(match: Match, agents: list[object]) -> Tables:
+async def play_until_stopped(match: Match, agents: list[object]) -> Tables:
     Path(os.environ["ETUDE_STOP_FILE"]).touch()
-    return finish_match(match, agents)
+    return await finish_match(match, agents)
 
 
-def finish_match(match: Match, agents: list[object]) -> Tables:
+async def finish_match(match: Match, agents: list[object]) -> Tables:
     return {"scores": [{"seat": 0, "score": 1}]}
 
 
-def score_seven(match: Match, agents: list[object]) -> Tables:
+async def score_seven(match: Match, agents: list[object]) -> Tables:
     return {"scores": [{"seat": 0, "score": 7}]}
 
 
@@ -112,7 +112,7 @@ class Deal(BaseModel):
     deal: int
 
 
-def play_typed(match: Match[Deal], agents: list[object]) -> Tables:
+async def play_typed(match: Match[Deal], agents: list[object]) -> Tables:
     return {"scores": [{"seat": 0, "score": match.config.deal}]}
 
 
