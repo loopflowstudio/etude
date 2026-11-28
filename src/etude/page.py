@@ -71,7 +71,6 @@ import hashlib
 import itertools
 import json
 import re
-import runpy
 import sys
 import tempfile
 import threading
@@ -89,9 +88,10 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import JsonValue, ValidationError
 
+from etude.controller.experiment import Experiment, declared_report, read_experiment
 from etude.errors import EtudeError, explain
 from etude.eval.records import Gap, Scheduled, Tournament, find_line_experiments
-from etude.experiment_file import experiment_named, refuse_renamed
+from etude.experiment_file import experiment_named
 from etude.home import home
 from etude.identity import SAFE_NAME
 from etude.records import BUILT_IN_NAMES, Record
@@ -588,9 +588,14 @@ class Pages:
         self._built: dict[tuple[Path | None, str], _BuiltPage] = {}
         self._known: set[Path] = set()
 
-    def build(self, file: Path | None, *, experiment: str | None = None) -> Page:
+    def build(self, file: Path | Experiment | None, *, experiment: str | None = None) -> Page:
         """`build`'s page, kept from the last call while its inputs are the same."""
-        return self._build(file, self._listings(), experiment)
+        runs = self._listings()
+        if isinstance(file, Experiment):
+            # Smoke has already executed the file for this pass.
+            sources = _source_versions(file.file, ())
+            return _build_page(file.name, _ReportFile(file.file, sources, file), runs).page
+        return self._build(file, runs, experiment)
 
     def build_each(self, directory: Path) -> dict[Path, Page | str]:
         """Each experiment file's page, or why it could not be built, so one never hides the rest."""
@@ -692,11 +697,11 @@ def _experiment_name(file: Path | None, experiment: str | None) -> str:
 
 
 def build(
-    source: Storage | Path | str, file: Path | None, *, experiment: str | None = None
+    source: Storage | Path | str, file: Path | Experiment | None, *, experiment: str | None = None
 ) -> Page:
     """The page of the experiment `file` names, from the runs under `source`.
 
-    The file is run each time, so an edited `report()` shows on the next
+    A path is run each time, so an edited `report()` shows on the next
     build. Raises `ValueError` naming the experiments `source` holds when it
     holds no run of this one, and `EtudeError` for a file that is not an
     experiment's.
@@ -1041,14 +1046,24 @@ class ReportDeclaration(Record):
 class _ReportFile:
     """The authored declarations for this build and the sources they used."""
 
-    def __init__(self, path: Path | None, before: SourceVersions) -> None:
+    def __init__(
+        self, path: Path | None, before: SourceVersions, definition: Experiment | None = None
+    ) -> None:
         self.path = path
         self._before = before
         self.sources: SourceVersions = ()
         with self._imports():
-            names = _run_file(path) if path else {}
-            self.report, self.origin, self.notes = _report(names.get("report"), path)
-            self.eval_jobs = names.get("eval_jobs")
+            if definition is None and path is not None:
+                definition = _run_file(path)
+            report = declared_report(definition) if definition else None
+            self.report = DEFAULT_REPORT if report is None else report
+            self.origin = f"{path.name}:report" if path and report is not None else None
+            self.notes = (
+                (f"{path.name} defines no report(), so this is the default report.",)
+                if path and report is None
+                else ()
+            )
+            self.eval_jobs = definition.eval if definition else None
 
     @contextmanager
     def _imports(self) -> Iterator[None]:
@@ -1064,8 +1079,6 @@ class _ReportFile:
     def tournaments(self, state: ExperimentState) -> list[Tournament]:
         if self.eval_jobs is None:
             return []
-        if not callable(self.eval_jobs):
-            raise EtudeError("experiment_eval_is_not_a_function", 422) from ValueError(self.path)
         with self._imports():
             return _wanted(self.eval_jobs, state)
 
@@ -1307,16 +1320,8 @@ def _without_hours(trained: Sequence[RunData]) -> tuple[str, ...]:
     )
 
 
-def _run_file(file: Path) -> dict[str, object]:
-    """The file's top-level names, run as `etude eval` runs it: it may import its neighbours."""
-    if file.suffix != ".py":
-        raise EtudeError("experiment_file_must_be_python", 422) from ValueError(file)
-    if not file.is_file():
-        raise EtudeError("experiment_file_not_found", 404) from FileNotFoundError(file)
-    refuse_renamed(file)
-    folder = str(file.resolve().parent)
-    if folder not in sys.path:
-        sys.path.insert(0, folder)
+def _run_file(file: Path) -> Experiment:
+    """Refresh imported source before reading the experiment for a page."""
     # A neighbour edited since the last build is imported afresh, as the file itself is run.
     for name, source in _neighbours(file).items():
         # Bytecode timestamps have only second precision; same-size edits within
@@ -1324,7 +1329,7 @@ def _run_file(file: Path) -> dict[str, object]:
         if source.suffix == ".py":
             Path(cache_from_source(str(source))).unlink(missing_ok=True)
         sys.modules.pop(name, None)
-    return runpy.run_path(str(file.resolve()))
+    return read_experiment(file)
 
 
 def _neighbours(file: Path) -> dict[str, Path]:
@@ -1383,24 +1388,6 @@ def _versions(paths: set[Path], *, observed: SourceVersions = ()) -> SourceVersi
             continue
         found.append((str(path), stat.st_mtime_ns, stat.st_size))
     return tuple(found)
-
-
-def _report(made: object, file: Path | None) -> tuple[Report, str | None, tuple[str, ...]]:
-    if made is None:
-        # Nothing is declared, so the page draws everything logged rather than nothing.
-        notes = (
-            (f"{file.name} defines no report(), so this is the default report.",) if file else ()
-        )
-        return DEFAULT_REPORT, None, notes
-    assert file is not None
-    if not callable(made):
-        raise EtudeError("experiment_report_is_not_a_function", 422) from ValueError(file)
-    report = made()
-    if not isinstance(report, Report):
-        raise EtudeError("experiment_report_returns_a_report", 422) from TypeError(
-            f"{file.name}: report() returned a {type(report).__name__}"
-        )
-    return report, f"{file.name}:report", ()
 
 
 @dataclass(frozen=True)
@@ -1659,10 +1646,8 @@ def _held_tournaments(
 
 def _wanted(want: Callable[..., object], state: ExperimentState) -> list[Tournament]:
     """The tournaments `eval_jobs(state)` returns, each with the checkpoints or entrants it holds."""
-    # The optional `eval` extra, imported where it is used (`_read_evals`): eval_jobs(state)
-    # and its evaluation jobs are built on etude.eval.
+    # Only reports with authored evaluations need the optional evaluation stack.
     from etude.controller.declarations import asked  # noqa: PLC0415
-    from etude.eval.records import Tournament  # noqa: PLC0415
 
     wanted = []
     for job in asked(want, state):

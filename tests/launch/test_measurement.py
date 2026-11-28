@@ -102,6 +102,7 @@ def test_command_kinds() -> None:
         cli.provider_app,
         cli.storage_app,
         cli.server_app,
+        cli.database_app,
     ):
         for command in app.registered_commands:
             assert command.callback is not None
@@ -214,6 +215,7 @@ def test_several_run_git_and_database_counts(
             8,
             ("numpy", "pydantic", "etude.launch.worker", "etude.launch.scheduler"),
         ),
+        (["guide"], 8, ("numpy", "pydantic", "etude.launch.server", "etude.launch.database")),
         # Client composition includes four modules each for Vast, Lium and Colab,
         # three each for EC2 and Lambda, the VM host script they share, the AWS
         # signer, the request every provider shares, the storage socket policy
@@ -313,6 +315,8 @@ def test_reads_need_no_provider_key(
         "usage": ["usage", "--machine", machine],
         "logs": ["logs", "--run", ids[0]],
     }
+    example = Path(__file__).resolve().parents[2] / "examples" / "prototype.py"
+    offline = {"check_experiment": ["check", str(example)], "guide": ["guide"]}
     declared = {
         command.callback.__name__
         for app in (cli.app, cli.pool_app, cli.ondemand_app, cli.machine_app, cli.storage_app)
@@ -320,7 +324,7 @@ def test_reads_need_no_provider_key(
         if command.callback is not None
         and getattr(command.callback, "command_kind", None) == Kind.read
     } | {"server_show"}
-    assert set(reads) == declared
+    assert set(reads) | set(offline) == declared
     with counting.record():
         for argv in reads.values():
             assert main(argv) == 0, argv
@@ -330,6 +334,22 @@ def test_reads_need_no_provider_key(
     assert (result.provider, result.bucket, result.ssh, result.git) == (0, 0, 0, 0)
     assert "last loop: never" in output and "[job machine=" in output
     assert "--follow collects new evidence from machines" in output
+
+    home = tmp_path / "offline-home"
+    home.mkdir()
+    (home / "server").write_text("unreachable.invalid")
+    monkeypatch.setenv("ETUDE_HOME", str(home))
+    monkeypatch.delenv("ETUDE_SERVER_LOCAL", raising=False)
+
+    def unreachable(*args: object, **kwargs: object) -> None:
+        pytest.fail("offline command contacted the selected server")
+
+    monkeypatch.setattr(server, "forward", unreachable)
+    for argv in offline.values():
+        with counting.record():
+            assert main(argv) == 0, argv
+            assert counting.snapshot() == Counts(), argv
+    assert not launcher_file(home).exists()
 
 
 @pytest.mark.scale

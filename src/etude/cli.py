@@ -9,13 +9,16 @@ server, and turns expected failures into one line on stderr.
 from __future__ import annotations
 
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from inspect import getdoc
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
+from typer.core import TyperGroup
+from typer.exceptions import TyperException
 
-from etude.errors import EtudeError, LauncherError, RetryRequested
+from etude.errors import EtudeError, LauncherError, RetryRequested, sanitize
 from etude.launch import cli as launch_cli
 from etude.launch.commands import Kind, kind
 from etude.train.cli import checkpoints, sync
@@ -26,11 +29,89 @@ app = launch_cli.app
 ExperimentOption = Annotated[
     str | None, typer.Option(help="experiment label, defaulting to the file stem")
 ]
+FileHelp = Annotated[
+    bool, typer.Option("--help", "-h", help="show these options, then the file's own parameters")
+]
+
+
+def _experiment_file(ctx: typer.Context, file: Path | None, help: bool = False) -> Path:
+    if file is not None and (file.suffix != ".py" or not file.is_file()):
+        raise typer.BadParameter(
+            f"{file}: expected an existing Python (.py) file", param_hint="FILE"
+        )
+    if help:
+        print(ctx.get_help())
+    if file is None:
+        if help:
+            raise typer.Exit()
+        raise typer.BadParameter("a Python experiment FILE is required", param_hint="FILE")
+    return file
+
+
+@app.command(
+    "check",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    add_help_option=False,
+)
+@kind(Kind.read)
+def check_experiment(
+    ctx: typer.Context,
+    file: Annotated[Path | None, typer.Argument(help="the experiment's Python file")] = None,
+    experiment: ExperimentOption = None,
+    source: Annotated[str | None, typer.Option(help="local runs directory")] = None,
+    format: Annotated[Literal["text", "json"], typer.Option(help="output format")] = "text",
+    help: FileHelp = False,
+) -> None:
+    """Validate an experiment file offline before launching it."""
+    file = _experiment_file(ctx, file, help)
+    # Entry points load only the command being run.
+    from etude.controller.check import show_check
+    from etude.controller.declarations import read_training_jobs
+    from etude.controller.experiment import read_experiment
+
+    if help:
+        definition = read_experiment(file, experiment=experiment)
+        if definition.training is not None:
+            read_training_jobs(file, help=True, function=definition.training)
+        return
+    raise typer.Exit(
+        show_check(file, ctx.args, experiment=experiment, source=source, format=format)
+    )
+
+
+@app.command()
+@kind(Kind.read)
+def guide(ctx: typer.Context) -> None:
+    """Print the experiment workflow, conventions and command list offline."""
+    document = Path(__file__).with_name("guide.md").read_text(encoding="utf-8")
+    root = ctx.find_root()
+    assert isinstance(root.command, TyperGroup)
+    commands = "\n".join(_guide_commands(root.command, root.command_path))
+    typer.echo(f"{document.rstrip()}\n\n## Commands\n\n{commands}")
+
+
+def _guide_commands(group: TyperGroup, prefix: str) -> Iterator[str]:
+    for name, command in sorted(group.commands.items()):
+        if command.hidden:
+            continue
+        path = f"{prefix} {name}"
+        callback = command.callback
+        subgroup = command if isinstance(command, TyperGroup) else None
+        if callback is not None and (subgroup is None or subgroup.invoke_without_command):
+            command_kind = getattr(callback, "command_kind", None)
+            if not isinstance(command_kind, Kind):
+                raise RuntimeError(f"{path} has no command kind")
+            help_text = getdoc(callback) if subgroup is not None else command.help
+            first_line = (help_text or "").partition("\n")[0]
+            yield f"- `{path}` ({command_kind}) {first_line}"
+        if subgroup is not None:
+            yield from _guide_commands(subgroup, path)
 
 
 @app.command("train")
 @kind(Kind.wait)
 def train_recipe(
+    ctx: typer.Context,
     file: Annotated[
         Path, typer.Argument(help="a Python file defining train(config) or training_jobs()")
     ],
@@ -50,6 +131,8 @@ def train_recipe(
     json_output: Annotated[bool, typer.Option("--json", help="print a JSON result")] = False,
 ) -> None:
     """Train a recipe on this computer; 0 finished, 75 stopped, other failed."""
+    file = _experiment_file(ctx, file)
+    # Entry points load only the command being run.
     from etude.controller.local import train
     from etude.spec import Until
 
@@ -89,21 +172,20 @@ def _submit(
     watch: float | None = None,
     retry_failed: bool = False,
 ) -> None:
-    if help:
-        print(ctx.get_help())
-    if file is None:
-        if help:
-            return
-        raise typer.BadParameter("a Python experiment FILE is required")
+    file = _experiment_file(ctx, file, help)
     import time
     from decimal import Decimal, InvalidOperation
 
     from etude.controller.advance import advance, source_for
-    from etude.controller.declarations import read_experiment, read_training_jobs
+    from etude.controller.declarations import read_training_jobs, require_training_options
+    from etude.controller.experiment import read_experiment, require_jobs
     from etude.spec import Until
     from etude.storage import storage_from_uri
 
     definition = read_experiment(file, experiment=experiment)
+    if not help:
+        require_training_options(ctx.args, definition)
+    require_jobs(definition)
     if help:
         if callable(definition.training):
             read_training_jobs(file, ctx.args, help=True, function=definition.training)
@@ -162,9 +244,6 @@ SmokeOption = Annotated[
     typer.Option(
         help="smoke the file here first, as etude smoke does, and submit nothing if it fails"
     ),
-]
-FileHelp = Annotated[
-    bool, typer.Option("--help", "-h", help="show these options, then the file's own parameters")
 ]
 # `launch` and `queue` take the same experiment options.
 JobOption = Annotated[str | None, typer.Option(help="select a declared job")]
@@ -295,33 +374,26 @@ def smoke_experiment(
     help: FileHelp = False,
 ) -> None:
     """Run a file's training, evaluation and report in smoke form on this computer. Spends nothing."""
-    if help:
-        print(ctx.get_help())
-    if file is None:
-        if help:
-            return
-        raise typer.BadParameter("an experiment FILE is required")
+    file = _experiment_file(ctx, file, help)
     from typing import cast
 
     from etude.controller.declarations import read_training_jobs
+    from etude.controller.experiment import read_experiment
     from etude.controller.smoke import STEPS, Step, smoke_file
-    from etude.experiment_file import defined_functions
     from etude.storage import storage_from_uri
 
     steps = step or list(STEPS)
     unknown = sorted(set(steps) - set(STEPS))
     if unknown:
         raise typer.BadParameter(f"--step is train, eval or report, not {', '.join(unknown)}")
-    runs = (
-        read_training_jobs(file, ctx.args, help=help)
-        if "train" in steps and "training_jobs" in defined_functions(file)
-        else None
-    )
     if help:
+        definition = read_experiment(file)
+        if "train" in steps and definition.training is not None:
+            read_training_jobs(file, help=True, function=definition.training)
         return
     smoke_file(
         file,
-        runs,
+        given=ctx.args,
         steps=[cast(Step, each) for each in steps],
         source=storage_from_uri(source) if source else None,
         keep=keep,
@@ -444,6 +516,7 @@ def report(
 @app.command("eval")
 @kind(Kind.wait)
 def eval_experiment(
+    ctx: typer.Context,
     file: Annotated[
         Path,
         typer.Argument(
@@ -468,14 +541,16 @@ def eval_experiment(
     ] = False,
 ) -> None:
     """Play here the matches eval_jobs(state) wants that no run delivered."""
+    file = _experiment_file(ctx, file)
     # Experiments join tracking, evaluation and the launcher.
     import time
 
     from etude.controller.advance import advance
-    from etude.controller.declarations import read_experiment
+    from etude.controller.experiment import read_experiment, require_jobs
     from etude.storage import default_root, storage_from_uri
 
     definition = read_experiment(file, experiment=experiment)
+    require_jobs(definition)
     storage = storage_from_uri(source or default_root())
     try:
         while True:
@@ -598,15 +673,14 @@ app.command()(kind(Kind.wait)(checkpoints))
 app.command()(kind(Kind.wait)(sync))
 
 
+_EXPERIMENT_COMMANDS = ("check", "launch", "queue", "smoke", "train", "eval")
+
 # Commands that run on this computer even when a server is chosen: they read
 # local files or a bucket, run a machine's worker, or submit through the server
 # themselves. Every other command is sent to a chosen server.
 _HERE = (
-    "launch",
-    "queue",
-    "smoke",
-    "train",
-    "eval",
+    *_EXPERIMENT_COMMANDS,
+    "guide",
     "database",
     "source",
     "fetch",
@@ -641,8 +715,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return result if isinstance(result, int) else 0
     except typer.Exit as error:
         return int(error.exit_code)
+    except TyperException as error:
+        typer.echo(f"etude: {sanitize(error.format_message())}", err=True)
+        if isinstance(error, typer.BadParameter) and not (argv and argv[0] in _EXPERIMENT_COMMANDS):
+            return 1
+        return error.exit_code
     except Exception as error:
         # Entry points load failure-specific dependencies only on the failing command.
+        from pydantic import ValidationError
+
+        from etude.call import validation_message
         from etude.storage_timeout import StorageUnavailable
 
         if isinstance(
@@ -654,15 +736,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 StorageUnavailable,
                 OSError,
                 ValueError,
-                typer.BadParameter,
             ),
         ):
-            # A bad flag value names its flag: "Invalid value for '--hidden': ...".
-            said = error.format_message() if isinstance(error, typer.BadParameter) else str(error)
-            print(f"etude: {said}", file=sys.stderr)
+            if isinstance(error, ValidationError):
+                said = validation_message(error)
+            else:
+                said = str(error)
+            if isinstance(error, (LauncherError, EtudeError)) and error.location is not None:
+                said = f"{error.location}: {said}"
+            print(f"etude: {sanitize(said)}", file=sys.stderr)
+            if isinstance(error, (LauncherError, EtudeError)) and error.fix:
+                fix = sanitize(error.fix).replace("\n", "\n       ")
+                print(f"  fix: {fix}", file=sys.stderr)
             return 1
-        # Typer's public invocation formats usage failures without importing its private parser.
-        if hasattr(error, "show") and hasattr(error, "exit_code"):
-            error.show()
-            raise SystemExit(error.exit_code) from None
         raise

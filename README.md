@@ -6,10 +6,11 @@ and resume unfinished work. You own the learning algorithm and game rules.
 
 ```sh
 uv add 'etude-sdk[eval]'                 # Python 3.12, in your project
-uv run etude train experiment.py        # your train(config), locally
-uv run etude eval experiment.py         # your play(match, agents), locally
+uv run etude check experiment.py         # validate declarations offline
+uv run etude train experiment.py         # your train(config), locally
+uv run etude eval experiment.py          # your play(match, agents), locally
 uv run etude report experiment.py --open
-uv run etude view experiment.py         # serve live runs, reports and machines
+uv run etude view experiment.py          # serve live runs, reports and machines
 ```
 
 The smallest training file (`experiment.py`) is:
@@ -41,7 +42,8 @@ with [training](docs/training.md), [evaluation](docs/evaluation.md),
 [tracking, live view and reports](docs/tracking.md), [renting machines](docs/launcher.md),
 and [limits](docs/limits.md). [Hanabi](docs/hanabi.md) is a cooperative PyTorch
 example. Import supported names from their defining modules; each module's
-`__all__` lists its public surface.
+`__all__` lists its public surface. Run `uv run etude guide` for an offline
+summary of conventions, a minimal experiment file and the command list.
 
 For Etude development, read [the architecture](docs/dev/launcher.md#layout-and-dependency-rules),
 [testing](TESTING.md) and [conventions](AGENTS.md). Licensed under [MIT](LICENSE).

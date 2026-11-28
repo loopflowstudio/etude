@@ -9,12 +9,14 @@ loads anything more for it.
 from __future__ import annotations
 
 import ast
+import runpy
+import sys
 from pathlib import Path
 
-from etude.errors import LauncherError
+from etude.errors import LauncherError, SourceLocation
 
 # What makes a Python file an experiment's: a top-level training_jobs(), eval_jobs(state) or report().
-EXPERIMENT_FUNCTIONS = ("training_jobs", "eval_jobs", "report")
+EXPERIMENT_FUNCTIONS = {"training_jobs", "eval_jobs", "report"}
 
 
 def experiment_named(path: Path) -> str | None:
@@ -22,26 +24,47 @@ def experiment_named(path: Path) -> str | None:
 
     Recognised by its text, without running it; a file that does not parse is no experiment.
     """
-    return path.stem if defined_functions(path) & set(EXPERIMENT_FUNCTIONS) else None
-
-
-def defined_functions(path: Path) -> frozenset[str]:
-    """The functions a file defines at its top level, by its text; none if it does not parse."""
     try:
-        tree = ast.parse(path.read_bytes(), filename=str(path))
+        return path.stem if _functions(path).keys() & EXPERIMENT_FUNCTIONS else None
     except SyntaxError:
-        return frozenset()
-    return frozenset(
-        each.name for each in tree.body if isinstance(each, ast.FunctionDef | ast.AsyncFunctionDef)
+        return None
+
+
+def git_checkout(directory: Path) -> Path | None:
+    """Find the enclosing checkout, including worktrees, without running Git."""
+    directory = directory.resolve()
+    return next(
+        (folder for folder in (directory, *directory.parents) if (folder / ".git").exists()),
+        None,
     )
+
+
+def _functions(path: Path) -> dict[str, int]:
+    tree = ast.parse(path.read_bytes(), filename=str(path))
+    return {
+        each.name: each.lineno
+        for each in tree.body
+        if isinstance(each, ast.FunctionDef | ast.AsyncFunctionDef)
+    }
 
 
 RENAMED = {"runs": "training_jobs", "training_runs": "training_jobs", "eval": "eval_jobs"}
 
 
-def refuse_renamed(path: Path) -> None:
-    """Refuse retired declaration spellings before executing an experiment file."""
-    defined = defined_functions(path)
+def execute_file(path: Path) -> dict[str, object]:
+    """Check for retired declarations, then execute the file with its siblings importable."""
+    defined = _functions(path)
     for old, new in RENAMED.items():
         if old in defined:
-            raise LauncherError(f"{path.name}: rename {old}() to {new}()")
+            parameters = "state" if new == "eval_jobs" else ""
+            raise LauncherError(
+                f"rename {old}() to {new}()",
+                fix=f"def {new}({parameters}):",
+                at=SourceLocation(path, defined[old]),
+            )
+
+    path = path.resolve()
+    folder = str(path.parent)
+    if folder not in sys.path:
+        sys.path.insert(0, folder)
+    return runpy.run_path(str(path))

@@ -130,7 +130,7 @@ def test_a_passing_smoke_queues_and_its_runs_record_it(
     [
         ("train", {}, "smoke train ppo: failed after"),
         # A game that breaks under its second deal only is still caught, and named.
-        ("eval", {"play": "play_failing_deal_one"}, "(RuntimeError: deal 1 crashed)"),
+        ("eval", {"play": "play_failing_deal_one"}, "RuntimeError: deal 1 crashed"),
         (
             "report",
             {"report": "raise RuntimeError('report broke')"},
@@ -149,7 +149,8 @@ def test_a_failing_step_submits_nothing_and_is_named(
     flags = ["--tiny", "1 diverge"] if step == "train" else []
     assert main(["launch", str(file), *flags, "--smoke"]) == 1
     err = capsys.readouterr().err
-    assert said in err and "nothing was submitted" in err
+    summary = err.splitlines()[-1]
+    assert f"smoke {step}" in summary and said in summary and "nothing was submitted" in summary
     assert default().runs(done=True) == ()
 
 
@@ -228,12 +229,18 @@ def test_eval_and_report_alone_read_a_source_and_deliver_nothing_to_it(
     _trained(source, tmp_path)
     before = sorted(source.rglob("*"))
     file = experiment(tmp_path / "lab")
+    reads = tmp_path / "declaration-loads"
+    file.write_text(
+        "from pathlib import Path\n"
+        f"with Path({str(reads)!r}).open('a') as log: log.write('loaded\\n')\n" + file.read_text()
+    )
     steps = ["--step", "eval", "--step", "report"]
     assert main(["smoke", str(file), *steps, "--source", str(source)]) == 0
     err = capsys.readouterr().err
     assert "smoke eval ladder: passed" in err and "smoke report: passed" in err
     assert "smoke train" not in err
     assert sorted(source.rglob("*")) == before
+    assert reads.read_text() == "loaded\n"
     assert main(["smoke", str(file), "--step", "eval"]) == 1
     assert "needs --source" in capsys.readouterr().err
 

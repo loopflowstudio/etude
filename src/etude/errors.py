@@ -1,24 +1,73 @@
 """Run failures and sanitized diagnostics, with standard-library-only dependencies."""
 
+import inspect
 import os
 import re
 import subprocess
 import traceback
+from collections.abc import Callable
 from pathlib import Path
+from typing import NamedTuple
 
 __all__ = ("EtudeError", "LauncherError")
 
 
-class EtudeError(Exception):
+class SourceLocation(NamedTuple):
+    file: Path
+    line: int
+
+    def __str__(self) -> str:
+        path = self.file.resolve()
+        cwd = Path.cwd()
+        if path.is_relative_to(cwd):
+            path = path.relative_to(cwd)
+        return f"{path}:{self.line}"
+
+
+def function_location(function: Callable[..., object]) -> SourceLocation | None:
+    try:
+        authored = inspect.unwrap(function)
+        file = Path(inspect.getfile(authored))
+        lines, start = inspect.getsourcelines(authored)
+    except (OSError, TypeError, ValueError):
+        return None
+    for offset, line in enumerate(lines):
+        if line.lstrip().startswith(("def ", "async def ")):
+            return SourceLocation(file, start + offset)
+    return SourceLocation(file, start)
+
+
+class _DiagnosticError(Exception):
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        fix: str | None = None,
+        at: Callable[..., object] | SourceLocation | None = None,
+    ) -> None:
+        self.fix = fix
+        self.location = function_location(at) if callable(at) else at
+        super().__init__(message)
+
+
+class EtudeError(_DiagnosticError):
     """A refusal with a short code a caller can match on."""
 
-    def __init__(self, code: str, status: int = 409, *, detail: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        status: int = 409,
+        *,
+        detail: str | None = None,
+        fix: str | None = None,
+        at: Callable[..., object] | SourceLocation | None = None,
+    ) -> None:
         self.code = code
         self.status = status
-        super().__init__(code if detail is None else f"{code}: {detail}")
+        super().__init__(code if detail is None else f"{code}: {detail}", fix=fix, at=at)
 
 
-class LauncherError(Exception):
+class LauncherError(_DiagnosticError):
     """The request cannot be carried out as asked."""
 
 

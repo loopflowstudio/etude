@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Sequence
 from decimal import Decimal
 from typing import Literal
@@ -258,7 +259,11 @@ class Job(Record):
     def require_hours(self) -> float:
         """The machine allowance; launch, queue and smoke require it."""
         if self.max_hours is None:
-            raise LauncherError("a job needs max_hours: the most hours it may hold a machine")
+            job = f"job {self.name!r}" if self.name else "a job"
+            raise LauncherError(
+                f"{job} needs max_hours: the most hours it may hold a machine",
+                fix="max_hours=1",
+            )
         return self.max_hours
 
     _check_inputs = field_validator("inputs")(_distinct)
@@ -267,7 +272,43 @@ class Job(Record):
     @classmethod
     def _seeds(cls, value: tuple[int, ...]) -> tuple[int, ...]:
         if not value or len(value) != len(set(value)):
-            raise ValueError("seeds must be nonempty and distinct")
+            raise LauncherError("seeds must be nonempty and distinct", fix="seeds=(1, 2, 3)")
+        return value
+
+    @field_validator("command")
+    @classmethod
+    def _command(cls, value: str) -> str:
+        if not cls.model_fields["command"].is_required():
+            # Typed jobs supply a default and derive the executable when lowered.
+            raise LauncherError(
+                "typed jobs derive command; use extras, environment, runtime or prepare",
+                fix="remove command= from the typed job",
+            )
+        if not value.strip():
+            raise LauncherError("a job needs a nonempty command", fix="command='your-command'")
+        return value
+
+    @field_validator("max_hours")
+    @classmethod
+    def _hours(cls, value: float | None) -> float | None:
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            raise LauncherError(
+                "a job's max_hours must be finite and more than zero", fix="max_hours=1"
+            )
+        return value
+
+    @field_validator("max_usd")
+    @classmethod
+    def _dollars(cls, value: Decimal | None) -> Decimal | None:
+        if value is not None and value <= 0:
+            raise LauncherError("a job's max_usd must be more than zero", fix="max_usd=5")
+        return value
+
+    @field_validator("max_attempts")
+    @classmethod
+    def _attempts(cls, value: int) -> int:
+        if value < 1:
+            raise LauncherError("a job needs at least one attempt", fix="max_attempts=1")
         return value
 
     @model_validator(mode="after")

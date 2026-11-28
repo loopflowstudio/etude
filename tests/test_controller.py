@@ -11,7 +11,7 @@ from etude.call import Function
 from etude.checkpoints import CheckpointRecord, PolicyKey
 from etude.cli import main
 from etude.controller.advance import advance
-from etude.controller.declarations import read_experiment
+from etude.controller.experiment import read_experiment
 from etude.controller.local import _place_inputs
 from etude.errors import EtudeError, LauncherError
 from etude.eval.match import environment

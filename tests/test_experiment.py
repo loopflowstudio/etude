@@ -19,7 +19,7 @@ from pydantic import BaseModel
 import etude.launch.client as client
 from etude.checkpoints import CheckpointRecord
 from etude.controller.advance import advance
-from etude.controller.declarations import Experiment, read_experiment
+from etude.controller.experiment import Experiment, read_experiment, require_jobs
 from etude.controller.local import _place_inputs
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval.match import environment
@@ -433,9 +433,12 @@ def test_an_experiment_file_defines_eval(tmp_path: Path) -> None:
     assert read.name == "experiment"
     assert read.eval is not None
     assert read.eval(ExperimentState(experiment="experiment")) == []
-    (tmp_path / "train_only.py").write_text("def train():\n    return []\n")
+    recipe = tmp_path / "train_only.py"
+    recipe.write_text("def train(config):\n    return []\n")
+    read = read_experiment(recipe)
+    assert read.train is not None and read.training is None and read.eval is None
     with pytest.raises(LauncherError, match="define training_jobs"):
-        read_experiment(tmp_path / "train_only.py")
+        require_jobs(read)
 
 
 class _Launcher:

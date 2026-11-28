@@ -8,19 +8,20 @@ RunRequests preserve their ids; Jobs expand to full experiment/job@seed addresse
 from __future__ import annotations
 
 import inspect
-import runpy
-import sys
 import typing
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import typer
+from typer.main import get_command
 
+from etude.controller.diagnostics import declaration
+from etude.controller.experiment import EvalFunction, Experiment, read_experiment
 from etude.errors import EtudeError, LauncherError
 from etude.experiment import observe
-from etude.experiment_file import refuse_renamed
+from etude.experiment_file import git_checkout
 from etude.identity import run_address
 from etude.jobs import EvalJob, ExperimentState, TrainingJob, TrainingRunSummary, evaluation_group
 from etude.spec import Job, RunRequest, declared_address, expand_runs
@@ -45,13 +46,95 @@ def read_training_jobs(
 
     if path.suffix != ".py":
         raise LauncherError("experiment files must be Python (.py), defining training_jobs()")
-    refuse_renamed(path)
     if function is None:
-        found = _namespace(path).get("training_jobs")
-        function = cast(Callable[..., object], found) if callable(found) else None
+        function = read_experiment(path).training
     if not callable(function):
-        raise LauncherError(f"{path.name}: define training_jobs() returning jobs or run requests")
-    signature = inspect.signature(function)
+        raise LauncherError(
+            f"{path.name}: define training_jobs() returning jobs or run requests",
+            fix="def training_jobs():\n    return TrainingJob(...)",
+        )
+    with declaration(path, function):
+        signature = inspect.signature(function)
+        job_app = _training_command(path, function, signature)
+        try:
+            command = get_command(job_app)
+        except RuntimeError as error:
+            raise LauncherError(
+                f"training_jobs() options: {error}",
+                fix="annotate file options with a command-line type such as str, int, float or bool",
+                at=function,
+            ) from error
+    parsed = command(
+        args=["--help"] if help else list(given),
+        prog_name=f"{path.name} parameters",
+        standalone_mode=False,
+    )
+    if help:
+        return []
+    # Outside help, Typer returns the options callback's typed arguments.
+    arguments = cast(dict[str, object], parsed)
+    params = {
+        name: value
+        for name, value in arguments.items()
+        if isinstance(value, (str, int, float, bool))
+    }
+    with declaration(path, function):
+        if "state" in signature.parameters:
+            arguments["state"] = (
+                state if state is not None else observe(default_root(), experiment or path.stem)
+            )
+        returned = function(**arguments)
+        items = returned if isinstance(returned, (list, tuple)) else [returned]
+        normalized: list[Job | RunRequest] = []
+        jobs: dict[str, Job] = {}
+        for each in items:
+            job = _training_job(each, path, function)
+            if not local:
+                job.require_hours()
+                require_checkout(job, function)
+            if jobs.setdefault(job.name, job) != job:
+                raise LauncherError(
+                    f"{path.name}: jobs need distinct names",
+                    fix="give each TrainingJob a different name=",
+                    at=function,
+                )
+            if not job.name:
+                raise LauncherError(
+                    f"{path.name}: TrainingJob requires name=", fix='name="base"', at=function
+                )
+            label = experiment or job.experiment or path.stem
+            named = job.model_copy(
+                update={
+                    "repo": str(Path(job.repo).resolve()) if job.repo else None,
+                    "experiment": label,
+                }
+            )
+            if not isinstance(each, RunRequest):
+                normalized.append(named)
+                continue
+            seed = each.seed if each.seed is not None else named.seeds[0]
+            address = (
+                run_address(each.id, label)
+                if each.id
+                else declared_address(label, named.name, seed)
+            )
+            normalized.append(
+                each.model_copy(
+                    update={
+                        "job": named,
+                        "params": each.params or params,
+                        "id": address,
+                        "seed": seed,
+                    }
+                )
+            )
+        return expand_runs(normalized, params=params)
+
+
+def _training_command(
+    path: Path, function: Callable[..., object], signature: inspect.Signature
+) -> typer.Typer:
+    """Parse the authored options with Typer. The caller supplies experiment state separately."""
     hints = typing.get_type_hints(function)
     reserved = {
         "pool",
@@ -64,34 +147,15 @@ def read_training_jobs(
         "quote",
         "help",
         "experiment",
+        "format",
         "resume",
         "until",
         "job",
         "seed",
     }
-    arguments: dict[str, Any] = {}
-    values: list[Any] = []
 
-    def invoke(**kwargs: Any) -> None:
-        arguments.update(kwargs)
-        observed = state
-        if "state" in signature.parameters and observed is None:
-            observed = observe(default_root(), experiment or path.stem)
-        try:
-            values.append(
-                function(
-                    **kwargs, **({"state": observed} if "state" in signature.parameters else {})
-                )
-            )
-        except Exception as error:
-            hint = (
-                ". Records take named fields, such as RunRequest(job=..., seed=1)"
-                if isinstance(error, TypeError) and "positional argument" in str(error)
-                else ""
-            )
-            raise LauncherError(
-                f"{path.name}: {type(error).__name__}: {' '.join(str(error).splitlines())}{hint}"
-            ) from error
+    def options(**kwargs: object) -> dict[str, object]:
+        return kwargs
 
     parameters = []
     for name, param in signature.parameters.items():
@@ -99,14 +163,18 @@ def read_training_jobs(
             continue
         if name in reserved or "no_" + name in reserved:
             raise LauncherError(
-                f"{path.name}: training_jobs() parameter {name!r} clashes with launcher option --{name.replace('_', '-')}"
+                f"{path.name}: training_jobs() parameter {name!r} clashes with launcher option --{name.replace('_', '-')}",
+                fix=f"rename the parameter to train_{name}",
+                at=function,
             )
         if param.kind not in (
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             inspect.Parameter.KEYWORD_ONLY,
         ):
             raise LauncherError(
-                f"{path.name}: training_jobs() parameter {name!r} must be a named parameter"
+                f"{path.name}: training_jobs() parameter {name!r} must be a named parameter",
+                fix=f"declare {name} as a named parameter",
+                at=function,
             )
         kind = hints.get(
             name, str if param.default is inspect.Parameter.empty else type(param.default)
@@ -120,73 +188,38 @@ def read_training_jobs(
             )
         )
     setattr(
-        invoke, "__signature__", signature.replace(parameters=parameters, return_annotation=None)
+        options, "__signature__", signature.replace(parameters=parameters, return_annotation=None)
     )
-    invoke.__doc__ = function.__doc__
+    options.__doc__ = function.__doc__
     job_app = typer.Typer(
         rich_markup_mode=None, pretty_exceptions_enable=False, add_completion=False
     )
-    job_app.command()(invoke)
-    job_app(
-        args=["--help"] if help else list(given),
-        prog_name=f"{path.name} parameters",
-        standalone_mode=False,
+    job_app.command()(options)
+    return job_app
+
+
+def _training_job(value: object, path: Path, function: Callable[..., object]) -> Job:
+    if isinstance(value, TrainingJob):
+        return value.plain()
+    if isinstance(value, RunRequest) and " -m etude.call " in value.job.command:
+        try:
+            evaluation_group(value.job)
+        except EtudeError:
+            return value.job
+    raise LauncherError(
+        f"{path.name}: training_jobs() must return TrainingJob",
+        fix="return TrainingJob(name='base', train=train, config=Config(), max_hours=1)",
+        at=function,
     )
-    if help:
-        return []
-    returned = values[0]
-    returned = list(returned) if isinstance(returned, (list, tuple)) else [returned]
-    for each in returned:
-        if isinstance(each, TrainingJob):
-            continue
-        if isinstance(each, RunRequest) and " -m etude.call " in each.job.command:
-            try:
-                evaluation_group(each.job)
-            except EtudeError:
-                continue
-        raise LauncherError(f"{path.name}: training_jobs() must return TrainingJob")
-    plain = [each.plain() if isinstance(each, Job) else each.job for each in returned]
-    jobs: list[Job] = []
-    for candidate in plain:
-        if not local:
-            candidate.require_hours()
-            if candidate.repo is not None and not any(
-                (folder / ".git").exists()
-                for folder in (Path(candidate.repo), *Path(candidate.repo).parents)
-            ):
-                raise LauncherError(f"{candidate.repo} is in no git checkout")
-        if candidate not in jobs:
-            jobs.append(candidate)
-    names = [job.name for job in jobs]
-    if len(names) != len(set(names)):
-        raise LauncherError(f"{path.name}: jobs need distinct names")
-    params = {
-        name: each for name, each in arguments.items() if isinstance(each, (str, int, float, bool))
-    }
-    normalized: list[Job | RunRequest] = []
-    for each, job in zip(returned, plain, strict=True):
-        if not job.name:
-            raise LauncherError(f"{path.name}: TrainingJob requires name=")
-        label = experiment or job.experiment or path.stem
-        named = job.model_copy(
-            update={
-                "repo": str(Path(job.repo).resolve()) if job.repo else None,
-                "experiment": label,
-            }
+
+
+def require_checkout(job: Job, function: Callable[..., object]) -> None:
+    if job.repo is not None and git_checkout(Path(job.repo)) is None:
+        raise LauncherError(
+            f"{job.repo} is in no git checkout",
+            fix="put the experiment in a Git checkout or set repo= to its checkout",
+            at=function,
         )
-        if isinstance(each, Job):
-            normalized.append(named)
-            continue
-        seed = each.seed if each.seed is not None else named.seeds[0]
-        address = (
-            run_address(each.id, label) if each.id else declared_address(label, named.name, seed)
-        )
-        normalized.append(
-            each.model_copy(
-                update={"job": named, "params": each.params or params, "id": address, "seed": seed}
-            )
-        )
-    return expand_runs(normalized, params=params)
 
 
 def format_known_run(request: RunRequest, prior: TrainingRunSummary) -> str:
@@ -213,52 +246,43 @@ def select_runs(
     return selected
 
 
-type EvalFunction = Callable[[ExperimentState], object]
+def with_queued_runs(state: ExperimentState, requests: Sequence[RunRequest]) -> ExperimentState:
+    """Make this pass's planned training runs visible to eval_jobs, before any save."""
+    queued = []
+    for request in requests:
+        assert request.id is not None  # Declarations have assigned addresses.
+        name = request.id.removeprefix(state.experiment + "/")
+        queued.append(
+            TrainingRunSummary.queued(name, state.experiment, request.job.name, request.seed)
+        )
+    return replace(state, runs=(*state.runs, *queued))
 
 
-@dataclass(frozen=True)
-class Experiment:
-    name: str
-    eval: EvalFunction | None
-    file: Path | None = None
-    training: Callable[..., object] | None = None
-
-
-def _namespace(path: Path) -> dict[str, Any]:
-    # As `python job.py` would, so the file can import its neighbours: `from train import train`.
-    folder = str(path.resolve().parent)
-    if folder not in sys.path:
-        sys.path.insert(0, folder)
-    return runpy.run_path(str(path.resolve()))
-
-
-def read_experiment(path: Path, *, experiment: str | None = None) -> Experiment:
-    if path.suffix != ".py":
-        raise LauncherError("experiment files must be Python (.py)")
-    refuse_renamed(path)
-    namespace = _namespace(path)
-    found = namespace.get("eval_jobs")
-    if found is not None and not callable(found):
-        raise LauncherError(f"{path.name}: eval_jobs must be a function")
-    if found is None and not callable(namespace.get("training_jobs")):
-        raise LauncherError(f"{path.name}: define training_jobs() or eval_jobs(state)")
-    return Experiment(
-        name=experiment or path.stem,
-        eval=cast(EvalFunction | None, found),
-        file=path,
-        training=cast(Callable[..., object] | None, namespace.get("training_jobs")),
-    )
+def require_training_options(
+    given: Sequence[str], experiment: Experiment, *, read_training: bool = True
+) -> None:
+    """File options must reach the training declaration for this invocation."""
+    if not given:
+        return
+    if experiment.training is None:
+        raise typer.BadParameter("file has no training_jobs() options", param_hint=given[0])
+    if not read_training:
+        raise typer.BadParameter("this invocation skips training_jobs()", param_hint=given[0])
 
 
 def asked(function: EvalFunction, state: ExperimentState) -> list[EvalJob]:
-    returned = function(state)
+    defining = function if inspect.isroutine(function) else type(function)
+    path = Path(inspect.getfile(inspect.unwrap(defining)))
+    with declaration(path, function):
+        returned = function(state)
     given = list(returned) if isinstance(returned, (list, tuple)) else [returned]
     jobs: list[EvalJob] = []
     for each in given:
         if not isinstance(each, EvalJob):
-            defining = function if inspect.isroutine(function) else type(function)
             raise LauncherError(
-                f"{Path(inspect.getfile(defining)).name}: eval_jobs() must return EvalJob"
+                f"{path.name}: eval_jobs() must return EvalJob",
+                fix="return EvalJob(tournament=tournament, play=play, max_hours=1)",
+                at=function,
             )
         jobs.append(each)
     return jobs

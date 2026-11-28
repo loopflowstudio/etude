@@ -5,6 +5,7 @@ This guide is for authors submitting work to local, SSH or rented machines;
 
 ```sh
 uv run etude database upgrade
+uv run etude check experiment.py
 uv run etude launch experiment.py --smoke
 uv run etude status
 uv run etude logs --run experiment/base@0
@@ -40,6 +41,83 @@ used by the launcher or the stored declaration.
 control execution. Typed jobs derive their command from an importable Python
 function and validated Pydantic config; do not specify another command. Their
 `extras` select project dependency extras for that function's environment.
+
+## Checking an experiment
+
+```text
+$ uv run etude check exp.py
+exp.py:12: error: seeds must be nonempty and distinct
+  fix: seeds=(1, 2, 3)
+game.py:6: error: play must be an async def function
+  fix: async def play(match: Match[Rules], agents: Sequence[Forward]) -> Tables:
+exp.py: 2 errors
+$ echo $?
+1
+```
+
+Once the reported lines are fixed, `check` prints the runs and matches a first
+launch would plan:
+
+```text
+$ uv run etude check exp.py
+exp.py: ok, as a first launch sees it (no stored runs)
+training  3 runs, up to 3 machine-hours, $15.00
+  exp/base@1  max_hours 1  max_usd 5.00
+  exp/base@2  max_hours 1  max_usd 5.00
+  exp/base@3  max_hours 1  max_usd 5.00
+eval
+  ladder  round robin  3 entrants  3 matches  3 games  max_hours 1  max_usd 5.00
+  panel  benchmark  0 checkpoints  0 matches  (none stored yet)  max_hours 1  max_usd 5.00
+next: etude launch exp.py --quote
+```
+
+`etude check FILE [--experiment NAME] [--source DIR] [--format text|json]`
+runs offline on this computer—with no provider key, bucket, database, git or
+SSH call—and shares the runtime's own validation rules across syntax and
+renamed declarations, `training_jobs()`, `eval_jobs(state)`, `train(config)`,
+and `report()`. In a file without `training_jobs()`, `check` validates a
+`train(config)` recipe's config type and verifies that a fully defaulted
+config survives a JSON round trip.
+For eval jobs with an accelerator-capable loader, a fresh interpreter checks
+the imports of the game module and its optional `build` hook. Run
+`etude check FILE --help` to see the flags defined by `training_jobs()`.
+Pass those flags after `FILE`.
+A plain file defining only `train(config)` checks as a local recipe
+(`etude train FILE`). A file defining only `report()` checks as a report-only
+file for `etude report FILE`.
+
+- **Offline state.** By default `check` evaluates declarations as a first
+  launch sees them (no stored runs, declared training runs queued). Pass
+  `--source DIR` to read an existing local runs directory. Training lists
+  runs that are missing from the source. Evaluation counts remaining matches
+  for the available checkpoints and entrants, taking delivered results into
+  account. If the plan has work, `check` suggests `etude launch FILE --quote`
+  for bucket storage and prices.
+- **Budgets and warnings.** Jobs without `max_usd` are noted as
+  `no max_usd: owned pools only` (owned pools and local runs accept them;
+  renting refuses them). Heavy game imports produce a warning and keep exit
+  status `0` when the declarations pass. For example, a game module importing
+  `torch` through `models.py` reports:
+
+  ```text
+  models.py:3: warning: game module game: imported torch via models
+    fix: define your game function in a lightweight module and move the import to load's module
+  ```
+- **JSON and exit codes.** `--format json` prints one JSON object with
+  `file`, `experiment`, `ok`, `issues`, `training`, `evals`, and `source` on
+  stdout. `kind` is `experiment`, `local_recipe`, or `report_only`.
+  `eval_skipped` indicates that evaluation needs training declarations to pass.
+  Dollar caps are decimal strings.
+  Exit status is `0` when there are no errors, `1` when the file has errors,
+  and `2` when nothing was checked (unusable file, source or command-line option).
+  `launch`, `queue`, `smoke`, `train` and `eval` also exit `2` for unusable
+  experiment files. `launch`, `queue` and `smoke` exit `2` for unused file flags.
+- **Same fixes at runtime.** `launch`, `queue`, `eval` and `smoke` print the
+  same `FILE:LINE` location and `fix:` line when they refuse a declaration.
+
+Run `uv run etude guide` for an offline summary of Etude's conventions, the
+`check` → `launch --quote` → `launch` → `wait` workflow, a minimal experiment
+file and the current command list.
 
 ## Pools and owned machines
 
@@ -284,6 +362,8 @@ explicitly lists that whole prefix so experiment-folder sources
 
 | Command | What it does |
 | --- | --- |
+| `check FILE.py` | Validates declarations offline and prints planned runs, matches or fixes. |
+| `guide` | Prints conventions, workflow, a minimal experiment file and all commands. |
 | `queue FILE.py` | Records intent and returns ids; waits for no provider (`--watch SECONDS` loops passes). |
 | `launch FILE.py` | Acquires capacity, starts what fits and queues the rest; fails with no runs recorded if none fit. |
 | `launch FILE.py --quote` | Plans without submitting or renting. |

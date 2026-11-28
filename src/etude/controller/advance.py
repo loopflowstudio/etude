@@ -5,19 +5,23 @@ new runs. The scheduler's public records are the only memory of a hand-down.
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from contextlib import nullcontext
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
 from etude.controller.declarations import (
-    Experiment,
     asked,
     format_known_run,
     read_training_jobs,
+    require_checkout,
     select_runs,
+    with_queued_runs,
 )
+from etude.controller.diagnostics import declaration
+from etude.controller.experiment import Experiment
 from etude.controller.smoke import smoke_file
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import digest, find_line_experiments
@@ -29,7 +33,6 @@ from etude.jobs import (
     EvalJob,
     Evaluation,
     ExperimentState,
-    TrainingRunSummary,
     _group_key,
     evaluation_group,
     fetch_checkpoints,
@@ -181,18 +184,8 @@ def advance(
             committed += request.job.max_usd or Decimal(0)
     jobs: list[EvalJob] = []
     if experiment.eval is not None and evaluate:
-        # This pass's new runs have no checkpoints yet, but their policies already exist
-        # for eval_jobs. Selection/resume passes skip evaluation, so every run here is new.
-        queued = []
-        for request in new:
-            assert request.id is not None  # Declarations have assigned addresses.
-            name = request.id.removeprefix(experiment.name + "/")
-            queued.append(
-                TrainingRunSummary.queued(name, experiment.name, request.job.name, request.seed)
-            )
-        asking = replace(state, runs=(*state.runs, *queued))
         try:
-            jobs = asked(experiment.eval, asking)
+            jobs = asked(experiment.eval, with_queued_runs(state, new))
         except EtudeError:
             # A policy of a run this pass left out (`--max-usd`) is missing; say which and why.
             for line, _ in lines.values():
@@ -209,9 +202,9 @@ def advance(
     if smoke_file_first and not quote:
         assert experiment.file is not None
         before = (
-            smoke_file(experiment.file, requests)
+            smoke_file(experiment, requests)
             if callable(experiment.training)
-            else smoke_file(experiment.file, steps=("eval", "report"), source=source)
+            else smoke_file(experiment, steps=("eval", "report"), source=source)
         )
         new = before.stamp(new)
         smoke = Smoke(steps=before.rest)
@@ -227,10 +220,10 @@ def advance(
     stopped_runs: set[str] = set()
     stored = StoredRuns.read(experiment.name, listing) if jobs else None
     groups: dict[str, list[_PendingEvaluation]] = {}
-    for declaration in jobs:
-        recorded = declaration.recorded()
+    for evaluation in jobs:
+        recorded = evaluation.recorded()
         found = played(
-            declaration.tournament,
+            evaluation.tournament,
             experiment=experiment.name,
             checkpoints=recorded.checkpoints,
             enter=recorded.entrants,
@@ -242,7 +235,7 @@ def advance(
         )
         pending = [match for match in new_matches if match.key not in running]
         done = TournamentDecision(
-            tournament=declaration.tournament.name,
+            tournament=evaluation.tournament.name,
             new=len(pending),
             running=len(new_matches) - len(pending),
             # Retryable failures are replayed with the new matches, not counted twice.
@@ -257,7 +250,16 @@ def advance(
                 match for match in pending if match.key not in failed or match.key in retryable
             ]
         if pending:
-            executable = declaration.lower(state, pending, policy_lines)
+            function = experiment.eval
+            assert function is not None
+            with (
+                declaration(experiment.file, function)
+                if experiment.file is not None
+                else nullcontext()
+            ):
+                executable = evaluation.lower(state, pending, policy_lines)
+                if mode != "local":
+                    require_checkout(executable, function)
             spec = evaluation_group(executable).evaluations[0]
             groups.setdefault(_group_key(executable, spec), []).append(
                 _PendingEvaluation(

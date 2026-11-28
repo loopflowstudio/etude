@@ -17,7 +17,7 @@ from etude.block_file import parse
 from etude.carriage import EVAL_BLOCK_PACK, checkpoint_file
 from etude.checkpoints import CheckpointRef
 from etude.controller.advance import advance
-from etude.controller.declarations import read_experiment
+from etude.controller.experiment import read_experiment
 from etude.errors import EtudeError
 from etude.eval.match import environment
 from etude.eval.query import _kept_path, compare, statsdb

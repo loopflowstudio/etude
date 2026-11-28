@@ -41,6 +41,7 @@ from etude.eval.block import (
     stage,
 )
 from etude.eval.game import (
+    GAME_IMPORT_FIX,
     Done,
     Game,
     GameReport,
@@ -790,9 +791,10 @@ def _play_matches(
             DirectoryStorage(resources.artifacts).put(name, report.model_dump_json().encode())
         except OSError as error:
             raise RetryRequested(f"game report {name} could not be retained") from error
-        if agent_process is not None and report.imports.warning and not warned_imports:
-            print(report.imports.warning, file=sys.stderr, flush=True)
-            warned_imports = True
+        if agent_process is not None and not warned_imports:
+            if (warning := report.imports.warning) is not None:
+                print(f"etude: {warning}; {GAME_IMPORT_FIX}", file=sys.stderr, flush=True)
+                warned_imports = True
 
     stopping = False
     context = multiprocessing.get_context("spawn")

@@ -26,7 +26,7 @@ from etude.call import Function
 from etude.carriage import put_back, restore_set
 from etude.checkpoints import CheckpointRef
 from etude.controller.advance import advance
-from etude.controller.declarations import Experiment, read_experiment
+from etude.controller.experiment import Experiment, read_experiment
 from etude.controller.smoke import Step, smoke_file
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval import resources as eval_resources
@@ -605,10 +605,10 @@ def test_play_arity_and_removed_workers_are_refused(tmp_path: Path) -> None:
         enter=(checkpoint("left"), checkpoint("right")),
         directory=tmp_path,
     ) as active:
-        with pytest.raises(TypeError, match="async def"):
+        with pytest.raises(LauncherError, match="async def"):
             active.play(sync_play)  # type: ignore[arg-type]
     with pytest.raises(ValidationError, match="workers"):
-        EvalJob.model_validate({**job("bad", None).model_dump(), "workers": 2})
+        EvalJob.model_validate({**job("bad", None).model_dump(exclude_unset=True), "workers": 2})
     with pytest.raises(ValidationError, match="max_delay_seconds"):
         Agents.model_validate({"max_delay_seconds": 0.05})
 
@@ -912,11 +912,13 @@ def test_agent_device_declarations_validate_and_round_trip() -> None:
             model.model_validate({"load": load_function, "devices": ["mps"]})
         assert misspelled.value.error_count() == 1
         assert "'cuda', 'metal' or 'cpu'" in str(misspelled.value)
-        with pytest.raises(ValidationError, match="devices requires a checkpoint loader"):
+        refusal = LauncherError if model is Agents else ValidationError
+        with pytest.raises(refusal, match="devices requires a checkpoint loader"):
             model.model_validate({"devices": ["cuda", "metal"]})
     for unused in ({"max_batch": 8}, {"memory_gb": 1.0}):
-        with pytest.raises(ValidationError, match="requires a checkpoint loader"):
+        with pytest.raises(LauncherError, match="requires a checkpoint loader") as refused:
             Agents.model_validate(unused)
+        assert refused.value.fix == "Agents(load=load)"
 
     declaration = Agents(load=load, devices=("metal", "cpu", "cuda", "metal"))
     assert declaration.devices == ("cuda", "metal")
@@ -1420,6 +1422,14 @@ hold_group(EvalGroup(evaluations=tuple(evaluation_group(job.lower(ExperimentStat
     )
     if with_agents:
         assert "move the import to load's module" in result.stderr
+    reports = [
+        GameReport.model_validate_json(path.read_bytes())
+        for path in (tmp_path / "heavy/artifacts/agents").glob("game-*.json")
+    ]
+    assert reports
+    for report in reports:
+        assert report.imports.file == tmp_path / "heavy_fixture_game.py"
+        assert report.imports.line == 1
 
 
 @pytest.mark.parametrize("grouped", [False, True], ids=["standalone", "group"])
@@ -2396,10 +2406,13 @@ def test_play_many_requires_one_async_generator_with_a_match_source(tmp_path: Pa
     with evaluating(
         environment("vector"), experiment="vector", matches=[], run="signature", directory=tmp_path
     ) as active:
-        with pytest.raises(TypeError, match="async def generator"):
+        with pytest.raises(LauncherError, match="async def generator"):
             active.play_many(plain)  # type: ignore[arg-type]
-        with pytest.raises(TypeError, match=r"MatchStream\[YourConfig\]"):
+        with pytest.raises(LauncherError, match=r"MatchStream\[YourConfig\]") as error:
             active.play_many(wrong_source)
+        assert error.value.fix == (
+            "async def play_many(matches: MatchStream[Rules]) -> AsyncIterator[tuple[Match, Tables]]:"
+        )
 
 
 def test_launched_group_recovers_both_tournaments_with_their_scores(
