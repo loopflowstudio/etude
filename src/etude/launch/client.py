@@ -47,6 +47,7 @@ from etude.launch.provisioner.providers.runpod.machines import RunPodMachines
 from etude.launch.provisioner.providers.vast.api import VastAPI
 from etude.launch.provisioner.providers.vast.machines import VastMachines
 from etude.launch.records import (
+    ExperimentLimit,
     LogSnapshot,
     Machine,
     MachineTemplate,
@@ -58,7 +59,7 @@ from etude.launch.records import (
     Storage,
 )
 from etude.launch.scheduler.loop import Scheduler
-from etude.launch.server import PythonClient, retained_scheduler, selected
+from etude.launch.server import LimitsReply, PythonClient, retained_scheduler, selected
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, _send, open_bucket
@@ -78,6 +79,8 @@ __all__ = (
     "default",
     "usage",
     "standing",
+    "limit",
+    "limits",
 )
 
 
@@ -291,3 +294,21 @@ def standing(
         return PythonClient(address).standing(experiment, job=job)
     with retained_scheduler() as reader:
         return reader.standing(experiment, job=job) if reader is not None else ()
+
+
+def limit(experiment: str) -> ExperimentLimit | None:
+    """Read a label's spending ceiling and commitments from the launcher database."""
+    configured = _read_limits(experiment).limits
+    return configured[0] if configured else None
+
+
+def limits() -> tuple[ExperimentLimit, ...]:
+    """Read all configured spending ceilings and commitments from the launcher database."""
+    return _read_limits(None).limits
+
+
+def _read_limits(experiment: str | None, *, include_default: bool = False) -> LimitsReply:
+    # A launch pass can read the ceiling and the default in one SSH exchange.
+    if address := selected():
+        return PythonClient(address).read_limits(experiment, include_default=include_default)
+    return LimitsReply.read(experiment, include_default=include_default)

@@ -164,7 +164,9 @@ def test_pending_group_queues_during_training_within_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, history: bool, budget: str
 ) -> None:
     b = bench(tmp_path)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
     b.scheduler.add_pool(Pool(name="waiting"))
+    b.scheduler.set_limit("grouped", Decimal(budget))
     monkeypatch.setattr(client, "_client", lambda: b.scheduler)
     monkeypatch.setattr(client, "standing", b.scheduler.standing)
     source = DirectoryStorage(tmp_path / "source")
@@ -194,7 +196,6 @@ def test_pending_group_queues_during_training_within_budget(
                 pool="waiting",
                 rent="l4",
                 mode="queue",
-                max_usd=Decimal(budget),
             )
         assert (measured.listings, measured.requests) == (1, 10 if history else 2)
         assert all(measured.got.count(key) == 1 for key in measured.got)
@@ -202,7 +203,8 @@ def test_pending_group_queues_during_training_within_budget(
         assert observed.provider == observed.bucket == observed.ssh == observed.git == 0
         if budget == "1":
             assert all(
-                d.state == "not queued" and "--max-usd" in (d.reason or "") for d in decisions
+                d.state == "not queued" and d.reason == "limit $1.00 ($0.00 committed)"
+                for d in decisions
             )
             assert b.scheduler.runs() == ()
         else:
@@ -215,7 +217,6 @@ def test_pending_group_queues_during_training_within_budget(
                 pool="waiting",
                 rent="l4",
                 mode="queue",
-                max_usd=Decimal(budget),
             )
             assert all(d.new == 0 and d.running == 1 and d.launched is None for d in again)
             assert len(b.scheduler.runs()) == 1
@@ -248,7 +249,6 @@ def test_pending_group_uses_existing_room_or_one_rental(
             source=source,
             rent="l4",
             mode="queue" if capacity == "unavailable" else "launch",
-            max_usd=Decimal(2),
         )
         assert decisions[0].launched == decisions[1].launched
         if capacity == "unavailable":
@@ -260,7 +260,7 @@ def test_pending_group_uses_existing_room_or_one_rental(
         records = b.scheduler.runs()
         assert len([r for r in records if r.experiment == "grouped"]) == 1
         creates = b.service.creates
-        again = advance(definition, source=source, rent="l4", mode="queue", max_usd=Decimal(2))
+        again = advance(definition, source=source, rent="l4", mode="queue")
         assert all(d.new == 0 and d.running == 1 and d.launched is None for d in again)
         assert b.scheduler.runs() == records
         assert b.service.creates == creates

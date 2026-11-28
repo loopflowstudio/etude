@@ -266,6 +266,7 @@ $ uv run etude continue --run ppo/base@0 --until steps=90000
 etude: experiment 'ppo' is limited to $50.00: $46.00 committed and this launch asks $6.00; `etude limit set ppo --max-usd D` raises it
 $ uv run etude limits
 ppo  $46.00 of $50.00 committed
+last loop: 12 seconds ago
 $ uv run etude limit set ppo --max-usd 60
 ppo  limited to $60.00; $46.00 committed
 $ uv run etude limit unset ppo

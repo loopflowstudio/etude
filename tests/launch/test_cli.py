@@ -125,9 +125,7 @@ def test_a_job_file_launches_runs_and_each_verb_reads_it_back(
     (tmp_path / "job.py").write_text(JOB_FILE)
     (tmp_path / "train.py").write_text(TRAIN)
 
-    launched = run(
-        capsys, "launch", str(tmp_path / "job.py"), "--experiment", "capacity", "--max-usd", "20"
-    )
+    launched = run(capsys, "launch", str(tmp_path / "job.py"), "--experiment", "capacity")
     ids = [line.split()[0] for line in launched]
     assert len(ids) == 4 and "new, queued" in launched[1]
 

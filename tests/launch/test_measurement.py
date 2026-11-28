@@ -98,6 +98,7 @@ def test_command_kinds() -> None:
         cli.app,
         cli.pool_app,
         cli.ondemand_app,
+        cli.limit_app,
         cli.machine_app,
         cli.provider_app,
         cli.storage_app,
@@ -311,6 +312,7 @@ def test_reads_need_no_provider_key(
         "storages": ["storages"],
         "server_show": ["server"],
         "usage": ["usage", "--machine", machine],
+        "limits": ["limits"],
         "logs": ["logs", "--run", ids[0]],
     }
     declared = {

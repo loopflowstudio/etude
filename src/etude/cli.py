@@ -74,7 +74,6 @@ def _submit(
     file: Path | None,
     pool: str | None,
     rent: str | None,
-    max_usd: str | None,
     help: bool,
     *,
     queued: bool,
@@ -89,6 +88,11 @@ def _submit(
     watch: float | None = None,
     retry_failed: bool = False,
 ) -> None:
+    # Click can bind an unknown option before FILE to the positional argument.
+    if any(arg.partition("=")[0] == "--max-usd" for arg in (str(file), *ctx.args)):
+        raise LauncherError(
+            "experiment spending limits are stored; run `etude limit set EXPERIMENT --max-usd D`"
+        )
     if help:
         print(ctx.get_help())
     if file is None:
@@ -96,7 +100,6 @@ def _submit(
             return
         raise typer.BadParameter("a Python experiment FILE is required")
     import time
-    from decimal import Decimal, InvalidOperation
 
     from etude.controller.advance import advance, source_for
     from etude.controller.declarations import read_experiment, read_training_jobs
@@ -114,10 +117,6 @@ def _submit(
         raise LauncherError("--resume cannot be combined with --quote")
     if resume and watch is not None:
         raise LauncherError("--resume cannot be combined with --watch")
-    try:
-        budget = None if max_usd is None else Decimal(max_usd)
-    except InvalidOperation:
-        raise LauncherError("--max-usd must be a dollar amount") from None
     storage = storage_from_uri(source_for(pool, rent, source))
     try:
         while True:
@@ -127,7 +126,6 @@ def _submit(
                 pool=pool,
                 rent=rent,
                 mode="queue" if queued else "launch",
-                max_usd=budget,
                 quote=quote,
                 smoke_file_first=smoke,
                 given=ctx.args,
@@ -171,7 +169,6 @@ JobOption = Annotated[str | None, typer.Option(help="select a declared job")]
 SeedOption = Annotated[int | None, typer.Option(help="select a declared seed")]
 ResumeOption = Annotated[bool, typer.Option(help="resume the selected run on current source")]
 UntilOption = Annotated[str | None, typer.Option(help="absolute target for the resumed run")]
-MaxUsdOption = Annotated[str | None, typer.Option(help="experiment commitment limit in dollars")]
 SourceOption = Annotated[str | None, typer.Option(help="where experiment runs are delivered")]
 RetryFailedOption = Annotated[bool, typer.Option(help="retry failed eval matches")]
 WatchOption = Annotated[
@@ -199,7 +196,6 @@ def launch(
     seed: SeedOption = None,
     resume: ResumeOption = False,
     until: UntilOption = None,
-    max_usd: MaxUsdOption = None,
     source: SourceOption = None,
     retry_failed: RetryFailedOption = False,
     watch: WatchOption = None,
@@ -210,7 +206,6 @@ def launch(
         file,
         pool,
         rent,
-        max_usd,
         help,
         queued=False,
         smoke=smoke,
@@ -243,7 +238,6 @@ def queue(
     seed: SeedOption = None,
     resume: ResumeOption = False,
     until: UntilOption = None,
-    max_usd: MaxUsdOption = None,
     source: SourceOption = None,
     retry_failed: RetryFailedOption = False,
     watch: WatchOption = None,
@@ -254,7 +248,6 @@ def queue(
         file,
         pool,
         rent,
-        max_usd,
         help,
         queued=True,
         smoke=smoke,

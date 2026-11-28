@@ -118,8 +118,8 @@ cohorts, which sat between, are removed.
   select copied queues. Stored experiment limits add a breaking migration
   (`experiment_limits.sql`) raising the reader floor so older clients of a
   shared `launcher.sqlite` cannot spend past a stored limit; upgrade every
-  client sharing that database. Workers
-  and guardians keep running during upgrades. Cohort evidence remains stored.
+  client sharing that database. Workers and guardians keep running during
+  upgrades. Cohort evidence remains stored.
   Unmerged SQL requires an empty
   development fixture. See [Upgrading Etude](../docs/launcher.md#upgrading-etude).
 - **`~/.etude/experiments/launched.json` is gone.** In-flight eval matches

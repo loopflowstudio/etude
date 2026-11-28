@@ -7,7 +7,7 @@ import pytest
 
 from etude.cli import main
 from etude.errors import LauncherError
-from etude.launch.client import queue
+from etude.launch.client import limit, limits, queue
 from etude.launch.database import launcher_file
 from etude.launch.records import Launch, OnDemand, Pool
 from etude.launch.scheduler.loop import Scheduler
@@ -67,6 +67,48 @@ def test_limit_validation(tmp_path: Path, experiment: str, usd: str, message: st
     with pytest.raises(LauncherError, match=message):
         b.scheduler.set_limit(experiment, Decimal(usd))
     assert b.scheduler.limits() == ()
+
+
+@pytest.mark.parametrize("command", ["launch", "queue"])
+@pytest.mark.parametrize("switch", [("--max-usd", "1"), ("--max-usd=1",)])
+@pytest.mark.parametrize("before_file", [False, True])
+def test_removed_limit_flag_is_refused_on_an_eval_only_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    switch: tuple[str, ...],
+    before_file: bool,
+) -> None:
+    file = tmp_path / "ppo.py"
+    file.write_text("def eval_jobs(state):\n    return []\n")
+    args = [*switch, str(file)] if before_file else [str(file), *switch]
+    assert main([command, *args]) == 1
+    assert "etude limit set EXPERIMENT --max-usd D" in capsys.readouterr().err
+
+
+def test_cli_lists_retained_estimated_commitments_without_provider_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    b = bench(tmp_path)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
+    (run,) = b.scheduler.launch(_request("finished"), rent="l4")
+    b.run(601)
+    assert b.scheduler.read(run).done
+    assert main(["limit", "set", "ppo", "--max-usd", "0.30"]) == 0
+    assert capsys.readouterr().out == "ppo  limited to $0.30; ~$0.10 committed\n"
+    assert main(["limits"]) == 0
+    assert capsys.readouterr().out == "ppo  ~$0.10 of $0.30 committed\nlast loop: never\n"
+    (configured,) = limits()
+    assert limit("ppo") == configured
+    assert configured.estimated
+    assert b.service.creates == 1
+    assert main(["limit", "unset", "ppo"]) == 0
+    assert limits() == ()
+    assert main(["limit", "unset", "ppo"]) == 1
+    assert "has no spending limit" in capsys.readouterr().err
+    assert main(["limit", "set", "ppo", "--max-usd", "two"]) == 1
+    assert "--max-usd must be a dollar amount" in capsys.readouterr().err
 
 
 def test_quote_and_launch_refuse_before_source_or_provider_calls(tmp_path: Path) -> None:

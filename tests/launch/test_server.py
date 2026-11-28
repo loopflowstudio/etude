@@ -9,7 +9,9 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Sequence
+from contextlib import redirect_stderr, redirect_stdout
 from decimal import Decimal
+from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
 
 import pytest
@@ -22,6 +24,8 @@ from etude.launch.client import (
     cancel,
     fetch,
     launch,
+    limit,
+    limits,
     logs,
     queue,
     status,
@@ -51,7 +55,17 @@ def test_remote_commands_use_one_exchange_without_local_database(
         exchanges += 1
         with monkeypatch.context() as scope:
             scope.setenv("ETUDE_SERVER_LOCAL", "1")
+            scope.setenv("ETUDE_HOME", str(tmp_path / "backend"))
             scope.setattr("etude.launch.cli.default", lambda: backend.scheduler)
+            if data := options.get("input"):
+                assert isinstance(data, bytes)
+                scope.setattr(sys, "stdin", TextIOWrapper(BytesIO(data)))
+                stdout, stderr = StringIO(), StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    code = main(list(argv))
+                return subprocess.CompletedProcess(
+                    argv, code, stdout.getvalue().encode(), stderr.getvalue().encode()
+                )
             code = main(list(argv))
         return subprocess.CompletedProcess(argv, code)
 
@@ -67,6 +81,37 @@ def test_remote_commands_use_one_exchange_without_local_database(
     assert main(["status"]) == 0
     assert "last loop: never" in capsys.readouterr().out
     assert exchanges == 3
+
+    assert main(["limit", "set", "ppo", "--max-usd", "0"]) == 0
+    assert "ppo  limited to $0.00; $0.00 committed" in capsys.readouterr().out
+    assert main(["limits"]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "ppo  $0.00 of $0.00 committed",
+        "last loop: never",
+    ]
+    (configured,) = limits()
+    assert limit("ppo") == configured
+    assert limit("other") is None
+    assert exchanges == 8
+
+    backend.scheduler.set_default(rent="l4")
+    file = tmp_path / "ppo.py"
+    file.write_text("""
+from etude.jobs import TrainingJob
+from tests.launch.tasks import Command, train_command
+
+def training_jobs() -> list[TrainingJob]:
+    return [TrainingJob(name="base", train=train_command, config=Command(command="true"),
+                        repo=None, max_hours=1, max_usd=1)]
+""")
+    assert main(["queue", str(file), "--source", str(tmp_path / "tracking")]) == 0
+    assert "ppo/base@0  new, not queued: limit $0.00" in capsys.readouterr().out
+    assert backend.scheduler.runs() == ()
+    assert exchanges == 10  # Standing and limits, including the server's default in the limit read.
+
+    assert main(["limit", "unset", "ppo"]) == 0
+    assert limit("ppo") is None
+    assert exchanges == 12
     assert not launcher_file(local).exists()
     assert backend.service.creates == 0
 

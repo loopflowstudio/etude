@@ -35,6 +35,7 @@ from etude.launch.logs import ConsoleTail
 from etude.launch.openssh import ssh_command
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import (
+    ExperimentLimit,
     Launch,
     LogSnapshot,
     MachineStatus,
@@ -119,6 +120,30 @@ class StandingRequest(Record):
     job: str | None = None
 
 
+class LimitsRequest(Record):
+    operation: Literal["limits"] = "limits"
+    experiment: str | None = None
+    include_default: bool = False
+
+
+class LimitsReply(Record):
+    limits: tuple[ExperimentLimit, ...] = ()
+    default_target: Target | None = None
+
+    @classmethod
+    def read(cls, experiment: str | None, *, include_default: bool) -> LimitsReply:
+        with retained_scheduler() as scheduler:
+            if scheduler is None:
+                return cls()
+            if experiment is None:
+                limits = scheduler.limits()
+            else:
+                limit = scheduler.limit(experiment)
+                limits = (limit,) if limit is not None else ()
+            target = scheduler.default_target() if limits and include_default else None
+            return cls(limits=limits, default_target=target)
+
+
 class ObservationRequest(Record):
     operation: Literal["observation"] = "observation"
     consoles: tuple[str, ...]
@@ -192,6 +217,7 @@ type Request = Annotated[
     | OutputRequest
     | RunOperation
     | StandingRequest
+    | LimitsRequest
     | ObservationRequest
     | WaitRequest
     | EvidenceRequest
@@ -211,6 +237,7 @@ type Response = (
     | Usage
     | LogSnapshot
     | LauncherObservation
+    | LimitsReply
     | tuple[RunRecord, ...]
     | tuple[Standing, ...]
     | Launch
@@ -482,6 +509,11 @@ class PythonClient:
             self._request(StandingRequest(experiment=experiment, job=job))
         )
 
+    def read_limits(self, experiment: str | None, *, include_default: bool = False) -> LimitsReply:
+        return LimitsReply.model_validate_json(
+            self._request(LimitsRequest(experiment=experiment, include_default=include_default))
+        )
+
     def observation(self, consoles: tuple[str, ...]) -> LauncherObservation:
         return LauncherObservation.model_validate_json(
             self._request(ObservationRequest(consoles=consoles))
@@ -541,11 +573,13 @@ class PythonClient:
 
 def receive(open_scheduler: Callable[[], Scheduler]) -> int:
     request = _REQUEST.validate_json(sys.stdin.buffer.read())
-    response = (
-        LauncherObservation.read(request.consoles)
-        if isinstance(request, ObservationRequest)
-        else _answer(open_scheduler(), request)
-    )
+    response: Response
+    if isinstance(request, ObservationRequest):
+        response = LauncherObservation.read(request.consoles)
+    elif isinstance(request, LimitsRequest):
+        response = LimitsReply.read(request.experiment, include_default=request.include_default)
+    else:
+        response = _answer(open_scheduler(), request)
     print(ServerReply(response).model_dump_json())
     return 0
 
@@ -676,7 +710,7 @@ def warning(scheduler: Scheduler) -> str | None:
     return None
 
 
-def show_freshness(scheduler: Scheduler) -> None:
+def show_freshness(scheduler: Scheduler | None = None) -> None:
     """Print when the server loop last passed: how fresh the database's answers are."""
     at = last_loop()
     if at is not None:
@@ -685,7 +719,7 @@ def show_freshness(scheduler: Scheduler) -> None:
     else:
         said = "never"
     print("last loop: " + said)
-    if problem := warning(scheduler):
+    if scheduler is not None and (problem := warning(scheduler)):
         print("warning: " + problem, file=sys.stderr)
 
 
