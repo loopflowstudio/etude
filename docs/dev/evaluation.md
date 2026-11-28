@@ -144,13 +144,14 @@ with evaluating(
   `ceil(max_batch / process_limit)` matches in flight. Code-only `play` uses one
   match per process. Pending forwards flush on a zero-delay loop barrier.
   The inference thread and checkpoint budgets use the count of processes
-  started for the panel. For `play_many`, empty processes share the pending
-  matches. A process that holds matches can top up to its share of pending
-  matches and receives at least one while work remains. Per-process
-  diagnostics are written to `game-{pid}.json`, and shared agent runs record
-  batch row counts and stage timings in `batches.json`. Direct game reports
-  count rows in `local_rows`. `evaluating` has no
-  setting for process count.
+  started for the panel. For `play_many`, the initial slot hint is capped at
+  `max_batch` when a loader is declared. Grants share unfinished matches
+  across processes, accounting for matches already held and pending work for
+  empty processes. A positive request receives at least one while grants are
+  open and work remains. Per-process diagnostics are written to
+  `game-{pid}.json`, and shared agent runs record batch row counts and stage
+  timings in `batches.json`. Direct game reports count rows in `local_rows`.
+  `evaluating` has no setting for process count.
 - **Order.** Matches start in the order `etude.eval.schedule.ordered` gives,
   so consecutive matches reuse the checkpoints kept loaded: first those
   loading the fewest checkpoints not yet used, then those reusing the most
@@ -215,8 +216,9 @@ with evaluating(
   stops new grants for the tournament. In-flight outcomes are retained. In `play_many`, yield
   `(match, error)` to fail one slot and keep taking pending matches. A raised
   error or an unknown or duplicate yield fails every held match. Returning with
-  held matches unyielded fails each unyielded match. A run with failed matches
-  ends failed.
+  held matches unyielded fails each unyielded match. Game-process startup
+  errors interrupt the group and leave unfinished matches eligible for retry.
+  A run with failed matches ends failed.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each drawn value from the
   environment whose latest match is newest, noting only overlaps on values

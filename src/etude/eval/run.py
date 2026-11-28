@@ -535,10 +535,19 @@ class Playing:
         self.skipped = len(self.run.matches) - len(self.pending)
 
     def grant(
-        self, count: int, *, processes: int = 1, unfed: int = 1, held: int = 0
+        self,
+        count: int,
+        *,
+        processes: int = 1,
+        unfed: int = 1,
+        held: int = 0,
+        total_held: int = 0,
     ) -> tuple[Match, ...]:
-        """Reserve pending matches while giving empty processes first claim on a fair share."""
-        share = math.ceil(len(self.pending) / (processes if held else unfed))
+        """Reserve a share of unfinished matches while leaving work for empty peers."""
+        pending = len(self.pending)
+        share = math.ceil((pending + total_held) / processes)
+        if not held:
+            share = min(share, math.ceil(pending / unfed))
         count = min(count, max(1, share - held))
         granted: list[Match] = []
         while self.pending and len(granted) < count:
@@ -694,7 +703,7 @@ def _play_pending(plays: Sequence[Playing], resources: Resources, checkout: str 
 class _GameGrant:
     playing: Playing
     matches: tuple[Match, ...]
-    target_slots: int
+    target_matches: int
 
 
 def _reserve_games(
@@ -716,14 +725,15 @@ def _reserve_games(
                 break
         if len(reserved) == before:
             break
-    return [
-        _GameGrant(
-            each,
-            matches,
-            math.ceil(len(each.pending) / counts[id(each)]) if each.streaming else plan.games,
-        )
-        for each, matches in reserved
-    ]
+    grants: list[_GameGrant] = []
+    for each, matches in reserved:
+        target_matches = plan.games
+        if each.streaming:
+            target_matches = math.ceil(len(each.pending) / counts[id(each)])
+            if each.agent_loader.load is not None:
+                target_matches = min(target_matches, each.agent_loader.max_batch)
+        grants.append(_GameGrant(each, matches, target_matches))
+    return grants
 
 
 @dataclass
@@ -735,11 +745,10 @@ class _GameProcess:
     done: bool = False
     exhausted: bool = False
 
-    def finish(self, message: Done, *, stopping: bool) -> None:
+    def finish(self, error: BaseException | None, *, stopping: bool) -> None:
         self.done = True
         self.pipe.close()
         each = self.playing
-        error = message.error
         if error is None:
             if self.held:
                 error = RuntimeError("play_many returned without yielding its held matches")
@@ -747,10 +756,7 @@ class _GameProcess:
                 error = RuntimeError("play_many returned before taking all pending matches")
             else:
                 return
-        matches = list(self.held.values())
-        if not matches and not each.streaming and each.pending:
-            matches.append(each.pending.popleft())
-        each.fail_matches(matches, error, terminal=True)
+        each.fail_matches(list(self.held.values()), error, terminal=True)
 
 
 def _play_matches(
@@ -804,7 +810,7 @@ def _play_matches(
             play=each.play,
             tournament=each.tournament,
             streaming=each.streaming,
-            target_slots=grant.target_slots,
+            target_matches=grant.target_matches,
             initial=grant.matches,
             agent_address=address,
             checkout=checkout,
@@ -840,6 +846,7 @@ def _play_matches(
                     processes=len(peers),
                     unfed=sum(not other.held for other in peers),
                     held=len(child.held),
+                    total_held=sum(len(other.held) for other in peers),
                 )
             else:
                 granted = each.grant(message.count)
@@ -853,7 +860,7 @@ def _play_matches(
         elif isinstance(message, Done):
             fail_checkpoints(message.loading_failures)
             record_report(message.report)
-            child.finish(message, stopping=stopping)
+            child.finish(message.error, stopping=stopping)
         else:
             raise TypeError(f"unexpected game message {type(message).__name__}")
 

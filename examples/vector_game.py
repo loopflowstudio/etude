@@ -24,9 +24,10 @@ def load(saved: CheckpointRef) -> ModelForward:
 
 
 async def play_many(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables | Exception]]:
+    capacity = min(4, matches.target_matches)
     slots: list[tuple[Match, Forward, int]] = []
     while True:
-        for match, agents in await matches.take(matches.target_slots - len(slots)):
+        for match, agents in await matches.take(capacity - len(slots)):
             slots.append((match, cast(Forward, agents[0]), 1 + match.seed % 3))
         if not slots:
             return

@@ -217,11 +217,13 @@ from etude.eval.records import Match
 from etude.eval.result import Tables
 from etude.jobs import Agents, EvalJob
 
+ENGINE_MAX_SLOTS = 128  # Size for the engine's arena memory budget.
+
 
 async def play_many(
     matches: MatchStream[Rules],
 ) -> AsyncIterator[tuple[Match[Rules], Tables | Exception]]:
-    pool = RolloutPool(slots=matches.target_slots)
+    pool = RolloutPool(slots=min(ENGINE_MAX_SLOTS, matches.target_matches))
     while True:
         for match, agents in await matches.take(pool.free):
             pool.load(match, agents)
@@ -250,12 +252,15 @@ job = EvalJob(
 Etude schedules the matches, caches checkpoints and stores each outcome as
 the generator yields it.
 
-- `matches.target_slots` suggests a pool size based on this process's initial
-  share of the tournament. Call `await matches.take(n)` with the number of free
-  slots to get up to `n` pending `(match, agents)` pairs. Etude shares pending
-  matches among empty processes and accounts for held matches when topping
-  up a process. An empty grant for `n > 0` means the tournament has no pending
-  matches or the run is stopping.
+- `matches.target_matches` suggests how many matches this process should hold
+  at once, from its initial share of the tournament, capped at `max_batch`
+  when a loader is declared. Size an engine with several games per match
+  accordingly.
+  Call `await matches.take(n)` with the number of free slots to get up to `n`
+  pending `(match, agents)` pairs. Etude shares pending matches among empty
+  processes and accounts for held matches when topping up a process. An empty
+  grant for `n > 0` means the tournament has no pending matches or the run is
+  stopping.
 - `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
   `rows=` for a pre-collated batch so the agent process never merges calls past
   `max_batch` rows and reports real row counts. A single pre-collated call
@@ -264,6 +269,9 @@ the generator yields it.
   object to batch calls for the same checkpoint. When Etude merges requests,
   the `ModelForward` returned by `load` can receive several pre-collated inputs
   in one list. Return one output per input, in the same order.
+- Grouped `play` and `play_many` tournaments using the same `Agents(load=...)`
+  share one agent process in shared inference, so their input elements must be
+  compatible with the same `ModelForward`.
 - Yield `(match, tables)` or `(match, Result(...))` with the match from `take` or
   a copy whose key identifies exactly one held match. Yield as each slot
   finishes so it can backfill without waiting for stragglers.
