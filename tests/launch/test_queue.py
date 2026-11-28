@@ -305,7 +305,7 @@ def test_queue_never_calls_provider(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("lost_reply", [False, True])
-def test_partial_launch_cleans_up_without_executable_work(
+def test_partial_launch_distinguishes_refusal_from_unknown_create(
     tmp_path: Path,
     lost_reply: bool,
 ) -> None:
@@ -326,12 +326,22 @@ def test_partial_launch_cleans_up_without_executable_work(
         return create(packet)
 
     b.service.create = second_fails  # type: ignore[method-assign]
-    ids = b.scheduler.launch(job().runs(1, 2), rent="l4")
-    assert b.scheduler.read(ids[0]).machine is not None
-    assert b.scheduler.read(ids[1]).phase == "queued"
-    assert b.store.sessions()[0].ended_at is None
+    runs = job().runs(1, 2)
+    if lost_reply:
+        with pytest.raises(LaunchError, match="create reply unknown"):
+            b.scheduler.launch(runs, rent="l4")
+        assert not b.store.runs()
+        confirmed, unknown = b.store.sessions()
+        assert confirmed.ended_at is not None
+        assert unknown.ended_at is None and unknown.refused_at is None
+        assert all(not session.work() for session in b.service.sessions.values())
+    else:
+        first, second = b.scheduler.launch(runs, rent="l4")
+        assert b.scheduler.read(first).machine is not None
+        assert b.scheduler.read(first).phase in {"setting_up", "running"}
+        assert b.scheduler.read(second).phase == "queued"
+        assert b.store.sessions()[0].ended_at is None
     assert calls == 2
-    assert b.scheduler.read(ids[0]).phase in {"setting_up", "running"}
 
 
 def test_launch_lock_fences_rivals_and_keeps_other_pools_working(tmp_path: Path) -> None:
