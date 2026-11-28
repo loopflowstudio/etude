@@ -207,6 +207,22 @@ def test_check_distinguishes_unchecked_input_syntax_and_local_recipes(
     assert json.loads(capsys.readouterr().out)["kind"] == "local_recipe"
 
 
+def test_check_and_launch_place_a_file_without_declarations_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = tmp_path / "notes.py"
+    file.write_text("x = 1\n")
+    fix = "  fix: def training_jobs():\n           return TrainingJob(...)\n"
+    assert main(["check", str(file)]) == 1
+    assert f"{file}:1: error: define training_jobs() or eval_jobs(state)\n{fix}" in (
+        capsys.readouterr().out
+    )
+    assert main(["launch", str(file), "--pool", "local"]) == 1
+    assert f"etude: {file}:1: define training_jobs() or eval_jobs(state)\n{fix}" in (
+        capsys.readouterr().err
+    )
+
+
 def test_check_reports_a_report_only_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

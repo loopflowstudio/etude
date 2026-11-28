@@ -31,7 +31,7 @@ from etude.controller.declarations import (
     read_training_jobs,
     select_runs,
 )
-from etude.errors import EtudeError, LauncherError
+from etude.errors import EtudeError, LauncherError, SourceLocation
 from etude.experiment import TrainingRuns, observe
 from etude.identity import run_address
 from etude.jobs import load_job_function
@@ -122,8 +122,9 @@ def train(
         )
     if definition.train is None:
         raise LauncherError(
-            f"{file.name}: define train(config) or training_jobs()",
+            "define train(config) or training_jobs()",
             fix="def train(config: Config) -> None:",
+            at=SourceLocation(file, 1),
         )
     return _train_each(
         [

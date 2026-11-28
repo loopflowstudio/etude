@@ -749,6 +749,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 said = f"{error.location}: {said}"
             print(f"etude: {sanitize(said)}", file=sys.stderr)
             if isinstance(error, (LauncherError, EtudeError)) and error.fix:
-                print(f"  fix: {sanitize(error.fix)}", file=sys.stderr)
+                fix = sanitize(error.fix).replace("\n", "\n       ")
+                print(f"  fix: {fix}", file=sys.stderr)
             return 1
         raise

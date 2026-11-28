@@ -276,7 +276,9 @@ def _show_text(checked: Check, given: Sequence[str]) -> None:
         where = SourceLocation(issue.file, issue.line)
         print(f"{where}: {issue.severity}: {issue.message}")
         if issue.fix:
-            print(f"  fix: {issue.fix}")
+            # Continuation lines align with the code after "  fix: ".
+            fix = issue.fix.replace("\n", "\n       ")
+            print(f"  fix: {fix}")
     if checked.eval_skipped:
         print("eval_jobs: not checked until training_jobs passes")
     if checked.issues:

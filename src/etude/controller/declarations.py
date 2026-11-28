@@ -17,7 +17,7 @@ from typing import cast
 import typer
 
 from etude.controller.diagnostics import declaration
-from etude.errors import EtudeError, LauncherError
+from etude.errors import EtudeError, LauncherError, SourceLocation
 from etude.experiment import observe
 from etude.experiment_file import execute_file, git_checkout
 from etude.identity import run_address
@@ -336,8 +336,9 @@ def require_jobs(experiment: Experiment) -> None:
     if experiment.training is None and experiment.eval is None:
         assert experiment.file is not None
         raise LauncherError(
-            f"{experiment.file.name}: define training_jobs() or eval_jobs(state)",
+            "define training_jobs() or eval_jobs(state)",
             fix="def training_jobs():\n    return TrainingJob(...)",
+            at=SourceLocation(experiment.file, 1),
         )
 
 
