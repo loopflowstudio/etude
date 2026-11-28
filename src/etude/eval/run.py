@@ -231,7 +231,7 @@ class EvalRun(Run):
         )
 
     def fail(self, scheduled: Match, error: BaseException) -> NoReturn:
-        raise self._record_failure((scheduled,), error) from error
+        raise self._record_failure((scheduled,), error)
 
     def _record_failure(
         self, scheduled: Sequence[Match], error: BaseException
@@ -247,11 +247,14 @@ class EvalRun(Run):
             self._stage_failure(match, detail, retry=retry)
         if scheduled:
             self._seal()
-        return (
+        failure: EtudeError | RetryRequested = (
             RetryRequested(sanitize(detail))
             if retry
             else EtudeError("match_failed", 500, detail=sanitize(detail))
         )
+        # The scheduler may hold this failure until in-flight outcomes are retained.
+        failure.__cause__ = error
+        return failure
 
     def store(
         self, scheduled: Match, outcome: Tables | Result, *, seconds: float | None = None

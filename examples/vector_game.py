@@ -5,7 +5,7 @@ from typing import cast
 
 from etude.checkpoints import CheckpointRef
 from etude.eval.agents import Forward, ForwardError, ModelForward
-from etude.eval.game import Matches
+from etude.eval.game import MatchStream
 from etude.eval.records import Match
 from etude.eval.result import Tables
 
@@ -20,7 +20,7 @@ def load(saved: CheckpointRef) -> ModelForward:
     return forward
 
 
-async def play_many(matches: Matches) -> AsyncIterator[tuple[Match, Tables | Exception]]:
+async def play_many(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables | Exception]]:
     slots: list[tuple[Match, Forward, int]] = []
     while True:
         for match, agents in await matches.take(4 - len(slots)):

@@ -40,7 +40,7 @@ from etude.eval.agents import (
     send_frame,
 )
 from etude.eval.batching import _Batches
-from etude.eval.game import GameReport, Matches
+from etude.eval.game import GameReport, MatchStream
 from etude.eval.loader import AgentLoader
 from etude.eval.match import environment
 from etude.eval.query import _kept_path, statsdb
@@ -1833,7 +1833,7 @@ def load_vector(checkpoint: CheckpointRef) -> ModelForward:
 
 
 async def vector_slots(
-    matches: Matches[VectorRules],
+    matches: MatchStream[VectorRules],
 ) -> AsyncIterator[tuple[Match[VectorRules], Result | Exception]]:
     active: list[tuple[Match[VectorRules], Forward, int]] = []
     while True:
@@ -1980,7 +1980,7 @@ def test_play_many_shares_one_agent_process_with_play(
         db.close()
 
 
-async def invalid_stream(matches: Matches[Config]) -> AsyncIterator[tuple[Match, Tables]]:
+async def invalid_stream(matches: MatchStream[Config]) -> AsyncIterator[tuple[Match, Tables]]:
     taken = await matches.take(2)
     match, agents = taken[0]
     outcome = match.config["outcome"]
@@ -2057,8 +2057,11 @@ def test_play_many_requires_one_async_generator_with_a_match_source(tmp_path: Pa
     ) as active:
         with pytest.raises(LauncherError, match="async def generator"):
             active.play_many(plain)  # type: ignore[arg-type]
-        with pytest.raises(LauncherError, match=r"Matches\[YourConfig\]"):
+        with pytest.raises(LauncherError, match=r"MatchStream\[YourConfig\]") as error:
             active.play_many(wrong_source)
+        assert error.value.fix == (
+            "async def play_many(matches: MatchStream[Rules]) -> AsyncIterator[tuple[Match, Tables]]:"
+        )
 
 
 def test_launched_group_recovers_both_tournaments_with_their_scores(
