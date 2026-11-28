@@ -159,7 +159,7 @@ class ExecutionPlan:
     """
 
     processes: int
-    games: int
+    max_batch: int
     inference: Inference
     cpus: int
     checkpoint_memory: int
@@ -167,6 +167,12 @@ class ExecutionPlan:
     @property
     def shared(self) -> bool:
         return self.inference in ("cuda", "metal")
+
+    @property
+    def games(self) -> int:
+        if self.inference in ("no loader", "no checkpoints"):
+            return 1
+        return math.ceil(self.max_batch / self.processes) if self.shared else self.max_batch
 
     @property
     def threads(self) -> int:
@@ -202,7 +208,7 @@ def plan_execution(
     """Choose shared or direct inference and size games, threads and checkpoint bytes.
 
     Shared inference leaves a core for the agent process when possible.
-    Async checkpoint games divide the batch allowance across game processes.
+    Direct inference gives each game process its own batch allowance.
     """
     if pending < 1:
         raise ValueError("an execution plan needs pending matches")
@@ -220,7 +226,7 @@ def plan_execution(
     return ExecutionPlan(
         inference=inference,
         processes=processes,
-        games=math.ceil(loader.max_batch / processes) if loading else 1,
+        max_batch=loader.max_batch,
         cpus=cpus,
         checkpoint_memory=held,
     )

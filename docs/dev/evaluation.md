@@ -140,19 +140,21 @@ with evaluating(
   functions or rule types binds each game process to one tournament while
   sharing one GPU agent process. Process count is bounded by pending matches,
   CPUs (leaving one core for the shared agent process when present) and memory.
-  For `play` with checkpoint inference, each process keeps up to
-  `ceil(max_batch / process_limit)` matches in flight. Code-only `play` uses one
-  match per process. Pending forwards flush on a zero-delay loop barrier.
+  For `play`, shared inference allows up to `ceil(max_batch / processes)`
+  matches per process, and direct checkpoint inference allows up to
+  `max_batch` per process. Code-only `play` uses one match per process.
+  Pending forwards flush on a zero-delay loop barrier.
   The inference thread and checkpoint budgets use the count of processes
-  started for the panel. For `play_many`, the startup line prints the initial
-  `target_matches` hints, capped at `max_batch` when a loader is declared.
+  started for the panel. The startup line gives the initial `target_matches`
+  for each play mode. With a loader, `play_many` hints are capped at `max_batch`.
   Both play modes request grants after loading and setting up the callback.
   Grants share unfinished matches across processes, accounting for matches
   already held and pending work for empty processes. A positive request
   receives at least one while grants are
   open and work remains. Per-process diagnostics are written to
   `game-{pid}.json`, and shared agent runs record batch row counts and stage
-  timings in `batches.json`. Direct game reports count rows in `local_rows`.
+  timings in `batches.json`. The agent closes the batch array on SIGTERM.
+  Direct game reports count rows in `local_rows`.
   `evaluating` has no setting for process count.
 - **Order.** Matches start in the order `etude.eval.schedule.ordered` gives,
   so consecutive matches reuse the checkpoints kept loaded: first those
@@ -214,14 +216,15 @@ with evaluating(
   `seat` and `group`, a seat or group the match lacks, a column named
   `player`, or a column whose type changes during a run is refused. A refused
   or raising match is recorded as failed with its error, nothing else of it
-  is stored. A raised `play` error or a return of the wrong type fails that
-  match alone. A refused table stops new grants for the tournament and
-  in-flight outcomes are retained. In `play_many`, yield
+  is stored. A raised `play` error fails that match alone. A refused table or
+  invalid outcome type fails its match, stops new grants for the tournament,
+  and lets held matches finish. In `play_many`, yield
   `(match, error)` to fail one slot and keep taking pending matches. A raised
   error or an unknown or duplicate yield fails every held match. Returning with
-  held matches unyielded fails each unyielded match. Errors loading or
+  held matches unyielded fails each unyielded match. Errors importing or
   setting up authored game code fail that tournament and leave ungranted
-  matches pending. Sibling tournaments continue. A game process that exits
+  matches pending. A loader import error fails its tournament in direct mode
+  and the group in shared mode. A game process that exits
   without reporting, a failed shared-agent connection or `RetryRequested`
   interrupts the group and leaves unfinished matches eligible for retry.
   A run with failed matches ends failed.

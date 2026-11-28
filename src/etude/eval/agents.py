@@ -21,7 +21,7 @@ from multiprocessing.connection import Connection, wait
 from multiprocessing.reduction import ForkingPickler
 from typing import TYPE_CHECKING, Protocol, cast
 
-from etude.errors import RetryRequested, explain
+from etude.errors import EtudeError, RetryRequested, explain
 from etude.eval.resources import ExecutionPlan, Resources, seconds_left
 
 __all__ = ("Forward", "ModelForward", "ForwardError")
@@ -341,24 +341,32 @@ def running_agents(
     try:
         ready = wait([parent, process.sentinel], timeout=seconds_left())
         if parent not in ready:
+            if ready:
+                raise RetryRequested("agent process exited during startup")
             raise RetryRequested("agent process failed to start before the deadline")
         try:
-            parent.recv()
+            startup_error: RuntimeError | RetryRequested | None = parent.recv()
         except EOFError as error:
             raise RetryRequested("agent process exited during startup") from error
+        if isinstance(startup_error, RetryRequested):
+            raise startup_error
+        if startup_error is not None:
+            raise EtudeError(
+                "agent_startup_failed", 500, detail=str(startup_error)
+            ) from startup_error
         yield agent
     finally:
         failed = sys.exc_info()[0] is not None
         if failed and process.is_alive():
             process.terminate()
-        if process.is_alive():
+        elif process.is_alive():
             try:
                 parent.send(None)
             except (OSError, EOFError):
                 pass
         process.join(timeout=seconds_left())
         if process.is_alive():
-            process.terminate()
+            process.kill()
             process.join()
         parent.close()
         exitcode = process.exitcode

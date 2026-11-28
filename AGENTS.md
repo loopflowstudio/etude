@@ -290,9 +290,10 @@ their library; each game process keeps one thread.
 and detected hardware, without a separate topology switch. Probe without
 importing the loader or its framework. The loader owns placement and GPU memory.
 Shared inference leaves a core for the agent process when possible. Pending
-matches and remaining host memory bound the process count. With `play`, checkpoint
-inference divides `max_batch` by the process limit and code-only games use one
-match per process. Budget inference threads and checkpoint memory using the
+matches and remaining host memory bound the process count. With `play`, shared
+inference divides `max_batch` by the process count, direct checkpoint inference
+gives each process up to `max_batch` matches, and code-only games use one match
+per process. Budget inference threads and checkpoint memory using the
 number of processes started. `play_many` requests work for its free slots.
 Empty processes share pending matches. Refills account for held matches and
 grant at least one while work remains.

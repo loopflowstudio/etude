@@ -190,12 +190,11 @@ uses one model-library thread, and gets a share of the checkpoint allowance
 input per row and return one ordered reply.
 
 Pending matches, CPUs and available host memory bound the game process count.
-For `play` with checkpoint inference, Etude divides `max_batch` by the process
-limit, rounding up, to set each process's match capacity. A small panel can
-fill that capacity with fewer processes. Shared inference leaves a core for
-the agent process when possible. The startup line shows process and thread
-counts, the inference mode and its reason, and the initial `target_matches`
-hint for `play_many`.
+With `play`, shared inference divides `max_batch` across game processes,
+rounding up. Direct checkpoint inference gives each process up to `max_batch`
+matches. Shared inference leaves a core for the agent process when possible.
+The startup line shows the process and thread counts, the inference mode and
+its reason, and the initial `target_matches` for each play mode.
 
 Choose tensor placement in `load` and honor Etude's thread environment there.
 Keep model imports in the loading module so shared game processes stay light.
@@ -278,8 +277,7 @@ the generator yields it.
   a copy whose key identifies exactly one held match. Yield as each slot
   finishes so it can backfill without waiting for stragglers.
 - Yield `(match, error)` for an ordinary game error and the remaining slots
-  can keep stepping and take pending matches. Refused tables stop new grants
-  for that tournament. An uncaught exception, an invalid match in a yield,
+  can keep stepping and take pending matches. An uncaught exception, an invalid match in a yield,
   or returning with held or pending matches fails the generator and its
   held matches. A transient infrastructure failure such as
   `RetryRequested` interrupts the group and retains unfinished matches for retry.
@@ -298,10 +296,13 @@ return {"scores": [{"seat": 0, "won": True}, {"seat": 1, "won": False}]}
 ```
 
 A successful match is reused across an experiment's tournaments in the same
-environment. An ordinary `play` error or a return of the wrong type fails that
-match and other matches keep playing. Errors loading or setting up authored
-game code fail its tournament while sibling tournaments continue. Completed
-results are retained, and matches that were never granted remain pending.
+environment. An ordinary `play` error fails its match and other matches keep
+playing. A refused table or an invalid outcome type in either play mode fails
+its match and stops grants for the tournament while held matches finish.
+Errors importing or setting up authored game code fail its tournament while
+sibling tournaments continue. A loader import error fails its tournament in
+direct mode and the group in shared mode. Completed results are retained,
+and matches that were never granted remain pending.
 Infrastructure failures retry, and ordinary failed matches require
 `--retry-failed`. A forward failure raises
 `ForwardError` (with `.checkpoint` naming the checkpoint key) at the awaiting

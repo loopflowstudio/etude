@@ -616,7 +616,7 @@ class Playing:
 
     def accept(self, match: Match, outcome: Outcome, started: float) -> None:
         if isinstance(outcome.result, BaseException):
-            self.fail_matches((match,), outcome.result)
+            self.fail_matches((match,), outcome.result, terminal=outcome.refused)
             return
         if match.key in self.run._failed:
             return
@@ -684,14 +684,14 @@ def _play_pending(plays: Sequence[Playing], resources: Resources, checkout: str 
     definition = plays[0].agent_loader
     if any(each.agent_loader != definition for each in plays):
         raise EtudeError("incompatible_eval_agents", 422)
-    has_checkpoints = definition.load is not None and any(
-        player_checkpoints(player)
+    checkpoint_tournaments = {
+        each.run.id
         for each in plays
-        for match in each.pending
-        for player in match.players
-    )
+        if definition.load is not None
+        and any(player_checkpoints(player) for match in each.pending for player in match.players)
+    }
     matches = sum(len(each.pending) for each in plays)
-    plan = plan_execution(matches, definition, checkpoints=has_checkpoints)
+    plan = plan_execution(matches, definition, checkpoints=bool(checkpoint_tournaments))
     initial = _reserve_games(plays, plan, ())
     if not initial:
         return
@@ -707,7 +707,7 @@ def _play_pending(plays: Sequence[Playing], resources: Resources, checkout: str 
             initial=initial,
             checkout=checkout,
             agent_process=process,
-            load=definition.load if has_checkpoints and not plan.shared else None,
+            direct_checkpoints=checkpoint_tournaments if not plan.shared else set(),
         )
         if process is not None:
             process.check()
@@ -739,7 +739,9 @@ def _reserve_games(
         for each in plays:
             key = id(each)
             limit = (
-                len(each.pending) if each.streaming else math.ceil(len(each.pending) / plan.games)
+                math.ceil(len(each.pending) / plan.games)
+                if plan.shared and not each.streaming
+                else len(each.pending)
             )
             if counts[key] >= limit:
                 continue
@@ -795,7 +797,7 @@ def _play_matches(
     initial: Sequence[_GameSlot],
     checkout: str | None,
     agent_process: AgentProcess | None,
-    load: Function | None,
+    direct_checkpoints: set[str],
 ) -> None:
     """Play tournament streams in spawned processes and retain outcomes on the invoking thread."""
     if any(each.run.should_stop for each in plays):
@@ -839,7 +841,7 @@ def _play_matches(
             agent_address=address,
             checkout=checkout,
             build=each.agent_loader.build,
-            load=load,
+            load=each.agent_loader.load if each.run.id in direct_checkpoints else None,
             memory=plan.checkpoint_bytes,
             max_batch=each.agent_loader.max_batch,
         )
@@ -952,22 +954,19 @@ def _play_matches(
 def _log_execution(
     plays: Sequence[Playing], plan: ExecutionPlan, initial: Sequence[_GameSlot]
 ) -> None:
-    streaming = any(each.streaming for each in plays)
     processes = plan.processes
     process_count = f"{processes} game {'process' if processes == 1 else 'processes'}"
-    game_count = f"{plan.games} {'game' if plan.games == 1 else 'games'} each"
-    capacity = f"up to {game_count}"
-    if streaming:
-        capacity = "slots requested by play_many"
-        targets = sorted({grant.target_matches for grant in initial if grant.playing.streaming})
+    capacities: list[str] = []
+    for streaming, name in ((False, "play"), (True, "play_many")):
+        targets = sorted(
+            {grant.target_matches for grant in initial if grant.playing.streaming == streaming}
+        )
         if targets:
             hint = str(targets[0]) if len(targets) == 1 else f"{targets[0]}–{targets[-1]}"
-            capacity += f" (initial target_matches={hint})"
-        if any(not each.streaming for each in plays):
-            capacity += f"; play holds up to {game_count}"
+            capacities.append(f"{name} (initial target_matches={hint})")
+    capacity = "; ".join(capacities)
     if plan.inference in ("no loader", "no checkpoints"):
-        if streaming:
-            print(f"etude: {process_count}, {capacity}", file=sys.stderr, flush=True)
+        print(f"etude: {process_count}, {capacity}", file=sys.stderr, flush=True)
         return
 
     tournaments = ", ".join(each.tournament for each in plays)

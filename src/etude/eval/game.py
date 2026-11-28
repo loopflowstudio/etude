@@ -101,6 +101,7 @@ class Outcome:
     result: Tables | Result | BaseException
     seconds: float
     loading_failures: tuple[ForwardError, ...] = ()
+    refused: bool = False
 
 
 @dataclass(frozen=True)
@@ -198,7 +199,14 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
 
 type Play = Callable[..., Awaitable[Tables | Result]]
 type PlayMany = Callable[..., AsyncIterator[tuple[Match, Tables | Result | Exception]]]
-type _Outcomes = AsyncGenerator[tuple[Match, Tables | Result | BaseException]]
+type _Outcomes = AsyncGenerator[tuple[Match, object]]
+
+
+@dataclass(frozen=True)
+class _PlayFailure:
+    """A raised play exception, distinct from an invalid return value."""
+
+    error: BaseException
 
 
 @lru_cache(maxsize=128)
@@ -369,10 +377,7 @@ async def _drive_play(
         errors: list[ForwardError] = []
         token = _match_errors.set(errors)
         try:
-            outcome = await play(match, agents)
-            if not isinstance(outcome, (Mapping, Result)):
-                raise TypeError("play must return tables or a Result")
-            return outcome
+            return await play(match, agents)
         finally:
             _match_errors.reset(token)
             if errors:
@@ -388,7 +393,7 @@ async def _drive_play(
             for task in [t for t in active if t in done]:
                 match = active.pop(task)
                 error = task.exception()
-                yield match, task.result() if error is None else error
+                yield match, task.result() if error is None else _PlayFailure(error)
     finally:
         for task in active:
             task.cancel()
@@ -435,18 +440,10 @@ async def _serve_stream(
             )
         )
         if (load := game.load) is not None:
-            # Process entry point: only CPU games import the local checkpoint owner.
+            # Process entry point: only direct checkpoint games import the local owner.
             from etude.eval.forwards import Forwards  # noqa: PLC0415
 
-            loaded_fn: Callable[..., object] | None = None
-
-            def load_checkpoint(checkpoint: CheckpointRef) -> object:
-                nonlocal loaded_fn
-                if loaded_fn is None:
-                    loaded_fn = load.load(game.checkout)
-                return loaded_fn(checkpoint)
-
-            local = Forwards(load_checkpoint, game.memory, game.max_batch)
+            local = Forwards(load.load(game.checkout), game.memory, game.max_batch)
             forwarder = _Forwarder(local, game.max_batch)
         elif game.agent_address is not None:
             client = await AgentClient.connect(game.agent_address)
@@ -468,13 +465,22 @@ async def _serve_stream(
             async for match, outcome in stream:
                 taken = source._release(match)
                 elapsed = time.monotonic() - taken.started
-                played_count += 1
-                if isinstance(outcome, BaseException):
-                    outcome = _portable_error(outcome)
-                elif not isinstance(outcome, (Result, Mapping)):
-                    raise TypeError("game outcomes must be tables, a Result or an exception")
+                result: Tables | Result | BaseException
+                refused = False
+                if isinstance(outcome, (Mapping, Result)):
+                    result = outcome
+                elif isinstance(outcome, _PlayFailure):
+                    result = _portable_error(outcome.error)
+                elif game.streaming and isinstance(outcome, BaseException):
+                    result = _portable_error(outcome)
+                else:
+                    result = TypeError(
+                        f"game outcomes must be tables or a Result, got {type(outcome).__name__}"
+                    )
+                    refused = True
+                played_count += not refused
                 failures = forwarder.drain_loading_failures() if forwarder else ()
-                pipe.send(Outcome(taken.scheduled_key, outcome, elapsed, failures))
+                pipe.send(Outcome(taken.scheduled_key, result, elapsed, failures, refused=refused))
     except Exception as error:
         stream_error = _portable_error(error)
     finally:

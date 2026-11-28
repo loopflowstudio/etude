@@ -8,6 +8,7 @@ records; game processes never import this module.
 from __future__ import annotations
 
 import selectors
+import signal
 import socket
 import sys
 import time
@@ -15,9 +16,11 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from pathlib import Path
-from typing import cast
+from types import FrameType
+from typing import NoReturn, cast
 
 from etude.call import Function
+from etude.errors import RetryRequested, explain
 from etude.eval.agents import (
     Answer,
     CheckpointRequest,
@@ -164,6 +167,10 @@ class _Batches:
         return observations
 
 
+def _terminate(signum: int, frame: FrameType | None) -> NoReturn:
+    raise SystemExit(128 + signum)
+
+
 def _run_agents(
     address: str,
     load: Function,
@@ -173,12 +180,23 @@ def _run_agents(
     control: Connection,
     artifacts: str,
 ) -> None:
-    batches = _Batches(load.load(checkout), max_batch, memory)
+    try:
+        loader = load.load(checkout)
+    except Exception as error:
+        detail = explain(error)
+        control.send(
+            RetryRequested(detail) if isinstance(error, RetryRequested) else RuntimeError(detail)
+        )
+        return
+
+    batches = _Batches(loader, max_batch, memory)
     peers: list[socket.socket] = []
     report = Path(artifacts, "batches.json").open("w")
     report.write("[")
+    report_end = report.tell()
     wait_seconds = 0.0
     try:
+        signal.signal(signal.SIGTERM, _terminate)
         with (
             socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener,
             selectors.DefaultSelector() as selector,
@@ -218,17 +236,20 @@ def _run_agents(
                 flushed = batches.flush(wait_seconds)
                 if flushed:
                     wait_seconds = 0.0
-                for batch in flushed:
-                    if report.tell() > 1:
-                        report.write(",")
-                    report.write(batch.model_dump_json())
-                if flushed:
-                    report.flush()
+                    report.write(
+                        ("," if report_end > 1 else "")
+                        + ",".join(batch.model_dump_json() for batch in flushed)
+                    )
+                    report_end = report.tell()
     finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        # A signal can interrupt an append. Close the array at its last complete flush.
+        report.seek(report_end)
+        report.write("]")
+        report.truncate()
+        report.close()
         for peer in peers:
             peer.close()
-        report.write("]")
-        report.close()
         print(
             f"etude: agents: stopped; {batches.loads} checkpoints loaded, {batches.rows} rows in {batches.batches} batches",
             file=sys.stderr,

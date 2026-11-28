@@ -8,8 +8,9 @@ import socket
 import subprocess
 import sys
 import tempfile
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import nullcontext
+from dataclasses import replace
 from decimal import Decimal
 from importlib import import_module
 from multiprocessing import active_children, get_context
@@ -620,13 +621,13 @@ def test_play_arity_and_removed_workers_are_refused(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("cpus", "pending", "agents", "memory_gb", "processes", "games"),
     [
-        (32, 64, True, None, 32, 1),
-        (16, 64, True, None, 16, 2),
-        (3, 20, True, None, 3, 11),
-        (2, 20, True, None, 2, 16),
+        (32, 64, True, None, 32, 32),
+        (16, 64, True, None, 16, 32),
+        (3, 20, True, None, 3, 32),
+        (2, 20, True, None, 2, 32),
         (8, 20, False, None, 8, 1),
-        (8, 20, True, None, 4, 8),
-        (8, 20, True, 1.5, 2, 16),
+        (8, 20, True, None, 4, 32),
+        (8, 20, True, 1.5, 2, 32),
         (8, 1, True, None, 1, 32),
         (1, 20, True, None, 1, 32),
         (1, 20, False, None, 1, 1),
@@ -666,8 +667,8 @@ def test_plan_execution_respects_cpu_pending_and_memory(
         (64, 8, None, True, "0", 3, 3),
         (64, 32, 15.5, True, "0", 2, 16),
         (64, 32, None, False, "0", 4, 1),
-        (64, 32, None, True, "", 4, 8),
-        (64, 32, None, True, "-1", 4, 8),
+        (64, 32, None, True, "", 4, 32),
+        (64, 32, None, True, "-1", 4, 32),
     ],
 )
 def test_gpu_games_fill_a_batch_with_pending_and_memory_bounds(
@@ -719,7 +720,7 @@ def test_a_failing_nvidia_driver_plays_direct(
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
     plan = plan_execution(64, Agents(load=load).plain(None), checkpoints=True)
-    assert (plan.inference, plan.processes, plan.games) == ("nvidia-smi failed", 4, 8)
+    assert (plan.inference, plan.processes, plan.games) == ("nvidia-smi failed", 4, 32)
 
 
 @pytest.mark.parametrize(
@@ -739,8 +740,8 @@ def test_a_failing_nvidia_driver_plays_direct(
         ("darwin", "arm64", 16, None, 8, 15, 1, 1, "metal"),
         ("darwin", "arm64", 1, None, 32, 1, 32, 1, "metal"),
         ("darwin", "arm64", 8, 15.5, 32, 2, 16, 6, "metal"),
-        ("darwin", "x86_64", 8, None, 32, 8, 4, 1, None),
-        ("linux", "arm64", 8, None, 32, 8, 4, 1, None),
+        ("darwin", "x86_64", 8, None, 32, 8, 32, 1, None),
+        ("linux", "arm64", 8, None, 32, 8, 32, 1, None),
     ],
 )
 def test_apple_silicon_plan_execution_bounds_games_by_cores_and_memory(
@@ -819,7 +820,7 @@ def test_probe_skipped_without_checkpoint_loading_or_accelerator(
         )
     loader = Agents(load=load, devices=("cpu",), max_batch=16).plain(None)
     cpu = plan_execution(8, loader, checkpoints=True)
-    assert (cpu.inference, cpu.processes, cpu.games, cpu.threads) == ("cpu-only loader", 8, 2, 1)
+    assert (cpu.inference, cpu.processes, cpu.games, cpu.threads) == ("cpu-only loader", 8, 16, 1)
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -847,13 +848,13 @@ def test_temporary_files_work_after_game_scratch_is_removed(
 
 
 @pytest.mark.parametrize(
-    ("device", "cpus", "memory_gb", "expected_processes", "expected_games"),
+    ("device", "cpus", "memory_gb", "expected_processes"),
     [
-        ("cuda", 1, None, 1, 32),
-        ("cuda", 4, None, 3, 11),
-        ("cuda", 4, 1.75, 1, 32),
-        ("cuda", 8, None, 3, 11),
-        ("metal", 3, None, 2, 16),
+        ("cuda", 1, None, 1),
+        ("cuda", 4, None, 3),
+        ("cuda", 4, 1.75, 1),
+        ("cuda", 8, None, 3),
+        ("metal", 3, None, 2),
     ],
 )
 def test_group_execution_respects_declared_agent_memory(
@@ -863,7 +864,6 @@ def test_group_execution_respects_declared_agent_memory(
     cpus: int,
     memory_gb: float | None,
     expected_processes: int,
-    expected_games: int,
     device: Accelerator,
 ) -> None:
     monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: device)
@@ -888,7 +888,7 @@ def test_group_execution_respects_declared_agent_memory(
     assert (
         f"shared inference for one, two, three ({device}); "
         f"{expected_processes} game {'process' if expected_processes == 1 else 'processes'}, "
-        f"up to {expected_games} {'game' if expected_games == 1 else 'games'} each; "
+        "play (initial target_matches=1); "
         f"{expected_threads} inference {'thread' if expected_threads == 1 else 'threads'}"
         in capfd.readouterr().err
     )
@@ -968,7 +968,8 @@ def test_agent_devices_control_grouping_and_execution(
     ] == [1, 1]
     assert (
         "etude: agents: direct inference for tuned, tuned_peer (cpu-only loader); "
-        "2 game processes, up to 16 games each; 1 inference thread each" in capfd.readouterr().err
+        "2 game processes, play (initial target_matches=1); 1 inference thread each"
+        in capfd.readouterr().err
     )
     assert not (direct_dir / "grouped/artifacts/agents/batches.json").exists()
 
@@ -1352,6 +1353,35 @@ def test_sigterm_reaps_agents_and_games_and_records_retry(tmp_path: Path) -> Non
     assert {p.pid for p in active_children()} <= before
     found = played(active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path)
     assert len(found.new) == len(found.retry) == len(found.failed) == 1
+    assert isinstance(
+        json.loads((tmp_path / "grouped/artifacts/agents/batches.json").read_text()), list
+    )
+
+
+def terminate_on_second_forward(checkpoint: CheckpointRef) -> ModelForward:
+    def forward(inputs: list[object]) -> list[object]:
+        if inputs == [1]:
+            os.kill(os.getpid(), signal.SIGTERM)
+        return inputs
+
+    return forward
+
+
+def test_agent_sigterm_keeps_completed_batches_in_valid_json(tmp_path: Path) -> None:
+    panel = [Match(players=(checkpoint("one"),), config={"rounds": 2})]
+    with (
+        pytest.raises(RetryRequested, match="agent process"),
+        evaluating(
+            environment("signal"),
+            experiment="signal",
+            matches=panel,
+            run="term",
+            directory=tmp_path,
+        ) as active,
+    ):
+        active.play(multi_round_play, agents=Agents(load=terminate_on_second_forward))
+    batches = json.loads((tmp_path / "signal/term/artifacts/agents/batches.json").read_text())
+    assert [batch["rows"] for batch in batches] == [1]
 
 
 def test_a_failed_load_is_not_attempted_again_in_the_run() -> None:
@@ -1553,46 +1583,80 @@ hold_group(EvalGroup(evaluations=tuple(evaluation_group(job.lower(ExperimentStat
         assert "move the import to load's module" in result.stderr
 
 
-@pytest.mark.parametrize("grouped", [False, True], ids=["standalone", "group"])
-def test_agent_startup_failure_reports_retryable_matches(
+def build_loader_fixture(player: object, leaves: Mapping[str, Forward]) -> object:
+    return player if isinstance(player, Code) else next(iter(leaves.values()))
+
+
+@pytest.mark.parametrize(
+    ("shared_agents", "mode"),
+    [(False, "error"), (True, "error"), (True, "retry"), (True, "exit")],
+    indirect=["shared_agents"],
+)
+def test_loader_import_failure_preserves_pending_matches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capfd: pytest.CaptureFixture[str],
-    grouped: bool,
+    mode: str,
+    request: pytest.FixtureRequest,
 ) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
     monkeypatch.setenv("ETUDE_FIXTURE_TOKEN", "synthetic-fixture-credential")
-    module = f"bad_agent_import_fixture_{'group' if grouped else 'standalone'}"
+    shared = request.node.callspec.params["shared_agents"]
+    module = f"bad_agent_import_fixture_{shared}_{mode}"
+    failure = {
+        "error": "raise RuntimeError('fixture loader import: ' + os.environ['ETUDE_FIXTURE_TOKEN'])",
+        "retry": "raise RetryRequested('fixture loader import')",
+        "exit": "os._exit(3)",
+    }[mode]
     (tmp_path / f"{module}.py").write_text(
         "import os\n"
         "from multiprocessing import parent_process\n"
         "from etude.checkpoints import CheckpointRef\n"
+        "from etude.errors import RetryRequested\n"
         "from etude.eval.agents import ModelForward\n"
         "if parent_process() is not None:\n"
-        "    raise RuntimeError('startup: ' + os.environ['ETUDE_FIXTURE_TOKEN'])\n"
+        f"    {failure}\n"
         "def load(checkpoint: CheckpointRef) -> ModelForward:\n"
         "    raise AssertionError('the agent should fail before loading')\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    agents = Agents(load=import_module(module).load)
+    agents = Agents(load=import_module(module).load, build=build_loader_fixture)
     selected = job("startup", agents)
-    with pytest.raises(RetryRequested, match="startup"):
-        if grouped:
-            hold_group(group(selected), directory=tmp_path)
-        else:
-            with evaluating(
-                selected.tournament, experiment="grouped", enter=selected.enter, directory=tmp_path
-            ) as active:
-                active.play(play, agents=agents)
-    log = capfd.readouterr().err
-    assert "[redacted]" in log and "synthetic-fixture-credential" not in log
-    assert json.loads((outputs / "etude-result.json").read_text())["tally"]["failed"] == 1
+    jobs = [selected]
+    if not shared:
+        jobs.append(
+            EvalJob(
+                tournament=tournament("code-only"),
+                enter=(Code(name="one"), Code(name="two")),
+                play=plain,
+                agents=agents,
+                max_hours=0.1,
+            )
+        )
+    retry = mode != "error"
+    with pytest.raises(
+        RetryRequested if retry else EtudeError,
+        match="during startup" if mode == "exit" else "fixture loader import",
+    ) as caught:
+        hold_group(group(*jobs), directory=tmp_path)
+    if not retry:
+        assert "fixture loader import: [redacted]" in str(caught.value)
+        if shared:
+            assert str(caught.value.__cause__).startswith("RuntimeError: fixture loader import")
+    assert json.loads((outputs / "etude-result.json").read_text())["tally"]["failed"] == int(retry)
     found = played(
         selected.tournament, experiment="grouped", enter=selected.enter, directory=tmp_path
     )
-    assert len(found.new) == len(found.retry) == len(found.failed) == 1
+    assert len(found.new) == 1
+    assert len(found.retry) == len(found.failed) == int(retry)
+    if not shared:
+        sibling = jobs[1]
+        kept = played(
+            sibling.tournament, experiment="grouped", enter=sibling.enter, directory=tmp_path
+        )
+        assert len(kept.delivered) == 1 and not kept.failed
+    assert hold_group(group(job("startup", Agents(load=load))), directory=tmp_path)[0].played == 1
 
 
 @pytest.mark.parametrize("streaming", [False, True], ids=["play", "play_many"])
@@ -1958,9 +2022,9 @@ def test_inference_budgets_follow_started_processes(
     request: pytest.FixtureRequest,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 8)
-    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 4 * 1024**3)
     shared = request.node.callspec.params["shared_agents"]
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 8 if shared else 2)
+    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 4 * 1024**3)
     player = checkpoint("one")
     if not shared:
         # Charge a 512 MiB checkpoint without allocating memory or reading any bytes.
@@ -1981,12 +2045,57 @@ def test_inference_budgets_follow_started_processes(
     assert len(reports) == 2
     assert sum(report.matches for report in reports) == 6
     log = capfd.readouterr().err
-    assert "2 game processes, up to 4 games each" in log
+    assert "2 game processes, play (initial target_matches=3)" in log
     if shared:
         assert "6 inference threads" in log
         assert set(json.loads((artifacts / "threads.json").read_text()).values()) == {"6"}
     else:
         assert [r.local_loads for r in reports] == [int(r.matches > 0) for r in reports]
+
+
+def test_direct_play_reserves_all_32_cores_with_eight_matches_each(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 32)
+    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 16 * 1024**3)
+    panel = [Match(players=(checkpoint("one"),), index=i) for i in range(256)]
+    with evaluating(
+        environment("sizing"), experiment="sizing", matches=panel, run="cpu", directory=tmp_path
+    ) as active:
+        loader = Agents(load=load, devices=("cpu",)).plain(None)
+        playing = Playing(active, Function(module=__name__, name=play.__name__), "cpu", loader)
+        plan = plan_execution(len(panel), loader, checkpoints=True)
+        assert [slot.target_matches for slot in _reserve_games([playing], plan, [])] == [8] * 32
+    shared = plan_execution(len(panel), Agents(load=load).plain(None), checkpoints=True)
+    assert (shared.games, replace(shared, processes=2).games) == (2, 16)
+
+
+def test_direct_play_batches_eight_rows_per_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 2)
+    agents = Agents(load=load, devices=("cpu",))
+    selected = group(
+        *(
+            EvalJob(
+                tournament=RoundRobin(
+                    name=name,
+                    environment=environment("grouped"),
+                    configs=tuple({"rounds": 1, "slot": slot} for slot in range(8)),
+                    games=1,
+                ),
+                enter=(checkpoint("left"), checkpoint("right")),
+                play=multi_round_play,
+                agents=agents,
+                repo=None,
+                max_hours=0.1,
+            )
+            for name in ("first", "second")
+        )
+    )
+    assert [result.played for result in hold_group(selected, directory=tmp_path)] == [8, 8]
+    reports = _game_reports(tmp_path / "grouped/artifacts/agents")
+    assert [(r.matches, r.local_rows, r.local_forward_calls) for r in reports] == [(8, 8, 1)] * 2
 
 
 @pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
@@ -2455,19 +2564,37 @@ async def checked_result(match: Match[Config], agents: Sequence[object]) -> Tabl
         return {}
     if outcome == "return":
         return cast(Tables, ["invalid return"])
+    if outcome == "return-exception":
+        return cast(Tables, ValueError("returned exception"))
     return await plain(match, list(agents))
 
 
-def test_play_invalid_return_fails_only_that_match(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def checked_pair(
+    matches: MatchStream[Config],
+) -> AsyncIterator[tuple[Match, Tables | Exception]]:
+    while taken := await matches.take(2):
+        for match, agents in taken:
+            yield match, await checked_result(match, agents)
+
+
+@pytest.mark.parametrize(
+    ("streaming", "invalid", "kind"),
+    [
+        (False, "return", "list"),
+        (True, "return", "list"),
+        (False, "return-exception", "ValueError"),
+    ],
+)
+def test_invalid_outcome_fails_one_match_stops_grants_and_retains_held_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, streaming: bool, invalid: str, kind: str
 ) -> None:
     monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
     panel = [
         Match(players=(checkpoint("one"),), config={"outcome": outcome}, index=i)
-        for i, outcome in enumerate(("return", "in-flight", "pending"))
+        for i, outcome in enumerate((invalid, "in-flight", "pending"))
     ]
     with (
-        pytest.raises(EtudeError, match="play must return tables or a Result"),
+        pytest.raises(EtudeError, match=f"game outcomes must be tables or a Result, got {kind}"),
         evaluating(
             environment("invalid_return"),
             experiment="invalid_return",
@@ -2476,20 +2603,24 @@ def test_play_invalid_return_fails_only_that_match(
             directory=tmp_path,
         ) as active,
     ):
-        active.play(checked_result, agents=Agents(load=echo, devices=("cpu",), max_batch=2))
+        agents = Agents(load=echo, devices=("cpu",), max_batch=2)
+        if streaming:
+            active.play_many(checked_pair, agents=agents)
+        else:
+            active.play(checked_result, agents=agents)
     db = statsdb("invalid_return", tmp_path)
     try:
         assert set(db.sql("select match, state, retry from matches").fetchall()) == {
             (panel[0].key, "failed", False),
             (panel[1].key, "done", False),
-            (panel[2].key, "done", False),
         }
         assert set(db.sql("select match from scores").fetchall()) == {
             (panel[1].key,),
-            (panel[2].key,),
         }
     finally:
         db.close()
+    reports = _game_reports(tmp_path / "invalid_return/policy/artifacts/agents")
+    assert [report.matches for report in reports] == [1]
 
 
 async def checked_stream(
