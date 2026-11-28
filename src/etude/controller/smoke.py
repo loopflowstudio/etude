@@ -36,7 +36,7 @@ from etude.controller.declarations import (
     read_training_jobs,
     require_training_options,
 )
-from etude.controller.diagnostics import declaration
+from etude.controller.diagnostics import causes, declaration
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Benchmark, RoundRobin
 from etude.eval.tournament import played
@@ -267,8 +267,10 @@ def _try_step[T](step: Step, name: str, work: Callable[[], T]) -> T:
         # Name the first error, not a wrapper such as eval's `match_failed`.
         first: BaseException = error
         # ProcessPoolExecutor attaches traceback transport metadata below the real error.
-        while first.__cause__ is not None and not isinstance(first.__cause__, _RemoteTraceback):
-            first = first.__cause__
+        for cause in causes(error):
+            if isinstance(cause, _RemoteTraceback):
+                break
+            first = cause
         raise LauncherError(
             f"smoke {step}{'' if name == step else ' ' + name}: failed after"
             f" {time.monotonic() - started:.1f} s ({type(first).__name__}: {first});"

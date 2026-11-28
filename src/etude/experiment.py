@@ -51,6 +51,11 @@ def observe(
     )
 
 
+def stored_state(listing: RunListing, experiment: str) -> jobs.ExperimentState:
+    """Read training records for an offline check, excluding launcher standings."""
+    return state_of(read_all(listing, experiment, metrics=frozenset()), experiment, retained=())
+
+
 def read_tournament_lines(
     listing: RunListing,
     state: jobs.ExperimentState,
@@ -61,11 +66,7 @@ def read_tournament_lines(
     """Read the lines reachable by these tournaments, sharing one source discovery."""
     found = list(state.lines)
     for name in sorted(find_line_experiments(tournaments) - {state.experiment}):
-        outside = (
-            observe(listing, name)
-            if include_standing
-            else state_of(read_all(listing, name, metrics=frozenset()), name, retained=())
-        )
+        outside = observe(listing, name) if include_standing else stored_state(listing, name)
         found.extend(line.seen_from(state.experiment) for line in outside.lines)
     return tuple(found)
 

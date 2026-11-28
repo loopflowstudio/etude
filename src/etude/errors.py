@@ -16,13 +16,12 @@ class SourceLocation(NamedTuple):
     file: Path
     line: int
 
-
-def format_location(location: SourceLocation) -> str:
-    path = location.file.resolve()
-    cwd = Path.cwd()
-    if path.is_relative_to(cwd):
-        path = path.relative_to(cwd)
-    return f"{path}:{location.line}"
+    def __str__(self) -> str:
+        path = self.file.resolve()
+        cwd = Path.cwd()
+        if path.is_relative_to(cwd):
+            path = path.relative_to(cwd)
+        return f"{path}:{self.line}"
 
 
 def function_location(function: Callable[..., object]) -> SourceLocation | None:

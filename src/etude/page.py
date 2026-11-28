@@ -590,7 +590,12 @@ class Pages:
 
     def build(self, file: Path | Experiment | None, *, experiment: str | None = None) -> Page:
         """`build`'s page, kept from the last call while its inputs are the same."""
-        return self._build(file, self._listings(), experiment)
+        runs = self._listings()
+        if isinstance(file, Experiment):
+            # Smoke has already executed the file for this pass.
+            sources = _source_versions(file.file, ())
+            return _build_page(file.name, _ReportFile(file.file, sources, file), runs).page
+        return self._build(file, runs, experiment)
 
     def build_each(self, directory: Path) -> dict[Path, Page | str]:
         """Each experiment file's page, or why it could not be built, so one never hides the rest."""
@@ -613,26 +618,20 @@ class Pages:
             self._local_declarations,
         )
 
-    def _build(
-        self, file: Path | Experiment | None, runs: _ReportRuns, experiment: str | None = None
-    ) -> Page:
-        definition = file if isinstance(file, Experiment) else None
-        path = file.file if isinstance(file, Experiment) else file
-        name = _experiment_name(path, definition.name if definition else experiment)
-        key = (path, name)
+    def _build(self, file: Path | None, runs: _ReportRuns, experiment: str | None = None) -> Page:
+        name = _experiment_name(file, experiment)
+        key = (file, name)
         kept = self._built.get(key)
-        sources = _source_versions(path, kept.sources if kept else ())
+        sources = _source_versions(file, kept.sources if kept else ())
         if (
-            definition is None
-            and kept is not None
+            kept is not None
             and kept.sources == sources
             and kept.versions == runs.source.versions_for(kept.experiments)
             and (kept.local_versions is None or kept.local_versions == runs.local_versions(name))
         ):
             return kept.page
-        built = _build_page(name, _ReportFile(path, sources, definition), runs)
-        if definition is None:
-            self._built[key] = built
+        built = _build_page(name, _ReportFile(file, sources), runs)
+        self._built[key] = built
         return built.page
 
 

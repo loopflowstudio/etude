@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import shlex
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from contextlib import nullcontext, redirect_stdout
 from decimal import Decimal
 from pathlib import Path
@@ -20,6 +20,7 @@ from pydantic import computed_field
 
 from etude.call import changed_config, config_type
 from etude.controller.declarations import (
+    EvalFunction,
     asked,
     declared_report,
     read_experiment,
@@ -30,24 +31,22 @@ from etude.controller.declarations import (
     with_queued_runs,
 )
 from etude.controller.diagnostics import Issue, declaration
-from etude.controller.game_imports import GameImport, check_game_imports
+from etude.controller.game_imports import check_game_imports
 from etude.controller.import_probe import ImportProbe
 from etude.errors import (
     EtudeError,
     LauncherError,
     SourceLocation,
-    format_location,
     function_location,
 )
 from etude.eval.records import RoundRobin
 from etude.eval.tournament import StoredRuns, played
-from etude.experiment import TrainingRuns, read_tournament_lines, state_of
+from etude.experiment import TrainingRuns, read_tournament_lines, stored_state
 from etude.jobs import Evaluation, ExperimentState, evaluation_group
 from etude.records import Record
 from etude.run import RunListing
 from etude.spec import Job
 from etude.storage import DirectoryStorage
-from etude.train.read import read_all
 
 
 class PlannedRun(Record):
@@ -95,7 +94,7 @@ def check_file(
     try:
         definition = read_experiment(file, experiment=name)
         require_training_options(given, definition)
-        if all(each is None for each in (definition.train, definition.report)):
+        if definition.train is None and definition.report is None:
             require_jobs(definition)
     except (EtudeError, LauncherError) as error:
         return Check(
@@ -106,11 +105,7 @@ def check_file(
     training: list[PlannedRun] = []
     evals: list[PlannedTournament] = []
     listing = RunListing.read(DirectoryStorage(source)) if source is not None else None
-    state = (
-        ExperimentState(experiment=name)
-        if listing is None
-        else state_of(read_all(listing, name, metrics=frozenset()), name, retained=())
-    )
+    state = ExperimentState(experiment=name) if listing is None else stored_state(listing, name)
     recipe = definition.train
     kind: Literal["experiment", "local_recipe", "report_only"] = "experiment"
     if definition.training is None and definition.eval is None:
@@ -145,52 +140,14 @@ def check_file(
     except (EtudeError, LauncherError) as error:
         issues.append(Issue.from_error(error, file))
 
-    games: list[GameImport] = []
+    probes: list[ImportProbe] = []
     eval_skipped = False
     if (evaluate := definition.eval) is not None:
         try:
-            with declaration(file, evaluate):
-                jobs = asked(evaluate, state)
-            stored = StoredRuns.read(name, listing) if jobs and listing is not None else None
-            with declaration(file, evaluate):
-                lines = (
-                    state.lines
-                    if listing is None
-                    else read_tournament_lines(
-                        listing, state, (job.recorded() for job in jobs), include_standing=False
-                    )
-                )
-                for job in jobs:
-                    matches = None
-                    if stored is not None:
-                        recorded = job.recorded()
-                        matches = played(
-                            job.tournament,
-                            experiment=name,
-                            checkpoints=recorded.checkpoints,
-                            enter=recorded.entrants,
-                            lines=lines,
-                            runs=stored,
-                        ).new
-                    lowered = job.lower(state, matches, lines)
-                    require_checkout(lowered, evaluate)
-                    (spec,) = evaluation_group(lowered).evaluations
-                    evals.append(_plan_tournament(lowered, spec))
-                    if spec.agents.load is not None and spec.agents.devices != ("cpu",):
-                        function = job.play or job.play_many
-                        assert function is not None  # A lowered job has one game function.
-                        games.append(
-                            GameImport(
-                                probe=ImportProbe(
-                                    checkout=Path(lowered.repo)
-                                    if lowered.repo
-                                    else file.resolve().parent,
-                                    play=spec.play,
-                                    build=spec.agents.build,
-                                ),
-                                location=function_location(function) or SourceLocation(file, 1),
-                            )
-                        )
+            for tournament, probe in _plan_evaluations(file, evaluate, state, listing):
+                evals.append(tournament)
+                if probe is not None:
+                    probes.append(probe)
         except EtudeError as error:
             if (
                 definition.training is not None
@@ -206,7 +163,7 @@ def check_file(
         declared_report(definition)
     except (EtudeError, LauncherError) as error:
         issues.append(Issue.from_error(error, file))
-    for issue in check_game_imports(games):
+    for issue in check_game_imports(probes):
         if issue not in issues:
             issues.append(issue)
     return Check(
@@ -219,6 +176,51 @@ def check_file(
         kind=kind,
         eval_skipped=eval_skipped,
     )
+
+
+def _plan_evaluations(
+    file: Path, evaluate: EvalFunction, state: ExperimentState, listing: RunListing | None
+) -> Iterator[tuple[PlannedTournament, ImportProbe | None]]:
+    """Yield each valid schedule even if a later tournament fails to lower."""
+    with declaration(file, evaluate):
+        jobs = asked(evaluate, state)
+    if not jobs:
+        return
+    stored = StoredRuns.read(state.experiment, listing) if listing is not None else None
+    with declaration(file, evaluate):
+        lines = (
+            state.lines
+            if listing is None
+            else read_tournament_lines(
+                listing, state, (job.recorded() for job in jobs), include_standing=False
+            )
+        )
+        for job in jobs:
+            matches = None
+            if stored is not None:
+                recorded = job.recorded()
+                matches = played(
+                    recorded.tournament,
+                    experiment=state.experiment,
+                    checkpoints=recorded.checkpoints,
+                    enter=recorded.entrants,
+                    lines=lines,
+                    runs=stored,
+                ).new
+            lowered = job.lower(state, matches, lines)
+            require_checkout(lowered, evaluate)
+            (spec,) = evaluation_group(lowered).evaluations
+            probe = None
+            if spec.agents.load is not None and spec.agents.devices != ("cpu",):
+                game = job.play or job.play_many
+                assert game is not None  # A lowered job has one game function.
+                probe = ImportProbe(
+                    checkout=Path(lowered.repo) if lowered.repo else file.resolve().parent,
+                    play=spec.play,
+                    build=spec.agents.build,
+                    location=function_location(game) or SourceLocation(file, 1),
+                )
+            yield _plan_tournament(lowered, spec), probe
 
 
 def _plan_tournament(job: Job, spec: Evaluation) -> PlannedTournament:
@@ -271,7 +273,7 @@ def show_check(
 def _show_text(checked: Check, given: Sequence[str]) -> None:
     file = checked.file
     for issue in checked.issues:
-        where = format_location(SourceLocation(issue.file, issue.line))
+        where = SourceLocation(issue.file, issue.line)
         print(f"{where}: {issue.severity}: {issue.message}")
         if issue.fix:
             print(f"  fix: {issue.fix}")

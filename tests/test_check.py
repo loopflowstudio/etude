@@ -375,7 +375,9 @@ def test_check_and_smoke_point_into_the_experiments_checkout(
     modules.mkdir()
     monkeypatch.syspath_prepend(str(modules))
     (modules / "check_remote_declaration.py").write_text(
-        "def raise_game_error():\n    raise RuntimeError('bad game settings')\n"
+        "def raise_game_error():\n"
+        "    error = RuntimeError('bad game settings')\n"
+        "    raise error from error\n"
     )
     file = tmp_path / "experiments" / "exp.py"
     file.write_text(
@@ -384,12 +386,12 @@ def test_check_and_smoke_point_into_the_experiments_checkout(
     )
     assert main(["check", str(file)]) == 1
     assert (
-        "src/check_remote_declaration.py:2: error: RuntimeError: bad game settings"
+        "src/check_remote_declaration.py:3: error: RuntimeError: bad game settings"
         in capsys.readouterr().out
     )
     assert main(["smoke", str(file), "--step", "eval", "--source", str(tmp_path / "runs")]) == 1
     error = capsys.readouterr().err
-    assert error.startswith("etude: src/check_remote_declaration.py:2: smoke eval: failed")
+    assert error.startswith("etude: src/check_remote_declaration.py:3: smoke eval: failed")
     assert "(RuntimeError: bad game settings)" in error
 
 

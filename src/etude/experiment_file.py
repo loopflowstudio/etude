@@ -16,7 +16,7 @@ from pathlib import Path
 from etude.errors import LauncherError, SourceLocation
 
 # What makes a Python file an experiment's: a top-level training_jobs(), eval_jobs(state) or report().
-EXPERIMENT_FUNCTIONS = ("training_jobs", "eval_jobs", "report")
+EXPERIMENT_FUNCTIONS = {"training_jobs", "eval_jobs", "report"}
 
 
 def experiment_named(path: Path) -> str | None:
@@ -25,7 +25,7 @@ def experiment_named(path: Path) -> str | None:
     Recognised by its text, without running it; a file that does not parse is no experiment.
     """
     try:
-        return path.stem if _functions(path).keys() & set(EXPERIMENT_FUNCTIONS) else None
+        return path.stem if _functions(path).keys() & EXPERIMENT_FUNCTIONS else None
     except SyntaxError:
         return None
 
@@ -51,8 +51,8 @@ def _functions(path: Path) -> dict[str, int]:
 RENAMED = {"runs": "training_jobs", "training_runs": "training_jobs", "eval": "eval_jobs"}
 
 
-def refuse_renamed(path: Path) -> None:
-    """Refuse retired declaration spellings before executing an experiment file."""
+def execute_file(path: Path) -> dict[str, object]:
+    """Check for retired declarations, then execute the file with its siblings importable."""
     defined = _functions(path)
     for old, new in RENAMED.items():
         if old in defined:
@@ -63,9 +63,6 @@ def refuse_renamed(path: Path) -> None:
                 at=SourceLocation(path, defined[old]),
             )
 
-
-def execute_file(path: Path) -> dict[str, object]:
-    """Execute current source with its sibling modules available for import."""
     path = path.resolve()
     folder = str(path.parent)
     if folder not in sys.path:

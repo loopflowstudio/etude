@@ -25,23 +25,25 @@ class Issue(Record):
     fix: str | None = None
 
     @classmethod
-    def from_error(cls, error: EtudeError | LauncherError, file: Path) -> Self:
-        location = locate(error, file)
+    def from_error(cls, error: Exception | SystemExit, file: Path) -> Self:
+        diagnosed = _declaration_error(error, file)
+        location = diagnosed.location
+        assert location is not None
         return cls(
             file=location.file,
             line=location.line,
-            message=sanitize(str(error)),
-            fix=sanitize(error.fix) if error.fix else None,
+            message=sanitize(str(diagnosed)),
+            fix=sanitize(diagnosed.fix) if diagnosed.fix else None,
         )
 
 
-def declaration_error(
+def _declaration_error(
     error: Exception | SystemExit, path: Path, function: Callable[..., object] | None = None
 ) -> EtudeError | LauncherError:
     """Describe an authored failure while keeping fixes and explicit locations."""
-    location = locate(error, path, function)
     if isinstance(error, (LauncherError, EtudeError)):
-        error.location = location
+        if error.location is None:
+            error.location = _locate(error, path, function)
         return error
     if isinstance(error, ValidationError):
         message = validation_message(error)
@@ -55,15 +57,15 @@ def declaration_error(
         if isinstance(error, TypeError) and str(error).startswith("BaseModel.__init__()")
         else None
     )
-    return LauncherError(message, fix=fix, at=location)
+    return LauncherError(message, fix=fix, at=_locate(error, path, function))
 
 
-def locate(
+def _locate(
     error: BaseException, path: Path, function: Callable[..., object] | None = None
 ) -> SourceLocation:
     """Use the explicit location, the deepest authored frame, or the declaration's def."""
-    causes = tuple(_causes(error))
-    for cause in causes:
+    chain = tuple(causes(error))
+    for cause in chain:
         if isinstance(cause, (LauncherError, EtudeError)) and cause.location is not None:
             return cause.location
         if isinstance(cause, SyntaxError) and cause.filename and cause.lineno:
@@ -71,7 +73,7 @@ def locate(
     base = path.resolve()
     directory = base if base.is_dir() else git_checkout(base.parent) or base.parent
     dependencies = (_PACKAGE, Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve())
-    for cause in reversed(causes):
+    for cause in reversed(chain):
         for frame in reversed(traceback.extract_tb(cause.__traceback__)):
             if frame.lineno is not None and not frame.filename.startswith("<"):
                 file = Path(frame.filename).resolve()
@@ -91,12 +93,14 @@ def locate(
 _PACKAGE = Path(__file__).resolve().parents[1]
 
 
-def _causes(error: BaseException) -> Iterator[BaseException]:
-    while True:
-        yield error
-        if error.__cause__ is None:
-            return
-        error = error.__cause__
+def causes(error: BaseException) -> Iterator[BaseException]:
+    """Follow explicit causes once each, including when an author raises an error from itself."""
+    seen: set[int] = set()
+    cause: BaseException | None = error
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        yield cause
+        cause = cause.__cause__
 
 
 @contextmanager
@@ -105,7 +109,7 @@ def declaration(path: Path, function: Callable[..., object] | None = None) -> It
     try:
         yield
     except (Exception, SystemExit) as error:
-        diagnosed = declaration_error(error, path, function)
+        diagnosed = _declaration_error(error, path, function)
         if diagnosed is error:
             raise
         raise diagnosed from error

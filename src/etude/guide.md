@@ -26,10 +26,9 @@ uv run etude eval experiment.py
 uv run etude report experiment.py --open
 ```
 
-- `etude check` runs offline (no bucket, database, git or SSH). It validates
-  declarations with the runtime's own rules and prints the planned runs and
-  matches, or the file, line and fix for each problem. Pass `--source DIR`
-  to count remaining work from local runs and match results.
+- `etude check` executes the declarations locally and prints planned runs
+  and matches. Errors name the source line and include a fix when available.
+  Pass `--source DIR` to count remaining work from local results.
 - `etude launch --quote` reads storage and provider availability to price the
   pass without submitting or renting.
 - `etude launch` starts what fits and queues the rest; `etude queue` records

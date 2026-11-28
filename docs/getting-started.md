@@ -19,10 +19,10 @@ with a fair-coin baseline, and reports the success rate. It needs no model
 library. For a separate project, copy it as `experiment.py`, run
 `uv init` if needed, then `uv add 'etude-sdk[eval]'`.
 
-`etude check` validates the experiment offline before anything runs or spends
-money: it prints the planned runs and matches, or the file, line and fix for
-any mistake. Run `uv run etude guide` anytime for Etude's conventions, a
-minimal experiment file and the full command list.
+`etude check` runs the file's declarations locally and prints the planned
+runs and matches. If a declaration fails, it points to the source line and
+shows a fix when one is available. Run `uv run etude guide` for a complete
+example and the command list.
 
 The file defines `training_jobs()` (training config and independent run seeds),
 `eval_jobs(state)` (checkpoint selection and match generator), and `report()`

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from etude.cli import main
-from etude.errors import EtudeError
+from etude.errors import EtudeError, LauncherError, SourceLocation
 from etude.page import (
     Drawn,
     Page,
@@ -115,8 +115,9 @@ def test_refresh_tracks_a_helper_first_imported_by_eval_jobs(tmp_path: Path) -> 
     pages = Pages(runs)
     assert pages.build(file).experiment == "lab"
     helper.write_text("raise ValueError('edited evaluation declaration')\n")
-    with pytest.raises(ValueError, match="edited evaluation declaration"):
+    with pytest.raises(LauncherError, match="ValueError: edited evaluation declaration") as failure:
         pages.build(file)
+    assert failure.value.location == SourceLocation(helper, 1)
 
 
 def test_checkpoints_with_no_etude_clock_are_named_with_the_reason(tmp_path: Path) -> None:

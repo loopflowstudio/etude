@@ -16,8 +16,9 @@ from typing import Annotated, Literal
 
 import typer
 from typer.core import TyperGroup
+from typer.exceptions import TyperException
 
-from etude.errors import EtudeError, LauncherError, RetryRequested, format_location, sanitize
+from etude.errors import EtudeError, LauncherError, RetryRequested, sanitize
 from etude.launch import cli as launch_cli
 from etude.launch.commands import Kind, kind
 from etude.train.cli import checkpoints, sync
@@ -719,6 +720,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return result if isinstance(result, int) else 0
     except typer.Exit as error:
         return int(error.exit_code)
+    except TyperException as error:
+        typer.echo(f"etude: {sanitize(error.format_message())}", err=True)
+        return error.exit_code
     except Exception as error:
         # Entry points load failure-specific dependencies only on the failing command.
         from pydantic import ValidationError
@@ -726,9 +730,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         from etude.call import validation_message
         from etude.storage_timeout import StorageUnavailable
 
-        if hasattr(error, "format_message") and hasattr(error, "exit_code"):
-            typer.echo(f"etude: {sanitize(error.format_message())}", err=True)
-            return int(error.exit_code)
         if isinstance(
             error,
             (
@@ -745,7 +746,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 said = str(error)
             if isinstance(error, (LauncherError, EtudeError)) and error.location is not None:
-                said = f"{format_location(error.location)}: {said}"
+                said = f"{error.location}: {said}"
             print(f"etude: {sanitize(said)}", file=sys.stderr)
             if isinstance(error, (LauncherError, EtudeError)) and error.fix:
                 print(f"  fix: {sanitize(error.fix)}", file=sys.stderr)

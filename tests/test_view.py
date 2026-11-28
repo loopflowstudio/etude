@@ -28,7 +28,7 @@ from etude.cache import Content
 from etude.checkpoints import CheckpointRecord
 from etude.cli import main
 from etude.controller.declarations import Experiment
-from etude.errors import LauncherError
+from etude.errors import LauncherError, SourceLocation
 from etude.eval.records import Code, Match
 from etude.eval.result import Tables
 from etude.home import home
@@ -131,8 +131,9 @@ def test_refresh_reads_an_edited_neighbour_the_file_imports(tmp_path: Path) -> N
         os.utime(helper, ns=(1_700_000_000_000_000_001, 1_700_000_000_000_000_001))
         assert '"Other"' in (server.page("/experiments/lab/report", refresh=True) or "")
         helper.write_text("NAME = (\n")
-        with pytest.raises(SyntaxError):
+        with pytest.raises(LauncherError, match="SyntaxError") as failure:
             server.page("/experiments/lab/report", refresh=True)
+        assert failure.value.location == SourceLocation(helper, 1)
         helper.write_text('NAME = "Repaired name"\n')
         assert '"Repaired name"' in (server.page("/experiments/lab/report", refresh=True) or "")
 
@@ -1865,8 +1866,9 @@ def test_reports_index_and_poll_show_the_last_served_build_without_source_reads(
         opened = built.replace("<td>Completed</td>", "<td>Open</td>")
         assert rows()["lab"] == opened
         file.write_text("raise ValueError('broken report')\n")
-        with pytest.raises(ValueError, match="broken report"):
+        with pytest.raises(LauncherError, match="ValueError: broken report") as failure:
             view.page(route, refresh=True)
+        assert failure.value.location == SourceLocation(file, 1)
         assert rows()["lab"] == opened
         file.write_text(COUNTED.replace("return Report()", "return Report(other_metrics=True)"))
         view.page(route, refresh=True)
