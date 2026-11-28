@@ -168,7 +168,6 @@ class Placement:
     bus: Literal["local", "socket"] | None
     processes: int
     inference_threads: int
-    games_per_process: int | None  # Concurrency of async play, if present.
     checkpoint_bytes: int
     reason: Inference | Literal["no pending matches"]
 
@@ -181,17 +180,24 @@ class Placement:
             queues, available, streaming_batch=max_batch if direct else 1, direct=direct
         )
 
-    def describe(self, tournaments: Sequence[str], *, target_matches: set[int]) -> str | None:
+    def describe(
+        self, tournaments: Sequence[str], *, play_targets: set[int], stream_targets: set[int]
+    ) -> str | None:
         """Describe the placement of one evaluation group."""
-        if not self.processes or (self.bus is None and not target_matches):
+        if not self.processes or (self.bus is None and not stream_targets):
             return None
         process = "game process" if self.processes == 1 else "game processes"
-        game = "game" if self.games_per_process == 1 else "games"
         capacity = []
-        if self.games_per_process is not None:
-            capacity.append(f"{self.games_per_process} {game} each")
-        if target_matches:
-            low, high = min(target_matches), max(target_matches)
+        if play_targets:
+            low, high = min(play_targets), max(play_targets)
+            if low != high:
+                capacity.append(f"{low}–{high} games each")
+            elif high == 1:
+                capacity.append("1 game each")
+            else:
+                capacity.append(f"up to {high} games each")
+        if stream_targets:
+            low, high = min(stream_targets), max(stream_targets)
             hint = str(low) if low == high else f"{low}–{high}"
             capacity.append(f"slots requested by play_many (initial target_matches={hint})")
         games = ", ".join((f"{self.processes} {process}", *capacity))
@@ -261,7 +267,6 @@ def place(
             bus=None,
             processes=0,
             inference_threads=0,
-            games_per_process=None,
             checkpoint_bytes=0,
             reason="no pending matches",
         )
@@ -274,9 +279,6 @@ def place(
             bus=None,
             processes=processes,
             inference_threads=0,
-            games_per_process=1
-            if any(queue.matches and not queue.streaming for queue in queues)
-            else None,
             checkpoint_bytes=0,
             reason=inference,
         )
@@ -297,25 +299,10 @@ def place(
     # A direct process can serve multiple queues in turn.
     processes = min(cap, sum(demand) if accelerator else max(demand))
     shared = accelerator and processes > 1
-    shares = _allocate_processes(
-        queues, processes, streaming_batch=streaming_batch, direct=not shared
-    )
-    games = min(
-        math.ceil(loader.max_batch / processes),
-        max(
-            (
-                math.ceil(queue.matches / max(1, share))
-                for queue, share in zip(queues, shares, strict=True)
-                if not queue.streaming
-            ),
-            default=0,
-        ),
-    )
     return Placement(
         bus="socket" if shared else "local",
         processes=processes,
         inference_threads=max(1, (cpus - processes) // (1 if shared else processes)),
-        games_per_process=games or None,
         checkpoint_bytes=held if shared else held // processes,
         reason=inference,
     )

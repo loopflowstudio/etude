@@ -1683,27 +1683,31 @@ class _ExplodingUnpickle:
 
 
 @pytest.mark.parametrize("transport", ["local", "socket"])
-def test_unpicklable_reply_fails_fast_redacts_secrets_and_unlocks_arrays(
-    transport: _Transport,
-) -> None:
+def test_undecodable_reply_fails_only_its_call(transport: _Transport) -> None:
     cp = checkpoint("bad_reply").checkpoint
+    other = checkpoint("healthy_reply").checkpoint
 
     def load(ref: CheckpointRef) -> ModelForward:
-        return lambda inputs: [_ExplodingUnpickle() for _ in inputs]
+        if ref.key == cp.key:
+            return lambda inputs: [_ExplodingUnpickle() for _ in inputs]
+        return lambda inputs: inputs
 
     async def run() -> None:
         async with _open_bus(transport, load) as bus:
             bus.bind(cp)
+            bus.bind(other)
             arr = np.arange(4, dtype=np.float32)
-            [fut] = bus.submit([ForwardCall(cp.key, [arr], 1)])
-            with pytest.raises(ForwardError) as info:
-                await asyncio.wait_for(fut, timeout=5.0)
-            assert info.value.checkpoint == cp.key
-            assert not info.value.retry
-            message = str(info.value)
-            assert "fixture decode error" in message
-            assert "topsecret" not in message
+            broken, healthy = bus.submit(
+                [ForwardCall(cp.key, [arr], 1), ForwardCall(other.key, [7], 1)]
+            )
+            with pytest.raises(ForwardError, match="fixture decode error") as info:
+                await asyncio.wait_for(broken, timeout=5)
+            assert info.value.checkpoint == cp.key and not info.value.retry
+            assert "topsecret" not in str(info.value)
             assert arr.flags.writeable
+            assert await asyncio.wait_for(healthy, timeout=5) == [7]
+            [later] = bus.submit([ForwardCall(other.key, [8], 1)])
+            assert await asyncio.wait_for(later, timeout=5) == [8]
 
     asyncio.run(run())
 

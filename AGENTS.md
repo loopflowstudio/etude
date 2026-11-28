@@ -294,11 +294,12 @@ Shared inference leaves a core for the agent process when possible. Pending
 matches and remaining host memory bound the process count. Checkpoint
 inference spreads `play` across processes before dividing `max_batch` among
 them. Code-only `play` runs one match per process. Direct `play_many` sizes
-for one process per `max_batch` matches, rounded up. A `play_many` request
-draws from its tournament's pending queue. Its grant is capped by its share of
-pending and held matches across active processes, rounded up and reduced by
-what it holds. Empty processes share pending matches. Positive requests receive
-at least one match while grants are open and pending work remains. Mixed groups
+for one process per `max_batch` matches, rounded up. Both play modes size
+their targets and grants from their tournament's share of pending and held
+matches across processes, rounded up and reduced by what they hold. Grants
+start after game setup. Empty processes share pending matches. Positive
+requests receive at least one match while grants are open and pending work
+remains. With a loader, `max_batch` caps each `play_many` grant. Mixed groups
 use one placement and share their inference budget.
 Cap merged forwards at `max_batch`. Split oversized requests with one
 input per row and preserve their reply order. Opaque oversized inputs run

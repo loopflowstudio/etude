@@ -149,11 +149,10 @@ with evaluating(
   - Code-only games (`bus=None`) use one thread per game process and skip the
     accelerator probe.
 
-  Each game process has one event loop. Async `play` runs up to
-  `games_per_process` matches at once and flushes forwards on a zero-delay
-  loop barrier. Placement sizes for one process per async match first, then
-  divides the batch budget across processes. Each async tournament bounds
-  the slots it needs using its own process share. Direct `play_many` sizes
+  Each game process has one event loop. Async `play` flushes forwards on a
+  zero-delay loop barrier. It sizes each stream's concurrency from its
+  tournament's match share, capped at the rounded-up `max_batch` per game
+  process with inference, or at one without it. Direct `play_many` sizes
   for one process per `max_batch` matches, rounded up. Shared and code-only
   `play_many` size for one process per match. Both play modes request their
   first matches after loading and setting up the callback. Active streams
@@ -162,10 +161,11 @@ with evaluating(
   tournament with unmet demand and the fewest active processes. Each
   `play_many` generator submits forwards on the call and requests matches for
   its free slots.
-  `MatchStream.target_matches` uses the same share calculation as grants and is
-  capped at `max_batch` when a loader is declared. The startup line shows the
-  hints given to the initial streams. Shares account for held matches and
-  reserve pending work for empty processes. A positive request receives at
+  Both play modes use the same share calculation for targets and grants.
+  For `play_many`, `max_batch` caps the hint and each grant when a loader is
+  declared. The startup line shows the targets given to the initial streams.
+  Shares account for held matches and reserve pending work for empty
+  processes. A positive request receives at
   least one while grants are open and work remains. Only processes serving
   that tournament count toward grant shares.
   The last grant closes the stream's requests locally, even if it includes matches.

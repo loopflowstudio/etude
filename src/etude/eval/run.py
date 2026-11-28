@@ -541,12 +541,22 @@ class Playing:
         self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
         self.skipped = len(self.run.matches) - len(self.pending)
 
-    def available_share(self, *, processes: int, unfed: int, total_held: int, held: int = 0) -> int:
+    def available_share(
+        self,
+        *,
+        processes: int,
+        unfed: int,
+        total_held: int,
+        held: int = 0,
+        limit: int | None = None,
+    ) -> int:
         """Share unfinished matches and reserve pending work for empty peers."""
         pending = len(self.pending)
         share = math.ceil((pending + total_held) / processes)
         if not held:
             share = min(share, math.ceil(pending / unfed))
+        if limit is not None:
+            pending = min(pending, limit)
         return min(pending, max(1, share - held))
 
     def grant(
@@ -557,10 +567,11 @@ class Playing:
         unfed: int = 1,
         held: int = 0,
         total_held: int = 0,
+        limit: int | None = None,
     ) -> tuple[Match, ...]:
         """Share unfinished matches while leaving pending work for empty game processes."""
         share = self.available_share(
-            processes=processes, unfed=unfed, held=held, total_held=total_held
+            processes=processes, unfed=unfed, held=held, total_held=total_held, limit=limit
         )
         count = min(count, share)
         granted: list[Match] = []
@@ -724,7 +735,8 @@ def play_together(
             match_bytes=match_bytes,
         )
         load = agents.load if placement.bus == "local" else None
-        games_per_process = placement.games_per_process
+        play_limit = math.ceil(agents.max_batch / placement.processes) if placement.bus else 1
+        stream_limit = agents.max_batch if agents.load is not None else None
 
         with ExitStack() as agent_lifetime:
             agent_process: AgentProcess | None = None
@@ -792,9 +804,9 @@ def play_together(
                     child_pipe.close()
                 return _GameProcess(process=process, pipe=parent, streams=streams)
 
-            def spawn_ready() -> set[int]:
+            def spawn_ready() -> dict[int, int]:
                 nonlocal stopping
-                started_targets: set[int] = set()
+                started_targets: dict[int, int] = {}
                 available = placement.processes - len(live)
                 if not available or stopping:
                     return started_targets
@@ -830,17 +842,12 @@ def play_together(
                 for each in pending:
                     key = id(each)
                     if starts[key]:
-                        share = each.available_share(
+                        match_targets[key] = each.available_share(
                             processes=serving[key] + starts[key],
                             unfed=unfed[key] + starts[key],
                             total_held=total_held[key],
+                            limit=stream_limit if each.streaming else play_limit,
                         )
-                        if not each.streaming:
-                            assert games_per_process is not None
-                            share = min(share, games_per_process)
-                        elif agents.load is not None:
-                            share = min(share, agents.max_batch)
-                        match_targets[key] = share
                 while len(live) < placement.processes:
                     spawned = False
                     for group in stream_groups:
@@ -854,9 +861,9 @@ def play_together(
                             return started_targets
                         live.append(spawn_one(targets, match_targets))
                         for each in targets:
-                            if each.streaming:
-                                started_targets.add(match_targets[id(each)])
-                            starts[id(each)] -= 1
+                            key = id(each)
+                            started_targets[key] = match_targets[key]
+                            starts[key] -= 1
                         spawned = True
                     if not spawned:
                         break
@@ -890,6 +897,7 @@ def play_together(
                             unfed=sum(not peer.held for peer in peers),
                             held=len(stream.held),
                             total_held=sum(len(peer.held) for peer in peers),
+                            limit=stream_limit if each.streaming else play_limit,
                         )
                         stream.held.update((match.key, match) for match in granted)
                     child.pipe.send(Grant(matches=granted, drained=stopping or not each.pending))
@@ -951,7 +959,16 @@ def play_together(
                 initial_targets = spawn_ready()
                 description = placement.describe(
                     [each.tournament for each in pending],
-                    target_matches=initial_targets,
+                    play_targets={
+                        initial_targets[id(each)]
+                        for each in pending
+                        if not each.streaming and id(each) in initial_targets
+                    },
+                    stream_targets={
+                        initial_targets[id(each)]
+                        for each in pending
+                        if each.streaming and id(each) in initial_targets
+                    },
                 )
                 if description is not None:
                     print(description, file=sys.stderr, flush=True)

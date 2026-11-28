@@ -193,10 +193,12 @@ checkpoint allowance (half of host memory by default).
 Pending matches, CPUs and available host memory bound the game process count.
 Etude spreads `play` matches across game processes first, then divides
 `max_batch` across those processes for checkpoint inference, rounding up.
+Each tournament sizes its `play` tasks from its own pending matches and
+available processes.
 Shared inference caps the number of game processes at `max_batch` and leaves
 a core for the agent process when possible. The startup line shows the
-inference mode and its reason, process and thread counts, and initial
-`target_matches` hints for `play_many`.
+inference mode and its reason, process and thread counts, initial `play`
+concurrency, and initial `target_matches` hints for `play_many`.
 
 Choose tensor placement in `load` and honor Etude's thread environment there.
 Keep model imports in the loading module so shared game processes stay light.
@@ -278,12 +280,13 @@ the generator yields it.
   loader is declared. Account for the number of games per match when sizing the
   engine's pool.
   Call `await matches.take(n)` with the number of free slots to get up to `n`
-  pending `(match, agents)` pairs. Both play modes take their first matches
-  after loading and setting up the game code. Grants account for held matches
-  and share pending work among empty processes. An empty grant for `n > 0` means the
-  tournament queue is drained or the run is stopping. Finish any matches
-  you still hold. Further calls return immediately once that stream receives
-  its final grant.
+  pending `(match, agents)` pairs. With a loader, each grant contains at most
+  `max_batch` matches. Both play modes take their first matches after loading
+  and setting up the game code. Grants account for held matches and share
+  pending work among empty processes. An empty grant for `n > 0` means the
+  tournament queue is drained or the run is stopping. Finish any matches you
+  still hold. Further calls return immediately once that stream receives its
+  final grant.
 - `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
   `rows=` for a pre-collated batch so batching never merges calls past
   `max_batch` rows and reports real row counts. An oversized pre-collated call
