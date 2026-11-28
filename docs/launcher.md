@@ -263,7 +263,7 @@ $ uv run etude launch ppo.py --rent gpu
 ppo: state from s3://YOUR_BUCKET/etude/launch: 0 training runs, 0 eval runs; $0.00 of $50.00 committed
 ppo/base@0  new, running
 $ uv run etude continue --run ppo/base@0 --until steps=90000
-etude: experiment 'ppo' is limited to $50.00: $46.00 committed and this launch asks $6.00; `etude limit set ppo --max-usd D` raises it
+etude: experiment 'ppo' is limited to $50.00: $46.00 committed and this launch asks $6.00. Use `etude limit set ppo --max-usd D` to raise the limit
 $ uv run etude limits
 ppo  $46.00 of $50.00 committed
 last loop: 12 seconds ago
@@ -278,9 +278,9 @@ under that label — `launch`, `queue`, `continue`, `--resume`, `--quote`, or
 Python `launch`/`queue`/`quote` — is checked against the label's committed
 total. An experiment without a limit is unlimited; `etude limit unset
 EXPERIMENT` removes a limit, and `etude limits` lists all active limits from
-the database without provider keys or network. It shows how much of the
-committed total is in flight, when the loop last ran, and `~` for a total
-that includes an estimate.
+the database without provider keys or network. It shows when the loop last
+ran. Limit listings, updates, launch previews and refusals show dollars in
+flight and use `~` for a total that includes an estimate.
 
 The total counts every paid run under that label in this launcher database
 since its first run, including runs recorded before the limit was set:
@@ -305,7 +305,8 @@ When a launch would exceed the limit:
   `new, not queued: limit $50.00 ($46.00 committed)`.
 - `--resume`, `etude continue`, and Python `launch`/`queue`/`quote`
   refuse the whole submission before publishing source or renting a machine,
-  naming the limit, committed total and the command to raise it.
+  naming the limit, committed total and the command to raise it. If in-flight
+  reservations leave too little room, retry after those launches settle.
 
 `--max-usd 0` freezes new paid launches. Lowering a limit or receiving a
 revised bill can put the committed total above the ceiling. Both affect

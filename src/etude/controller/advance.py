@@ -100,9 +100,7 @@ def source_for(pool: str | None, rent: str | None, source: str | None = None) ->
 def _limit_reason(limit: ExperimentLimit | None, committed: Decimal, ask: Decimal) -> str | None:
     if limit is None or ask == 0 or committed + ask <= limit.max_usd:
         return None
-    return (
-        f"limit {limit.format_usd(limit.max_usd)} ({limit.format_committed(committed)} committed)"
-    )
+    return f"limit {limit.format_usd(limit.max_usd)} ({limit.format_committed(committed)})"
 
 
 def advance(
@@ -133,8 +131,8 @@ def advance(
     target = Target(pool=pool, rent=rent)
     limit = None
     if mode != "local" and (rent is not None or pool is None):
-        spending = client._read_limits(
-            experiment.name, include_default=pool is None and rent is None and not resume
+        spending = client.read_limits(
+            experiment.name, include_default=pool is None and rent is None
         )
         if spending.limits:
             limit = spending.limits[0]
@@ -143,9 +141,7 @@ def advance(
     budget = None if resume else limit
     spending_line = ""
     if limit is not None:
-        spending_line = (
-            f"; {limit.format_committed()} of {limit.format_usd(limit.max_usd)} committed"
-        )
+        spending_line = f"; {limit.format_committed(show_limit=True)}"
     print(
         f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: "
         f"{_count(len(state.runs), 'training run')}, {_count(len(state.eval_runs), 'eval run')}"

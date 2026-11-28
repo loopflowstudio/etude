@@ -11,6 +11,7 @@ from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch.client import limit, limits, queue
 from etude.launch.database import launcher_file
+from etude.launch.provisioner.machines import check_creation
 from etude.launch.records import Launch, Offer, OnDemand, Pool
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet
@@ -122,6 +123,15 @@ def test_cli_lists_retained_estimated_commitments_without_provider_keys(
     assert "--max-usd must be a dollar amount" in capsys.readouterr().err
 
 
+def test_limits_requires_an_initialized_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    assert main(["limits"]) == 1
+    assert "is not initialized; run etude database upgrade" in capsys.readouterr().err
+    assert not launcher_file(tmp_path).exists()
+
+
 def test_limits_shows_in_flight_dollars_and_warns_when_the_loop_is_stale(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -133,6 +143,10 @@ def test_limits_shows_in_flight_dollars_and_warns_when_the_loop_is_stale(
     assert "limited to $0.005" in capsys.readouterr().out
     b.scheduler.queue(_request("queued", usd="0.001"), rent="l4")
     b.scheduler.prepare_launch((_request("preparing", usd="0.0000001"),), rent="l4")
+    assert main(["limit", "set", "ppo", "--max-usd", "0.005"]) == 0
+    assert capsys.readouterr().out == (
+        "ppo  limited to $0.005; $0.001 committed ($0.0000001 in flight)\n"
+    )
     assert main(["limits"]) == 0
     captured = capsys.readouterr()
     assert captured.out == (
@@ -141,6 +155,10 @@ def test_limits_shows_in_flight_dollars_and_warns_when_the_loop_is_stale(
     assert "work is waiting; no server loop has run recently" in captured.err
     with pytest.raises(LauncherError, match=r"limited to \$0.005: .* asks \$0.0041"):
         b.scheduler.queue(_request("above", usd="0.0041"), rent="l4")
+    with pytest.raises(LauncherError) as refused:
+        b.scheduler.queue(_request("held", usd="0.004"), rent="l4")
+    assert "$0.001 committed ($0.0000001 in flight)" in str(refused.value)
+    assert "Retry after in-flight launches settle" in str(refused.value)
 
 
 def test_quote_and_launch_refuse_before_source_or_provider_calls(tmp_path: Path) -> None:
@@ -297,7 +315,60 @@ def test_abandoned_preparation_expires_and_fences_the_late_ssh_client(tmp_path: 
     assert other.limits()[0].reserved_usd == 0
 
 
-def test_expiry_during_placement_fences_the_rental_plan(
+def test_abandoned_launch_logs_finish_after_retry_before_the_scheduler_sweeps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    b = bench(tmp_path)
+    monkeypatch.setattr("etude.launch.client._client", lambda: b.scheduler)
+    b.scheduler.set_limit("ppo", Decimal(1))
+    request = _request("retry")
+    abandoned = b.scheduler.prepare_launch((request,), rent="l4")
+    assert not b.scheduler.logs(run="ppo/retry").complete
+
+    b.clock.advance(300)
+    (run,) = b.scheduler.queue(request, rent="l4")
+    b.store.cancel(b.store.run(run), b.clock())
+    assert b.scheduler.read(run).done
+    count = Counting(b.store, b.service)
+    with count.record():
+        assert main(["logs", "--run", run, "--follow", "--timeout", "1"]) == 0
+    output = capsys.readouterr().out
+    assert f"launch {abandoned.id}: expired" in output
+    assert "admitted" in output and "incomplete" not in output
+    assert count.snapshot().provider == count.snapshot().bucket == 0
+    assert b.store.launch_evidence(abandoned.id).state == "preparing"
+
+    b.scheduler.tick()
+    b.scheduler.tick()
+    assert b.store.launch_evidence(abandoned.id).state == "failed"
+    snapshot = b.scheduler.logs(run=run)
+    assert snapshot.complete
+    assert [d.message for d in snapshot.diagnostics if d.launch == abandoned.id].count(
+        "reservation expired"
+    ) == 1
+
+
+def test_a_stage_that_outlasts_its_lease_cannot_rent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    b = bench(tmp_path)
+    b.scheduler.set_limit("ppo", Decimal(1))
+    other = Scheduler(open_database(launcher_file(tmp_path)), {}, clock=b.clock)
+
+    def late_stage(*_: object) -> None:
+        b.clock.advance(301)
+        assert other.queue(_request("replacement"), rent="l4") == ("ppo/replacement",)
+
+    monkeypatch.setattr(b.scheduler, "_stage", late_stage)
+    with pytest.raises(LauncherError, match="reservation expired"):
+        b.scheduler.launch(_request("slow"), rent="l4")
+    assert b.service.creates == 0
+    assert not b.store.sessions()
+    assert other.limits()[0].committed_usd == 1
+    assert other.limits()[0].reserved_usd == 0
+
+
+def test_slow_staging_renews_the_reservation_before_placement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     b = bench(tmp_path)
@@ -305,19 +376,69 @@ def test_expiry_during_placement_fences_the_rental_plan(
     other = Scheduler(open_database(launcher_file(tmp_path)), {}, clock=b.clock)
     offer = b.service.offer
 
-    def late_offer() -> Offer:
+    def slow_offer() -> Offer:
         b.clock.advance(2)
-        assert other.queue(_request("replacement"), rent="l4") == ("ppo/replacement",)
+        with pytest.raises(LauncherError, match=r"\$1.00 in flight"):
+            other.queue(_request("replacement"), rent="l4")
         return offer()
 
     monkeypatch.setattr(b.scheduler, "_stage", lambda *_: b.clock.advance(299))
-    monkeypatch.setattr(b.service, "offer", late_offer)
-    with pytest.raises(LauncherError, match="reservation expired"):
-        b.scheduler.launch(_request("slow"), rent="l4")
-    assert b.service.creates == 0
-    assert not b.store.sessions()
+    monkeypatch.setattr(b.service, "offer", slow_offer)
+    assert b.scheduler.launch(_request("slow"), rent="l4") == ("ppo/slow",)
+    assert other.limits()[0].reserved_usd == 0
+    assert b.service.creates == 1
+
+
+def test_reusing_idle_machines_renews_admission_between_placements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    b = bench(tmp_path, max_machines=2)
+    machines = {b.scheduler.rent("l4", 3) for _ in range(2)}
+    b.scheduler.set_limit("ppo", Decimal(2))
+    other = Scheduler(open_database(launcher_file(tmp_path)), {}, clock=b.clock)
+    link = b.store.link_launch
+
+    def link_after_delay(launch: str, session: str, *, acquired: bool = False) -> None:
+        b.clock.advance(160)
+        assert other.limits()[0].reserved_usd == 2
+        link(launch, session, acquired=acquired)
+
+    monkeypatch.setattr(b.store, "link_launch", link_after_delay)
+    runs = b.scheduler.launch((_request("first"), _request("second")), rent="l4")
+    assert {b.scheduler.attempts(run)[0].machine for run in runs} == machines
+    assert b.service.creates == 2
+    assert other.limits()[0].committed_usd == 2
+    assert other.limits()[0].reserved_usd == 0
+
+
+def test_unsettled_acquisition_keeps_admission_live_after_lease_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    b = bench(tmp_path)
+    b.scheduler.set_limit("ppo", Decimal(1))
+    other = Scheduler(open_database(launcher_file(tmp_path)), {}, clock=b.clock)
+    create = b.service.create
+
+    def slow_create(packet: Packet) -> str:
+        b.clock.advance(299)
+        check_creation()  # the supplying lock is renewed immediately before the provider call
+        provider_id = create(packet)
+        b.clock.advance(2)
+        other.tick()
+        assert other.limits()[0].reserved_usd == 1
+        snapshot = other.logs(run="ppo/slow")
+        (launch,) = snapshot.launches
+        assert snapshot.launch_state(launch) == "admitting"
+        assert not snapshot.complete
+        return provider_id
+
+    monkeypatch.setattr(b.service, "create", slow_create)
+    (run,) = b.scheduler.launch(_request("slow"), rent="l4")
+    assert b.scheduler.attempts(run)[0].added
     assert other.limits()[0].committed_usd == 1
     assert other.limits()[0].reserved_usd == 0
+    (session,) = b.service.sessions.values()
+    assert session.killed_at is None
 
 
 def test_expired_admission_cannot_record_runs(
@@ -460,10 +581,12 @@ def test_unlimited_admission_and_limited_queries_use_bounded_reads(tmp_path: Pat
     lookup = query_plan(b.store, lambda: b.store.limit("ppo"))
     runs = query_plan(b.store, lambda: b.store.runs(experiment="ppo"))
     reservations = query_plan(b.store, lambda: b.store.reservations("ppo", b.clock()))
+    sweep = query_plan(b.store, lambda: b.store.expire_launches(b.clock))
     assert any("SEARCH experiment_limits USING INDEX" in step for step in lookup), lookup
     assert any("SEARCH r USING INDEX runs_experiment" in step for step in runs), runs
     for index in ("launches_reserving", "sessions_open_machines", "launch_acquisitions"):
         assert any(index in step for step in reservations), reservations
+    assert sum("SEARCH l USING INDEX launches_reserving" in step for step in sweep) == 2, sweep
 
 
 def test_unfinished_run_commits_its_spend_when_the_bill_exceeds_its_cap(tmp_path: Path) -> None:

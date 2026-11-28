@@ -81,6 +81,7 @@ __all__ = (
     "standing",
     "limit",
     "limits",
+    "read_limits",
 )
 
 
@@ -298,17 +299,17 @@ def standing(
 
 def limit(experiment: str) -> ExperimentLimit | None:
     """Read a label's spending ceiling and commitments from the launcher database."""
-    configured = _read_limits(experiment).limits
+    configured = read_limits(experiment).limits
     return configured[0] if configured else None
 
 
 def limits() -> tuple[ExperimentLimit, ...]:
     """Read all configured spending ceilings and commitments from the launcher database."""
-    return _read_limits(None).limits
+    return read_limits(None).limits
 
 
-def _read_limits(experiment: str | None, *, include_default: bool = False) -> LimitsReply:
-    # A launch pass can read the ceiling and the default in one SSH exchange.
+def read_limits(experiment: str | None, *, include_default: bool = False) -> LimitsReply:
+    """Read limits in one exchange. A requested owned default needs no spending check."""
     if address := selected():
         return PythonClient(address).read_limits(experiment, include_default=include_default)
     return LimitsReply.read(experiment, include_default=include_default)

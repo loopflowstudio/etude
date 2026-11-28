@@ -321,13 +321,10 @@ def limits() -> None:
     """List experiment spending limits and committed totals from the database."""
     from etude.launch import server
 
-    with server.retained_scheduler() as scheduler:
-        for limit in scheduler.limits() if scheduler is not None else ():
-            total = f"{limit.format_committed()} of {limit.format_usd(limit.max_usd)} committed"
-            if limit.reserved_usd:
-                total += f" ({limit.format_usd(limit.reserved_usd)} in flight)"
-            print(f"{limit.experiment}  {total}")
-        server.show_freshness(scheduler)
+    scheduler = default()
+    for limit in scheduler.limits():
+        print(f"{limit.experiment}  {limit.format_committed(show_limit=True)}")
+    server.show_freshness(scheduler)
 
 
 @limit_app.command("set")
@@ -344,9 +341,7 @@ def limit_set(
     except InvalidOperation:
         raise LauncherError("--max-usd must be a dollar amount") from None
     limit = default().set_limit(experiment, amount)
-    print(
-        f"{experiment}  limited to {limit.format_usd(limit.max_usd)}; {limit.format_committed()} committed"
-    )
+    print(f"{experiment}  limited to {limit.format_usd(limit.max_usd)}; {limit.format_committed()}")
 
 
 @limit_app.command("unset")

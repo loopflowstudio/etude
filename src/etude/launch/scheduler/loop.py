@@ -58,6 +58,7 @@ from etude.launch.records import (
     Availability,
     Cause,
     Diagnostic,
+    ExperimentCeiling,
     ExperimentLimit,
     Hardware,
     HourlyRate,
@@ -370,7 +371,7 @@ class Scheduler:
         _validate_experiment(experiment)
         if not max_usd.is_finite() or max_usd < 0:
             raise LauncherError("an experiment spending limit must be nonnegative and finite")
-        limit = ExperimentLimit(experiment=experiment, max_usd=max_usd, set_at=self._clock())
+        limit = ExperimentCeiling(experiment=experiment, max_usd=max_usd, set_at=self._clock())
         self._store.set_limit(limit)
         with self._store.reading():
             return self._measure_limit(limit, self._clock())
@@ -393,7 +394,7 @@ class Scheduler:
             return tuple(self._measure_limit(limit, now) for limit in self._store.limits())
 
     def _measure_limit(
-        self, limit: ExperimentLimit, now: datetime, requests: Sequence[LaunchRequest] = ()
+        self, limit: ExperimentCeiling, now: datetime, requests: Sequence[LaunchRequest] = ()
     ) -> ExperimentLimit:
         standing = {item.record.id: item for item in self.standing(limit.experiment)}
         committed = sum((item.committed_usd for item in standing.values()), Decimal(0))
@@ -409,21 +410,28 @@ class Scheduler:
             (_additional_usd(request, standing.get(request.run)) for request in requests),
             Decimal(0),
         )
-        measured = limit.model_copy(
-            update={
-                "committed_usd": committed,
-                "reserved_usd": reserved,
-                "estimated": any(
-                    item.status.estimated and item.committed_usd == item.status.usd
-                    for item in standing.values()
-                ),
-            }
+        measured = ExperimentLimit(
+            experiment=limit.experiment,
+            max_usd=limit.max_usd,
+            set_at=limit.set_at,
+            committed_usd=committed,
+            reserved_usd=reserved,
+            estimated=any(
+                item.status.estimated and item.committed_usd == item.status.usd
+                for item in standing.values()
+            ),
         )
         if requests and ask > 0 and committed + ask > limit.max_usd:
+            suggestion = (
+                "Retry after in-flight launches settle, or use"
+                if committed - reserved + ask <= limit.max_usd
+                else "Use"
+            )
             raise LauncherError(
-                f"experiment {limit.experiment!r} is limited to {limit.format_usd(limit.max_usd)}: "
-                f"{measured.format_committed()} committed and this launch asks {limit.format_usd(ask)}; "
-                f"`etude limit set {limit.experiment} --max-usd D` raises it"
+                f"experiment {limit.experiment!r} is limited to "
+                f"{measured.format_usd(limit.max_usd)}: {measured.format_committed()} "
+                f"and this launch asks {measured.format_usd(ask)}. "
+                f"{suggestion} `etude limit set {limit.experiment} --max-usd D` to raise the limit"
             )
         return measured
 
@@ -1017,6 +1025,7 @@ class Scheduler:
         if target.rent is not None:
             # Before the locks: an upload can outlast their lease.
             self._stage(self._store.ondemand(target.rent), records)
+            self._store.renew_launch(launch, self._clock, state="admitting")
         with ExitStack() as locks:
             for name in names:  # pools before on-demands, as tick takes them
                 if not locks.enter_context(self._store.lock(name, self._clock)):
@@ -1097,6 +1106,7 @@ class Scheduler:
                                     " etude queue would wait"
                                 ) from None
                     else:
+                        self._store.renew_launch(launch, self._clock, state="admitting")
                         session = self._store.session(existing.id)
                         if not self._live(session, now):
                             raise LauncherError(
@@ -1466,29 +1476,43 @@ class Scheduler:
         """
         if timeout is not None and not refresh:
             raise ValueError("a log timeout bounds a refresh")
-        selection = self._log_selection(run, machine)
+        with self._store.reading():
+            observed_at = self._clock()
+            selection = self._log_selection(run, machine)
+            reserving = {
+                launch.id
+                for launch in selection.launches
+                if self._store.launch_reserves(launch, observed_at)
+            }
+            settled = not reserving and all(
+                session.ended_at is not None or session.refused_at is not None
+                for session in selection.sessions
+            )
+            if (
+                settled
+                and run is not None
+                and (
+                    not selection.launches
+                    or any(launch.state == "admitted" for launch in selection.launches)
+                )
+            ):
+                settled = self.read(run).done
         streams = (
             self._collect_logs(selection.sessions, selection.attempts, timeout)
             if refresh
             else self._retained_logs(selection.sessions, selection.attempts)
         )
-        settled = all(
-            session.ended_at is not None or session.refused_at is not None
-            for session in selection.sessions
-        )
-        if run is not None:
-            if not selection.launches or any(
-                launch.state == "admitted" for launch in selection.launches
-            ):
-                settled = settled and self.read(run).done
-            else:
-                settled = settled and all(launch.state == "failed" for launch in selection.launches)
         return LogSnapshot(
             settled=settled,
-            observed_at=self._clock(),
+            observed_at=observed_at,
             launches=selection.launches,
             diagnostics=self._diagnostics(selection),
             streams=streams,
+            expired_launches=frozenset(
+                launch.id
+                for launch in selection.launches
+                if launch.pending and launch.id not in reserving
+            ),
         )
 
     def _collect_logs(
@@ -1716,6 +1740,7 @@ class Scheduler:
                         self._tick_supply(supply, self._clock())
                     except Stale:
                         continue
+        self._store.expire_launches(self._clock)
         self._bills(self._clock())
 
     def _tick_supply(self, supply: Supply, now: datetime) -> None:

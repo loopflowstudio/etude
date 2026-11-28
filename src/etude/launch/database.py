@@ -40,7 +40,7 @@ from etude.launch.records import (
     TRY_EXEMPT,
     Cause,
     Diagnostic,
-    ExperimentLimit,
+    ExperimentCeiling,
     Hardware,
     Image,
     Launch,
@@ -366,11 +366,18 @@ _OPEN_SESSION_MACHINES = (
 
 # Compare UTC wall times without the zone suffix so a whole second sorts
 # before the same second with fractional digits.
-_LIVE_LAUNCH_LEASE = """json_extract(l.body, '$.state') IN ('preparing', 'admitting')
-    AND rtrim(json_extract(l.body, '$.expires_at'), 'Z') > :now"""
+_PENDING_LAUNCH = "json_extract(l.body, '$.state') IN ('preparing', 'admitting')"
+_LAUNCH_EXPIRY = "rtrim(json_extract(l.body, '$.expires_at'), 'Z')"
+_LIVE_LAUNCH_LEASE = f"{_PENDING_LAUNCH} AND {_LAUNCH_EXPIRY} > :now"
 _UNSETTLED_LAUNCH_RENTAL = """s.acquired = 1 AND m.kind = 'rented'
     AND w.ended_at IS NULL AND w.refused_at IS NULL
     AND json_extract(l.body, '$.state') != 'admitted'"""
+_HAS_LAUNCH_RENTAL = f"""EXISTS (
+    SELECT 1 FROM launch_sessions s
+    JOIN sessions w ON w.id = s.session
+    JOIN machines m ON m.name = w.machine
+    WHERE s.launch = l.id AND {_UNSETTLED_LAUNCH_RENTAL}
+)"""
 
 
 def _utc_wall_time(at: datetime) -> str:
@@ -510,12 +517,8 @@ class Database:
                     )
                 previous = self._db.execute(
                     f"""SELECT l.id FROM launch_runs r JOIN launches l ON l.id = r.launch
-                        WHERE r.run = :run AND (({_LIVE_LAUNCH_LEASE}) OR EXISTS (
-                            SELECT 1 FROM launch_sessions s
-                            JOIN sessions w ON w.id = s.session
-                            JOIN machines m ON m.name = w.machine
-                            WHERE s.launch = l.id AND {_UNSETTLED_LAUNCH_RENTAL}
-                        )) LIMIT 1""",
+                        WHERE r.run = :run
+                          AND (({_LIVE_LAUNCH_LEASE}) OR {_HAS_LAUNCH_RENTAL}) LIMIT 1""",
                     {"run": request.run, "now": _utc_wall_time(now)},
                 ).fetchone()
                 if previous is not None:
@@ -552,8 +555,19 @@ class Database:
             )
         return launch
 
-    def _require_launch_lease(self, launch: Launch, at: datetime) -> None:
-        if launch.expires_at is None or launch.expires_at <= at:
+    def launch_reserves(self, launch: Launch, at: datetime) -> bool:
+        """An unexpired lease or an unsettled rental acquired by this launch holds dollars."""
+        return launch.lease_live(at) or (
+            launch.state != "admitted"
+            and self._db.execute(
+                f"SELECT 1 FROM launches l WHERE l.id = ? AND {_HAS_LAUNCH_RENTAL}",
+                (launch.id,),
+            ).fetchone()
+            is not None
+        )
+
+    def _require_reservation(self, launch: Launch, at: datetime) -> None:
+        if not self.launch_reserves(launch, at):
             raise LauncherError(f"launch {launch.id} reservation expired; prepare it again")
 
     def _renew_launch(self, launch: Launch, at: datetime) -> Launch:
@@ -567,10 +581,12 @@ class Database:
         with self._together():
             launch = self._launch_in_state(identity, "preparing")
             now = clock()
-            if not failed and launch.expires_at is not None and now < launch.expires_at:
+            if not failed and launch.lease_live(now):
                 return self._renew_launch(launch.model_copy(update={"state": "admitting"}), now)
             stopped = launch.model_copy(update={"state": "failed"})
             self._save_launch(stopped)
+            if not failed:
+                self._record_launch_expiry(launch, now)
         if failed:
             return stopped
         raise LauncherError(f"launch {identity} reservation expired; prepare it again")
@@ -585,16 +601,56 @@ class Database:
     ) -> None:
         with self._together():
             launch = self._launch_in_state(identity, state)
-            now = clock()
-            self._require_launch_lease(launch, now)
             if requests is not None:
                 launch = launch.model_copy(update={"requests": requests})
-            self._renew_launch(launch, now)
+            self._keep_launch(launch, clock())
 
     def fail_admission(self, identity: str) -> None:
         with self._together():
-            launch = self._launch_in_state(identity, "admitting")
+            launch = self.launch_evidence(identity)
+            if launch.state == "failed":
+                return  # a concurrent sweep may have retained the expiry
+            if launch.state != "admitting":
+                raise LauncherError(f"launch {identity} already {launch.state}")
             self._save_launch(launch.model_copy(update={"state": "failed"}))
+
+    def _keep_launch(self, launch: Launch, at: datetime) -> None:
+        if launch.lease_live(at):
+            self._renew_launch(launch, at)
+        else:
+            # An acquisition can keep the reservation without renewing an expired lease.
+            self._require_reservation(launch, at)
+
+    def expire_launches(self, clock: Callable[[], datetime]) -> None:
+        """Retain expiry for abandoned requests without an unsettled acquisition."""
+        rows = self._db.execute(
+            f"""SELECT l.id FROM launches l
+                WHERE {_PENDING_LAUNCH} AND {_LAUNCH_EXPIRY} <= :now AND NOT {_HAS_LAUNCH_RENTAL}
+                UNION ALL
+                SELECT l.id FROM launches l
+                WHERE {_PENDING_LAUNCH} AND {_LAUNCH_EXPIRY} IS NULL AND NOT {_HAS_LAUNCH_RENTAL}""",
+            {"now": _utc_wall_time(clock())},
+        ).fetchall()
+        if not rows:
+            return
+        with self._together():
+            at = clock()
+            for row in rows:
+                launch = self.launch_evidence(row[0])
+                if launch.pending and not self.launch_reserves(launch, at):
+                    self._save_launch(launch.model_copy(update={"state": "failed"}))
+                    self._record_launch_expiry(launch, at)
+
+    def _record_launch_expiry(self, launch: Launch, at: datetime) -> None:
+        self.retain_diagnostic(
+            Diagnostic(
+                id=uuid4().hex,
+                observed_at=at,
+                operation="admission",
+                message="reservation expired",
+                launch=launch.id,
+            )
+        )
 
     def reservations(self, experiment: str, at: datetime) -> tuple[LaunchRequest, ...]:
         """Requests with a live lease or an unsettled rental."""
@@ -617,7 +673,7 @@ class Database:
             )
         )
 
-    def set_limit(self, limit: ExperimentLimit) -> None:
+    def set_limit(self, limit: ExperimentCeiling) -> None:
         self._write(
             """INSERT INTO experiment_limits(experiment, max_usd, set_at) VALUES (?,?,?)
                ON CONFLICT(experiment) DO UPDATE SET max_usd=excluded.max_usd, set_at=excluded.set_at""",
@@ -630,16 +686,16 @@ class Database:
         ).rowcount:
             raise LauncherError(f"experiment {experiment!r} has no spending limit")
 
-    def limit(self, experiment: str) -> ExperimentLimit | None:
+    def limit(self, experiment: str) -> ExperimentCeiling | None:
         row = self._db.execute(
             "SELECT experiment, max_usd, set_at FROM experiment_limits WHERE experiment=?",
             (experiment,),
         ).fetchone()
-        return None if row is None else ExperimentLimit.model_validate(dict(row))
+        return None if row is None else ExperimentCeiling.model_validate(dict(row))
 
-    def limits(self) -> tuple[ExperimentLimit, ...]:
+    def limits(self) -> tuple[ExperimentCeiling, ...]:
         return tuple(
-            ExperimentLimit.model_validate(dict(row))
+            ExperimentCeiling.model_validate(dict(row))
             for row in self._db.execute(
                 "SELECT experiment, max_usd, set_at FROM experiment_limits ORDER BY experiment"
             )
@@ -1018,7 +1074,7 @@ class Database:
             for supply in {self.session(a.session).supply for a in attempts}:
                 self.check_lock(supply)
             evidence = self._launch_in_state(launch, "admitting")
-            self._require_launch_lease(evidence, clock())
+            self._require_reservation(evidence, clock())
             resuming = {r.run for r in evidence.requests if r.resume_version is not None}
             for run in runs:
                 if run.launch.created_at is None:
@@ -1149,9 +1205,7 @@ class Database:
         with self._together():
             now = self.check_lock(session.supply)
             if launch is not None:
-                evidence = self._launch_in_state(launch, "admitting")
-                self._require_launch_lease(evidence, now)
-                self._renew_launch(evidence, now)
+                self._keep_launch(self._launch_in_state(launch, "admitting"), now)
             if self.machine_busy(session.machine):
                 raise Stale(f"machine {session.machine!r} still has a run on it")
             live = [w for w in self.unsettled_sessions() if w.supply == session.supply]

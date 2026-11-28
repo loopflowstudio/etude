@@ -1,6 +1,7 @@
 """One pass deduplicates addresses using only storage and public scheduler records."""
 
 import re
+from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -288,6 +289,32 @@ def test_a_pass_prints_one_line_per_run_in_declared_order(
     advance(read_experiment(file), source=DirectoryStorage(tmp_path / "source"), mode="queue")
     assert "two/base@1  new, queued" in capsys.readouterr().out
     assert b.scheduler.limits()[0].committed_usd == 1
+
+
+def test_a_pass_shows_the_in_flight_hold_that_prevents_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    b = bench(tmp_path)
+    b.clock.now = datetime.now(UTC)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    b.scheduler.set_limit("two", Decimal(1))
+    b.scheduler.prepare_launch(
+        (RunRequest(job=Job(command="train", experiment="two", max_hours=1, max_usd=Decimal(1))),),
+        rent="l4",
+    )
+    file = tmp_path / "two.py"
+    file.write_text(FILE)
+    advance(
+        read_experiment(file),
+        source=DirectoryStorage(tmp_path / "source"),
+        rent="l4",
+        mode="launch",
+    )
+    assert b.scheduler.runs() == () and b.service.creates == 0
+    out = capsys.readouterr().out
+    assert "$1.00 of $1.00 committed ($1.00 in flight)" in out
+    assert "not queued: limit $1.00 ($1.00 committed ($1.00 in flight))" in out
 
 
 def test_wrong_eval_kind_refuses_before_training_is_submitted(tmp_path: Path) -> None:

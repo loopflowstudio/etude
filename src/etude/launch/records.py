@@ -679,15 +679,20 @@ class Quote(Record):
         return total
 
 
-class ExperimentLimit(Record):
-    """The stored spending ceiling and total committed under one experiment label."""
+class ExperimentCeiling(Record):
+    """The stored spending ceiling for one experiment label."""
 
     experiment: str
     max_usd: Decimal
     set_at: datetime
-    committed_usd: Decimal = Decimal(0)
-    reserved_usd: Decimal = Decimal(0)
-    estimated: bool = False
+
+
+class ExperimentLimit(ExperimentCeiling):
+    """A spending ceiling with the commitments measured at read time."""
+
+    committed_usd: Decimal
+    reserved_usd: Decimal
+    estimated: bool
 
     @staticmethod
     def format_usd(amount: Decimal, *, estimated: bool = False) -> str:
@@ -698,9 +703,17 @@ class ExperimentLimit(Record):
             dollars = f"{amount:.2f}"
         return f"{'~' if estimated else ''}${dollars}"
 
-    def format_committed(self, committed: Decimal | None = None) -> str:
+    def format_committed(
+        self, committed: Decimal | None = None, *, show_limit: bool = False
+    ) -> str:
         amount = self.committed_usd if committed is None else committed
-        return self.format_usd(amount, estimated=self.estimated)
+        total = self.format_usd(amount, estimated=self.estimated)
+        if show_limit:
+            total += f" of {self.format_usd(self.max_usd)}"
+        total += " committed"
+        if self.reserved_usd:
+            total += f" ({self.format_usd(self.reserved_usd)} in flight)"
+        return total
 
 
 class LaunchRequest(Record):
@@ -722,6 +735,13 @@ class Launch(Record):
     target: Target | None = None  # absent from evidence written before experiment limits
     state: Literal["preparing", "admitting", "admitted", "failed"] = "preparing"
     expires_at: datetime | None = None
+
+    @property
+    def pending(self) -> bool:
+        return self.state in {"preparing", "admitting"}
+
+    def lease_live(self, at: datetime) -> bool:
+        return self.pending and self.expires_at is not None and self.expires_at > at
 
     def addressed(self, runs: Sequence[RunRequest]) -> tuple[RunRequest, ...]:
         """Give the original requests their retained run addresses."""
@@ -778,18 +798,22 @@ class LogStream(Record):
 
 
 class LogSnapshot(Record):
+    """Launch, run and session settlement at observation time, with available log streams."""
+
     settled: bool = False
     observed_at: datetime
     launches: tuple[Launch, ...] = ()
     diagnostics: tuple[Diagnostic, ...] = ()
     streams: tuple[LogStream, ...] = ()
+    expired_launches: frozenset[str] = frozenset()
+
+    def launch_state(self, launch: Launch) -> str:
+        return "expired" if launch.id in self.expired_launches else launch.state
 
     @property
     def complete(self) -> bool:
-        return (
-            self.settled
-            and all(launch.state not in {"preparing", "admitting"} for launch in self.launches)
-            and all(stream.complete and not stream.retrieval_error for stream in self.streams)
+        return self.settled and all(
+            stream.complete and not stream.retrieval_error for stream in self.streams
         )
 
 

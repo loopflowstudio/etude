@@ -113,9 +113,16 @@ def training_jobs() -> list[TrainingJob]:
     assert "ppo/base@0  new, queued" in capsys.readouterr().out
     assert exchanges == 15  # Standing before and after prepare, missing sources and submit.
 
+    backend.scheduler.set_default("lab")
+    assert main(["queue", str(file), "--source", str(tmp_path / "tracking"), "--resume"]) == 0
+    out = capsys.readouterr().out
+    assert "ppo/base@0  new, queued" in out and "committed" not in out
+    assert backend.scheduler.record("ppo/base@0").launch.version == 2
+    assert exchanges == 21  # The owned default and its limit exemption share one read.
+
     assert main(["limit", "unset", "ppo"]) == 0
     assert limit("ppo") is None
-    assert exchanges == 17
+    assert exchanges == 23
     assert not launcher_file(local).exists()
     assert backend.service.creates == 0
 

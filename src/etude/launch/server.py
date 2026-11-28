@@ -714,7 +714,7 @@ def warning(scheduler: Scheduler) -> str | None:
     return None
 
 
-def show_freshness(scheduler: Scheduler | None = None) -> None:
+def show_freshness(scheduler: Scheduler) -> None:
     """Print when the server loop last passed: how fresh the database's answers are."""
     at = last_loop()
     if at is not None:
@@ -723,7 +723,7 @@ def show_freshness(scheduler: Scheduler | None = None) -> None:
     else:
         said = "never"
     print("last loop: " + said)
-    if scheduler is not None and (problem := warning(scheduler)):
+    if problem := warning(scheduler):
         print("warning: " + problem, file=sys.stderr)
 
 
