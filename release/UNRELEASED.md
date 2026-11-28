@@ -106,9 +106,10 @@ cohorts, which sat between, are removed.
   EXPERIMENT`. The limit holds across every launch under that label in the
   same database (`launch`, `queue`, `continue`, `--resume`, `--quote`, and
   Python `launch`/`queue`/`quote`), including runs recorded before the limit
-  was set. Unfinished paid runs commit `max(spent, max_usd)` and finished runs
-  commit attributed cost; owned-pool runs commit `$0`, and `--max-usd 0`
-  freezes paid spend. `--max-usd` is removed from `etude launch FILE` and
+  was set. Unfinished runs with a rental target commit `max(spent, max_usd)`.
+  Finished runs and runs on owned pools count any attributed rental spend.
+  Owned-pool launches ask for `$0`, and `--max-usd 0` freezes new paid
+  commitments. `--max-usd` is removed from `etude launch FILE` and
   `etude queue FILE` and is refused with a hint to run `etude limit set`.
 - **The SSH controller is the server.** `etude server set HOST`; the setting
   file is `~/.etude/server`, and a selection is set again after upgrading.

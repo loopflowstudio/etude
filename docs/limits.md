@@ -48,10 +48,10 @@ failure recovery requires.
   bucket) pays AWS for that transfer, outside the quote.
   An experiment spending limit (`etude limit set`) bounds paid runs under that
   label within one launcher database (this computer, or clients sharing one
-  `etude server`); it excludes owned-pool runs, unlabelled runs, idle time on
-  hand-rented machines (`etude rent`), and runs in other databases. One limit
-  spanning separate launcher databases, or a limit an agent sharing the same
-  shell cannot raise, requires a hosted service.
+  `etude server`). Owned-pool launches add no commitment. Unlabelled runs,
+  idle time on hand-rented machines (`etude rent`), and runs in other databases
+  fall outside the limit. A limit spanning separate launcher databases, or one
+  an agent sharing the same shell cannot raise, requires a hosted service.
   Rental windows cannot outlast scoped storage grants (7 days on R2, 36 hours
   on S3). Queues require a scheduling loop to keep advancing.
 - `etude launch` targeting an on-demand renews its five-minute reservation
