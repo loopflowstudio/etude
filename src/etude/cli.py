@@ -9,11 +9,13 @@ server, and turns expected failures into one line on stderr.
 from __future__ import annotations
 
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from inspect import getdoc
 from pathlib import Path
 from typing import Annotated, Literal
 
 import typer
+from typer.core import TyperGroup
 
 from etude.errors import EtudeError, LauncherError, RetryRequested, sanitize
 from etude.launch import cli as launch_cli
@@ -47,6 +49,35 @@ def check_experiment(
     raise typer.Exit(
         show_check(file, ctx.args, experiment=experiment, source=source, format=format)
     )
+
+
+@app.command()
+@kind(Kind.read)
+def guide(ctx: typer.Context) -> None:
+    """Print the experiment workflow, conventions and command list offline."""
+    document = Path(__file__).with_name("guide.md").read_text(encoding="utf-8")
+    root = ctx.find_root()
+    assert isinstance(root.command, TyperGroup)
+    commands = "\n".join(_guide_commands(root.command, root.command_path))
+    typer.echo(f"{document.rstrip()}\n\n## Commands\n\n{commands}")
+
+
+def _guide_commands(group: TyperGroup, prefix: str) -> Iterator[str]:
+    for name, command in sorted(group.commands.items()):
+        if command.hidden:
+            continue
+        path = f"{prefix} {name}"
+        callback = command.callback
+        subgroup = command if isinstance(command, TyperGroup) else None
+        if callback is not None and (subgroup is None or subgroup.invoke_without_command):
+            command_kind = getattr(callback, "command_kind", None)
+            if not isinstance(command_kind, Kind):
+                raise RuntimeError(f"{path} has no command kind")
+            help_text = getdoc(callback) if subgroup is not None else command.help
+            first_line = (help_text or "").partition("\n")[0]
+            yield f"- `{path}` ({command_kind}) {first_line}"
+        if subgroup is not None:
+            yield from _guide_commands(subgroup, path)
 
 
 @app.command("train")
@@ -626,6 +657,7 @@ app.command()(kind(Kind.wait)(sync))
 # themselves. Every other command is sent to a chosen server.
 _HERE = (
     "check",
+    "guide",
     "launch",
     "queue",
     "smoke",

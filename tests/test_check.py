@@ -1,21 +1,76 @@
-"""Offline checks report the runtime's declaration failures and import warnings."""
+"""Exercise offline checks and the guide through the CLI."""
 
 import json
 import os
+import re
 from hashlib import sha256
 from pathlib import Path
 from textwrap import dedent
 
 import pytest
+from typer.main import get_command_name
 
 from etude.checkpoints import CheckpointRecord
-from etude.cli import main
+from etude.cli import app, main
 from etude.controller import check
 from etude.launch import client, server
 from etude.launch.database import launcher_file
 from etude.records import ArtifactRef, Clock, RunRecord
 from etude.storage import DirectoryStorage
 from tests.run.storage import MeasuredStorage
+
+
+def test_guide_lists_registered_commands(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["guide"]) == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    guide, commands = captured.out.split("\n## Commands\n\n")
+    rows = re.findall(r"(?m)^- `etude (.*?)` \((read|ask|wait)\) \S.*$", commands)
+    assert len(rows) == len(commands.splitlines())
+    assert len(rows) == len(dict(rows))
+
+    groups = {"": app}
+    for group in app.registered_groups:
+        assert isinstance(group.name, str) and group.typer_instance is not None
+        groups[f"{group.name} "] = group.typer_instance
+    expected: dict[str, object] = {}
+    for prefix, group_app in groups.items():
+        for command in group_app.registered_commands:
+            assert command.callback is not None
+            if not command.hidden:
+                name = command.name or get_command_name(command.callback.__name__)
+                expected[prefix + name] = getattr(command.callback, "command_kind", None)
+        if (callback := group_app.registered_callback) is not None:
+            assert callback.callback is not None
+            expected[prefix.strip()] = getattr(callback.callback, "command_kind", None)
+    assert dict(rows) == expected
+
+    references = re.findall(
+        r"(?m)(?:^|`)(?:uv run )?etude ([a-z][a-z-]*(?: [a-z][a-z-]*(?=[ `]|$))*)",
+        guide,
+    )
+    assert set(references) <= set(expected)
+    assert "`etude server` (read) Show which machine holds the database" in commands
+
+
+def test_guide_example_checks_at_first_launch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["guide"]) == 0
+    (example,) = re.findall(r"```python\n(.*?)```", capsys.readouterr().out, re.DOTALL)
+    (tmp_path / ".git").mkdir()
+    file = tmp_path / "experiment.py"
+    file.write_text(example)
+
+    assert main(["check", str(file), "--format", "json"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["issues"] == []
+    assert [run["address"] for run in result["training"]] == [
+        "experiment/coin@0",
+        "experiment/coin@1",
+    ]
+    (panel,) = result["evals"]
+    assert (panel["name"], panel["checkpoints"], panel["matches"]) == ("prediction", 0, 0)
 
 
 def _experiment(folder: Path, *, module: str, load: str = "checkpoint") -> Path:

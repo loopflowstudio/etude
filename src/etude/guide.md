@@ -4,8 +4,10 @@ Offline reference for experiment authors and coding agents.
 
 ## Workflow
 
-Before renting compute, validate the file offline, price the pass, launch, then
-wait for runs to finish and rentals to be deleted:
+Save and commit the example below as `experiment.py` in a uv project with
+`etude-sdk[eval]` installed. For the rental commands, use your configured
+on-demand name in place of `gpu`. Validate the file offline, quote the pass,
+launch, then wait for runs to finish and rentals to be deleted.
 
 ```sh
 uv run etude check experiment.py
@@ -179,7 +181,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         EvalJob(
             tournament=PANEL,
             play=play,
-            agents=Agents(load=load, build=build),
+            agents=Agents(load=load, build=build, devices=("cpu",)),
             checkpoints=saved,
             max_hours=0.1,
             max_usd=Decimal("0.50"),

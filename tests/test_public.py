@@ -126,7 +126,12 @@ def _authored_imports(source: str) -> list[ast.ImportFrom]:
 
 def test_authored_examples_use_supported_imports() -> None:
     sources = [(path, path.read_text()) for path in (ROOT / "examples").glob("*.py")]
-    for path in [ROOT / "README.md", *(ROOT / "docs").glob("*.md"), ROOT / "release/UNRELEASED.md"]:
+    for path in [
+        ROOT / "README.md",
+        *(ROOT / "docs").glob("*.md"),
+        ROOT / "release/UNRELEASED.md",
+        ROOT / "src/etude/guide.md",
+    ]:
         text = path.read_text()
         for block in re.finditer(r"```python\n(.*?)```", text, re.DOTALL):
             if text[: block.start()].rstrip().endswith("<!-- implementation-reference -->"):
