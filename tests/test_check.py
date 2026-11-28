@@ -169,7 +169,7 @@ def test_check_and_eval_locate_a_bad_loader_and_check_reports_bad_budget_and_rep
     )
     assert main(["check", str(file)]) == 1
     issues = capsys.readouterr().out
-    assert f"{file}:8: error: a job needs a command and hours" in issues
+    assert f"{file}:8: error: a job's max_hours must be finite and more than zero" in issues
     assert "  fix: max_hours=1" in issues
     assert f"{tmp_path / 'check_loader.py'}:12: error: load must take one checkpoint" in issues
     assert "  fix: def load(checkpoint):" in issues

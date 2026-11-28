@@ -66,6 +66,7 @@ def read_training_jobs(
         "quote",
         "help",
         "experiment",
+        "format",
         "resume",
         "until",
         "job",

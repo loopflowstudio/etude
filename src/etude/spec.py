@@ -283,14 +283,16 @@ class Job(Record):
                 fix="remove command= from the typed job",
             )
         if not value.strip():
-            raise LauncherError("a job needs a command and hours", fix="command='your-command'")
+            raise LauncherError("a job needs a nonempty command", fix="command='your-command'")
         return value
 
     @field_validator("max_hours")
     @classmethod
     def _hours(cls, value: float | None) -> float | None:
         if value is not None and (not math.isfinite(value) or value <= 0):
-            raise LauncherError("a job needs a command and hours", fix="max_hours=1")
+            raise LauncherError(
+                "a job's max_hours must be finite and more than zero", fix="max_hours=1"
+            )
         return value
 
     @field_validator("max_usd")
