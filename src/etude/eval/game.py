@@ -27,7 +27,7 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Generic, cast
 
 from etude.call import Function
-from etude.errors import RetryRequested, explain
+from etude.errors import RetryRequested
 from etude.eval.agents import AgentClient, Forward, ForwardError, ForwardResult
 from etude.eval.composition import build_agents
 from etude.eval.records import Match, _MatchConfig
@@ -374,7 +374,10 @@ async def _drive_play(
         errors: list[ForwardError] = []
         token = _match_errors.set(errors)
         try:
-            return await play(match, agents)
+            outcome = await play(match, agents)
+            if not isinstance(outcome, (Mapping, Result)):
+                raise TypeError("play must return tables or a Result")
+            return outcome
         finally:
             _match_errors.reset(token)
             if errors:
@@ -426,7 +429,6 @@ async def _serve_stream(
     forwarder: _Forwarder | None = None
     played_count = 0
 
-    starting = True
     stream_error: BaseException | None = None
     try:
         play = game.play.load(game.checkout)
@@ -464,7 +466,6 @@ async def _serve_stream(
             build_hook,
             target_matches=game.target_matches,
         )
-        starting = False
         stream = (
             cast(Callable[[MatchStream], _Outcomes], play)(source)
             if game.streaming
@@ -482,10 +483,7 @@ async def _serve_stream(
                 failures = forwarder.drain_loading_failures() if forwarder else ()
                 pipe.send(Outcome(taken.scheduled_key, outcome, elapsed, failures))
     except Exception as error:
-        if starting and not isinstance(error, RetryRequested):
-            stream_error = RetryRequested(f"game process failed during startup: {explain(error)}")
-        else:
-            stream_error = _portable_error(error)
+        stream_error = _portable_error(error)
     finally:
         if client is not None:
             await client.close()

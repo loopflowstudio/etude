@@ -193,8 +193,9 @@ Pending matches, CPUs and available host memory bound the game process count.
 For `play` with checkpoint inference, Etude divides `max_batch` by the process
 limit, rounding up, to set each process's match capacity. A small panel can
 fill that capacity with fewer processes. Shared inference leaves a core for
-the agent process when possible. The startup line gives the mode, its reason,
-and the process, slot and thread counts.
+the agent process when possible. The startup line shows process and thread
+counts, the inference mode and its reason, and the initial `target_matches`
+hint for `play_many`.
 
 Choose tensor placement in `load` and honor Etude's thread environment there.
 Keep model imports in the loading module so shared game processes stay light.
@@ -296,14 +297,18 @@ return {"scores": [{"seat": 0, "won": True}, {"seat": 1, "won": False}]}
 ```
 
 A successful match is reused across an experiment's tournaments in the same
-environment. An ordinary game error fails that match and other matches keep
-playing. Errors retain completed results. Infrastructure failures retry, and
-ordinary game failures require `--retry-failed`. A forward failure raises
+environment. An ordinary `play` error or a return of the wrong type fails that
+match and other matches keep playing. Errors loading or setting up authored
+game code fail its tournament while sibling tournaments continue. Errors
+retain completed results. Infrastructure failures retry, and ordinary failed
+matches require `--retry-failed`. A forward failure raises
 `ForwardError` (with `.checkpoint` naming the checkpoint key) at the awaiting
-call. In `play`, catching `ForwardError` does not hide it from Etude's failure
-retention: the match still fails. In `play_many`, catching `ForwardError` lets
-you drop affected slots and yield `(match, error)` while unrelated matches
-complete. A checkpoint load failure applies to unfinished matches seating
+call. If the shared agent process cannot deserialize a request's inputs, it
+answers that request with `ForwardError` and continues serving other requests.
+Etude records a failed match even when `play` catches `ForwardError`.
+In `play_many`, catch `ForwardError`, drop affected slots and yield `(match,
+error)` while unrelated matches complete. A checkpoint load failure applies
+to unfinished matches seating
 that checkpoint, including matches that yield fallback tables.
 [Limits](limits.md) covers process, event-loop and API side effects.
 

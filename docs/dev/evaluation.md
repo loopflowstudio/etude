@@ -144,10 +144,11 @@ with evaluating(
   `ceil(max_batch / process_limit)` matches in flight. Code-only `play` uses one
   match per process. Pending forwards flush on a zero-delay loop barrier.
   The inference thread and checkpoint budgets use the count of processes
-  started for the panel. For `play_many`, the initial slot hint is capped at
-  `max_batch` when a loader is declared. Grants share unfinished matches
-  across processes, accounting for matches already held and pending work for
-  empty processes. A positive request receives at least one while grants are
+  started for the panel. For `play_many`, the startup line prints the initial
+  `target_matches` hints, capped at `max_batch` when a loader is declared.
+  Grants share unfinished matches across processes, accounting for matches
+  already held and pending work for empty processes. A positive request
+  receives at least one while grants are
   open and work remains. Per-process diagnostics are written to
   `game-{pid}.json`, and shared agent runs record batch row counts and stage
   timings in `batches.json`. Direct game reports count rows in `local_rows`.
@@ -212,12 +213,16 @@ with evaluating(
   `seat` and `group`, a seat or group the match lacks, a column named
   `player`, or a column whose type changes during a run is refused. A refused
   or raising match is recorded as failed with its error, nothing else of it
-  is stored. A raised `play` error fails that match alone; a refused table
-  stops new grants for the tournament. In-flight outcomes are retained. In `play_many`, yield
+  is stored. A raised `play` error or a return of the wrong type fails that
+  match alone. A refused table stops new grants for the tournament and
+  in-flight outcomes are retained. In `play_many`, yield
   `(match, error)` to fail one slot and keep taking pending matches. A raised
   error or an unknown or duplicate yield fails every held match. Returning with
-  held matches unyielded fails each unyielded match. Game-process startup
-  errors interrupt the group and leave unfinished matches eligible for retry.
+  held matches unyielded fails each unyielded match. Errors loading or
+  setting up authored game code fail that tournament and its held matches.
+  Sibling tournaments continue. A game process that exits without reporting,
+  a failed shared-agent connection or `RetryRequested` interrupts the group
+  and leaves unfinished matches eligible for retry.
   A run with failed matches ends failed.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each drawn value from the

@@ -865,7 +865,7 @@ def _play_matches(
     try:
         for grant in initial:
             live.append(spawn_one(grant))
-        _log_execution(plays, plan)
+        _log_execution(plays, plan, initial)
         while live:
             left = seconds_left()
             allowance = (
@@ -927,7 +927,9 @@ def _play_matches(
         raise Terminated("evaluation stopped before its execution deadline")
 
 
-def _log_execution(plays: Sequence[Playing], plan: ExecutionPlan) -> None:
+def _log_execution(
+    plays: Sequence[Playing], plan: ExecutionPlan, initial: Sequence[_GameGrant]
+) -> None:
     streaming = any(each.streaming for each in plays)
     processes = plan.processes
     process_count = f"{processes} game {'process' if processes == 1 else 'processes'}"
@@ -935,6 +937,10 @@ def _log_execution(plays: Sequence[Playing], plan: ExecutionPlan) -> None:
     capacity = f"up to {game_count}"
     if streaming:
         capacity = "slots requested by play_many"
+        targets = sorted({grant.target_matches for grant in initial if grant.playing.streaming})
+        if targets:
+            hint = str(targets[0]) if len(targets) == 1 else f"{targets[0]}–{targets[-1]}"
+            capacity += f" (initial target_matches={hint})"
         if any(not each.streaming for each in plays):
             capacity += f"; play holds up to {game_count}"
     if plan.inference in ("no loader", "no checkpoints"):

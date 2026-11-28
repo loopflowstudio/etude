@@ -25,6 +25,7 @@ from etude.eval.agents import (
     CheckpointRequest,
     ForwardError,
     ForwardResult,
+    decode_requests,
     recv_frame,
     send_frame,
 )
@@ -211,8 +212,12 @@ def _run_agents(
                         peer = cast(socket.socket, event.fileobj)
                         started = time.monotonic()
                         try:
-                            payload = recv_frame(peer)
-                            requests = cast(list[CheckpointRequest], ForkingPickler.loads(payload))
+                            requests: list[CheckpointRequest] = []
+                            for request in decode_requests(recv_frame(peer)):
+                                if isinstance(request, Answer):
+                                    send_frame(peer, ForkingPickler.dumps(request))
+                                else:
+                                    requests.append(request)
                         except (EOFError, OSError):
                             selector.unregister(peer)
                             peer.close()

@@ -36,6 +36,8 @@ from etude.eval.agents import (
     Forward,
     ForwardError,
     ModelForward,
+    decode_requests,
+    encode_requests,
     recv_frame,
     send_frame,
 )
@@ -1121,6 +1123,46 @@ def test_bad_batch_answers_fail_all_asking_tournaments(
         db.close()
 
 
+def restore_unreadable_input() -> NoReturn:
+    raise ModuleNotFoundError("fixture input class is unavailable")
+
+
+class UnreadableInput:
+    def __reduce__(self) -> tuple[Callable[[], NoReturn], tuple[()]]:
+        return restore_unreadable_input, ()
+
+
+async def sends_unreadable_input(match: Match, agents: Sequence[Forward]) -> Tables:
+    bad, good = await asyncio.gather(
+        agents[0]([UnreadableInput()]), agents[1]([7]), return_exceptions=True
+    )
+    assert good == [7]
+    assert await agents[0]([8]) == [8]
+    assert isinstance(bad, ForwardError)
+    assert bad.checkpoint == match.players[0].name
+    assert not bad.retry and not bad.loading
+    raise bad
+
+
+def test_unreadable_agent_input_fails_only_its_request(tmp_path: Path) -> None:
+    agents = Agents(load=echo)
+    selected = group(job("bad_input", agents, sends_unreadable_input), job("healthy", agents))
+    broken, healthy = [spec.address.split("/")[-1] for spec in selected.evaluations]
+    with pytest.raises(EtudeError, match="fixture input class is unavailable"):
+        hold_group(selected, directory=tmp_path)
+    reports = {r.tournament: r for r in _game_reports(tmp_path / "grouped/artifacts/agents")}
+    assert (reports["bad_input"].requests, reports["bad_input"].answers) == (2, 3)
+    db = statsdb("grouped", tmp_path)
+    try:
+        assert set(db.sql("select run, state, retry from matches").fetchall()) == {
+            (broken, "failed", False),
+            (healthy, "done", False),
+        }
+        assert db.sql("select distinct run from scores").fetchall() == [(healthy,)]
+    finally:
+        db.close()
+
+
 def test_launched_group_delivers_members_then_the_next_pass_plays_nothing(
     tmp_path: Path, command_python: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1465,7 +1507,7 @@ def test_agent_startup_failure_reports_retryable_matches(
 
 
 @pytest.mark.parametrize("streaming", [False, True], ids=["play", "play_many"])
-def test_game_import_failure_leaves_unfinished_matches_retryable(
+def test_game_import_failure_fails_its_tournament_and_leaves_siblings_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, streaming: bool
 ) -> None:
     monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
@@ -1480,31 +1522,33 @@ def test_game_import_failure_leaves_unfinished_matches_retryable(
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     game = getattr(import_module(module), callback)
-    panel = [Match(players=(Code(name="one"),), index=i) for i in range(3)]
-    world = environment("game_startup")
-    with (
-        pytest.raises(
-            RetryRequested, match="game process failed during startup.*fixture game import"
+    selected = group(
+        EvalJob(
+            tournament=tournament("broken"),
+            enter=(Code(name="one"), Code(name="two")),
+            play_many=game if streaming else None,
+            play=None if streaming else game,
+            max_hours=0.1,
         ),
-        evaluating(
-            world, experiment="startup", matches=panel, run="games", directory=tmp_path
-        ) as active,
-    ):
-        if streaming:
-            active.play_many(game)
-        else:
-            active.play(game)
-    db = statsdb("startup", tmp_path)
+        job("healthy", None),
+    )
+    broken, healthy = [spec.address.split("/")[-1] for spec in selected.evaluations]
+    with pytest.raises(EtudeError, match="fixture game import failed"):
+        hold_group(selected, directory=tmp_path)
+    db = statsdb("grouped", tmp_path)
     try:
-        assert set(db.sql("select match, state, retry from matches").fetchall()) == {
-            (match.key, "failed", True) for match in panel
+        assert set(db.sql("select run, state from runs").fetchall()) == {
+            (broken, "failed"),
+            (healthy, "finished"),
         }
+        expected = {(healthy, "done", False)}
+        if not streaming:
+            # Only play reserves a match before the game code imports.
+            expected.add((broken, "failed", False))
+        assert set(db.sql("select run, state, retry from matches").fetchall()) == expected
+        assert db.sql("select distinct run from scores").fetchall() == [(healthy,)]
     finally:
         db.close()
-    with evaluating(
-        world, experiment="startup", matches=panel, run="games", directory=tmp_path, resume=True
-    ) as active:
-        assert active.play(plain).played == 3
 
 
 def test_game_teardown_error_leaves_ungranted_matches_unrecorded(tmp_path: Path) -> None:
@@ -1750,8 +1794,10 @@ def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoin
         for turn in range(2):
             for client, peer in peers:
                 request = CheckpointRequest(turn, cp.checkpoint, [WireValue(turn)], 1)
-                send_frame(client, ForkingPickler.dumps([request]))
-                batches.add(peer, ForkingPickler.loads(recv_frame(peer)))
+                send_frame(client, b"".join(encode_requests([request])))
+                (decoded,) = decode_requests(recv_frame(peer))
+                assert isinstance(decoded, CheckpointRequest)
+                batches.add(peer, [decoded])
             observations.extend(batches.flush())
             for client, _ in peers:
                 assert ForkingPickler.loads(recv_frame(client)) == Answer(turn, [str(turn)])
@@ -2044,7 +2090,11 @@ async def records_target_matches(matches: MatchStream) -> AsyncIterator[tuple[Ma
 
 @pytest.mark.parametrize(("cpus", "max_batch"), [(3, None), (1, 2)], ids=["share", "batch-cap"])
 def test_play_many_targets_its_initial_share_bounded_by_batch_size(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cpus: int, max_batch: int | None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    cpus: int,
+    max_batch: int | None,
 ) -> None:
     monkeypatch.setattr(eval_resources, "available_cpus", lambda: cpus)
     player = Code(name="one") if max_batch is None else checkpoint("one")
@@ -2058,6 +2108,7 @@ def test_play_many_targets_its_initial_share_bounded_by_batch_size(
         environment("vector"), experiment="vector", matches=panel, run="slots", directory=tmp_path
     ) as active:
         assert active.play_many(records_target_matches, agents=agents).played == 5
+    assert "play_many (initial target_matches=2)" in capfd.readouterr().err
     db = statsdb("vector", tmp_path)
     try:
         assert db.sql("select score, count(*) from scores group by score").fetchall() == [(2, 5)]
@@ -2265,7 +2316,43 @@ async def checked_result(match: Match[Config], agents: Sequence[object]) -> Tabl
         raise RetryRequested("fixture driver retry")
     if outcome == "schema":
         return {}
+    if outcome == "return":
+        return cast(Tables, ["invalid return"])
     return await plain(match, list(agents))
+
+
+def test_play_invalid_return_fails_only_that_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
+    panel = [
+        Match(players=(checkpoint("one"),), config={"outcome": outcome}, index=i)
+        for i, outcome in enumerate(("return", "in-flight", "pending"))
+    ]
+    with (
+        pytest.raises(EtudeError, match="play must return tables or a Result"),
+        evaluating(
+            environment("invalid_return"),
+            experiment="invalid_return",
+            matches=panel,
+            run="policy",
+            directory=tmp_path,
+        ) as active,
+    ):
+        active.play(checked_result, agents=Agents(load=echo, devices=("cpu",), max_batch=2))
+    db = statsdb("invalid_return", tmp_path)
+    try:
+        assert set(db.sql("select match, state, retry from matches").fetchall()) == {
+            (panel[0].key, "failed", False),
+            (panel[1].key, "done", False),
+            (panel[2].key, "done", False),
+        }
+        assert set(db.sql("select match from scores").fetchall()) == {
+            (panel[1].key,),
+            (panel[2].key,),
+        }
+    finally:
+        db.close()
 
 
 async def checked_stream(

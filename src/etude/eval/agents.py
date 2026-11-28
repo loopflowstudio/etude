@@ -86,6 +86,34 @@ class Answer:
 
 
 _HEADER = struct.Struct("!Q")
+_REQUEST_HEADER = struct.Struct("!QQQ")
+
+
+def encode_requests(requests: Sequence[CheckpointRequest]) -> list[bytes | memoryview]:
+    """Frame each pickle with the request identity needed to answer a decode error."""
+    parts: list[bytes | memoryview] = []
+    for request in requests:
+        key = request.checkpoint.key.encode()
+        body = ForkingPickler.dumps(request)
+        parts.extend((_REQUEST_HEADER.pack(request.id, len(key), len(body)) + key, body))
+    return parts
+
+
+def decode_requests(payload: bytes) -> Iterator[CheckpointRequest | Answer]:
+    view = memoryview(payload)
+    offset = 0
+    while offset < len(view):
+        request_id, key_size, body_size = _REQUEST_HEADER.unpack_from(view, offset)
+        key_start = offset + _REQUEST_HEADER.size
+        body_start = key_start + key_size
+        offset = body_start + body_size
+        try:
+            request = cast(CheckpointRequest, ForkingPickler.loads(view[body_start:offset]))
+        except Exception as error:
+            key = str(view[key_start:body_start], "utf-8")
+            yield Answer(request_id, ForwardError(key, f"agent {key}: {explain(error)}"))
+        else:
+            yield request
 
 
 def send_frame(sock: socket.socket, payload: bytes | memoryview) -> None:
@@ -154,11 +182,11 @@ class AgentClient:
         self._next_id += len(items)
         started = time.monotonic()
         try:
-            payload = ForkingPickler.dumps(items)
-            self._writer.write(_HEADER.pack(len(payload)))
-            self._writer.write(payload)
+            parts = encode_requests(items)
+            size = sum(map(len, parts))
+            self._writer.writelines([_HEADER.pack(size), *parts])
             self.requests += 1
-            self.request_bytes += len(payload)
+            self.request_bytes += size
         except OSError as error:
             failure = RetryRequested("agent process exited before answering")
             self._fail_all(failure)
