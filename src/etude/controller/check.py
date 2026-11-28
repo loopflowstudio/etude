@@ -25,6 +25,7 @@ from etude.controller.declarations import (
     read_training_jobs,
     require_checkout,
     require_jobs,
+    require_training_options,
     with_queued_runs,
 )
 from etude.controller.diagnostics import Issue, declaration
@@ -81,10 +82,6 @@ class Check(Record):
         return all(issue.severity != "error" for issue in self.issues)
 
 
-class NoTrainingOptions(ValueError):
-    """The input file has no training declaration to receive its flags."""
-
-
 def check_file(
     file: Path,
     given: Sequence[str] = (),
@@ -96,6 +93,7 @@ def check_file(
     name = experiment or file.stem
     try:
         definition = read_experiment(file, experiment=name)
+        require_training_options(given, definition)
         if all(each is None for each in (definition.train, definition.report)):
             require_jobs(definition)
     except (EtudeError, LauncherError) as error:
@@ -103,8 +101,6 @@ def check_file(
             file=file, experiment=name, source=source, issues=(Issue.from_error(error, file),)
         )
 
-    if given and definition.training is None:
-        raise NoTrainingOptions("file has no training_jobs() options")
     issues: list[Issue] = []
     training: list[PlannedRun] = []
     evals: list[PlannedTournament] = []
@@ -119,6 +115,12 @@ def check_file(
     if definition.training is None and definition.eval is None:
         kind = "local_recipe" if recipe is not None else "report_only"
     try:
+        if recipe is not None:
+            with declaration(file, recipe):
+                config = config_type(recipe)
+                if all(not field.is_required() for field in config.model_fields.values()):
+                    default = changed_config(config, "{}")
+                    config.model_validate_json(default.model_dump_json(round_trip=True))
         if definition.training is not None:
             requests = read_training_jobs(
                 file, given, experiment=definition.name, state=state, function=definition.training
@@ -139,11 +141,6 @@ def check_file(
                     )
                 )
             state = with_queued_runs(state, requests)
-        elif recipe is not None and kind == "local_recipe":
-            with declaration(file, recipe):
-                config = config_type(recipe)
-                default = changed_config(config, "{}")
-                config.model_validate_json(default.model_dump_json(round_trip=True))
     except (EtudeError, LauncherError) as error:
         issues.append(Issue.from_error(error, file))
 
@@ -194,7 +191,11 @@ def check_file(
                             )
                         )
         except EtudeError as error:
-            if issues and error.code in {"run_not_found", "policy_not_found"}:
+            if (
+                definition.training is not None
+                and issues
+                and error.code in {"run_not_found", "policy_not_found"}
+            ):
                 eval_skipped = True
             else:
                 issues.append(Issue.from_error(error, file))
@@ -244,9 +245,6 @@ def show_check(
     source: str | None,
     format: Literal["text", "json"],
 ) -> int:
-    if file.suffix != ".py" or not file.is_file():
-        print(f"{file}: expected an existing Python (.py) file", file=sys.stderr)
-        return 2
     directory = None
     if source is not None:
         if "://" in source:
@@ -324,11 +322,13 @@ def _show_text(checked: Check) -> None:
                 f"  {tournament.name}  {selected}  {schedule}"
                 f"  {_budget(tournament.max_hours, tournament.max_usd)}"
             )
-    if checked.training or checked.evals:
+    if checked.training or any(tournament.matches for tournament in checked.evals):
         command = ["etude", "launch", str(file), "--quote"]
         if checked.experiment != file.stem:
             command.extend(("--experiment", checked.experiment))
         print(f"next: {shlex.join(command)}")
+    else:
+        print("nothing left to launch")
 
 
 def _budget(hours: float, usd: Decimal | None) -> str:

@@ -74,12 +74,14 @@ next: etude launch exp.py --quote
 `etude check FILE [--experiment NAME] [--source DIR] [--format text|json]`
 runs offline on this computer—with no provider key, bucket, database, git or
 SSH call—and shares the runtime's own validation rules across syntax and
-renamed declarations, `training_jobs()`, `eval_jobs(state)`, and `report()`.
+renamed declarations, `training_jobs()`, `eval_jobs(state)`, `train(config)`,
+and `report()`. When `train` is present, `check` validates its config type
+and verifies that a fully defaulted config survives a JSON round trip.
 For eval jobs with an accelerator-capable loader, a fresh interpreter checks
-the imports of the game module and its optional `build` hook. Pass any of the
-experiment file's own flags after `FILE`. Run `etude check FILE --help` to see
-its flags. A plain file defining only
-`train(config)` checks its signature and default config as a local recipe
+the imports of the game module and its optional `build` hook. Run
+`etude check FILE --help` to see the flags defined by `training_jobs()`.
+Pass those flags after `FILE`.
+A plain file defining only `train(config)` checks as a local recipe
 (`etude train FILE`). A file defining only `report()` checks as a report-only
 file for `etude report FILE`.
 
@@ -88,7 +90,8 @@ file for `etude report FILE`.
   `--source DIR` to read an existing local runs directory. Training lists
   runs that are missing from the source. Evaluation counts remaining matches
   for the available checkpoints and entrants, taking delivered results into
-  account. Use `etude launch FILE --quote` for bucket storage and prices.
+  account. If the plan has work, `check` suggests `etude launch FILE --quote`
+  for bucket storage and prices.
 - **Budgets and warnings.** Jobs without `max_usd` are noted as
   `no max_usd: owned pools only` (owned pools and local runs accept them;
   renting refuses them). Heavy game imports produce a warning and keep exit
@@ -106,6 +109,8 @@ file for `etude report FILE`.
   Dollar caps are decimal strings.
   Exit status is `0` when there are no errors, `1` when the file has errors,
   and `2` when nothing was checked (unusable file, source or command-line option).
+  `launch`, `queue` and `smoke` also exit `2` for missing files or unused
+  file flags.
 - **Same fixes at runtime.** `launch`, `queue`, `eval` and `smoke` print the
   same `FILE:LINE` location and `fix:` line when they refuse a declaration.
 

@@ -29,7 +29,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
-from etude.controller.declarations import Experiment, asked, read_experiment, read_training_jobs
+from etude.controller.declarations import (
+    Experiment,
+    asked,
+    read_experiment,
+    read_training_jobs,
+    require_training_options,
+)
+from etude.controller.diagnostics import declaration
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Benchmark, RoundRobin
 from etude.eval.tournament import played
@@ -71,6 +78,7 @@ def smoke_file(
     definition = read_experiment(file) if isinstance(file, Path) else file
     path = definition.file
     assert path is not None
+    require_training_options(given, definition, read_training="train" in steps and runs is None)
     if definition.training is None:
         steps = tuple(step for step in steps if step != "train")
         source = source or DirectoryStorage(default_root())
@@ -159,6 +167,8 @@ def _evaluate(definition: Experiment, source: Storage, store: DirectoryStorage) 
         [job.recorded() for job in runnable],
     )
     batches: dict[str, list[Job]] = {}
+    path = definition.file
+    assert path is not None
     for job in runnable:
         tiny = job.model_copy(update={"tournament": _tiny_tournament(job.tournament)})
         recorded = tiny.recorded()
@@ -170,7 +180,8 @@ def _evaluate(definition: Experiment, source: Storage, store: DirectoryStorage) 
             lines=lines,
             storages=[store],
         ).new
-        lowered = tiny.lower(state, pending, lines)
+        with declaration(path, function):
+            lowered = tiny.lower(state, pending, lines)
         spec = evaluation_group(lowered).evaluations[0]
         batches.setdefault(_group_key(lowered, spec), []).append(lowered)
     for batch in batches.values():

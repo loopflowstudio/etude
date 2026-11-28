@@ -276,7 +276,10 @@ def read_experiment(path: Path, *, experiment: str | None = None) -> Experiment:
                 )
         if report is not None and not callable(report):
             raise EtudeError(
-                "experiment_report_is_not_a_function", 422, fix="def report() -> Report:"
+                "experiment_report_is_not_a_function",
+                422,
+                detail=f"report has type {type(report).__name__}",
+                fix="def report() -> Report:",
             )
     return Experiment(
         name=experiment or path.stem,
@@ -298,9 +301,22 @@ def declared_report(experiment: Experiment) -> Report | None:
             raise EtudeError(
                 "experiment_report_returns_a_report",
                 422,
+                detail=f"report() returned {type(report).__name__}",
                 fix="return Report()",
-            ) from TypeError(f"{experiment.file.name}: report() returned a {type(report).__name__}")
+            )
     return report
+
+
+def require_training_options(
+    given: Sequence[str], experiment: Experiment, *, read_training: bool = True
+) -> None:
+    """File options must reach the training declaration for this invocation."""
+    if not given:
+        return
+    if experiment.training is None:
+        raise typer.BadParameter("file has no training_jobs() options", param_hint=given[0])
+    if not read_training:
+        raise typer.BadParameter("this invocation skips training_jobs()", param_hint=given[0])
 
 
 def require_jobs(experiment: Experiment) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -67,11 +68,18 @@ def locate(
             return SourceLocation(Path(cause.filename), cause.lineno)
     base = path.resolve()
     directory = base if base.is_dir() else git_checkout(base.parent) or base.parent
+    dependencies = (_PACKAGE, Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve())
     for cause in reversed(causes):
         for frame in reversed(traceback.extract_tb(cause.__traceback__)):
             if frame.lineno is not None and not frame.filename.startswith("<"):
                 file = Path(frame.filename).resolve()
-                if file.is_relative_to(directory) and not file.is_relative_to(_PACKAGE):
+                if not file.is_relative_to(directory):
+                    continue
+                # A project can keep its interpreter and installed packages in its checkout.
+                if any(file.is_relative_to(root) for root in dependencies):
+                    continue
+                parts = file.relative_to(directory).parts
+                if all(not part.startswith(".") and part != "site-packages" for part in parts):
                     return SourceLocation(file, frame.lineno)
     return (function_location(function) if function is not None else None) or SourceLocation(
         path, 1

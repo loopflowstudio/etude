@@ -33,6 +33,20 @@ FileHelp = Annotated[
 ]
 
 
+def _experiment_file(ctx: typer.Context, file: Path | None, help: bool) -> Path | None:
+    if help:
+        print(ctx.get_help())
+    if file is None:
+        if help:
+            return None
+        raise typer.BadParameter("a Python experiment FILE is required", param_hint="FILE")
+    if file.suffix != ".py" or not file.is_file():
+        raise typer.BadParameter(
+            f"{file}: expected an existing Python (.py) file", param_hint="FILE"
+        )
+    return file
+
+
 @app.command(
     "check",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
@@ -48,15 +62,10 @@ def check_experiment(
     help: FileHelp = False,
 ) -> None:
     """Validate an experiment file offline before launching it."""
-    if help:
-        print(ctx.get_help())
-    if file is None:
-        if help:
-            return
-        typer.echo("etude check: a Python experiment FILE is required", err=True)
-        raise typer.Exit(2)
+    if (file := _experiment_file(ctx, file, help)) is None:
+        return
     # Entry points load only the command being run.
-    from etude.controller.check import NoTrainingOptions, show_check
+    from etude.controller.check import show_check
     from etude.controller.declarations import read_experiment, read_training_jobs
 
     if help:
@@ -64,12 +73,9 @@ def check_experiment(
         if definition.training is not None:
             read_training_jobs(file, help=True, function=definition.training)
         return
-    try:
-        status = show_check(file, ctx.args, experiment=experiment, source=source, format=format)
-    except NoTrainingOptions as error:
-        typer.echo(f"etude check: {error}", err=True)
-        status = 2
-    raise typer.Exit(status)
+    raise typer.Exit(
+        show_check(file, ctx.args, experiment=experiment, source=source, format=format)
+    )
 
 
 @app.command()
@@ -162,21 +168,24 @@ def _submit(
     watch: float | None = None,
     retry_failed: bool = False,
 ) -> None:
-    if help:
-        print(ctx.get_help())
-    if file is None:
-        if help:
-            return
-        raise typer.BadParameter("a Python experiment FILE is required")
+    if (file := _experiment_file(ctx, file, help)) is None:
+        return
     import time
     from decimal import Decimal, InvalidOperation
 
     from etude.controller.advance import advance, source_for
-    from etude.controller.declarations import read_experiment, read_training_jobs, require_jobs
+    from etude.controller.declarations import (
+        read_experiment,
+        read_training_jobs,
+        require_jobs,
+        require_training_options,
+    )
     from etude.spec import Until
     from etude.storage import storage_from_uri
 
     definition = read_experiment(file, experiment=experiment)
+    if not help:
+        require_training_options(ctx.args, definition)
     require_jobs(definition)
     if help:
         if callable(definition.training):
@@ -366,12 +375,8 @@ def smoke_experiment(
     help: FileHelp = False,
 ) -> None:
     """Run a file's training, evaluation and report in smoke form on this computer. Spends nothing."""
-    if help:
-        print(ctx.get_help())
-    if file is None:
-        if help:
-            return
-        raise typer.BadParameter("an experiment FILE is required")
+    if (file := _experiment_file(ctx, file, help)) is None:
+        return
     from typing import cast
 
     from etude.controller.declarations import read_experiment, read_training_jobs
@@ -719,12 +724,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         from etude.call import validation_message
         from etude.storage_timeout import StorageUnavailable
 
-        # Typer's parser attaches context to bad values. A command can also
-        # raise a context-free BadParameter as a domain refusal.
+        # Typer attaches context to parse errors. A command can name a parameter
+        # explicitly for an input error or leave it unnamed for a domain refusal.
         if (
             hasattr(error, "format_message")
             and hasattr(error, "exit_code")
-            and (not isinstance(error, typer.BadParameter) or error.ctx is not None)
+            and (
+                not isinstance(error, typer.BadParameter)
+                or error.ctx is not None
+                or error.param_hint is not None
+            )
         ):
             typer.echo(f"etude: {sanitize(error.format_message())}", err=True)
             return int(error.exit_code)

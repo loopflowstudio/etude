@@ -454,7 +454,7 @@ uv run etude guide
 
 `etude check FILE` validates an experiment file offline before launching or
 spending money, running the runtime's own checks across `training_jobs()`,
-`eval_jobs(state)`, `report()`, local `train(config)` recipes and game-module
+`eval_jobs(state)`, `report()`, `train(config)` and game-module
 imports (warning when a shared-inference game module pulls in heavy model
 libraries). It reports errors as `FILE:LINE: error: ...` with inline `fix:`
 lines (exit `1`), or prints the planned runs, budgets and tournaments as a

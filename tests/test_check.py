@@ -176,7 +176,8 @@ def test_check_and_eval_locate_a_bad_loader_and_check_reports_bad_budget_and_rep
     assert "  fix: max_hours=1" in issues
     assert f"{tmp_path / 'check_loader.py'}:12: error: load must take one checkpoint" in issues
     assert "  fix: def load(checkpoint):" in issues
-    assert f"{file}:15: error: experiment_report_returns_a_report" in issues
+    assert f"{file}:15: error: experiment_report_returns_a_report: report() returned dict" in issues
+    assert "  fix: return Report()" in issues
     assert "3 errors" in issues
     assert main(["eval", str(file), "--source", str(tmp_path / "stored")]) == 1
     assert "  fix: def load(checkpoint):" in capsys.readouterr().err
@@ -188,8 +189,6 @@ def test_check_distinguishes_unchecked_input_syntax_and_local_recipes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     file = tmp_path / "recipe.py"
-    assert main(["check", str(file)]) == 2
-    assert "expected an existing Python" in capsys.readouterr().err
     file.write_text("# experiment\ndef train(\n")
     assert main(["check", str(file)]) == 1
     assert f"{file}:2: error: SyntaxError:" in capsys.readouterr().out
@@ -219,6 +218,57 @@ def test_check_reports_a_report_only_file(
     checked = json.loads(capsys.readouterr().out)
     assert checked["kind"] == "report_only"
     assert checked["training"] == checked["evals"] == []
+
+
+def test_report_refusals_describe_the_authored_value(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = tmp_path / "notes.py"
+    for source, diagnostic, fix in (
+        ("report = 42", "experiment_report_is_not_a_function: report has type int", "def report()"),
+        (
+            "def report(): return {}",
+            "experiment_report_returns_a_report: report() returned dict",
+            "return Report()",
+        ),
+    ):
+        file.write_text(source + "\n")
+        assert main(["check", str(file)]) == 1
+        assert f"error: {diagnostic}\n  fix: {fix}" in capsys.readouterr().out
+        assert main(["report", str(file), "--source", str(tmp_path / "runs")]) == 1
+        assert f"{diagnostic}\n  fix: {fix}" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["check", "launch", "queue", "smoke"])
+def test_experiment_commands_refuse_missing_files_and_unused_options(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("ETUDE_HOME", str(home))
+    file = tmp_path / "eval_only.py"
+    assert main([command]) == 2
+    assert "a Python experiment FILE is required" in capsys.readouterr().err
+    assert main([command, str(file)]) == 2
+    assert f"{file}: expected an existing Python" in capsys.readouterr().err
+    file.write_text("def eval_jobs(state): raise AssertionError('must refuse the flag first')\n")
+    assert main([command, str(file), "--typo"]) == 2
+    captured = capsys.readouterr()
+    assert "--typo" in captured.err
+    assert "file has no training_jobs() options" in captured.err
+    assert captured.out == ""
+    assert not launcher_file(home).exists()
+
+
+def test_smoke_refuses_training_flags_without_the_train_step(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = tmp_path / "exp.py"
+    file.write_text("def training_jobs(width: int = 64): raise AssertionError('must not train')\n")
+    assert main(["smoke", str(file), "--step", "report", "--width", "32"]) == 2
+    assert "this invocation skips training_jobs()" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("name", ["training_jobs", "train"])
@@ -294,20 +344,108 @@ def test_check_and_launch_require_a_checkout_for_eval_only_files(
     assert capsys.readouterr().err == f"etude: {location} {message}\n  {fix}\n"
 
 
-def test_check_formats_a_constructor_type_error_without_the_raw_input(
+def test_smoke_locates_errors_when_lowering_an_eval_declaration(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    file = _experiment(tmp_path, module="check_constructor")
+    file = tmp_path / "unlabelled.py"
     file.write_text(
-        file.read_text()
-        .replace("seeds=(1, 1)", "seeds=(1,)")
-        .replace("max_hours=1", 'max_hours="wrong"', 1)
+        dedent(f"""\
+        from etude.checkpoints import CheckpointRecord
+        from etude.eval.match import environment
+        from etude.eval.records import Benchmark
+        from etude.jobs import EvalJob
+        from etude.records import ArtifactRef
+
+        async def play(match, agents):
+            raise AssertionError("must not play")
+
+        def eval_jobs(state):
+            checkpoint = CheckpointRecord(
+                run="unlabelled", ordinal=1, at={{}},
+                artifact=ArtifactRef(uri={(tmp_path / "weights").as_uri()!r},
+                                     sha256="a" * 64, size_bytes=1),
+            )
+            return EvalJob(tournament=Benchmark(name="panel", environment=environment("check")),
+                           checkpoints=(checkpoint,), play=play, max_hours=1, repo=None)
+        """)
     )
+    assert main(["smoke", str(file), "--step", "eval"]) == 1
+    assert capsys.readouterr().err == (
+        f"etude: {file}:10: checkpoint_names_no_experiment: Use checkpoints from a named experiment\n"
+        '  fix: state.run("base@0").checkpoints\n'
+    )
+
+
+def test_check_formats_a_constructor_type_error_without_the_raw_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    (tmp_path / ".git").touch()
+    site = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True)
+    (site / "check_constructor_dependency.py").write_text(
+        "from etude.jobs import TrainingJob\n"
+        "def make_job(**kwargs):\n"
+        "    return TrainingJob(**kwargs)\n"
+    )
+    monkeypatch.syspath_prepend(str(site))
+    file = _experiment(tmp_path, module="check_constructor")
+    source = "from check_constructor_dependency import make_job\n" + file.read_text().replace(
+        "return TrainingJob(", "return make_job("
+    )
+    for text, message in (
+        (source, "seeds must be nonempty and distinct"),
+        (
+            source.replace("seeds=(1, 1)", "seeds=(1,)").replace(
+                "max_hours=1", 'max_hours="wrong"', 1
+            ),
+            "TrainingJob.max_hours: Input should be a valid number",
+        ),
+    ):
+        file.write_text(text)
+        assert main(["check", str(file)]) == 1
+        issues = capsys.readouterr().out
+        assert f"{file}:9: error: {message}" in issues
+        assert "wrong" not in issues and "pydantic.dev" not in issues
+        assert main(["launch", str(file), "--source", str(tmp_path / "runs"), "--quote"]) == 1
+        assert f"{file}:9: {message}" in capsys.readouterr().err
+
+
+def test_check_validates_train_alongside_eval_and_accepts_required_config_fields(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / ".git").touch()
+    file = tmp_path / "hybrid.py"
+    source = dedent("""\
+        from pydantic import BaseModel
+        from etude.eval.match import environment
+        from etude.eval.records import Benchmark
+        from etude.jobs import EvalJob
+
+        class Config(BaseModel):
+            width: int
+
+        def train(config: Config) -> None:
+            raise AssertionError("must not train")
+
+        async def play(match, agents):
+            raise AssertionError("must not play")
+
+        def eval_jobs(state):
+            return EvalJob(tournament=Benchmark(name="panel", environment=environment("check")),
+                           play=play, max_hours=1)
+        """)
+    file.write_text(source.replace("config: Config", "config: int"))
     assert main(["check", str(file)]) == 1
-    issues = capsys.readouterr().out
-    assert f"{file}:8: error: TrainingJob.max_hours: Input should be a valid number" in issues
-    assert "wrong" not in issues
-    assert "pydantic.dev" not in issues
+    assert (
+        f"{file}:9: error: train's parameter 'config' must be annotated" in capsys.readouterr().out
+    )
+    file.write_text(source)
+    assert main(["check", str(file)]) == 0
+    output = capsys.readouterr().out
+    assert "panel  benchmark  0 checkpoints  0 matches" in output
+    assert "nothing left to launch" in output
+    assert "next:" not in output
 
 
 def test_check_formats_config_round_trip_errors(
