@@ -249,7 +249,7 @@ measure one checkpoint and one host.
 
 `Agents(load=load, devices=("cuda", "metal"))` is the default for checkpoint
 loaders. Use `("cuda",)` or `("metal",)` to share only on the corresponding
-hardware for `play`, or `("cpu",)` for direct inference on all hosts. Undeclared or
+hardware for `play` and `play_many`, or `("cpu",)` for direct inference on all hosts. Undeclared or
 unavailable accelerators use direct inference. Startup output names the mode,
 its reason, the game count and the thread budget. Older queued loader records
 without a device declaration use the default.
