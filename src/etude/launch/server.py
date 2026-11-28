@@ -131,7 +131,14 @@ class LimitsReply(Record):
     default_target: Target | None = None
 
     @classmethod
-    def read(cls, experiment: str | None, *, include_default: bool) -> LimitsReply:
+    def read(cls, experiment: str | None, *, include_default: bool = False) -> LimitsReply:
+        """Read limits and, when requested, the default target in one exchange."""
+        if address := selected():
+            return PythonClient(address).read_limits(experiment, include_default=include_default)
+        return cls._read_local(experiment, include_default=include_default)
+
+    @classmethod
+    def _read_local(cls, experiment: str | None, *, include_default: bool) -> LimitsReply:
         with retained_scheduler() as scheduler:
             if scheduler is None:
                 return cls()
@@ -579,7 +586,9 @@ def receive(open_scheduler: Callable[[], Scheduler]) -> int:
     if isinstance(request, ObservationRequest):
         response = LauncherObservation.read(request.consoles)
     elif isinstance(request, LimitsRequest):
-        response = LimitsReply.read(request.experiment, include_default=request.include_default)
+        response = LimitsReply._read_local(
+            request.experiment, include_default=request.include_default
+        )
     else:
         response = _answer(open_scheduler(), request)
     print(ServerReply(response).model_dump_json())

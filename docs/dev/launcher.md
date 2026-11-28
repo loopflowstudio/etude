@@ -824,18 +824,18 @@ provisioning and execution, while provisioners and workers remain independent.
 
 - **Controller.** `controller/advance.py` reads declarations, observes state
   through `client.standing(experiment)` and storage, checks any stored limit
-  through `client.read_limits(experiment, include_default=...)`, and
-  calls `launch` or `queue` for new work. It holds nothing between passes.
+  through `LimitsReply.read` in `server.py`, and calls `launch` or `queue`
+  for new work. It holds nothing between passes.
   Declaration reading, smoke and local composition live beside it.
 - **Scheduler.** `scheduler/loop.py` owns database writes, locks, runs, queue,
   placement, job limits and stored experiment spending limits. `prepare_launch`
-  reserves dollars atomically under a five-minute lease, renewed at source,
-  staging and placement boundaries. An unsettled rental acquired by the
-  launch retains the reservation even after lease expiry. Logs recognize an
-  abandoned launch at expiry and the scheduler records its failure on the
-  next tick. The transaction that writes admitted runs replaces
-  the reservation with their commitment. `quote` checks the same limit on a
-  read snapshot.
+  reserves dollars atomically under a five-minute lease, renewed at source
+  preparation, before each staged archive, after staging and at placement.
+  An unsettled rental acquired by the launch retains the reservation even
+  after lease expiry. Logs recognize an abandoned launch at expiry and the
+  scheduler records its failure on the next tick. The transaction that writes
+  admitted runs replaces the reservation with their commitment. `quote`
+  checks the same limit on a read snapshot.
   `costs.py` holds dollar arithmetic and `placement.py`
   holds placement values; neither owns lifecycle state. `executor.py` composes
   startup (`startup.py`, `ssh.py`) with directory, SSH or bucket journals.

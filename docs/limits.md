@@ -54,6 +54,9 @@ failure recovery requires.
   shell cannot raise, requires a hosted service.
   Rental windows cannot outlast scoped storage grants (7 days on R2, 36 hours
   on S3). Queues require a scheduling loop to keep advancing.
+- `etude launch` targeting an on-demand renews its five-minute reservation
+  before each source archive upload. If one upload outlasts the lease, the
+  launch fails before renting, even for a label with no spending limit.
 - `availability` and `--quote` report a provider's stock signal, not a
   reservation. A provider can call hardware `rentable now` and refuse the
   create seconds later; the launch then fails with the provider's reason and

@@ -39,7 +39,7 @@ from etude.jobs import (
 from etude.launch import client
 from etude.launch.listing import show_quote
 from etude.launch.records import ExperimentLimit, Target
-from etude.launch.server import selected
+from etude.launch.server import LimitsReply, selected
 from etude.run import RunListing
 from etude.spec import Job, RunRequest, Smoke, Until
 from etude.storage import Storage, default_root
@@ -131,9 +131,7 @@ def advance(
     target = Target(pool=pool, rent=rent)
     limit = None
     if mode != "local" and (rent is not None or pool is None):
-        spending = client.read_limits(
-            experiment.name, include_default=pool is None and rent is None
-        )
+        spending = LimitsReply.read(experiment.name, include_default=pool is None and rent is None)
         if spending.limits:
             limit = spending.limits[0]
         target = spending.default_target or target

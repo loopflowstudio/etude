@@ -20,12 +20,28 @@ from etude.records import RunRecord
 from etude.spec import Job, RunRequest
 from tests.launch.counting import Counting, Counts, query_plan
 from tests.launch.fake import L4, bench, open_database
+from tests.launch.test_source import git
+from tests.launch.test_source import repository as repository
 
 
-def _request(name: str, *, usd: str = "1", experiment: str = "ppo") -> RunRequest:
+def _request(
+    name: str,
+    *,
+    usd: str = "1",
+    experiment: str = "ppo",
+    repo: Path | None = None,
+    revision: str | None = None,
+) -> RunRequest:
     return RunRequest(
         id=name,
-        job=Job(command="train", experiment=experiment, max_hours=1, max_usd=Decimal(usd)),
+        job=Job(
+            command="train",
+            experiment=experiment,
+            max_hours=1,
+            max_usd=Decimal(usd),
+            repo=str(repo) if repo is not None else None,
+            revision=revision,
+        ),
     )
 
 
@@ -348,30 +364,61 @@ def test_abandoned_launch_logs_finish_after_retry_before_the_scheduler_sweeps(
     ) == 1
 
 
-def test_a_stage_that_outlasts_its_lease_cannot_rent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(("upload_seconds", "limited"), [(151, False), (151, True), (301, True)])
+def test_staging_renews_admission_between_archives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repository: tuple[Path, Path],  # noqa: F811
+    upload_seconds: int,
+    limited: bool,
 ) -> None:
     b = bench(tmp_path)
-    b.scheduler.set_limit("ppo", Decimal(1))
+    repo, _ = repository
+    first = git(repo, "rev-parse", "HEAD")
+    git(repo, "commit", "--allow-empty", "-m", "Second source archive")
+    second = git(repo, "rev-parse", "HEAD")
+    runs = (
+        _request("first", repo=repo, revision=first),
+        _request("second", repo=repo, revision=second),
+    )
+    if limited:
+        b.scheduler.set_limit("ppo", Decimal(2))
     other = Scheduler(open_database(launcher_file(tmp_path)), {}, clock=b.clock)
+    stage = b.service.stage
+    expires = upload_seconds > 300
 
-    def late_stage(*_: object) -> None:
-        b.clock.advance(301)
-        assert other.queue(_request("replacement"), rent="l4") == ("ppo/replacement",)
+    def slow_upload(repo: str, commit: str) -> None:
+        stage(repo, commit)
+        b.clock.advance(upload_seconds)
+        if expires:
+            assert other.queue(_request("replacement"), rent="l4") == ("ppo/replacement",)
+        elif limited and len(b.service.staged) == 2:
+            with pytest.raises(LauncherError, match=r"\$2.00 in flight"):
+                other.queue(_request("replacement"), rent="l4")
 
-    monkeypatch.setattr(b.scheduler, "_stage", late_stage)
-    with pytest.raises(LauncherError, match="reservation expired"):
-        b.scheduler.launch(_request("slow"), rent="l4")
-    assert b.service.creates == 0
-    assert not b.store.sessions()
-    assert other.limits()[0].committed_usd == 1
-    assert other.limits()[0].reserved_usd == 0
+    monkeypatch.setattr(b.service, "stage", slow_upload)
+    if expires:
+        with pytest.raises(LauncherError, match="reservation expired"):
+            b.scheduler.launch(runs, rent="l4")
+        assert b.service.staged == [(min(first, second), 0)]
+        assert b.service.creates == 0
+        assert not b.store.sessions()
+        assert other.limits()[0].committed_usd == 1
+    else:
+        assert b.scheduler.launch(runs, rent="l4") == ("ppo/first", "ppo/second")
+        assert b.service.staged == [(commit, 0) for commit in sorted((first, second))]
+        assert b.service.creates == 2
+    if limited:
+        assert other.limits()[0].reserved_usd == 0
 
 
 def test_slow_staging_renews_the_reservation_before_placement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repository: tuple[Path, Path],  # noqa: F811
 ) -> None:
     b = bench(tmp_path)
+    repo, _ = repository
     b.scheduler.set_limit("ppo", Decimal(1))
     other = Scheduler(open_database(launcher_file(tmp_path)), {}, clock=b.clock)
     offer = b.service.offer
@@ -382,9 +429,11 @@ def test_slow_staging_renews_the_reservation_before_placement(
             other.queue(_request("replacement"), rent="l4")
         return offer()
 
-    monkeypatch.setattr(b.scheduler, "_stage", lambda *_: b.clock.advance(299))
+    monkeypatch.setattr(b.service, "stage", lambda *_: b.clock.advance(299))
     monkeypatch.setattr(b.service, "offer", slow_offer)
-    assert b.scheduler.launch(_request("slow"), rent="l4") == ("ppo/slow",)
+    assert b.scheduler.launch(_request("slow", repo=repo, revision="HEAD"), rent="l4") == (
+        "ppo/slow",
+    )
     assert other.limits()[0].reserved_usd == 0
     assert b.service.creates == 1
 

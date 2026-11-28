@@ -81,7 +81,6 @@ __all__ = (
     "standing",
     "limit",
     "limits",
-    "read_limits",
 )
 
 
@@ -299,17 +298,10 @@ def standing(
 
 def limit(experiment: str) -> ExperimentLimit | None:
     """Read a label's spending ceiling and commitments from the launcher database."""
-    configured = read_limits(experiment).limits
+    configured = LimitsReply.read(experiment).limits
     return configured[0] if configured else None
 
 
 def limits() -> tuple[ExperimentLimit, ...]:
     """Read all configured spending ceilings and commitments from the launcher database."""
-    return read_limits(None).limits
-
-
-def read_limits(experiment: str | None, *, include_default: bool = False) -> LimitsReply:
-    """Read limits in one exchange. A requested owned default needs no spending check."""
-    if address := selected():
-        return PythonClient(address).read_limits(experiment, include_default=include_default)
-    return LimitsReply.read(experiment, include_default=include_default)
+    return LimitsReply.read(None).limits
