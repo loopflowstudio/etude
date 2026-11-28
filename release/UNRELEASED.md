@@ -184,9 +184,10 @@ match duration. Without a rental target, the run waits in the pool's queue
   Ready requests flush immediately.
 - **Remove `workers=`** from `EvalJob(...)` and `evaluating(...)`; it is
   refused. Etude sizes processes from CPU, memory and pending work. For
-  `play`, CUDA and direct checkpoint inference divide `max_batch` across
-  processes. Metal uses one match per process and leaves a core for shared
-  inference when possible. `play_many` chooses its own slot count.
+  `play` with checkpoint inference, Etude divides `max_batch` across
+  processes, rounding up. Shared inference leaves a core for the agent
+  process when possible. `play_many` requests matches for free slots and
+  Etude caps each grant at the process's share of the pending matches.
 - **Guard Python scripts that play.** `evaluating(...)` without `workers=`
   played in its own process; its games now play in fresh processes, which
   import the script again. Put `run.play` under `if __name__ == "__main__":`.
@@ -246,8 +247,9 @@ reached 6,992 games/hour with 15 concurrent games and shared MPS (7.43 mean
 rows/forward), 6,470 games/hour with 32 concurrent games and shared MPS,
 and 6,183 games/hour with direct CPU inference. The single-thread shared
 CPU comparison reached 1,222 games/hour. In a separate Apple Silicon check
-using `examples/agents.py`, immediate flushing processed 24 rows in 20
-batches, compared with two batches before the change. Scores matched.
+using `examples/agents.py` with one match per process, immediate flushing
+processed 24 rows in 20 batches, compared with two batches before the change.
+Scores matched.
 
 `Agents(load=load, devices=("cuda", "metal"))` is the default for checkpoint
 loaders. Use `("cuda",)` or `("metal",)` to share only on the corresponding

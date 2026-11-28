@@ -155,7 +155,7 @@ class ExecutionPlan:
     in shared mode, and each game process's (always one) in direct mode.
     `inference` names the shared accelerator or explains direct play.
     `games` is the per-process concurrency for async `play`. Streaming authors
-    choose their own slot count.
+    request matches for their free slots.
     """
 
     processes: int
@@ -194,8 +194,7 @@ def plan_execution(
     """Choose shared or direct inference and size games, threads and checkpoint bytes.
 
     Shared inference leaves a core for the agent process when possible.
-    Async CUDA and direct checkpoint games divide the batch allowance across
-    game processes. Metal schedules one async match per game process.
+    Async checkpoint games divide the batch allowance across game processes.
     """
     if pending < 1:
         raise ValueError("an execution plan needs pending matches")
@@ -213,7 +212,7 @@ def plan_execution(
     return ExecutionPlan(
         inference=inference,
         processes=processes,
-        games=math.ceil(loader.max_batch / processes) if loading and inference != "metal" else 1,
+        games=math.ceil(loader.max_batch / processes) if loading else 1,
         threads=max(1, cpus - processes) if shared else 1,
         checkpoint_bytes=held if shared else held // processes,
     )

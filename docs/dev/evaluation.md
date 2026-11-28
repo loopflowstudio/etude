@@ -140,12 +140,12 @@ with evaluating(
   functions or rule types binds each game process to one tournament while
   sharing one GPU agent process. Process count is bounded by pending matches,
   CPUs (leaving one core for the shared agent process when present) and memory.
-  For `play` with CUDA or direct checkpoint inference, each process keeps up
-  to `ceil(max_batch / processes)` matches in flight. Metal and code-only
-  games use one match per process. Pending forwards flush on a zero-delay
-  loop barrier.
-  For `play_many`, each process pulls
-  whatever `matches.take(n)` requests from pending matches. Per-process
+  For `play` with checkpoint inference, each process keeps up to
+  `ceil(max_batch / processes)` matches in flight. Code-only `play` uses one
+  match per process. Pending forwards flush on a zero-delay loop barrier.
+  For `play_many`, each `matches.take(n)` grant is capped at
+  `ceil(pending / processes)` for the tournament. The parent counts processes
+  that have started and still have an open stream. Per-process
   diagnostics are written to `game-{pid}.json`, and shared agent runs record
   batch row counts and stage timings in `batches.json`. `evaluating` has no
   setting for process count.
@@ -414,13 +414,13 @@ with evaluating(
 ## Measuring CUDA evaluation
 
 Read `game-*.json` for matches played by each process and `batches.json` for
-rows per forward and time spent waiting for requests. For `play_many`, the
-engine's slot count determines how much of the panel each process can take.
+rows per forward and time spent waiting for requests.
 `max_batch` defaults to 32 rows and bounds how much the agent process merges.
 An oversized pre-collated request runs alone.
 
-On one RTX 4090, Manabot played the same 128-game float32 panel through
-Etude's synchronous API and through `play_many` with 64 slots per process.
+Before fair-share grants, Manabot played the same 128-game float32 panel on
+one RTX 4090 through Etude's synchronous API and through `play_many` with
+64 slots per process.
 All 128 traces per checkpoint matched across the two callbacks. Two of the
 12 streaming processes played matches. The socket arm spent 30–38 seconds
 waiting for requests and 11–12 seconds in forwards.
