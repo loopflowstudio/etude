@@ -302,7 +302,7 @@ When a launch would exceed the limit:
 
 - `etude launch FILE`, `etude queue FILE` and their `--quote` admit declared
   runs in order while they fit; each remaining run prints
-  `new, not queued: limit $50.00 ($46.00 committed)`.
+  `new, not queued: limit $50.00: $46.00 committed`.
 - `--resume`, `etude continue`, and Python `launch`/`queue`/`quote`
   refuse the whole submission before publishing source or renting a machine,
   naming the limit, committed total and the command to raise it. If in-flight

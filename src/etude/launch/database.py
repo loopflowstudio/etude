@@ -1570,6 +1570,10 @@ def _invalid_records(db: sqlite3.Connection) -> list[str]:
             lambda row: Provider.model_validate(dict(row)),
         ),
         "storages": ("SELECT * FROM storages", lambda row: Storage.model_validate(dict(row))),
+        "experiment_limits": (
+            "SELECT * FROM experiment_limits",
+            lambda row: ExperimentCeiling.model_validate(dict(row)),
+        ),
     }
     bodies: dict[str, type[Record]] = {
         "launches": Launch,
@@ -1580,8 +1584,12 @@ def _invalid_records(db: sqlite3.Connection) -> list[str]:
     }
     for table, record in bodies.items():
         rows[table] = (f"SELECT * FROM {table}", partial(_body, record))
+    # A database may stop at a migration set older than a table's own migration.
+    present = {name for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     problems: list[str] = []
     for table, (query, read) in rows.items():
+        if table not in present:
+            continue
         invalid = 0
         for row in db.execute(query):
             remaining()

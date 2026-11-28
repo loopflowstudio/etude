@@ -683,14 +683,17 @@ class ExperimentCeiling(Record):
     """The stored spending ceiling for one experiment label."""
 
     experiment: str
-    max_usd: Decimal
+    max_usd: Decimal = Field(ge=0, allow_inf_nan=False)
     set_at: datetime
 
 
 class ExperimentLimit(ExperimentCeiling):
     """A spending ceiling with the commitments measured at read time."""
 
+    # The total compared against `max_usd`: recorded runs plus `reserved_usd`,
+    # unlike `ExperimentState.committed_usd`, which counts recorded runs only.
     committed_usd: Decimal
+    # Held by launches still preparing, admitting or settling a rental.
     reserved_usd: Decimal
     estimated: bool
 

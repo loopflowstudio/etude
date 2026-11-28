@@ -100,7 +100,7 @@ def source_for(pool: str | None, rent: str | None, source: str | None = None) ->
 def _limit_reason(limit: ExperimentLimit | None, committed: Decimal, ask: Decimal) -> str | None:
     if limit is None or ask == 0 or committed + ask <= limit.max_usd:
         return None
-    return f"limit {limit.format_usd(limit.max_usd)} ({limit.format_committed(committed)})"
+    return f"limit {limit.format_usd(limit.max_usd)}: {limit.format_committed(committed)}"
 
 
 def advance(

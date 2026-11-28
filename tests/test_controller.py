@@ -250,7 +250,7 @@ def test_an_experiment_limit_refuses_hand_down_before_any_rental(
     )
     assert b.scheduler.runs() == ()
     assert b.service.creates == 0
-    assert "not queued: limit $0.50 ($0.00 committed)" in capsys.readouterr().out
+    assert "not queued: limit $0.50: $0.00 committed" in capsys.readouterr().out
     advance(
         read_experiment(file),
         source=DirectoryStorage(tmp_path / "source"),
@@ -258,7 +258,7 @@ def test_an_experiment_limit_refuses_hand_down_before_any_rental(
         mode="launch",
         quote=True,
     )
-    assert "not queued: limit $0.50 ($0.00 committed)" in capsys.readouterr().out
+    assert "not queued: limit $0.50: $0.00 committed" in capsys.readouterr().out
     assert b.scheduler.limits()[0].committed_usd == 0
     assert b.service.creates == 0
 
@@ -281,7 +281,7 @@ def test_a_pass_prints_one_line_per_run_in_declared_order(
     )
     assert capsys.readouterr().out.splitlines()[1:] == [
         "two/base@0  new, queued",
-        "two/base@1  new, not queued: limit $1.50 ($1.00 committed)",
+        "two/base@1  new, not queued: limit $1.50: $1.00 committed",
     ]
     b.scheduler.add_pool(Pool(name="waiting"))
     b.scheduler.set_default("waiting")
@@ -314,7 +314,7 @@ def test_a_pass_shows_the_in_flight_hold_that_prevents_admission(
     assert b.scheduler.runs() == () and b.service.creates == 0
     out = capsys.readouterr().out
     assert "$1.00 of $1.00 committed ($1.00 in flight)" in out
-    assert "not queued: limit $1.00 ($1.00 committed ($1.00 in flight))" in out
+    assert "not queued: limit $1.00: $1.00 committed ($1.00 in flight)" in out
 
 
 def test_wrong_eval_kind_refuses_before_training_is_submitted(tmp_path: Path) -> None:
