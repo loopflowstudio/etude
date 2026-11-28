@@ -12,7 +12,7 @@ provenance and tables remain readable without reinterpreting stored results.
 `evaluating` opens one `EvalRun`. Pass a tournament, or an environment with
 an explicit match list; `run.play(play)` plays its unstored matches with an
 `async def play(match, agents)`, and `run.play_many(play_many)` drives a
-streaming async generator over `Matches`. Outside a launch, give `experiment=`.
+streaming async generator over `MatchStream`. Outside a launch, give `experiment=`.
 `run.should_stop` stops granting new matches; a planned stop seals completed
 tables and raises `Stopped`. Use the evaluating context and its play methods;
 one-call adapters have been removed. Games play in fresh `multiprocessing` spawn
@@ -126,7 +126,7 @@ with evaluating(
 - **Match config.** Your Pydantic model, such as `Deal`, describes one
   match's settings. `Seating(configs=(Deal(deal=7), ...))` makes a match for
   each config. Annotate `async def play(match: Match[Deal], agents: Sequence[object])`
-  or `async def play_many(matches: Matches[Deal])` to receive that type,
+  or `async def play_many(matches: MatchStream[Deal])` to receive that type,
   including in worker processes. Etude defines no match config base class.
   The JSON values identify the match; the Python class name does not. Stored
   `conditions` fields still decode; the old Python property is removed.

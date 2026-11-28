@@ -1,7 +1,7 @@
 """Game-process event loop, zero-delay forward barrier and match streaming.
 
 Each spawned game process runs one `asyncio` event loop consuming a match stream
-(`Matches[Rules]`) over its parent pipe. `play_many` consumes it directly;
+(`MatchStream[Rules]`) over its parent pipe. `play_many` consumes it directly;
 Etude drives `async def play` as bounded match tasks. Both share the zero-delay
 forward barrier and send each finished match to the parent for storage.
 """
@@ -35,7 +35,7 @@ from etude.eval.resources import Resources, seconds_left
 from etude.eval.result import Result, Tables
 from etude.records import Record
 
-__all__ = ("Matches",)
+__all__ = ("MatchStream",)
 
 if TYPE_CHECKING:
     from etude.checkpoints import CheckpointRef
@@ -116,7 +116,7 @@ class _TakenMatch:
     started: float
 
 
-class Matches(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PEP 696 default syntax.
+class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PEP 696 default syntax.
     """One game process's match grants and the seats built for them."""
 
     def __init__(
@@ -203,11 +203,11 @@ def _match_type(play: Callable[..., object], *, streaming: bool = False) -> type
         raise TypeError("play must take match and agents")
     hints = typing.get_type_hints(authored)
     if streaming:
-        source = hints.get(parameters[0].name, Matches)
-        if source is Matches:
+        source = hints.get(parameters[0].name, MatchStream)
+        if source is MatchStream:
             return Match
-        if typing.get_origin(source) is not Matches:
-            raise TypeError("play_many's parameter must be annotated with Matches[YourConfig]")
+        if typing.get_origin(source) is not MatchStream:
+            raise TypeError("play_many's parameter must be annotated with MatchStream[YourConfig]")
         (config,) = typing.get_args(source)
         return Match[config]  # type: ignore[valid-type]  # Specialize from the author's annotation.
     kind = hints.get(parameters[0].name, Match)
@@ -332,7 +332,7 @@ def _portable_error(error: BaseException) -> BaseException:
 
 async def _drive_play(
     play: Callable[[Match, Sequence[object]], Awaitable[Tables | Result]],
-    matches: Matches,
+    matches: MatchStream,
     concurrency: int,
 ) -> _Outcomes:
     """Run up to `concurrency` async `play` tasks at once, backfilling each slot."""
@@ -422,11 +422,11 @@ async def _serve_stream(
             client = await AgentClient.connect(game.agent_address)
             forwarder = _Forwarder(client, game.max_batch)
 
-        source: Matches = Matches(
+        source: MatchStream = MatchStream(
             pipe, game.initial, kind, forwarder.bind if forwarder else None, build_hook
         )
         stream = (
-            cast(Callable[[Matches], _Outcomes], play)(source)
+            cast(Callable[[MatchStream], _Outcomes], play)(source)
             if game.concurrency is None
             else _drive_play(cast(Play, play), source, game.concurrency)
         )

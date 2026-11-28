@@ -124,16 +124,16 @@ identity, and everything already stored.
 
 ```python
 # game.py: imports no model library
-def play(match: Match[Deal], agents: Sequence[Forward]) -> Tables:
+async def play(match: Match[Deal], agents: Sequence[Forward]) -> Tables:
     ...
-    [logits] = agents[seat]([observation])
+    [logits] = await agents[seat]([observation])
     action = choose(logits, random)  # game-side randomness seeded from match.seed
 
 
 # models.py: may import Torch
 def load(
     checkpoint: CheckpointRef,
-) -> Forward: ...  # deterministic list of inputs -> list of outputs
+) -> ModelForward: ...  # deterministic list of inputs -> list of outputs
 
 
 # capacity.py
@@ -179,9 +179,10 @@ match duration. Without a rental target, the run waits in the pool's queue
 ### Upgrade
 
 - **Make game functions async and await checkpoint forwards.** Define
-  `async def play(match, agents)` or use `play_many(matches)` to step and
-  refill vectorized slots. Remove `max_delay_seconds` from `Agents`.
-  Ready requests flush immediately.
+  `async def play(match, agents)` or write an async generator
+  `play_many(matches: MatchStream[Deal])` to step and refill vectorized slots.
+  Import `MatchStream` from `etude.eval.game`. Remove `max_delay_seconds` from
+  `Agents`. Ready requests flush immediately.
 - **Remove `workers=`** from `EvalJob(...)` and `evaluating(...)`; it is
   refused. Etude sizes processes from CPU, memory and pending work. For
   `play` with checkpoint inference, Etude divides `max_batch` across
