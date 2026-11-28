@@ -322,10 +322,7 @@ def limits() -> None:
     from etude.launch import client, server
 
     for limit in client.limits():
-        mark = "~" if limit.estimated else ""
-        print(
-            f"{limit.experiment}  {mark}${limit.committed_usd:.2f} of ${limit.max_usd:.2f} committed"
-        )
+        print(f"{limit.experiment}  {limit.format_committed()} of ${limit.max_usd:.2f} committed")
     server.show_freshness()
 
 
@@ -343,10 +340,7 @@ def limit_set(
     except InvalidOperation:
         raise LauncherError("--max-usd must be a dollar amount") from None
     limit = default().set_limit(experiment, amount)
-    mark = "~" if limit.estimated else ""
-    print(
-        f"{experiment}  limited to ${limit.max_usd:.2f}; {mark}${limit.committed_usd:.2f} committed"
-    )
+    print(f"{experiment}  limited to ${limit.max_usd:.2f}; {limit.format_committed()} committed")
 
 
 @limit_app.command("unset")

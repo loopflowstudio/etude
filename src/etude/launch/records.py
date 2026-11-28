@@ -688,6 +688,12 @@ class ExperimentLimit(Record):
     committed_usd: Decimal = Decimal(0)
     estimated: bool = False
 
+    def format_committed(self, committed: Decimal | None = None) -> str:
+        """Keep sub-cent spend visible when it can still block admission."""
+        amount = self.committed_usd if committed is None else committed
+        dollars = f"{amount:.3g}" if 0 < amount < Decimal("0.01") else f"{amount:.2f}"
+        return f"{'~' if self.estimated else ''}${dollars}"
+
 
 class LaunchRequest(Record):
     run: str

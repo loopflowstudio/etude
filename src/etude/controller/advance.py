@@ -100,8 +100,7 @@ def source_for(pool: str | None, rent: str | None, source: str | None = None) ->
 def _limit_reason(limit: ExperimentLimit | None, committed: Decimal, ask: Decimal) -> str | None:
     if limit is None or ask == 0 or committed + ask <= limit.max_usd:
         return None
-    mark = "~" if limit.estimated else ""
-    return f"limit ${limit.max_usd:.2f} ({mark}${committed:.2f} committed)"
+    return f"limit ${limit.max_usd:.2f} ({limit.format_committed(committed)} committed)"
 
 
 def advance(
@@ -142,8 +141,7 @@ def advance(
     budget = None if resume or quote else limit
     spending_line = ""
     if limit is not None:
-        mark = "~" if limit.estimated else ""
-        spending_line = f"; {mark}${committed:.2f} of ${limit.max_usd:.2f} committed"
+        spending_line = f"; {limit.format_committed()} of ${limit.max_usd:.2f} committed"
     print(
         f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: "
         f"{_count(len(state.runs), 'training run')}, {_count(len(state.eval_runs), 'eval run')}"

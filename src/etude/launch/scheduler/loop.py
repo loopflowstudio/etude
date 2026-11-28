@@ -404,13 +404,7 @@ class Scheduler:
             (_additional_usd(request, standing.get(request.run)) for request in requests),
             Decimal(0),
         )
-        if requests and committed + ask > limit.max_usd:
-            raise LauncherError(
-                f"experiment {limit.experiment!r} is limited to ${limit.max_usd:.2f}: "
-                f"${committed:.2f} committed and this launch asks ${ask:.2f}; "
-                f"`etude limit set {limit.experiment} --max-usd D` raises it"
-            )
-        return limit.model_copy(
+        measured = limit.model_copy(
             update={
                 "committed_usd": committed,
                 "estimated": any(
@@ -419,6 +413,13 @@ class Scheduler:
                 ),
             }
         )
+        if requests and committed + ask > limit.max_usd:
+            raise LauncherError(
+                f"experiment {limit.experiment!r} is limited to ${limit.max_usd:.2f}: "
+                f"{measured.format_committed()} committed and this launch asks ${ask:.2f}; "
+                f"`etude limit set {limit.experiment} --max-usd D` raises it"
+            )
+        return measured
 
     def _check_limits(self, requests: Sequence[LaunchRequest]) -> None:
         experiments: dict[str, list[LaunchRequest]] = {}

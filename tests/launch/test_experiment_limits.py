@@ -86,22 +86,30 @@ def test_removed_limit_flag_is_refused_on_an_eval_only_file(
     assert "etude limit set EXPERIMENT --max-usd D" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(("rate", "displayed"), [("0.59", "~$0.10"), ("0.0024", "~$0.0004")])
 def test_cli_lists_retained_estimated_commitments_without_provider_keys(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    rate: str,
+    displayed: str,
 ) -> None:
-    b = bench(tmp_path)
+    b = bench(tmp_path, usd_per_hour=rate)
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
     monkeypatch.delenv("RUNPOD_API_KEY", raising=False)
     (run,) = b.scheduler.launch(_request("finished"), rent="l4")
     b.run(601)
     assert b.scheduler.read(run).done
     assert main(["limit", "set", "ppo", "--max-usd", "0.30"]) == 0
-    assert capsys.readouterr().out == "ppo  limited to $0.30; ~$0.10 committed\n"
+    assert capsys.readouterr().out == f"ppo  limited to $0.30; {displayed} committed\n"
     assert main(["limits"]) == 0
-    assert capsys.readouterr().out == "ppo  ~$0.10 of $0.30 committed\nlast loop: never\n"
+    assert capsys.readouterr().out == f"ppo  {displayed} of $0.30 committed\nlast loop: never\n"
     (configured,) = limits()
     assert limit("ppo") == configured
     assert configured.estimated
+    with pytest.raises(LauncherError) as refused:
+        b.scheduler.launch(_request("second", usd="0.30"), rent="l4")
+    assert f"{displayed} committed and this launch asks $0.30" in str(refused.value)
     assert b.service.creates == 1
     assert main(["limit", "unset", "ppo"]) == 0
     assert limits() == ()
