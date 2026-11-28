@@ -541,6 +541,14 @@ class Playing:
         self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
         self.skipped = len(self.run.matches) - len(self.pending)
 
+    def _match_share(self, *, processes: int, unfed: int, total_held: int, held: int = 0) -> int:
+        """Share unfinished matches and reserve pending work for empty peers."""
+        pending = len(self.pending)
+        share = math.ceil((pending + total_held) / processes)
+        if not held:
+            share = min(share, math.ceil(pending / unfed))
+        return share
+
     def grant(
         self,
         count: int,
@@ -551,10 +559,9 @@ class Playing:
         total_held: int = 0,
     ) -> tuple[Match, ...]:
         """Share unfinished matches while leaving pending work for empty game processes."""
-        pending = len(self.pending)
-        share = math.ceil((pending + total_held) / processes)
-        if not held:
-            share = min(share, math.ceil(pending / unfed))
+        share = self._match_share(
+            processes=processes, unfed=unfed, held=held, total_held=total_held
+        )
         count = min(count, max(1, share - held))
         granted: list[Match] = []
         while self.pending and len(granted) < count:
@@ -811,11 +818,15 @@ def play_together(
                 available = placement.processes - len(live)
                 if not available or stopping:
                     return started_targets
-                serving = Counter(
-                    id(active.playing)
-                    for child in live
-                    if (active := child.active_stream) is not None
-                )
+                serving: Counter[int] = Counter()
+                unfed: Counter[int] = Counter()
+                total_held: Counter[int] = Counter()
+                for child in live:
+                    if (active := child.active_stream) is not None:
+                        key = id(active.playing)
+                        serving[key] += 1
+                        unfed[key] += not active.held
+                        total_held[key] += len(active.held)
                 starts = dict(
                     zip(
                         map(id, pending),
@@ -825,6 +836,7 @@ def play_together(
                                     len(each.pending),
                                     streaming=each.streaming,
                                     serving=serving[id(each)],
+                                    unfed=unfed[id(each)],
                                 )
                                 for each in pending
                             ],
@@ -836,13 +848,14 @@ def play_together(
                 )
                 match_targets: dict[int, int] = {}
                 for each in pending:
-                    if each.streaming and starts[id(each)]:
-                        share = math.ceil(
-                            len(each.pending) / (serving[id(each)] + starts[id(each)])
+                    key = id(each)
+                    if each.streaming and starts[key]:
+                        share = each._match_share(
+                            processes=serving[key] + starts[key],
+                            unfed=unfed[key] + starts[key],
+                            total_held=total_held[key],
                         )
-                        match_targets[id(each)] = (
-                            min(share, agents.max_batch) if agents.load else share
-                        )
+                        match_targets[key] = min(share, agents.max_batch) if agents.load else share
                 while len(live) < placement.processes:
                     spawned = False
                     for group in stream_groups:

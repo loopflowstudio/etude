@@ -214,8 +214,9 @@ Etude can run several copies of `play_many` in separate game processes. Each
 generator asks for matches from the same tournament queue. For direct
 inference, Etude plans one process per `max_batch` pending matches, rounded up,
 subject to the host budget. Tournaments can use processes freed by siblings
-as their queues finish. A freed slot dedicated to one tournament goes to the
-pending queue with the fewest active processes.
+as their queues finish. Etude counts active processes awaiting matches toward
+pending demand before starting more. A freed dedicated slot goes to the
+tournament with unmet demand and the fewest active processes.
 
 In direct mode, Etude sets each game process's model and BLAS thread environment
 variables (`OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, etc.)
@@ -272,9 +273,10 @@ Etude schedules the matches, caches checkpoints and stores each outcome as
 the generator yields it.
 
 - `matches.target_matches` suggests how many matches this process should hold
-  at once, based on its initial share of the tournament and capped at
-  `max_batch` when a loader is declared. Account for the number of games per
-  match when sizing the engine's pool.
+  at once. Etude estimates the first grant when the process starts, accounting
+  for matches its peers already hold. The hint is capped at `max_batch` when a
+  loader is declared. Account for the number of games per match when sizing the
+  engine's pool.
   Call `await matches.take(n)` with the number of free slots to get up to `n`
   pending `(match, agents)` pairs. Grants account for held matches and share
   pending work among empty processes. An empty grant for `n > 0` means the

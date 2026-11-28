@@ -46,7 +46,7 @@ from etude.eval.agents import (
 )
 from etude.eval.batching import Batch, _add_socket_batch, _Batches, _encode_socket, _send_peer
 from etude.eval.bus import ForwardOutcome
-from etude.eval.game import GameReport, MatchStream, Take
+from etude.eval.game import GameReport, MatchStream, StreamEnd, Take
 from etude.eval.loader import AgentLoader
 from etude.eval.match import environment
 from etude.eval.query import _kept_path, statsdb
@@ -3187,6 +3187,153 @@ def test_play_many_sends_no_take_after_the_last_match_is_granted(
     ) as active:
         assert active.play_many(code_only_vector_slots).played == 1
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("direct", [True, False], ids=["direct", "shared"])
+def test_booting_streams_cover_pending_demand_as_siblings_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, direct: bool
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 4 if direct else 5)
+    recv = Connection.recv
+    first: Connection | None = None
+    draining: set[Connection | int] = set()
+    serving_stream = not direct
+    initialized = False
+
+    def receive(pipe: Connection) -> object:
+        nonlocal serving_stream
+        message: object = recv(pipe)
+        if pipe is first and isinstance(message, StreamEnd):
+            serving_stream = True
+        return message
+
+    def finish_siblings(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal first, initialized
+        if not initialized:
+            assert len(handles) == (8 if direct else 9)
+            if direct:
+                pipe = handles[0]
+                assert isinstance(pipe, Connection)
+                first = pipe
+                draining.update(handles[2:])
+            else:
+                # Ordinary and streaming starts alternate while both queues need slots.
+                draining.update((*handles[:2], *handles[4:6]))
+            initialized = True
+        if first is not None and not serving_stream:
+            assert first.poll(10), "the first direct process did not finish its async stream"
+            return (first,)
+        if remaining := draining.intersection(handles):
+            ready = wait(remaining, timeout=10)
+            assert ready, "an async sibling did not exit"
+            draining.difference_update(handle for handle in ready if isinstance(handle, int))
+            return ready
+        return wait(handles, timeout=timeout)
+
+    monkeypatch.setattr(Connection, "recv", receive)
+    monkeypatch.setattr("etude.eval.run.wait", finish_siblings)
+    agents = Agents(load=load, devices=("cpu",) if direct else ("cuda",), max_batch=4)
+    ordinary = job("ordinary", agents, plain, games=4 if direct else 2)
+    stream_count = 4 if direct else 2
+    stream = EvalJob(
+        tournament=RoundRobin(
+            name="stream", environment=environment("grouped"), config={}, games=stream_count
+        ),
+        enter=ordinary.enter,
+        play_many=records_target_matches,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    assert [
+        result.played for result in hold_group(group(ordinary, stream), directory=tmp_path)
+    ] == [
+        4 if direct else 2,
+        stream_count,
+    ]
+    reports = _game_reports(tmp_path / "grouped/artifacts/agents")
+    assert len(reports) == 4
+    assert sum("stream" in report.tournaments for report in reports) == (1 if direct else 2)
+
+
+async def records_initial_grant(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables]]:
+    initial = True
+    while taken := await matches.take(64):
+        for match, _ in taken:
+            yield (
+                match,
+                {
+                    "grants": [
+                        {
+                            "seat": 0,
+                            "target": matches.target_matches,
+                            "size": len(taken),
+                            "first": initial,
+                        }
+                    ]
+                },
+            )
+        initial = False
+
+
+def test_expanded_stream_targets_its_first_grant_while_peers_hold_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial: tuple[Connection | int, ...] = ()
+    first_granted = short_exited = expanded_granted = False
+
+    def prioritize_expansion(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal initial, first_granted, short_exited, expanded_granted
+        if not initial:
+            assert len(handles) == 7
+            initial = tuple(handles)
+        if not first_granted:
+            ready = wait(initial[:1], timeout=10)
+            assert ready, "the first stream did not request matches"
+            first_granted = True
+            return ready
+        if not short_exited:
+            ready = wait([handle for handle in initial[2:4] if handle in handles], timeout=10)
+            assert ready, "the short tournament did not release its slot"
+            short_exited = initial[3] in ready
+            return ready
+        if not expanded_granted:
+            (expanded,) = [
+                handle
+                for handle in handles
+                if isinstance(handle, Connection) and handle not in initial
+            ]
+            ready = wait([expanded], timeout=10)
+            assert ready, "the expanded stream did not request matches"
+            expanded_granted = True
+            return ready
+        return wait(handles, timeout=timeout)
+
+    monkeypatch.setattr("etude.eval.run.wait", prioritize_expansion)
+    agents = Agents(load=load, max_batch=16)
+    short = job("short", agents, plain)
+    stream = EvalJob(
+        tournament=RoundRobin(
+            name="stream", environment=environment("grouped"), config={}, games=12
+        ),
+        enter=short.enter,
+        play_many=records_initial_grant,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    assert [result.played for result in hold_group(group(stream, short), directory=tmp_path)] == [
+        12,
+        1,
+    ]
+    with statsdb("grouped", tmp_path) as db:
+        assert db.sql(
+            "select target, size, count(*) from grants where first and target < 6 group by all"
+        ).fetchall() == [(3, 3, 3)]
 
 
 def test_drained_async_queue_releases_process_while_peer_still_holds_games(

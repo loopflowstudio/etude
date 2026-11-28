@@ -155,6 +155,7 @@ class TournamentQueue:
     matches: int
     streaming: bool = False
     serving: int = 0
+    unfed: int = 0  # Active processes that hold no matches.
 
     def process_demand(self, streaming_batch: int) -> int:
         return math.ceil(self.matches / streaming_batch) if self.streaming else self.matches
@@ -226,7 +227,7 @@ def _allocate_processes(
     queues: Sequence[TournamentQueue], processes: int, *, streaming_batch: int, direct: bool
 ) -> tuple[int, ...]:
     """Share direct processes or give each new dedicated process to the least served queue."""
-    demand = [queue.process_demand(streaming_batch) for queue in queues]
+    demand = [max(0, queue.process_demand(streaming_batch) - queue.unfed) for queue in queues]
     if direct:
         return tuple(min(count, processes) for count in demand)
     allocated = [0] * len(demand)
