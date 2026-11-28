@@ -291,9 +291,9 @@ class _Forwarder:
     async def _forward(
         self, checkpoint: CheckpointRef, inputs: list[object], *, rows: int | None = None
     ) -> list[object]:
-        if rows is not None and rows < 0:
-            raise ValueError("rows must be non-negative")
         if not inputs:
+            if rows:
+                raise ValueError("rows must be 0 or omitted for empty inputs")
             return []
         count = len(inputs) if rows is None else rows
         if count < 1:

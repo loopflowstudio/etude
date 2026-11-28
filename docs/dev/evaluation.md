@@ -211,8 +211,8 @@ with evaluating(
   `seat` and `group`, a seat or group the match lacks, a column named
   `player`, or a column whose type changes during a run is refused. A refused
   or raising match is recorded as failed with its error, nothing else of it
-  is stored. A raised `play` error or refused table stops new grants for the
-  tournament. In-flight outcomes are retained. In `play_many`, yield
+  is stored. A raised `play` error fails that match alone; a refused table
+  stops new grants for the tournament. In-flight outcomes are retained. In `play_many`, yield
   `(match, error)` to fail one slot and keep taking pending matches. A raised
   error or an unknown or duplicate yield fails every held match. Returning with
   held matches unyielded fails each unyielded match. A run with failed matches
