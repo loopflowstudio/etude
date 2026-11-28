@@ -135,7 +135,10 @@ def advance(
         if limit.allows(committed, ask):
             committed += ask
             return None
-        return f"limit {limit.format_usd(limit.max_usd)}: {limit.format_committed(committed)}"
+        return (
+            f"limit {limit.format_usd(limit.max_usd)}: {limit.format_committed(committed)}; "
+            f"asks {limit.format_usd(ask)}"
+        )
 
     print(
         f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: "

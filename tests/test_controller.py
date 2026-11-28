@@ -274,7 +274,7 @@ def test_a_pass_prints_one_line_per_run_in_declared_order(
     )
     assert capsys.readouterr().out.splitlines()[1:] == [
         "two/base@0  new, queued",
-        "two/base@1  new, not queued: limit $1.50: $1.00 committed",
+        "two/base@1  new, not queued: limit $1.50: $1.00 committed; asks $1.00",
     ]
     b.scheduler.add_pool(Pool(name="waiting"))
     b.scheduler.set_default("waiting")

@@ -299,7 +299,9 @@ refusal or deletion.
   refuse the whole request. The refusal gives the limit, committed amount
   and command to raise it. It suggests retrying if settling in-flight launches
   could leave enough room. For a refused submission, `etude logs --run RUN`
-  shows the reason.
+  shows the reason. `etude launch FILE` labels runs with the file's stem; a
+  `Job` or `TrainingJob` passed to Python `launch` counts only with
+  `experiment="LABEL"` set, and is otherwise unlabelled.
 
 Lowering a ceiling or revising a bill affects future admissions. A zero
 ceiling freezes new commitments. `etude limit unset EXPERIMENT` restores
