@@ -1,9 +1,13 @@
 """Small test panels executed through the public EvalRun lifetime."""
 
 from collections.abc import Awaitable, Callable, Sequence
+from multiprocessing.connection import Connection, wait
 from pathlib import Path
 
+import pytest
+
 from etude.checkpoints import CheckpointRef
+from etude.eval.bus import ForwardOutcome
 from etude.eval.records import (
     Benchmark,
     Environment,
@@ -17,6 +21,29 @@ from etude.eval.result import EvalResult, Result, Tables
 from etude.eval.tournament import _open_evaluation, evaluating
 from etude.jobs import Agents
 from etude.storage import Storage
+
+
+def identify_outcome(request_id: int, outcome: ForwardOutcome) -> tuple[int, ForwardOutcome]:
+    return request_id, outcome
+
+
+def wait_for_games(monkeypatch: pytest.MonkeyPatch, *, processes: int, rounds: int = 1) -> None:
+    """Synchronize fixture grants or outcomes without relying on child startup order."""
+
+    def ready_games(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal rounds
+        pipes = [handle for handle in handles if isinstance(handle, Connection)]
+        if not rounds:
+            return wait(handles, timeout=timeout)
+        assert len(pipes) == processes
+        rounds -= 1
+        for pipe in pipes:
+            assert pipe.poll(10), "a fixture game did not send its message"
+        return pipes
+
+    monkeypatch.setattr("etude.eval.run.wait", ready_games)
 
 
 def play_matches(

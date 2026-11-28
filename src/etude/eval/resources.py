@@ -1,12 +1,13 @@
 """Process environment for game and agent processes.
 
-`plan_execution` chooses shared or direct inference and returns process, thread
-and per-owner checkpoint-byte budgets for startup and dispatch. `resources`
-owns temporary fast scratch; `Resources.configure` sets child-only environment
-before author imports, leaving the calling process untouched. Observations are
-kept in the run's durable artifact folder by the group owner.
+`place` returns `Placement`, choosing the inference bus, game processes and
+inference thread budget. `resources` owns temporary fast scratch;
+`Resources.configure` sets child-only environment before author imports,
+leaving the calling process untouched. Observations are kept in the run's
+durable artifact folder by the group owner.
 """
 
+import math
 import os
 import platform
 import shutil
@@ -14,10 +15,11 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from heapq import heapify, heappop, heappush
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -147,30 +149,78 @@ def _detect_accelerator() -> Accelerator | _Unavailable:
 
 
 @dataclass(frozen=True)
-class ExecutionPlan:
-    """Process topology and per-owner checkpoint-byte budget for one eval group.
+class TournamentQueue:
+    """Pending match demand and active processes for one tournament."""
 
-    `threads` is each inference owner's thread budget: the shared agent process's
-    in shared mode, and each game process's (always one) in direct mode.
-    `inference` names the shared accelerator or explains direct play.
-    """
+    matches: int
+    streaming: bool = False
+    serving: int = 0
+    unfed: int = 0  # Active processes that hold no matches.
 
+    def process_demand(self, streaming_batch: int) -> int:
+        return math.ceil(self.matches / streaming_batch) if self.streaming else self.matches
+
+
+@dataclass(frozen=True)
+class Placement:
+    """Process topology and resources per inference owner."""
+
+    bus: Literal["local", "socket"] | None
     processes: int
-    inference: Inference
-    cpus: int
-    checkpoint_memory: int
+    inference_threads: int
+    checkpoint_bytes: int
+    reason: Inference | Literal["no pending matches"]
 
-    @property
-    def shared(self) -> bool:
-        return self.inference in ("cuda", "metal")
+    def match_limit(
+        self, *, streaming: bool, uses_checkpoints: bool, max_batch: int | None
+    ) -> int | None:
+        """Cap the matches one stream can take per grant."""
+        if streaming:
+            return max_batch
+        if not uses_checkpoints or max_batch is None:
+            return 1
+        return math.ceil(max_batch / self.processes) if self.bus == "socket" else max_batch
 
-    @property
-    def threads(self) -> int:
-        return max(1, self.cpus - self.processes) if self.shared else 1
+    def process_shares(
+        self, queues: Sequence[TournamentQueue], max_batch: int, *, available: int
+    ) -> tuple[int, ...]:
+        """Allocate free process slots according to pending match demand."""
+        direct = self.bus == "local"
+        return _allocate_processes(
+            queues, available, streaming_batch=max_batch if direct else 1, direct=direct
+        )
 
-    @property
-    def checkpoint_bytes(self) -> int:
-        return self.checkpoint_memory if self.shared else self.checkpoint_memory // self.processes
+    def describe(
+        self, tournaments: Sequence[str], *, play_targets: set[int], stream_targets: set[int]
+    ) -> str | None:
+        """Describe the placement of one evaluation group."""
+        if not self.processes or (self.bus is None and not stream_targets):
+            return None
+        process = "game process" if self.processes == 1 else "game processes"
+        capacity = []
+        if play_targets:
+            low, high = min(play_targets), max(play_targets)
+            if low != high:
+                capacity.append(f"{low}–{high} games each")
+            elif high == 1:
+                capacity.append("1 game each")
+            else:
+                capacity.append(f"up to {high} games each")
+        if stream_targets:
+            low, high = min(stream_targets), max(stream_targets)
+            hint = str(low) if low == high else f"{low}–{high}"
+            capacity.append(f"slots requested by play_many (initial target_matches={hint})")
+        games = ", ".join((f"{self.processes} {process}", *capacity))
+        if self.bus is None:
+            return f"etude: {games}"
+        mode = "shared" if self.bus == "socket" else "direct"
+        threads = self.inference_threads
+        unit = "thread" if threads == 1 else "threads"
+        each = " each" if self.bus == "local" and self.processes > 1 else ""
+        return (
+            f"etude: agents: {mode} inference for {', '.join(tournaments)} ({self.reason}); "
+            f"{games}; {threads} inference {unit}{each}"
+        )
 
 
 def _select_inference(loader: "AgentLoader", checkpoints: bool) -> Inference:
@@ -189,34 +239,82 @@ def _select_inference(loader: "AgentLoader", checkpoints: bool) -> Inference:
             return unavailable
 
 
-def plan_execution(
-    pending: int,
-    loader: "AgentLoader",
-    *,
-    checkpoints: bool,
-) -> ExecutionPlan:
-    """Choose shared or direct inference and budget processes, threads and checkpoint bytes.
+def _allocate_processes(
+    queues: Sequence[TournamentQueue], processes: int, *, streaming_batch: int, direct: bool
+) -> tuple[int, ...]:
+    """Share direct processes or give each new dedicated process to the least served queue."""
+    demand = [max(0, queue.process_demand(streaming_batch) - queue.unfed) for queue in queues]
+    if direct:
+        return tuple(min(count, processes) for count in demand)
+    allocated = [0] * len(demand)
+    eligible = [(queue.serving, index) for index, queue in enumerate(queues) if demand[index]]
+    heapify(eligible)
+    for _ in range(processes):
+        if not eligible:
+            break
+        serving, index = heappop(eligible)
+        allocated[index] += 1
+        if allocated[index] < demand[index]:
+            heappush(eligible, (serving + 1, index))
+    return tuple(allocated)
 
-    Shared inference leaves a core for the agent process when possible.
+
+def place(
+    queues: Sequence[TournamentQueue],
+    *,
+    loader: "AgentLoader",
+    checkpoints: bool,
+    match_bytes: int = 0,
+) -> Placement:
+    """Allocate one host to the pending async and streaming match queues.
+
+    `match_bytes` is the largest known total of distinct checkpoints seated in
+    a pending match.
     """
-    if pending < 1:
-        raise ValueError("an execution plan needs pending matches")
+    total = sum(queue.matches for queue in queues)
+    if not total:
+        return Placement(
+            bus=None,
+            processes=0,
+            inference_threads=0,
+            checkpoint_bytes=0,
+            reason="no pending matches",
+        )
     inference = _select_inference(loader, checkpoints)
     cpus = available_cpus()
-    total_memory = memory_bytes()
-    loading = loader.load is not None and checkpoints
-    held = 0
-    if loading:
-        held = total_memory // 2 if loader.memory_gb is None else int(loader.memory_gb * 1024**3)
+    host_bytes = memory_bytes()
+    if inference in ("no loader", "no checkpoints"):
+        processes = min(cpus, max(1, host_bytes // GAME_BYTES), total)
+        return Placement(
+            bus=None,
+            processes=processes,
+            inference_threads=0,
+            checkpoint_bytes=0,
+            reason=inference,
+        )
+    # One reservation covers the shared cache or all direct caches combined.
+    memory_gb = loader.memory_gb
+    held = int(memory_gb * 1024**3) if memory_gb is not None else host_bytes // 2
+    accelerator = inference in ("cuda", "metal")
+    memory_processes = max(1, (host_bytes - held) // GAME_BYTES)
+    cap = min(max(1, cpus - 1) if accelerator else cpus, memory_processes)
+    if accelerator:
+        cap = min(cap, loader.max_batch)
+    elif match_bytes > 0:
+        # Each direct process needs room for a match in its own checkpoint cache.
+        cap = min(cap, max(1, held // match_bytes))
 
-    shared = inference in ("cuda", "metal")
-    capacity = max(1, cpus - 1) if shared else cpus
-    processes = min(pending, capacity, max(1, (total_memory - held) // GAME_BYTES))
-    return ExecutionPlan(
-        inference=inference,
+    streaming_batch = 1 if accelerator else loader.max_batch
+    demand = (queue.process_demand(streaming_batch) for queue in queues)
+    # A direct process can serve multiple queues in turn.
+    processes = min(cap, sum(demand) if accelerator else max(demand))
+    shared = accelerator and processes > 1
+    return Placement(
+        bus="socket" if shared else "local",
         processes=processes,
-        cpus=cpus,
-        checkpoint_memory=held,
+        inference_threads=max(1, (cpus - processes) // (1 if shared else processes)),
+        checkpoint_bytes=held if shared else held // processes,
+        reason=inference,
     )
 
 

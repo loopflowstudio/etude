@@ -1,10 +1,11 @@
 """Play variable-length matches with a pre-collated forward per step.
 
-uv run etude eval examples/vectorized.py --source /tmp/vectorized
+ETUDE_TRACK_DIR=/tmp/vectorized uv run etude eval examples/vectorized.py
 """
 
 from agent_game import checkpoint
-from vector_game import load, play_many
+from vector_game import play_many
+from vector_models import load
 
 from etude.eval.match import environment
 from etude.eval.records import Benchmark, Seating
@@ -21,7 +22,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
                 seatings=(Seating(name="self play", players=(model, model), games=8),),
             ),
             play_many=play_many,
-            agents=Agents(load=load, max_batch=4),
+            agents=Agents(load=load, devices=("cpu",), max_batch=4),
             max_hours=0.1,
         )
     ]

@@ -200,7 +200,7 @@ def test_an_aligned_hours_seat_takes_the_other_jobs_latest_checkpoint_once_it_ha
 def test_checkpoints_held_on_the_go_then_a_seating_added_in_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     bucket = DirectoryStorage(tmp_path / "bucket")
     checkpoints = trained(tmp_path, bucket)
@@ -222,7 +222,7 @@ def test_checkpoints_held_on_the_go_then_a_seating_added_in_batch(
     for measured in later:
         assert (measured.listings, measured.requests) == (1, 0)
         reports = sum("/artifacts/agents/game-" in key for key in measured.uploaded)
-        assert reports == 4
+        assert reports == 2
         assert measured.uploads - reports == 22
     # A retry on another empty machine replays nothing.
     again = MeasuredStorage(bucket)

@@ -283,25 +283,30 @@ game processes build wrappers and play; say neither "server", "worker" nor "poli
 for any of these ("policy" is reserved for policy keys).
 Etude sets the model-library thread environment before importing the checkpoint
 loading module. Direct game processes load through the same cache/eviction owner
-as shared inference and report failures to the parent even when play catches them. Loaders must honor that inference budget when configuring
-their library; each game process keeps one thread.
+as shared inference and report failures to the parent even when play catches
+them. Loaders must honor their inference budget when configuring the library.
+Shared inference game processes keep one thread each.
 `Agents.devices` declares loader capabilities in hardware terms (default
-`("cuda", "metal")`). Derive shared or direct inference from that declaration
-and detected hardware, without a separate topology switch. Probe without
+`("cuda", "metal")`). Derive shared or direct inference from that declaration,
+detected hardware and the number of game processes. Probe without
 importing the loader or its framework. The loader owns placement and GPU memory.
 Shared inference leaves a core for the agent process when possible. Pending
-matches and remaining host memory bound the process count. With `play`, shared
-inference divides `max_batch` by the process count, direct checkpoint inference
-gives each process up to `max_batch` matches, and code-only games use one match
-per process. Budget inference threads and checkpoint memory using the
-number of processes started. `play_many` requests work for its free slots.
-Empty processes share pending matches. Refills account for held matches and
-grant at least one while work remains.
-Cap merged shared forwards at `max_batch`. Split oversized requests with one
+matches and remaining host memory bound the process count. Shared inference
+spreads `play` across processes before dividing `max_batch` among them.
+Direct checkpoint `play` allows up to `max_batch` matches per process.
+Code-only `play` runs one match per process. Direct `play_many` sizes
+for one process per `max_batch` matches, rounded up. Both play modes size
+their targets and grants from their tournament's share of pending and held
+matches across processes, rounded up and reduced by what they hold. Grants
+start after game setup. Empty processes share pending matches. Positive
+requests receive at least one match while grants are open and pending work
+remains. With a loader, `max_batch` caps each `play_many` grant. Mixed groups
+use one placement and share their inference budget.
+Cap merged forwards at `max_batch`. Split oversized requests with one
 input per row and preserve their reply order. Opaque oversized inputs run
 alone. An absent or undeclared accelerator plays direct. Skip the probe for
 CPU-only loaders and plays without a loader or checkpoints. Log the mode,
-reason and sizing in one startup line.
+reason and sizing once per group.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any

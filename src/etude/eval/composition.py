@@ -1,7 +1,8 @@
 """Reconstruct author player records in games and bind their checkpoint leaves.
 
 Stored trees stay portable and readable without author imports. Only build_agents
-loads wrapper modules; network model loading remains in the agent process.
+loads wrapper modules; network model loading stays on the inference thread or in
+the shared agent process.
 """
 
 import importlib

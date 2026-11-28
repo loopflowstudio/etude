@@ -281,15 +281,32 @@ keeps the completed prefix; changing config or base seed changes match keys.
   matches=matches) as run: run.play(play, agents=Agents(...))`. Put execution
   under `if __name__ == "__main__":`; play, load and build are importable
   module-level functions. There is one signature, `play(match, agents)`.
+  `Match` has `players`, `config`, `games`, `index` and `base_seed` (no
+  `seed`). Outside a launch each `evaluating` call opens a new run and plays
+  every match again; pass `resume=True, run=NAME` to continue one.
+- Interrupting `etude eval` with SIGINT exits 0 with no summary line; the
+  next plain `etude eval` plays only the unfinished matches. Drive it with a
+  Python driver that reads output on a thread and sends SIGINT after N
+  `matches played` lines. Read results with `statsdb(EXPERIMENT).sql(...)`;
+  `matches` has `run, match, state, retry, error`, `scores` has
+  `seat, score, run, match`.
+- To check what the bus moves for Manabot's real `Prepared`, run a probe from
+  Manabot's checkout with its own `.venv/bin/python -I`, putting this
+  branch's `src` first on `sys.path`: build observations with
+  `managym.Env`, `encode_observation` and `prepare(...)`, call
+  `Flight().lock([prepared])` (packing only sends locked, read-only arrays
+  out of band), then `pack_local_inputs(normalize_inputs([prepared]))` and
+  read `arrays`, `arrays_copied` and `pickled_bytes`. Never edit Manabot's
+  checkout or environment for this.
 
-CPU games load forwards directly and keep one model-library thread per game.
-On visible NVIDIA hardware or native arm64 macOS, when `Agents.devices` declares
-it, a shared agent process batches checkpoint forwards; only that path keeps
-model loading out of game imports. This Mac exercises the Metal path directly:
+Direct inference loads forwards on a dedicated thread in each game process.
+For `play`, a declared and detected NVIDIA or Apple Silicon accelerator selects
+one shared agent process. For `play_many`, one game process runs a direct
+inference thread on every host. Native arm64 macOS exercises the Metal path:
 the example labs print `shared inference … (metal)` and write
 `home/track/<experiment>/artifacts/agents/batches.json`. For the direct path on
-the same Mac, pin `cpython-3.12.12-macos-x86_64-none` in a lab's
-`.python-version` (Rosetta), or declare `devices=("cpu",)`. Code-only builds start
+the same Mac, declare `devices=("cpu",)` for `play`, or use `play_many`.
+Code-only builds start
 no loading process and perform no hardware probe. Check controlled CPU/memory
 capacity, cross-tournament batching, multiple leaves, eviction and partial-batch
 drain with bounded fixtures; never create resource pressure. Keep complete

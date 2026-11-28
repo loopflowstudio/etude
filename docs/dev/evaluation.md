@@ -13,11 +13,10 @@ provenance and tables remain readable without reinterpreting stored results.
 an explicit match list; `run.play(play)` plays its unstored matches with an
 `async def play(match, agents)`, and `run.play_many(play_many)` drives a
 streaming async generator over `MatchStream`. Outside a launch, give `experiment=`.
-`run.should_stop` stops granting new matches; a planned stop seals completed
-tables and raises `Stopped`. Use the evaluating context and its play methods;
-one-call adapters have been removed. Games play in fresh `multiprocessing` spawn
-processes, which import the calling script again: a script keeps `run.play` and
-`run.play_many` under `if __name__ == "__main__":`.
+When `run.should_stop` is true, the runner stops granting matches. On a stop
+request or SIGTERM it seals staged results and raises `Terminated`. Games play
+in fresh `multiprocessing` spawn processes, which import the calling script
+again. Keep `run.play` and `run.play_many` under `if __name__ == "__main__":`.
 
 <!-- implementation-reference -->
 ```python
@@ -134,30 +133,62 @@ with evaluating(
   `games`: the unit Etude schedules, resumes and resamples. A tournament's
   `Seating` makes one match per config. Seat swaps belong
   inside `play`. Group `all` holds every seat; a player may sit in two seats.
-- **Game processes.** Each game process runs one `asyncio` event loop consuming
-  one tournament stream (Etude's task driver for `async def play`, or the
-  author's `play_many` async generator); a grouped run with differing play
-  functions or rule types binds each game process to one tournament while
-  sharing one GPU agent process. Process count is bounded by pending matches,
-  CPUs (leaving one core for the shared agent process when present) and memory.
-  For `play`, shared inference allows up to `ceil(max_batch / processes)`
-  matches per process, and direct checkpoint inference allows up to
-  `max_batch` per process. Code-only `play` uses one match at a time per
-  process and bypasses the shared agent.
-  Pending forwards flush on a zero-delay loop barrier.
-  The inference thread and checkpoint budgets use the count of processes
-  started for the panel. The startup line gives the initial `target_matches`
-  for each play mode. With a loader, `play_many` hints are capped at `max_batch`.
-  Both play modes request grants after loading and setting up the callback.
-  Grants share unfinished matches across processes, accounting for matches
-  already held and pending work for empty processes. A positive request
-  receives at least one while grants are
-  open and work remains. Per-process diagnostics are written to
-  `game-{pid}.json`, and shared agent runs record batch row counts and stage
-  timings in `batches.json`. The agent closes the batch array on SIGTERM.
-  Game reports count outcomes sent to the parent in `matches`, including
-  failed and refused outcomes. Direct game reports count rows in `local_rows`.
-  `evaluating` has no setting for process count.
+- **Game processes and placement.** `Placement` owns the group's process
+  layout, checkpoint bytes per inference owner and startup line. The
+  checkpoint reservation is `Agents.memory_gb` or half of host memory.
+  - Shared inference (`bus="socket"`) requires a declared, detected CUDA or
+    Metal accelerator and more than one game process. Each game process serves
+    one tournament and gets one thread. The agent process gets the remaining
+    cores and the full checkpoint reservation. Both accelerators cap the number
+    of game processes at `max_batch`.
+  - In direct inference (`bus="local"`), each process can serve the tournament
+    queues in turn and keeps its cache across streams. Direct copies share the
+    checkpoint reservation and use `max(1, (cpus - processes) // processes)`
+    inference threads each. Process count is capped so each cache can fit the
+    largest pending match's known checkpoint bytes, with a one-process floor.
+  - Code-only games (`bus=None`) use one thread per game process and skip the
+    accelerator probe.
+
+  Each game process has one event loop. Async `play` flushes forwards on a
+  zero-delay loop barrier. It sizes each stream's concurrency from its
+  tournament's match share. Shared `play` caps the share at
+  `ceil(max_batch / processes)`. Direct checkpoint `play` caps it at
+  `max_batch`, and code-only `play` runs one match per process and bypasses
+  the shared agent. Direct `play_many` sizes
+  for one process per `max_batch` matches, rounded up. Shared and code-only
+  `play_many` size for one process per match. Both play modes request their
+  first matches after loading and setting up the callback. Active streams
+  without held matches count toward pending process demand. A freed dedicated
+  process slot goes to the
+  tournament with unmet demand and the fewest active processes. Each
+  `play_many` generator submits forwards on the call and requests matches for
+  its free slots.
+  Both play modes use the same share calculation for targets and grants.
+  For `play_many`, `max_batch` caps the hint and each grant when a loader is
+  declared. The startup line shows the targets given to the initial streams.
+  Shares account for held matches and split pending work among empty
+  processes. A positive request receives at
+  least one while grants are open and work remains. Only processes serving
+  that tournament count toward grant shares.
+  The last grant closes the stream's requests locally, even if it includes matches.
+  Both play modes share the agent process for checkpoint inference.
+  Per-process diagnostics go to `artifacts/agents/game-{pid}.json`
+  (`GameReport` with `tournaments: tuple[str, ...]`), keeping a game-thread-filtered
+  `builtins.__import__` hook active from module load through player wrapper
+  loading and play until process exit (with `"mlx"` alongside `"torch"`,
+  `"jax"`, `"tensorflow"` in `_HEAVY`) so inference-thread imports are ignored
+  while wrapper and lazy game imports stay visible. Import warnings print once
+  on stderr for heavy ML libraries when a bus is active. Socket `play` also
+  warns when the module count exceeds `MAX_GAME_IMPORTS`. `GameReport` embeds a
+  frozen `BusReport` (`calls`, `answers`, `arrays`, `arrays_copied`, `pickled`,
+  `pickled_bytes`, `copied_bytes`, `wire_bytes`, `handoff_seconds`,
+  `round_trip_seconds`).
+  Batch row counts and stage timings use one `Batch` record:
+  `artifacts/agents/batches-{pid}.json` per direct game process and
+  `artifacts/agents/batches.json` for the shared agent process. The shared
+  agent has up to two seconds within the run deadline to close its report
+  and closes it on SIGTERM. Game reports count all outcomes sent, including
+  failed and refused outcomes. `evaluating` has no setting for process count.
 - **Order.** Matches start in the order `etude.eval.schedule.ordered` gives,
   so consecutive matches reuse the checkpoints kept loaded: first those
   loading the fewest checkpoints not yet used, then those reusing the most
@@ -218,20 +249,19 @@ with evaluating(
   `seat` and `group`, a seat or group the match lacks, a column named
   `player`, or a column whose type changes during a run is refused. A refused
   or raising match is recorded as failed with its error, nothing else of it
-  is stored. A raised `play` error fails that match alone. A refused table or
-  invalid outcome type fails its match, stops new grants for the tournament,
-  and lets held matches finish. In `play_many`, yield
-  `(match, error)` to fail one slot and keep taking pending matches. A raised
-  error or an unknown or duplicate yield fails every held match. Returning with
-  held matches unyielded fails each unyielded match. Errors importing or
-  setting up authored game code fail that tournament and leave ungranted
-  matches pending. A loader import error fails its tournament in direct mode
-  and the group in shared mode. These setup errors use `eval_startup_failed`.
-  Stream errors with no match failure to record use `eval_stream_failed`.
-  A game process that exits without reporting, a failed shared-agent
-  connection or `RetryRequested` interrupts the group and leaves unfinished
-  matches eligible for retry.
-  A run with failed matches ends failed.
+  is stored. Ordinary `play` errors fail one match. In `play_many`, yield
+  `(match, error)` for an ordinary error and keep taking pending matches.
+  Refused tables and invalid outcome types stop new grants while held matches
+  finish. Broken streams fail their held matches.
+  Errors importing or setting up authored game code fail the tournament with
+  `eval_startup_failed` and leave ungranted matches available on resume.
+  A loader import error fails its tournament in direct mode and the group in
+  shared mode. A stream error with no match failure to record uses
+  `eval_stream_failed`.
+  A game process that exits without reporting, a failed shared-agent connection
+  or an explicit retry interrupts the group and keeps unfinished matches
+  eligible for retry.
+  Completed outcomes remain available for resumption.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each drawn value from the
   environment whose latest match is newest, noting only overlaps on values
@@ -241,6 +271,12 @@ with evaluating(
   `run.play_many(play_many)` to carry on.
   A launched retry resumes automatically. Matches already delivered to any
   of `storages` are skipped, even on a machine with an empty disk.
+  A retryable error is returned for each tournament with queued or in-flight
+  matches. Matches dropped from the queue after a permanent failure remain
+  unplayed. The group raises `Terminated` after closing its members when a stop
+  interrupted them. A game process failure belongs to its unfinished streams.
+  A failure after all streams end applies to all tournaments that process
+  served. Already stored matches are reused on retry.
 - **Progress.** Each stored match prints one line to stderr:
   `etude: RUN: 12/36 matches played, 220s elapsed`.
 - **Storage.** Stored matches are sealed into blocks every five minutes (or
@@ -264,6 +300,72 @@ with evaluating(
   deletes exactly the files delivered blocks replace, and deletes nothing
   while any old file there is unconverted. Convert where the run is written,
   deliver, then delete in each store.
+
+## Forward bus
+
+`etude.eval.bus` defines the single transport boundary between game code and
+loaded checkpoints (`ForwardBus` and `ForwardCall`). It imports no
+batching or loader code; NumPy is imported when an array is first seen, and
+Etude never imports a model library.
+
+<!-- implementation-reference -->
+```python
+@dataclass(frozen=True)
+class ForwardCall:
+    checkpoint: str  # Key registered by bind().
+    inputs: list[object]
+    rows: int
+
+
+class ForwardBus(Protocol):
+    @property
+    def flight(self) -> Flight: ...
+
+    def bind(self, checkpoint: CheckpointRef) -> None: ...
+    def submit(self, calls: Sequence[ForwardCall]) -> list[asyncio.Future[list[object]]]: ...
+    async def close(self) -> BusReport: ...
+```
+
+A seat's `Forward` handle holds a checkpoint key and the game process's
+`_Forwarder`. In `play_many`, a call submits immediately. In `play`, the
+forwarder locks inputs and groups calls from the same event-loop turn by
+checkpoint and row budget. Both paths resolve each caller's future with its
+slice of the reply. The forwarder records loading failures even when a match
+abandons its awaitable.
+
+Both transports use `_FlightBook` to allocate request IDs, own the input locks
+and count transfers. The barrier holds a reference in the same lock ledger
+until submission acquires its own. A writable NumPy input stays locked
+through the last reply using it, including after cancellation. Batching uses
+`_Batches` to merge ready requests up to `max_batch` and `Forwards` to load
+and evict checkpoints. It encodes each reply independently so a serialization
+failure applies only to its caller.
+
+**Direct inference.** `LocalForwardBus` queues requests to a non-daemon
+inference thread. Only that thread holds the loaded models. Plain
+C-contiguous, non-object NumPy inputs travel as read-only views. Pickle
+protocol 5 carries containers with eligible array buffers sent out of band.
+The thread copies NumPy outputs before replying, so the model can reuse its
+buffers. It posts replies to the game loop with `call_soon_threadsafe`.
+Closing the bus signals the thread and joins within the evaluation deadline.
+If the join expires, outstanding calls keep their inputs locked. An unexpected
+thread exit fails pending and later calls with `RetryRequested`.
+
+**Shared inference.** `SocketForwardBus` sends length-prefixed frames to the
+agent process over a private Unix socket. Serialization copies the NumPy
+outputs. Each request and reply carries its call ID and checkpoint key in
+the header. An undecodable body fails that call with a permanent
+`ForwardError`. The reserved ID zero carries a peer-wide framing error.
+An unexpected disconnect or truncated frame requests a retry.
+
+On both transports, the array codec walks lists, tuples, dictionary values and
+dataclass fields. It retains containers with unchanged leaves and reconstructs
+containers that need a conversion, preserving cycles.
+It tries the buffer protocol before CPU DLPack so lazy MLX outputs materialize
+on the inference thread. It copies the resulting arrays and releases buffer
+views on the producing thread. A device array that cannot export CPU data
+fails its call with `ForwardError`. The shared contract suite in
+`tests/eval/test_bus.py` exercises both transports.
 
 ## Tournaments
 

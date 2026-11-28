@@ -25,12 +25,21 @@ failure recovery requires.
   must be importable top-level definitions. Games run in spawned processes.
   Multiple `async def play` matches share one `asyncio` event loop per game
   process; blocking the loop without awaiting stalls the other games in that
-  process until the run deadline. Shared inference uses a declared, detected
-  accelerator (`cuda` or `metal` on native arm64 macOS). A CPU-only loader
-  can declare `devices=("cpu",)` to skip the probe. Direct game processes use
-  one model-library thread each. Your loader must honor the thread environment
-  and owns device selection and GPU memory residency. A game-process crash
-  makes held matches retryable while already-sealed matches survive.
+  process until the run deadline. Checkpoint workloads with a declared,
+  detected CUDA or Metal accelerator and multiple game processes use one
+  shared agent process. Other checkpoint workloads use direct inference in
+  each game process. Your loader must honor the thread environment and owns
+  device selection and GPU memory residency. If a game process crashes during
+  play, queued and in-flight matches are recorded as retryable failures.
+  Tournaments that already finished or failed keep their status.
+- Direct inference isolates loaded models on the inference thread, but a game
+  module that defines `load` (or imports the same stateful module) still shares
+  Python module globals with it inside one interpreter. The in-flight read-only
+  lock covers the `numpy.ndarray` object handed to `forward(...)`, not slices
+  taken earlier from the same buffer or native pointers. In `play`, call-time
+  locking covers `numpy.ndarray` objects immediately while mutable containers
+  (`dict`, `list`, `bytearray`) snapshot when the zero-delay barrier flushes
+  (versus on call in `play_many`).
 - A match must return rows to count as done. In `play`, caught `ForwardError`s
   still fail the match; in `play_many`, yield `(match, error)` for failed slots
   or let the error escape to fail held matches. Ordinary game failures need

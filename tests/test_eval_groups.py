@@ -2,17 +2,20 @@
 
 import asyncio
 import json
+import math
 import os
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import nullcontext
 from decimal import Decimal
+from hashlib import sha256
 from importlib import import_module
-from multiprocessing import active_children, get_context
+from multiprocessing import active_children
 from multiprocessing.connection import Connection, wait
 from pathlib import Path
 from typing import NoReturn, cast
@@ -30,12 +33,12 @@ from etude.controller.smoke import Step, smoke_file
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval import resources as eval_resources
 from etude.eval.agents import (
-    AgentClient,
     Answer,
     CheckpointRequest,
     Forward,
     ForwardError,
     ModelForward,
+    SocketForwardBus,
     decode_answer,
     decode_requests,
     encode_answer,
@@ -43,8 +46,9 @@ from etude.eval.agents import (
     recv_frame,
     send_frame,
 )
-from etude.eval.batching import _Batches
-from etude.eval.game import GameReport, MatchStream
+from etude.eval.batching import Batch, _add_socket_batch, _Batches, _send_peer
+from etude.eval.bus import ForwardCall, ForwardOutcome
+from etude.eval.game import GameReport, MatchStream, StreamEnd, Take
 from etude.eval.loader import AgentLoader
 from etude.eval.match import environment
 from etude.eval.query import _kept_path, statsdb
@@ -53,14 +57,16 @@ from etude.eval.resources import (
     Accelerator,
     Device,
     Inference,
+    Placement,
+    TournamentQueue,
     _detect_accelerator,
     available_cpus,
     memory_bytes,
-    plan_execution,
+    place,
     resources,
 )
 from etude.eval.result import Result, Tables
-from etude.eval.run import Playing, Terminated, _GameProcess, _reserve_games
+from etude.eval.run import EvalRun, Playing, Terminated
 from etude.eval.tournament import evaluating, played
 from etude.experiment import observe, state_of
 from etude.jobs import (
@@ -85,12 +91,13 @@ from etude.records import (
     RunRecord,
     RunSubmission,
 )
-from etude.run import sync
+from etude.run import Run, sync
 from etude.spec import Job, RunRequest
 from etude.storage import DirectoryStorage, default_root
 from etude.train.read import read_all
 from tests.eval.arithmetic import checkpoint, load, play
-from tests.eval.thread_budget import load_checkpoint
+from tests.eval.playing import identify_outcome, wait_for_games
+from tests.eval.thread_budget import load_array_checkpoint, load_checkpoint
 from tests.launch.counting import Counting, job_text
 from tests.launch.fake import bench
 from tests.run.storage import MeasuredStorage
@@ -115,7 +122,16 @@ async def plain(match: Match, agents: list[object]) -> Tables:
     return {"scores": [{"seat": 0, "score": 7}]}
 
 
-def tournament(name: str) -> RoundRobin:
+async def request_stop(match: Match, agents: list[object]) -> Tables:
+    Path(os.environ["ETUDE_STOP_FILE"]).touch()
+    return await plain(match, agents)
+
+
+def tournament(name: str, *, games: int | None = None) -> RoundRobin:
+    if games is not None:
+        return RoundRobin(
+            name=name, environment=environment("grouped"), config={"lane": name}, games=games
+        )
     return RoundRobin(
         name=name, environment=environment("grouped"), configs=({"lane": name},), games=1
     )
@@ -125,9 +141,11 @@ def job(
     name: str,
     agents: Agents | None,
     playing: Callable[..., Awaitable[Tables]] | None = None,
+    *,
+    games: int | None = None,
 ) -> EvalJob:
     return EvalJob(
-        tournament=tournament(name),
+        tournament=tournament(name, games=games),
         enter=(checkpoint("left"), checkpoint("right")),
         play=playing or (plain if agents is None else play),
         agents=agents or Agents(),
@@ -425,19 +443,19 @@ def test_unknown_durations_rent_instead_of_stranding_new_tournaments(
         assert len(b.scheduler.runs()) == 1
 
 
-def test_an_execution_deadline_is_a_retryable_failure_not_a_success(
+def test_a_deadline_before_play_stops_the_tournament_with_retryable_matches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ETUDE_DEADLINE", "2000-01-01T00:00:00+00:00")
     active = job("deadline", None)
-    with pytest.raises(RetryRequested, match="execution deadline"):
+    with pytest.raises(Terminated, match="execution deadline"):
         hold_group(group(active), directory=tmp_path)
     result = played(active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path)
     assert len(result.new) == len(result.failed) == len(result.retry) == 1
     db = statsdb("grouped", tmp_path)
     try:
         assert db.sql("select state, retry from matches").fetchall() == [("failed", True)]
-        assert db.sql("select state from runs").fetchall() == [("failed",)]
+        assert db.sql("select state from runs").fetchall() == [("stopped",)]
     finally:
         db.close()
 
@@ -530,8 +548,8 @@ def test_two_tournaments_share_loaded_agents_and_resume_without_starting_them(
     reports = _game_reports(tmp_path / "grouped/artifacts/agents")
     assert len(reports) == 2
     assert sum(r.matches for r in reports) == 2
-    assert sum(r.requests for r in reports) == 4
-    assert sum(r.answers for r in reports) == 4
+    assert sum(r.bus.calls for r in reports) == 4
+    assert sum(r.bus.answers for r in reports) == 4
     log = capfd.readouterr().err
     assert log.count("agents: shared inference") == 1
     assert log.count("agents: loaded") == 2
@@ -618,59 +636,124 @@ def test_play_arity_and_removed_workers_are_refused(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("cpus", "pending", "agents", "memory_gb", "processes"),
+    (
+        "cpus",
+        "pending",
+        "agents",
+        "max_batch",
+        "memory_gb",
+        "expected",
+    ),
     [
-        (32, 64, True, None, 32),
-        (16, 64, True, None, 16),
-        (3, 20, True, None, 3),
-        (2, 20, True, None, 2),
-        (8, 20, False, None, 8),
-        (8, 20, True, None, 4),
-        (8, 20, True, 1.5, 2),
-        (8, 1, True, None, 1),
-        (1, 20, True, None, 1),
-        (1, 20, False, None, 1),
-        (8, 20, True, 2.0, 1),
+        # Saturated play CPU: 64 pending, max_batch=32 -> 16/32 processes.
+        (32, (64,), True, 32, None, ("local", 32, 1)),
+        (16, (64,), True, 32, None, ("local", 16, 1)),
+        (16, (5,), True, 32, None, ("local", 5, 2)),
+        (16, (30,), True, 256, None, ("local", 16, 1)),
+        (16, (16,), True, 32, None, ("local", 16, 1)),
+        # Direct processes share queues, so the largest determines their count.
+        (8, (4, 3, 2), True, 8, None, ("local", 4, 1)),
+        (3, (20,), True, 32, None, ("local", 3, 1)),
+        (2, (20,), True, 32, None, ("local", 2, 1)),
+        (8, (20,), False, 32, None, (None, 8, 0)),
+        (8, (20,), True, 32, None, ("local", 4, 1)),
+        (8, (20,), True, 32, 1.5, ("local", 2, 3)),
+        (8, (1,), True, 32, None, ("local", 1, 7)),
+        (1, (20,), True, 32, None, ("local", 1, 1)),
+        (1, (20,), False, 32, None, (None, 1, 0)),
+        (8, (), True, 32, None, (None, 0, 0)),
+        (8, (0,), True, 32, None, (None, 0, 0)),
+        (8, (20,), True, 32, 2.0, ("local", 1, 7)),
     ],
 )
-def test_plan_execution_respects_cpu_pending_and_memory(
+def test_place_respects_cpu_pending_and_memory(
     monkeypatch: pytest.MonkeyPatch,
     cpus: int,
-    pending: int,
+    pending: tuple[int, ...],
     agents: bool,
+    max_batch: int,
     memory_gb: float | None,
-    processes: int,
+    expected: tuple[str | None, int, int],
 ) -> None:
     monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: "no accelerator detected")
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
     monkeypatch.setattr(
         "etude.eval.resources.memory_bytes", lambda: 16 * 1024**3 if cpus >= 16 else 2 * 1024**3
     )
-    loader = Agents(load=load, memory_gb=memory_gb).plain(None)
-    plan = plan_execution(pending, loader, checkpoints=agents)
-    reason = "no accelerator detected" if agents else "no checkpoints"
-    assert (plan.processes, plan.threads, plan.inference) == (processes, 1, reason)
+    chosen = place(
+        [TournamentQueue(count) for count in pending],
+        loader=Agents(load=load, max_batch=max_batch, memory_gb=memory_gb).plain(None),
+        checkpoints=agents,
+    )
+    assert (
+        chosen.bus,
+        chosen.processes,
+        chosen.inference_threads,
+    ) == expected
 
 
 @pytest.mark.parametrize(
-    ("pending", "memory_gb", "agents", "visible", "processes"),
+    ("match_mib", "processes", "threads"),
+    [(200, 10, 1), (300, 6, 1), (2100, 1, 15), (1, 16, 1)],
+)
+@pytest.mark.parametrize("shared_agents", [False], indirect=True)
+def test_place_sizes_direct_caches_for_a_match(
+    monkeypatch: pytest.MonkeyPatch, match_mib: int, processes: int, threads: int
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 16)
+    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 16 * 1024**3)
+    placement = place(
+        (TournamentQueue(64),),
+        loader=Agents(load=load, memory_gb=2).plain(None),
+        checkpoints=True,
+        match_bytes=match_mib * 1024**2,
+    )
+    assert placement.bus == "local"
+    assert placement.processes == processes
+    assert placement.inference_threads == threads
+    assert placement.checkpoint_bytes == 2 * 1024**3 // processes
+
+
+@pytest.mark.parametrize(
+    (
+        "cpus",
+        "pending",
+        "streaming",
+        "max_batch",
+        "memory_gb",
+        "agents",
+        "visible",
+        "expected",
+    ),
     [
-        (64, None, True, "0", 3),
-        (3, None, True, "0", 3),
-        (64, 15.5, True, "0", 2),
-        (64, None, False, "0", 4),
-        (64, None, True, "", 4),
-        (64, None, True, "-1", 4),
+        # Saturated play GPU (4 cores).
+        (4, (64,), False, 32, None, True, "0", ("socket", 3, 1)),
+        # A single game process keeps inference local even on a declared accelerator.
+        (4, (1,), False, 32, None, True, "0", ("local", 1, 3)),
+        (16, (16,), False, 32, None, True, "0", ("socket", 15, 1)),
+        # Three one-match tournaments leave one core for inference.
+        (4, (1, 1, 1), False, 32, None, True, "0", ("socket", 3, 1)),
+        (4, (64,), False, 8, None, True, "0", ("socket", 3, 1)),
+        (16, (64,), False, 4, None, True, "0", ("socket", 4, 12)),
+        (4, (64,), False, 32, 15.5, True, "0", ("socket", 2, 2)),
+        (4, (2, 3), True, 32, None, True, "0", ("socket", 3, 1)),
+        (4, (64,), False, 32, None, False, "0", (None, 4, 0)),
+        (4, (2, 3), True, 32, None, False, "0", (None, 4, 0)),
+        (4, (64,), False, 32, None, True, "", ("local", 4, 1)),
+        (4, (2, 3), True, 32, None, True, "", ("local", 1, 3)),
     ],
 )
-def test_cuda_plan_bounds_processes_by_cores_pending_and_memory(
+def test_cuda_placement_routes_both_play_functions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    pending: int,
+    cpus: int,
+    pending: tuple[int, ...],
+    streaming: bool,
+    max_batch: int,
     memory_gb: float | None,
     agents: bool,
     visible: str,
-    processes: int,
+    expected: tuple[str | None, int, int],
 ) -> None:
     monkeypatch.setattr(eval_resources, "_detect_accelerator", _detect_accelerator)
     monkeypatch.setattr("etude.eval.resources.sys.platform", "linux")
@@ -680,21 +763,98 @@ def test_cuda_plan_bounds_processes_by_cores_pending_and_memory(
     probe.chmod(0o700)
     monkeypatch.setenv("PATH", str(tmp_path))
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    chosen = place(
+        [TournamentQueue(count, streaming=streaming) for count in pending],
+        loader=Agents(load=load, max_batch=max_batch, memory_gb=memory_gb).plain(None),
+        checkpoints=agents,
+    )
+    assert (
+        chosen.bus,
+        chosen.processes,
+        chosen.inference_threads,
+    ) == expected
+    assert (tmp_path / "nvidia-smi.ran").exists() is (agents and visible == "0")
+    if agents:
+        assert chosen.reason == ("cuda" if visible == "0" else "CUDA_VISIBLE_DEVICES hides GPUs")
+
+
+@pytest.mark.parametrize("accelerator", ["cuda", "metal"])
+def test_place_allocates_the_remaining_accelerator_processes_to_streaming(
+    monkeypatch: pytest.MonkeyPatch, accelerator: Accelerator
+) -> None:
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: accelerator)
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 16)
+    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 16 * 1024**3)
+    queues = (TournamentQueue(10), TournamentQueue(128, streaming=True))
+    plan = place(queues, loader=Agents(load=load, max_batch=32).plain(None), checkpoints=True)
+    assert plan.bus == "socket"
+    assert plan.processes == 15
+    assert plan.process_shares(queues, 32, available=plan.processes) == (8, 7)
+
+
+def test_code_only_and_cpu_streaming_do_not_probe_gpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_probe() -> NoReturn:
+        raise AssertionError("GPU probe should not run without a loader or accelerator declaration")
+
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", fail_probe)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
-    loader = Agents(load=load, memory_gb=memory_gb).plain(None)
-    plan = plan_execution(pending, loader, checkpoints=agents)
-    expected_shared = agents and visible == "0"
-    assert plan.processes == processes
-    assert plan.threads == (max(1, 4 - processes) if expected_shared else 1)
-    assert plan.shared is expected_shared
-    assert (tmp_path / "nvidia-smi.ran").exists() is expected_shared
-    if expected_shared:
-        assert plan.inference == "cuda"
-    elif agents:
-        assert plan.inference == "CUDA_VISIBLE_DEVICES hides GPUs"
-    else:
-        assert plan.inference == "no checkpoints"
+    assert place((TournamentQueue(6),), loader=AgentLoader(), checkpoints=False) == Placement(
+        bus=None,
+        processes=4,
+        inference_threads=0,
+        checkpoint_bytes=0,
+        reason="no loader",
+    )
+    assert place(
+        (TournamentQueue(2, streaming=True), TournamentQueue(3, streaming=True)),
+        loader=AgentLoader(),
+        checkpoints=False,
+    ) == Placement(
+        bus=None,
+        processes=4,
+        inference_threads=0,
+        checkpoint_bytes=0,
+        reason="no loader",
+    )
+    assert place(
+        (TournamentQueue(2, streaming=True), TournamentQueue(3, streaming=True)),
+        loader=Agents(load=load, devices=("cpu",)).plain(None),
+        checkpoints=True,
+        match_bytes=16 * 1024**3,
+    ) == Placement(
+        bus="local",
+        processes=1,
+        inference_threads=3,
+        checkpoint_bytes=8 * 1024**3,
+        reason="cpu-only loader",
+    )
+
+
+@pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
+@pytest.mark.parametrize("memory_gb", [None, 1.5])
+def test_place_reserves_checkpoint_memory_once(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest, memory_gb: float | None
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
+    samples = iter([2 * 1024**3])
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: next(samples))
+    shared = bool(request.node.callspec.params["shared_agents"])
+    placement = place(
+        (TournamentQueue(6),),
+        loader=Agents(load=load, max_batch=2, memory_gb=memory_gb).plain(None),
+        checkpoints=True,
+        match_bytes=2 * 1024**3 if shared else 1,
+    )
+    assert placement.bus == ("socket" if shared else "local")
+    assert placement.processes > 1
+    reserved = (1024 if memory_gb is None else 1536) * 1024**2
+    owners = 1 if shared else placement.processes
+    assert placement.checkpoint_bytes == reserved // owners
 
 
 def test_a_failing_nvidia_driver_plays_direct(
@@ -709,27 +869,28 @@ def test_a_failing_nvidia_driver_plays_direct(
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
-    plan = plan_execution(64, Agents(load=load).plain(None), checkpoints=True)
-    assert (plan.inference, plan.processes) == ("nvidia-smi failed", 4)
+    plan = place((TournamentQueue(64),), loader=Agents(load=load).plain(None), checkpoints=True)
+    assert (plan.reason, plan.processes) == ("nvidia-smi failed", 4)
 
 
 @pytest.mark.parametrize(
-    ("plat", "machine", "cpus", "memory_gb", "processes", "threads", "accelerator"),
+    ("plat", "machine", "cpus", "memory_gb", "batch_inputs", "processes", "threads", "accelerator"),
     [
-        ("darwin", "arm64", 8, None, 7, 1, "metal"),
-        ("darwin", "arm64", 16, None, 15, 1, "metal"),
-        ("darwin", "arm64", 1, None, 1, 1, "metal"),
-        ("darwin", "arm64", 8, 15.5, 2, 6, "metal"),
-        ("darwin", "x86_64", 8, None, 8, 1, None),
-        ("linux", "arm64", 8, None, 8, 1, None),
+        ("darwin", "arm64", 8, None, 32, 7, 1, "metal"),
+        ("darwin", "arm64", 16, None, 8, 8, 8, "metal"),
+        ("darwin", "arm64", 1, None, 32, 1, 1, "metal"),
+        ("darwin", "arm64", 8, 15.5, 32, 2, 6, "metal"),
+        ("darwin", "x86_64", 8, None, 32, 8, 1, None),
+        ("linux", "arm64", 8, None, 32, 8, 1, None),
     ],
 )
-def test_apple_silicon_plan_bounds_processes_by_cores_and_memory(
+def test_apple_silicon_placement_bounds_games_by_cores_and_memory(
     monkeypatch: pytest.MonkeyPatch,
     plat: str,
     machine: str,
     cpus: int,
     memory_gb: float | None,
+    batch_inputs: int,
     processes: int,
     threads: int,
     accelerator: Accelerator | None,
@@ -741,15 +902,16 @@ def test_apple_silicon_plan_bounds_processes_by_cores_and_memory(
     monkeypatch.setattr("etude.eval.resources.shutil.which", lambda _: None)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
-    loader = Agents(load=load, memory_gb=memory_gb).plain(None)
-    plan = plan_execution(64, loader, checkpoints=True)
-    shared = accelerator is not None
-    assert (plan.processes, plan.threads, plan.inference) == (
+    loader = Agents(load=load, memory_gb=memory_gb, max_batch=batch_inputs).plain(None)
+    plan = place((TournamentQueue(64),), loader=loader, checkpoints=True)
+    shared = accelerator is not None and processes > 1
+    assert (plan.processes, plan.inference_threads, plan.reason) == (
         processes,
         threads,
         accelerator or "no accelerator detected",
     )
     held = int(memory_gb * 1024**3) if memory_gb is not None else 8 * 1024**3
+    assert plan.bus == ("socket" if shared else "local")
     assert plan.checkpoint_bytes == (held if shared else held // processes)
 
 
@@ -772,7 +934,7 @@ def test_agent_devices_share_only_on_declared_accelerators(
 ) -> None:
     monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: detected)
     loader = Agents(load=load, devices=devices).plain(None)
-    assert plan_execution(1, loader, checkpoints=True).inference == inference
+    assert place((TournamentQueue(1),), loader=loader, checkpoints=True).reason == inference
 
 
 def test_probe_skipped_without_checkpoint_loading_or_accelerator(
@@ -788,15 +950,19 @@ def test_probe_skipped_without_checkpoint_loading_or_accelerator(
         (AgentLoader(), True, "no loader"),
         (Agents(load=load).plain(None), False, "no checkpoints"),
     ):
-        plan = plan_execution(8, loader, checkpoints=checkpoints)
-        assert (plan.inference, plan.processes, plan.checkpoint_bytes) == (
+        plan = place((TournamentQueue(8),), loader=loader, checkpoints=checkpoints)
+        assert (plan.reason, plan.processes, plan.checkpoint_bytes) == (
             reason,
             8,
             0,
         )
-    loader = Agents(load=load, devices=("cpu",)).plain(None)
-    cpu = plan_execution(8, loader, checkpoints=True)
-    assert (cpu.inference, cpu.processes, cpu.threads) == ("cpu-only loader", 8, 1)
+    loader = Agents(load=load, devices=("cpu",), max_batch=16).plain(None)
+    cpu = place((TournamentQueue(8),), loader=loader, checkpoints=True)
+    assert (cpu.reason, cpu.processes, cpu.inference_threads) == (
+        "cpu-only loader",
+        8,
+        1,
+    )
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -847,12 +1013,13 @@ def test_group_execution_respects_declared_agent_memory(
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: next(measurements))
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     outstanding: list[int] = []
+    shared = expected_processes > 1
 
     def count_processes(
         handles: Sequence[Connection | int], timeout: float | None = None
     ) -> list[object]:
         # Each live game process contributes pipe + sentinel; agent contributes sentinel.
-        outstanding.append((len(handles) - 1) // 2)
+        outstanding.append((len(handles) - int(shared)) // 2)
         return list(wait(handles, timeout=timeout))
 
     monkeypatch.setattr("etude.eval.run.wait", count_processes)
@@ -861,14 +1028,17 @@ def test_group_execution_respects_declared_agent_memory(
     assert [result.played for result in hold_group(selected, directory=tmp_path)] == [1, 1, 1]
     assert max(outstanding) == expected_processes
     expected_threads = max(1, cpus - expected_processes)
+    process = "game process" if expected_processes == 1 else "game processes"
+    thread = "thread" if expected_threads == 1 else "threads"
+    mode = "shared" if shared else "direct"
     assert (
-        f"shared inference for one, two, three ({device}); "
-        f"{expected_processes} game {'process' if expected_processes == 1 else 'processes'}, "
-        "play (initial target_matches=1); "
-        f"{expected_threads} inference {'thread' if expected_threads == 1 else 'threads'}"
-        in capfd.readouterr().err
+        f"{mode} inference for one, two, three ({device}); "
+        f"{expected_processes} {process}, 1 game each; "
+        f"{expected_threads} inference {thread}" in capfd.readouterr().err
     )
-    batches = json.loads((tmp_path / "grouped/artifacts/agents/batches.json").read_bytes())
+    artifacts = tmp_path / "grouped/artifacts/agents"
+    [batch_file] = artifacts.glob("batches.json" if shared else "batches-*.json")
+    batches = json.loads(batch_file.read_bytes())
     assert sum(batch["loads"] for batch in batches) == 2
     budgets = json.loads((tmp_path / "grouped/artifacts/agents/threads.json").read_text())
     assert set(budgets.values()) == {str(expected_threads)}
@@ -944,8 +1114,7 @@ def test_agent_devices_control_grouping_and_execution(
     ] == [1, 1]
     assert (
         "etude: agents: direct inference for tuned, tuned_peer (cpu-only loader); "
-        "2 game processes, play (initial target_matches=1); 1 inference thread each"
-        in capfd.readouterr().err
+        "1 game process, 1 game each; 1 inference thread" in capfd.readouterr().err
     )
     assert not (direct_dir / "grouped/artifacts/agents/batches.json").exists()
 
@@ -982,48 +1151,42 @@ def echo(checkpoint: CheckpointRef) -> ModelForward:
 
 
 def test_batch_merges_rows_up_to_max_batch_and_runs_oversized_alone() -> None:
-    first_game, first_agent = socket.socketpair()
-    second_game, second_agent = socket.socketpair()
+    first_answers: list[tuple[int, ForwardOutcome]] = []
+    second_answers: list[tuple[int, ForwardOutcome]] = []
     player = checkpoint("one")
-    batches = _Batches(echo, 4, 1024)
-    with first_game, first_agent, second_game, second_agent:
-        batches.add(first_agent, [CheckpointRequest(1, player.checkpoint, [("a", "b")], 2)])
-        batches.add(
-            second_agent,
-            [
-                CheckpointRequest(2, player.checkpoint, [("c", "d")], 2),
-                CheckpointRequest(3, player.checkpoint, ["e"], 1),
-            ],
-        )
-        first = batches.flush()
-        assert decode_answer(recv_frame(first_game)) == Answer(
-            1, player.checkpoint.key, [("a", "b")]
-        )
-        assert decode_answer(recv_frame(second_game)) == Answer(
-            2, player.checkpoint.key, [("c", "d")]
-        )
-        assert [b.rows for b in first] == [4]
-        assert [b.requests for b in first] == [2]
-        assert batches.loads == 1
-        second = batches.flush()
-        assert decode_answer(recv_frame(second_game)) == Answer(3, player.checkpoint.key, ["e"])
-        assert [b.rows for b in second] == [1]
-        # A single pre-collated call above max_batch runs alone and reports real rows.
-        batches.add(first_agent, [CheckpointRequest(4, player.checkpoint, ["big"], 6)])
-        oversized = batches.flush()
-        assert decode_answer(recv_frame(first_game)) == Answer(4, player.checkpoint.key, ["big"])
-        assert [b.rows for b in oversized] == [6]
+    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(echo, 4, 1024, encode=identify_outcome)
+    batches.add(first_answers.append, 1, player.checkpoint, [("a", "b")], 2)
+    batches.add(second_answers.append, 2, player.checkpoint, [("c", "d")], 2)
+    batches.add(second_answers.append, 3, player.checkpoint, ["e"], 1)
+    first = batches.flush()
+    assert first_answers.pop(0) == (1, ForwardOutcome("one", [("a", "b")]))
+    assert second_answers.pop(0) == (2, ForwardOutcome("one", [("c", "d")]))
+    assert [b.rows for b in first] == [4]
+    assert [b.requests for b in first] == [2]
+    assert batches.loads == 1
+    second = batches.flush()
+    assert second_answers.pop(0) == (3, ForwardOutcome("one", ["e"]))
+    assert [b.rows for b in second] == [1]
+    # A single pre-collated call above max_batch runs alone and reports real rows.
+    batches.add(first_answers.append, 4, player.checkpoint, ["big"], 6)
+    oversized = batches.flush()
+    assert first_answers.pop(0) == (4, ForwardOutcome("one", ["big"]))
+    assert [b.rows for b in oversized] == [6]
 
 
 def test_oversized_game_request_uses_bounded_forwards_and_one_ordered_reply() -> None:
     game, agent = socket.socketpair()
     player = checkpoint("one")
-    batches = _Batches(echo, 2, 1024)
+    batches = _Batches(echo, 2, 1024, encode=encode_answer)
     inputs: list[object] = [1, 2, 3, 4, 5]
     with game, agent:
-        batches.add(agent, [CheckpointRequest(1, player.checkpoint, inputs, len(inputs))])
+        _add_socket_batch(
+            batches,
+            _send_peer(agent),
+            [CheckpointRequest(1, player.checkpoint, inputs, len(inputs))],
+        )
         observed = batches.flush()
-        assert decode_answer(recv_frame(game)) == Answer(1, player.checkpoint.key, inputs)
+        assert decode_answer(recv_frame(game)) == Answer(1, ForwardOutcome("one", inputs))
         assert not wait([game], timeout=0)
         assert [(batch.rows, batch.forward_calls) for batch in observed] == [
             (2, 1),
@@ -1045,29 +1208,23 @@ def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_inputs() ->
         for name in ("a", "b", "c")
     ]
     a, b, c = players
-    batches = _Batches(echo, 1, 2)
-    parent, child = socket.socketpair()
-    try:
-        for index, player in enumerate((a, b), start=1):
-            batches.add(child, [CheckpointRequest(index, player.checkpoint, [player.name], 1)])
-            batches.flush()
-            assert decode_answer(recv_frame(parent)) == Answer(
-                index, player.checkpoint.key, [player.name]
-            )
-        # While a still has waiting rows in pending, loading c evicts b instead of a.
-        batches.add(child, [CheckpointRequest(3, c.checkpoint, ["c"], 1)])
-        batches.add(child, [CheckpointRequest(4, a.checkpoint, ["a"], 1)])
+    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(echo, 1, 2, encode=identify_outcome)
+    answers: list[tuple[int, ForwardOutcome]] = []
+    for index, player in enumerate((a, b), start=1):
+        batches.add(answers.append, index, player.checkpoint, [player.name], 1)
         batches.flush()
-        assert decode_answer(recv_frame(parent)) == Answer(3, c.checkpoint.key, ["c"])
-        assert decode_answer(recv_frame(parent)) == Answer(4, a.checkpoint.key, ["a"])
-        assert batches.loads == 3
-        batches.add(child, [CheckpointRequest(5, b.checkpoint, ["b"], 1)])
-        batches.flush()
-        assert decode_answer(recv_frame(parent)) == Answer(5, b.checkpoint.key, ["b"])
-        assert batches.loads == 4  # b was evicted to make room for c.
-    finally:
-        parent.close()
-        child.close()
+        assert answers.pop(0) == (index, ForwardOutcome(player.checkpoint.key, [player.name]))
+    # While a still has waiting rows in pending, loading c evicts b instead of a.
+    batches.add(answers.append, 3, c.checkpoint, ["c"], 1)
+    batches.add(answers.append, 4, a.checkpoint, ["a"], 1)
+    batches.flush()
+    assert answers.pop(0) == (3, ForwardOutcome(c.checkpoint.key, ["c"]))
+    assert answers.pop(0) == (4, ForwardOutcome(a.checkpoint.key, ["a"]))
+    assert batches.loads == 3
+    batches.add(answers.append, 5, b.checkpoint, ["b"], 1)
+    batches.flush()
+    assert answers.pop(0) == (5, ForwardOutcome(b.checkpoint.key, ["b"]))
+    assert batches.loads == 4  # b was evicted to make room for c.
 
 
 class WrongAnswers:
@@ -1098,8 +1255,8 @@ def test_bad_batch_answers_fail_all_asking_tournaments(
         hold_group(selected, directory=tmp_path)
     reports = _game_reports(tmp_path / "grouped/artifacts/agents")
     assert len(reports) == 2
-    assert [r.requests for r in reports] == [1, 1]
-    assert [r.answers for r in reports] == [1, 1]
+    assert [r.bus.calls for r in reports] == [1, 1]
+    assert [r.bus.answers for r in reports] == [1, 1]
     db = statsdb("grouped", tmp_path)
     try:
         assert db.sql("select state, retry from matches").fetchall() == [("failed", False)] * 2
@@ -1109,7 +1266,7 @@ def test_bad_batch_answers_fail_all_asking_tournaments(
 
 
 def restore_unreadable_value() -> NoReturn:
-    raise ModuleNotFoundError("fixture value is unavailable")
+    raise ModuleNotFoundError("fixture value class is unavailable")
 
 
 class UnreadableValue:
@@ -1155,24 +1312,25 @@ async def sends_bad_payload(match: Match[Config], agents: Sequence[Forward]) -> 
 
 
 @pytest.mark.parametrize(
-    ("stage", "operation", "answers"),
+    ("stage", "message", "answers"),
     [
-        ("encode_input", "encode inputs", 2),
-        ("decode_input", "decode inputs", 3),
-        ("encode_output", "encode outputs", 3),
-        ("decode_output", "decode outputs", 3),
+        ("encode_input", "could not encode inputs", 2),
+        ("decode_input", "agent request failed to decode", 3),
+        ("encode_output", "could not encode outputs", 3),
+        ("decode_output", "agent reply failed to decode", 3),
     ],
 )
 def test_bad_wire_payload_fails_only_its_request(
-    tmp_path: Path, stage: str, operation: str, answers: int
+    tmp_path: Path, stage: str, message: str, answers: int
 ) -> None:
     agents = Agents(load=wire_failures)
     selected = group(job(stage, agents, sends_bad_payload), job("healthy", agents))
     broken, healthy = [spec.address.split("/")[-1] for spec in selected.evaluations]
-    with pytest.raises(EtudeError, match=f"could not {operation}"):
+    with pytest.raises(EtudeError, match=message):
         hold_group(selected, directory=tmp_path)
-    reports = {r.tournament: r for r in _game_reports(tmp_path / "grouped/artifacts/agents")}
-    assert (reports[stage].requests, reports[stage].answers) == (2, answers)
+    reports = {r.tournaments: r for r in _game_reports(tmp_path / "grouped/artifacts/agents")}
+    bus = reports[(stage,)].bus
+    assert (bus.calls, bus.answers) == (answers, answers)
     db = statsdb("grouped", tmp_path)
     try:
         assert set(db.sql("select run, state, retry from matches").fetchall()) == {
@@ -1184,48 +1342,62 @@ def test_bad_wire_payload_fails_only_its_request(
         db.close()
 
 
-def test_unencodable_output_preserves_the_other_reply_in_a_merged_forward() -> None:
-    checkpoint_ref = checkpoint("one").checkpoint
-    batches = _Batches(wire_failures, 2, 1024)
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ("encode_output", "could not encode outputs"),
+        ("decode_output", "agent reply failed to decode"),
+    ],
+)
+def test_bad_output_preserves_the_other_reply_in_a_merged_forward(
+    payload: str, message: str
+) -> None:
+    ref = checkpoint("one").checkpoint
+    batches = _Batches(wire_failures, 2, 1024, encode=encode_answer)
     game, agent = socket.socketpair()
     with game, agent:
-        batches.add(
-            agent,
+        _add_socket_batch(
+            batches,
+            _send_peer(agent),
             [
-                CheckpointRequest(1, checkpoint_ref, ["encode_output"], 1),
-                CheckpointRequest(2, checkpoint_ref, [7], 1),
+                CheckpointRequest(1, ref, [payload], 1),
+                CheckpointRequest(2, ref, [7], 1),
             ],
         )
         [batch] = batches.flush()
         assert (batch.rows, batch.requests, batch.forward_calls) == (2, 2, 1)
         bad = decode_answer(recv_frame(game))
-        assert (bad.id, bad.checkpoint) == (1, checkpoint_ref.key)
-        assert isinstance(bad.result, ForwardError) and not bad.result.retry
-        assert decode_answer(recv_frame(game)) == Answer(2, checkpoint_ref.key, [7])
+        assert (bad.id, bad.outcome.checkpoint) == (1, ref.key)
+        assert bad.outcome.error is not None and message in bad.outcome.error
+        assert not bad.outcome.retry
+        assert decode_answer(recv_frame(game)) == Answer(2, ForwardOutcome(ref.key, [7]))
 
 
 @pytest.mark.parametrize("truncated", [False, True])
-def test_agent_disconnection_retries_unanswered_requests(truncated: bool) -> None:
-    async def exchange() -> None:
-        checkpoint_ref = checkpoint("one").checkpoint
-        game, peer = socket.socketpair()
-        with game, peer:
-            reader, writer = await asyncio.open_connection(sock=game)
-            client = AgentClient(reader, writer)
+def test_agent_disconnection_retries_unanswered_requests(tmp_path: Path, truncated: bool) -> None:
+    async def exchange(address: str, listener: socket.socket) -> None:
+        ref = checkpoint("one").checkpoint
+        bus = await SocketForwardBus.connect(address)
+        peer, _ = listener.accept()
+        with peer:
             try:
-                futures = client.send_batch([(checkpoint_ref, [1], 1), (checkpoint_ref, [2], 1)])
+                bus.bind(ref)
+                futures = bus.submit([ForwardCall(ref.key, [1], 1), ForwardCall(ref.key, [2], 1)])
                 if truncated:
-                    header, body = encode_answer(Answer(1, checkpoint_ref.key, [1]))
+                    header, body = encode_answer(1, ForwardOutcome(ref.key, [1]))
                     send_frame(peer, header, body[:-1])
                 peer.shutdown(socket.SHUT_WR)
                 async with asyncio.timeout(5):
                     answers = await asyncio.gather(*futures, return_exceptions=True)
                 assert all(isinstance(answer, RetryRequested) for answer in answers)
             finally:
-                await client.close()
-                await writer.wait_closed()
+                await bus.close()
 
-    asyncio.run(exchange())
+    with resources(tmp_path) as owned, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        address = str(owned.scratch / "agent.sock")
+        server.bind(address)
+        server.listen()
+        asyncio.run(exchange(address, server))
 
 
 def test_launched_group_delivers_members_then_the_next_pass_plays_nothing(
@@ -1278,7 +1450,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
 
 
 def test_game_imports_only_play_module_with_one_send_and_receive_per_decision(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     (tmp_path / "light_agent_game.py").write_text("""
 import sys
@@ -1288,19 +1460,84 @@ from etude.eval.records import Match
 from etude.eval.result import Tables
 
 async def play(match: Match, agents: Sequence[Forward]) -> Tables:
-    assert "tests.eval.arithmetic" not in sys.modules
+    assert "separate_loading" not in sys.modules
     assert "etude.eval.batching" not in sys.modules
     assert await agents[0]([]) == []
     return {"scores": [{"seat": 0, "score": int(str((await agents[0]([1]))[0]))}]}
 """)
-    monkeypatch.syspath_prepend(str(tmp_path))
-    selected = job("light", Agents(load=load), import_module("light_agent_game").play)
-    (result,) = hold_group(group(selected), directory=tmp_path)
-    assert result.played == 1
-    artifacts = tmp_path / "grouped/artifacts/agents"
-    [report] = _game_reports(artifacts)
-    assert report.requests == report.answers == 1
-    assert report.imports.count == 1
+    (tmp_path / "separate_loading.py").write_text(
+        "raise RuntimeError('model module imported by game')\n"
+    )
+    program = """
+import json
+import multiprocessing
+import socket
+import sys
+import threading
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from etude.call import Function
+from etude.eval.agents import CheckpointRequest, decode_requests, encode_answer, recv_frame, send_frame
+from etude.eval.bus import ForwardOutcome
+from etude.eval.game import Done, Grant, Outcome, Stream, StreamEnd, Take, run_game_process
+from etude.eval.records import Match
+from etude.eval.resources import Resources
+from tests.eval.arithmetic import checkpoint
+
+
+counts = {"sent": 0, "received": 0}
+with TemporaryDirectory(dir="/tmp", prefix="etude-test-") as scratch, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+    address = scratch + "/a.sock"
+    listener.bind(address)
+    listener.listen()
+    def answer() -> None:
+        peer, _ = listener.accept()
+        with peer:
+            batch = list(decode_requests(recv_frame(peer)))
+            counts["received"] += 1
+            for req in batch:
+                assert isinstance(req, CheckpointRequest)
+                send_frame(peer, *encode_answer(req.id, ForwardOutcome(req.checkpoint.key, req.inputs)))
+                counts["sent"] += 1
+    thread = threading.Thread(target=answer)
+    thread.start()
+    parent, child = multiprocessing.Pipe()
+    match = Match(players=(checkpoint("one"),))
+    def drive() -> None:
+        req = parent.recv()
+        assert isinstance(req, Take)
+        parent.send(Grant(matches=(match,), drained=True))
+        outcome = parent.recv()
+        assert isinstance(outcome, Outcome) and outcome.error is None
+        end = parent.recv()
+        assert isinstance(end, StreamEnd) and end.error is None
+        done = parent.recv()
+        assert isinstance(done, Done)
+        assert done.report.bus.calls == done.report.bus.answers == 1
+        assert done.report.matches == 1
+        print(done.report.imports.model_dump_json())
+    driver = threading.Thread(target=drive)
+    driver.start()
+    run_game_process(
+        child,
+        Resources(scratch=Path(scratch), artifacts=Path(scratch)),
+        (Stream("light", Function(module="light_agent_game", name="play", path=sys.argv[1]), False, 1, True),),
+        checkpoint_bytes=0,
+        agents=address,
+    )
+    driver.join()
+    thread.join()
+    parent.close()
+assert counts == {"sent": 1, "received": 1}
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=15,
+    )
+    assert json.loads(result.stdout)["count"] == 1
 
 
 def test_eval_only_smoke_starts_one_agent_process(
@@ -1312,7 +1549,6 @@ def test_eval_only_smoke_starts_one_agent_process(
     assert all(step.outcome == "passed" for step in result.rest)
     log = capfd.readouterr().err
     assert log.count("agents: shared inference") == log.count("agents: stopped") == 1
-    assert "3 game processes" in log
 
 
 async def stop_parent(match: Match, agents: Sequence[Forward]) -> Tables:
@@ -1321,66 +1557,44 @@ async def stop_parent(match: Match, agents: Sequence[Forward]) -> Tables:
     return {"scores": [{"seat": 0, "score": 1}]}
 
 
-def test_sigterm_reaps_agents_and_games_and_records_retry(tmp_path: Path) -> None:
+def test_sigterm_reaps_agents_and_games_and_records_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     before = {p.pid for p in active_children()}
     active = job("stop", Agents(load=load)).model_copy(update={"play": stop_parent})
+    selected = group(active)
+    address = "grouped/interrupted"
+    monkeypatch.setenv("ETUDE_RUN_ADDRESS", address)
     with pytest.raises(Terminated):
-        hold_group(group(active), directory=tmp_path)
+        hold_group(selected, directory=tmp_path)
     assert {p.pid for p in active_children()} <= before
     found = played(active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path)
     assert len(found.new) == len(found.retry) == len(found.failed) == 1
-    assert isinstance(
-        json.loads((tmp_path / "grouped/artifacts/agents/batches.json").read_text()), list
-    )
-
-
-def terminate_on_second_forward(checkpoint: CheckpointRef) -> ModelForward:
-    def forward(inputs: list[object]) -> list[object]:
-        if inputs == [1]:
-            os.kill(os.getpid(), signal.SIGTERM)
-        return inputs
-
-    return forward
-
-
-def test_agent_sigterm_keeps_completed_batches_in_valid_json(tmp_path: Path) -> None:
-    panel = [Match(players=(checkpoint("one"),), config={"rounds": 2})]
-    with (
-        pytest.raises(RetryRequested, match="agent process"),
-        evaluating(
-            environment("signal"),
-            experiment="signal",
-            matches=panel,
-            run="term",
-            directory=tmp_path,
-        ) as active,
-    ):
-        active.play(multi_round_play, agents=Agents(load=terminate_on_second_forward))
-    batches = json.loads((tmp_path / "signal/term/artifacts/agents/batches.json").read_text())
-    assert [batch["rows"] for batch in batches] == [1]
+    root = tmp_path / address
+    member = root / selected.evaluations[0].address
+    for folder in (root, member):
+        assert RunOutcome.model_validate_json((folder / "outcome.json").read_bytes()).state == (
+            "stopped"
+        )
 
 
 def test_a_failed_load_is_not_attempted_again_in_the_run() -> None:
-    batches = _Batches(raises_load, 1, 10)
-    parent, child = socket.socketpair()
-    try:
-        player = checkpoint("one")
-        batches.add(child, [CheckpointRequest(1, player.checkpoint, [1], 1)])
-        batches.flush()
-        first = decode_answer(recv_frame(parent))
-        assert isinstance(first.result, ForwardError) and first.result.loading
-        assert "fixture loading error" in str(first.result)
-        # If loading is attempted a second time this function would now succeed.
-        batches.forwards.load = echo
-        batches.add(child, [CheckpointRequest(2, player.checkpoint, [2], 1)])
-        batches.flush()
-        second = decode_answer(recv_frame(parent))
-        assert isinstance(second.result, ForwardError) and second.result.loading
-        assert str(second.result) == str(first.result)
-        assert batches.loads == 0
-    finally:
-        parent.close()
-        child.close()
+    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(
+        raises_load, 1, 10, encode=identify_outcome
+    )
+    answers: list[tuple[int, ForwardOutcome]] = []
+    player = checkpoint("one")
+    batches.add(answers.append, 1, player.checkpoint, [1], 1)
+    batches.flush()
+    _, first = answers.pop(0)
+    assert first.error and "fixture loading error" in first.error and first.loading
+    # If loading is attempted a second time this function would now succeed.
+    batches.forwards.load = echo
+    batches.add(answers.append, 2, player.checkpoint, [2], 1)
+    batches.flush()
+    _, second = answers.pop(0)
+    assert second.error == first.error and second.loading
+    assert batches.loads == 0
 
 
 @pytest.mark.parametrize("version", [1, 2])
@@ -1443,23 +1657,7 @@ def test_a_game_failure_retains_in_flight_outcomes_and_resume_skips_successes(
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     # Keep acceptance order deterministic: failure, success, then another failure.
     monkeypatch.setattr("etude.eval.tournament.ordered", lambda matches: iter(matches))
-    pipes_seen: list[object] = []
-
-    def all_pipes(
-        handles: Sequence[Connection | int], timeout: float | None = None
-    ) -> list[object]:
-        # Wait until every active pipe has a message so all 3 processes advance in lockstep.
-        pipes: list[Connection] = [h for h in handles if isinstance(h, Connection)]
-        if len(pipes) == 3 and len(pipes_seen) < 2:
-            pipes_seen.append(len(pipes))
-            ready: list[object] = []
-            while len(ready) < len(pipes):
-                for item in wait([p for p in pipes if p not in ready], timeout=timeout):
-                    ready.append(item)
-            return ready
-        return list(wait(handles, timeout=timeout))
-
-    monkeypatch.setattr("etude.eval.run.wait", all_pipes)
+    wait_for_games(monkeypatch, processes=3, rounds=2)
     matches = [
         Match(players=(checkpoint("one"),), config={"outcome": outcome, "index": seed}, games=1)
         for seed, outcome in enumerate(("failed", "done", "retry" if retry else "failed", "done"))
@@ -1498,6 +1696,7 @@ def test_a_game_failure_retains_in_flight_outcomes_and_resume_skips_successes(
     assert (repaired.played, repaired.skipped) == ((3, 1) if retry else (2, 2))
 
 
+@pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
 def test_a_game_failure_does_not_stop_other_tournaments(tmp_path: Path) -> None:
     agents = Agents(load=load)
     bad = job("bad", agents).model_copy(update={"play": fails_game})
@@ -1516,8 +1715,9 @@ def test_a_game_failure_does_not_stop_other_tournaments(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("library", ["torch", "mlx"])
 @pytest.mark.parametrize("with_agents", [False, True])
+@pytest.mark.parametrize("gpu", [False, True])
 def test_heavy_import_warning_is_once_and_only_for_games_with_agents(
-    tmp_path: Path, library: str, with_agents: bool
+    tmp_path: Path, library: str, with_agents: bool, gpu: bool
 ) -> None:
     (tmp_path / f"{library}.py").write_text("# Controlled framework fixture.\n")
     (tmp_path / "heavy_fixture_game.py").write_text(
@@ -1536,7 +1736,7 @@ from etude.jobs import Agents, EvalGroup, EvalJob, evaluation_group, hold_group,
 from tests.eval.arithmetic import load
 from tests.eval.arithmetic import checkpoint
 import etude.eval.resources
-etude.eval.resources._detect_accelerator = lambda: "cuda"
+etude.eval.resources._detect_accelerator = lambda: "cuda" if sys.argv[3] == "True" else "no accelerator detected"
 agents = Agents(load=load) if sys.argv[2] == "True" else Agents()
 jobs = [EvalJob(tournament=RoundRobin(name=name, environment=environment("heavy"), configs=({},), games=1),
                enter=(checkpoint("one"), checkpoint("two")), play=play,
@@ -1545,7 +1745,7 @@ hold_group(EvalGroup(evaluations=tuple(evaluation_group(job.lower(ExperimentStat
            directory=sys.argv[1])
 """
     result = subprocess.run(
-        [sys.executable, "-c", program, str(tmp_path), str(with_agents)],
+        [sys.executable, "-c", program, str(tmp_path), str(with_agents), str(gpu)],
         capture_output=True,
         text=True,
         check=False,
@@ -1559,82 +1759,135 @@ hold_group(EvalGroup(evaluations=tuple(evaluation_group(job.lower(ExperimentStat
         assert "move the import to load's module" in result.stderr
 
 
-def build_loader_fixture(player: object, leaves: Mapping[str, Forward]) -> object:
-    return player if isinstance(player, Code) else next(iter(leaves.values()))
-
-
-@pytest.mark.parametrize(
-    ("shared_agents", "mode"),
-    [(False, "error"), (True, "error"), (True, "retry"), (True, "exit")],
-    indirect=["shared_agents"],
-)
-def test_loader_import_failure_preserves_pending_matches(
+def test_agent_startup_failure_reports_retryable_matches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    mode: str,
-    request: pytest.FixtureRequest,
+    capfd: pytest.CaptureFixture[str],
 ) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
     monkeypatch.setenv("ETUDE_FIXTURE_TOKEN", "synthetic-fixture-credential")
+    # Put the secret in the artifacts path and block batches.json with a directory
+    # so the agent process fails during startup before control.send(None).
+    root = tmp_path / "synthetic-fixture-credential"
+    (root / "grouped/artifacts/agents/batches.json").mkdir(parents=True)
+    agents = Agents(load=load)
+    selected = group(job("startup", agents), job("another", agents))
+    with pytest.raises(RetryRequested, match="startup"):
+        hold_group(selected, directory=root)
+    log = capfd.readouterr().err
+    assert "[redacted]" in log and "synthetic-fixture-credential" not in log
+    assert json.loads((outputs / "etude-result.json").read_text())["tally"]["failed"] == 2
+    spec = selected.evaluations[0]
+    found = played(
+        spec.definition, experiment="grouped", enter=spec.tournament.entrants, directory=root
+    )
+    assert len(found.new) == len(found.retry) == len(found.failed) == 1
+
+
+@pytest.mark.parametrize(
+    ("kind", "module_source", "expected_error"),
+    [
+        ("missing_module", None, "ModuleNotFoundError"),
+        ("syntax_error", "def load(\n", "SyntaxError"),
+        (
+            "runtime_secret",
+            "import os\nraise RuntimeError('import boom: ' + os.environ['ETUDE_FIXTURE_TOKEN'])\n",
+            "import boom: [redacted]",
+        ),
+    ],
+)
+@pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
+def test_broken_loader_import_leaves_matches_pending_on_both_transports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    module_source: str | None,
+    expected_error: str,
+) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
+    monkeypatch.setenv("ETUDE_FIXTURE_TOKEN", "synthetic-fixture-credential")
+    module_name = f"broken_loader_{kind}_fixture"
+    if module_source is not None:
+        (tmp_path / f"{module_name}.py").write_text(module_source)
+    selected = group(job("broken_loader", Agents(load=load), games=2))
+    spec = selected.evaluations[0]
+    assert spec.agents is not None
+    spec = spec.model_copy(
+        update={
+            "agents": spec.agents.model_copy(
+                update={"load": Function(module=module_name, name="load", path=str(tmp_path))}
+            )
+        }
+    )
+    with pytest.raises(EtudeError, match="eval_startup_failed") as info:
+        hold_group(EvalGroup(evaluations=(spec,)), directory=tmp_path)
+    assert expected_error in str(info.value)
+    assert "synthetic-fixture-credential" not in str(info.value)
+    assert json.loads((outputs / "etude-result.json").read_text())["tally"]["failed"] == 0
+    found = played(
+        spec.definition, experiment="grouped", enter=spec.tournament.entrants, directory=tmp_path
+    )
+    assert len(found.new) == 2 and not found.failed and not found.retry
+
+
+def build_loader_fixture(player: object, leaves: Mapping[str, Forward]) -> object:
+    return player if isinstance(player, Code) else next(iter(leaves.values()))
+
+
+@pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
+def test_code_only_tournament_bypasses_inference_in_a_mixed_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
     shared = request.node.callspec.params["shared_agents"]
-    module = f"bad_agent_import_fixture_{shared}_{mode}"
-    failure = {
-        "error": "raise RuntimeError('fixture loader import: ' + os.environ['ETUDE_FIXTURE_TOKEN'])",
-        "retry": "raise RetryRequested('fixture loader import')",
-        "exit": "os._exit(3)",
-    }[mode]
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 3)
+    module = f"code_only_mixed_fixture_{shared}"
     (tmp_path / f"{module}.py").write_text(
-        "import os\n"
         "from multiprocessing import parent_process\n"
-        "from etude.checkpoints import CheckpointRef\n"
-        "from etude.errors import RetryRequested\n"
-        "from etude.eval.agents import ModelForward\n"
+        "from typing import NoReturn\n"
+        "from etude.eval.agents import SocketForwardBus\n"
+        "from etude.eval.records import Match\n"
+        "from etude.eval.result import Tables\n"
+        "async def reject_connection(address: str) -> NoReturn:\n"
+        "    raise AssertionError('code-only game tried to connect to the shared agent')\n"
         "if parent_process() is not None:\n"
-        f"    {failure}\n"
-        "def load(checkpoint: CheckpointRef) -> ModelForward:\n"
-        "    raise AssertionError('the agent should fail before loading')\n"
+        "    SocketForwardBus.connect = reject_connection\n"
+        "async def play(match: Match, agents: list[object]) -> Tables:\n"
+        "    return {'scores': [{'seat': 0, 'score': 7}]}\n"
+        "def load(checkpoint: object) -> NoReturn:\n"
+        "    raise AssertionError('loader should fail at import')\n"
+        + (
+            ""
+            if shared
+            else "if parent_process() is not None:\n    raise RuntimeError('fixture loader import')\n"
+        )
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    agents = Agents(load=import_module(module).load, build=build_loader_fixture)
-    selected = job("startup", agents)
-    jobs = [selected]
-    if not shared:
-        jobs.append(
-            EvalJob(
-                tournament=tournament("code-only"),
-                enter=(Code(name="one"), Code(name="two")),
-                play=plain,
-                agents=agents,
-                max_hours=0.1,
-            )
-        )
-    retry = mode != "error"
-    with pytest.raises(
-        RetryRequested if retry else EtudeError,
-        match="during startup" if mode == "exit" else "fixture loader import",
-    ) as caught:
-        hold_group(group(*jobs), directory=tmp_path)
-    if not retry:
-        assert isinstance(caught.value, EtudeError)
-        assert caught.value.code == "eval_startup_failed"
-        assert "fixture loader import: [redacted]" in str(caught.value)
-        if shared:
-            assert str(caught.value.__cause__).startswith("RuntimeError: fixture loader import")
-    assert json.loads((outputs / "etude-result.json").read_text())["tally"]["failed"] == int(retry)
-    found = played(
-        selected.tournament, experiment="grouped", enter=selected.enter, directory=tmp_path
+    code_play = import_module(module).play if shared else plain
+    loader = load if shared else import_module(module).load
+    agents = Agents(load=loader, build=build_loader_fixture)
+    code_only = EvalJob(
+        tournament=tournament("code-only", games=3),
+        enter=(Code(name="one"), Code(name="two")),
+        play=code_play,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
     )
-    assert len(found.new) == 1
-    assert len(found.retry) == len(found.failed) == int(retry)
-    if not shared:
-        sibling = jobs[1]
+    model = job("models", agents)
+    selected = group(code_only, model)
+    if shared:
+        assert [result.played for result in hold_group(selected, directory=tmp_path)] == [3, 1]
+    else:
+        with pytest.raises(EtudeError, match="eval_startup_failed: .*fixture loader import"):
+            hold_group(selected, directory=tmp_path)
         kept = played(
-            sibling.tournament, experiment="grouped", enter=sibling.enter, directory=tmp_path
+            code_only.tournament, experiment="grouped", enter=code_only.enter, directory=tmp_path
         )
-        assert len(kept.delivered) == 1 and not kept.failed
-    assert hold_group(group(job("startup", Agents(load=load))), directory=tmp_path)[0].played == 1
+        assert len(kept.delivered) == 3 and not kept.failed
 
 
 @pytest.mark.parametrize("streaming", [False, True], ids=["play", "play_many"])
@@ -1834,6 +2087,64 @@ def test_loader_failure_reaches_undispatched_matches_across_tournaments(
         db.close()
 
 
+async def asks_last_seat_first(match: Match, agents: Sequence[Forward]) -> Tables:
+    # The first forwards ask "transient", "transient" and "left": the retryable leaf fails first.
+    for agent in reversed(agents):
+        try:
+            await agent([1])
+        except ForwardError:
+            pass
+    return {"scores": [{"seat": 0, "score": 99}]}
+
+
+def mixed_retry_load(checkpoint: CheckpointRef) -> ModelForward:
+    if str(checkpoint.key) == "transient":
+        raise RetryRequested("fixture player unavailable")
+    if str(checkpoint.key) == "broken":
+        raise ValueError("fixture broken player")
+    return load(checkpoint)
+
+
+@pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
+def test_later_permanent_loader_failure_keeps_tournament_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
+    active = job("one", Agents(load=mixed_retry_load)).model_copy(
+        update={
+            "enter": (checkpoint("transient"), checkpoint("broken"), checkpoint("left")),
+            "play": asks_last_seat_first,
+        }
+    )
+    with pytest.raises(RetryRequested):
+        hold_group(group(active), directory=tmp_path)
+    found = played(active.tournament, experiment="grouped", enter=active.enter, directory=tmp_path)
+    assert len(found.retry) >= 1
+    assert len(found.failed) == 3
+
+
+@pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
+def test_earlier_permanent_tournament_keeps_group_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
+    agents = Agents(load=mixed_retry_load)
+    broken = job("first", agents).model_copy(
+        update={"enter": (checkpoint("broken"), checkpoint("left"))}
+    )
+    transient = job("second", agents).model_copy(
+        update={"enter": (checkpoint("transient"), checkpoint("right"))}
+    )
+    with pytest.raises(RetryRequested):
+        hold_group(group(broken, transient), directory=tmp_path)
+    first = played(broken.tournament, experiment="grouped", enter=broken.enter, directory=tmp_path)
+    second = played(
+        transient.tournament, experiment="grouped", enter=transient.enter, directory=tmp_path
+    )
+    assert len(first.failed) == 1 and not first.retry
+    assert len(second.retry) == 1
+
+
 async def returns_before_loading(match: Match, agents: Sequence[Forward]) -> Tables:
     if any(player.name == "left" for player in match.players):
         return await plain(match, list(agents))
@@ -1901,24 +2212,29 @@ def wire_agent(checkpoint: CheckpointRef) -> ModelForward:
 def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoint() -> None:
     # Small real sockets retain the wire bytes; no load or clock threshold.
     cp = checkpoint("wire")
-    batches = _Batches(wire_agent, 2, 1024)
-    first, first_peer = socket.socketpair()
-    second, second_peer = socket.socketpair()
-    peers = [(first, first_peer), (second, second_peer)]
+    batches = _Batches(wire_agent, 2, 1024, encode=encode_answer)
+    sockets = [socket.socketpair() for _ in range(2)]
+    clients = [parent for parent, _ in sockets]
+    receivers = [child for _, child in sockets]
+    answer_size = sum(map(len, encode_answer(1, ForwardOutcome("wire", [WireValue(0)]))))
     WireValue.serializations = 0
     observations = []
-    with first, first_peer, second, second_peer:
+
+    try:
         for turn in range(2):
-            for client, peer in peers:
-                request = CheckpointRequest(turn, cp.checkpoint, [WireValue(turn)], 1)
-                send_frame(client, *encode_request(request))
-                (decoded,) = decode_requests(recv_frame(peer))
-                assert isinstance(decoded, CheckpointRequest)
-                batches.add(peer, [decoded])
+            for index, (peer_client, receiver) in enumerate(zip(clients, receivers, strict=True)):
+                request = CheckpointRequest(
+                    turn * 2 + index + 1, cp.checkpoint, [WireValue(turn)], 1
+                )
+                send_frame(peer_client, *encode_request(request))
+                decoded = list(decode_requests(recv_frame(receiver)))
+                _add_socket_batch(batches, _send_peer(receiver), decoded)
             observations.extend(batches.flush())
-            for client, _ in peers:
-                assert decode_answer(recv_frame(client)) == Answer(
-                    turn, cp.checkpoint.key, [str(turn)]
+            for index, peer_client in enumerate(clients):
+                answer_payload = recv_frame(peer_client)
+                assert len(answer_payload) == answer_size
+                assert decode_answer(answer_payload) == Answer(
+                    turn * 2 + index + 1, ForwardOutcome("wire", [str(turn)])
                 )
         assert WireValue.serializations == 8  # Four decisions, one encoding each way.
         assert [batch.rows for batch in observations] == [2, 2]
@@ -1926,6 +2242,11 @@ def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoin
         assert [batch.forward_calls for batch in observations] == [1, 1]
         assert [batch.loads for batch in observations] == [1, 0]
         assert batches.loads == 1
+    finally:
+        for peer_client in clients:
+            peer_client.close()
+        for receiver in receivers:
+            receiver.close()
 
 
 def test_agentless_game_reports_have_no_inference_wait(tmp_path: Path) -> None:
@@ -1934,8 +2255,8 @@ def test_agentless_game_reports_have_no_inference_wait(tmp_path: Path) -> None:
     [report] = _game_reports(tmp_path / "grouped/artifacts/agents")
     assert report.matches == 1
     assert report.wall_seconds >= 0.0
-    assert report.requests == report.answers == 0
-    assert report.round_trip_seconds == report.transport_seconds == 0.0
+    assert report.bus.calls == report.bus.answers == 0
+    assert report.bus.round_trip_seconds == report.bus.handoff_seconds == 0.0
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [0]
     assert len(_game_reports(tmp_path / "grouped/artifacts/agents")) == 1
 
@@ -1963,163 +2284,122 @@ async def multi_round_play(match: Match[Config], agents: Sequence[Forward]) -> T
     rounds = int(str(match.config["rounds"]))
     total = 0
     for step in range(rounds):
-        [value] = await agents[0]([step])
+        [value] = await agents[step % len(agents)]([step])
         total += int(str(value))
     return {"scores": [{"seat": 0, "score": total}]}
-
-
-@pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
-def test_inference_budgets_follow_started_processes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    request: pytest.FixtureRequest,
-    capfd: pytest.CaptureFixture[str],
-) -> None:
-    shared = request.node.callspec.params["shared_agents"]
-    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 8 if shared else 2)
-    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 4 * 1024**3)
-    player = checkpoint("one")
-    if not shared:
-        # Charge a 512 MiB checkpoint without allocating memory or reading any bytes.
-        saved = player.checkpoint
-        player = checkpoint_player(
-            saved.model_copy(
-                update={"artifact": saved.artifact.model_copy(update={"size_bytes": 512 * 1024**2})}
-            )
-        )
-    panel = [Match(players=(player,), config={"rounds": 2}, index=i) for i in range(6)]
-    with evaluating(
-        environment("budget"), experiment="budget", matches=panel, run="small", directory=tmp_path
-    ) as active:
-        loader = load_checkpoint if shared else echo
-        assert active.play(multi_round_play, agents=Agents(load=loader, max_batch=24)).played == 6
-    artifacts = tmp_path / "budget/small/artifacts/agents"
-    reports = _game_reports(artifacts)
-    assert sum(report.matches for report in reports) == 6
-    log = capfd.readouterr().err
-    if shared:
-        assert len(reports) == 6
-        assert "6 game processes, play (initial target_matches=1)" in log
-        assert "2 inference threads" in log
-        assert set(json.loads((artifacts / "threads.json").read_text()).values()) == {"2"}
-    else:
-        assert len(reports) == 2
-        assert "2 game processes, play (initial target_matches=3)" in log
-        assert [r.local_loads for r in reports] == [int(r.matches > 0) for r in reports]
-
-
-def test_direct_play_reserves_all_32_cores_with_eight_matches_each(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 32)
-    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 16 * 1024**3)
-    panel = [Match(players=(checkpoint("one"),), index=i) for i in range(256)]
-    with evaluating(
-        environment("sizing"), experiment="sizing", matches=panel, run="cpu", directory=tmp_path
-    ) as active:
-        loader = Agents(load=load, devices=("cpu",)).plain(None)
-        playing = Playing(active, Function(module=__name__, name=play.__name__), "cpu", loader)
-        plan = plan_execution(len(panel), loader, checkpoints=True)
-        slots = _reserve_games([playing], plan, [])
-    assert [slot.target_matches for slot in slots] == [8] * 32
-
-
-@pytest.mark.parametrize("accelerator", ["cuda", "metal"])
-@pytest.mark.parametrize(("max_batch", "target"), [(256, 3), (16, 2)])
-def test_shared_play_spreads_a_32_match_panel_across_12_cores(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    accelerator: Accelerator,
-    max_batch: int,
-    target: int,
-) -> None:
-    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: accelerator)
-    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 13)
-    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 8 * 1024**3)
-    panel = [Match(players=(checkpoint("one"),), index=i) for i in range(32)]
-    with evaluating(
-        environment("sizing"), experiment="sizing", matches=panel, run="shared", directory=tmp_path
-    ) as active:
-        loader = Agents(load=load, max_batch=max_batch).plain(None)
-        playing = Playing(active, Function(module=__name__, name=play.__name__), "shared", loader)
-        plan = plan_execution(len(panel), loader, checkpoints=True)
-        slots = _reserve_games([playing], plan, [])
-    assert [slot.target_matches for slot in slots] == [target] * 12
-
-
-def test_code_only_play_in_a_shared_group_uses_one_match_and_no_agent_socket(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 3)
-    module = "code_only_shared_group_fixture"
-    (tmp_path / f"{module}.py").write_text(
-        "from multiprocessing import parent_process\n"
-        "from typing import NoReturn\n"
-        "from etude.eval.agents import AgentClient\n"
-        "from etude.eval.records import Match\n"
-        "from etude.eval.result import Tables\n"
-        "async def reject_connection(address: str) -> NoReturn:\n"
-        "    raise AssertionError('code-only game tried to connect to the shared agent')\n"
-        "if parent_process() is not None:\n"
-        "    AgentClient.connect = reject_connection\n"
-        "async def play(match: Match, agents: list[object]) -> Tables:\n"
-        "    return {'scores': [{'seat': 0, 'score': 7}]}\n"
-    )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    agents = Agents(load=load, build=build_loader_fixture)
-    code_only = EvalJob(
-        tournament=RoundRobin(
-            name="code-only",
-            environment=environment("grouped"),
-            configs=tuple({"index": index} for index in range(3)),
-            games=1,
-        ),
-        enter=(Code(name="one"), Code(name="two")),
-        play=import_module(module).play,
-        agents=agents,
-        repo=None,
-        max_hours=0.1,
-    )
-    results = hold_group(group(code_only, job("models", agents)), directory=tmp_path)
-    assert [result.played for result in results] == [3, 1]
-    log = capfd.readouterr().err
-    assert "2 game processes, play (initial target_matches=1)" in log
-    reports = _game_reports(tmp_path / "grouped/artifacts/agents")
-    assert sum(report.requests for report in reports if report.tournament == "models") == 2
 
 
 def test_direct_play_batches_eight_rows_per_process(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(eval_resources, "available_cpus", lambda: 2)
-    agents = Agents(load=load, devices=("cpu",))
-    selected = group(
-        *(
-            EvalJob(
-                tournament=RoundRobin(
-                    name=name,
-                    environment=environment("grouped"),
-                    configs=tuple({"rounds": 1, "slot": slot} for slot in range(8)),
-                    games=1,
-                ),
-                enter=(checkpoint("left"), checkpoint("right")),
-                play=multi_round_play,
-                agents=agents,
-                repo=None,
-                max_hours=0.1,
-            )
-            for name in ("first", "second")
-        )
-    )
-    assert [result.played for result in hold_group(selected, directory=tmp_path)] == [8, 8]
-    reports = _game_reports(tmp_path / "grouped/artifacts/agents")
-    assert [(r.matches, r.local_rows, r.local_forward_calls) for r in reports] == [(8, 8, 1)] * 2
+    wait_for_games(monkeypatch, processes=2)
+    panel = [Match(players=(checkpoint("one"),), config={"rounds": 1}, index=i) for i in range(16)]
+    with evaluating(
+        environment("sizing"), experiment="sizing", matches=panel, run="direct", directory=tmp_path
+    ) as active:
+        agents = Agents(load=load, devices=("cpu",), max_batch=8)
+        assert active.play(multi_round_play, agents=agents).played == 16
+    artifacts = tmp_path / "sizing/direct/artifacts/agents"
+    assert sorted(report.matches for report in _game_reports(artifacts)) == [8, 8]
+    assert [
+        [batch["rows"] for batch in json.loads(path.read_bytes())]
+        for path in artifacts.glob("batches-*.json")
+    ] == [[8], [8]]
 
 
-@pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
-def test_barrier_batches_games_into_one_message_per_process_per_round(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+def terminate_on_second_forward(checkpoint: CheckpointRef) -> ModelForward:
+    def forward(inputs: list[object]) -> list[object]:
+        if 1 in inputs:
+            os.kill(os.getpid(), signal.SIGTERM)
+        return inputs
+
+    return forward
+
+
+def test_agent_sigterm_keeps_completed_batches_in_valid_json(tmp_path: Path) -> None:
+    panel = [Match(players=(checkpoint("one"),), config={"rounds": 2}, index=i) for i in range(2)]
+    with (
+        pytest.raises(RetryRequested),
+        evaluating(
+            environment("signal"),
+            experiment="signal",
+            matches=panel,
+            run="term",
+            directory=tmp_path,
+        ) as active,
+    ):
+        active.play(multi_round_play, agents=Agents(load=terminate_on_second_forward))
+    batches = json.loads((tmp_path / "signal/term/artifacts/agents/batches.json").read_text())
+    assert 1 <= sum(batch["rows"] for batch in batches) <= 2
+
+
+@pytest.mark.parametrize(
+    ("sizes", "seats", "processes", "loads"),
+    [
+        pytest.param((80, 80), (0, 1), 1, 2, id="two-checkpoints"),
+        pytest.param((300,), (0,), 1, 1, id="above-budget"),
+        pytest.param((80,), (0, 0), 2, 2, id="self-play"),
+        pytest.param((1, 1), (0, 1), 2, 3, id="tiny-checkpoints"),
+    ],
+)
+@pytest.mark.parametrize("shared_agents", [False], indirect=True)
+def test_direct_play_retains_match_checkpoints_within_its_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sizes: tuple[int, ...],
+    seats: tuple[int, ...],
+    processes: int,
+    loads: int,
 ) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 2)
+    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 2 * 1024**3)
+    wait_for_games(monkeypatch, processes=processes)
+    players = []
+    for index, size in enumerate(sizes):
+        name = f"checkpoint-{index}"
+        path = tmp_path / name
+        data = b"1".rjust(size)
+        path.write_bytes(data)
+        artifact = ArtifactRef(uri=path.as_uri(), sha256=sha256(data).hexdigest(), size_bytes=size)
+        players.append(checkpoint_player(CheckpointRef(address=name, artifact=artifact)))
+    matches = (
+        Match(players=(players[0],), config={"rounds": 6}, index=0),
+        Match(players=tuple(players[seat] for seat in seats), config={"rounds": 6}, index=1),
+    )
+    with evaluating(
+        environment("sizing"),
+        experiment="sizing",
+        matches=matches,
+        run="direct",
+        directory=tmp_path,
+    ) as active:
+        result = active.play(
+            multi_round_play, agents=Agents(load=load, max_batch=2, memory_gb=256 / 1024**3)
+        )
+    assert result.played == 2
+    artifacts = tmp_path / "sizing/direct/artifacts/agents"
+    reports = _game_reports(artifacts)
+    assert len(reports) == processes
+    assert sum(report.matches for report in reports) == 2
+    assert (
+        sum(
+            batch["loads"]
+            for path in artifacts.glob("batches-*.json")
+            for batch in json.loads(path.read_bytes())
+        )
+        == loads
+    )
+    with statsdb("sizing", tmp_path) as db:
+        assert db.sql("select score from scores").fetchall() == [(21,), (21,)]
+
+
+def test_barrier_batches_games_into_one_message_per_process_per_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 6 games of unequal length (2, 2, 3, 3, 4, 4 decisions) in 1 game process:
+    # zero-delay barrier batches all waiting games every round, shrinking as games finish.
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     cp = checkpoint("one")
     lengths = (2, 2, 3, 3, 4, 4)
@@ -2127,9 +2407,6 @@ def test_barrier_batches_games_into_one_message_per_process_per_round(
         Match(players=(cp,), config={"rounds": rounds, "slot": index}, games=1)
         for index, rounds in enumerate(lengths)
     ]
-    shared = bool(request.node.callspec.params["shared_agents"])
-    # Cap to 1 game process so all 6 games run on one event loop.
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2 if shared else 1)
     with evaluating(
         environment("barrier"),
         experiment="barrier",
@@ -2142,44 +2419,43 @@ def test_barrier_batches_games_into_one_message_per_process_per_round(
     artifacts = tmp_path / "barrier/unequal/artifacts/agents"
     [report] = _game_reports(artifacts)
     assert report.matches == 6
-    if shared:
-        # 4 decision rounds -> exactly 4 socket messages for all 6 games (not 18).
-        assert report.requests == report.answers == 4
-        batches = json.loads((artifacts / "batches.json").read_text())
-        assert [batch["rows"] for batch in batches] == [6, 6, 4, 2]
-        assert [batch["requests"] for batch in batches] == [1, 1, 1, 1]
-    else:
-        assert report.local_forward_calls == 4
-        assert report.local_rows == sum(lengths)
-        assert report.local_loads == 1
+    assert report.bus.calls == report.bus.answers == 4
+    assert report.bus.wire_bytes == 0
+    assert not (artifacts / "batches.json").exists()
+    batches = json.loads((artifacts / f"batches-{report.pid}.json").read_text())
+    assert [batch["rows"] for batch in batches] == [6, 6, 4, 2]
+    assert [batch["requests"] for batch in batches] == [1, 1, 1, 1]
+    assert sum(batch["loads"] for batch in batches) == 1
 
 
+@pytest.mark.parametrize("accelerator", ["cuda", "metal"])
 def test_barrier_batches_across_multiple_processes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, accelerator: Accelerator
 ) -> None:
-    # Binding a four-match tournament to each process makes the count independent of startup order.
-    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 3)
-    agents = Agents(load=load, max_batch=8)
-    jobs = [
-        EvalJob(
-            tournament=RoundRobin(
-                name=name,
-                environment=environment("barrier"),
-                configs=tuple({"rounds": 3, "slot": slot} for slot in range(4)),
-                games=1,
-            ),
-            enter=(checkpoint("left"), checkpoint("right")),
-            play=multi_round_play,
-            agents=agents,
-            repo=None,
-            max_hours=0.1,
-        )
-        for name in ("first", "second")
+    # 8 games of 3 rounds each across 2 game processes (4 games each, max_batch=8):
+    # each process sends 3 socket messages (P=2 -> 6 messages total, not N*3=24).
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3)
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: accelerator)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
+    cp = checkpoint("one")
+    matches = [
+        Match(players=(cp,), config={"rounds": 3, "slot": index}, games=1) for index in range(8)
     ]
-    assert [result.played for result in hold_group(group(*jobs), directory=tmp_path)] == [4, 4]
-    artifacts = tmp_path / "grouped/artifacts/agents"
+    with evaluating(
+        environment("barrier"),
+        experiment="barrier",
+        matches=matches,
+        run="multi-proc",
+        directory=tmp_path,
+    ) as active:
+        result = active.play(multi_round_play, agents=Agents(load=load, max_batch=8))
+    assert result.played == 8
+    artifacts = tmp_path / "barrier/multi-proc/artifacts/agents"
     reports = _game_reports(artifacts)
-    assert [(r.matches, r.requests, r.answers) for r in reports] == [(4, 3, 3)] * 2
+    assert len(reports) == 2
+    assert sum(r.matches for r in reports) == 8
+    assert [r.bus.calls for r in reports] == [3, 3]
+    assert [r.bus.answers for r in reports] == [3, 3]
     batches = json.loads((artifacts / "batches.json").read_text())
     assert sum(batch["rows"] for batch in batches) == 24
     assert all(batch["rows"] <= 8 for batch in batches)
@@ -2205,6 +2481,9 @@ def load_vector(checkpoint: CheckpointRef) -> ModelForward:
 
 
 async def oversized_rows(match: Match, agents: Sequence[Forward]) -> Tables:
+    assert await agents[0]([], rows=0) == []
+    with pytest.raises(ValueError, match="empty inputs"):
+        await agents[0]([], rows=1)
     assert await agents[0]([1, 2, 3, 4, 5]) == [1, 2, 3, 4, 5]
     return {"scores": [{"seat": 0, "score": 7}]}
 
@@ -2224,7 +2503,14 @@ def test_direct_forward_splits_oversized_rows_into_ordered_pieces(tmp_path: Path
             == 1
         )
     [report] = _game_reports(tmp_path / "vector/direct/artifacts/agents")
-    assert (report.local_forward_calls, report.local_rows, report.local_loads) == (3, 5, 1)
+    batches = [
+        Batch.model_validate(batch)
+        for batch in json.loads(
+            (tmp_path / f"vector/direct/artifacts/agents/batches-{report.pid}.json").read_bytes()
+        )
+    ]
+    assert [batch.rows for batch in batches] == [2, 2, 1]
+    assert sum(batch.loads for batch in batches) == 1
 
 
 async def vector_slots(
@@ -2346,40 +2632,6 @@ def test_play_many_targets_its_initial_share_bounded_by_batch_size(
         db.close()
 
 
-def test_replacement_stream_targets_its_share_while_a_peer_holds_matches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 2)
-    panel = [Match(players=(Code(name="one"),), index=i) for i in range(14)]
-    with evaluating(
-        environment("vector"), experiment="vector", matches=panel, run="slots", directory=tmp_path
-    ) as active:
-        playing = Playing(
-            run=active,
-            play=Function(module=__name__, name=records_target_matches.__name__),
-            tournament="slots",
-            agent_loader=AgentLoader(),
-            streaming=True,
-        )
-        plan = plan_execution(len(panel) + 1, playing.agent_loader, checkpoints=False)
-        # A sibling tournament has finished, freeing a slot while this process holds six matches.
-        held = playing.grant(6, processes=2, unfed=2)
-        context = get_context("spawn")
-        parent, child = context.Pipe()
-        process = context.Process()
-        try:
-            survivor = _GameProcess(playing, process, parent, {m.key: m for m in held})
-            [replacement] = _reserve_games([playing], plan, [survivor])
-            assert list(playing.pending) == panel[6:]
-            granted = playing.grant(14, processes=2, unfed=1, total_held=len(held))
-            assert replacement.target_matches == len(granted) == 7
-            assert list(playing.pending) == panel[13:]
-        finally:
-            parent.close()
-            child.close()
-            process.close()
-
-
 @pytest.mark.parametrize("retry", [False, True])
 def test_play_many_backfills_after_an_author_error_and_stops_on_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry: bool
@@ -2410,9 +2662,11 @@ def test_play_many_backfills_after_an_author_error_and_stops_on_retry(
         ) as active,
     ):
         active.play_many(vector_slots, agents=Agents(load=load_vector, max_batch=2))
+    artifacts = tmp_path / "vector/slots/artifacts/agents"
     if not retry:
-        artifacts = tmp_path / "vector/slots/artifacts/agents"
-        batches = json.loads((artifacts / "batches.json").read_text())
+        assert not (artifacts / "batches.json").exists()
+        [batch_file] = list(artifacts.glob("batches-*.json"))
+        batches = json.loads(batch_file.read_text())
         assert [batch["rows"] for batch in batches] == [2, 2, 2, 2]
     db = statsdb("vector", tmp_path)
     try:
@@ -2429,28 +2683,33 @@ def test_play_many_backfills_after_an_author_error_and_stops_on_retry(
         db.close()
 
 
-@pytest.mark.parametrize("accelerator", ["cuda", "metal"])
-def test_play_many_shares_one_agent_process_with_play(
+@pytest.mark.parametrize("accelerator", ["no accelerator detected", "cuda", "metal"])
+def test_mixed_play_functions_share_checkpoint_inference(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    accelerator: Inference,
     capfd: pytest.CaptureFixture[str],
-    accelerator: Accelerator,
 ) -> None:
     monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: accelerator)
+    shared = accelerator in ("cuda", "metal")
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
-    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
-    agents = Agents(load=load_vector, max_batch=3)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 4 * 1024**3)
+    if shared:
+        wait_for_games(monkeypatch, processes=3)
+    players = (checkpoint("left"), checkpoint("right"))
+    # A cache big enough for these two two-byte checkpoints retains both across streams.
+    agents = Agents(load=load_array_checkpoint, max_batch=3, memory_gb=4 / 1024**3)
     jobs = [
         EvalJob(
             tournament=RoundRobin(
                 name=name,
                 environment=environment("grouped"),
                 config=VectorRules(),
-                games=1,
+                games=2,
                 base_seed=seed,
             ),
-            enter=(checkpoint("left"), checkpoint("right")),
-            play_many=vector_slots,
+            enter=players,
+            play_many=array_vector_slots,
             agents=agents,
             repo=None,
             max_hours=0.1,
@@ -2460,27 +2719,1457 @@ def test_play_many_shares_one_agent_process_with_play(
     selected = group(*jobs, job("ordinary", agents))
     assert [spec.streaming for spec in selected.evaluations] == [True, True, False]
     results = hold_group(selected, directory=tmp_path)
-    assert [result.played for result in results] == [1, 1, 1]
-    log = capfd.readouterr().err
-    assert log.count("agents: shared inference") == 1
-    assert f"shared inference for first, second, ordinary ({accelerator})" in log
+    assert [result.played for result in results] == [2, 2, 1]
+    stderr = capfd.readouterr().err
+    startup = [line for line in stderr.splitlines() if "inference for " in line]
+    mode = "shared" if shared else "direct"
+    processes = "3 game processes" if shared else "1 game process"
+    threads = "1 inference thread" if shared else "3 inference threads"
+    assert startup == [
+        f"etude: agents: {mode} inference for first, second, ordinary ({accelerator}); "
+        f"{processes}, 1 game each, slots requested by play_many (initial target_matches=2); {threads}",
+    ]
     artifacts = tmp_path / "grouped/artifacts/agents"
     reports = _game_reports(artifacts)
-    assert sorted((report.tournament, report.matches) for report in reports if report.matches) == [
-        ("first", 1),
-        ("ordinary", 1),
-        ("second", 1),
+    if shared:
+        for name in ("first", "second"):
+            [stream] = [report for report in reports if report.tournaments == (name,)]
+            assert (stream.matches, stream.bus.calls) == (2, 2)
+        [ordinary] = [report for report in reports if report.tournaments == ("ordinary",)]
+        assert ordinary.matches == 1
+        assert all(report.bus.wire_bytes > 0 for report in reports if report.matches)
+        [batch_file] = artifacts.glob("batches.json")
+        assert not list(artifacts.glob("batches-*.json"))
+    else:
+        [report] = reports
+        assert (report.tournaments, report.matches) == (("first", "second", "ordinary"), 5)
+        assert report.bus.wire_bytes == 0
+        assert report.bus.arrays > 0 and report.bus.arrays_copied == 0
+        [batch_file] = artifacts.glob("batches-*.json")
+        assert not (artifacts / "batches.json").exists()
+    batches = [Batch.model_validate(batch) for batch in json.loads(batch_file.read_bytes())]
+    assert sum(batch.rows for batch in batches) == 10
+    loads = sorted((batch.checkpoint, batch.loads) for batch in batches if batch.loads)
+    assert loads == sorted((player.checkpoint.key, 1) for player in players)
+    budgets = json.loads((artifacts / "threads.json").read_bytes())
+    assert set(budgets.values()) == {"1" if shared else "3"}
+    db = statsdb("grouped", tmp_path)
+    try:
+        assert db.sql("select count(*) from vector_scores").fetchone() == (4,)
+        assert db.sql("select count(*) from scores").fetchone() == (2,)
+    finally:
+        db.close()
+
+
+_mixed_forward_started = threading.Event()
+_mixed_forward_release = threading.Event()
+
+
+def load_mixed_stream_probe(ref: CheckpointRef) -> ModelForward:
+    def forward(inputs: list[object]) -> list[object]:
+        if isinstance(inputs[0], dict):
+            _mixed_forward_started.set()
+            if not _mixed_forward_release.wait(timeout=5):
+                raise TimeoutError("fixture game did not finish stepping")
+            return [cast(dict[str, list[int]], value)["step"][0] for value in inputs]
+        return [len(inputs)] * len(inputs)
+
+    return forward
+
+
+async def overlapping_stream(
+    matches: MatchStream,
+) -> AsyncIterator[tuple[Match, Tables]]:
+    [(match, agents)] = await matches.take(1)
+    forward = cast(Forward, agents[0])
+    inputs = {"step": [1]}
+    pending = forward([inputs])
+    try:
+        assert _mixed_forward_started.wait(timeout=5), "stream deferred its forward"
+        inputs["step"][0] = 2
+        following = forward([inputs])
+        inputs["step"][0] = 3
+    finally:
+        _mixed_forward_release.set()
+    [old] = await pending
+    [new] = await following
+    yield match, {"snapshots": [{"seat": 0, "first": cast(int, old), "second": cast(int, new)}]}
+
+
+async def mixed_barrier_play(match: Match, agents: Sequence[object]) -> Tables:
+    [rows] = await cast(Forward, agents[0])([0])
+    return {"scores": [{"seat": 0, "score": cast(int, rows)}]}
+
+
+def test_direct_mixed_group_switches_submission_mode_between_streams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
+    agents = Agents(load=load_mixed_stream_probe, max_batch=4)
+    players = (checkpoint("left"), checkpoint("right"))
+    vector = EvalJob(
+        tournament=tournament("vector"),
+        enter=players,
+        play_many=overlapping_stream,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    ordinary = EvalJob(
+        tournament=RoundRobin(
+            name="ordinary", environment=environment("grouped"), games=2, base_seed=2
+        ),
+        enter=players,
+        play=mixed_barrier_play,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    assert [
+        result.played for result in hold_group(group(vector, ordinary), directory=tmp_path)
+    ] == [
+        1,
+        2,
     ]
-    batches = json.loads((artifacts / "batches.json").read_text())
-    assert sum(batch["rows"] for batch in batches) == 4
-    assert max(batch["rows"] for batch in batches) <= 3
-    assert sum(batch["requests"] for batch in batches) == 4
+    [report] = (tmp_path / "grouped/artifacts/agents").glob("game-*.json")
+    assert GameReport.model_validate_json(report.read_bytes()).tournaments == ("vector", "ordinary")
+    with statsdb("grouped", tmp_path) as db:
+        assert db.sql("select first, second from snapshots").fetchall() == [(1, 2)]
+        assert db.sql("select score from scores").fetchall() == [(2,), (2,)]
+
+
+async def array_vector_slots(
+    matches: MatchStream[VectorRules],
+) -> AsyncIterator[tuple[Match[VectorRules], Result | Exception]]:
+    import numpy as np  # noqa: PLC0415  # Test fixture keeps NumPy local to array tests.
+
+    active: list[tuple[Match[VectorRules], Forward, Forward, int]] = []
+    while True:
+        for match, agents in await matches.take(2 - len(active)):
+            active.append(
+                (match, cast(Forward, agents[0]), cast(Forward, agents[1]), match.config.turns)
+            )
+        if not active:
+            return
+        rows = np.array([left for _, _, _, left in active], dtype=np.int64)
+        pending_first = active[0][1]([rows], rows=len(active))
+        pending_second = active[0][2]([rows], rows=len(active))
+        [first_out] = await pending_first
+        [second_out] = await pending_second
+        totals = cast(np.ndarray, first_out) + cast(np.ndarray, second_out)
+        ready = active
+        active = []
+        for (match, first, second, left), score in zip(ready, totals.tolist(), strict=True):
+            if left > 1:
+                active.append((match, first, second, left - 1))
+            else:
+                yield match, Result(tables={"vector_scores": [{"seat": 0, "score": score}]})
+
+
+async def failing_stream(
+    matches: MatchStream[VectorRules],
+) -> AsyncIterator[tuple[Match[VectorRules], Result]]:
+    taken = await matches.take(2)
+    assert taken
+    raise ValueError("first tournament failed")
+    yield taken[0][0], Result(tables={"vector_scores": []})
+
+
+async def code_only_vector_slots(
+    matches: MatchStream[VectorRules],
+) -> AsyncIterator[tuple[Match[VectorRules], Result | ValueError]]:
+    while True:
+        taken = await matches.take(2)
+        if not taken:
+            return
+        for match, _ in taken:
+            if match.config.error == "exit":
+                os._exit(3)
+            if match.config.error == "fatal":
+                raise RetryRequested("fixture stream interrupted")
+            if match.config.error == "stop":
+                os.kill(os.getppid(), signal.SIGTERM)
+                signal.pause()
+                return
+            if match.config.error == "ordinary-error":
+                yield match, ValueError("fixture slot error")
+            else:
+                yield (
+                    match,
+                    Result(tables={"vector_scores": [{"seat": 0, "score": match.config.turns}]}),
+                )
+
+
+@pytest.mark.parametrize(
+    ("interruption", "share_streams"),
+    [("exit", False), ("stop", False), ("teardown", False), ("exit", True), ("fatal", True)],
+)
+def test_interrupted_tournament_keeps_completed_tournament_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interruption: str, share_streams: bool
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
+    agents = Agents(load=load) if share_streams else None
+    ordinary = job("ordinary", agents)
+
+    def streaming_job(name: str, error: str, games: int) -> EvalJob:
+        return EvalJob(
+            tournament=RoundRobin(
+                name=name,
+                environment=environment("grouped"),
+                config=VectorRules(error=error),
+                games=games,
+            ),
+            enter=ordinary.enter,
+            play_many=code_only_vector_slots,
+            agents=ordinary.agents,
+            repo=None,
+            max_hours=0.1,
+        )
+
+    stop = interruption == "stop"
+    stream = streaming_job("stream", "" if interruption == "teardown" else interruption, 3)
+    members = [ordinary, stream]
+    if stop:
+        # An earlier match failure must not mask the group's stop.
+        members.insert(1, streaming_job("earlier-error", "ordinary-error", 1))
+    if interruption == "teardown":
+        # Every stream match is stored before the final report fails to write.
+        put = DirectoryStorage.put
+
+        def fail_stream_report(storage: DirectoryStorage, key: str, data: bytes) -> None:
+            if key.startswith("game-") and GameReport.model_validate_json(data).tournaments == (
+                "stream",
+            ):
+                raise OSError("fixture could not write the final report")
+            put(storage, key, data)
+
+        monkeypatch.setattr(DirectoryStorage, "put", fail_stream_report)
+    selected = group(*members)
+    address = "grouped/mixed"
+    monkeypatch.setenv("ETUDE_RUN_ADDRESS", address)
+    error, detail = {
+        "exit": (RetryRequested, "game process exited"),
+        "fatal": (RetryRequested, "fixture stream interrupted"),
+        "stop": (Terminated, "received SIGTERM"),
+        "teardown": (RetryRequested, "game report .* could not be retained"),
+    }[interruption]
+    with pytest.raises(error, match=detail):
+        hold_group(selected, directory=tmp_path)
+
+    root = tmp_path / address
+    ordinary_run, *_, stream_run = selected.evaluations
+    interrupted_state = "stopped" if stop else "failed"
+    for folder, state in (
+        (root, interrupted_state),
+        (root / stream_run.address, interrupted_state),
+        (root / ordinary_run.address, "finished"),
+    ):
+        assert RunOutcome.model_validate_json((folder / "outcome.json").read_bytes()).state == state
+    completed = played(
+        ordinary.tournament, experiment="grouped", enter=ordinary.enter, directory=tmp_path
+    )
+    assert len(completed.delivered) == 1 and not completed.failed
+    interrupted = played(
+        stream.tournament, experiment="grouped", enter=stream.enter, directory=tmp_path
+    )
+    if interruption == "teardown":
+        assert len(interrupted.delivered) == 3 and not interrupted.failed
+    else:
+        assert len(interrupted.new) == len(interrupted.failed) == len(interrupted.retry) == 3
+
+
+async def hold_stream_match(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables]]:
+    [(match, _)] = await matches.take(1)
+    signal.pause()
+    yield match, {"scores": [{"seat": 0, "score": 1}]}
+
+
+def test_report_failure_fails_its_owner_while_a_sibling_is_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 2)
+    monkeypatch.setenv("ETUDE_RUN_ADDRESS", "grouped/mixed")
+    wait_for_games(monkeypatch, processes=2)
+    put = DirectoryStorage.put
+
+    def fail_report(storage: DirectoryStorage, key: str, data: bytes) -> None:
+        if key.startswith("game-") and GameReport.model_validate_json(data).tournaments == (
+            "ordinary",
+        ):
+            raise OSError("fixture report failure")
+        put(storage, key, data)
+
+    monkeypatch.setattr(DirectoryStorage, "put", fail_report)
+    ordinary = job("ordinary", None)
+    sibling = EvalJob(
+        tournament=RoundRobin(
+            name="sibling", environment=environment("grouped"), games=3, base_seed=2
+        ),
+        enter=ordinary.enter,
+        play_many=hold_stream_match,
+        repo=None,
+        max_hours=0.1,
+    )
+    selected = group(ordinary, sibling)
+    with pytest.raises(RetryRequested, match="game report .* could not be retained"):
+        hold_group(selected, directory=tmp_path)
+    for spec in selected.evaluations:
+        outcome = tmp_path / "grouped/mixed" / spec.address / "outcome.json"
+        assert RunOutcome.model_validate_json(outcome.read_bytes()).state == "failed"
+    delivered = played(
+        ordinary.tournament, experiment="grouped", enter=ordinary.enter, directory=tmp_path
+    )
+    assert len(delivered.delivered) == 1 and not delivered.failed
+    interrupted = played(
+        sibling.tournament, experiment="grouped", enter=sibling.enter, directory=tmp_path
+    )
+    assert len(interrupted.failed) == len(interrupted.retry) == 3
+
+
+async def fail_first_stream_match(
+    matches: MatchStream[VectorRules],
+) -> AsyncIterator[tuple[Match[VectorRules], Exception]]:
+    for match, _ in await matches.take(1):
+        yield match, ValueError("fixture stream error")
+        raise ValueError("fixture stream error")
+
+
+@pytest.mark.parametrize(
+    ("first_streaming", "interruption"),
+    [(False, "stop"), (False, "exit"), (True, "stop"), (True, "exit"), (False, "teardown")],
+    ids=["play-stop", "play-crash", "stream-stop", "stream-crash", "teardown"],
+)
+def test_interruption_leaves_abandoned_matches_unplayed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    first_streaming: bool,
+    interruption: str,
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
+    monkeypatch.setenv("ETUDE_RUN_ADDRESS", "grouped/interrupted")
+    players = (checkpoint("left"), checkpoint("right"))
+    agents = Agents(load=load_vector) if first_streaming else Agents()
+    broken = EvalJob(
+        tournament=RoundRobin(
+            name="broken",
+            environment=environment("grouped"),
+            config=VectorRules() if first_streaming else {"outcome": "schema"},
+            games=3,
+        ),
+        enter=players,
+        play=None if first_streaming else checked_result,
+        play_many=fail_first_stream_match if first_streaming else None,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    later = EvalJob(
+        tournament=RoundRobin(
+            name="later",
+            environment=environment("grouped"),
+            config=VectorRules(error="" if interruption == "teardown" else interruption),
+            games=3,
+            base_seed=1,
+        ),
+        enter=players,
+        play_many=code_only_vector_slots,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    if interruption == "teardown":
+        put = DirectoryStorage.put
+
+        def fail_later_report(storage: DirectoryStorage, key: str, data: bytes) -> None:
+            if key.startswith("game-") and GameReport.model_validate_json(data).tournaments == (
+                "later",
+            ):
+                raise OSError("fixture could not write the final report")
+            put(storage, key, data)
+
+        monkeypatch.setattr(DirectoryStorage, "put", fail_later_report)
+    selected = group(broken, later)
+    error, detail = {
+        "stop": (Terminated, "received SIGTERM"),
+        "exit": (RetryRequested, "game process exited"),
+        "teardown": (RetryRequested, "game report .* could not be retained"),
+    }[interruption]
+    with pytest.raises(error, match=detail):
+        hold_group(selected, directory=tmp_path)
+    if first_streaming:
+        assert "direct inference for broken, later (cuda); 1 game process" in (
+            capfd.readouterr().err
+        )
+
+    root = tmp_path / "grouped/interrupted"
+    for spec, state in zip(
+        selected.evaluations,
+        ("failed", "stopped" if interruption == "stop" else "failed"),
+        strict=True,
+    ):
+        outcome = root / spec.address / "outcome.json"
+        assert RunOutcome.model_validate_json(outcome.read_bytes()).state == state
+    first = played(broken.tournament, experiment="grouped", enter=players, directory=tmp_path)
+    assert [match.index for match in first.failed] == [0]
+    assert {match.index for match in first.new} == {1, 2}
+    assert not first.retry
+    second = played(later.tournament, experiment="grouped", enter=players, directory=tmp_path)
+    if interruption == "teardown":
+        assert len(second.delivered) == 3
+    else:
+        assert len(second.failed) == len(second.retry) == 3
+
+
+def test_a_stop_on_the_final_take_leaves_the_tournament_finished(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def stop_after_last_match(run: EvalRun) -> bool:
+        return len(run.done) == len(run.matches)
+
+    monkeypatch.setattr(Run, "should_stop", property(stop_after_last_match))
+    selected = group(job("finished", None))
+    (result,) = hold_group(selected, directory=tmp_path)
+    assert result.played == 1
+    outcome = tmp_path / selected.evaluations[0].address / "outcome.json"
+    assert RunOutcome.model_validate_json(outcome.read_bytes()).state == "finished"
+
+
+@pytest.mark.parametrize("crash", [False, True])
+def test_mixed_eval_group_attributes_checkpoint_failures_to_both_play_functions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, crash: bool
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 2)
+    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 2 * 1024**3)
+    agents = Agents(load=exits_load if crash else selective_load)
+    broken, left, right = (checkpoint(name) for name in ("broken", "left", "right"))
+    ordinary = job("ordinary", agents).model_copy(update={"enter": (broken, left)})
+    stream = EvalJob(
+        tournament=RoundRobin(
+            name="stream", environment=environment("grouped"), config=VectorRules(), games=1
+        ),
+        enter=(broken, left, right),
+        play_many=code_only_vector_slots,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    with pytest.raises(RetryRequested if crash else EtudeError):
+        hold_group(group(ordinary, stream), directory=tmp_path)
+
+    found = played(stream.tournament, experiment="grouped", enter=stream.enter, directory=tmp_path)
+    if crash:
+        assert len(found.failed) == len(found.retry) == len(found.new) == 3
+        assert not found.delivered
+    else:
+        assert not found.retry
+        assert len(found.failed) == 2
+        assert all(
+            any(player.name == "broken" for player in match.players) for match in found.failed
+        )
+        [healthy] = found.delivered
+        assert {player.name for player in healthy.match.players} == {"left", "right"}
+
+
+async def large_slot_request(
+    matches: MatchStream[VectorRules],
+) -> AsyncIterator[tuple[Match[VectorRules], Tables | Exception]]:
+    while granted := await matches.take(64):
+        for match, agents in granted:
+            try:
+                await cast(Forward, agents[0])([1])
+            except ForwardError as error:
+                yield match, error
+            else:
+                yield match, {"grants": [{"seat": 0, "size": len(granted)}]}
+
+
+@pytest.mark.parametrize(
+    ("accelerator", "cpus", "mode", "processes"),
+    [
+        ("no accelerator detected", 1, "direct", 1),
+        ("no accelerator detected", 3, "direct", 2),
+        ("cuda", 3, "shared", 2),
+        ("metal", 3, "shared", 2),
+    ],
+)
+def test_play_many_caps_large_grants_across_game_processes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capfd: pytest.CaptureFixture[str],
+    accelerator: Inference,
+    cpus: int,
+    mode: str,
+    processes: int,
+) -> None:
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: accelerator)
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: cpus)
+    slots = EvalJob(
+        tournament=RoundRobin(
+            name="slots", environment=environment("grouped"), config=VectorRules(), games=6
+        ),
+        enter=(checkpoint("left"), checkpoint("right")),
+        play_many=large_slot_request,
+        agents=Agents(load=load_vector, max_batch=4),
+        repo=None,
+        max_hours=0.1,
+    )
+    (result,) = hold_group(group(slots), directory=tmp_path)
+    assert result.played == 6
+    stderr = capfd.readouterr().err
+    process = "process" if processes == 1 else "processes"
+    assert (
+        f"{mode} inference for slots ({accelerator}); "
+        f"{processes} game {process}, slots requested by play_many" in stderr
+    )
+    artifacts = tmp_path / "grouped/artifacts/agents"
+    reports = _game_reports(artifacts)
+    assert len(reports) == processes and sum(report.matches for report in reports) == 6
+    assert all(
+        (report.bus.wire_bytes > 0) == (mode == "shared") for report in reports if report.matches
+    )
+    with statsdb("grouped", tmp_path) as db:
+        assert db.sql("select count(*), max(size) from grants").fetchone() == (
+            6,
+            min(4, math.ceil(6 / processes)),
+        )
+
+
+@pytest.mark.parametrize("broken", [False, True])
+def test_fast_direct_stream_takes_pending_matches_while_its_peer_waits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken: bool
+) -> None:
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: "no accelerator detected")
+    first: Connection | None = None
+
+    def wait_for_first(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal first
+        if first is None:
+            first = next(handle for handle in handles if isinstance(handle, Connection))
+        if not first.closed:
+            assert first.poll(10), "the first stream stopped sending results"
+            return (first,)
+        return wait(handles, timeout=timeout)
+
+    monkeypatch.setattr("etude.eval.run.wait", wait_for_first)
+    healthy, broken_player = checkpoint("left"), checkpoint("broken")
+    matches = [
+        Match(players=(broken_player if broken and index < 5 else healthy,), index=index)
+        for index in range(8)
+    ]
+    with (
+        pytest.raises(EtudeError, match="fixture broken player") if broken else nullcontext(),
+        evaluating(
+            environment("vector"),
+            experiment="vector",
+            run="uneven",
+            matches=matches,
+            directory=tmp_path,
+        ) as active,
+    ):
+        active.play_many(large_slot_request, agents=Agents(load=selective_load, max_batch=4))
+    reports = _game_reports(tmp_path / "vector/uneven/artifacts/agents")
+    assert sorted(report.matches for report in reports) == [0, 7 if broken else 8]
+    with statsdb("vector", tmp_path) as db:
+        assert db.sql("select count(*) from grants").fetchone() == (3 if broken else 8,)
+        assert set(
+            db.sql("select match, retry from matches where state = 'failed'").fetchall()
+        ) == ({(match.key, False) for match in matches[:5]} if broken else set())
+
+
+def test_fast_direct_process_can_play_all_matches_in_its_second_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 2)
+    artifacts = tmp_path / "grouped/artifacts/agents"
+    first: Connection | None = None
+    finished_first: GameReport | None = None
+
+    def serve_first_process(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal first, finished_first
+        if first is None:
+            first, second = [handle for handle in handles if isinstance(handle, Connection)]
+            assert first.poll(10) and second.poll(10), "the game processes did not request matches"
+            return (first, second)
+        if not first.closed:
+            assert first.poll(10), "the first game process stopped responding"
+            return (first,)
+        if finished_first is None:
+            [finished_first] = _game_reports(artifacts)
+        return wait(handles, timeout=timeout)
+
+    monkeypatch.setattr("etude.eval.run.wait", serve_first_process)
+    agents = Agents(load=load, devices=("cpu",), max_batch=2)
+    selected = group(job("first", agents, plain, games=2), job("later", agents, plain, games=3))
+    assert [result.played for result in hold_group(selected, directory=tmp_path)] == [2, 3]
+    assert finished_first is not None and finished_first.matches == 4
+
+
+def test_stop_during_first_direct_stream_leaves_later_matches_unstarted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
+    monkeypatch.setenv("ETUDE_STOP_FILE", str(tmp_path / "stop"))
+    agents = Agents(load=load, devices=("cpu",))
+    first, later = job("first", agents, request_stop), job("later", agents, plain)
+
+    with pytest.raises(Terminated, match="evaluation stopped"):
+        hold_group(group(first, later), directory=tmp_path)
+
+    reports = _game_reports(tmp_path / "grouped/artifacts/agents")
+    [report] = reports
+    assert report.tournaments == ("first", "later") and report.matches == 1
+    retained = played(later.tournament, experiment="grouped", enter=later.enter, directory=tmp_path)
+    assert len(retained.new) == len(retained.retry) == 1
+    assert not retained.delivered
+
+
+def test_released_shared_slot_starts_waiting_tournament_before_expanding_active_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 3)
+    artifacts = tmp_path / "grouped/artifacts/agents"
+    active_process: tuple[Connection | int, ...] = ()
+    first_reports: set[tuple[str, ...]] = set()
+
+    def delay_active_process(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal active_process, first_reports
+        if not active_process:
+            active_process = tuple(handles[:2])
+        if not first_reports:
+            reports = _game_reports(artifacts)
+            if len(reports) == 2:
+                first_reports = {report.tournaments for report in reports}
+            else:
+                ready = wait(
+                    [handle for handle in handles if handle not in active_process], timeout=10
+                )
+                assert ready, "the second game slot stopped responding"
+                return ready
+        return wait(handles, timeout=timeout)
+
+    monkeypatch.setattr("etude.eval.run.wait", delay_active_process)
+    agents = Agents(load=load, max_batch=2)
+    jobs = (
+        job("active", agents, plain, games=2),
+        job("short", agents, plain),
+        job("waiting", agents, plain),
+    )
+    assert [result.played for result in hold_group(group(*jobs), directory=tmp_path)] == [2, 1, 1]
+    assert first_reports == {("short",), ("waiting",)}
+
+
+def test_play_many_sends_no_take_after_the_last_match_is_granted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receive = Connection.recv
+    requests: list[Take] = []
+
+    def count_takes(pipe: Connection) -> object:
+        message: object = receive(pipe)
+        if isinstance(message, Take):
+            requests.append(message)
+        return message
+
+    monkeypatch.setattr(Connection, "recv", count_takes)
+    with evaluating(
+        environment("vector"),
+        experiment="vector",
+        matches=(Match(players=(Code(name="one"),), config=VectorRules()),),
+        directory=tmp_path,
+    ) as active:
+        assert active.play_many(code_only_vector_slots).played == 1
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("direct", [True, False], ids=["direct", "shared"])
+def test_booting_streams_cover_pending_demand_as_siblings_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, direct: bool
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 4 if direct else 5)
+    recv = Connection.recv
+    first: Connection | None = None
+    draining: set[Connection | int] = set()
+    serving_stream = not direct
+    initialized = False
+
+    def receive(pipe: Connection) -> object:
+        nonlocal serving_stream
+        message: object = recv(pipe)
+        if pipe is first and isinstance(message, StreamEnd):
+            serving_stream = True
+        return message
+
+    def finish_siblings(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal first, initialized
+        if not initialized:
+            assert len(handles) == (8 if direct else 9)
+            if direct:
+                pipe = handles[0]
+                assert isinstance(pipe, Connection)
+                first = pipe
+                draining.update(handles[2:])
+            else:
+                # Ordinary and streaming starts alternate while both queues need slots.
+                draining.update((*handles[:2], *handles[4:6]))
+            initialized = True
+        if first is not None and not serving_stream:
+            assert first.poll(10), "the first direct process did not finish its async stream"
+            return (first,)
+        if remaining := draining.intersection(handles):
+            ready = wait(remaining, timeout=10)
+            assert ready, "an async sibling did not exit"
+            draining.difference_update(handle for handle in ready if isinstance(handle, int))
+            return ready
+        return wait(handles, timeout=timeout)
+
+    monkeypatch.setattr(Connection, "recv", receive)
+    monkeypatch.setattr("etude.eval.run.wait", finish_siblings)
+    agents = Agents(load=load, devices=("cpu",) if direct else ("cuda",), max_batch=4)
+    ordinary = job("ordinary", agents, plain, games=4 if direct else 2)
+    stream_count = 4 if direct else 2
+    stream = EvalJob(
+        tournament=RoundRobin(
+            name="stream", environment=environment("grouped"), config={}, games=stream_count
+        ),
+        enter=ordinary.enter,
+        play_many=records_target_matches,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    assert [
+        result.played for result in hold_group(group(ordinary, stream), directory=tmp_path)
+    ] == [
+        4 if direct else 2,
+        stream_count,
+    ]
+    reports = _game_reports(tmp_path / "grouped/artifacts/agents")
+    assert len(reports) == 4
+    assert sum("stream" in report.tournaments for report in reports) == (1 if direct else 2)
+
+
+async def records_initial_grant(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables]]:
+    initial = True
+    while taken := await matches.take(64):
+        for match, _ in taken:
+            yield (
+                match,
+                {
+                    "grants": [
+                        {
+                            "seat": 0,
+                            "target": matches.target_matches,
+                            "size": len(taken),
+                            "first": initial,
+                        }
+                    ]
+                },
+            )
+        initial = False
+
+
+def test_expanded_stream_targets_its_first_grant_while_peers_hold_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial: tuple[Connection | int, ...] = ()
+    first_granted = short_exited = expanded_granted = False
+
+    def prioritize_expansion(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal initial, first_granted, short_exited, expanded_granted
+        if not initial:
+            assert len(handles) == 7
+            initial = tuple(handles)
+        if not first_granted:
+            ready = wait(initial[:1], timeout=10)
+            assert ready, "the first stream did not request matches"
+            first_granted = True
+            return ready
+        if not short_exited:
+            ready = wait([handle for handle in initial[2:4] if handle in handles], timeout=10)
+            assert ready, "the short tournament did not release its slot"
+            short_exited = initial[3] in ready
+            return ready
+        if not expanded_granted:
+            (expanded,) = [
+                handle
+                for handle in handles
+                if isinstance(handle, Connection) and handle not in initial
+            ]
+            ready = wait([expanded], timeout=10)
+            assert ready, "the expanded stream did not request matches"
+            expanded_granted = True
+            return ready
+        return wait(handles, timeout=timeout)
+
+    monkeypatch.setattr("etude.eval.run.wait", prioritize_expansion)
+    agents = Agents(load=load, max_batch=16)
+    short = job("short", agents, plain)
+    stream = EvalJob(
+        tournament=RoundRobin(
+            name="stream", environment=environment("grouped"), config={}, games=12
+        ),
+        enter=short.enter,
+        play_many=records_initial_grant,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    assert [result.played for result in hold_group(group(stream, short), directory=tmp_path)] == [
+        12,
+        1,
+    ]
+    with statsdb("grouped", tmp_path) as db:
+        assert db.sql(
+            "select target, size, count(*) from grants where first and target < 6 group by all"
+        ).fetchall() == [(3, 3, 3)]
+
+
+def test_drained_async_queue_releases_process_while_peer_still_holds_games(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 5)
+    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 4 * 1024**3)
+    first: tuple[Connection, int] | None = None
+    exited = False
+    replaced = False
+
+    def wait_for_first(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal first, exited, replaced
+        if first is None:
+            pipe, sentinel = handles[0], handles[1]
+            assert isinstance(pipe, Connection) and isinstance(sentinel, int)
+            first = (pipe, sentinel)
+            second = handles[4]
+            assert isinstance(second, Connection)
+            assert pipe.poll(10) and second.poll(10), "the async processes did not request matches"
+            return (pipe, second)
+        pipe, sentinel = first
+        if not pipe.closed:
+            assert pipe.poll(10), "the first async process stopped sending results"
+            return (pipe,)
+        if not exited:
+            ready = wait([sentinel], timeout=10)
+            assert ready, "the first async process did not exit"
+            exited = True
+            return ready
+        if not replaced:
+            # The other async process still holds its startup matches. A new
+            # stream must be scheduled before we let any other child report.
+            assert sum(isinstance(handle, Connection) for handle in handles) == 4
+            replaced = True
+        return wait(handles, timeout=timeout)
+
+    monkeypatch.setattr("etude.eval.run.wait", wait_for_first)
+    agents = Agents(load=load, max_batch=16)
+    ordinary = job("ordinary", agents, plain).model_copy(
+        update={
+            "tournament": RoundRobin(
+                name="ordinary", environment=environment("grouped"), config={}, games=8
+            )
+        }
+    )
+    stream = EvalJob(
+        tournament=RoundRobin(
+            name="stream", environment=environment("grouped"), config=VectorRules(), games=8
+        ),
+        enter=ordinary.enter,
+        play_many=code_only_vector_slots,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    assert [
+        result.played for result in hold_group(group(ordinary, stream), directory=tmp_path)
+    ] == [
+        8,
+        8,
+    ]
+    assert replaced
+
+
+def test_streaming_tournament_uses_processes_released_by_its_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 16)
+    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 16 * 1024**3)
+    small_pipes: set[Connection] = set()
+    expanded = False
+
+    def wait_for_small_queues(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal expanded
+        if expanded:
+            return wait(handles, timeout=timeout)
+        pipes = [handle for handle in handles if isinstance(handle, Connection)]
+        if not small_pipes:
+            assert len(pipes) == 15
+            # Initial slots rotate through three small queues and the large one.
+            small_pipes.update(pipe for index, pipe in enumerate(pipes) if index not in (3, 7, 11))
+        if len(pipes) == 15 and all(pipe.closed for pipe in small_pipes):
+            expanded = True
+            return wait(handles, timeout=timeout)
+        # Leave large-queue requests waiting for grants until its siblings exit.
+        ready = wait(
+            [handle for handle in handles if isinstance(handle, int) or handle in small_pipes],
+            timeout=10 if timeout is None else min(timeout, 10),
+        )
+        assert ready, "released slots did not go to the remaining tournament"
+        return ready
+
+    monkeypatch.setattr("etude.eval.run.wait", wait_for_small_queues)
+    agents = Agents(load=load, max_batch=32)
+    players = (checkpoint("left"), checkpoint("right"))
+    jobs = [
+        EvalJob(
+            tournament=RoundRobin(
+                name=name,
+                environment=environment("grouped"),
+                config=VectorRules(),
+                games=games,
+                base_seed=seed,
+            ),
+            enter=players,
+            play_many=code_only_vector_slots,
+            agents=agents,
+            repo=None,
+            max_hours=0.1,
+        )
+        for seed, (name, games) in enumerate(zip(("one", "two", "three", "large"), (4, 4, 4, 200)))
+    ]
+    assert [result.played for result in hold_group(group(*jobs), directory=tmp_path)] == [
+        4,
+        4,
+        4,
+        200,
+    ]
+    assert expanded
+    reports = _game_reports(tmp_path / "grouped/artifacts/agents")
+    assert sum(report.tournaments == ("large",) and report.matches > 0 for report in reports) == 15
+
+
+def test_code_only_play_many_group_runs_without_bus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    def fail_probe() -> bool:
+        raise AssertionError("code-only play_many group must not probe GPU hardware")
+
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", fail_probe)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    jobs = [
+        EvalJob(
+            tournament=RoundRobin(
+                name=name,
+                environment=environment("grouped"),
+                config=VectorRules(),
+                games=2,
+                base_seed=seed,
+            ),
+            enter=(Code(name="left"), Code(name="right")),
+            play_many=code_only_vector_slots,
+            agents=Agents(),
+            repo=None,
+            max_hours=0.1,
+        )
+        for seed, name in enumerate(("first", "second"), start=1)
+    ]
+    results = hold_group(group(*jobs), directory=tmp_path)
+    assert [result.played for result in results] == [2, 2]
+    stderr = capfd.readouterr().err
+    assert "etude: 4 game processes, slots requested by play_many" in stderr
+    assert "agents:" not in stderr
+    artifacts = tmp_path / "grouped/artifacts/agents"
+    assert not list(artifacts.glob("batches*.json"))
+    reports = _game_reports(artifacts)
+    assert len(reports) == 4
+    assert {report.tournaments for report in reports} == {("first",), ("second",)}
+    assert sum(report.matches for report in reports) == 4
+    assert all(report.bus.calls == 0 for report in reports)
+
+
+@pytest.mark.parametrize("shared_agents", [False], indirect=True)
+def test_direct_mixed_group_isolates_stream_failure_between_tournaments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    agents = Agents(load=load_array_checkpoint, max_batch=4)
+    broken = EvalJob(
+        tournament=RoundRobin(
+            name="broken",
+            environment=environment("grouped"),
+            config=VectorRules(),
+            games=2,
+            base_seed=1,
+        ),
+        enter=(checkpoint("left"), checkpoint("right")),
+        play_many=failing_stream,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    healthy = EvalJob(
+        tournament=RoundRobin(
+            name="healthy",
+            environment=environment("grouped"),
+            config=VectorRules(),
+            games=2,
+            base_seed=2,
+        ),
+        enter=(checkpoint("left"), checkpoint("right")),
+        play_many=array_vector_slots,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    with pytest.raises(EtudeError, match="first tournament failed"):
+        hold_group(group(broken, healthy, job("ordinary", agents)), directory=tmp_path)
+    artifacts = tmp_path / "grouped/artifacts/agents"
+    reports = _game_reports(artifacts)
+    [report] = reports
+    assert report.tournaments == ("broken", "healthy", "ordinary")
     db = statsdb("grouped", tmp_path)
     try:
         assert db.sql("select count(*) from vector_scores").fetchone() == (2,)
         assert db.sql("select count(*) from scores").fetchone() == (2,)
+        assert db.sql("select count(*) from matches where state = 'failed'").fetchone() == (2,)
+        assert sorted(row[0] for row in db.sql("select state from runs").fetchall()) == [
+            "failed",
+            "finished",
+            "finished",
+        ]
     finally:
         db.close()
+
+
+def test_direct_play_many_group_isolates_stream_import_error_before_bus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    agents = Agents(load=load_array_checkpoint, max_batch=4)
+    first = EvalJob(
+        tournament=RoundRobin(
+            name="bad-import",
+            environment=environment("grouped"),
+            config=VectorRules(),
+            games=2,
+            base_seed=1,
+        ),
+        enter=(checkpoint("left"), checkpoint("right")),
+        play_many=array_vector_slots,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    healthy = EvalJob(
+        tournament=RoundRobin(
+            name="healthy",
+            environment=environment("grouped"),
+            config=VectorRules(),
+            games=2,
+            base_seed=2,
+        ),
+        enter=(checkpoint("left"), checkpoint("right")),
+        play_many=array_vector_slots,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    selected = group(first, healthy)
+    broken_spec = selected.evaluations[0].model_copy(
+        update={"play": Function(module="nonexistent_stream_module_xyz", name="play_many")}
+    )
+    with pytest.raises(EtudeError, match="nonexistent_stream_module_xyz"):
+        hold_group(
+            EvalGroup(evaluations=(broken_spec, selected.evaluations[1])), directory=tmp_path
+        )
+    artifacts = tmp_path / "grouped/artifacts/agents"
+    assert len(list(artifacts.glob("game-*.json"))) == 1
+    db = statsdb("grouped", tmp_path)
+    try:
+        assert db.sql("select count(*) from vector_scores").fetchone() == (2,)
+        healthy_name = selected.evaluations[1].address.split("/")[-1]
+        assert db.sql("select run, state from matches").fetchall() == [(healthy_name, "done")] * 2
+        assert sorted(row[0] for row in db.sql("select state from runs").fetchall()) == [
+            "failed",
+            "finished",
+        ]
+    finally:
+        db.close()
+
+
+def test_direct_imports_snapshot_excludes_loader_and_detects_mlx_in_game_module(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "torch.py").write_text("# Synthetic torch fixture.\n")
+    (tmp_path / "mlx.py").write_text("# Synthetic mlx fixture.\n")
+    (tmp_path / "heavy_loader_fixture.py").write_text(
+        "import mlx\nimport torch\n"
+        "from etude.checkpoints import CheckpointRef\n"
+        "from etude.eval.agents import ModelForward\n"
+        "def load(checkpoint: CheckpointRef) -> ModelForward:\n"
+        "    return lambda inputs: [1 for _ in inputs]\n"
+    )
+    (tmp_path / "light_play_many_fixture.py").write_text(
+        "from collections.abc import AsyncIterator\n"
+        "from typing import cast\n"
+        "from etude.eval.agents import Forward\n"
+        "from etude.eval.game import MatchStream\n"
+        "from etude.eval.records import Match\n"
+        "from etude.eval.result import Tables\n"
+        "async def play_many(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables]]:\n"
+        "    while True:\n"
+        "        taken = await matches.take(2)\n"
+        "        if not taken:\n"
+        "            return\n"
+        "        for match, agents in taken:\n"
+        "            [score] = await cast(Forward, agents[0])([0])\n"
+        "            yield match, {'scores': [{'seat': 0, 'score': int(str(score))}]}\n"
+    )
+    (tmp_path / "mlx_game_fixture.py").write_text(
+        "import mlx\n"
+        "from collections.abc import Sequence\n"
+        "from etude.eval.agents import Forward\n"
+        "from etude.eval.records import Match\n"
+        "from etude.eval.result import Tables\n"
+        "async def play(match: Match, agents: Sequence[Forward]) -> Tables:\n"
+        "    return {'scores': [{'seat': 0, 'score': 1}]}\n"
+    )
+    program = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import etude.eval.resources
+from etude.eval.game import GameReport
+from etude.eval.match import environment
+from etude.eval.records import RoundRobin
+from etude.jobs import Agents, EvalGroup, EvalJob, ExperimentState, evaluation_group, hold_group
+from tests.eval.arithmetic import checkpoint
+from heavy_loader_fixture import load
+from light_play_many_fixture import play_many
+from mlx_game_fixture import play
+
+# 1. Direct play_many with heavy loader: game imports snapshot must stay clean.
+direct_root = Path(sys.argv[1]) / "direct"
+direct_job = EvalJob(
+    tournament=RoundRobin(name="clean", environment=environment("imp"), configs=({},), games=1),
+    enter=(checkpoint("one"), checkpoint("two")),
+    play_many=play_many,
+    agents=Agents(load=load),
+    repo=None,
+    max_hours=0.1,
+)
+hold_group(
+    evaluation_group(direct_job.lower(ExperimentState(experiment="imp"))),
+    directory=direct_root,
+)
+[report_path] = list((direct_root / "imp/artifacts/agents").glob("game-*.json"))
+direct_report = GameReport.model_validate_json(report_path.read_bytes())
+assert direct_report.tournaments == ("clean",)
+assert direct_report.imports.heavy == ()
+assert direct_report.imports.warning() is None
+
+# 2. Shared-agent play importing mlx in the game module warns on mlx.
+etude.eval.resources._detect_accelerator = lambda: "cuda"
+shared_root = Path(sys.argv[1]) / "shared"
+shared_job = EvalJob(
+    tournament=RoundRobin(name="mlx-warn", environment=environment("imp2"), configs=({},), games=1),
+    enter=(checkpoint("one"), checkpoint("two")),
+    play=play,
+    agents=Agents(load=load),
+    repo=None,
+    max_hours=0.1,
+)
+hold_group(
+    evaluation_group(shared_job.lower(ExperimentState(experiment="imp2"))),
+    directory=shared_root,
+)
+[shared_path] = list((shared_root / "imp2/artifacts/agents").glob("game-*.json"))
+shared_report = GameReport.model_validate_json(shared_path.read_bytes())
+assert shared_report.imports.heavy == ("mlx",)
+shared_warning = shared_report.imports.warning()
+assert shared_warning is not None
+assert "imported mlx" in shared_warning
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("game module mlx_game_fixture: imported mlx") == 1
+
+
+@pytest.mark.parametrize("gpu", [False, True])
+def test_import_hygiene_catches_wrapper_and_lazy_play_imports_on_both_transports(
+    tmp_path: Path, gpu: bool
+) -> None:
+    (tmp_path / "torch.py").write_text("# Synthetic torch fixture.\n")
+    (tmp_path / "mlx.py").write_text("# Synthetic mlx fixture.\n")
+    (tmp_path / "clean_loader_fixture.py").write_text(
+        "import mlx\nimport torch\n"
+        "from etude.checkpoints import CheckpointRef\n"
+        "from etude.eval.agents import ModelForward\n"
+        "def load(checkpoint: CheckpointRef) -> ModelForward:\n"
+        "    return lambda inputs: [1 for _ in inputs]\n"
+    )
+    (tmp_path / "heavy_wrapper_fixture.py").write_text(
+        "import torch\n"
+        "from etude.eval.records import Seat\n"
+        "from etude.records import Record\n"
+        "class HeavyWrapper(Record):\n"
+        "    over: Seat\n"
+    )
+    (tmp_path / "wrapper_game_fixture.py").write_text(
+        "from collections.abc import Mapping, Sequence\n"
+        "from etude.eval.agents import Forward\n"
+        "from etude.eval.records import Match\n"
+        "from etude.eval.result import Tables\n"
+        "def build(player: object, leaves: Mapping[str, Forward]) -> object:\n"
+        "    return player\n"
+        "async def play(match: Match, agents: Sequence[object]) -> Tables:\n"
+        "    return {'scores': [{'seat': 0, 'score': 1}]}\n"
+    )
+    (tmp_path / "lazy_mlx_game_fixture.py").write_text(
+        "from collections.abc import Sequence\n"
+        "from etude.eval.agents import Forward\n"
+        "from etude.eval.records import Match\n"
+        "from etude.eval.result import Tables\n"
+        "async def play(match: Match, agents: Sequence[Forward]) -> Tables:\n"
+        "    # Call forward first so direct mode has already imported mlx on the inference thread.\n"
+        "    [score] = await agents[0]([0])\n"
+        "    import mlx\n"
+        "    assert mlx is not None\n"
+        "    return {'scores': [{'seat': 0, 'score': int(str(score))}]}\n"
+    )
+    program = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import etude.eval.resources
+from etude.eval.game import GameReport
+from etude.eval.match import environment
+from etude.eval.records import RoundRobin, compose
+from etude.jobs import Agents, EvalJob, ExperimentState, evaluation_group, hold_group
+from tests.eval.arithmetic import checkpoint
+from clean_loader_fixture import load
+from heavy_wrapper_fixture import HeavyWrapper
+from wrapper_game_fixture import build as wrapper_build
+from wrapper_game_fixture import play as wrapper_play
+from lazy_mlx_game_fixture import play as lazy_play
+
+etude.eval.resources._detect_accelerator = lambda: "cuda" if sys.argv[2] == "True" else "no accelerator detected"
+
+# 1. Player wrapper module importing torch is caught during build_agents on both transports.
+wrap_root = Path(sys.argv[1]) / "wrap"
+wrap_job = EvalJob(
+    tournament=RoundRobin(name="wrap", environment=environment("w"), configs=({},), games=1),
+    enter=(compose(HeavyWrapper(over=checkpoint("one"))), checkpoint("two")),
+    play=wrapper_play,
+    agents=Agents(load=load, build=wrapper_build),
+    repo=None,
+    max_hours=0.1,
+)
+hold_group(evaluation_group(wrap_job.lower(ExperimentState(experiment="w"))), directory=wrap_root)
+[wrap_path] = list((wrap_root / "w/artifacts/agents").glob("game-*.json"))
+wrap_report = GameReport.model_validate_json(wrap_path.read_bytes())
+assert wrap_report.imports.heavy == ("torch",)
+assert wrap_report.imports.importer == "heavy_wrapper_fixture"
+assert wrap_report.imports.warning() is not None
+
+# 2. Lazy import inside play() after the inference thread already loaded mlx is caught too.
+lazy_root = Path(sys.argv[1]) / "lazy"
+lazy_job = EvalJob(
+    tournament=RoundRobin(name="lazy", environment=environment("l"), configs=({},), games=1),
+    enter=(checkpoint("one"), checkpoint("two")),
+    play=lazy_play,
+    agents=Agents(load=load),
+    repo=None,
+    max_hours=0.1,
+)
+hold_group(evaluation_group(lazy_job.lower(ExperimentState(experiment="l"))), directory=lazy_root)
+[lazy_path] = list((lazy_root / "l/artifacts/agents").glob("game-*.json"))
+lazy_report = GameReport.model_validate_json(lazy_path.read_bytes())
+assert lazy_report.imports.heavy == ("mlx",)
+assert lazy_report.imports.importer == "lazy_mlx_game_fixture"
+assert lazy_report.imports.warning() is not None
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(tmp_path), str(gpu)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("game module wrapper_game_fixture: imported torch") == 1
+    assert result.stderr.count("game module lazy_mlx_game_fixture: imported mlx") == 1
+
+
+@pytest.mark.parametrize(("gpu", "streaming"), [(False, False), (True, False), (True, True)])
+def test_only_socket_play_warns_about_module_count(
+    tmp_path: Path, gpu: bool, streaming: bool
+) -> None:
+    package = tmp_path / "many_mods_pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    imports = []
+    for index in range(270):
+        (package / f"m{index}.py").write_text(f"VALUE = {index}\n")
+        imports.append(f"import many_mods_pkg.m{index}")
+    (tmp_path / "many_mods_loader.py").write_text(
+        "from etude.checkpoints import CheckpointRef\n"
+        "from etude.eval.agents import ModelForward\n"
+        "def load(checkpoint: CheckpointRef) -> ModelForward:\n"
+        "    return lambda inputs: [1 for _ in inputs]\n"
+    )
+    (tmp_path / "many_mods_game.py").write_text(
+        "\n".join(imports) + "\nfrom collections.abc import AsyncIterator, Sequence\n"
+        "from etude.eval.agents import Forward\n"
+        "from etude.eval.game import MatchStream\n"
+        "from etude.eval.records import Config, Match\n"
+        "from etude.eval.result import Tables\n"
+        "async def play(match: Match, agents: Sequence[Forward]) -> Tables:\n"
+        "    [score] = await agents[0]([0])\n"
+        "    return {'scores': [{'seat': 0, 'score': int(str(score))}]}\n"
+        "async def play_many(matches: MatchStream[Config]) -> AsyncIterator[tuple[Match, Tables]]:\n"
+        "    while granted := await matches.take(1):\n"
+        "        for match, agents in granted:\n"
+        "            yield match, await play(match, agents)\n"
+    )
+    program = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import etude.eval.resources
+from etude.eval.game import MAX_GAME_IMPORTS, GameReport
+from etude.eval.match import environment
+from etude.eval.records import RoundRobin
+from etude.jobs import Agents, EvalJob, ExperimentState, evaluation_group, hold_group
+from tests.eval.arithmetic import checkpoint
+from many_mods_game import play, play_many
+from many_mods_loader import load
+
+gpu = sys.argv[2] == "True"
+streaming = sys.argv[3] == "True"
+etude.eval.resources._detect_accelerator = lambda: "cuda" if gpu else "no accelerator detected"
+etude.eval.resources.available_cpus = lambda: 3 if gpu else 1
+etude.eval.resources.memory_bytes = lambda: 2 * 1024**3
+root = Path(sys.argv[1]) / "run"
+job = EvalJob(
+    tournament=RoundRobin(name="many", environment=environment("many"), config={}, games=2),
+    enter=(checkpoint("one"), checkpoint("two")),
+    play=play if not streaming else None,
+    play_many=play_many if streaming else None,
+    agents=Agents(load=load, max_batch=1 if not gpu else 2),
+    repo=None,
+    max_hours=0.1,
+)
+hold_group(evaluation_group(job.lower(ExperimentState(experiment="many"))), directory=root)
+paths = list((root / "many/artifacts/agents").glob("game-*.json"))
+assert len(paths) == (2 if gpu else 1)
+for path in paths:
+    report = GameReport.model_validate_json(path.read_bytes())
+    assert report.imports.heavy == ()
+    assert report.imports.count > MAX_GAME_IMPORTS
+    assert report.imports.warning(count_limit=False) is None
+    assert report.imports.warning(count_limit=True) is not None
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(tmp_path), str(gpu), str(streaming)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    expected = 1 if gpu and not streaming else 0
+    assert result.stderr.count("game module many_mods_game: loaded ") == expected
+
+
+async def record_game_process(match: Match, agents: list[object]) -> Tables:
+    return {"scores": [{"seat": 0, "score": os.getpid()}]}
+
+
+def test_direct_async_tournaments_get_their_own_match_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    taking_small: set[Connection] = set()
+    recv = Connection.recv
+
+    def receive(pipe: Connection) -> object:
+        message: object = recv(pipe)
+        if isinstance(message, Take) and message.stream == 1:
+            taking_small.add(pipe)
+        return message
+
+    def wait_for_small_takes(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        # Let each process take from the small queue before any can refill it.
+        if 0 < len(taking_small) < 4:
+            handles = [handle for handle in handles if handle not in taking_small]
+            timeout = 10 if timeout is None else min(timeout, 10)
+        return wait(handles, timeout=timeout)
+
+    monkeypatch.setattr(Connection, "recv", receive)
+    monkeypatch.setattr("etude.eval.run.wait", wait_for_small_takes)
+    agents = Agents(load=load, devices=("cpu",), max_batch=32)
+    selected = group(
+        job("large", agents, plain, games=64), job("small", agents, record_game_process, games=4)
+    )
+    large, small = hold_group(selected, directory=tmp_path)
+    assert (large.played, small.played) == (64, 4)
+    assert "4 game processes, 1–8 games each" in capfd.readouterr().err
+    with statsdb("grouped", tmp_path) as db:
+        assert db.sql(
+            "select count(distinct score) from scores where run = ?", params=[small.name]
+        ).fetchone() == (4,)
+
+
+def test_async_startup_grants_keep_every_shared_game_process_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 5)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 4 * 1024**3)
+    wait_for_games(monkeypatch, processes=4)
+    small_root = tmp_path / "small"
+    agents = Agents(load=load_checkpoint, max_batch=32)
+    small_job = EvalJob(
+        tournament=RoundRobin(
+            name="small",
+            environment=environment("grouped"),
+            config={"lane": "small"},
+            games=5,
+        ),
+        enter=(checkpoint("left"), checkpoint("right")),
+        play=play,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    assert [r.played for r in hold_group(group(small_job), directory=small_root)] == [5]
+    small_err = capfd.readouterr().err
+    assert "4 game processes, up to 2 games each; 1 inference thread" in small_err
+    reports = _game_reports(small_root / "grouped/artifacts/agents")
+    assert sorted(report.matches for report in reports) == [1, 1, 1, 2]
 
 
 async def invalid_stream(matches: MatchStream[Config]) -> AsyncIterator[tuple[Match, Tables]]:

@@ -70,6 +70,7 @@ from etude.eval.records import (
 from etude.eval.result import EvalResult
 from etude.eval.run import (
     Playing,
+    Terminated,
     _group_progress,
     _terminable,
     play_together,
@@ -844,7 +845,7 @@ def hold_group(
     directory: Path | str | None = None,
     storages: Sequence[Storage] = (),
 ) -> tuple[EvalResult, ...]:
-    """Start agents once, play every tournament, then raise any match failure.
+    """Play every tournament on one host, then raise any match failure.
 
     A launch owns the aggregate tally and closes its root after every tournament
     and shared resource closes. Each tournament keeps its scientific result files.
@@ -923,7 +924,14 @@ def hold_group(
                 member.close()
                 results.append(outcome)
         if failures:
-            raise failures[0]
+            # Stops determine the group's status. Otherwise, retryable failures take priority.
+            raise max(
+                failures,
+                key=lambda error: (
+                    isinstance(error, Terminated),
+                    isinstance(error, RetryRequested),
+                ),
+            )
     return tuple(results)
 
 

@@ -1,48 +1,57 @@
-"""Advance a small panel of variable-length games together."""
+"""Advance a small panel of variable-length games in two overlapping halves."""
 
-from collections.abc import AsyncIterator
-from itertools import islice
+from collections.abc import AsyncIterator, Awaitable
 from typing import cast
 
-from etude.checkpoints import CheckpointRef
-from etude.eval.agents import Forward, ForwardError, ModelForward
+import numpy as np
+
+from etude.eval.agents import Forward, ForwardError
 from etude.eval.game import MatchStream
 from etude.eval.records import Match
 from etude.eval.result import Tables
 
+type _Slot = tuple[Match, Forward, int]
 
-def load(saved: CheckpointRef) -> ModelForward:
-    bias = int(saved.path.read_text())
 
-    def forward(inputs: list[object]) -> list[object]:
-        # Run all ready rows together, then return one output batch per input.
-        batches = [cast(tuple[int, ...], batch) for batch in inputs]
-        scores = iter(turn + bias for batch in batches for turn in batch)
-        return [list(islice(scores, len(batch))) for batch in batches]
-
-    return forward
+def _submit_half(half: list[_Slot]) -> Awaitable[list[object]] | None:
+    if not half:
+        return None
+    # This panel seats the same checkpoint in every match; submit eagerly.
+    forward = half[0][1]
+    batch = np.array([left for _, _, left in half], dtype=np.int64)
+    return forward([batch], rows=len(half))
 
 
 async def play_many(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables | Exception]]:
+    halves: list[list[_Slot]] = [[], []]
     capacity = min(4, matches.target_matches)
-    slots: list[tuple[Match, Forward, int]] = []
+    capacities = ((capacity + 1) // 2, capacity // 2)
     while True:
-        for match, agents in await matches.take(capacity - len(slots)):
-            slots.append((match, cast(Forward, agents[0]), 1 + match.seed % 3))
-        if not slots:
+        for half, half_capacity in zip(halves, capacities, strict=True):
+            if len(half) < half_capacity:
+                for match, agents in await matches.take(half_capacity - len(half)):
+                    half.append((match, cast(Forward, agents[0]), 1 + match.seed % 3))
+        if not halves[0] and not halves[1]:
             return
-        # This panel seats the same checkpoint in every match.
-        forward = slots[0][1]
-        try:
-            [output] = await forward([tuple(left for _, _, left in slots)], rows=len(slots))
-        except ForwardError as error:
-            for match, _, _ in slots:
-                yield match, error
-            slots.clear()
-            continue
-        ready, slots = slots, []
-        for (match, agent, left), score in zip(ready, cast(list[int], output), strict=True):
-            if left > 1:
-                slots.append((match, agent, left - 1))
-            else:
-                yield match, {"scores": [{"seat": 0, "score": score}, {"seat": 1, "score": -score}]}
+        # Submit half A eagerly so inference runs while half B prepares and submits.
+        pending = [_submit_half(halves[0]), _submit_half(halves[1])]
+        for index, awaitable in enumerate(pending):
+            if awaitable is None:
+                continue
+            ready = halves[index]
+            halves[index] = []
+            try:
+                [output] = await awaitable
+            except ForwardError as error:
+                for match, _, _ in ready:
+                    yield match, error
+                continue
+            scores = cast(np.ndarray, output)
+            for (match, agent, left), score in zip(ready, scores.tolist(), strict=True):
+                if left > 1:
+                    halves[index].append((match, agent, left - 1))
+                else:
+                    yield (
+                        match,
+                        {"scores": [{"seat": 0, "score": score}, {"seat": 1, "score": -score}]},
+                    )

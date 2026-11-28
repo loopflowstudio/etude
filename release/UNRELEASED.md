@@ -153,15 +153,15 @@ eval ladder: 48 new, 0 running, 0 failed, running capacity/evals-1a2b3c4d5e6f
 eval gauntlet: 24 new, 0 running, 0 failed, running capacity/evals-1a2b3c4d5e6f
 ```
 
-A pass hands down the eval jobs that can run together as one run on one
-machine, instead of one run per tournament, and their tournaments play at
-once.
+A pass hands down compatible eval jobs as one run on one machine.
 
 An eval job may declare `agents=Agents(load=..., build=...)`. You write the
 game as `async def play(match, agents)` or as a streaming `play_many(matches)`
 async generator. `load(checkpoint)` returns a deterministic model forward.
-Etude shares checkpoint inference on declared, detected NVIDIA or Apple Silicon
-hardware (native arm64 Python). Direct game processes cache their own forwards.
+Etude shares checkpoint inference across multiple game processes on declared,
+detected NVIDIA or Apple Silicon hardware (native arm64 Python). Direct game
+processes cache their own forwards on dedicated inference threads and pass
+C-contiguous NumPy input arrays without copying.
 The forward returns one output per input, in order, independently of batch
 composition. Your game owns sampling, seeded from `match.seed`; player-record
 fields describe greedy/sample choice and temperature. The build hook returns
@@ -187,9 +187,10 @@ match duration. Without a rental target, the run waits in the pool's queue
   refused. Etude sizes processes from CPU, memory and pending work. For
   `play`, shared inference divides `max_batch` across game processes, rounding
   up, and leaves a core for the agent process when possible. Direct checkpoint
-  inference allows up to `max_batch` matches per process. For `play_many`, use
-  `matches.target_matches` to size the game pool and request matches as slots
-  free up.
+  inference allows up to `max_batch` matches per process.
+  Use `matches.target_matches` to size the `play_many` game pool, and request
+  matches as slots free up. Mixed groups share placement and checkpoint
+  inference.
 - **Guard Python scripts that play.** `evaluating(...)` without `workers=`
   played in its own process; its games now play in fresh processes, which
   import the script again. Put `run.play` under `if __name__ == "__main__":`.
@@ -239,7 +240,7 @@ shared arm. This is one shuffled panel on one host; it does not establish a
 universal CPU model-size crossover. GPU placement retains the earlier fair
 Large-checkpoint results below.
 
-On an Apple Silicon Mac (native arm64 Python), `etude eval` can batch checkpoint
+On an Apple Silicon Mac (native arm64 Python), `play` can batch checkpoint
 inference through one shared agent process, with up to `cpus - 1` game processes
 and merged batches up to `max_batch` rows. Before the move to async play and
 immediate flushing, 128 held-out Manabot `w160l8` games on a 16-core M4 Max
@@ -253,7 +254,7 @@ Scores matched.
 
 `Agents(load=load, devices=("cuda", "metal"))` is the default for checkpoint
 loaders. Use `("cuda",)` or `("metal",)` to share only on the corresponding
-hardware, or `("cpu",)` for direct inference on all hosts. Undeclared or
+hardware for `play` and `play_many`, or `("cpu",)` for direct inference on all hosts. Undeclared or
 unavailable accelerators use direct inference. Startup output names the mode,
 its reason, the game count and the thread budget. Older queued loader records
 without a device declaration use the default.

@@ -2,18 +2,20 @@
 
 import asyncio
 import json
-import socket
 from pathlib import Path
 from random import Random
 
 import pytest
 
-from etude.eval.agents import Answer, CheckpointRequest, decode_answer, recv_frame
 from etude.eval.batching import _Batches
+from etude.eval.bus import ForwardOutcome
+from etude.eval.forwards import Forwards
 from etude.eval.records import Code, compose
 from etude.jobs import Agents, hold_group
 from tests.eval.arithmetic import checkpoint
+from tests.eval.arithmetic import load as load_adder
 from tests.eval.mirror import Mirror, Search, async_forward, build, load, play
+from tests.eval.playing import identify_outcome
 from tests.test_eval_groups import group, job
 
 
@@ -21,7 +23,8 @@ from tests.test_eval_groups import group, job
 def test_mirror_sends_all_branches_once_per_ply_and_builds_author_objects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shared: bool
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3 if shared else 1)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     monkeypatch.setattr(
         "etude.eval.resources._detect_accelerator",
         lambda: "cuda" if shared else "no accelerator detected",
@@ -31,46 +34,60 @@ def test_mirror_sends_all_branches_once_per_ply_and_builds_author_objects(
     greedy = mirror.model_copy(update={"choice": "greedy"})
     assert compose(mirror).key != compose(greedy).key
     assert compose(mirror).key != compose(mirror.model_copy(update={"temperature": 2.0})).key
-    selected = job("mirror", Agents(load=load, build=build)).model_copy(
-        update={"play": play, "enter": (compose(mirror), compose(greedy))}
+    branches = mirror.worlds * mirror.actions
+    games = 2 if shared else 1
+    selected = job("mirror", Agents(load=load, build=build, max_batch=branches))
+    selected = selected.model_copy(
+        update={
+            "play": play,
+            "enter": (compose(mirror), compose(greedy)),
+            "tournament": selected.tournament.model_copy(
+                update={"config": {}, "configs": (), "games": games}
+            ),
+        }
     )
-    assert hold_group(group(selected), directory=tmp_path)[0].played == 1
+    assert hold_group(group(selected), directory=tmp_path)[0].played == games
     artifacts = tmp_path / "grouped/artifacts/agents"
+    reports = [json.loads(path.read_text()) for path in artifacts.glob("game-*.json")]
+    assert len(reports) == games
+    assert all((report["bus"]["wire_bytes"] > 0) == shared for report in reports)
     if shared:
         batches = json.loads((artifacts / "batches.json").read_text())
-        assert sum(batch["forward_calls"] for batch in batches) == 2 * 2 * mirror.depth
-        assert {batch["rows"] for batch in batches} == {mirror.worlds * mirror.actions}
-        assert sum(batch["loads"] for batch in batches) == 1
     else:
-        [report] = [json.loads(path.read_text()) for path in artifacts.glob("game-*.json")]
-        assert report["local_forward_calls"] == 2 * 2 * mirror.depth
-        assert report["local_rows"] == 2 * 2 * mirror.depth * mirror.worlds * mirror.actions
-        assert report["local_loads"] == 1
+        [report] = reports
+        batches = json.loads((artifacts / f"batches-{report['pid']}.json").read_text())
         assert not (artifacts / "batches.json").exists()
+    assert sum(batch["forward_calls"] for batch in batches) == games * 2 * 2 * mirror.depth
+    assert {batch["rows"] for batch in batches} == {branches}
+    assert sum(batch["loads"] for batch in batches) == 1
 
 
 def test_mirror_trajectories_do_not_depend_on_other_inputs_in_the_batch() -> None:
     small = checkpoint("small")
-    parent, child = socket.socketpair()
-    batches = _Batches(load, 32, 1024)
+    batches: _Batches[tuple[int, ForwardOutcome]] = _Batches(
+        load, 32, 1024, encode=identify_outcome
+    )
+    answers: list[tuple[int, ForwardOutcome]] = []
+    next_id = 0
 
     async def shared(inputs: list[object], *, rows: int | None = None) -> list[object]:
+        nonlocal next_id
+        next_id += 1
+        batches.add(answers.append, next_id, small.checkpoint, [100], 1)
+        next_id += 1
         batches.add(
-            child,
-            [
-                CheckpointRequest(1, small.checkpoint, [100], 1),
-                CheckpointRequest(
-                    2, small.checkpoint, inputs, len(inputs) if rows is None else rows
-                ),
-            ],
+            answers.append,
+            next_id,
+            small.checkpoint,
+            inputs,
+            len(inputs) if rows is None else rows,
         )
         batches.flush()
-        first = decode_answer(recv_frame(parent))
-        assert first == Answer(1, small.checkpoint.key, [101])
-        answer = decode_answer(recv_frame(parent))
-        assert isinstance(answer, Answer)
-        assert isinstance(answer.result, list)
-        return answer.result
+        first = answers.pop(0)
+        assert first == (next_id - 1, ForwardOutcome(small.checkpoint.key, [101]))
+        _, answer = answers.pop(0)
+        assert answer.error is None
+        return answer.outputs
 
     async def compare() -> None:
         for choice in ("greedy", "sample"):
@@ -81,11 +98,7 @@ def test_mirror_trajectories_do_not_depend_on_other_inputs_in_the_batch() -> Non
                 await remote.choose(actual_random) for _ in range(4)
             ]
 
-    try:
-        asyncio.run(compare())
-    finally:
-        parent.close()
-        child.close()
+    asyncio.run(compare())
 
 
 def test_code_players_build_author_objects_without_an_agent_process(
@@ -109,7 +122,8 @@ def test_cpu_games_in_a_group_load_checkpoints_in_each_game_process(
     monkeypatch.setattr(
         "etude.eval.resources._detect_accelerator", lambda: "no accelerator detected"
     )
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     small = checkpoint("small")
     players = (compose(Mirror(over=small)), compose(Mirror(over=small, choice="greedy")))
     declarations = [
@@ -122,12 +136,21 @@ def test_cpu_games_in_a_group_load_checkpoints_in_each_game_process(
         1,
         1,
     ]
-    reports = [
-        json.loads(path.read_text())
-        for path in (tmp_path / "grouped/artifacts/agents").glob("game-*.json")
-    ]
-    assert len(reports) == 2
-    assert sum(report["matches"] for report in reports) == 2
-    assert sum(report["local_forward_calls"] for report in reports) == 16
-    assert all(report["local_loads"] == 1 for report in reports)
-    assert all(report["requests"] == report["answers"] == 0 for report in reports)
+    artifacts = tmp_path / "grouped/artifacts/agents"
+    [report] = [json.loads(path.read_text()) for path in artifacts.glob("game-*.json")]
+    [batches] = artifacts.glob("batches-*.json")
+    batch_rows = json.loads(batches.read_text())
+    assert report["tournaments"] == ["first", "second"]
+    assert report["matches"] == 2
+    assert sum(batch["loads"] for batch in batch_rows) == 1
+    assert sum(batch["forward_calls"] for batch in batch_rows) == 16
+    assert report["bus"]["calls"] == 16
+    assert report["bus"]["wire_bytes"] == 0
+
+
+def test_a_checkpoint_larger_than_the_budget_loads_once_per_run() -> None:
+    ref = checkpoint("large").checkpoint
+    forwards = Forwards(load_adder, memory=1)
+    outcomes = [forwards.answer(ref, [index]) for index in range(3)]
+    assert [outcome.error for outcome in outcomes] == [None, None, None]
+    assert forwards.loads == 1

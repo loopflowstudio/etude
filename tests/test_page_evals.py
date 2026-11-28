@@ -40,7 +40,7 @@ from etude.report import Matches, Score
 from etude.storage import DirectoryStorage, S3Storage, Storage
 from etude.train.tracking import TrainingRun
 from tests.eval.games import play, play_failing_deal_one, play_teams, play_with_evidence
-from tests.eval.playing import play_matches, play_tournament
+from tests.eval.playing import play_matches, play_tournament, wait_for_games
 from tests.eval.stored import stored_inference
 from tests.experiments import authored, experiment_file
 from tests.run.storage import CountedClient, MeasuredStorage
@@ -1508,7 +1508,12 @@ def report():
     assert 500 not in by_updates_failed
 
 
-def test_partially_scored_seated_point_keeps_failed_and_unplayed_counts(tmp_path: Path) -> None:
+def test_partially_scored_seated_point_keeps_failed_and_unplayed_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
+    wait_for_games(monkeypatch, processes=2)
     runs = tmp_path / "runs"
     with open_run(
         experiment="lab",

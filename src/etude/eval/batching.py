@@ -1,38 +1,212 @@
-"""The agent process's zero-delay batching loop and durable batch observations.
+"""Zero-delay checkpoint batching for both the shared agent process and `LocalForwardBus`.
 
-`_Batches` owns pending requests; `Forwards` owns loading and byte-based eviction.
-`_run_agents` imports the authored loader and records batches as frozen Pydantic
-records; game processes never import this module.
+`_Batches` owns pending requests and runs `Forwards` loading, eviction, input
+freezing and output normalization on both transports using transport-neutral
+`ForwardOutcome`s. `_run_agents` drives `_Batches` over a private Unix socket
+using `Answer` and `CheckpointRequest` wire envelopes.
+`LocalForwardBus` drives the same `_Batches` on a dedicated non-daemon inference
+thread inside a game process. Socket game processes never import this module.
 """
 
 from __future__ import annotations
 
+import asyncio
+import os
+import pickle
+import queue
+import select
 import selectors
 import signal
 import socket
 import sys
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from pathlib import Path
-from types import FrameType
-from typing import NoReturn, cast
+from types import FrameType, ModuleType
+from typing import TYPE_CHECKING, NoReturn, TextIO, cast
 
 from etude.call import Function
 from etude.errors import RetryRequested, explain
 from etude.eval.agents import (
+    _PEER_ERROR_ID,
     Answer,
     CheckpointRequest,
     ForwardError,
-    ForwardResult,
+    _forward_error,
+    _Message,
     decode_requests,
     encode_answer,
     recv_frame,
     send_frame,
 )
+from etude.eval.bus import (
+    BusReport,
+    Flight,
+    ForwardCall,
+    ForwardOutcome,
+    Normalized,
+    _FlightBook,
+    _numpy,
+    arrays,
+    freeze,
+    normalize_inputs,
+    normalize_outputs,
+)
 from etude.eval.forwards import Forwards
+from etude.eval.resources import seconds_left
 from etude.records import Record
+
+if TYPE_CHECKING:
+    from numpy import ndarray
+
+    from etude.checkpoints import CheckpointRef
+
+_IMMUTABLE_PLAIN = (type(None), bool, int, float, complex, str, bytes)
+
+
+@dataclass(frozen=True)
+class PickledPayload:
+    """Pickle protocol 5 control bytes plus out-of-band zero-copy buffers."""
+
+    data: bytes
+    buffers: list[pickle.PickleBuffer]
+
+
+@dataclass(frozen=True)
+class PackResult:
+    """Encoded local-bus inputs with transfer accounting for `BusReport`."""
+
+    payload: list[object] | PickledPayload
+    arrays: int
+    arrays_copied: int
+    copied_bytes: int
+    pickled: int
+    pickled_bytes: int
+
+
+def _is_plain_array(value: object, np: ModuleType) -> bool:
+    return type(value) is np.ndarray and not bool(cast("ndarray", value).dtype.hasobject)
+
+
+def _is_fast_array(value: object, np: ModuleType | None) -> bool:
+    return (
+        np is not None
+        and _is_plain_array(value, np)
+        and bool(cast("ndarray", value).flags.c_contiguous)
+    )
+
+
+def _pickle_with_buffers(
+    values: list[object], pointer_ids: set[int], *, require_readonly: bool
+) -> PickledPayload:
+    """Pickle protocol 5 emitting only selected ndarray buffers out-of-band."""
+    buffers: list[pickle.PickleBuffer] = []
+
+    def collect(buf: pickle.PickleBuffer) -> bool:
+        view = memoryview(buf)
+        by_pointer = (not require_readonly or view.readonly) and id(view.obj) in pointer_ids
+        view.release()
+        if by_pointer:
+            buffers.append(buf)
+            return False
+        return True
+
+    data = pickle.dumps(values, protocol=5, buffer_callback=collect)
+    return PickledPayload(data=data, buffers=buffers)
+
+
+def pack_local_inputs(normalized: Normalized) -> PackResult:
+    """Encode normalized game inputs for the local inference thread.
+
+    Top-level non-object ndarrays skip pickle: C-contiguous ones pass a read-only
+    view by pointer, and non-contiguous ones copy into a contiguous array. Every
+    other shape uses pickle protocol 5 so nested C-contiguous ndarrays stay
+    zero-copy while containers and non-C-contiguous arrays copy into the
+    inference thread's own objects. Call after `Flight.lock` so locked game
+    arrays expose read-only buffers.
+    """
+    np = _numpy()
+    values = normalized.values
+    if np is not None and values and all(_is_plain_array(item, np) for item in values):
+        views: list[object] = []
+        pointer_arrays = 0
+        copied_arrays = 0
+        copied_bytes = 0
+        for item in values:
+            array = cast("ndarray", item)
+            if array.flags.c_contiguous:
+                view = array.view()
+                view.flags.writeable = False
+                views.append(view)
+                if id(array) not in normalized.owned_ids:
+                    pointer_arrays += 1
+            else:
+                contiguous = np.ascontiguousarray(array)
+                contiguous.flags.writeable = False
+                views.append(contiguous)
+                copied_arrays += 1
+                copied_bytes += int(contiguous.nbytes)
+        return PackResult(
+            payload=views,
+            arrays=pointer_arrays,
+            arrays_copied=len(normalized.owned_ids) + copied_arrays,
+            copied_bytes=normalized.copied_bytes + copied_bytes,
+            pickled=0,
+            pickled_bytes=0,
+        )
+
+    # Mark freshly materialized non-NumPy arrays read-only so pickle emits them
+    # out-of-band alongside locked game arrays, while mutable bytearrays copy in-band.
+    pointer_ids: set[int] = set()
+    pointer_arrays = 0
+    copied_arrays = 0
+    copied_bytes = 0
+    for array in arrays(values):
+        owned = id(array) in normalized.owned_ids
+        if owned:
+            array.flags.writeable = False
+        if _is_fast_array(array, np):
+            pointer_ids.add(id(array))
+            if not owned:
+                pointer_arrays += 1
+        elif not owned:
+            copied_arrays += 1
+            copied_bytes += int(array.nbytes)
+
+    payload = _pickle_with_buffers(values, pointer_ids, require_readonly=True)
+    return PackResult(
+        payload=payload,
+        arrays=pointer_arrays,
+        arrays_copied=len(normalized.owned_ids) + copied_arrays,
+        copied_bytes=normalized.copied_bytes + copied_bytes,
+        pickled=1,
+        pickled_bytes=len(payload.data),
+    )
+
+
+def pack_local_outputs(outputs: list[object]) -> list[object] | PickledPayload:
+    """Encode normalized, owned model outputs for return to the game loop.
+
+    Top-level immutable scalars and owned C-contiguous ndarrays pass directly by
+    pointer. Everything else round-trips through pickle protocol 5 with
+    out-of-band buffers only for owned C-contiguous ndarray leaves, copying
+    containers, mutable bytearrays and opaque objects in-band.
+    """
+    np = _numpy()
+    if all(type(item) in _IMMUTABLE_PLAIN or _is_fast_array(item, np) for item in outputs):
+        return outputs
+    owned_ids = {id(array) for array in arrays(outputs) if _is_fast_array(array, np)}
+    return _pickle_with_buffers(outputs, owned_ids, require_readonly=False)
+
+
+def unpack_local(payload: list[object] | PickledPayload) -> list[object]:
+    """Reconstruct a local-bus payload on the receiving thread."""
+    if isinstance(payload, PickledPayload):
+        return cast(list[object], pickle.loads(payload.data, buffers=payload.buffers))
+    return payload
 
 
 class Batch(Record):
@@ -50,26 +224,25 @@ class Batch(Record):
 
 
 @dataclass
-class _Pending:
-    peer: socket.socket
-    request: CheckpointRequest
+class _Pending[Encoded]:
+    reply: Callable[[Encoded], None]
+    id: int
+    checkpoint: CheckpointRef
+    inputs: list[object]
+    rows: int
     receive_seconds: float
 
 
-def _responses(
-    key: str, result: ForwardResult, batch: list[_Pending]
-) -> list[tuple[bytes, memoryview]]:
-    responses: list[tuple[bytes, memoryview]] = []
-    offset = 0
-    for item in batch:
-        stop = offset + len(item.request.inputs)
-        part = result if isinstance(result, ForwardError) else result[offset:stop]
-        responses.append(encode_answer(Answer(item.request.id, key, part)))
-        offset = stop
-    return responses
+def _failed_outcome(checkpoint: str, error: Exception) -> ForwardOutcome:
+    return ForwardOutcome(
+        checkpoint=checkpoint,
+        outputs=[],
+        error=f"agent {checkpoint}: {explain(error)}",
+        retry=isinstance(error, RetryRequested),
+    )
 
 
-class _Batches:
+class _Batches[Encoded]:
     """Single-thread ownership of loaded agents and queued per-checkpoint requests."""
 
     def __init__(
@@ -77,10 +250,15 @@ class _Batches:
         load: Callable[..., object],
         max_batch: int,
         memory: int,
+        *,
+        encode: Callable[[int, ForwardOutcome], Encoded],
+        copy_outputs: bool = False,
     ) -> None:
-        self.forwards = Forwards(load, memory, max_batch)
+        self.forwards = Forwards(load, memory)
         self.max_batch = max_batch
-        self.pending: dict[str, list[_Pending]] = {}
+        self._encode = encode
+        self._copy_outputs = copy_outputs
+        self.pending: dict[str, list[_Pending[Encoded]]] = {}
         self.batches = 0
         self.rows = 0
 
@@ -90,73 +268,116 @@ class _Batches:
 
     def add(
         self,
-        peer: socket.socket,
-        requests: Sequence[CheckpointRequest],
+        reply: Callable[[Encoded], None],
+        request_id: int,
+        checkpoint: CheckpointRef,
+        inputs: list[object],
+        rows: int,
         receive_seconds: float = 0.0,
     ) -> None:
-        for request in requests:
-            pending = _Pending(peer, request, receive_seconds / len(requests))
-            self.pending.setdefault(request.checkpoint.key, []).append(pending)
+        self.pending.setdefault(checkpoint.key, []).append(
+            _Pending(reply, request_id, checkpoint, inputs, rows, receive_seconds)
+        )
+
+    def _encode_batch(
+        self, outcome: ForwardOutcome, batch: list[_Pending[Encoded]]
+    ) -> list[Encoded]:
+        if outcome.error is not None:
+            return [self._encode(item.id, outcome) for item in batch]
+        replies = []
+        offset = 0
+        for item in batch:
+            end = offset + len(item.inputs)
+            part = ForwardOutcome(outcome.checkpoint, outcome.outputs[offset:end])
+            try:
+                reply = self._encode(item.id, part)
+            except Exception as error:
+                key = outcome.checkpoint
+                reply = self._encode(
+                    item.id,
+                    ForwardOutcome(
+                        key, [], error=f"agent {key}: could not encode outputs: {explain(error)}"
+                    ),
+                )
+            replies.append(reply)
+            offset = end
+        return replies
 
     def _forward(
-        self, key: str, batch: list[_Pending], rows: int
-    ) -> tuple[ForwardResult, list[Batch]]:
-        checkpoint = batch[0].request.checkpoint
-        inputs = [item for pending in batch for item in pending.request.inputs]
-        answer = self.forwards.answer(checkpoint, inputs, self.pending.keys(), rows=rows)
+        self, key: str, batch: list[_Pending[Encoded]], rows: int
+    ) -> tuple[ForwardOutcome, list[Batch]]:
+        checkpoint = batch[0].checkpoint
+        inputs = [value for pending in batch for value in pending.inputs]
+        freeze(inputs)
+        # Opaque pre-collated inputs have no Etude-owned row slicing operation.
+        size = self.max_batch if rows == len(inputs) else len(inputs)
+        # A model may reuse staging on the next forward, before the reply is encoded.
+        copy_arrays = self._copy_outputs or size < len(inputs)
+        outputs: list[object] = []
         observations: list[Batch] = []
-        for index, forwarded in enumerate(answer.batches):
-            if forwarded.loads:
+        for start in range(0, len(inputs), size):
+            chunk = inputs[start : start + size]
+            count = len(chunk) if rows == len(inputs) else rows
+            before_calls, before_loads = self.forwards.calls, self.forwards.loads
+            before_forward, before_load = self.forwards.forward_seconds, self.forwards.load_seconds
+            outcome = self.forwards.answer(checkpoint, chunk, self.pending.keys())
+            loads = self.forwards.loads - before_loads
+            if loads:
                 print(f"etude: agents: loaded {key}", file=sys.stderr, flush=True)
+            started = time.monotonic()
+            if outcome.error is None:
+                try:
+                    outputs.extend(normalize_outputs(outcome.outputs, copy_arrays=copy_arrays))
+                except Exception as error:
+                    outcome = _failed_outcome(key, error)
             observations.append(
                 Batch(
                     checkpoint=key,
-                    rows=forwarded.rows,
-                    requests=len(batch) if index == 0 else 0,
+                    rows=count,
+                    requests=len(batch) if start == 0 else 0,
                     queue_wait_seconds=0.0,
                     receive_seconds=0.0,
-                    load_seconds=forwarded.load_seconds,
-                    forward_seconds=forwarded.forward_seconds,
-                    encode_seconds=0.0,
+                    load_seconds=self.forwards.load_seconds - before_load,
+                    forward_seconds=self.forwards.forward_seconds - before_forward,
+                    encode_seconds=time.monotonic() - started,
                     send_seconds=0.0,
-                    forward_calls=forwarded.calls,
-                    loads=forwarded.loads,
+                    forward_calls=self.forwards.calls - before_calls,
+                    loads=loads,
                 )
             )
-        return answer.result, observations
+            if outcome.error is not None:
+                return outcome, observations
+        return ForwardOutcome(key, outputs), observations
 
     def flush(self, queue_wait_seconds: float = 0.0) -> list[Batch]:
         """Flush ready requests by checkpoint, batching up to `max_batch` rows."""
         observations: list[Batch] = []
         remaining_wait = queue_wait_seconds
         for key, items in list(self.pending.items()):
-            batch: list[_Pending] = []
+            batch: list[_Pending[Encoded]] = []
             rows = 0
             for item in items:
-                if batch and rows + item.request.rows > self.max_batch:
+                if batch and rows + item.rows > self.max_batch:
                     break
                 batch.append(item)
-                rows += item.request.rows
+                rows += item.rows
             del items[: len(batch)]
             if not items:
                 del self.pending[key]
-            answer, forwarded = self._forward(key, batch, rows)
+            outcome, forwarded = self._forward(key, batch, rows)
             started = time.monotonic()
-            responses = _responses(key, answer, batch)
+            encoded = self._encode_batch(outcome, batch)
             encode_seconds = time.monotonic() - started
             receive_seconds = sum(p.receive_seconds for p in batch)
             started = time.monotonic()
-            for item, response in zip(batch, responses, strict=True):
-                try:
-                    send_frame(item.peer, *response)
-                except (OSError, EOFError):
-                    pass  # The game may have been cancelled at its deadline.
+            for item, response in zip(batch, encoded, strict=True):
+                item.reply(response)
             send_seconds = time.monotonic() - started
             forwarded[0] = forwarded[0].model_copy(
                 update={
                     "queue_wait_seconds": remaining_wait,
                     "receive_seconds": receive_seconds,
-                    "encode_seconds": encode_seconds,
+                    "encode_seconds": forwarded[0].encode_seconds + encode_seconds,
                     "send_seconds": send_seconds,
                 }
             )
@@ -165,6 +386,325 @@ class _Batches:
             observations.extend(forwarded)
             remaining_wait = 0.0
         return observations
+
+
+@dataclass(frozen=True)
+class _LocalCall:
+    id: int
+    checkpoint: str
+    payload: list[object] | PickledPayload
+    rows: int
+
+
+# None is the stop sentinel; CheckpointRef binds a checkpoint; a tuple submits calls.
+type _LocalMessage = CheckpointRef | tuple[_LocalCall, ...] | None
+
+
+@dataclass(frozen=True)
+class _PackedReply:
+    id: int
+    checkpoint: str
+    payload: PickledPayload
+
+
+type _LocalReply = tuple[int, ForwardOutcome] | _PackedReply
+
+
+def _encode_local(request_id: int, outcome: ForwardOutcome) -> _LocalReply:
+    if outcome.error is not None:
+        return (request_id, outcome)
+    packed = pack_local_outputs(outcome.outputs)
+    if isinstance(packed, PickledPayload):
+        return _PackedReply(request_id, outcome.checkpoint, packed)
+    return (request_id, outcome)
+
+
+def _write_batches(report: TextIO | None, flushed: Sequence[Batch]) -> None:
+    if report is None or not flushed:
+        return
+    report.write(
+        ("," if report.tell() > 1 else "") + ",".join(batch.model_dump_json() for batch in flushed)
+    )
+    report.flush()
+
+
+def _resolve_loader(
+    load: Function | Callable[..., object], checkout: str | None
+) -> Callable[..., object] | Exception:
+    """Resolve author code on its inference owner before grants start."""
+    try:
+        return load.load(checkout) if isinstance(load, Function) else load
+    except RetryRequested as error:
+        return RetryRequested(explain(error))
+    except Exception as error:
+        return RuntimeError(explain(error))
+
+
+def _inference_loop(
+    inbox: queue.SimpleQueue[_LocalMessage],
+    load: Function | Callable[..., object],
+    checkout: str | None,
+    max_batch: int,
+    memory: int,
+    report_path: Path | None,
+    loop: asyncio.AbstractEventLoop,
+    deliver: Callable[[_LocalReply], None],
+    status: Callable[[Exception | None], None],
+) -> None:
+    """Dedicated inference thread body; owns `Forwards`, loader and all loaded models."""
+    bound: dict[str, CheckpointRef] = {}
+    report: TextIO | None = None
+    wait_seconds = 0.0
+
+    def post(reply: _LocalReply) -> None:
+        try:
+            loop.call_soon_threadsafe(deliver, reply)
+        except RuntimeError:
+            pass  # Event loop closed during shutdown.
+
+    def handle(message: CheckpointRef | tuple[_LocalCall, ...]) -> None:
+        if not isinstance(message, tuple):
+            bound[message.key] = message
+            return
+        for item in message:
+            # bind and submit share a FIFO; the game has already checked the key.
+            checkpoint = bound[item.checkpoint]
+            started = time.monotonic()
+            try:
+                inputs = unpack_local(item.payload)
+            except Exception as error:
+                post((item.id, _failed_outcome(item.checkpoint, error)))
+                continue
+            batches.add(
+                post,
+                item.id,
+                checkpoint,
+                inputs,
+                item.rows,
+                receive_seconds=time.monotonic() - started,
+            )
+
+    try:
+        # Setup sits inside the guard: a report file that cannot open must fail
+        # callers at once rather than leave them waiting for the deadline.
+        loader = _resolve_loader(load, checkout)
+        if isinstance(loader, Exception):
+            loop.call_soon_threadsafe(status, loader)
+            return
+        batches: _Batches[_LocalReply] = _Batches(
+            loader, max_batch, memory, encode=_encode_local, copy_outputs=True
+        )
+        if report_path is not None:
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report = report_path.open("w")
+            report.write("[")
+        loop.call_soon_threadsafe(status, None)
+        while True:
+            if not batches.pending:
+                wait_started = time.monotonic()
+                message = inbox.get()
+                wait_seconds += time.monotonic() - wait_started
+                if message is None:
+                    return
+                handle(message)
+            while True:
+                try:
+                    message = inbox.get_nowait()
+                except queue.Empty:
+                    break
+                if message is None:
+                    return
+                handle(message)
+            flushed = batches.flush(wait_seconds)
+            if flushed:
+                wait_seconds = 0.0
+                _write_batches(report, flushed)
+    except BaseException as error:
+        cause = explain(error)
+        failure = RetryRequested(f"inference thread exited unexpectedly: {cause}")
+        try:
+            loop.call_soon_threadsafe(status, failure)
+        except RuntimeError:
+            pass
+        print(f"etude: agents: {cause}", file=sys.stderr, flush=True)
+    finally:
+        if report is not None:
+            try:
+                report.write("]")
+                report.close()
+            except OSError:
+                pass  # A full disk must not keep callers from failing fast.
+
+
+class LocalForwardBus:
+    """In-process `ForwardBus` backed by one long-lived non-daemon inference thread."""
+
+    def __init__(
+        self,
+        load: Function | Callable[..., object],
+        *,
+        max_batch: int,
+        memory: int,
+        checkout: str | None = None,
+        artifacts: Path | None = None,
+    ) -> None:
+        self._loop = asyncio.get_running_loop()
+        self._startup: asyncio.Future[Exception | None] = self._loop.create_future()
+        self._inbox: queue.SimpleQueue[_LocalMessage] = queue.SimpleQueue()
+        self._bound: set[str] = set()
+        self._book = _FlightBook(_forward_error)
+        report_path = None if artifacts is None else artifacts / f"batches-{os.getpid()}.json"
+        self._thread = threading.Thread(
+            target=_inference_loop,
+            name="inference",
+            args=(
+                self._inbox,
+                load,
+                checkout,
+                max_batch,
+                memory,
+                report_path,
+                self._loop,
+                self._receive,
+                self._update_status,
+            ),
+            daemon=False,
+        )
+        self._thread.start()
+
+    def _update_status(self, error: Exception | None) -> None:
+        if error is not None:
+            self._book.fail_all(error)
+        if not self._startup.done():
+            self._startup.set_result(error)
+
+    async def startup_error(self) -> Exception | None:
+        """Wait for the inference thread to resolve the loader and open observations."""
+        try:
+            async with asyncio.timeout(seconds_left()):
+                return await asyncio.shield(self._startup)
+        except TimeoutError as error:
+            raise RetryRequested("inference thread failed to start before the deadline") from error
+
+    @property
+    def flight(self) -> Flight:
+        return self._book.flight
+
+    def bind(self, checkpoint: CheckpointRef) -> None:
+        if checkpoint.key in self._bound:
+            return
+        self._bound.add(checkpoint.key)
+        self._inbox.put(checkpoint)
+
+    def submit(self, calls: Sequence[ForwardCall]) -> list[asyncio.Future[list[object]]]:
+        if not calls:
+            return []
+        if self._book.closed_error is not None:
+            return [self._book.rejected(self._loop, call.checkpoint) for call in calls]
+
+        for call in calls:
+            if call.checkpoint not in self._bound:
+                raise KeyError(f"checkpoint {call.checkpoint} is not bound")
+
+        started = time.monotonic()
+        stage = self._book.stage(self._loop, started)
+        queued: list[_LocalCall] = []
+        futures: list[asyncio.Future[list[object]]] = []
+        arrays_count = 0
+        arrays_copied = 0
+        copied_bytes = 0
+        pickled = 0
+        pickled_bytes = 0
+        try:
+            for call in calls:
+                request_id, future = stage.add(call)
+                try:
+                    packed = pack_local_inputs(normalize_inputs(call.inputs))
+                except Exception as error:
+                    stage.rollback_last()
+                    futures.append(
+                        self._book.failed(
+                            self._loop,
+                            ForwardError(
+                                call.checkpoint, f"agent {call.checkpoint}: {explain(error)}"
+                            ),
+                        )
+                    )
+                    continue
+                queued.append(_LocalCall(request_id, call.checkpoint, packed.payload, call.rows))
+                futures.append(future)
+                arrays_count += packed.arrays
+                arrays_copied += packed.arrays_copied
+                copied_bytes += packed.copied_bytes
+                pickled += packed.pickled
+                pickled_bytes += packed.pickled_bytes
+            if queued:
+                stage.commit(
+                    arrays=arrays_count,
+                    arrays_copied=arrays_copied,
+                    copied_bytes=copied_bytes,
+                    pickled=pickled,
+                    pickled_bytes=pickled_bytes,
+                )
+                self._inbox.put(tuple(queued))
+        except BaseException:
+            stage.rollback()
+            raise
+        finally:
+            self._book.add_handoff(time.monotonic() - started)
+        return futures
+
+    def _receive(self, reply: _LocalReply) -> None:
+        if isinstance(reply, _PackedReply):
+            started = time.monotonic()
+            try:
+                outcome = ForwardOutcome(
+                    checkpoint=reply.checkpoint, outputs=unpack_local(reply.payload)
+                )
+            except Exception as error:
+                outcome = _failed_outcome(reply.checkpoint, error)
+            finally:
+                self._book.add_handoff(time.monotonic() - started)
+            self._book.deliver(reply.id, outcome)
+            return
+        request_id, outcome = reply
+        self._book.deliver(request_id, outcome)
+
+    async def close(self) -> BusReport:
+        if self._book.closed_error is None:
+            self._book.closed_error = RetryRequested("forward bus is closed")
+        self._inbox.put(None)
+        await asyncio.to_thread(self._thread.join, seconds_left())
+        await asyncio.sleep(0)  # Let replies posted just before thread exit settle on the loop.
+        if not self._thread.is_alive():
+            self._book.fail_all(self._book.closed_error)
+        return self._book.report()
+
+
+def _add_socket_batch(
+    batches: _Batches[_Message],
+    reply: Callable[[_Message], None],
+    requests: Sequence[CheckpointRequest | Answer],
+    receive_seconds: float = 0.0,
+) -> None:
+    if not requests:
+        return
+    share = receive_seconds / len(requests)
+    for request in requests:
+        if isinstance(request, Answer):
+            reply(encode_answer(request.id, request.outcome))
+        else:
+            batches.add(reply, request.id, request.checkpoint, request.inputs, request.rows, share)
+
+
+def _send_peer(peer: socket.socket) -> Callable[[_Message], None]:
+    def send(payload: _Message) -> None:
+        try:
+            send_frame(peer, *payload)
+        except (OSError, EOFError):
+            pass  # The game may have been cancelled at its deadline.
+
+    return send
 
 
 def _terminate(signum: int, frame: FrameType | None) -> NoReturn:
@@ -180,16 +720,11 @@ def _run_agents(
     control: Connection,
     artifacts: str,
 ) -> None:
-    try:
-        loader = load.load(checkout)
-    except Exception as error:
-        detail = explain(error)
-        control.send(
-            RetryRequested(detail) if isinstance(error, RetryRequested) else RuntimeError(detail)
-        )
+    loader = _resolve_loader(load, checkout)
+    if isinstance(loader, Exception):
+        control.send(loader)
         return
-
-    batches = _Batches(loader, max_batch, memory)
+    batches = _Batches(loader, max_batch, memory, encode=encode_answer)
     peers: list[socket.socket] = []
     report = Path(artifacts, "batches.json").open("w")
     report.write("[")
@@ -219,27 +754,33 @@ def _run_agents(
                         selector.register(peer, selectors.EVENT_READ)
                     else:
                         peer = cast(socket.socket, event.fileobj)
-                        started = time.monotonic()
-                        try:
-                            requests: list[CheckpointRequest] = []
-                            for request in decode_requests(recv_frame(peer)):
-                                if isinstance(request, Answer):
-                                    send_frame(peer, *encode_answer(request))
-                                else:
-                                    requests.append(request)
-                        except (EOFError, OSError):
-                            selector.unregister(peer)
-                            peer.close()
-                            peers.remove(peer)
-                        else:
-                            batches.add(peer, requests, time.monotonic() - started)
+                        while True:
+                            started = time.monotonic()
+                            try:
+                                requests = list(decode_requests(recv_frame(peer)))
+                            except (EOFError, OSError, ValueError) as error:
+                                if isinstance(error, ValueError):
+                                    message = f"agent request failed to decode: {explain(error)}"
+                                    print(f"etude: agents: {message}", file=sys.stderr, flush=True)
+                                    _send_peer(peer)(
+                                        encode_answer(
+                                            _PEER_ERROR_ID,
+                                            ForwardOutcome("", [], error=message),
+                                        )
+                                    )
+                                selector.unregister(peer)
+                                peer.close()
+                                peers.remove(peer)
+                                break
+                            _add_socket_batch(
+                                batches, _send_peer(peer), requests, time.monotonic() - started
+                            )
+                            if not select.select([peer], [], [], 0.0)[0]:
+                                break
                 flushed = batches.flush(wait_seconds)
                 if flushed:
                     wait_seconds = 0.0
-                    report.write(
-                        ("," if report_end > 1 else "")
-                        + ",".join(batch.model_dump_json() for batch in flushed)
-                    )
+                    _write_batches(report, flushed)
                     report_end = report.tell()
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)

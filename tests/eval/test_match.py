@@ -41,7 +41,7 @@ from tests.eval.games import (
     play_text_hits,
     play_unkeyed,
 )
-from tests.eval.playing import play_matches
+from tests.eval.playing import play_matches, wait_for_games
 from tests.eval.stored import stored_inference
 from tests.run.storage import CountedClient, MeasuredStorage
 
@@ -526,6 +526,8 @@ def test_a_launched_eval_run_that_fails_reports_what_it_played_and_what_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
+    wait_for_games(monkeypatch, processes=2)
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     monkeypatch.setenv("ETUDE_OUTPUT_DIR", str(outputs))
@@ -536,4 +538,5 @@ def test_a_launched_eval_run_that_fails_reports_what_it_played_and_what_failed(
             matches=matches, directory=tmp_path,
         )  # fmt: skip
     tally = read_result(outputs).tally
-    assert tally is not None and (tally.done, tally.failed) == (0, len(matches))
+    assert tally is not None
+    assert (tally.done, tally.total, tally.failed) == (0, len(matches), len(matches))

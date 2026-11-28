@@ -174,30 +174,33 @@ as identity and `Sampler.choose` as the action method.
 by the runnable [`agents.py`](../examples/agents.py) experiment.
 
 Each game process runs its `play` tasks on one `asyncio` event loop. Calls
-queued in the same loop turn flush together. Avoid blocking the event loop between `await`s.
+queued in the same loop turn flush together. Avoid blocking the event loop
+between `await`s.
 
-`Agents(load=load, devices=("cuda", "metal"))` shares inference on a visible
-NVIDIA GPU or an Apple Silicon Mac running native arm64 Python. This is the
-default. Use `("cuda",)` for a CUDA-only loader, `("metal",)` for an Apple GPU
-loader, or `("cpu",)` for direct inference without a probe. Etude drops
-`"cpu"` from mixed declarations.
+`Agents(load=load, devices=("cuda", "metal"))` can share inference on a visible
+NVIDIA GPU or an Apple Silicon Mac running native arm64 Python. These are the
+default devices. Use `("cuda",)` for a CUDA-only loader,
+`("metal",)` for an Apple GPU loader, or `("cpu",)` for direct inference
+without a probe. Etude drops `"cpu"` from mixed declarations.
 
-With a matching accelerator, game processes send their pending calls in one
-message to a shared agent process, which merges ready requests by checkpoint
+With a matching accelerator and multiple game processes, the games send
+pending calls to a shared agent process, which merges ready requests by checkpoint
 up to `max_batch` rows and writes observations to `artifacts/agents/batches.json`.
-Without a matching accelerator, each game process caches its own checkpoints,
-uses one model-library thread, and gets a share of the checkpoint allowance
-(half of host memory by default). Both modes split oversized requests with one
-input per row and return one ordered reply.
+Both modes split oversized requests with one input per row and return one
+ordered reply. With direct inference, each game process keeps its own
+checkpoint cache and gets a share of the available model-library threads and
+checkpoint allowance (half of host memory by default).
 
 Pending matches, CPUs and available host memory bound the game process count.
-An async `play` panel can start a process per available game core even when
-its pending matches fit into one inference batch.
-With `play`, shared inference divides `max_batch` across game processes,
-rounding up. Direct checkpoint inference gives each process up to `max_batch`
-matches. Shared inference leaves a core for the agent process when possible.
-The startup line shows the process and thread counts, the inference mode and
-its reason, and the initial `target_matches` for each play mode.
+Etude spreads `play` matches across game processes first. Shared inference
+then divides `max_batch` across those processes, rounding up. Direct
+checkpoint inference allows up to `max_batch` matches per process.
+Each tournament sizes its `play` tasks from its own pending matches and
+available processes.
+Shared inference caps the number of game processes at `max_batch` and leaves
+a core for the agent process when possible. The startup line shows the
+inference mode and its reason, process and thread counts, initial `play`
+concurrency, and initial `target_matches` hints for `play_many`.
 
 Choose tensor placement in `load` and honor Etude's thread environment there.
 Keep model imports in the loading module so shared game processes stay light.
@@ -205,8 +208,23 @@ Keep model imports in the loading module so shared game processes stay light.
 
 ## Vectorized engines
 
-Run the [vectorized example](../examples/vectorized.py) with
-`uv run etude eval examples/vectorized.py --source /tmp/vectorized`.
+Run the [vectorized example](../examples/vectorized.py):
+
+```sh
+ETUDE_TRACK_DIR=/tmp/vectorized uv run etude eval examples/vectorized.py
+```
+
+Etude can run several copies of `play_many` in separate game processes. Each
+generator asks for matches from the same tournament queue. For direct
+inference, Etude plans one process per `max_batch` pending matches, rounded up,
+subject to the host budget. Tournaments can use processes freed by siblings
+as their queues finish. Etude counts active processes awaiting matches toward
+pending demand before starting more. A freed dedicated slot goes to the
+tournament with unmet demand and the fewest active processes.
+
+In direct mode, Etude sets each game process's model and BLAS thread environment
+variables (`OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, etc.)
+before author modules are imported.
 
 For engines that step many games together and collate observations themselves,
 write an async generator `play_many(matches)` instead of `play(match, agents)`:
@@ -220,16 +238,17 @@ from etude.eval.records import Match
 from etude.eval.result import Tables
 from etude.jobs import Agents, EvalJob
 
-ENGINE_MAX_SLOTS = 128  # Size for the engine's arena memory budget.
-
 
 async def play_many(
     matches: MatchStream[Rules],
 ) -> AsyncIterator[tuple[Match[Rules], Tables | Exception]]:
-    pool = RolloutPool(slots=min(ENGINE_MAX_SLOTS, matches.target_matches))
+    pool = RolloutPool(slots=min(256, matches.target_matches))
+    refill = True
     while True:
-        for match, agents in await matches.take(pool.free):
-            pool.load(match, agents)
+        if refill:
+            for match, agents in await matches.take(pool.free):
+                pool.load(match, agents)
+            refill = False
         if not pool.active:
             return
         for forward, batch, rows, slots in pool.ready_batches():
@@ -237,9 +256,11 @@ async def play_many(
                 [outputs] = await forward([batch], rows=rows)
             except ForwardError as error:
                 for match in pool.drop(slots):
+                    refill = True
                     yield match, error
                 continue
             for match, tables in pool.step(slots, outputs):
+                refill = True
                 yield match, tables
 
 
@@ -256,34 +277,108 @@ Etude schedules the matches, caches checkpoints and stores each outcome as
 the generator yields it.
 
 - `matches.target_matches` suggests how many matches this process should hold
-  at once, from its initial share of the tournament, capped at `max_batch`
-  when a loader is declared. Size an engine with several games per match
-  accordingly.
+  at once. Etude estimates the first grant when the process starts, accounting
+  for matches its peers already hold. The hint is capped at `max_batch` when a
+  loader is declared. Account for the number of games per match when sizing the
+  engine's pool.
   Call `await matches.take(n)` with the number of free slots to get up to `n`
-  pending `(match, agents)` pairs. In both play modes, processes take their first
-  matches after loading and setting up the game code. Etude shares pending
-  matches among empty processes and accounts for held matches when refilling.
-  An empty grant for `n > 0` means the tournament has no pending matches or
-  the run is stopping.
+  pending `(match, agents)` pairs. With a loader, each grant contains at most
+  `max_batch` matches. Both play modes take their first matches after loading
+  and setting up the game code. Grants account for held matches and share
+  pending work among empty processes. A process that already holds matches
+  can still take at least one if grants are open and work remains.
+  An empty grant for `n > 0` means the
+  tournament queue is drained or the run is stopping. Finish any matches you
+  still hold. Further calls return immediately once that stream receives its
+  final grant.
 - `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
-  `rows=` for a pre-collated batch so the agent process never merges calls past
-  `max_batch` rows and reports real row counts. A single pre-collated call
-  above `max_batch` rows runs alone. An engine can choose smaller batches
-  when its model needs a hard limit. Group ready rows by their shared `Forward`
-  object to batch calls for the same checkpoint. When Etude merges requests,
-  the `ModelForward` returned by `load` can receive several pre-collated inputs
-  in one list. Return one output per input, in the same order.
-- Grouped `play` and `play_many` tournaments using the same `Agents(load=...)`
-  share one agent process in shared inference, so their input elements must be
-  compatible with the same `ModelForward`.
-- Yield `(match, tables)` or `(match, Result(...))` with the match from `take` or
-  a copy whose key identifies exactly one held match. Yield as each slot
+  `rows=` for a pre-collated batch so batching never merges calls past
+  `max_batch` rows and reports real row counts. An oversized pre-collated call
+  runs alone. Engines that need a hard limit should collate fewer rows per
+  call. Because every match in the process shares one `Forward`
+  object per checkpoint, engines can group ready rows by forward identity.
+  A merged call can pass several pre-collated inputs to `ModelForward`, which
+  returns one output per input in the same order. Grouped `play` and
+  `play_many` tournaments use the same loader and must pass compatible inputs.
+- Yield `(match, tables)` or `(match, Result(...))` with the match from `take`
+  or a copy whose key identifies exactly one held match. Yield as each slot
   finishes so it can backfill without waiting for stragglers.
-- Yield `(match, error)` for an ordinary game error and the remaining slots
-  can keep stepping and take pending matches. An uncaught exception, an invalid match in a yield,
-  or returning with held or pending matches fails the generator and its
-  held matches. A transient infrastructure failure such as
-  `RetryRequested` interrupts the group and retains unfinished matches for retry.
+- Yield `(match, error)` for an ordinary game error and keep stepping the other
+  slots. Uncaught generator errors, yielding an unknown or duplicate match,
+  and returning with held or pending matches fail the
+  stream and its held matches. `RetryRequested` interrupts the group and
+  retains unfinished matches for retry.
+
+## How a forward travels
+
+In `play_many`, calling `forward(...)` submits immediately without waiting for
+an event-loop barrier, so a vectorized engine can split its pool in two and
+overlap stepping one half with the other half's forward:
+
+```python
+import numpy as np
+
+from etude.eval.agents import Forward
+
+
+async def advance_halves(
+    forward: Forward,
+    half_a: np.ndarray,
+    half_b: np.ndarray,
+    rows: int,
+) -> tuple[object, object]:
+    # half_a stays read-only until its reply arrives.
+    pending_a = forward([half_a], rows=rows)
+    step_half(half_b)  # runs while half_a's forward executes on the inference thread
+    [out_a] = await pending_a  # half_a is writable again; out_a holds NumPy leaves
+    pending_b = forward([half_b], rows=rows)
+    step_half(half_a)
+    [out_b] = await pending_b
+    return out_a, out_b
+```
+
+Calls queued during inference can merge up to `max_batch` rows per checkpoint.
+In `play`, Etude locks inputs on the call and batches concurrent matches at
+the end of the event-loop turn.
+
+- **NumPy boundary.** Across both direct and shared-process transports, array
+  leaves inside tuples, lists, dictionary values and dataclass fields reach
+  `load`'s forward as `numpy.ndarray` and return to game code as owned writable
+  `numpy.ndarray`. Non-NumPy or lazy outputs (such as MLX, Torch or JAX arrays)
+  exporting the buffer protocol or CPU `__dlpack__` are materialized into owned
+  `numpy.ndarray` on the inference thread before leaving (with their backing
+  views released on that thread), and non-NumPy input leaves are converted
+  before submit. Non-CPU device tensors (CUDA/MPS) in inputs or outputs fail
+  with `ForwardError` asking `load` or game code to move them to CPU/NumPy.
+  Etude imports no model library.
+- **Zero-copy inputs on direct inference.** A top-level C-contiguous non-object
+  `numpy.ndarray` passes to the inference thread by pointer with no copy and no
+  pickle; nested C-contiguous NumPy leaves inside lists, tuples, dicts and
+  dataclass instances also move without copying their payload bytes.
+  Non-C-contiguous arrays, non-NumPy array leaves, mutable `bytearray`s and
+  plain Python containers are copied. Unpicklable inputs raise `ForwardError`.
+- **Read-only in flight, no aliasing.** In both `play` and `play_many`, a
+  writeable NumPy array handed to `forward(...)` is marked read-only on the call
+  until its answer arrives—writing to it while in flight raises `ValueError`—and
+  restored afterwards; an array already read-only on entry stays read-only.
+  Cancelling the await does not unlock the array early: it unlocks once the
+  inference thread finishes that forward. The model receives a read-only view,
+  so an in-place mutation such as `x /= 255` inside `load`'s forward raises
+  `ValueError` (delivered to the game as `ForwardError`) without modifying the
+  game's array. A loader calling `torch.from_numpy(x)` on CPU sees PyTorch's
+  one-time read-only warning; copying to a device or calling `torch.tensor(x)`
+  avoids it. Model outputs are copied into owned writable arrays before crossing
+  back to the game loop, so outputs never alias an in-flight input array or a
+  reused buffer inside `load`.
+
+Grouped `play` and `play_many` tournaments share a process budget and the
+`Agents.memory_gb` checkpoint allowance.
+
+| Placement | Inference transport |
+|---|---|
+| Declared CUDA or Metal accelerator detected and more than one game process | One shared agent process over a private Unix socket. Its checkpoint cache serves every tournament. |
+| One game process or no matching accelerator | A direct inference thread and checkpoint cache in each game process. Each process can reuse loaded checkpoints across tournament queues. |
+| No checkpoint loader or no checkpoints | Game processes only. |
 
 ## Results and retry
 
@@ -299,29 +394,32 @@ return {"scores": [{"seat": 0, "won": True}, {"seat": 1, "won": False}]}
 ```
 
 A successful match is reused across an experiment's tournaments in the same
-environment. An ordinary `play` error fails its match and other matches keep
-playing. A refused table or an invalid outcome type in either play mode fails
-its match and stops grants for the tournament while held matches finish.
-Errors importing or setting up authored game code fail its tournament while
-sibling tournaments continue. A loader import error fails its tournament in
-direct mode and the group in shared mode. Completed results are retained,
-and matches that were never granted remain pending. Etude reports
-`eval_startup_failed` for setup errors before the match stream starts.
-A stream error with no match failure to record reports `eval_stream_failed`.
-Infrastructure failures retry, and ordinary failed matches require
-`--retry-failed`. A forward failure raises
-`ForwardError` (with `.checkpoint` naming the checkpoint key) at the awaiting
-call. In shared inference, a game process sends each checkpoint's calls from
-one event-loop turn as one request, so a serialization error in one input or
-output raises a non-retryable `ForwardError` at every call in that request.
-Other checkpoints, other turns and other processes continue. A lost connection interrupts the
-group and leaves unfinished matches eligible for retry.
-Etude records a failed match even when `play` catches `ForwardError`.
-In `play_many`, catch `ForwardError`, drop affected slots and yield `(match,
-error)` while unrelated matches complete. A checkpoint load failure applies
-to unfinished matches seating
-that checkpoint, including matches that yield fallback tables.
-[Limits](limits.md) covers process, event-loop and API side effects.
+environment. If a game process exits unexpectedly or a wait for results expires,
+queued and in-flight matches can retry. A failure after all of a game process's
+streams end applies to the tournaments it served. Stored results are reused.
+A stop records `stopped` for the group and the tournaments it interrupts.
+Tournaments that already finished or failed keep their status. An ordinary
+`play` error fails one match. A refused table or an invalid outcome type
+fails its match and stops grants for the tournament while held matches finish.
+Ordinary failed matches require `--retry-failed`. Errors importing or setting
+up authored game code fail the tournament while siblings continue. A loader
+import error fails its tournament in direct mode and the group in shared mode.
+Etude reports `eval_startup_failed` for setup errors and `eval_stream_failed`
+for stream errors with no match failure to record. Ungranted matches remain
+available on resume.
+
+A failed forward raises `ForwardError` at the awaiting call, with the checkpoint
+key on `.checkpoint`. In shared inference, a serialization error in a
+request or reply raises a non-retryable `ForwardError` at each call batched
+into that request. Other requests in the same message or merged forward
+continue. A lost connection
+interrupts the group and leaves unfinished matches eligible for retry. In
+`play`, Etude records the match as failed even if the game catches the error.
+In `play_many`, catch it to drop
+affected slots and yield `(match, error)` while unrelated matches complete.
+Checkpoint load failures apply to unfinished matches seating that checkpoint,
+including any that yield fallback tables. [Limits](limits.md) covers process,
+event-loop and API side effects.
 
 ## Querying
 
