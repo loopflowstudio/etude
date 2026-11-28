@@ -845,7 +845,7 @@ class Scheduler:
         return launch
 
     def fail_launch(self, identity: str, message: str) -> None:
-        self._store.finish_preparation(identity, self._clock, failed=True)
+        self._store.fail_launch(identity, expected="preparing")
         self._diagnose("source preparation", message, launch=identity)
 
     def renew_preparation(self, identity: str) -> None:
@@ -914,7 +914,7 @@ class Scheduler:
                 raise LaunchError(
                     launch.id, ids, "run admitted; delivery unconfirmed; " + explain(error)
                 ) from error
-            self._store.fail_admission(launch.id)
+            self._store.fail_launch(launch.id, expected="admitting")
             self._diagnose(operation, "admission failed; no run recorded", error, launch=launch.id)
             if not isinstance(error, Exception):
                 raise

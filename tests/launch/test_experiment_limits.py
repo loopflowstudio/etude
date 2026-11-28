@@ -15,7 +15,7 @@ from etude.launch.provisioner.machines import check_creation
 from etude.launch.records import Launch, Offer, OnDemand, Pool
 from etude.launch.scheduler.loop import Scheduler
 from etude.launch.schemas import Packet
-from etude.launch.server import LaunchInput, SubmissionRequest, _answer
+from etude.launch.server import FailLaunchRequest, LaunchInput, SubmissionRequest, _answer
 from etude.records import RunRecord
 from etude.spec import Job, RunRequest
 from tests.launch.counting import Counting, Counts, query_plan
@@ -46,7 +46,7 @@ def _request(
 
 
 def test_queue_counts_prior_runs_and_owned_work_can_pass_a_full_limit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     b = bench(tmp_path)
     monkeypatch.setattr("etude.launch.client._client", lambda: b.scheduler)
@@ -56,11 +56,19 @@ def test_queue_counts_prior_runs_and_owned_work_can_pass_a_full_limit(
     b.scheduler.set_default("lab")
     assert queue(_request("owned")) == ("ppo/owned",)
     b.scheduler.set_default(rent="l4")
-    with pytest.raises(LauncherError, match=r"\$1.00 committed.*asks \$1.00.*limit set ppo"):
+    with pytest.raises(
+        LauncherError, match=r"\$1.00 committed.*asks \$1.00.*limit set ppo"
+    ) as refused:
         queue(_request("second"))
     assert {r.id for r in b.store.runs()} == {first, "ppo/owned"}
-    assert b.store.launches("ppo/second")[-1].state == "failed"
+    (rejected,) = b.store.launches("ppo/second")
     reopened = Scheduler(open_database(launcher_file(tmp_path)), {}, clock=b.clock)
+    with monkeypatch.context() as scope:
+        scope.setattr("etude.launch.client._client", lambda: reopened)
+        assert main(["logs", "--run", "ppo/second"]) == 0
+    output = capsys.readouterr().out
+    assert f"launch {rejected.id}: failed" in output
+    assert f"admission: {refused.value}" in output
     assert reopened.limits()[0].committed_usd == 1
     reopened.set_limit("ppo", Decimal(2))
     assert queue(_request("second")) == ("ppo/second",)
@@ -295,6 +303,12 @@ def test_server_reserves_before_client_publication_and_releases_a_failed_intent(
         ),
     ) == ("ppo/remote",)
     assert backend.limits()[0].committed_usd == 1
+    with pytest.raises(LauncherError, match="already admitted"):
+        _answer(
+            backend, FailLaunchRequest(launch=launch.id, message="client could not publish source")
+        )
+    assert b.store.launch_evidence(launch.id).state == "admitted"
+    assert backend.record("ppo/remote").id == "ppo/remote"
 
 
 def test_abandoned_preparation_expires_and_fences_the_late_ssh_client(tmp_path: Path) -> None:

@@ -34,6 +34,7 @@ from uuid import uuid4
 from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError
 from etude.launch.errors import SchemaAdvanced
+from etude.launch.logging import bounded
 from etude.launch.provenance import frontier
 from etude.launch.records import (
     RETRYABLE,
@@ -532,7 +533,7 @@ class Database:
             if refused is None:
                 launch = self._renew_launch(launch, clock())
             else:
-                self._save_launch(launch.model_copy(update={"state": "failed"}))
+                self._record_admission_failure(launch, now, str(refused))
             self._db.executemany(
                 "INSERT INTO launch_runs(launch, run) VALUES (?, ?)",
                 ((launch.id, r.run) for r in launch.requests),
@@ -575,20 +576,13 @@ class Database:
         self._save_launch(launch)
         return launch
 
-    def finish_preparation(
-        self, identity: str, clock: Callable[[], datetime], *, failed: bool = False
-    ) -> Launch:
+    def finish_preparation(self, identity: str, clock: Callable[[], datetime]) -> Launch:
         with self._together():
             launch = self._launch_in_state(identity, "preparing")
             now = clock()
-            if not failed and launch.lease_live(now):
+            if launch.lease_live(now):
                 return self._renew_launch(launch.model_copy(update={"state": "admitting"}), now)
-            stopped = launch.model_copy(update={"state": "failed"})
-            self._save_launch(stopped)
-            if not failed:
-                self._record_launch_expiry(launch, now)
-        if failed:
-            return stopped
+            self._record_admission_failure(launch, now, "reservation expired")
         raise LauncherError(f"launch {identity} reservation expired; prepare it again")
 
     def renew_launch(
@@ -605,12 +599,13 @@ class Database:
                 launch = launch.model_copy(update={"requests": requests})
             self._keep_launch(launch, clock())
 
-    def fail_admission(self, identity: str) -> None:
+    def fail_launch(self, identity: str, *, expected: Literal["preparing", "admitting"]) -> None:
+        """Fail a pending launch. A sweep may already have recorded its expiry."""
         with self._together():
             launch = self.launch_evidence(identity)
             if launch.state == "failed":
-                return  # a concurrent sweep may have retained the expiry
-            if launch.state != "admitting":
+                return
+            if launch.state != expected:
                 raise LauncherError(f"launch {identity} already {launch.state}")
             self._save_launch(launch.model_copy(update={"state": "failed"}))
 
@@ -638,16 +633,16 @@ class Database:
             for row in rows:
                 launch = self.launch_evidence(row[0])
                 if launch.pending and not self.launch_reserves(launch, at):
-                    self._save_launch(launch.model_copy(update={"state": "failed"}))
-                    self._record_launch_expiry(launch, at)
+                    self._record_admission_failure(launch, at, "reservation expired")
 
-    def _record_launch_expiry(self, launch: Launch, at: datetime) -> None:
+    def _record_admission_failure(self, launch: Launch, at: datetime, message: str) -> None:
+        self._save_launch(launch.model_copy(update={"state": "failed"}))
         self.retain_diagnostic(
             Diagnostic(
                 id=uuid4().hex,
                 observed_at=at,
                 operation="admission",
-                message="reservation expired",
+                message=bounded(message),
                 launch=launch.id,
             )
         )

@@ -114,9 +114,11 @@ for event in snapshot.diagnostics:
 
 Diagnostics read retained database facts without provider or
 bucket calls. With a server selected, those facts live on the server.
-Preparation intent is recorded there before the submitting client publishes its
-source. A disconnected submitting client can leave a preparing launch; it is
-reported as unresolved and does not authorize automatic resubmission.
+Launch intent is recorded before the submitting client publishes its source.
+A spending limit refusal records the reason with the failed launch. If a client
+disconnects during preparation, logs show the launch as expired when its lease
+runs out. A source failure reported after the scheduler records expiry appears
+alongside the expiry reason.
 
 ## The server
 

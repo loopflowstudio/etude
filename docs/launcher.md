@@ -308,6 +308,9 @@ When a launch would exceed the limit:
   naming the limit, committed total and the command to raise it. If in-flight
   reservations leave too little room, retry after those launches settle.
 
+When the scheduler refuses a launch for exceeding its limit,
+`etude logs --run RUN` shows the retained reason.
+
 `--max-usd 0` freezes new paid launches. Lowering a limit or receiving a
 revised bill can put the committed total above the ceiling. Both affect
 future admissions, while existing reservations and runs keep their funding.
