@@ -3,7 +3,7 @@
 `_Batches` owns pending requests and runs `Forwards` loading, eviction, input
 freezing and output normalization on both transports using transport-neutral
 `ForwardOutcome`s. `_run_agents` drives `_Batches` over a private Unix socket
-(with `Answer`/`CheckpointRequest`/`BatchRequest` wire envelopes confined there);
+using `Answer` and `CheckpointRequest` wire envelopes.
 `LocalForwardBus` drives the same `_Batches` on a dedicated non-daemon inference
 thread inside a game process. Socket game processes never import this module.
 """
@@ -33,9 +33,10 @@ from etude.errors import RetryRequested, explain
 from etude.eval.agents import (
     _PEER_ERROR_ID,
     Answer,
-    BatchRequest,
+    CheckpointRequest,
     ForwardError,
     _forward_error,
+    decode_requests,
     recv_frame,
     send_frame,
 )
@@ -688,14 +689,17 @@ def _encode_socket(request_id: int, outcome: ForwardOutcome) -> memoryview:
 def _add_socket_batch(
     batches: _Batches[memoryview],
     reply: Callable[[memoryview], None],
-    batch: BatchRequest,
+    requests: Sequence[CheckpointRequest | Answer],
     receive_seconds: float = 0.0,
 ) -> None:
-    if not batch.requests:
+    if not requests:
         return
-    share = receive_seconds / len(batch.requests)
-    for request in batch.requests:
-        batches.add(reply, request.id, request.checkpoint, request.inputs, request.rows, share)
+    share = receive_seconds / len(requests)
+    for request in requests:
+        if isinstance(request, Answer):
+            reply(ForkingPickler.dumps(request))
+        else:
+            batches.add(reply, request.id, request.checkpoint, request.inputs, request.rows, share)
 
 
 def _send_peer(peer: socket.socket) -> Callable[[memoryview], None]:
@@ -706,17 +710,6 @@ def _send_peer(peer: socket.socket) -> Callable[[memoryview], None]:
             pass  # The game may have been cancelled at its deadline.
 
     return send
-
-
-def _receive_request(peer: socket.socket) -> BatchRequest:
-    payload = recv_frame(peer)
-    try:
-        request = ForkingPickler.loads(payload)
-        if not isinstance(request, BatchRequest):
-            raise TypeError("expected BatchRequest")
-    except Exception as error:
-        raise ValueError(f"agent request failed to decode: {explain(error)}") from None
-    return request
 
 
 def _run_agents(
@@ -758,14 +751,15 @@ def _run_agents(
                         while True:
                             started = time.monotonic()
                             try:
-                                request = _receive_request(peer)
+                                requests = list(decode_requests(recv_frame(peer)))
                             except (EOFError, OSError, ValueError) as error:
                                 if isinstance(error, ValueError):
-                                    print(f"etude: agents: {error}", file=sys.stderr, flush=True)
+                                    message = f"agent request failed to decode: {explain(error)}"
+                                    print(f"etude: agents: {message}", file=sys.stderr, flush=True)
                                     _send_peer(peer)(
                                         _encode_socket(
                                             _PEER_ERROR_ID,
-                                            ForwardOutcome("", [], error=str(error)),
+                                            ForwardOutcome("", [], error=message),
                                         )
                                     )
                                 selector.unregister(peer)
@@ -773,7 +767,7 @@ def _run_agents(
                                 peers.remove(peer)
                                 break
                             _add_socket_batch(
-                                batches, _send_peer(peer), request, time.monotonic() - started
+                                batches, _send_peer(peer), requests, time.monotonic() - started
                             )
                             if not select.select([peer], [], [], 0.0)[0]:
                                 break

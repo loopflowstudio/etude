@@ -24,7 +24,7 @@ def _submit_half(half: list[_Slot]) -> Awaitable[list[object]] | None:
 
 async def play_many(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables | Exception]]:
     halves: list[list[_Slot]] = [[], []]
-    capacity = min(4, matches.target_slots)
+    capacity = min(4, matches.target_matches)
     capacities = ((capacity + 1) // 2, capacity // 2)
     while True:
         for half, half_capacity in zip(halves, capacities, strict=True):

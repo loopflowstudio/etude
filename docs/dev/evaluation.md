@@ -160,8 +160,9 @@ with evaluating(
   request matches when they start. A freed dedicated process slot goes to the
   pending queue with the fewest active processes. Each `play_many` generator
   submits forwards on the call and requests matches for its free slots.
-  `MatchStream.target_slots` suggests the initial share, capped at `max_batch`
-  when a loader is declared. Grants account for
+  `MatchStream.target_matches` suggests the initial share, capped at `max_batch`
+  when a loader is declared. The startup line shows the hints given to the
+  initial streams. Grants account for
   held matches and reserve a share of pending work for empty processes. A
   positive request receives at least one while grants are open and work
   remains. Only processes serving that tournament count toward grant shares.
@@ -243,13 +244,16 @@ with evaluating(
   `seat` and `group`, a seat or group the match lacks, a column named
   `player`, or a column whose type changes during a run is refused. A refused
   or raising match is recorded as failed with its error, nothing else of it
-  is stored. Ordinary `play` errors fail one match. In `play_many`, yield
-  `(match, error)` for an ordinary error and keep taking pending matches.
+  is stored. Ordinary `play` errors and returns of the wrong type fail one
+  match. In `play_many`, yield `(match, error)` for an ordinary error and
+  keep taking pending matches.
   Refused tables, uncaught generator errors, invalid yields and early returns
   stop new grants for the tournament. Broken streams fail their held matches.
-  An import failure leaves the affected tournament's unfinished matches
-  eligible for retry. A shared startup failure or an explicit retry from play
-  interrupts the group. Completed outcomes remain available for resumption.
+  Errors loading or setting up authored game code fail the tournament and
+  its held matches. Sibling tournaments continue. A game process that exits
+  without reporting, a failed shared-agent connection or an explicit retry
+  interrupts the group and keeps unfinished matches eligible for retry.
+  Completed outcomes remain available for resumption.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each drawn value from the
   environment whose latest match is newest, noting only overlaps on values

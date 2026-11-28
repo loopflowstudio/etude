@@ -101,11 +101,6 @@ class CheckpointRequest:
 
 
 @dataclass(frozen=True)
-class BatchRequest:
-    requests: tuple[CheckpointRequest, ...]
-
-
-@dataclass(frozen=True)
 class Answer:
     id: int
     checkpoint: str
@@ -116,7 +111,43 @@ class Answer:
 
 
 _HEADER = struct.Struct("!Q")
+_REQUEST_HEADER = struct.Struct("!QQQ")
 _PEER_ERROR_ID = 0  # Flight ids start at one. This answer closes the peer.
+
+
+def encode_requests(requests: Sequence[CheckpointRequest]) -> list[bytes | memoryview]:
+    """Alternate request headers and pickles so one decode error can be answered."""
+    parts: list[bytes | memoryview] = []
+    for request in requests:
+        key = request.checkpoint.key.encode()
+        body = ForkingPickler.dumps(request)
+        parts.extend((_REQUEST_HEADER.pack(request.id, len(key), len(body)) + key, body))
+    return parts
+
+
+def decode_requests(payload: bytes) -> Iterator[CheckpointRequest | Answer]:
+    view = memoryview(payload)
+    offset = 0
+    while offset < len(view):
+        key_start = offset + _REQUEST_HEADER.size
+        if key_start > len(view):
+            raise ValueError("truncated request header")
+        request_id, key_size, body_size = _REQUEST_HEADER.unpack_from(view, offset)
+        body_start = key_start + key_size
+        offset = body_start + body_size
+        if offset > len(view):
+            raise ValueError("truncated request payload")
+        try:
+            request = ForkingPickler.loads(view[body_start:offset])
+            if not isinstance(request, CheckpointRequest):
+                raise TypeError("expected CheckpointRequest")
+        except Exception as error:
+            key = str(view[key_start:body_start], "utf-8")
+            yield Answer(
+                request_id, key, [], error=f"agent request failed to decode: {explain(error)}"
+            )
+        else:
+            yield request
 
 
 def send_frame(sock: socket.socket, payload: bytes | memoryview) -> None:
@@ -238,7 +269,7 @@ class SocketForwardBus:
                     CheckpointRequest(request_id, checkpoint, normalized.values, call.rows)
                 )
                 futures.append(future)
-            payload = ForkingPickler.dumps(BatchRequest(tuple(requests)))
+            parts = encode_requests(requests)
         except (pickle.PicklingError, TypeError, AttributeError, ValueError) as error:
             stage.rollback()
             self._book.add_handoff(time.monotonic() - started)
@@ -258,16 +289,16 @@ class SocketForwardBus:
             self._book.add_handoff(time.monotonic() - started)
             raise
 
+        size = sum(map(len, parts))
         stage.commit(
             arrays_copied=arrays_copied,
             copied_bytes=copied_bytes,
             pickled=len(calls),
-            pickled_bytes=len(payload),
-            wire_bytes=len(payload),
+            pickled_bytes=sum(map(len, parts[1::2])),
+            wire_bytes=size,
         )
         try:
-            self._transport.write(_HEADER.pack(len(payload)))
-            self._transport.write(payload)
+            self._transport.writelines([_HEADER.pack(size), *parts])
         except OSError:
             self._book.fail_all(RetryRequested("agent process exited before answering"))
         finally:

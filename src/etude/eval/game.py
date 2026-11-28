@@ -109,7 +109,7 @@ class Stream:
     tournament: str
     function: Function
     streaming: bool
-    target_slots: int
+    target_matches: int
     initial: tuple[Match, ...] = ()
 
 
@@ -179,21 +179,21 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
         bind: Callable[[CheckpointRef], Forward] | None,
         build: Callable[[object, Mapping[str, Forward]], object] | None,
         *,
-        target_slots: int,
+        target_matches: int,
     ) -> None:
         self._request = request
         self._initial = initial
         self._kind = kind
         self._bind = bind
         self._build = build
-        self._target_slots = target_slots
+        self._target_matches = target_matches
         self._drained = False
         self._held: dict[int, _TakenMatch] = {}
 
     @property
-    def target_slots(self) -> int:
-        """Suggested pool size for this stream, capped at `max_batch` with a loader."""
-        return self._target_slots
+    def target_matches(self) -> int:
+        """Suggested matches to hold at once in this process, capped at `max_batch` with a loader."""
+        return self._target_matches
 
     async def take(self, count: int) -> list[tuple[Match[_MatchConfig], Sequence[object]]]:
         """Request up to `count` pending matches and their built seat agents."""
@@ -458,7 +458,7 @@ async def _drive_play(
     matches: MatchStream,
 ) -> _Outcomes:
     """Run async `play` tasks up to the stream's slot count and backfill each slot."""
-    concurrency = matches.target_slots
+    concurrency = matches.target_matches
     active: dict[asyncio.Task[Tables | Result], Match] = {}
 
     async def run_one(match: Match, agents: Sequence[object]) -> Tables | Result:
@@ -474,6 +474,8 @@ async def _drive_play(
             _match_errors.reset(token)
         if errors:
             raise errors[0]
+        if not isinstance(result, (Mapping, Result)):
+            raise TypeError("play must return tables or a Result")
         return result
 
     try:
@@ -646,25 +648,29 @@ async def _serve_stream(
     starting = True
     loop.add_reader(pipe.fileno(), on_pipe_readable)
     try:
-        build_hook = (
-            None
-            if build is None
-            else cast(Callable[[object, Mapping[str, Forward]], object], build.load(checkout))
-        )
+        build_hook: Callable[[object, Mapping[str, Forward]], object] | None = None
+        build_error: Exception | None = None
+        if build is not None:
+            try:
+                build_hook = cast(
+                    Callable[[object, Mapping[str, Forward]], object], build.load(checkout)
+                )
+            except RetryRequested:
+                raise
+            except Exception as load_error:
+                build_error = load_error
         loaded_streams: list[tuple[Callable[..., object], type[Match]] | Exception] = []
         for spec in streams:
+            if build_error is not None:
+                loaded_streams.append(build_error)
+                continue
             try:
                 play_fn = spec.function.load(checkout)
                 kind = _match_type(play_fn, streaming=spec.streaming)
+            except RetryRequested:
+                raise
             except Exception as load_error:
-                startup_error = (
-                    load_error
-                    if isinstance(load_error, RetryRequested)
-                    else RetryRequested(
-                        f"game process failed during startup: {explain(load_error)}"
-                    )
-                )
-                loaded_streams.append(startup_error)
+                loaded_streams.append(load_error)
             else:
                 loaded_streams.append((play_fn, kind))
         # Capture pre-bus top-level imports, then keep the thread-filtered hook
@@ -720,7 +726,7 @@ async def _serve_stream(
                         kind,
                         forwarder.bind if forwarder is not None else None,
                         build_hook,
-                        target_slots=spec.target_slots,
+                        target_matches=spec.target_matches,
                     )
                     stream = (
                         cast(

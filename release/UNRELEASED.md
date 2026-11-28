@@ -187,7 +187,7 @@ match duration. Without a rental target, the run waits in the pool's queue
   refused. Etude sizes processes from CPU, memory and pending work. For
   `play` with checkpoints, Etude divides `max_batch` across processes, rounding
   up. Shared inference leaves a core for the agent process when possible.
-  Use `matches.target_slots` to size the `play_many` game pool, and request
+  Use `matches.target_matches` to size the `play_many` game pool, and request
   matches as slots free up. Mixed groups share placement and checkpoint
   inference.
 - **Guard Python scripts that play.** `evaluating(...)` without `workers=`

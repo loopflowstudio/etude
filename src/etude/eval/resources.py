@@ -180,17 +180,19 @@ class Placement:
             queues, available, streaming_batch=max_batch if direct else 1, direct=direct
         )
 
-    def describe(self, tournaments: Sequence[str], *, streaming: bool) -> str | None:
+    def describe(self, tournaments: Sequence[str], *, target_matches: set[int]) -> str | None:
         """Describe the placement of one evaluation group."""
-        if not self.processes or (self.bus is None and not streaming):
+        if not self.processes or (self.bus is None and not target_matches):
             return None
         process = "game process" if self.processes == 1 else "game processes"
         game = "game" if self.games_per_process == 1 else "games"
         capacity = []
         if self.games_per_process is not None:
             capacity.append(f"{self.games_per_process} {game} each")
-        if streaming:
-            capacity.append("slots requested by play_many")
+        if target_matches:
+            low, high = min(target_matches), max(target_matches)
+            hint = str(low) if low == high else f"{low}–{high}"
+            capacity.append(f"slots requested by play_many (initial target_matches={hint})")
         games = ", ".join((f"{self.processes} {process}", *capacity))
         if self.bus is None:
             return f"etude: {games}"

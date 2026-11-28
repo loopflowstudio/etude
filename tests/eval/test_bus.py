@@ -1708,8 +1708,8 @@ def test_unpicklable_reply_fails_fast_redacts_secrets_and_unlocks_arrays(
     asyncio.run(run())
 
 
-def test_unpicklable_request_disconnects_only_its_peer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+def test_undecodable_request_fails_only_its_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
@@ -1732,16 +1732,17 @@ def test_unpicklable_request_disconnects_only_its_peer(
             bad, pending = broken.submit(
                 [ForwardCall(cp.key, [_ExplodingUnpickle()], 1), ForwardCall(other.key, [arr], 1)]
             )
-            for key, future in ((cp.key, bad), (other.key, pending)):
-                with pytest.raises(ForwardError, match="agent request failed to decode") as info:
-                    await asyncio.wait_for(future, timeout=5)
-                assert info.value.checkpoint == key and not info.value.retry
-                assert "topsecret" not in str(info.value)
+            with pytest.raises(
+                ForwardError, match="agent request failed to decode: .*fixture decode error"
+            ) as info:
+                await asyncio.wait_for(bad, timeout=5)
+            assert info.value.checkpoint == cp.key and not info.value.retry
+            assert "topsecret" not in str(info.value)
+            [output] = await asyncio.wait_for(pending, timeout=5)
+            np.testing.assert_array_equal(output, arr)
             assert arr.flags.writeable
             [later] = broken.submit([ForwardCall(other.key, [3], 1)])
-            with pytest.raises(ForwardError, match="agent request failed to decode") as info:
-                await later
-            assert info.value.checkpoint == other.key and not info.value.retry
+            assert await asyncio.wait_for(later, timeout=5) == [3]
             [after] = healthy.submit([ForwardCall(cp.key, [2], 1)])
             assert await asyncio.wait_for(after, timeout=5) == [2]
         finally:
@@ -1750,10 +1751,6 @@ def test_unpicklable_request_disconnects_only_its_peer(
 
     with resources(tmp_path) as owned, running_agents(definition, None, owned, placement) as agent:
         asyncio.run(run(agent.address))
-    stderr = capfd.readouterr().err
-    assert "agent request failed to decode: " in stderr
-    assert "fixture decode error" in stderr
-    assert "topsecret" not in stderr
 
 
 async def _broken_request_play(match: Match, agents: Sequence[Forward]) -> Tables:

@@ -194,8 +194,9 @@ Pending matches, CPUs and available host memory bound the game process count.
 Etude spreads `play` matches across game processes first, then divides
 `max_batch` across those processes for checkpoint inference, rounding up.
 Shared inference caps the number of game processes at `max_batch` and leaves
-a core for the agent process when possible. The startup line gives the mode,
-its reason, and the process, slot and thread counts.
+a core for the agent process when possible. The startup line shows the
+inference mode and its reason, process and thread counts, and initial
+`target_matches` hints for `play_many`.
 
 Choose tensor placement in `load` and honor Etude's thread environment there.
 Keep model imports in the loading module so shared game processes stay light.
@@ -236,7 +237,7 @@ from etude.jobs import Agents, EvalJob
 async def play_many(
     matches: MatchStream[Rules],
 ) -> AsyncIterator[tuple[Match[Rules], Tables | Exception]]:
-    pool = RolloutPool(slots=min(256, matches.target_slots))
+    pool = RolloutPool(slots=min(256, matches.target_matches))
     refill = True
     while True:
         if refill:
@@ -270,8 +271,10 @@ job = EvalJob(
 Etude schedules the matches, caches checkpoints and stores each outcome as
 the generator yields it.
 
-- `matches.target_slots` suggests a pool size using this process's initial
-  share of the tournament, capped at `max_batch` when a loader is declared.
+- `matches.target_matches` suggests how many matches this process should hold
+  at once, based on its initial share of the tournament and capped at
+  `max_batch` when a loader is declared. Account for the number of games per
+  match when sizing the engine's pool.
   Call `await matches.take(n)` with the number of free slots to get up to `n`
   pending `(match, agents)` pairs. Grants account for held matches and share
   pending work among empty processes. An empty grant for `n > 0` means the
@@ -385,19 +388,23 @@ environment. If a game process exits unexpectedly or a wait for results expires,
 queued and in-flight matches can retry. A failure after all of a game process's
 streams end applies to the tournaments it served. Stored results are reused.
 A stop records `stopped` for the group and the tournaments it interrupts.
-Tournaments that already finished or failed keep their status. Ordinary
-game errors fail one match and require `--retry-failed`. Matches dropped
-after a refused table or broken stream remain unplayed.
+Tournaments that already finished or failed keep their status. An ordinary
+`play` error or a return of the wrong type fails one match. Failed matches
+of this kind require `--retry-failed`. Errors loading or setting up authored
+game code fail the tournament while sibling tournaments continue. Matches
+that were still queued when a table was refused or a stream broke remain
+unplayed.
 
-An undecodable request or reply on shared inference closes that game process's
-connection and fails its pending forwards. Other game processes keep playing.
 A failed forward raises `ForwardError` at the awaiting call, with the checkpoint
-key on `.checkpoint`. In `play`, Etude records the match as failed even if the
-game catches the error. In `play_many`, catch it to drop affected slots and
-yield `(match, error)` while unrelated matches complete. Checkpoint load
-failures apply to unfinished matches seating that checkpoint, including any
-that yield fallback tables. [Limits](limits.md) covers process, event-loop and
-API side effects.
+key on `.checkpoint`. If the shared agent process cannot deserialize a request,
+it answers that request with `ForwardError` and continues serving other
+requests. Invalid framing or an undecodable reply closes that game process's
+connection and fails its pending forwards. In `play`, Etude records the match
+as failed even if the game catches the error. In `play_many`, catch it to drop
+affected slots and yield `(match, error)` while unrelated matches complete.
+Checkpoint load failures apply to unfinished matches seating that checkpoint,
+including any that yield fallback tables. [Limits](limits.md) covers process,
+event-loop and API side effects.
 
 ## Querying
 

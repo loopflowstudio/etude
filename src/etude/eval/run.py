@@ -750,7 +750,7 @@ def play_together(
             stream_groups = [pending] if placement.bus == "local" else [(each,) for each in pending]
 
             def spawn_one(
-                targets: tuple[Playing, ...], starts: dict[int, int], slots: dict[int, int]
+                targets: tuple[Playing, ...], starts: dict[int, int], match_targets: dict[int, int]
             ) -> _GameProcess:
                 parent, child_pipe = context.Pipe()
                 # Reserve initial async matches only for the stream that starts with the process.
@@ -759,13 +759,13 @@ def play_together(
                 for index, each in enumerate(targets):
                     initial: tuple[Match, ...] = ()
                     if each.streaming:
-                        target_slots = slots[id(each)]
+                        target_matches = match_targets[id(each)]
                     else:
                         assert games_per_process is not None
-                        target_slots = games_per_process
+                        target_matches = games_per_process
                         if index == 0:
                             share = math.ceil(len(each.pending) / starts[id(each)])
-                            initial = each.grant(min(target_slots, share))
+                            initial = each.grant(min(target_matches, share))
                     streams.append(
                         _GameStream(
                             playing=each,
@@ -777,7 +777,7 @@ def play_together(
                             tournament=each.tournament,
                             function=each.play,
                             streaming=each.streaming,
-                            target_slots=target_slots,
+                            target_matches=target_matches,
                             initial=initial,
                         )
                     )
@@ -805,11 +805,12 @@ def play_together(
                 child_pipe.close()
                 return _GameProcess(process=process, pipe=parent, streams=tuple(streams))
 
-            def spawn_ready() -> None:
+            def spawn_ready() -> set[int]:
                 nonlocal stopping
+                started_targets: set[int] = set()
                 available = placement.processes - len(live)
                 if not available or stopping:
-                    return
+                    return started_targets
                 serving = Counter(
                     id(active.playing)
                     for child in live
@@ -833,13 +834,15 @@ def play_together(
                         strict=True,
                     )
                 )
-                slots: dict[int, int] = {}
+                match_targets: dict[int, int] = {}
                 for each in pending:
                     if each.streaming and starts[id(each)]:
                         share = math.ceil(
                             len(each.pending) / (serving[id(each)] + starts[id(each)])
                         )
-                        slots[id(each)] = min(share, agents.max_batch) if agents.load else share
+                        match_targets[id(each)] = (
+                            min(share, agents.max_batch) if agents.load else share
+                        )
                 while len(live) < placement.processes:
                     spawned = False
                     for group in stream_groups:
@@ -850,13 +853,16 @@ def play_together(
                             continue
                         if any(each.run.should_stop for each in targets):
                             stopping = True
-                            return
-                        live.append(spawn_one(targets, starts, slots))
+                            return started_targets
+                        live.append(spawn_one(targets, starts, match_targets))
                         for each in targets:
+                            if each.streaming:
+                                started_targets.add(match_targets[id(each)])
                             starts[id(each)] -= 1
                         spawned = True
                     if not spawned:
                         break
+                return started_targets
 
             def fail_stream(stream: _GameStream, error: BaseException) -> None:
                 each = stream.playing
@@ -904,12 +910,7 @@ def play_together(
                     fail_checkpoints(message.loading_failures)
                     stream = child.streams[message.stream]
                     each = stream.playing
-                    if isinstance(message.error, RetryRequested):
-                        # A tournament's game import can fail while its siblings use the bus.
-                        each.run.fail_pending(message.error)
-                        each._remember_failure(message.error)
-                        each.pending.clear()
-                    elif message.error is not None:
+                    if message.error is not None:
                         fail_stream(stream, message.error)
                     elif stream.held:
                         fail_stream(
@@ -953,10 +954,10 @@ def play_together(
                     handle_message(child, message)
 
             try:
-                spawn_ready()
+                initial_targets = spawn_ready()
                 description = placement.describe(
                     [each.tournament for each in pending],
-                    streaming=any(each.streaming for each in pending),
+                    target_matches=initial_targets,
                 )
                 if description is not None:
                     print(description, file=sys.stderr, flush=True)
