@@ -145,6 +145,12 @@ def group(*jobs: EvalJob) -> EvalGroup:
     )
 
 
+def _game_reports(directory: Path) -> list[GameReport]:
+    return [
+        GameReport.model_validate_json(path.read_bytes()) for path in directory.glob("game-*.json")
+    ]
+
+
 def test_a_pass_groups_by_agents_and_keeps_group_limits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -517,10 +523,7 @@ def test_two_tournaments_share_loaded_agents_and_resume_without_starting_them(
         )
         for batch in batches
     )
-    reports = [
-        GameReport.model_validate_json(path.read_bytes())
-        for path in (tmp_path / "grouped/artifacts/agents").glob("game-*.json")
-    ]
+    reports = _game_reports(tmp_path / "grouped/artifacts/agents")
     assert len(reports) == 2
     assert sum(r.matches for r in reports) == 2
     assert sum(r.requests for r in reports) == 4
@@ -531,7 +534,7 @@ def test_two_tournaments_share_loaded_agents_and_resume_without_starting_them(
     assert "2 checkpoints loaded, 4 rows" in log
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [0, 0]
     assert "agents: shared inference" not in capfd.readouterr().err
-    assert len(list((tmp_path / "grouped/artifacts/agents").glob("game-*.json"))) == 2
+    assert len(_game_reports(tmp_path / "grouped/artifacts/agents")) == 2
     db = statsdb("grouped", tmp_path)
     try:
         assert db.sql("select score from scores").fetchall() == [(2,)] * 4
@@ -1003,9 +1006,14 @@ def test_batch_merges_rows_up_to_max_batch_and_runs_oversized_alone() -> None:
     player = checkpoint("one")
     batches = _Batches(echo, 4, 1024)
     with first_game, first_agent, second_game, second_agent:
-        batches.add(first_agent, CheckpointRequest(1, player.checkpoint, [("a", "b")], 2))
-        batches.add(second_agent, CheckpointRequest(2, player.checkpoint, [("c", "d")], 2))
-        batches.add(second_agent, CheckpointRequest(3, player.checkpoint, ["e"], 1))
+        batches.add(first_agent, [CheckpointRequest(1, player.checkpoint, [("a", "b")], 2)])
+        batches.add(
+            second_agent,
+            [
+                CheckpointRequest(2, player.checkpoint, [("c", "d")], 2),
+                CheckpointRequest(3, player.checkpoint, ["e"], 1),
+            ],
+        )
         first = batches.flush()
         assert ForkingPickler.loads(recv_frame(first_game)) == Answer(1, [("a", "b")])
         assert ForkingPickler.loads(recv_frame(second_game)) == Answer(2, [("c", "d")])
@@ -1016,7 +1024,7 @@ def test_batch_merges_rows_up_to_max_batch_and_runs_oversized_alone() -> None:
         assert ForkingPickler.loads(recv_frame(second_game)) == Answer(3, ["e"])
         assert [b.rows for b in second] == [1]
         # A single pre-collated call above max_batch runs alone and reports real rows.
-        batches.add(first_agent, CheckpointRequest(4, player.checkpoint, ["big"], 6))
+        batches.add(first_agent, [CheckpointRequest(4, player.checkpoint, ["big"], 6)])
         oversized = batches.flush()
         assert ForkingPickler.loads(recv_frame(first_game)) == Answer(4, ["big"])
         assert [b.rows for b in oversized] == [6]
@@ -1028,7 +1036,7 @@ def test_oversized_game_request_uses_bounded_forwards_and_one_ordered_reply() ->
     batches = _Batches(echo, 2, 1024)
     inputs: list[object] = [1, 2, 3, 4, 5]
     with game, agent:
-        batches.add(agent, CheckpointRequest(1, player.checkpoint, inputs, len(inputs)))
+        batches.add(agent, [CheckpointRequest(1, player.checkpoint, inputs, len(inputs))])
         observed = batches.flush()
         assert ForkingPickler.loads(recv_frame(game)) == Answer(1, inputs)
         assert not wait([game], timeout=0)
@@ -1056,17 +1064,17 @@ def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_inputs() ->
     parent, child = socket.socketpair()
     try:
         for index, player in enumerate((a, b), start=1):
-            batches.add(child, CheckpointRequest(index, player.checkpoint, [player.name], 1))
+            batches.add(child, [CheckpointRequest(index, player.checkpoint, [player.name], 1)])
             batches.flush()
             assert ForkingPickler.loads(recv_frame(parent)) == Answer(index, [player.name])
         # While a still has waiting rows in pending, loading c evicts b instead of a.
-        batches.add(child, CheckpointRequest(3, c.checkpoint, ["c"], 1))
-        batches.add(child, CheckpointRequest(4, a.checkpoint, ["a"], 1))
+        batches.add(child, [CheckpointRequest(3, c.checkpoint, ["c"], 1)])
+        batches.add(child, [CheckpointRequest(4, a.checkpoint, ["a"], 1)])
         batches.flush()
         assert ForkingPickler.loads(recv_frame(parent)) == Answer(3, ["c"])
         assert ForkingPickler.loads(recv_frame(parent)) == Answer(4, ["a"])
         assert batches.loads == 3
-        batches.add(child, CheckpointRequest(5, b.checkpoint, ["b"], 1))
+        batches.add(child, [CheckpointRequest(5, b.checkpoint, ["b"], 1)])
         batches.flush()
         assert ForkingPickler.loads(recv_frame(parent)) == Answer(5, ["b"])
         assert batches.loads == 4  # b was evicted to make room for c.
@@ -1101,10 +1109,7 @@ def test_bad_batch_answers_fail_all_asking_tournaments(
     selected = group(job("one", agents), job("two", agents))
     with pytest.raises(EtudeError, match="match_failed"):
         hold_group(selected, directory=tmp_path)
-    reports = [
-        GameReport.model_validate_json(path.read_bytes())
-        for path in (tmp_path / "grouped/artifacts/agents").glob("game-*.json")
-    ]
+    reports = _game_reports(tmp_path / "grouped/artifacts/agents")
     assert len(reports) == 2
     assert [r.requests for r in reports] == [1, 1]
     assert [r.answers for r in reports] == [1, 1]
@@ -1186,8 +1191,7 @@ async def play(match: Match, agents: Sequence[Forward]) -> Tables:
     (result,) = hold_group(group(selected), directory=tmp_path)
     assert result.played == 1
     artifacts = tmp_path / "grouped/artifacts/agents"
-    (path,) = artifacts.glob("game-*.json")
-    report = GameReport.model_validate_json(path.read_bytes())
+    [report] = _game_reports(artifacts)
     assert report.requests == report.answers == 1
     assert report.imports.count == 1
 
@@ -1224,14 +1228,14 @@ def test_a_failed_load_is_not_attempted_again_in_the_run() -> None:
     parent, child = socket.socketpair()
     try:
         player = checkpoint("one")
-        batches.add(child, CheckpointRequest(1, player.checkpoint, [1], 1))
+        batches.add(child, [CheckpointRequest(1, player.checkpoint, [1], 1)])
         batches.flush()
         first = ForkingPickler.loads(recv_frame(parent))
         assert isinstance(first.result, ForwardError) and first.result.loading
         assert "fixture loading error" in str(first.result)
         # If loading is attempted a second time this function would now succeed.
         batches.forwards.load = echo
-        batches.add(child, CheckpointRequest(2, player.checkpoint, [2], 1))
+        batches.add(child, [CheckpointRequest(2, player.checkpoint, [2], 1)])
         batches.flush()
         second = ForkingPickler.loads(recv_frame(parent))
         assert isinstance(second.result, ForwardError) and second.result.loading
@@ -1680,7 +1684,7 @@ def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoin
             for client, peer in peers:
                 request = CheckpointRequest(turn, cp.checkpoint, [WireValue(turn)], 1)
                 send_frame(client, ForkingPickler.dumps([request]))
-                batches.add_batch(peer, ForkingPickler.loads(recv_frame(peer)))
+                batches.add(peer, ForkingPickler.loads(recv_frame(peer)))
             observations.extend(batches.flush())
             for client, _ in peers:
                 assert ForkingPickler.loads(recv_frame(client)) == Answer(turn, [str(turn)])
@@ -1695,15 +1699,13 @@ def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoin
 def test_agentless_game_reports_have_no_inference_wait(tmp_path: Path) -> None:
     selected = group(job("plain", None))
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [1]
-    paths = list((tmp_path / "grouped/artifacts/agents").glob("game-*.json"))
-    assert len(paths) == 1
-    report = GameReport.model_validate_json(paths[0].read_bytes())
+    [report] = _game_reports(tmp_path / "grouped/artifacts/agents")
     assert report.matches == 1
     assert report.wall_seconds >= 0.0
     assert report.requests == report.answers == 0
     assert report.round_trip_seconds == report.transport_seconds == 0.0
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [0]
-    assert len(list((tmp_path / "grouped/artifacts/agents").glob("game-*.json"))) == 1
+    assert len(_game_reports(tmp_path / "grouped/artifacts/agents")) == 1
 
 
 def test_standalone_play_retains_game_report_without_a_group(tmp_path: Path) -> None:
@@ -1718,9 +1720,7 @@ def test_standalone_play_retains_game_report_without_a_group(tmp_path: Path) -> 
         storages=(bucket,),
     ) as active:
         assert active.play(plain).played == 1
-    paths = list((tmp_path / "grouped/standalone/artifacts/agents").glob("game-*.json"))
-    assert len(paths) == 1
-    report = GameReport.model_validate_json(paths[0].read_bytes())
+    [report] = _game_reports(tmp_path / "grouped/standalone/artifacts/agents")
     assert report.matches == 1
     assert report.wall_seconds >= 0.0
     assert bucket.uploads == 6
@@ -1760,9 +1760,7 @@ def test_barrier_batches_games_into_one_message_per_process_per_round(
         result = active.play(multi_round_play, agents=Agents(load=load, max_batch=6))
     assert result.played == 6
     artifacts = tmp_path / "barrier/unequal/artifacts/agents"
-    [report] = [
-        GameReport.model_validate_json(p.read_bytes()) for p in artifacts.glob("game-*.json")
-    ]
+    [report] = _game_reports(artifacts)
     assert report.matches == 6
     if shared:
         # 4 decision rounds -> exactly 4 socket messages for all 6 games (not 18).
@@ -1800,9 +1798,7 @@ def test_barrier_batches_across_multiple_processes(
     ]
     assert [result.played for result in hold_group(group(*jobs), directory=tmp_path)] == [4, 4]
     artifacts = tmp_path / "grouped/artifacts/agents"
-    reports = [
-        GameReport.model_validate_json(p.read_bytes()) for p in artifacts.glob("game-*.json")
-    ]
+    reports = _game_reports(artifacts)
     assert [(r.matches, r.requests, r.answers) for r in reports] == [(4, 3, 3)] * 2
     batches = json.loads((artifacts / "batches.json").read_text())
     assert sum(batch["rows"] for batch in batches) == 24
@@ -1958,9 +1954,7 @@ def test_play_many_shares_one_agent_process_with_play(
     assert log.count("agents: shared inference") == 1
     assert f"shared inference for first, second, ordinary ({accelerator})" in log
     artifacts = tmp_path / "grouped/artifacts/agents"
-    reports = [
-        GameReport.model_validate_json(path.read_bytes()) for path in artifacts.glob("game-*.json")
-    ]
+    reports = _game_reports(artifacts)
     assert sorted((report.tournament, report.matches) for report in reports if report.matches) == [
         ("first", 1),
         ("ordinary", 1),

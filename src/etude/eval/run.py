@@ -44,7 +44,6 @@ from etude.eval.game import (
     Done,
     Game,
     GameReport,
-    Grant,
     Outcome,
     Play,
     PlayMany,
@@ -178,17 +177,9 @@ class EvalRun(Run):
             raise result
         return result
 
-    def _store_played(
-        self, scheduled: Match, outcome: Tables | Result | BaseException, *, seconds: float = 0.0
-    ) -> None:
-        if isinstance(outcome, ForwardError) and outcome.retry:
-            raise RetryRequested(str(outcome)) from outcome
-        if isinstance(outcome, RetryRequested):
-            raise outcome
-        if isinstance(outcome, BaseException):
-            self.fail(scheduled, outcome)
-        self.store(scheduled, outcome, seconds=seconds)
-        self.done.add(scheduled.key)
+    def _store_played(self, match: Match, result: Tables | Result, seconds: float) -> None:
+        self.store(match, result, seconds=seconds)
+        self.done.add(match.key)
         self._report.played()
         self._seal()
 
@@ -244,11 +235,12 @@ class EvalRun(Run):
     def _record_failure(
         self, scheduled: Sequence[Match], error: BaseException
     ) -> EtudeError | RetryRequested:
-        detail = (
-            explain(error)
-            if isinstance(error, subprocess.SubprocessError)
-            else f"{type(error).__name__}: {error}"
-        )
+        if isinstance(error, ForwardError) and error.loading:
+            detail = str(error)
+        elif isinstance(error, subprocess.SubprocessError):
+            detail = explain(error)
+        else:
+            detail = f"{type(error).__name__}: {error}"
         retry = isinstance(error, RetryRequested) or isinstance(error, ForwardError) and error.retry
         for match in scheduled:
             self._stage_failure(match, detail, retry=retry)
@@ -522,7 +514,7 @@ def _terminable() -> Iterator[None]:
 
 @dataclass
 class Playing:
-    """A live tournament and its game function and optional agent address."""
+    """A live tournament, its remaining grants and its retained outcomes."""
 
     run: EvalRun
     play: Function
@@ -540,13 +532,69 @@ class Playing:
 
     def grant(self, count: int, *, processes: int = 1) -> tuple[Match, ...]:
         """Reserve up to one process's share of the remaining matches."""
-        count = min(count, max(1, math.ceil(len(self.pending) / processes)))
+        count = min(count, math.ceil(len(self.pending) / processes))
         granted: list[Match] = []
         while self.pending and len(granted) < count:
             match = self.pending.popleft()
             if match.key not in self.run._failed and match.key not in self.run.done:
                 granted.append(match)
         return tuple(granted)
+
+    def _remember_failure(self, error: EtudeError | RetryRequested) -> None:
+        if self.failure is None or (
+            isinstance(error, RetryRequested) and not isinstance(self.failure, RetryRequested)
+        ):
+            self.failure = error
+
+    def fail_checkpoint(self, error: ForwardError) -> None:
+        affected = [
+            match
+            for match in self.run.matches
+            if match.key not in self.run.done
+            and match.key not in self.run._failed
+            and any(
+                c.key == error.checkpoint
+                for player in match.players
+                for c in player_checkpoints(player)
+            )
+        ]
+        if affected:
+            self.failure = self.run._record_failure(affected, error)
+            self.pending = deque(
+                match for match in self.pending if match.key not in self.run._failed
+            )
+
+    def fail_matches(self, matches: Sequence[Match], error: BaseException) -> None:
+        if not self.streaming:
+            # A retry raised by per-match play interrupts the whole pass.
+            if isinstance(error, RetryRequested):
+                raise error
+            if isinstance(error, ForwardError) and error.retry:
+                raise RetryRequested(str(error)) from error
+            self.pending.clear()
+        self._remember_failure(self.run._record_failure(matches, error))
+
+    def accept(self, match: Match, outcome: Outcome, started: float) -> None:
+        if match.key in self.run._failed:
+            return
+        if isinstance(outcome.result, BaseException):
+            self.fail_matches((match,), outcome.result)
+            return
+        try:
+            self.run._store_played(match, outcome.result, outcome.seconds)
+        except EtudeError as error:
+            if error.code != "match_failed":
+                raise
+            self._remember_failure(error)
+            self.pending.clear()
+            return
+        self.played += 1
+        print(
+            f"etude: {self.run.name}: {self.played}/{len(self.run.matches) - self.skipped} matches played, "
+            f"{time.monotonic() - started:.0f}s elapsed",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def play_together(
@@ -627,13 +675,30 @@ class _GameProcess:
     held: dict[str, Match] = field(default_factory=dict)
     done: bool = False
 
-
-def _retain(name: str, report: GameReport, directory: Path) -> None:
-    """Keep per-process reports beside group batches, or under a standalone run's artifacts."""
-    try:
-        DirectoryStorage(directory).put(name, report.model_dump_json().encode())
-    except OSError as error:
-        raise RetryRequested(f"game report {name} could not be retained") from error
+    def finish(self, message: Done, *, stopping: bool) -> None:
+        self.done = True
+        self.pipe.close()
+        each = self.playing
+        error = message.error
+        if error is None:
+            if self.held:
+                error = RuntimeError("play_many returned without yielding its held matches")
+            elif each.streaming and not stopping and each.pending and not message.report.matches:
+                error = RuntimeError("play_many returned without taking pending matches")
+            else:
+                return
+        matches = list(self.held.values())
+        if not matches and not each.streaming and each.pending:
+            matches.append(each.pending.popleft())
+        matches = [
+            match
+            for match in matches
+            if match.key not in each.run._failed and match.key not in each.run.done
+        ]
+        if matches or each.streaming:
+            # A broken stream stops grants even after releasing its last match.
+            each.pending.clear()
+            each.fail_matches(matches, error)
 
 
 def _play_matches(
@@ -656,99 +721,18 @@ def _play_matches(
                 continue
             failed_checkpoints.add(failure.checkpoint)
             for each in plays:
-                affected = [
-                    match
-                    for match in each.run.matches
-                    if match.key not in each.run.done
-                    and match.key not in each.run._failed
-                    and any(
-                        c.key == failure.checkpoint
-                        for player in match.players
-                        for c in player_checkpoints(player)
-                    )
-                ]
-                if not affected:
-                    continue
-                detail = str(failure)
-                each.failure = (
-                    RetryRequested(detail)
-                    if failure.retry
-                    else EtudeError("match_failed", 500, detail=detail)
-                )
-                for match in affected:
-                    each.run._stage_failure(match, detail, retry=failure.retry)
-                each.run._seal()
-                each.pending = deque(
-                    match for match in each.pending if match.key not in each.run._failed
-                )
+                each.fail_checkpoint(failure)
 
     def record_report(report: GameReport) -> None:
         nonlocal warned_imports
-        _retain(f"game-{report.pid}.json", report, resources.artifacts)
+        name = f"game-{report.pid}.json"
+        try:
+            DirectoryStorage(resources.artifacts).put(name, report.model_dump_json().encode())
+        except OSError as error:
+            raise RetryRequested(f"game report {name} could not be retained") from error
         if agent_process is not None and report.imports.warning and not warned_imports:
             print(report.imports.warning, file=sys.stderr, flush=True)
             warned_imports = True
-
-    def accept(each: Playing, match: Match, outcome: Outcome) -> None:
-        payload = outcome.result
-        if isinstance(payload, ForwardError) and payload.loading:
-            fail_checkpoints((payload,))
-        if match.key in each.run._failed:
-            return
-        if each.streaming and isinstance(payload, BaseException):
-            # The author released this slot explicitly. Pending matches can still succeed.
-            remember_failure(each, each.run._record_failure((match,), payload))
-            return
-        try:
-            each.run._store_played(match, payload, seconds=outcome.seconds)
-        except EtudeError as error:
-            if error.code != "match_failed":
-                raise
-            remember_failure(each, error)
-            # Stop granting new matches; already-running matches still reach accept.
-            each.pending.clear()
-        else:
-            each.played += 1
-            print(
-                f"etude: {each.run.name}: {each.played}/{len(each.run.matches) - each.skipped} matches played, "
-                f"{time.monotonic() - started:.0f}s elapsed",
-                file=sys.stderr,
-                flush=True,
-            )
-
-    def remember_failure(each: Playing, error: EtudeError | RetryRequested) -> None:
-        if each.failure is None or (
-            isinstance(error, RetryRequested) and not isinstance(each.failure, RetryRequested)
-        ):
-            each.failure = error
-
-    def fail_held(child: _GameProcess, error: BaseException) -> None:
-        each = child.playing
-        matches = list(child.held.values())
-        child.held.clear()
-        if not matches and not each.streaming:
-            if each.pending:
-                matches = [each.pending.popleft()]
-            else:
-                return
-        matches = [
-            match
-            for match in matches
-            if match.key not in each.run._failed and match.key not in each.run.done
-        ]
-        if each.streaming:
-            each.pending.clear()
-            # A broken stream fails the tournament even after releasing its last match.
-            remember_failure(each, each.run._record_failure(matches, error))
-            return
-        for match in matches:
-            try:
-                each.run._store_played(match, error)
-            except EtudeError as match_error:
-                if match_error.code != "match_failed":
-                    raise
-                each.failure = match_error
-                each.pending.clear()
 
     stopping = any(each.run.should_stop for each in plays)
     context = multiprocessing.get_context("spawn")
@@ -812,27 +796,16 @@ def _play_matches(
             )
             granted = () if stopping else each.grant(message.count, processes=processes)
             child.held.update((match.key, match) for match in granted)
-            child.pipe.send(Grant(granted))
+            child.pipe.send(granted)
         elif isinstance(message, Outcome):
             match = child.held.pop(message.match_key)
-            accept(each, match, message)
+            if isinstance(message.result, ForwardError) and message.result.loading:
+                fail_checkpoints((message.result,))
+            each.accept(match, message, started)
         elif isinstance(message, Done):
             fail_checkpoints(message.loading_failures)
             record_report(message.report)
-            if message.error is not None:
-                fail_held(child, message.error)
-            elif child.held:
-                fail_held(
-                    child,
-                    RuntimeError("play_many returned without yielding its held matches"),
-                )
-            elif each.streaming and not stopping and each.pending and not message.report.matches:
-                fail_held(
-                    child,
-                    RuntimeError("play_many returned without taking pending matches"),
-                )
-            child.done = True
-            child.pipe.close()
+            child.finish(message, stopping=stopping)
         else:
             raise TypeError(f"unexpected game message {type(message).__name__}")
 
@@ -872,6 +845,7 @@ def _play_matches(
                         handle_message(child, message)
                         if not exited:
                             break
+            # Retain buffered outcomes from every child before raising on a crashed process.
             for child in live.copy():
                 if child.process.sentinel not in ready:
                     continue

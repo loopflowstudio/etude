@@ -86,24 +86,12 @@ class _Batches:
     def add(
         self,
         peer: socket.socket,
-        request: CheckpointRequest,
-        receive_seconds: float = 0.0,
-    ) -> None:
-        self.pending.setdefault(request.checkpoint.key, []).append(
-            _Pending(peer, request, receive_seconds)
-        )
-
-    def add_batch(
-        self,
-        peer: socket.socket,
         requests: Sequence[CheckpointRequest],
         receive_seconds: float = 0.0,
     ) -> None:
-        if not requests:
-            return
-        share = receive_seconds / len(requests)
         for request in requests:
-            self.add(peer, request, share)
+            pending = _Pending(peer, request, receive_seconds / len(requests))
+            self.pending.setdefault(request.checkpoint.key, []).append(pending)
 
     def _forward(
         self, key: str, batch: list[_Pending], rows: int
@@ -238,13 +226,13 @@ def _run_agents(
                         started = time.monotonic()
                         try:
                             payload = recv_frame(peer)
-                            request = cast(list[CheckpointRequest], ForkingPickler.loads(payload))
+                            requests = cast(list[CheckpointRequest], ForkingPickler.loads(payload))
                         except (EOFError, OSError):
                             selector.unregister(peer)
                             peer.close()
                             peers.remove(peer)
                         else:
-                            batches.add_batch(peer, request, time.monotonic() - started)
+                            batches.add(peer, requests, time.monotonic() - started)
                 flushed = batches.flush(wait_seconds)
                 if flushed:
                     wait_seconds = 0.0
