@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import nullcontext
 from decimal import Decimal
@@ -53,6 +54,7 @@ from etude.eval.resources import (
     Device,
     Inference,
     Placement,
+    TournamentQueue,
     _detect_accelerator,
     available_cpus,
     memory_bytes,
@@ -630,15 +632,15 @@ def test_play_arity_and_removed_workers_are_refused(tmp_path: Path) -> None:
         (16, (64,), True, 32, None, ("local", 16, 1, 0, 2, True)),
         # Small play CPU: 5 pending, max_batch=32, 16 cores -> 1 process, 15 inference threads.
         (16, (5,), True, 32, None, ("local", 1, 15, 0, 5, True)),
-        # Medium play CPU: 30 pending, max_batch=256, 16 cores -> 2 processes, 7 threads each.
-        (16, (30,), True, 256, None, ("local", 2, 7, 0, 30, True)),
-        (16, (16,), True, 32, None, ("local", 8, 1, 0, 4, True)),
+        # Both panels fit in one process once it gets the whole batch budget.
+        (16, (30,), True, 256, None, ("local", 1, 15, 0, 30, True)),
+        (16, (16,), True, 32, None, ("local", 1, 15, 0, 16, True)),
         # Direct processes share queues, so the largest determines their count.
-        (8, (4, 3, 2), True, 8, None, ("local", 2, 3, 0, 4, True)),
+        (8, (4, 3, 2), True, 8, None, ("local", 1, 7, 0, 4, True)),
         (3, (20,), True, 32, None, ("local", 2, 1, 0, 16, True)),
         (2, (20,), True, 32, None, ("local", 2, 1, 0, 16, True)),
         (8, (20,), False, 32, None, (None, 8, 1, 0, 1, False)),
-        (8, (20,), True, 32, None, ("local", 3, 1, 0, 11, True)),
+        (8, (20,), True, 32, None, ("local", 2, 3, 0, 16, True)),
         (8, (20,), True, 32, 1.5, ("local", 2, 3, 0, 16, True)),
         (8, (1,), True, 32, None, ("local", 1, 7, 0, 1, True)),
         (1, (20,), True, 32, None, ("local", 1, 1, 0, 20, True)),
@@ -663,7 +665,7 @@ def test_place_respects_cpu_pending_and_memory(
         "etude.eval.resources.memory_bytes", lambda: 16 * 1024**3 if cpus >= 16 else 2 * 1024**3
     )
     chosen = place(
-        pending,
+        [TournamentQueue(count) for count in pending],
         loader=Agents(load=load, max_batch=max_batch, memory_gb=memory_gb).plain(None),
         checkpoints=agents,
     )
@@ -688,7 +690,7 @@ def test_place_sizes_direct_caches_for_a_match(
     monkeypatch.setattr(eval_resources, "available_cpus", lambda: 16)
     monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 16 * 1024**3)
     placement = place(
-        (64,),
+        (TournamentQueue(64),),
         loader=Agents(load=load, memory_gb=2).plain(None),
         checkpoints=True,
         match_bytes=match_mib * 1024**2,
@@ -752,8 +754,7 @@ def test_cuda_placement_routes_both_play_functions(
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
     chosen = place(
-        () if streaming else pending,
-        streaming=pending if streaming else (),
+        [TournamentQueue(count, streaming=streaming) for count in pending],
         loader=Agents(load=load, max_batch=max_batch, memory_gb=memory_gb).plain(None),
         checkpoints=agents,
     )
@@ -770,6 +771,21 @@ def test_cuda_placement_routes_both_play_functions(
         assert chosen.reason == ("cuda" if visible == "0" else "CUDA_VISIBLE_DEVICES hides GPUs")
 
 
+@pytest.mark.parametrize("accelerator", ["cuda", "metal"])
+def test_place_allocates_the_remaining_accelerator_processes_to_streaming(
+    monkeypatch: pytest.MonkeyPatch, accelerator: Accelerator
+) -> None:
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: accelerator)
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 16)
+    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 16 * 1024**3)
+    queues = (TournamentQueue(10), TournamentQueue(128, streaming=True))
+    plan = place(queues, loader=Agents(load=load, max_batch=32).plain(None), checkpoints=True)
+    assert plan.bus == "socket"
+    assert plan.games_per_process == 3
+    assert plan.processes == 15
+    assert plan.tournament_processes == (4, 11)
+
+
 def test_code_only_and_cpu_streaming_do_not_probe_gpu(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -779,9 +795,10 @@ def test_code_only_and_cpu_streaming_do_not_probe_gpu(
     monkeypatch.setattr(eval_resources, "_detect_accelerator", fail_probe)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
-    assert place((6,), loader=AgentLoader(), checkpoints=False) == Placement(
+    assert place((TournamentQueue(6),), loader=AgentLoader(), checkpoints=False) == Placement(
         bus=None,
         processes=4,
+        tournament_processes=(4,),
         game_threads=1,
         agent_threads=0,
         games_per_process=1,
@@ -789,9 +806,14 @@ def test_code_only_and_cpu_streaming_do_not_probe_gpu(
         checkpoint_bytes=0,
         reason="no loader",
     )
-    assert place((), streaming=(2, 3), loader=AgentLoader(), checkpoints=False) == Placement(
+    assert place(
+        (TournamentQueue(2, streaming=True), TournamentQueue(3, streaming=True)),
+        loader=AgentLoader(),
+        checkpoints=False,
+    ) == Placement(
         bus=None,
         processes=4,
+        tournament_processes=(2, 2),
         game_threads=1,
         agent_threads=0,
         games_per_process=None,
@@ -800,14 +822,14 @@ def test_code_only_and_cpu_streaming_do_not_probe_gpu(
         reason="no loader",
     )
     assert place(
-        (),
-        streaming=(2, 3),
+        (TournamentQueue(2, streaming=True), TournamentQueue(3, streaming=True)),
         loader=Agents(load=load, devices=("cpu",)).plain(None),
         checkpoints=True,
         match_bytes=16 * 1024**3,
     ) == Placement(
         bus="local",
         processes=1,
+        tournament_processes=(1, 1),
         game_threads=3,
         agent_threads=0,
         games_per_process=None,
@@ -827,7 +849,7 @@ def test_place_reserves_checkpoint_memory_once(
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: next(samples))
     shared = bool(request.node.callspec.params["shared_agents"])
     placement = place(
-        (6,),
+        (TournamentQueue(6),),
         loader=Agents(load=load, max_batch=2, memory_gb=memory_gb).plain(None),
         checkpoints=True,
         match_bytes=2 * 1024**3 if shared else 1,
@@ -851,7 +873,7 @@ def test_a_failing_nvidia_driver_plays_direct(
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
-    plan = place((64,), loader=Agents(load=load).plain(None), checkpoints=True)
+    plan = place((TournamentQueue(64),), loader=Agents(load=load).plain(None), checkpoints=True)
     assert (plan.reason, plan.processes, plan.games_per_process) == ("nvidia-smi failed", 4, 8)
 
 
@@ -859,7 +881,7 @@ def test_a_failing_nvidia_driver_plays_direct(
     ("plat", "machine", "cpus", "memory_gb", "batch_inputs", "processes", "threads", "accelerator"),
     [
         ("darwin", "arm64", 8, None, 32, 7, 1, "metal"),
-        ("darwin", "arm64", 16, None, 8, 15, 1, "metal"),
+        ("darwin", "arm64", 16, None, 8, 8, 8, "metal"),
         ("darwin", "arm64", 1, None, 32, 1, 1, "metal"),
         ("darwin", "arm64", 8, 15.5, 32, 2, 6, "metal"),
         ("darwin", "x86_64", 8, None, 32, 8, 1, None),
@@ -885,7 +907,7 @@ def test_apple_silicon_placement_bounds_games_by_cores_and_memory(
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
     loader = Agents(load=load, memory_gb=memory_gb, max_batch=batch_inputs).plain(None)
-    plan = place((64,), loader=loader, checkpoints=True)
+    plan = place((TournamentQueue(64),), loader=loader, checkpoints=True)
     shared = accelerator is not None and processes > 1
     assert (plan.processes, (plan.agent_threads or plan.game_threads), plan.reason) == (
         processes,
@@ -917,7 +939,7 @@ def test_agent_devices_share_only_on_declared_accelerators(
 ) -> None:
     monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: detected)
     loader = Agents(load=load, devices=devices).plain(None)
-    assert place((1,), loader=loader, checkpoints=True).reason == inference
+    assert place((TournamentQueue(1),), loader=loader, checkpoints=True).reason == inference
 
 
 def test_probe_skipped_without_checkpoint_loading_or_accelerator(
@@ -933,7 +955,7 @@ def test_probe_skipped_without_checkpoint_loading_or_accelerator(
         (AgentLoader(), True, "no loader"),
         (Agents(load=load).plain(None), False, "no checkpoints"),
     ):
-        plan = place((8,), loader=loader, checkpoints=checkpoints)
+        plan = place((TournamentQueue(8),), loader=loader, checkpoints=checkpoints)
         assert (plan.reason, plan.processes, plan.games_per_process, plan.checkpoint_bytes) == (
             reason,
             8,
@@ -941,7 +963,7 @@ def test_probe_skipped_without_checkpoint_loading_or_accelerator(
             0,
         )
     loader = Agents(load=load, devices=("cpu",), max_batch=16).plain(None)
-    cpu = place((8,), loader=loader, checkpoints=True)
+    cpu = place((TournamentQueue(8),), loader=loader, checkpoints=True)
     assert (cpu.reason, cpu.processes, cpu.games_per_process, cpu.game_threads) == (
         "cpu-only loader",
         4,
@@ -2384,6 +2406,83 @@ def test_mixed_play_functions_share_checkpoint_inference(
         db.close()
 
 
+_mixed_forward_started = threading.Event()
+_mixed_forward_release = threading.Event()
+
+
+def load_mixed_stream_probe(ref: CheckpointRef) -> ModelForward:
+    def forward(inputs: list[object]) -> list[object]:
+        if isinstance(inputs[0], dict):
+            _mixed_forward_started.set()
+            if not _mixed_forward_release.wait(timeout=5):
+                raise TimeoutError("fixture game did not finish stepping")
+            return [cast(dict[str, list[int]], value)["step"][0] for value in inputs]
+        return [len(inputs)] * len(inputs)
+
+    return forward
+
+
+async def overlapping_stream(
+    matches: Matches,
+) -> AsyncIterator[tuple[Match, Tables]]:
+    [(match, agents)] = await matches.take(1)
+    forward = cast(Forward, agents[0])
+    inputs = {"step": [1]}
+    pending = forward([inputs])
+    try:
+        assert _mixed_forward_started.wait(timeout=5), "stream deferred its forward"
+        inputs["step"][0] = 2
+        following = forward([inputs])
+        inputs["step"][0] = 3
+    finally:
+        _mixed_forward_release.set()
+    [old] = await pending
+    [new] = await following
+    yield match, {"snapshots": [{"seat": 0, "first": cast(int, old), "second": cast(int, new)}]}
+
+
+async def mixed_barrier_play(match: Match, agents: Sequence[object]) -> Tables:
+    [rows] = await cast(Forward, agents[0])([0])
+    return {"scores": [{"seat": 0, "score": cast(int, rows)}]}
+
+
+def test_direct_mixed_group_switches_submission_mode_between_streams(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
+    agents = Agents(load=load_mixed_stream_probe, max_batch=4)
+    players = (checkpoint("left"), checkpoint("right"))
+    vector = EvalJob(
+        tournament=tournament("vector"),
+        enter=players,
+        play_many=overlapping_stream,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    ordinary = EvalJob(
+        tournament=RoundRobin(
+            name="ordinary", environment=environment("grouped"), games=2, base_seed=2
+        ),
+        enter=players,
+        play=mixed_barrier_play,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    assert [
+        result.played for result in hold_group(group(vector, ordinary), directory=tmp_path)
+    ] == [
+        1,
+        2,
+    ]
+    [report] = (tmp_path / "grouped/artifacts/agents").glob("game-*.json")
+    assert GameReport.model_validate_json(report.read_bytes()).tournaments == ("vector", "ordinary")
+    with statsdb("grouped", tmp_path) as db:
+        assert db.sql("select first, second from snapshots").fetchall() == [(1, 2)]
+        assert db.sql("select score from scores").fetchall() == [(2,), (2,)]
+
+
 async def array_vector_slots(
     matches: Matches[VectorRules],
 ) -> AsyncIterator[tuple[Match[VectorRules], Result | Exception]]:
@@ -2514,6 +2613,54 @@ def test_interrupted_tournament_keeps_completed_tournament_finished(
         assert len(interrupted.delivered) == 3 and not interrupted.failed
     else:
         assert len(interrupted.new) == len(interrupted.failed) == len(interrupted.retry) == 3
+
+
+async def hold_stream_match(matches: Matches) -> AsyncIterator[tuple[Match, Tables]]:
+    [(match, _)] = await matches.take(1)
+    signal.pause()
+    yield match, {"scores": [{"seat": 0, "score": 1}]}
+
+
+def test_report_failure_fails_its_owner_while_a_sibling_is_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 2)
+    monkeypatch.setenv("ETUDE_RUN_ADDRESS", "grouped/mixed")
+    wait_for_games(monkeypatch, processes=2)
+    put = DirectoryStorage.put
+
+    def fail_report(storage: DirectoryStorage, key: str, data: bytes) -> None:
+        if key.startswith("game-") and GameReport.model_validate_json(data).tournaments == (
+            "ordinary",
+        ):
+            raise OSError("fixture report failure")
+        put(storage, key, data)
+
+    monkeypatch.setattr(DirectoryStorage, "put", fail_report)
+    ordinary = job("ordinary", None)
+    sibling = EvalJob(
+        tournament=RoundRobin(
+            name="sibling", environment=environment("grouped"), games=3, base_seed=2
+        ),
+        enter=ordinary.enter,
+        play_many=hold_stream_match,
+        repo=None,
+        max_hours=0.1,
+    )
+    selected = group(ordinary, sibling)
+    with pytest.raises(RetryRequested, match="game report .* could not be retained"):
+        hold_group(selected, directory=tmp_path)
+    for spec in selected.evaluations:
+        outcome = tmp_path / "grouped/mixed" / spec.address / "outcome.json"
+        assert RunOutcome.model_validate_json(outcome.read_bytes()).state == "failed"
+    delivered = played(
+        ordinary.tournament, experiment="grouped", enter=ordinary.enter, directory=tmp_path
+    )
+    assert len(delivered.delivered) == 1 and not delivered.failed
+    interrupted = played(
+        sibling.tournament, experiment="grouped", enter=sibling.enter, directory=tmp_path
+    )
+    assert len(interrupted.failed) == len(interrupted.retry) == 3
 
 
 async def fail_first_stream_match(

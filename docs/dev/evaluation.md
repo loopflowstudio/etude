@@ -134,13 +134,14 @@ with evaluating(
   `Seating` makes one match per config. Seat swaps belong
   inside `play`. Group `all` holds every seat; a player may sit in two seats.
 - **Game processes and placement.** `Placement` owns the group's process
-  layout, checkpoint bytes per inference owner and startup line. The one
-  checkpoint reservation is `Agents.memory_gb` or half of host memory.
+  layout, each tournament's process limit, checkpoint bytes per inference owner
+  and startup line. The checkpoint reservation is `Agents.memory_gb` or half
+  of host memory.
   - Shared inference (`bus="socket"`) requires a declared, detected CUDA or
     Metal accelerator and more than one game process. Each game process serves
     one tournament and gets one thread. The agent process gets the remaining
-    cores and the full checkpoint reservation. CUDA bounds the game process
-    count by `max_batch`.
+    cores and the full checkpoint reservation. Both accelerators cap the number
+    of game processes at `max_batch`.
   - In direct inference (`bus="local"`), each process can serve the tournament
     queues in turn and keeps its cache across streams. Direct copies share the
     checkpoint reservation and use `max(1, (cpus - processes) // processes)`
@@ -151,11 +152,13 @@ with evaluating(
 
   Each game process has one event loop. Async `play` runs up to
   `games_per_process` matches at once and flushes forwards on a zero-delay
-  loop barrier. The parent reserves the first async matches for each process
-  before handling outcomes. Each `play_many` generator requests matches for
-  its free slots. A take grants at most the tournament's pending matches
-  divided by the processes with an open stream for it, rounded up. Both kinds
-  of tournament share an agent process when using shared inference.
+  loop barrier. Placement sizes an async queue by the number of processes
+  needed to cover its pending matches at that concurrency. The parent reserves
+  the first async matches and one match per starting `play_many` stream before
+  handling requests. Each `play_many` generator submits forwards on the call
+  and requests matches for its free slots. A take grants at most the available
+  matches divided by that tournament's planned process count, rounded up.
+  Both kinds of tournament share an agent process when using shared inference.
   Per-process diagnostics go to `artifacts/agents/game-{pid}.json`
   (`GameReport` with `tournaments: tuple[str, ...]`), keeping a game-thread-filtered
   `builtins.__import__` hook active from module load through player wrapper
@@ -249,8 +252,9 @@ with evaluating(
   A retryable error is returned for each tournament with queued or in-flight
   matches. Matches dropped from the queue after a permanent failure remain
   unplayed. The group raises `Terminated` after closing its members when a stop
-  interrupted them. A game process teardown error after all matches have
-  settled belongs to the tournaments served by that process.
+  interrupted them. A game process teardown error also fails the tournaments
+  served by that process after their matches have settled. Already stored
+  matches are reused on retry.
 - **Progress.** Each stored match prints one line to stderr:
   `etude: RUN: 12/36 matches played, 220s elapsed`.
 - **Storage.** Stored matches are sealed into blocks every five minutes (or

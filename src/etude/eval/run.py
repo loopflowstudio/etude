@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -70,7 +70,7 @@ from etude.eval.records import (
     outcomes,
     player_checkpoints,
 )
-from etude.eval.resources import Resources, place, resources, seconds_left
+from etude.eval.resources import Resources, TournamentQueue, place, resources, seconds_left
 from etude.eval.result import EvalResult as EvalResult
 from etude.eval.result import Result as Result
 from etude.eval.result import Row
@@ -547,7 +547,7 @@ class Playing:
 
     def grant(self, count: int, *, processes: int = 1) -> tuple[Match, ...]:
         """Reserve up to one process's share of the remaining matches."""
-        count = min(count, math.ceil(len(self.pending) / processes))
+        count = min(count, max(1, math.ceil(len(self.pending) / processes)))
         granted: list[Match] = []
         while self.pending and len(granted) < count:
             match = self.pending.popleft()
@@ -557,12 +557,32 @@ class Playing:
 
 
 @dataclass
+class _GameStream:
+    playing: Playing
+    held: dict[str, Match]
+    reserved: Match | None = None  # One streaming match available on the first positive take.
+    ended: bool = False
+
+    def release_reservation(self) -> None:
+        if self.reserved is not None and self.reserved.key not in self.playing.run._failed:
+            self.playing.pending.appendleft(self.reserved)
+        self.reserved = None
+
+    def restore(self) -> None:
+        self.playing.pending.extendleft(reversed(self.held.values()))
+        self.release_reservation()
+
+
+@dataclass
 class _GameProcess:
-    plays: tuple[Playing, ...]
     process: multiprocessing.context.SpawnProcess
     pipe: Connection
-    held: dict[int, dict[str, Match]]  # Every open stream, including those between grants.
+    streams: tuple[_GameStream, ...]
     done: bool = False
+
+    @property
+    def tournaments(self) -> tuple[Playing, ...]:
+        return tuple(stream.playing for stream in self.streams)
 
 
 def _retain(name: str, report: GameReport, directory: Path) -> None:
@@ -581,7 +601,7 @@ def play_together(
 ) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
     """Run all pending tournament queues under one placement."""
     pending = tuple(each for each in plays if each.pending)
-    teardown_plays = pending
+    failed_owner: tuple[Playing, ...] = ()
     agents = pending[0].agent_loader if pending else AgentLoader()
     if any(each.agent_loader != agents for each in pending):
         raise EtudeError("incompatible_eval_agents", 422)
@@ -658,31 +678,8 @@ def play_together(
         ):
             each.failure = error
 
-    def fail_held(each: Playing, held: dict[str, Match], error: BaseException) -> None:
-        matches = list(held.values())
-        if not matches and not each.streaming and each.pending:
-            matches = [each.pending[0]]
-        matches = [
-            match
-            for match in matches
-            if match.key not in each.run._failed and match.key not in each.run.done
-        ]
-        if each.streaming:
-            # A broken stream fails the tournament even after releasing its last match.
-            remember_failure(each, each.run._record_failure(matches, error))
-            each.pending.clear()
-            return
-        for match in matches:
-            try:
-                each.run._store_played(match, error)
-            except EtudeError as match_error:
-                if match_error.code != "match_failed":
-                    raise
-                remember_failure(each, match_error)
-                each.pending.clear()
-
     def run_pending(owned: Resources) -> None:
-        nonlocal teardown_plays
+        nonlocal failed_owner
         if any(each.run.should_stop for each in pending):
             raise Terminated("evaluation stopped before its execution deadline")
         stopping = False
@@ -702,14 +699,14 @@ def play_together(
                         needs_loading = True
                         match_bytes = max(match_bytes, sum(sizes.values()))
         placement = place(
-            [len(each.pending) for each in pending if not each.streaming],
-            streaming=[len(each.pending) for each in pending if each.streaming],
+            [TournamentQueue(len(each.pending), streaming=each.streaming) for each in pending],
             loader=agents,
             checkpoints=needs_loading,
             match_bytes=match_bytes,
         )
         load = agents.load if placement.bus == "local" else None
         games_per_process = placement.games_per_process
+        process_limits = dict(zip(map(id, pending), placement.tournament_processes, strict=True))
 
         with ExitStack() as agent_lifetime:
             agent_process: AgentProcess | None = None
@@ -719,15 +716,11 @@ def play_together(
                 )
             agent_address = agent_process.address if agent_process is not None else None
 
-            def record_report(child: _GameProcess, report: GameReport | None) -> None:
-                nonlocal warned_imports, teardown_plays
+            def record_report(report: GameReport | None) -> None:
+                nonlocal warned_imports
                 if report is None:
                     return
-                try:
-                    _retain(f"game-{report.pid}.json", report, owned.artifacts)
-                except RetryRequested:
-                    teardown_plays = child.plays
-                    raise
+                _retain(f"game-{report.pid}.json", report, owned.artifacts)
                 if placement.bus is not None and not warned_imports:
                     warning = report.imports.warning(count_limit=placement.bus == "socket")
                     if warning:
@@ -742,20 +735,31 @@ def play_together(
                 parent, child_pipe = context.Pipe()
                 # Starting async games own their initial matches before any outcome is handled.
                 # Streaming engines request work when they have free slots.
-                streams = tuple(
-                    Stream(
-                        tournament=each.tournament,
-                        function=each.play,
-                        concurrency=None if each.streaming else games_per_process,
-                        initial=each.grant(games_per_process)
-                        if not each.streaming and games_per_process is not None
-                        else (),
+                specs = []
+                streams = []
+                for each in targets:
+                    concurrency = None if each.streaming else games_per_process
+                    initial = each.grant(concurrency) if concurrency is not None else ()
+                    # Keep a fast stream from draining the queue before its peers start.
+                    reserved = each.pending.popleft() if each.streaming else None
+                    streams.append(
+                        _GameStream(
+                            playing=each,
+                            held={match.key: match for match in initial},
+                            reserved=reserved,
+                        )
                     )
-                    for each in targets
-                )
+                    specs.append(
+                        Stream(
+                            tournament=each.tournament,
+                            function=each.play,
+                            concurrency=concurrency,
+                            initial=initial,
+                        )
+                    )
                 process = context.Process(
                     target=run_game_process,
-                    args=(child_pipe, owned, streams),
+                    args=(child_pipe, owned, tuple(specs)),
                     kwargs={
                         "threads": placement.game_threads,
                         "agents": agent_address,
@@ -769,94 +773,126 @@ def play_together(
                 try:
                     process.start()
                 except BaseException:
-                    for each, spec in zip(targets, streams, strict=True):
-                        each.pending.extendleft(reversed(spec.initial))
+                    for stream in streams:
+                        stream.restore()
                     parent.close()
                     child_pipe.close()
                     raise
                 child_pipe.close()
-                held = {
-                    index: {match.key: match for match in spec.initial}
-                    for index, spec in enumerate(streams)
-                }
-                return _GameProcess(plays=targets, process=process, pipe=parent, held=held)
-
-            def active_streams(targets: tuple[Playing, ...], stream: int) -> int:
-                return sum(child.plays is targets and stream in child.held for child in live)
+                return _GameProcess(process=process, pipe=parent, streams=tuple(streams))
 
             def spawn_ready() -> None:
                 nonlocal stopping
+                serving = Counter(
+                    id(stream.playing)
+                    for child in live
+                    for stream in child.streams
+                    if not stream.ended
+                )
                 while len(live) < placement.processes and not stopping:
                     spawned = False
-                    for targets in stream_groups:
+                    for group in stream_groups:
                         if len(live) >= placement.processes:
                             break
-                        if not any(
-                            each.pending
-                            and (
-                                not each.streaming
-                                or active_streams(targets, index) < len(each.pending)
-                            )
-                            for index, each in enumerate(targets)
-                        ):
+                        targets = tuple(
+                            each
+                            for each in group
+                            if each.pending and serving[id(each)] < process_limits[id(each)]
+                        )
+                        if not targets:
                             continue
-                        if any(each.pending and each.run.should_stop for each in targets):
+                        if any(each.run.should_stop for each in targets):
                             stopping = True
                             return
                         live.append(spawn_one(targets))
+                        serving.update(map(id, targets))
                         spawned = True
                     if not spawned:
                         break
 
+            def fail_stream(stream: _GameStream, error: BaseException) -> None:
+                each = stream.playing
+                matches = list(stream.held.values())
+                if not matches and not each.streaming and each.pending:
+                    matches = [each.pending[0]]
+                matches = [
+                    match
+                    for match in matches
+                    if match.key not in each.run._failed and match.key not in each.run.done
+                ]
+                if each.streaming:
+                    remember_failure(each, each.run._record_failure(matches, error))
+                    each.pending.clear()
+                    # A broken stream also revokes reservations its peers have yet to claim.
+                    for peer in live:
+                        for opened in peer.streams:
+                            if opened.playing is each:
+                                opened.reserved = None
+                    return
+                for match in matches:
+                    try:
+                        each.run._store_played(match, error)
+                    except EtudeError as match_error:
+                        if match_error.code != "match_failed":
+                            raise
+                        remember_failure(each, match_error)
+                        each.pending.clear()
+
             def handle_message(child: _GameProcess, message: object) -> None:
-                nonlocal stopping, teardown_plays
+                nonlocal stopping, failed_owner
                 if isinstance(message, Take):
-                    each = child.plays[message.stream]
-                    if not stopping and each.pending and each.run.should_stop:
+                    stream = child.streams[message.stream]
+                    each = stream.playing
+                    if not stopping and (each.pending or stream.reserved) and each.run.should_stop:
                         stopping = True
                     granted: tuple[Match, ...] = ()
                     if not stopping and message.count > 0:
-                        processes = (
-                            active_streams(child.plays, message.stream) if each.streaming else 1
-                        )
+                        stream.release_reservation()
+                        processes = process_limits[id(each)] if each.streaming else 1
                         granted = each.grant(message.count, processes=processes)
-                        child.held[message.stream].update((match.key, match) for match in granted)
+                        stream.held.update((match.key, match) for match in granted)
                     child.pipe.send(Grant(granted))
                 elif isinstance(message, Outcome):
-                    each = child.plays[message.stream]
-                    held = child.held[message.stream]
+                    stream = child.streams[message.stream]
+                    held = stream.held
                     # A retry during acceptance still belongs to this grant.
-                    accept(each, held[message.match_key], message)
+                    accept(stream.playing, held[message.match_key], message)
                     del held[message.match_key]
                 elif isinstance(message, StreamEnd):
-                    each = child.plays[message.stream]
                     fail_checkpoints(message.loading_failures)
-                    held = child.held.get(message.stream, {})
+                    stream = child.streams[message.stream]
+                    each = stream.playing
+                    stream.release_reservation()
                     if message.error is not None:
-                        fail_held(each, held, message.error)
-                    elif held:
-                        fail_held(
-                            each,
-                            held,
+                        fail_stream(stream, message.error)
+                    elif stream.held:
+                        fail_stream(
+                            stream,
                             RuntimeError("play_many returned without yielding its held matches"),
                         )
                     elif each.streaming and not stopping and each.pending and not message.matches:
-                        fail_held(
-                            each,
-                            {},
+                        fail_stream(
+                            stream,
                             RuntimeError("play_many returned without taking pending matches"),
                         )
-                    child.held.pop(message.stream, None)
+                    stream.held.clear()
+                    stream.ended = True
                 elif isinstance(message, (Done, Fatal)):
                     fail_checkpoints(message.loading_failures)
-                    record_report(child, message.report)
-                    if isinstance(message, Fatal):
-                        if isinstance(message.error, RetryRequested):
-                            teardown_plays = child.plays
-                            raise message.error
-                        for index, each in enumerate(child.plays):
-                            fail_held(each, child.held.get(index, {}), message.error)
-                            child.held.pop(index, None)
+                    try:
+                        record_report(message.report)
+                        if isinstance(message, Fatal):
+                            if isinstance(message.error, RetryRequested):
+                                raise message.error
+                            for stream in child.streams:
+                                each = stream.playing
+                                remember_failure(each, each.run._record_failure((), message.error))
+                                if not stream.ended:
+                                    fail_stream(stream, message.error)
+                                    stream.ended = True
+                    except RetryRequested:
+                        failed_owner = child.tournaments
+                        raise
                     child.done = True
                     child.pipe.close()
                 else:
@@ -909,7 +945,7 @@ def play_together(
                             receive(child)
                         child.process.join()
                         if not child.done or child.process.exitcode != 0:
-                            teardown_plays = child.plays
+                            failed_owner = child.tournaments
                             raise RetryRequested("game process exited before returning its match")
                         live.remove(child)
                         child.process.close()
@@ -918,8 +954,9 @@ def play_together(
             except RetryRequested:
                 # Keep unreturned grants eligible for retry after the children are reaped.
                 for child in live:
-                    for index, held in child.held.items():
-                        child.plays[index].pending.extend(held.values())
+                    for stream in child.streams:
+                        if not stream.ended:
+                            stream.restore()
                 raise
             finally:
                 for child in live:
@@ -945,12 +982,11 @@ def play_together(
                 each.failure = error
                 affected = True
             each.pending.clear()
-        if not affected:
-            # A late teardown error belongs to the owner of the failed process.
-            if not teardown_plays:
-                raise
-            for each in teardown_plays:
-                each.failure = error
+        owners = failed_owner or (() if affected else pending)
+        if not affected and not owners:
+            raise
+        for each in owners:
+            each.failure = error
     finally:
         for each in plays:
             each.run._report.failed += each.run.failed

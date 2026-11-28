@@ -1,6 +1,6 @@
 """Play variable-length matches with a pre-collated forward per step.
 
-uv run etude eval examples/vectorized.py --source /tmp/vectorized
+ETUDE_TRACK_DIR=/tmp/vectorized uv run etude eval examples/vectorized.py
 """
 
 from agent_game import checkpoint

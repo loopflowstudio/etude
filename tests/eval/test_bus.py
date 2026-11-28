@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from multiprocessing import Pipe
+from multiprocessing.connection import Connection, wait
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal, cast
@@ -36,7 +37,7 @@ from etude.eval.game import GameReport, Matches, _Forwarder
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Match, compose
-from etude.eval.resources import place, resources
+from etude.eval.resources import TournamentQueue, place, resources
 from etude.eval.result import Tables
 from etude.eval.tournament import evaluating
 from etude.jobs import Agents, EvalGroup, ExperimentState, evaluation_group, hold_group
@@ -776,10 +777,12 @@ def test_play_barrier_keeps_in_flight_inputs_locked_if_close_cannot_join(
             answer = forward([running])
             try:
                 assert await asyncio.to_thread(entered.wait, 5.0)
-                forward([staged])
+                staged_answer = forward([staged])
                 assert not staged.flags.writeable
                 forwarder.clear_pending()
                 assert staged.flags.writeable
+                with pytest.raises(asyncio.CancelledError):
+                    await staged_answer
 
                 with monkeypatch.context() as patch:
                     patch.setattr("etude.eval.batching.seconds_left", lambda: 0.0)
@@ -1571,6 +1574,38 @@ def test_vectorized_example_uses_two_half_numpy_arrays_zero_copy(
     assert reports[0].bus.wire_bytes == 0
 
 
+def test_vectorized_panel_reserves_work_before_a_fast_process_takes_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 8 * 1024**3)
+    rounds = 0
+
+    def first_process_twice(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal rounds
+        if rounds < 2:
+            rounds += 1
+            first = next(handle for handle in handles if isinstance(handle, Connection))
+            assert first.poll(10), "vectorized process did not request its next half"
+            return (first,)
+        return wait(handles, timeout=timeout)
+
+    monkeypatch.setattr("etude.eval.run.wait", first_process_twice)
+    eval_group = _load_example_group(Path("examples/vectorized.py"))
+    assert [result.played for result in hold_group(eval_group, directory=tmp_path)] == [8]
+    artifacts = tmp_path / "vectorized/artifacts/agents"
+    reports = [
+        GameReport.model_validate_json(path.read_bytes()) for path in artifacts.glob("game-*.json")
+    ]
+    assert [report.matches for report in reports] == [1] * 8
+    assert all(
+        report.bus.arrays > 0 and report.bus.arrays_copied == report.bus.wire_bytes == 0
+        for report in reports
+    )
+
+
 @pytest.mark.parametrize("transport", ["local", "socket"])
 def test_unawaited_play_many_future_on_early_exit_emits_no_warning_and_unlocks(
     transport: _Transport,
@@ -1694,7 +1729,7 @@ def test_unpicklable_request_disconnects_only_its_peer(
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     monkeypatch.setattr("etude.eval.resources._detect_accelerator", lambda: "cuda")
     definition = Agents(load=_identity_load).plain(None)
-    placement = place((), streaming=(2,), loader=definition, checkpoints=True)
+    placement = place((TournamentQueue(2, streaming=True),), loader=definition, checkpoints=True)
     cp = checkpoint("bad_request").checkpoint
     other = checkpoint("other_request").checkpoint
 

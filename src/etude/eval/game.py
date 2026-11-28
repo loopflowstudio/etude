@@ -273,7 +273,7 @@ class _Forwarder:
     def __init__(self, bus: ForwardBus, *, max_batch: int, eager: bool = False) -> None:
         self._bus = bus
         self.max_batch = max_batch
-        self._eager = eager
+        self.eager = eager
         self._handles: dict[str, _BoundForward] = {}
         self._pending: dict[str, list[_PendingCall]] = {}
         self._flight = Flight()
@@ -293,7 +293,7 @@ class _Forwarder:
     ) -> asyncio.Future[list[object]]:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[list[object]] = loop.create_future()
-        if self._eager:
+        if self.eager:
             self._submit([(checkpoint, [_PendingCall(inputs, rows, future)])])
         else:
             # The barrier holds these locks through the bus reply, even on cancellation.
@@ -308,6 +308,7 @@ class _Forwarder:
         for calls in self._pending.values():
             for call in calls:
                 self._flight.unlock(call.locked)
+                call.future.cancel()
         self._pending.clear()
 
     def _chunks(self, calls: list[_PendingCall]) -> Iterator[list[_PendingCall]]:
@@ -633,11 +634,7 @@ async def _serve_stream(
             elif agents is not None:
                 bus = await SocketForwardBus.connect(agents)
         if bus is not None:
-            forwarder = _Forwarder(
-                bus,
-                max_batch=max_batch,
-                eager=all(spec.concurrency is None for spec in streams),
-            )
+            forwarder = _Forwarder(bus, max_batch=max_batch)
 
         bind: Callable[[CheckpointRef], Forward] | None = (
             forwarder.bind if forwarder is not None else None
@@ -684,6 +681,8 @@ async def _serve_stream(
             if isinstance(loaded, Exception):
                 stream_error = loaded
             else:
+                if forwarder is not None:
+                    forwarder.eager = spec.concurrency is None
                 try:
                     play, kind = loaded
                     source: Matches = Matches(
@@ -737,6 +736,9 @@ async def _serve_stream(
                     raise
                 except Exception as error:
                     stream_error = error
+                finally:
+                    if forwarder is not None:
+                        forwarder.clear_pending()
             pipe.send(
                 StreamEnd(
                     stream=stream_index,

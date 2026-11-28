@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import deque
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -148,11 +149,20 @@ def _detect_accelerator() -> Accelerator | _Unavailable:
 
 
 @dataclass(frozen=True)
+class TournamentQueue:
+    """Pending match demand for one tournament."""
+
+    matches: int
+    streaming: bool = False
+
+
+@dataclass(frozen=True)
 class Placement:
     """Process topology, stream sharing, and resources per inference owner."""
 
     bus: Literal["local", "socket"] | None
     processes: int
+    tournament_processes: tuple[int, ...]
     game_threads: int
     agent_threads: int
     games_per_process: int | None  # Concurrency of async play, if present.
@@ -200,10 +210,23 @@ def _select_inference(loader: "AgentLoader", checkpoints: bool) -> Inference:
             return unavailable
 
 
+def _allocate_processes(demand: Sequence[int], processes: int) -> tuple[int, ...]:
+    """Share the host in tournament order, leaving one slot for queues that start later."""
+    allocated = [0] * len(demand)
+    eligible = deque(index for index, count in enumerate(demand) if count)
+    for _ in range(processes):
+        index = eligible.popleft()
+        allocated[index] += 1
+        if allocated[index] < demand[index]:
+            eligible.append(index)
+    return tuple(
+        max(1, slots) if count else 0 for slots, count in zip(allocated, demand, strict=True)
+    )
+
+
 def place(
-    pending: Sequence[int],
+    queues: Sequence[TournamentQueue],
     *,
-    streaming: Sequence[int] = (),
     loader: "AgentLoader",
     checkpoints: bool,
     match_bytes: int = 0,
@@ -211,14 +234,14 @@ def place(
     """Allocate one host to the pending async and streaming match queues.
 
     `match_bytes` is the largest known total of distinct checkpoints seated in
-    a pending match.
+    a pending match. Process counts follow the input queue order.
     """
-    queues = tuple(count for count in pending if count > 0)
-    streams = tuple(count for count in streaming if count > 0)
-    if not queues and not streams:
+    total = sum(queue.matches for queue in queues)
+    if not total:
         return Placement(
             bus=None,
             processes=0,
+            tournament_processes=(0,) * len(queues),
             game_threads=1,
             agent_threads=0,
             games_per_process=None,
@@ -229,15 +252,18 @@ def place(
     inference = _select_inference(loader, checkpoints)
     cpus = available_cpus()
     host_bytes = memory_bytes()
-    loading = loader.load is not None and checkpoints
-    if not loading:
-        cap = min(cpus, max(1, host_bytes // GAME_BYTES))
+    largest_play = max((queue.matches for queue in queues if not queue.streaming), default=0)
+    if inference in ("no loader", "no checkpoints"):
+        processes = min(cpus, max(1, host_bytes // GAME_BYTES), total)
         return Placement(
             bus=None,
-            processes=min(cap, sum(queues) + sum(streams)),
+            processes=processes,
+            tournament_processes=_allocate_processes(
+                [queue.matches for queue in queues], processes
+            ),
             game_threads=1,
             agent_threads=0,
-            games_per_process=1 if queues else None,
+            games_per_process=1 if largest_play else None,
             share_streams=False,
             checkpoint_bytes=0,
             reason=inference,
@@ -248,32 +274,36 @@ def place(
     accelerator = inference in ("cuda", "metal")
     memory_processes = max(1, (host_bytes - held) // GAME_BYTES)
     cap = min(max(1, cpus - 1) if accelerator else cpus, memory_processes)
-    if inference == "cuda":
+    if accelerator:
         cap = min(cap, loader.max_batch)
-    if not accelerator and match_bytes > 0:
+    elif match_bytes > 0:
         # Each direct process needs room for a match in its own checkpoint cache.
         cap = min(cap, max(1, held // match_bytes))
-    largest = max(queues, default=0)
-    if not accelerator:
-        # Direct processes reuse their cache and serve the same queues in turn.
-        queues = (largest,) if queues else ()
-        streams = (max(streams),) if streams else ()
-    # Each streaming generator can take its own slots. Size async demand at
-    # the host's process limit, then divide the batch across the processes chosen.
-    streaming_demand = sum(streams)
-    games = math.ceil(loader.max_batch / min(cap, sum(queues) + streaming_demand))
-    async_demand = sum(math.ceil(count / games) for count in queues)
-    demand = async_demand + streaming_demand if accelerator else max(async_demand, streaming_demand)
-    processes = min(cap, demand)
+
+    processes = min(cap, total)
+    while True:
+        games = math.ceil(loader.max_batch / processes)
+        demand = [
+            queue.matches if queue.streaming else math.ceil(queue.matches / games)
+            for queue in queues
+        ]
+        # Direct processes can serve separate queues in turn. Recalculate when
+        # fewer processes increase async concurrency enough to shrink demand again.
+        needed = sum(demand) if accelerator else max(demand)
+        if needed >= processes:
+            break
+        processes = needed
+
     shared = accelerator and processes > 1
     return Placement(
         bus="socket" if shared else "local",
         processes=processes,
+        tournament_processes=_allocate_processes(demand, processes)
+        if shared
+        else tuple(min(count, processes) for count in demand),
         game_threads=1 if shared else max(1, (cpus - processes) // processes),
         agent_threads=max(1, cpus - processes) if shared else 0,
-        games_per_process=min(math.ceil(loader.max_batch / processes), largest)
-        if largest
-        else None,
+        games_per_process=min(games, largest_play) if largest_play else None,
         share_streams=not shared,
         checkpoint_bytes=held if shared else held // processes,
         reason=inference,
