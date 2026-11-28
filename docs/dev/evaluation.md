@@ -155,10 +155,10 @@ with evaluating(
   divides the batch budget across processes. Each async tournament bounds
   the slots it needs using its own process share. Direct `play_many` sizes
   for one process per `max_batch` matches, rounded up. Shared and code-only
-  `play_many` size for one process per match. The parent spreads initial
-  matches across processes starting with an async stream. Later streams
-  request matches when they start. Active streams without held matches count
-  toward pending process demand. A freed dedicated process slot goes to the
+  `play_many` size for one process per match. Both play modes request their
+  first matches after loading and setting up the callback. Active streams
+  without held matches count toward pending process demand. A freed dedicated
+  process slot goes to the
   tournament with unmet demand and the fewest active processes. Each
   `play_many` generator submits forwards on the call and requests matches for
   its free slots.
@@ -252,9 +252,10 @@ with evaluating(
   Refused tables, uncaught generator errors, invalid yields and early returns
   stop new grants for the tournament. Broken streams fail their held matches.
   Errors loading or setting up authored game code fail the tournament and
-  its held matches. Sibling tournaments continue. A game process that exits
-  without reporting, a failed shared-agent connection or an explicit retry
-  interrupts the group and keeps unfinished matches eligible for retry.
+  leave ungranted matches available on resume. Sibling tournaments continue.
+  A game process that exits without reporting, a failed shared-agent connection
+  or an explicit retry interrupts the group and keeps unfinished matches
+  eligible for retry.
   Completed outcomes remain available for resumption.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each drawn value from the
@@ -332,8 +333,8 @@ and count transfers. The barrier holds a reference in the same lock ledger
 until submission acquires its own. A writable NumPy input stays locked
 through the last reply using it, including after cancellation. Batching uses
 `_Batches` to merge ready requests up to `max_batch` and `Forwards` to load
-and evict checkpoints. It encodes all replies from a forward before delivering
-any, so an encoding failure reaches every caller in that batch.
+and evict checkpoints. It encodes each reply independently so a serialization
+failure applies only to its caller.
 
 **Direct inference.** `LocalForwardBus` queues requests to a non-daemon
 inference thread. Only that thread holds the loaded models. Plain
@@ -347,10 +348,10 @@ thread exit fails pending and later calls with `RetryRequested`.
 
 **Shared inference.** `SocketForwardBus` sends length-prefixed frames to the
 agent process over a private Unix socket. Serialization copies the NumPy
-outputs. An undecodable request receives an `Answer` with reserved ID zero
-before the agent closes that peer. This frame and an undecodable reply fail
-the peer's pending and future calls with a permanent `ForwardError` for each
-checkpoint. An unexpected disconnect requests a retry.
+outputs. Each request and reply carries its call ID and checkpoint key in
+the header. An undecodable body fails that call with a permanent
+`ForwardError`. The reserved ID zero carries a peer-wide framing error.
+An unexpected disconnect or truncated frame requests a retry.
 
 On both transports, the array codec walks lists, tuples, dictionary values and
 dataclass fields. It retains containers with unchanged leaves and reconstructs

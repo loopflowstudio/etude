@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import multiprocessing
-import pickle
 import socket
 import struct
 import sys
@@ -103,57 +102,81 @@ class CheckpointRequest:
 @dataclass(frozen=True)
 class Answer:
     id: int
-    checkpoint: str
-    outputs: list[object]
-    error: str | None = None
-    retry: bool = False
-    loading: bool = False
+    outcome: ForwardOutcome
 
 
 _HEADER = struct.Struct("!Q")
-_REQUEST_HEADER = struct.Struct("!QQQ")
+_MESSAGE_HEADER = struct.Struct("!QQQ")
 _PEER_ERROR_ID = 0  # Flight ids start at one. This answer closes the peer.
 
 
-def encode_requests(requests: Sequence[CheckpointRequest]) -> list[bytes | memoryview]:
-    """Alternate request headers and pickles so one decode error can be answered."""
-    parts: list[bytes | memoryview] = []
-    for request in requests:
-        key = request.checkpoint.key.encode()
-        body = ForkingPickler.dumps(request)
-        parts.extend((_REQUEST_HEADER.pack(request.id, len(key), len(body)) + key, body))
-    return parts
+type _Message = tuple[bytes, memoryview]
 
 
-def decode_requests(payload: bytes) -> Iterator[CheckpointRequest | Answer]:
+def _encode_message(request_id: int, checkpoint: str, value: object) -> _Message:
+    key = checkpoint.encode()
+    body = ForkingPickler.dumps(value)
+    return _MESSAGE_HEADER.pack(request_id, len(key), len(body)) + key, body
+
+
+def _messages(payload: bytes) -> Iterator[tuple[int, str, memoryview]]:
+    """Read routing metadata before unpickling so a body failure has an owner."""
     view = memoryview(payload)
     offset = 0
     while offset < len(view):
-        key_start = offset + _REQUEST_HEADER.size
+        key_start = offset + _MESSAGE_HEADER.size
         if key_start > len(view):
-            raise ValueError("truncated request header")
-        request_id, key_size, body_size = _REQUEST_HEADER.unpack_from(view, offset)
+            raise EOFError("truncated agent message header")
+        request_id, key_size, body_size = _MESSAGE_HEADER.unpack_from(view, offset)
         body_start = key_start + key_size
         offset = body_start + body_size
         if offset > len(view):
-            raise ValueError("truncated request payload")
+            raise EOFError("truncated agent message body")
+        yield request_id, str(view[key_start:body_start], "utf-8"), view[body_start:offset]
+
+
+def encode_request(request: CheckpointRequest) -> _Message:
+    return _encode_message(request.id, request.checkpoint.key, request)
+
+
+def decode_requests(payload: bytes) -> Iterator[CheckpointRequest | Answer]:
+    for request_id, key, body in _messages(payload):
         try:
-            request = ForkingPickler.loads(view[body_start:offset])
+            request = ForkingPickler.loads(body)
             if not isinstance(request, CheckpointRequest):
                 raise TypeError("expected CheckpointRequest")
+            if request.id != request_id or request.checkpoint.key != key:
+                raise ValueError("agent request identity does not match its frame")
         except Exception as error:
-            key = str(view[key_start:body_start], "utf-8")
             yield Answer(
-                request_id, key, [], error=f"agent request failed to decode: {explain(error)}"
+                request_id,
+                ForwardOutcome(key, [], error=f"agent request failed to decode: {explain(error)}"),
             )
         else:
             yield request
 
 
-def send_frame(sock: socket.socket, payload: bytes | memoryview) -> None:
-    """Write one length-prefixed payload to a blocking stream socket."""
-    sock.sendall(_HEADER.pack(len(payload)))
-    sock.sendall(payload)
+def encode_answer(request_id: int, outcome: ForwardOutcome) -> _Message:
+    return _encode_message(request_id, outcome.checkpoint, outcome)
+
+
+def decode_answer(payload: bytes) -> Answer:
+    ((request_id, key, body),) = _messages(payload)
+    try:
+        outcome = ForkingPickler.loads(body)
+        if not isinstance(outcome, ForwardOutcome):
+            raise TypeError("expected ForwardOutcome")
+        if outcome.checkpoint != key:
+            raise ValueError("agent reply identity does not match its frame")
+    except Exception as error:
+        outcome = ForwardOutcome(key, [], error=f"agent reply failed to decode: {explain(error)}")
+    return Answer(request_id, outcome)
+
+
+def send_frame(sock: socket.socket, header: bytes, body: memoryview) -> None:
+    """Write one length-prefixed message without copying its payload."""
+    sock.sendall(_HEADER.pack(len(header) + len(body)) + header)
+    sock.sendall(body)
 
 
 def _recv_exact(sock: socket.socket, size: int) -> bytes:
@@ -253,54 +276,53 @@ class SocketForwardBus:
 
         started = time.monotonic()
         stage = self._book.stage(loop, started)
-        requests: list[CheckpointRequest] = []
+        parts: list[bytes | memoryview] = []
         futures: list[asyncio.Future[list[object]]] = []
         arrays_copied = 0
         copied_bytes = 0
         try:
             for call in calls:
                 checkpoint = self._checkpoints[call.checkpoint]
-                normalized = normalize_inputs(call.inputs)
+                request_id, future = stage.add(call)
+                try:
+                    normalized = normalize_inputs(call.inputs)
+                    parts.extend(
+                        encode_request(
+                            CheckpointRequest(request_id, checkpoint, normalized.values, call.rows)
+                        )
+                    )
+                except Exception as error:
+                    stage.rollback_last()
+                    futures.append(
+                        self._book.failed(
+                            loop,
+                            ForwardError(
+                                call.checkpoint,
+                                f"agent {call.checkpoint}: could not encode inputs: {explain(error)}",
+                            ),
+                        )
+                    )
+                    continue
                 for array in arrays(normalized.values):
                     arrays_copied += 1
                     copied_bytes += int(array.nbytes)
-                request_id, future = stage.add(call)
-                requests.append(
-                    CheckpointRequest(request_id, checkpoint, normalized.values, call.rows)
-                )
                 futures.append(future)
-            parts = encode_requests(requests)
-        except (pickle.PicklingError, TypeError, AttributeError, ValueError) as error:
-            stage.rollback()
-            self._book.add_handoff(time.monotonic() - started)
-            if len(calls) == 1:
-                return [
-                    self._book.failed(
-                        loop,
-                        ForwardError(
-                            calls[0].checkpoint,
-                            f"agent {calls[0].checkpoint}: {explain(error)}",
-                        ),
-                    )
-                ]
-            return [self.submit([call])[0] for call in calls]
+            if parts:
+                size = sum(map(len, parts))
+                stage.commit(
+                    arrays_copied=arrays_copied,
+                    copied_bytes=copied_bytes,
+                    pickled=len(parts) // 2,
+                    pickled_bytes=sum(map(len, parts[1::2])),
+                    wire_bytes=size,
+                )
+                try:
+                    self._transport.writelines([_HEADER.pack(size), *parts])
+                except OSError:
+                    self._book.fail_all(RetryRequested("agent process exited before answering"))
         except BaseException:
             stage.rollback()
-            self._book.add_handoff(time.monotonic() - started)
             raise
-
-        size = sum(map(len, parts))
-        stage.commit(
-            arrays_copied=arrays_copied,
-            copied_bytes=copied_bytes,
-            pickled=len(calls),
-            pickled_bytes=sum(map(len, parts[1::2])),
-            wire_bytes=size,
-        )
-        try:
-            self._transport.writelines([_HEADER.pack(size), *parts])
-        except OSError:
-            self._book.fail_all(RetryRequested("agent process exited before answering"))
         finally:
             self._book.add_handoff(time.monotonic() - started)
         return futures
@@ -310,27 +332,20 @@ class SocketForwardBus:
             return
         started = time.monotonic()
         try:
-            answer = ForkingPickler.loads(payload)
-            if not isinstance(answer, Answer):
-                raise TypeError(f"expected Answer, got {type(answer).__name__}")
+            answer = decode_answer(payload)
+        except EOFError:
+            self._book.fail_all(RetryRequested("agent process exited before answering"))
+            self._transport.close()
+            return
         except Exception as error:
             self._fail_peer(f"agent reply failed to decode: {explain(error)}")
             return
         finally:
             self._book.add_handoff(time.monotonic() - started, wire_bytes=len(payload))
         if answer.id == _PEER_ERROR_ID:
-            self._fail_peer(answer.error or "agent peer failed")
+            self._fail_peer(answer.outcome.error or "agent peer failed")
             return
-        self._book.deliver(
-            answer.id,
-            ForwardOutcome(
-                checkpoint=answer.checkpoint,
-                outputs=answer.outputs,
-                error=answer.error,
-                retry=answer.retry,
-                loading=answer.loading,
-            ),
-        )
+        self._book.deliver(answer.id, answer.outcome)
 
     def _fail_peer(self, message: str) -> None:
         self._book.fail_all(lambda checkpoint: ForwardError(checkpoint, message))

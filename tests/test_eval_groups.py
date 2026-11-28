@@ -17,7 +17,6 @@ from hashlib import sha256
 from importlib import import_module
 from multiprocessing import active_children
 from multiprocessing.connection import Connection, wait
-from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from typing import NoReturn, cast
 
@@ -39,13 +38,16 @@ from etude.eval.agents import (
     Forward,
     ForwardError,
     ModelForward,
+    SocketForwardBus,
+    decode_answer,
     decode_requests,
-    encode_requests,
+    encode_answer,
+    encode_request,
     recv_frame,
     send_frame,
 )
-from etude.eval.batching import Batch, _add_socket_batch, _Batches, _encode_socket, _send_peer
-from etude.eval.bus import ForwardOutcome
+from etude.eval.batching import Batch, _add_socket_batch, _Batches, _send_peer
+from etude.eval.bus import ForwardCall, ForwardOutcome
 from etude.eval.game import GameReport, MatchStream, StreamEnd, Take
 from etude.eval.loader import AgentLoader
 from etude.eval.match import environment
@@ -1185,7 +1187,7 @@ def test_batch_merges_rows_up_to_max_batch_and_runs_oversized_alone() -> None:
 def test_oversized_game_request_uses_bounded_forwards_and_one_ordered_reply() -> None:
     game, agent = socket.socketpair()
     player = checkpoint("one")
-    batches = _Batches(echo, 2, 1024, encode=_encode_socket)
+    batches = _Batches(echo, 2, 1024, encode=encode_answer)
     inputs: list[object] = [1, 2, 3, 4, 5]
     with game, agent:
         _add_socket_batch(
@@ -1194,7 +1196,7 @@ def test_oversized_game_request_uses_bounded_forwards_and_one_ordered_reply() ->
             [CheckpointRequest(1, player.checkpoint, inputs, len(inputs))],
         )
         observed = batches.flush()
-        assert ForkingPickler.loads(recv_frame(game)) == Answer(1, "one", inputs)
+        assert decode_answer(recv_frame(game)) == Answer(1, ForwardOutcome("one", inputs))
         assert not wait([game], timeout=0)
         assert [(batch.rows, batch.forward_calls) for batch in observed] == [
             (2, 1),
@@ -1273,19 +1275,44 @@ def test_bad_batch_answers_fail_all_asking_tournaments(
         db.close()
 
 
-def restore_unreadable_input() -> NoReturn:
-    raise ModuleNotFoundError("fixture input class is unavailable")
+def restore_unreadable_value() -> NoReturn:
+    raise ModuleNotFoundError("fixture value class is unavailable")
 
 
-class UnreadableInput:
+class UnreadableValue:
     def __reduce__(self) -> tuple[Callable[[], NoReturn], tuple[()]]:
-        return restore_unreadable_input, ()
+        return restore_unreadable_value, ()
 
 
-async def sends_unreadable_input(match: Match, agents: Sequence[Forward]) -> Tables:
-    bad, good = await asyncio.gather(
-        agents[0]([UnreadableInput()]), agents[1]([7]), return_exceptions=True
-    )
+class UnencodableValue:
+    def __reduce__(self) -> NoReturn:
+        raise RetryRequested("fixture value cannot be encoded")
+
+
+class WireFailures:
+    def __call__(self, inputs: list[object]) -> list[object]:
+        return [
+            UnencodableValue()
+            if row == "encode_output"
+            else UnreadableValue()
+            if row == "decode_output"
+            else row
+            for row in inputs
+        ]
+
+
+def wire_failures(checkpoint: CheckpointRef) -> ModelForward:
+    return WireFailures()
+
+
+async def sends_bad_payload(match: Match[Config], agents: Sequence[Forward]) -> Tables:
+    stage = match.config["lane"]
+    value: object = stage
+    if stage == "encode_input":
+        value = UnencodableValue()
+    elif stage == "decode_input":
+        value = UnreadableValue()
+    bad, good = await asyncio.gather(agents[0]([value]), agents[1]([7]), return_exceptions=True)
     assert good == [7]
     assert await agents[0]([8]) == [8]
     assert isinstance(bad, ForwardError)
@@ -1294,15 +1321,26 @@ async def sends_unreadable_input(match: Match, agents: Sequence[Forward]) -> Tab
     raise bad
 
 
-def test_unreadable_agent_input_fails_only_its_request(tmp_path: Path) -> None:
-    agents = Agents(load=echo)
-    selected = group(job("bad_input", agents, sends_unreadable_input), job("healthy", agents))
+@pytest.mark.parametrize(
+    ("stage", "message", "answers"),
+    [
+        ("encode_input", "could not encode inputs", 2),
+        ("decode_input", "agent request failed to decode", 3),
+        ("encode_output", "could not encode outputs", 3),
+        ("decode_output", "agent reply failed to decode", 3),
+    ],
+)
+def test_bad_wire_payload_fails_only_its_request(
+    tmp_path: Path, stage: str, message: str, answers: int
+) -> None:
+    agents = Agents(load=wire_failures)
+    selected = group(job(stage, agents, sends_bad_payload), job("healthy", agents))
     broken, healthy = [spec.address.split("/")[-1] for spec in selected.evaluations]
-    with pytest.raises(EtudeError, match="fixture input class is unavailable"):
+    with pytest.raises(EtudeError, match=message):
         hold_group(selected, directory=tmp_path)
     reports = {r.tournaments: r for r in _game_reports(tmp_path / "grouped/artifacts/agents")}
-    bus = reports[("bad_input",)].bus
-    assert (bus.calls, bus.answers) == (3, 3)
+    bus = reports[(stage,)].bus
+    assert (bus.calls, bus.answers) == (answers, answers)
     db = statsdb("grouped", tmp_path)
     try:
         assert set(db.sql("select run, state, retry from matches").fetchall()) == {
@@ -1312,6 +1350,64 @@ def test_unreadable_agent_input_fails_only_its_request(tmp_path: Path) -> None:
         assert db.sql("select distinct run from scores").fetchall() == [(healthy,)]
     finally:
         db.close()
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ("encode_output", "could not encode outputs"),
+        ("decode_output", "agent reply failed to decode"),
+    ],
+)
+def test_bad_output_preserves_the_other_reply_in_a_merged_forward(
+    payload: str, message: str
+) -> None:
+    ref = checkpoint("one").checkpoint
+    batches = _Batches(wire_failures, 2, 1024, encode=encode_answer)
+    game, agent = socket.socketpair()
+    with game, agent:
+        _add_socket_batch(
+            batches,
+            _send_peer(agent),
+            [
+                CheckpointRequest(1, ref, [payload], 1),
+                CheckpointRequest(2, ref, [7], 1),
+            ],
+        )
+        [batch] = batches.flush()
+        assert (batch.rows, batch.requests, batch.forward_calls) == (2, 2, 1)
+        bad = decode_answer(recv_frame(game))
+        assert (bad.id, bad.outcome.checkpoint) == (1, ref.key)
+        assert bad.outcome.error is not None and message in bad.outcome.error
+        assert not bad.outcome.retry
+        assert decode_answer(recv_frame(game)) == Answer(2, ForwardOutcome(ref.key, [7]))
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+def test_agent_disconnection_retries_unanswered_requests(tmp_path: Path, truncated: bool) -> None:
+    async def exchange(address: str, listener: socket.socket) -> None:
+        ref = checkpoint("one").checkpoint
+        bus = await SocketForwardBus.connect(address)
+        peer, _ = listener.accept()
+        with peer:
+            try:
+                bus.bind(ref)
+                futures = bus.submit([ForwardCall(ref.key, [1], 1), ForwardCall(ref.key, [2], 1)])
+                if truncated:
+                    header, body = encode_answer(1, ForwardOutcome(ref.key, [1]))
+                    send_frame(peer, header, body[:-1])
+                peer.shutdown(socket.SHUT_WR)
+                async with asyncio.timeout(5):
+                    answers = await asyncio.gather(*futures, return_exceptions=True)
+                assert all(isinstance(answer, RetryRequested) for answer in answers)
+            finally:
+                await bus.close()
+
+    with resources(tmp_path) as owned, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        address = str(owned.scratch / "agent.sock")
+        server.bind(address)
+        server.listen()
+        asyncio.run(exchange(address, server))
 
 
 def test_launched_group_delivers_members_then_the_next_pass_plays_nothing(
@@ -1388,11 +1484,11 @@ import multiprocessing
 import socket
 import sys
 import threading
-from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from etude.call import Function
-from etude.eval.agents import Answer, recv_frame, send_frame
+from etude.eval.agents import CheckpointRequest, decode_requests, encode_answer, recv_frame, send_frame
+from etude.eval.bus import ForwardOutcome
 from etude.eval.game import Done, Grant, Outcome, Stream, StreamEnd, Take, run_game_process
 from etude.eval.records import Match
 from etude.eval.resources import Resources
@@ -1407,10 +1503,11 @@ with TemporaryDirectory(dir="/tmp", prefix="etude-test-") as scratch, socket.soc
     def answer() -> None:
         peer, _ = listener.accept()
         with peer:
-            batch = ForkingPickler.loads(recv_frame(peer))
+            batch = list(decode_requests(recv_frame(peer)))
             counts["received"] += 1
-            for req in batch.requests:
-                send_frame(peer, ForkingPickler.dumps(Answer(req.id, req.checkpoint.key, req.inputs)))
+            for req in batch:
+                assert isinstance(req, CheckpointRequest)
+                send_frame(peer, *encode_answer(req.id, ForwardOutcome(req.checkpoint.key, req.inputs)))
                 counts["sent"] += 1
     thread = threading.Thread(target=answer)
     thread.start()
@@ -1762,14 +1859,22 @@ def test_game_import_failure_fails_its_tournament_and_leaves_siblings_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, streaming: bool
 ) -> None:
     monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
+    monkeypatch.setenv("ETUDE_FAIL_FIXTURE_GAME_IMPORT", "1")
     module = f"bad_game_import_fixture_{'stream' if streaming else 'play'}"
     callback = "play_many" if streaming else "play"
     (tmp_path / f"{module}.py").write_text(
+        "import os\n"
         "from multiprocessing import parent_process\n"
-        "if parent_process() is not None:\n"
+        "if parent_process() is not None and os.getenv('ETUDE_FAIL_FIXTURE_GAME_IMPORT'):\n"
         "    raise RuntimeError('fixture game import failed')\n"
         f"async def {callback}({'matches' if streaming else 'match, agents'}):\n"
-        f"    {'yield' if streaming else 'return'} {{}}\n"
+        + (
+            "    while taken := await matches.take(1):\n"
+            "        for match, _ in taken:\n"
+            "            yield match, {'scores': [{'seat': 0, 'score': 7}]}\n"
+            if streaming
+            else "    return {'scores': [{'seat': 0, 'score': 7}]}\n"
+        )
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     game = getattr(import_module(module), callback)
@@ -1792,14 +1897,17 @@ def test_game_import_failure_fails_its_tournament_and_leaves_siblings_running(
             (broken, "failed"),
             (healthy, "finished"),
         }
-        expected = {(healthy, "done", False)}
-        if not streaming:
-            # Only play reserves a match before the game code imports.
-            expected.add((broken, "failed", False))
-        assert set(db.sql("select run, state, retry from matches").fetchall()) == expected
+        assert db.sql("select run, state, retry from matches").fetchall() == [
+            (healthy, "done", False)
+        ]
         assert db.sql("select distinct run from scores").fetchall() == [(healthy,)]
     finally:
         db.close()
+
+    monkeypatch.delenv("ETUDE_FAIL_FIXTURE_GAME_IMPORT")
+    repaired, sibling = hold_group(selected, directory=tmp_path)
+    assert (repaired.played, repaired.skipped) == (1, 0)
+    assert (sibling.played, sibling.skipped) == (0, 1)
 
 
 async def catches_agent_error(match: Match, agents: Sequence[Forward]) -> Tables:
@@ -2067,16 +2175,13 @@ def wire_agent(checkpoint: CheckpointRef) -> ModelForward:
 def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoint() -> None:
     # Small real sockets retain the wire bytes; no load or clock threshold.
     cp = checkpoint("wire")
-    batches: _Batches[memoryview] = _Batches(wire_agent, 2, 1024, encode=_encode_socket)
+    batches = _Batches(wire_agent, 2, 1024, encode=encode_answer)
     sockets = [socket.socketpair() for _ in range(2)]
     clients = [parent for parent, _ in sockets]
     receivers = [child for _, child in sockets]
-    answer_size = len(ForkingPickler.dumps(Answer(1, "wire", [WireValue(0)])))
+    answer_size = sum(map(len, encode_answer(1, ForwardOutcome("wire", [WireValue(0)]))))
     WireValue.serializations = 0
     observations = []
-
-    def send_to(sock: socket.socket) -> Callable[[memoryview], None]:
-        return lambda payload: send_frame(sock, payload)
 
     try:
         for turn in range(2):
@@ -2084,15 +2189,15 @@ def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoin
                 request = CheckpointRequest(
                     turn * 2 + index + 1, cp.checkpoint, [WireValue(turn)], 1
                 )
-                send_frame(peer_client, b"".join(encode_requests([request])))
+                send_frame(peer_client, *encode_request(request))
                 decoded = list(decode_requests(recv_frame(receiver)))
-                _add_socket_batch(batches, send_to(receiver), decoded)
+                _add_socket_batch(batches, _send_peer(receiver), decoded)
             observations.extend(batches.flush())
             for index, peer_client in enumerate(clients):
                 answer_payload = recv_frame(peer_client)
                 assert len(answer_payload) == answer_size
-                assert ForkingPickler.loads(answer_payload) == Answer(
-                    turn * 2 + index + 1, "wire", [str(turn)]
+                assert decode_answer(answer_payload) == Answer(
+                    turn * 2 + index + 1, ForwardOutcome("wire", [str(turn)])
                 )
         assert WireValue.serializations == 8  # Four decisions, one encoding each way.
         assert [batch.rows for batch in observations] == [2, 2]
@@ -3095,7 +3200,9 @@ def test_fast_direct_process_can_play_all_matches_in_its_second_stream(
     ) -> Sequence[object]:
         nonlocal first, finished_first
         if first is None:
-            first = next(handle for handle in handles if isinstance(handle, Connection))
+            first, second = [handle for handle in handles if isinstance(handle, Connection)]
+            assert first.poll(10) and second.poll(10), "the game processes did not request matches"
+            return (first, second)
         if not first.closed:
             assert first.poll(10), "the first game process stopped responding"
             return (first,)
@@ -3353,6 +3460,10 @@ def test_drained_async_queue_releases_process_while_peer_still_holds_games(
             pipe, sentinel = handles[0], handles[1]
             assert isinstance(pipe, Connection) and isinstance(sentinel, int)
             first = (pipe, sentinel)
+            second = handles[4]
+            assert isinstance(second, Connection)
+            assert pipe.poll(10) and second.poll(10), "the async processes did not request matches"
+            return (pipe, second)
         pipe, sentinel = first
         if not pipe.closed:
             assert pipe.poll(10), "the first async process stopped sending results"
@@ -3902,8 +4013,9 @@ for path in paths:
 def test_async_startup_grants_keep_every_shared_game_process_busy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 16)
-    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 5)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 4 * 1024**3)
+    wait_for_games(monkeypatch, processes=4)
     small_root = tmp_path / "small"
     agents = Agents(load=load_checkpoint, max_batch=32)
     small_job = EvalJob(
@@ -3911,7 +4023,7 @@ def test_async_startup_grants_keep_every_shared_game_process_busy(
             name="small",
             environment=environment("grouped"),
             config={"lane": "small"},
-            games=16,
+            games=5,
         ),
         enter=(checkpoint("left"), checkpoint("right")),
         play=play,
@@ -3919,11 +4031,11 @@ def test_async_startup_grants_keep_every_shared_game_process_busy(
         repo=None,
         max_hours=0.1,
     )
-    assert [r.played for r in hold_group(group(small_job), directory=small_root)] == [16]
+    assert [r.played for r in hold_group(group(small_job), directory=small_root)] == [5]
     small_err = capfd.readouterr().err
-    assert "15 game processes, 2 games each; 1 inference thread" in small_err
+    assert "4 game processes, 2 games each; 1 inference thread" in small_err
     reports = _game_reports(small_root / "grouped/artifacts/agents")
-    assert sorted(report.matches for report in reports) == [1] * 14 + [2]
+    assert sorted(report.matches for report in reports) == [1, 1, 1, 2]
 
 
 async def invalid_stream(matches: MatchStream[Config]) -> AsyncIterator[tuple[Match, Tables]]:

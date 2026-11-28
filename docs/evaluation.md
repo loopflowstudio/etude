@@ -278,8 +278,9 @@ the generator yields it.
   loader is declared. Account for the number of games per match when sizing the
   engine's pool.
   Call `await matches.take(n)` with the number of free slots to get up to `n`
-  pending `(match, agents)` pairs. Grants account for held matches and share
-  pending work among empty processes. An empty grant for `n > 0` means the
+  pending `(match, agents)` pairs. Both play modes take their first matches
+  after loading and setting up the game code. Grants account for held matches
+  and share pending work among empty processes. An empty grant for `n > 0` means the
   tournament queue is drained or the run is stopping. Finish any matches
   you still hold. Further calls return immediately once that stream receives
   its final grant.
@@ -393,16 +394,17 @@ A stop records `stopped` for the group and the tournaments it interrupts.
 Tournaments that already finished or failed keep their status. An ordinary
 `play` error or a return of the wrong type fails one match. Failed matches
 of this kind require `--retry-failed`. Errors loading or setting up authored
-game code fail the tournament while sibling tournaments continue. Matches
-that were still queued when a table was refused or a stream broke remain
-unplayed.
+game code fail the tournament while sibling tournaments continue. Ungranted
+matches remain available on resume, including matches still queued when a
+table was refused or a stream broke.
 
 A failed forward raises `ForwardError` at the awaiting call, with the checkpoint
-key on `.checkpoint`. If the shared agent process cannot deserialize a request,
-it answers that request with `ForwardError` and continues serving other
-requests. Invalid framing or an undecodable reply closes that game process's
-connection and fails its pending forwards. In `play`, Etude records the match
-as failed even if the game catches the error. In `play_many`, catch it to drop
+key on `.checkpoint`. In shared inference, a serialization error in a
+request or reply fails that call with a non-retryable `ForwardError`.
+Other calls in the same message or merged forward continue. A lost connection
+interrupts the group and leaves unfinished matches eligible for retry. In
+`play`, Etude records the match as failed even if the game catches the error.
+In `play_many`, catch it to drop
 affected slots and yield `(match, error)` while unrelated matches complete.
 Checkpoint load failures apply to unfinished matches seating that checkpoint,
 including any that yield fallback tables. [Limits](limits.md) covers process,

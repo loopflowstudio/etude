@@ -541,13 +541,13 @@ class Playing:
         self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
         self.skipped = len(self.run.matches) - len(self.pending)
 
-    def _match_share(self, *, processes: int, unfed: int, total_held: int, held: int = 0) -> int:
+    def available_share(self, *, processes: int, unfed: int, total_held: int, held: int = 0) -> int:
         """Share unfinished matches and reserve pending work for empty peers."""
         pending = len(self.pending)
         share = math.ceil((pending + total_held) / processes)
         if not held:
             share = min(share, math.ceil(pending / unfed))
-        return share
+        return min(pending, max(1, share - held))
 
     def grant(
         self,
@@ -559,10 +559,10 @@ class Playing:
         total_held: int = 0,
     ) -> tuple[Match, ...]:
         """Share unfinished matches while leaving pending work for empty game processes."""
-        share = self._match_share(
+        share = self.available_share(
             processes=processes, unfed=unfed, held=held, total_held=total_held
         )
-        count = min(count, max(1, share - held))
+        count = min(count, share)
         granted: list[Match] = []
         while self.pending and len(granted) < count:
             match = self.pending.popleft()
@@ -757,40 +757,22 @@ def play_together(
             stream_groups = [pending] if placement.bus == "local" else [(each,) for each in pending]
 
             def spawn_one(
-                targets: tuple[Playing, ...], starts: dict[int, int], match_targets: dict[int, int]
+                targets: tuple[Playing, ...], match_targets: dict[int, int]
             ) -> _GameProcess:
                 parent, child_pipe = context.Pipe()
-                # Reserve initial async matches only for the stream that starts with the process.
-                specs = []
-                streams = []
-                for index, each in enumerate(targets):
-                    initial: tuple[Match, ...] = ()
-                    if each.streaming:
-                        target_matches = match_targets[id(each)]
-                    else:
-                        assert games_per_process is not None
-                        target_matches = games_per_process
-                        if index == 0:
-                            share = math.ceil(len(each.pending) / starts[id(each)])
-                            initial = each.grant(min(target_matches, share))
-                    streams.append(
-                        _GameStream(
-                            playing=each,
-                            held={match.key: match for match in initial},
-                        )
+                specs = tuple(
+                    Stream(
+                        tournament=each.tournament,
+                        function=each.play,
+                        streaming=each.streaming,
+                        target_matches=match_targets[id(each)],
                     )
-                    specs.append(
-                        Stream(
-                            tournament=each.tournament,
-                            function=each.play,
-                            streaming=each.streaming,
-                            target_matches=target_matches,
-                            initial=initial,
-                        )
-                    )
+                    for each in targets
+                )
+                streams = tuple(_GameStream(playing=each, held={}) for each in targets)
                 process = context.Process(
                     target=run_game_process,
-                    args=(child_pipe, owned, tuple(specs)),
+                    args=(child_pipe, owned, specs),
                     kwargs={
                         "threads": placement.inference_threads if placement.bus == "local" else 1,
                         "agents": agent_address,
@@ -804,13 +786,11 @@ def play_together(
                 try:
                     process.start()
                 except BaseException:
-                    for stream in streams:
-                        stream.restore()
                     parent.close()
-                    child_pipe.close()
                     raise
-                child_pipe.close()
-                return _GameProcess(process=process, pipe=parent, streams=tuple(streams))
+                finally:
+                    child_pipe.close()
+                return _GameProcess(process=process, pipe=parent, streams=streams)
 
             def spawn_ready() -> set[int]:
                 nonlocal stopping
@@ -849,13 +829,18 @@ def play_together(
                 match_targets: dict[int, int] = {}
                 for each in pending:
                     key = id(each)
-                    if each.streaming and starts[key]:
-                        share = each._match_share(
+                    if starts[key]:
+                        share = each.available_share(
                             processes=serving[key] + starts[key],
                             unfed=unfed[key] + starts[key],
                             total_held=total_held[key],
                         )
-                        match_targets[key] = min(share, agents.max_batch) if agents.load else share
+                        if not each.streaming:
+                            assert games_per_process is not None
+                            share = min(share, games_per_process)
+                        elif agents.load is not None:
+                            share = min(share, agents.max_batch)
+                        match_targets[key] = share
                 while len(live) < placement.processes:
                     spawned = False
                     for group in stream_groups:
@@ -867,7 +852,7 @@ def play_together(
                         if any(each.run.should_stop for each in targets):
                             stopping = True
                             return started_targets
-                        live.append(spawn_one(targets, starts, match_targets))
+                        live.append(spawn_one(targets, match_targets))
                         for each in targets:
                             if each.streaming:
                                 started_targets.add(match_targets[id(each)])
@@ -893,23 +878,19 @@ def play_together(
                     if not stopping and each.pending and each.run.should_stop:
                         stopping = True
                     granted: tuple[Match, ...] = ()
-                    if not stopping and message.count > 0:
-                        if each.streaming and each.pending:
-                            peers = [
-                                active
-                                for peer in live
-                                if (active := peer.active_stream) is not None
-                                and active.playing is each
-                            ]
-                            granted = each.grant(
-                                message.count,
-                                processes=len(peers),
-                                unfed=sum(not peer.held for peer in peers),
-                                held=len(stream.held),
-                                total_held=sum(len(peer.held) for peer in peers),
-                            )
-                        else:
-                            granted = each.grant(message.count)
+                    if not stopping and message.count > 0 and each.pending:
+                        peers = [
+                            active
+                            for peer in live
+                            if (active := peer.active_stream) is not None and active.playing is each
+                        ]
+                        granted = each.grant(
+                            message.count,
+                            processes=len(peers),
+                            unfed=sum(not peer.held for peer in peers),
+                            held=len(stream.held),
+                            total_held=sum(len(peer.held) for peer in peers),
+                        )
                         stream.held.update((match.key, match) for match in granted)
                     child.pipe.send(Grant(matches=granted, drained=stopping or not each.pending))
                 elif isinstance(message, Outcome):

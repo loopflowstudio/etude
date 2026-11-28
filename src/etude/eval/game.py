@@ -110,7 +110,6 @@ class Stream:
     function: Function
     streaming: bool
     target_matches: int
-    initial: tuple[Match, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -174,7 +173,6 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
     def __init__(
         self,
         request: Callable[[int], Awaitable[Grant]],
-        initial: tuple[Match, ...],
         kind: type[Match[_MatchConfig]],
         bind: Callable[[CheckpointRef], Forward] | None,
         build: Callable[[object, Mapping[str, Forward]], object] | None,
@@ -182,7 +180,6 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
         target_matches: int,
     ) -> None:
         self._request = request
-        self._initial = initial
         self._kind = kind
         self._bind = bind
         self._build = build
@@ -199,14 +196,10 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
         """Request up to `count` pending matches and their built seat agents."""
         if count <= 0 or self._drained:
             return []
-        if self._initial:
-            granted, self._initial = self._initial[:count], self._initial[count:]
-        else:
-            grant = await self._request(count)
-            granted = grant.matches
-            self._drained = grant.drained
+        grant = await self._request(count)
+        self._drained = grant.drained
         seats: list[tuple[Match[_MatchConfig], Sequence[object]]] = []
-        for match in granted:
+        for match in grant.matches:
             if self._kind is Match:
                 authored = cast(Match[_MatchConfig], match)
             else:
@@ -722,7 +715,6 @@ async def _serve_stream(
                     play, kind = loaded
                     source: MatchStream = MatchStream(
                         partial(request_grant, stream_index),
-                        spec.initial,
                         kind,
                         forwarder.bind if forwarder is not None else None,
                         build_hook,

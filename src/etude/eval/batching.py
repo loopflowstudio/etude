@@ -23,7 +23,6 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
-from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, TextIO, cast
@@ -36,7 +35,9 @@ from etude.eval.agents import (
     CheckpointRequest,
     ForwardError,
     _forward_error,
+    _Message,
     decode_requests,
+    encode_answer,
     recv_frame,
     send_frame,
 )
@@ -280,20 +281,26 @@ class _Batches[Encoded]:
     def _encode_batch(
         self, outcome: ForwardOutcome, batch: list[_Pending[Encoded]]
     ) -> list[Encoded]:
-        # Encode every reply before sending any. A conversion failure applies to the whole batch.
-        if outcome.error is None:
+        if outcome.error is not None:
+            return [self._encode(item.id, outcome) for item in batch]
+        replies = []
+        offset = 0
+        for item in batch:
+            end = offset + len(item.inputs)
+            part = ForwardOutcome(outcome.checkpoint, outcome.outputs[offset:end])
             try:
-                replies = []
-                offset = 0
-                for item in batch:
-                    end = offset + len(item.inputs)
-                    part = ForwardOutcome(outcome.checkpoint, outcome.outputs[offset:end])
-                    replies.append(self._encode(item.id, part))
-                    offset = end
-                return replies
+                reply = self._encode(item.id, part)
             except Exception as error:
-                outcome = _failed_outcome(outcome.checkpoint, error)
-        return [self._encode(item.id, outcome) for item in batch]
+                key = outcome.checkpoint
+                reply = self._encode(
+                    item.id,
+                    ForwardOutcome(
+                        key, [], error=f"agent {key}: could not encode outputs: {explain(error)}"
+                    ),
+                )
+            replies.append(reply)
+            offset = end
+        return replies
 
     def _forward(
         self, key: str, batch: list[_Pending[Encoded]], rows: int
@@ -612,7 +619,7 @@ class LocalForwardBus:
                 request_id, future = stage.add(call)
                 try:
                     packed = pack_local_inputs(normalize_inputs(call.inputs))
-                except (pickle.PicklingError, TypeError, AttributeError, ValueError) as error:
+                except Exception as error:
                     stage.rollback_last()
                     futures.append(
                         self._book.failed(
@@ -673,22 +680,9 @@ class LocalForwardBus:
         return self._book.report()
 
 
-def _encode_socket(request_id: int, outcome: ForwardOutcome) -> memoryview:
-    return ForkingPickler.dumps(
-        Answer(
-            id=request_id,
-            checkpoint=outcome.checkpoint,
-            outputs=outcome.outputs,
-            error=outcome.error,
-            retry=outcome.retry,
-            loading=outcome.loading,
-        )
-    )
-
-
 def _add_socket_batch(
-    batches: _Batches[memoryview],
-    reply: Callable[[memoryview], None],
+    batches: _Batches[_Message],
+    reply: Callable[[_Message], None],
     requests: Sequence[CheckpointRequest | Answer],
     receive_seconds: float = 0.0,
 ) -> None:
@@ -697,15 +691,15 @@ def _add_socket_batch(
     share = receive_seconds / len(requests)
     for request in requests:
         if isinstance(request, Answer):
-            reply(ForkingPickler.dumps(request))
+            reply(encode_answer(request.id, request.outcome))
         else:
             batches.add(reply, request.id, request.checkpoint, request.inputs, request.rows, share)
 
 
-def _send_peer(peer: socket.socket) -> Callable[[memoryview], None]:
-    def send(payload: memoryview) -> None:
+def _send_peer(peer: socket.socket) -> Callable[[_Message], None]:
+    def send(payload: _Message) -> None:
         try:
-            send_frame(peer, payload)
+            send_frame(peer, *payload)
         except (OSError, EOFError):
             pass  # The game may have been cancelled at its deadline.
 
@@ -720,7 +714,7 @@ def _run_agents(
     control: Connection,
     artifacts: str,
 ) -> None:
-    batches: _Batches[memoryview] = _Batches(load, max_batch, memory, encode=_encode_socket)
+    batches = _Batches(load, max_batch, memory, encode=encode_answer)
     peers: list[socket.socket] = []
     report = Path(artifacts, "batches.json").open("w")
     report.write("[")
@@ -757,7 +751,7 @@ def _run_agents(
                                     message = f"agent request failed to decode: {explain(error)}"
                                     print(f"etude: agents: {message}", file=sys.stderr, flush=True)
                                     _send_peer(peer)(
-                                        _encode_socket(
+                                        encode_answer(
                                             _PEER_ERROR_ID,
                                             ForwardOutcome("", [], error=message),
                                         )
