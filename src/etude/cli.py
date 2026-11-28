@@ -15,7 +15,7 @@ from typing import Annotated
 
 import typer
 
-from etude.errors import EtudeError, LauncherError, RetryRequested
+from etude.errors import EtudeError, LauncherError, RetryRequested, sanitize
 from etude.launch import cli as launch_cli
 from etude.launch.commands import Kind, kind
 from etude.train.cli import checkpoints, sync
@@ -26,6 +26,23 @@ app = launch_cli.app
 ExperimentOption = Annotated[
     str | None, typer.Option(help="experiment label, defaulting to the file stem")
 ]
+
+
+@app.command("check", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@kind(Kind.read)
+def check_experiment(
+    ctx: typer.Context,
+    file: Annotated[Path | None, typer.Argument(help="the experiment's Python file")] = None,
+    experiment: ExperimentOption = None,
+) -> None:
+    """Validate an experiment file offline before launching it."""
+    # Entry points load only the command being run.
+    from etude.controller.check import show_check
+
+    if file is None:
+        typer.echo("etude check: a Python experiment FILE is required", err=True)
+        raise typer.Exit(2)
+    raise typer.Exit(show_check(file, ctx.args, experiment))
 
 
 @app.command("train")
@@ -99,11 +116,12 @@ def _submit(
     from decimal import Decimal, InvalidOperation
 
     from etude.controller.advance import advance, source_for
-    from etude.controller.declarations import read_experiment, read_training_jobs
+    from etude.controller.declarations import read_experiment, read_training_jobs, require_jobs
     from etude.spec import Until
     from etude.storage import storage_from_uri
 
     definition = read_experiment(file, experiment=experiment)
+    require_jobs(definition)
     if help:
         if callable(definition.training):
             read_training_jobs(file, ctx.args, help=True, function=definition.training)
@@ -472,10 +490,11 @@ def eval_experiment(
     import time
 
     from etude.controller.advance import advance
-    from etude.controller.declarations import read_experiment
+    from etude.controller.declarations import read_experiment, require_jobs
     from etude.storage import default_root, storage_from_uri
 
     definition = read_experiment(file, experiment=experiment)
+    require_jobs(definition)
     storage = storage_from_uri(source or default_root())
     try:
         while True:
@@ -602,6 +621,7 @@ app.command()(kind(Kind.wait)(sync))
 # local files or a bucket, run a machine's worker, or submit through the server
 # themselves. Every other command is sent to a chosen server.
 _HERE = (
+    "check",
     "launch",
     "queue",
     "smoke",
@@ -643,6 +663,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(error.exit_code)
     except Exception as error:
         # Entry points load failure-specific dependencies only on the failing command.
+        from pydantic import ValidationError
+
+        from etude.controller.diagnostics import validation_message
         from etude.storage_timeout import StorageUnavailable
 
         if isinstance(
@@ -657,9 +680,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 typer.BadParameter,
             ),
         ):
-            # A bad flag value names its flag: "Invalid value for '--hidden': ...".
-            said = error.format_message() if isinstance(error, typer.BadParameter) else str(error)
-            print(f"etude: {said}", file=sys.stderr)
+            if isinstance(error, typer.BadParameter):
+                said = error.format_message()
+            elif isinstance(error, ValidationError):
+                said = validation_message(error)
+            else:
+                said = str(error)
+            if isinstance(error, (LauncherError, EtudeError)) and error.location is not None:
+                said = f"{error.location.file}:{error.location.line}: {said}"
+            print(f"etude: {sanitize(said)}", file=sys.stderr)
+            if isinstance(error, (LauncherError, EtudeError)) and error.fix:
+                print(f"  fix: {sanitize(error.fix)}", file=sys.stderr)
             return 1
         # Typer's public invocation formats usage failures without importing its private parser.
         if hasattr(error, "show") and hasattr(error, "exit_code"):

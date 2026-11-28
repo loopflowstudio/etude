@@ -5,7 +5,7 @@ new runs. The scheduler's public records are the only memory of a hand-down.
 """
 
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -17,6 +17,7 @@ from etude.controller.declarations import (
     format_known_run,
     read_training_jobs,
     select_runs,
+    with_queued_runs,
 )
 from etude.controller.smoke import smoke_file
 from etude.errors import EtudeError, LauncherError
@@ -29,7 +30,6 @@ from etude.jobs import (
     EvalJob,
     Evaluation,
     ExperimentState,
-    TrainingRunSummary,
     _group_key,
     evaluation_group,
     fetch_checkpoints,
@@ -181,18 +181,8 @@ def advance(
             committed += request.job.max_usd or Decimal(0)
     jobs: list[EvalJob] = []
     if experiment.eval is not None and evaluate:
-        # This pass's new runs have no checkpoints yet, but their policies already exist
-        # for eval_jobs. Selection/resume passes skip evaluation, so every run here is new.
-        queued = []
-        for request in new:
-            assert request.id is not None  # Declarations have assigned addresses.
-            name = request.id.removeprefix(experiment.name + "/")
-            queued.append(
-                TrainingRunSummary.queued(name, experiment.name, request.job.name, request.seed)
-            )
-        asking = replace(state, runs=(*state.runs, *queued))
         try:
-            jobs = asked(experiment.eval, asking)
+            jobs = asked(experiment.eval, with_queued_runs(state, new))
         except EtudeError:
             # A policy of a run this pass left out (`--max-usd`) is missing; say which and why.
             for line, _ in lines.values():

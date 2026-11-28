@@ -430,15 +430,31 @@ class Agents(LoaderDeclaration[Callable[..., object]]):
 
     @model_validator(mode="after")
     def _validate_loading(self) -> Agents:
-        if self.load is not None and len(inspect.signature(self.load).parameters) != 1:
-            raise TypeError("load must take one checkpoint")
-        if self.build is not None and len(inspect.signature(self.build).parameters) != 2:
-            raise TypeError("build must take player and leaves")
+        for function, parameters in (
+            (self.load, ("checkpoint",)),
+            (self.build, ("player", "leaves")),
+        ):
+            if function is None:
+                continue
+            given = inspect.signature(function).parameters.values()
+            if len(given) != len(parameters) or any(
+                p.kind not in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD) for p in given
+            ):
+                message = (
+                    "load must take one checkpoint"
+                    if len(parameters) == 1
+                    else "build must take player and leaves"
+                )
+                raise LauncherError(
+                    message, fix=f"def {function.__name__}({', '.join(parameters)}):", at=function
+                )
         # Unused settings would still split the group key.
         if self.load is None:
             unused = sorted(self.model_fields_set & {"devices", "max_batch", "memory_gb"})
             if unused:
-                raise ValueError(f"{', '.join(unused)} requires a checkpoint loader")
+                raise LauncherError(
+                    f"{', '.join(unused)} requires a checkpoint loader", fix="Agents(load=load)"
+                )
         return self
 
     def plain(self, repo: Path | None) -> AgentLoader:
@@ -606,22 +622,18 @@ class TrainingJob[C: BaseModel](Job):
     @classmethod
     def _named(cls, value: object) -> object:
         if isinstance(value, dict) and not value.get("name"):
-            raise LauncherError("TrainingJob requires name=")
+            raise LauncherError("TrainingJob requires name=", fix='name="base"')
         return value
 
     @model_validator(mode="after")
     def _validate_training(self) -> TrainingJob[C]:
-        if "command" in self.model_fields_set:
-            raise LauncherError(
-                "typed jobs derive command; use extras, environment, runtime or prepare"
-            )
         _refuse_unused_extras(self.extras, self.prepare)
         self.plain()
         return self
 
     def plain(self) -> Job:
         if not self.name:
-            raise LauncherError("TrainingJob requires name=")
+            raise LauncherError("TrainingJob requires name=", fix='name="base"')
         options = _options(self)
         if self.start is not None:
             options["inputs"] = (*self.inputs, *checkpoint_inputs_for(self.start, "start"))
@@ -663,7 +675,8 @@ class EvalJob(Job):
     def _ready_tournament(cls, value: object) -> object:
         if callable(value):
             raise LauncherError(
-                "tournament must be a Benchmark or RoundRobin; call the function first"
+                "tournament must be a Benchmark or RoundRobin; call the function first",
+                fix="tournament=make_tournament()",
             )
         return value
 
@@ -671,33 +684,34 @@ class EvalJob(Job):
     def _validate_evaluation(self) -> EvalJob:
         if self.experiment is not None:
             raise LauncherError(
-                "EvalJob belongs to its file's experiment; use experiment= or policy= on a seat"
+                "EvalJob belongs to its file's experiment; use experiment= or policy= on a seat",
+                fix="remove experiment= from EvalJob",
             )
         if self.name and self.name != self.tournament.name:
-            raise LauncherError("an EvalJob is named by its tournament")
-        object.__setattr__(self, "name", self.tournament.name)
-        if "command" in self.model_fields_set:
             raise LauncherError(
-                "typed jobs derive command; use extras, environment, runtime or prepare"
+                "an EvalJob is named by its tournament", fix="remove name= from EvalJob"
             )
+        object.__setattr__(self, "name", self.tournament.name)
         _refuse_unused_extras(self.extras, self.prepare)
-        _require_hours(_options(self))
+        self.require_hours()
         if isinstance(self.tournament, Benchmark) and self.enter:
             raise LauncherError(
-                f"{self.tournament.name} is a benchmark: give it checkpoints, no entrants"
+                f"{self.tournament.name} is a benchmark: give it checkpoints, no entrants",
+                fix="replace enter= with checkpoints=",
             )
         if self.checkpoint is not None and self.checkpoints:
-            raise LauncherError("give one checkpoint input, or the checkpoints an experiment chose")
+            raise LauncherError(
+                "give one checkpoint input, or the checkpoints an experiment chose",
+                fix="keep only one of checkpoint= and checkpoints=",
+            )
         if isinstance(self.tournament, RoundRobin) and (
             self.checkpoint is not None or self.checkpoints or not self.enter
         ):
             raise LauncherError(
-                f"{self.tournament.name} is a round robin: give it entrants, no checkpoint"
+                f"{self.tournament.name} is a round robin: give it entrants, no checkpoint",
+                fix="enter=(player_a, player_b)",
             )
-        try:
-            _match_type(self._game(), streaming=self.play_many is not None)
-        except TypeError as error:
-            raise LauncherError(str(error)) from None
+        _match_type(self._game(), streaming=self.play_many is not None)
         players = list(self.enter)
         if isinstance(self.tournament, Benchmark):
             players.extend(
@@ -714,7 +728,10 @@ class EvalJob(Job):
                 for p in players
             )
         ):
-            raise LauncherError("composed and code players need Agents(build=)")
+            raise LauncherError(
+                "composed and code players need Agents(build=)",
+                fix="Agents(load=load, build=build)",
+            )
         return self
 
     def _game(self) -> Play | PlayMany:
@@ -722,7 +739,10 @@ class EvalJob(Job):
             return self.play
         if self.play_many is not None and self.play is None:
             return self.play_many
-        raise LauncherError("give either async def play or async def play_many")
+        raise LauncherError(
+            "give either async def play or async def play_many",
+            fix="set play=play or play_many=play_many once",
+        )
 
     def recorded(self) -> TournamentRun:
         """The author's selection; no scheduling, source lookup or executable payload."""
@@ -750,6 +770,7 @@ class EvalJob(Job):
                 "checkpoint_names_no_experiment",
                 422,
                 detail="Use checkpoints from a named experiment",
+                fix='state.run("base@0").checkpoints',
             )
         options = _options(self)
         options["name"] = self.tournament.name
@@ -777,7 +798,12 @@ class EvalJob(Job):
             name = f"checkpoint-{digest(key)[:16]}{PurePosixPath(checkpoint_file_name(checkpoint.artifact.uri)).suffix}"
             for item in given.get(key, ()) or checkpoint_inputs_for(checkpoint, name):
                 if item.name in inputs and inputs[item.name] != item:
-                    raise EtudeError("eval_input_conflict", 422, detail=item.name)
+                    raise EtudeError(
+                        "eval_input_conflict",
+                        422,
+                        detail=item.name,
+                        fix="rename the conflicting Input",
+                    )
                 inputs[item.name] = item
             files[key] = name
         spec = Evaluation(
@@ -1234,18 +1260,13 @@ def _received(evaluation: Evaluation) -> Evaluation:
     )
 
 
-def _require_hours(options: JobOptions) -> None:
-    """Refuse a job with no `max_hours` in words, before `Job` refuses it as a missing field."""
-    if "max_hours" not in options:
-        raise LauncherError("a job needs max_hours: the most hours it may hold a machine")
-
-
 def _refuse_unused_extras(extras: tuple[str, ...], prepare: Preparation | None) -> None:
     """A preparation naming its own interpreter owns its install, so extras would go unused."""
     if extras and prepare is not None and prepare.python is not None:
         raise LauncherError(
             "extras= is not used when prepare= names its own python; "
-            "install the extras in that preparation's command"
+            "install the extras in that preparation's command",
+            fix="remove extras= and install those dependencies in prepare.command",
         )
 
 
@@ -1289,20 +1310,19 @@ def _called(function: Function) -> str:
 
 def _config_text(function: Callable[..., object], config: BaseModel) -> str:
     """`config` as the job's text, refused unless `function` takes it and it validates back."""
-    try:
-        kind = config_type(function)
-    except TypeError as error:
-        raise LauncherError(str(error)) from None
+    kind = config_type(function)
     if not isinstance(config, kind):
         raise LauncherError(
-            f"{function.__qualname__} takes a {kind.__name__} config, not {type(config).__name__}"
+            f"{function.__qualname__} takes a {kind.__name__} config, not {type(config).__name__}",
+            fix=f"config={kind.__name__}(...)",
         )
     text = config.model_dump_json()
     try:
         kind.model_validate_json(text)
     except ValidationError as error:
         raise LauncherError(
-            f"the {kind.__name__} config would not validate on the machine: {error}"
+            f"the {kind.__name__} config would not validate on the machine: {error}",
+            fix=f"make {kind.__name__} accept its serialized fields",
         ) from None
     return text
 
@@ -1381,7 +1401,9 @@ def _function(function: Callable[..., object], repo: Path | None) -> Function:
             )
     if module in ("__main__", "<run_path>") or "<" in name:
         raise LauncherError(
-            f"{name} must be defined at the top of an importable module, so the job can import it"
+            f"{name} must be defined at the top of an importable module, so the job can import it",
+            fix="move the function to the top level of an importable Python module",
+            at=function,
         )
     file = getattr(sys.modules.get(module), "__file__", None)
     if repo is None or file is None:
@@ -1395,6 +1417,8 @@ def _function(function: Callable[..., object], repo: Path | None) -> Function:
     if relative[-len(expected) :] != expected:
         raise LauncherError(
             f"{module} is at {'/'.join(relative)} in {repo}, where the job cannot import it"
-            f" as {module}"
+            f" as {module}",
+            fix=f"make the module importable as {module} from the job's checkout",
+            at=function,
         )
     return Function(module=module, name=name, path="/".join(relative[: -len(expected)]))

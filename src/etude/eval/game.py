@@ -26,7 +26,7 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Generic, cast
 
 from etude.call import Function
-from etude.errors import RetryRequested
+from etude.errors import LauncherError, RetryRequested
 from etude.eval.agents import AgentClient, Answer, Forward, ForwardError
 from etude.eval.composition import build_agents
 from etude.eval.records import Match, _MatchConfig
@@ -157,31 +157,45 @@ type _Outcomes = AsyncGenerator[tuple[Match, Tables | Result | BaseException]]
 @lru_cache(maxsize=128)
 def _match_type(play: Callable[..., object], *, streaming: bool = False) -> type[Match]:
     authored = inspect.unwrap(play)
+    fix = (
+        "async def play_many(matches: Matches[Rules]) -> AsyncIterator[tuple[Match, Tables]]:"
+        if streaming
+        else "async def play(match: Match[Rules], agents: Sequence[Forward]) -> Tables:"
+    )
     if streaming:
         if not inspect.isasyncgenfunction(authored):
-            raise TypeError("play_many must be an async def generator that yields outcomes")
+            raise LauncherError(
+                "play_many must be an async def generator that yields outcomes",
+                fix=f"{fix}\n    yield match, tables",
+                at=play,
+            )
     elif not inspect.iscoroutinefunction(authored):
-        raise TypeError("play must be an async def function")
+        raise LauncherError("play must be an async def function", fix=fix, at=play)
     parameters = list(inspect.signature(play).parameters.values())
     if len(parameters) != (1 if streaming else 2) or any(
         p.kind not in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
         for p in parameters
     ):
-        if streaming:
-            raise TypeError("play_many must take matches")
-        raise TypeError("play must take match and agents")
+        message = "play_many must take matches" if streaming else "play must take match and agents"
+        raise LauncherError(message, fix=fix, at=play)
     hints = typing.get_type_hints(authored)
     if streaming:
         source = hints.get(parameters[0].name, Matches)
         if source is Matches:
             return Match
         if typing.get_origin(source) is not Matches:
-            raise TypeError("play_many's parameter must be annotated with Matches[YourConfig]")
+            raise LauncherError(
+                "play_many's parameter must be annotated with Matches[YourConfig]",
+                fix=fix,
+                at=play,
+            )
         (config,) = typing.get_args(source)
         return Match[config]  # type: ignore[valid-type]  # Specialize from the author's annotation.
     kind = hints.get(parameters[0].name, Match)
     if not isinstance(kind, type) or not issubclass(kind, Match):
-        raise TypeError("play's parameter must be annotated with Match[YourConfig]")
+        raise LauncherError(
+            "play's parameter must be annotated with Match[YourConfig]", fix=fix, at=play
+        )
     return kind
 
 

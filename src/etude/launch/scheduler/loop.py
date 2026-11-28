@@ -2753,10 +2753,11 @@ class Scheduler:
     def _validate_job(self, job: Job, target: Target) -> None:
         if target.pool is not None and self._store.pool(target.pool).off:
             raise LauncherError(f"pool {target.pool!r} is turned off")
+        hours = job.require_hours()
         if target.rent is not None:
             ondemand = self._store.ondemand(target.rent)  # raises if no such on-demand
             longest = self._longest_rental(ondemand)
-            if job.require_hours() * 3600 + ondemand.setup_seconds > longest:
+            if hours * 3600 + ondemand.setup_seconds > longest:
                 # One rental holds a run from setup to its last hour; none outlasts its grant.
                 raise LauncherError(
                     f"a job on on-demand {target.rent!r} may ask for at most "
@@ -2764,16 +2765,10 @@ class Scheduler:
                     f"grants last {longest / 3600:g} hours, including "
                     f"{ondemand.setup_seconds} setup seconds"
                 )
-        if not job.command.strip() or job.require_hours() <= 0:
-            raise LauncherError("a job needs a command and hours")
         if job.max_usd is None and target.rent is not None:
             raise LauncherError(
                 f"on-demand {target.rent!r} can spend money, so the job needs max_usd"
             )
-        if job.max_usd is not None and job.max_usd <= 0:
-            raise LauncherError("a job's max_usd must be more than zero")
-        if job.max_attempts < 1:
-            raise LauncherError("a job needs at least one attempt")
 
     def _resumed(self, request: RunRequest) -> RunRecord:
         """Check identity and cumulative allowances before source publication or renting."""

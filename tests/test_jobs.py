@@ -479,7 +479,7 @@ def test_the_job_command_starts_by_importing_no_other_part_of_etude() -> None:
         capture_output=True,
         text=True,
     ).stdout
-    assert loaded.strip() == "['etude', 'etude.call', 'etude.stopping']"
+    assert loaded.strip() == "['etude', 'etude.call', 'etude.errors', 'etude.stopping']"
 
 
 def test_job_seeds_expand_to_named_requests_without_changing_job_identity(tmp_path: Path) -> None:

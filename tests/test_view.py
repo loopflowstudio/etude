@@ -27,6 +27,7 @@ from etude.block_file import block_key, tail_key
 from etude.cache import Content
 from etude.checkpoints import CheckpointRecord
 from etude.cli import main
+from etude.controller.declarations import Experiment
 from etude.errors import LauncherError
 from etude.eval.records import Code, Match
 from etude.eval.result import Tables
@@ -413,7 +414,7 @@ def test_report_edits_and_a_restart_leave_both_experiments_publishing(
     file.write_text("def report(\n")
     started, release, ended = threading.Event(), threading.Event(), threading.Event()
 
-    def held(path: Path) -> dict[str, object]:
+    def held(path: Path) -> Experiment:
         # read_report holds the actual author-import lock while executing the file.
         started.set()
         try:

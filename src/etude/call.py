@@ -26,6 +26,7 @@ from typing import Annotated
 import typer
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
+from etude.errors import LauncherError
 from etude.stopping import Stopped
 
 
@@ -62,16 +63,23 @@ class Function(BaseModel):
 def config_type(function: Callable[..., object]) -> type[BaseModel]:
     """The Pydantic type of the function's one parameter, which its config is validated into."""
     parameters = list(inspect.signature(function).parameters.values())
-    if len(parameters) != 1:
-        raise TypeError(
+    if len(parameters) != 1 or parameters[0].kind not in (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    ):
+        raise LauncherError(
             f"{function.__qualname__} must take exactly one parameter, its config; "
-            f"it takes {len(parameters)}"
+            f"it takes {len(parameters)}",
+            fix=f"def {function.__name__}(config: Config) -> None:",
+            at=function,
         )
     kind = typing.get_type_hints(function).get(parameters[0].name)
     if not (isinstance(kind, type) and issubclass(kind, BaseModel)):
-        raise TypeError(
+        raise LauncherError(
             f"{function.__qualname__}'s parameter {parameters[0].name!r} must be annotated "
-            "with a Pydantic model, the type of its config"
+            "with a Pydantic model, the type of its config",
+            fix=f"def {function.__name__}({parameters[0].name}: Config) -> None:",
+            at=function,
         )
     return kind
 

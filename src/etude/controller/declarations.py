@@ -8,21 +8,21 @@ RunRequests preserve their ids; Jobs expand to full experiment/job@seed addresse
 from __future__ import annotations
 
 import inspect
-import runpy
-import sys
 import typing
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, cast
 
 import typer
 
+from etude.controller.diagnostics import declaration
 from etude.errors import EtudeError, LauncherError
 from etude.experiment import observe
-from etude.experiment_file import refuse_renamed
+from etude.experiment_file import execute_file, refuse_renamed
 from etude.identity import run_address
 from etude.jobs import EvalJob, ExperimentState, TrainingJob, TrainingRunSummary, evaluation_group
+from etude.report import Report
 from etude.spec import Job, RunRequest, declared_address, expand_runs
 from etude.storage import default_root
 
@@ -45,14 +45,16 @@ def read_training_jobs(
 
     if path.suffix != ".py":
         raise LauncherError("experiment files must be Python (.py), defining training_jobs()")
-    refuse_renamed(path)
     if function is None:
-        found = _namespace(path).get("training_jobs")
-        function = cast(Callable[..., object], found) if callable(found) else None
+        function = read_experiment(path).training
     if not callable(function):
-        raise LauncherError(f"{path.name}: define training_jobs() returning jobs or run requests")
-    signature = inspect.signature(function)
-    hints = typing.get_type_hints(function)
+        raise LauncherError(
+            f"{path.name}: define training_jobs() returning jobs or run requests",
+            fix="def training_jobs():\n    return TrainingJob(...)",
+        )
+    with declaration(path, function):
+        signature = inspect.signature(function)
+        hints = typing.get_type_hints(function)
     reserved = {
         "pool",
         "rent",
@@ -77,21 +79,9 @@ def read_training_jobs(
         observed = state
         if "state" in signature.parameters and observed is None:
             observed = observe(default_root(), experiment or path.stem)
-        try:
-            values.append(
-                function(
-                    **kwargs, **({"state": observed} if "state" in signature.parameters else {})
-                )
-            )
-        except Exception as error:
-            hint = (
-                ". Records take named fields, such as RunRequest(job=..., seed=1)"
-                if isinstance(error, TypeError) and "positional argument" in str(error)
-                else ""
-            )
-            raise LauncherError(
-                f"{path.name}: {type(error).__name__}: {' '.join(str(error).splitlines())}{hint}"
-            ) from error
+        values.append(
+            function(**kwargs, **({"state": observed} if "state" in signature.parameters else {}))
+        )
 
     parameters = []
     for name, param in signature.parameters.items():
@@ -99,14 +89,18 @@ def read_training_jobs(
             continue
         if name in reserved or "no_" + name in reserved:
             raise LauncherError(
-                f"{path.name}: training_jobs() parameter {name!r} clashes with launcher option --{name.replace('_', '-')}"
+                f"{path.name}: training_jobs() parameter {name!r} clashes with launcher option --{name.replace('_', '-')}",
+                fix=f"rename the parameter to train_{name}",
+                at=function,
             )
         if param.kind not in (
             inspect.Parameter.POSITIONAL_OR_KEYWORD,
             inspect.Parameter.KEYWORD_ONLY,
         ):
             raise LauncherError(
-                f"{path.name}: training_jobs() parameter {name!r} must be a named parameter"
+                f"{path.name}: training_jobs() parameter {name!r} must be a named parameter",
+                fix=f"declare {name} as a named parameter",
+                at=function,
             )
         kind = hints.get(
             name, str if param.default is inspect.Parameter.empty else type(param.default)
@@ -127,11 +121,12 @@ def read_training_jobs(
         rich_markup_mode=None, pretty_exceptions_enable=False, add_completion=False
     )
     job_app.command()(invoke)
-    job_app(
-        args=["--help"] if help else list(given),
-        prog_name=f"{path.name} parameters",
-        standalone_mode=False,
-    )
+    with declaration(path, function):
+        job_app(
+            args=["--help"] if help else list(given),
+            prog_name=f"{path.name} parameters",
+            standalone_mode=False,
+        )
     if help:
         return []
     returned = values[0]
@@ -144,29 +139,45 @@ def read_training_jobs(
                 evaluation_group(each.job)
             except EtudeError:
                 continue
-        raise LauncherError(f"{path.name}: training_jobs() must return TrainingJob")
-    plain = [each.plain() if isinstance(each, Job) else each.job for each in returned]
+        raise LauncherError(
+            f"{path.name}: training_jobs() must return TrainingJob",
+            fix="return TrainingJob(name='base', train=train, config=Config(), max_hours=1)",
+            at=function,
+        )
+    with declaration(path, function):
+        plain = [each.plain() if isinstance(each, Job) else each.job for each in returned]
     jobs: list[Job] = []
     for candidate in plain:
         if not local:
-            candidate.require_hours()
+            with declaration(path, function):
+                candidate.require_hours()
             if candidate.repo is not None and not any(
                 (folder / ".git").exists()
                 for folder in (Path(candidate.repo), *Path(candidate.repo).parents)
             ):
-                raise LauncherError(f"{candidate.repo} is in no git checkout")
+                raise LauncherError(
+                    f"{candidate.repo} is in no git checkout",
+                    fix="put the experiment in a Git checkout or set repo= to its checkout",
+                    at=function,
+                )
         if candidate not in jobs:
             jobs.append(candidate)
     names = [job.name for job in jobs]
     if len(names) != len(set(names)):
-        raise LauncherError(f"{path.name}: jobs need distinct names")
+        raise LauncherError(
+            f"{path.name}: jobs need distinct names",
+            fix="give each TrainingJob a different name=",
+            at=function,
+        )
     params = {
         name: each for name, each in arguments.items() if isinstance(each, (str, int, float, bool))
     }
     normalized: list[Job | RunRequest] = []
     for each, job in zip(returned, plain, strict=True):
         if not job.name:
-            raise LauncherError(f"{path.name}: TrainingJob requires name=")
+            raise LauncherError(
+                f"{path.name}: TrainingJob requires name=", fix='name="base"', at=function
+            )
         label = experiment or job.experiment or path.stem
         named = job.model_copy(
             update={
@@ -213,6 +224,18 @@ def select_runs(
     return selected
 
 
+def with_queued_runs(state: ExperimentState, requests: Sequence[RunRequest]) -> ExperimentState:
+    """Make this pass's planned training runs visible to eval_jobs, before any save."""
+    queued = []
+    for request in requests:
+        assert request.id is not None  # Declarations have assigned addresses.
+        name = request.id.removeprefix(state.experiment + "/")
+        queued.append(
+            TrainingRunSummary.queued(name, state.experiment, request.job.name, request.seed)
+        )
+    return replace(state, runs=(*state.runs, *queued))
+
+
 type EvalFunction = Callable[[ExperimentState], object]
 
 
@@ -222,43 +245,77 @@ class Experiment:
     eval: EvalFunction | None
     file: Path | None = None
     training: Callable[..., object] | None = None
-
-
-def _namespace(path: Path) -> dict[str, Any]:
-    # As `python job.py` would, so the file can import its neighbours: `from train import train`.
-    folder = str(path.resolve().parent)
-    if folder not in sys.path:
-        sys.path.insert(0, folder)
-    return runpy.run_path(str(path.resolve()))
+    report: Callable[[], object] | None = None
+    train: Callable[..., object] | None = None
 
 
 def read_experiment(path: Path, *, experiment: str | None = None) -> Experiment:
     if path.suffix != ".py":
-        raise LauncherError("experiment files must be Python (.py)")
-    refuse_renamed(path)
-    namespace = _namespace(path)
-    found = namespace.get("eval_jobs")
-    if found is not None and not callable(found):
-        raise LauncherError(f"{path.name}: eval_jobs must be a function")
-    if found is None and not callable(namespace.get("training_jobs")):
-        raise LauncherError(f"{path.name}: define training_jobs() or eval_jobs(state)")
+        raise EtudeError("experiment_file_must_be_python", 422) from ValueError(path)
+    if not path.is_file():
+        raise EtudeError("experiment_file_not_found", 404) from FileNotFoundError(path)
+    with declaration(path):
+        refuse_renamed(path)
+        namespace = execute_file(path)
+        found = namespace.get("eval_jobs")
+        training = namespace.get("training_jobs")
+        report = namespace.get("report")
+        train = namespace.get("train")
+        if found is not None and not callable(found):
+            raise LauncherError(
+                f"{path.name}: eval_jobs must be a function", fix="def eval_jobs(state):"
+            )
+        if report is not None and not callable(report):
+            raise EtudeError(
+                "experiment_report_is_not_a_function", 422, fix="def report() -> Report:"
+            )
     return Experiment(
         name=experiment or path.stem,
         eval=cast(EvalFunction | None, found),
         file=path,
-        training=cast(Callable[..., object] | None, namespace.get("training_jobs")),
+        training=training if callable(training) else None,
+        report=report if callable(report) else None,
+        train=train if callable(train) else None,
     )
 
 
+def declared_report(experiment: Experiment) -> Report | None:
+    if experiment.report is None:
+        return None
+    assert experiment.file is not None
+    with declaration(experiment.file, experiment.report):
+        report = experiment.report()
+        if not isinstance(report, Report):
+            raise EtudeError(
+                "experiment_report_returns_a_report",
+                422,
+                fix="return Report()",
+            ) from TypeError(f"{experiment.file.name}: report() returned a {type(report).__name__}")
+    return report
+
+
+def require_jobs(experiment: Experiment) -> None:
+    if experiment.training is None and experiment.eval is None:
+        assert experiment.file is not None
+        raise LauncherError(
+            f"{experiment.file.name}: define training_jobs() or eval_jobs(state)",
+            fix="def training_jobs():\n    return TrainingJob(...)",
+        )
+
+
 def asked(function: EvalFunction, state: ExperimentState) -> list[EvalJob]:
-    returned = function(state)
+    defining = function if inspect.isroutine(function) else type(function)
+    path = Path(inspect.getfile(inspect.unwrap(defining)))
+    with declaration(path, function):
+        returned = function(state)
     given = list(returned) if isinstance(returned, (list, tuple)) else [returned]
     jobs: list[EvalJob] = []
     for each in given:
         if not isinstance(each, EvalJob):
-            defining = function if inspect.isroutine(function) else type(function)
             raise LauncherError(
-                f"{Path(inspect.getfile(defining)).name}: eval_jobs() must return EvalJob"
+                f"{path.name}: eval_jobs() must return EvalJob",
+                fix="return EvalJob(tournament=tournament, play=play, max_hours=1)",
+                at=function,
             )
         jobs.append(each)
     return jobs

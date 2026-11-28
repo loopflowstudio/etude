@@ -30,7 +30,7 @@ from tempfile import TemporaryDirectory
 from typing import Literal
 
 from etude.controller.declarations import asked, read_experiment, read_training_jobs
-from etude.errors import LauncherError
+from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Benchmark, RoundRobin
 from etude.eval.tournament import played
 from etude.experiment import observe, read_tournament_lines
@@ -248,6 +248,8 @@ def _try_step[T](step: Step, name: str, work: Callable[[], T]) -> T:
     try:
         return work()
     except Exception as error:
+        if isinstance(error, (LauncherError, EtudeError)) and error.fix is not None:
+            raise
         traceback.print_exc()
         # Name the first error, not a wrapper such as eval's `match_failed`.
         first: BaseException = error
