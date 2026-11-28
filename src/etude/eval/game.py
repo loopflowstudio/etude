@@ -121,7 +121,10 @@ class Take:
 
 @dataclass(frozen=True)
 class Grant:
+    """Matches for this take and whether this stream can request more."""
+
     matches: tuple[Match, ...]
+    drained: bool
 
 
 @dataclass(frozen=True)
@@ -170,7 +173,7 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
 
     def __init__(
         self,
-        request: Callable[[int], Awaitable[tuple[Match, ...]]],
+        request: Callable[[int], Awaitable[Grant]],
         initial: tuple[Match, ...],
         kind: type[Match[_MatchConfig]],
         bind: Callable[[CheckpointRef], Forward] | None,
@@ -184,7 +187,7 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
         self._bind = bind
         self._build = build
         self._target_slots = target_slots
-        self._exhausted = False
+        self._drained = False
         self._held: dict[int, _TakenMatch] = {}
 
     @property
@@ -194,13 +197,14 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
 
     async def take(self, count: int) -> list[tuple[Match[_MatchConfig], Sequence[object]]]:
         """Request up to `count` pending matches and their built seat agents."""
-        if count <= 0 or self._exhausted:
+        if count <= 0 or self._drained:
             return []
         if self._initial:
             granted, self._initial = self._initial[:count], self._initial[count:]
         else:
-            granted = await self._request(count)
-            self._exhausted = not granted
+            grant = await self._request(count)
+            granted = grant.matches
+            self._drained = grant.drained
         seats: list[tuple[Match[_MatchConfig], Sequence[object]]] = []
         for match in granted:
             if self._kind is Match:
@@ -472,14 +476,10 @@ async def _drive_play(
             raise errors[0]
         return result
 
-    exhausted = False
     try:
         while True:
-            if not exhausted and len(active) < concurrency:
-                taken = await matches.take(concurrency - len(active))
-                if not taken:
-                    exhausted = True
-                for match, agents in taken:
+            if len(active) < concurrency:
+                for match, agents in await matches.take(concurrency - len(active)):
                     active[asyncio.create_task(run_one(match, agents))] = match
             if not active:
                 return
@@ -596,8 +596,9 @@ async def _serve_stream(
     bus_report = BusReport()
     forwarder: _Forwarder | None = None
     played_count = 0
-    pending_grant: asyncio.Future[tuple[Match, ...]] | None = None
+    pending_grant: asyncio.Future[Grant] | None = None
     take_lock = asyncio.Lock()
+    drained = Grant(matches=(), drained=True)
     tournaments = tuple(spec.tournament for spec in streams)
 
     async def close_bus() -> None:
@@ -632,16 +633,15 @@ async def _serve_stream(
         )
 
     def on_pipe_readable() -> None:
-        nonlocal pending_grant
         try:
             message = cast(Grant, pipe.recv())
         except (EOFError, OSError):
             loop.remove_reader(pipe.fileno())
             if pending_grant is not None and not pending_grant.done():
-                pending_grant.set_result(())
+                pending_grant.set_result(drained)
             return
         if pending_grant is not None and not pending_grant.done():
-            pending_grant.set_result(message.matches)
+            pending_grant.set_result(message)
 
     starting = True
     loop.add_reader(pipe.fileno(), on_pipe_readable)
@@ -689,16 +689,16 @@ async def _serve_stream(
         if bus is not None:
             forwarder = _Forwarder(bus, max_batch=max_batch)
 
-        async def request_grant(stream_index: int, count: int) -> tuple[Match, ...]:
+        async def request_grant(stream_index: int, count: int) -> Grant:
             nonlocal pending_grant
             async with take_lock:
-                future: asyncio.Future[tuple[Match, ...]] = loop.create_future()
+                future: asyncio.Future[Grant] = loop.create_future()
                 pending_grant = future
                 try:
                     pipe.send(Take(count, stream=stream_index))
                 except (EOFError, OSError):
                     pending_grant = None
-                    return ()
+                    return drained
                 try:
                     return await future
                 finally:

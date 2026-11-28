@@ -156,14 +156,16 @@ with evaluating(
   the slots it needs using its own process share. Direct `play_many` sizes
   for one process per `max_batch` matches, rounded up. Shared and code-only
   `play_many` size for one process per match. The parent spreads initial
-  matches for the first async stream across starting processes. Later streams
-  request matches when they start, and pending queues fill slots as children
-  exit. Each `play_many` generator submits forwards on the call and requests
-  matches for its free slots. `MatchStream.target_slots` suggests the initial
-  share, capped at `max_batch` when a loader is declared. Grants account for
+  matches across processes starting with an async stream. Later streams
+  request matches when they start. A freed dedicated process slot goes to the
+  pending queue with the fewest active processes. Each `play_many` generator
+  submits forwards on the call and requests matches for its free slots.
+  `MatchStream.target_slots` suggests the initial share, capped at `max_batch`
+  when a loader is declared. Grants account for
   held matches and reserve a share of pending work for empty processes. A
   positive request receives at least one while grants are open and work
   remains. Only processes serving that tournament count toward grant shares.
+  The last grant closes the stream's requests locally, even if it includes matches.
   Both kinds of tournament share an agent process when using shared inference.
   Per-process diagnostics go to `artifacts/agents/game-{pid}.json`
   (`GameReport` with `tournaments: tuple[str, ...]`), keeping a game-thread-filtered

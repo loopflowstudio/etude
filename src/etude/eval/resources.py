@@ -15,11 +15,11 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections import deque
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from heapq import heapify, heappop, heappush
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -150,10 +150,11 @@ def _detect_accelerator() -> Accelerator | _Unavailable:
 
 @dataclass(frozen=True)
 class TournamentQueue:
-    """Pending match demand for one tournament."""
+    """Pending match demand and active processes for one tournament."""
 
     matches: int
     streaming: bool = False
+    serving: int = 0
 
     def process_demand(self, streaming_batch: int) -> int:
         return math.ceil(self.matches / streaming_batch) if self.streaming else self.matches
@@ -175,8 +176,9 @@ class Placement:
     ) -> tuple[int, ...]:
         """Allocate free process slots according to pending match demand."""
         direct = self.bus == "local"
-        demand = [queue.process_demand(max_batch if direct else 1) for queue in queues]
-        return _allocate_processes(demand, available, direct=direct)
+        return _allocate_processes(
+            queues, available, streaming_batch=max_batch if direct else 1, direct=direct
+        )
 
     def describe(self, tournaments: Sequence[str], *, streaming: bool) -> str | None:
         """Describe the placement of one evaluation group."""
@@ -218,17 +220,23 @@ def _select_inference(loader: "AgentLoader", checkpoints: bool) -> Inference:
             return unavailable
 
 
-def _allocate_processes(demand: Sequence[int], processes: int, *, direct: bool) -> tuple[int, ...]:
-    """Assign processes in tournament order, sharing direct caches across queues."""
+def _allocate_processes(
+    queues: Sequence[TournamentQueue], processes: int, *, streaming_batch: int, direct: bool
+) -> tuple[int, ...]:
+    """Share direct processes or give each new dedicated process to the least served queue."""
+    demand = [queue.process_demand(streaming_batch) for queue in queues]
     if direct:
         return tuple(min(count, processes) for count in demand)
     allocated = [0] * len(demand)
-    eligible = deque(index for index, count in enumerate(demand) if count)
-    for _ in range(min(sum(demand), processes)):
-        index = eligible.popleft()
+    eligible = [(queue.serving, index) for index, queue in enumerate(queues) if demand[index]]
+    heapify(eligible)
+    for _ in range(processes):
+        if not eligible:
+            break
+        serving, index = heappop(eligible)
         allocated[index] += 1
         if allocated[index] < demand[index]:
-            eligible.append(index)
+            heappush(eligible, (serving + 1, index))
     return tuple(allocated)
 
 
@@ -281,11 +289,14 @@ def place(
         # Each direct process needs room for a match in its own checkpoint cache.
         cap = min(cap, max(1, held // match_bytes))
 
-    demand = [queue.process_demand(1 if accelerator else loader.max_batch) for queue in queues]
+    streaming_batch = 1 if accelerator else loader.max_batch
+    demand = (queue.process_demand(streaming_batch) for queue in queues)
     # A direct process can serve multiple queues in turn.
     processes = min(cap, sum(demand) if accelerator else max(demand))
     shared = accelerator and processes > 1
-    shares = _allocate_processes(demand, processes, direct=not shared)
+    shares = _allocate_processes(
+        queues, processes, streaming_batch=streaming_batch, direct=not shared
+    )
     games = min(
         math.ceil(loader.max_batch / processes),
         max(

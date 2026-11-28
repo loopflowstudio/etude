@@ -45,7 +45,7 @@ from etude.eval.agents import (
 )
 from etude.eval.batching import Batch, _add_socket_batch, _Batches, _encode_socket, _send_peer
 from etude.eval.bus import ForwardOutcome
-from etude.eval.game import GameReport, MatchStream
+from etude.eval.game import GameReport, MatchStream, Take
 from etude.eval.loader import AgentLoader
 from etude.eval.match import environment
 from etude.eval.query import _kept_path, statsdb
@@ -119,7 +119,16 @@ async def plain(match: Match, agents: list[object]) -> Tables:
     return {"scores": [{"seat": 0, "score": 7}]}
 
 
-def tournament(name: str) -> RoundRobin:
+async def request_stop(match: Match, agents: list[object]) -> Tables:
+    Path(os.environ["ETUDE_STOP_FILE"]).touch()
+    return await plain(match, agents)
+
+
+def tournament(name: str, *, games: int | None = None) -> RoundRobin:
+    if games is not None:
+        return RoundRobin(
+            name=name, environment=environment("grouped"), config={"lane": name}, games=games
+        )
     return RoundRobin(
         name=name, environment=environment("grouped"), configs=({"lane": name},), games=1
     )
@@ -129,9 +138,11 @@ def job(
     name: str,
     agents: Agents | None,
     playing: Callable[..., Awaitable[Tables]] | None = None,
+    *,
+    games: int | None = None,
 ) -> EvalJob:
     return EvalJob(
-        tournament=tournament(name),
+        tournament=tournament(name, games=games),
         enter=(checkpoint("left"), checkpoint("right")),
         play=playing or (plain if agents is None else play),
         agents=agents or Agents(),
@@ -1366,12 +1377,9 @@ with TemporaryDirectory(dir="/tmp", prefix="etude-test-") as scratch, socket.soc
     def drive() -> None:
         req = parent.recv()
         assert isinstance(req, Take)
-        parent.send(Grant((match,)))
+        parent.send(Grant(matches=(match,), drained=True))
         outcome = parent.recv()
         assert isinstance(outcome, Outcome) and outcome.error is None
-        req2 = parent.recv()
-        assert isinstance(req2, Take)
-        parent.send(Grant(()))
         end = parent.recv()
         assert isinstance(end, StreamEnd) and end.error is None
         done = parent.recv()
@@ -3031,6 +3039,113 @@ def test_fast_direct_stream_takes_pending_matches_while_its_peer_waits(
         assert set(
             db.sql("select match, retry from matches where state = 'failed'").fetchall()
         ) == ({(match.key, False) for match in matches[:5]} if broken else set())
+
+
+def test_fast_direct_process_can_play_all_matches_in_its_second_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 2)
+    artifacts = tmp_path / "grouped/artifacts/agents"
+    first: Connection | None = None
+    finished_first: GameReport | None = None
+
+    def serve_first_process(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal first, finished_first
+        if first is None:
+            first = next(handle for handle in handles if isinstance(handle, Connection))
+        if not first.closed:
+            assert first.poll(10), "the first game process stopped responding"
+            return (first,)
+        if finished_first is None:
+            [finished_first] = _game_reports(artifacts)
+        return wait(handles, timeout=timeout)
+
+    monkeypatch.setattr("etude.eval.run.wait", serve_first_process)
+    agents = Agents(load=load, devices=("cpu",), max_batch=2)
+    selected = group(job("first", agents, plain, games=2), job("later", agents, plain, games=3))
+    assert [result.played for result in hold_group(selected, directory=tmp_path)] == [2, 3]
+    assert finished_first is not None and finished_first.matches == 4
+
+
+def test_stop_during_first_direct_stream_leaves_later_matches_unstarted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
+    monkeypatch.setenv("ETUDE_STOP_FILE", str(tmp_path / "stop"))
+    agents = Agents(load=load, devices=("cpu",))
+    first, later = job("first", agents, request_stop), job("later", agents, plain)
+
+    with pytest.raises(Terminated, match="evaluation stopped"):
+        hold_group(group(first, later), directory=tmp_path)
+
+    reports = _game_reports(tmp_path / "grouped/artifacts/agents")
+    [report] = reports
+    assert report.tournaments == ("first", "later") and report.matches == 1
+    retained = played(later.tournament, experiment="grouped", enter=later.enter, directory=tmp_path)
+    assert len(retained.new) == len(retained.retry) == 1
+    assert not retained.delivered
+
+
+def test_released_shared_slot_starts_waiting_tournament_before_expanding_active_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 3)
+    artifacts = tmp_path / "grouped/artifacts/agents"
+    active_process: tuple[Connection | int, ...] = ()
+    first_reports: set[tuple[str, ...]] = set()
+
+    def delay_active_process(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal active_process, first_reports
+        if not active_process:
+            active_process = tuple(handles[:2])
+        if not first_reports:
+            reports = _game_reports(artifacts)
+            if len(reports) == 2:
+                first_reports = {report.tournaments for report in reports}
+            else:
+                ready = wait(
+                    [handle for handle in handles if handle not in active_process], timeout=10
+                )
+                assert ready, "the second game slot stopped responding"
+                return ready
+        return wait(handles, timeout=timeout)
+
+    monkeypatch.setattr("etude.eval.run.wait", delay_active_process)
+    agents = Agents(load=load, max_batch=2)
+    jobs = (
+        job("active", agents, plain, games=2),
+        job("short", agents, plain),
+        job("waiting", agents, plain),
+    )
+    assert [result.played for result in hold_group(group(*jobs), directory=tmp_path)] == [2, 1, 1]
+    assert first_reports == {("short",), ("waiting",)}
+
+
+def test_play_many_sends_no_take_after_the_last_match_is_granted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    receive = Connection.recv
+    requests: list[Take] = []
+
+    def count_takes(pipe: Connection) -> object:
+        message: object = receive(pipe)
+        if isinstance(message, Take):
+            requests.append(message)
+        return message
+
+    monkeypatch.setattr(Connection, "recv", count_takes)
+    with evaluating(
+        environment("vector"),
+        experiment="vector",
+        matches=(Match(players=(Code(name="one"),), config=VectorRules()),),
+        directory=tmp_path,
+    ) as active:
+        assert active.play_many(code_only_vector_slots).played == 1
+    assert len(requests) == 1
 
 
 def test_drained_async_queue_releases_process_while_peer_still_holds_games(

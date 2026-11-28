@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -810,12 +810,21 @@ def play_together(
                 available = placement.processes - len(live)
                 if not available or stopping:
                     return
+                serving = Counter(
+                    id(active.playing)
+                    for child in live
+                    if (active := child.active_stream) is not None
+                )
                 starts = dict(
                     zip(
                         map(id, pending),
                         placement.process_shares(
                             [
-                                TournamentQueue(len(each.pending), streaming=each.streaming)
+                                TournamentQueue(
+                                    len(each.pending),
+                                    streaming=each.streaming,
+                                    serving=serving[id(each)],
+                                )
                                 for each in pending
                             ],
                             agents.max_batch,
@@ -827,12 +836,9 @@ def play_together(
                 slots: dict[int, int] = {}
                 for each in pending:
                     if each.streaming and starts[id(each)]:
-                        serving = sum(
-                            active.playing is each
-                            for child in live
-                            if (active := child.active_stream) is not None
+                        share = math.ceil(
+                            len(each.pending) / (serving[id(each)] + starts[id(each)])
                         )
-                        share = math.ceil(len(each.pending) / (serving + starts[id(each)]))
                         slots[id(each)] = min(share, agents.max_batch) if agents.load else share
                 while len(live) < placement.processes:
                     spawned = False
@@ -886,7 +892,7 @@ def play_together(
                         else:
                             granted = each.grant(message.count)
                         stream.held.update((match.key, match) for match in granted)
-                    child.pipe.send(Grant(granted))
+                    child.pipe.send(Grant(matches=granted, drained=stopping or not each.pending))
                 elif isinstance(message, Outcome):
                     stream = child.streams[message.stream]
                     held = stream.held

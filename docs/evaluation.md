@@ -213,7 +213,8 @@ Etude can run several copies of `play_many` in separate game processes. Each
 generator asks for matches from the same tournament queue. For direct
 inference, Etude plans one process per `max_batch` pending matches, rounded up,
 subject to the host budget. Tournaments can use processes freed by siblings
-as their queues finish.
+as their queues finish. A freed slot dedicated to one tournament goes to the
+pending queue with the fewest active processes.
 
 In direct mode, Etude sets each game process's model and BLAS thread environment
 variables (`OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, etc.)
@@ -236,9 +237,12 @@ async def play_many(
     matches: MatchStream[Rules],
 ) -> AsyncIterator[tuple[Match[Rules], Tables | Exception]]:
     pool = RolloutPool(slots=min(256, matches.target_slots))
+    refill = True
     while True:
-        for match, agents in await matches.take(pool.free):
-            pool.load(match, agents)
+        if refill:
+            for match, agents in await matches.take(pool.free):
+                pool.load(match, agents)
+            refill = False
         if not pool.active:
             return
         for forward, batch, rows, slots in pool.ready_batches():
@@ -246,9 +250,11 @@ async def play_many(
                 [outputs] = await forward([batch], rows=rows)
             except ForwardError as error:
                 for match in pool.drop(slots):
+                    refill = True
                     yield match, error
                 continue
             for match, tables in pool.step(slots, outputs):
+                refill = True
                 yield match, tables
 
 
@@ -270,7 +276,8 @@ the generator yields it.
   pending `(match, agents)` pairs. Grants account for held matches and share
   pending work among empty processes. An empty grant for `n > 0` means the
   tournament queue is drained or the run is stopping. Finish any matches
-  you still hold.
+  you still hold. Further calls return immediately once that stream receives
+  its final grant.
 - `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
   `rows=` for a pre-collated batch so batching never merges calls past
   `max_batch` rows and reports real row counts. An oversized pre-collated call
