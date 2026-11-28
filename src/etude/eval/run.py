@@ -8,6 +8,7 @@ what play completed. Tournament scheduling lives in eval.tournament.
 from __future__ import annotations
 
 import inspect
+import math
 import multiprocessing
 import os
 import secrets
@@ -538,6 +539,16 @@ class Playing:
         self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
         self.skipped = len(self.run.matches) - len(self.pending)
 
+    def grant(self, count: int, *, processes: int = 1) -> tuple[Match, ...]:
+        """Reserve up to one process's share of the remaining matches."""
+        count = min(count, max(1, math.ceil(len(self.pending) / processes)))
+        granted: list[Match] = []
+        while self.pending and len(granted) < count:
+            match = self.pending.popleft()
+            if match.key not in self.run._failed and match.key not in self.run.done:
+                granted.append(match)
+        return tuple(granted)
+
 
 def play_together(
     plays: Sequence[Playing],
@@ -746,19 +757,11 @@ def _play_matches(
     live: list[_GameProcess] = []
     address = agent_process.address if agent_process is not None else None
 
-    def grant(each: Playing, count: int) -> tuple[Match, ...]:
-        granted: list[Match] = []
-        while each.pending and len(granted) < count:
-            match = each.pending.popleft()
-            if match.key not in each.run._failed and match.key not in each.run.done:
-                granted.append(match)
-        return tuple(granted)
-
     def spawn_one(each: Playing) -> _GameProcess:
         parent, child_pipe = context.Pipe()
         # Starting play processes own their first matches even if another match fails
         # before they finish importing the game. Streaming engines request their own slots.
-        initial = () if each.streaming else grant(each, plan.games)
+        initial = () if each.streaming else each.grant(plan.games)
         game = Game(
             play=each.play,
             tournament=each.tournament,
@@ -804,7 +807,12 @@ def _play_matches(
         each = child.playing
         if isinstance(message, Take):
             stopping = stopping or each.run.should_stop
-            granted = () if stopping else grant(each, message.count)
+            processes = (
+                sum(other.playing is each and not other.done for other in live)
+                if each.streaming
+                else 1
+            )
+            granted = () if stopping else each.grant(message.count, processes=processes)
             child.held.update((match.key, match) for match in granted)
             child.pipe.send(Grant(granted))
         elif isinstance(message, Outcome):

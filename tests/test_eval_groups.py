@@ -56,7 +56,7 @@ from etude.eval.resources import (
     resources,
 )
 from etude.eval.result import Result, Tables
-from etude.eval.run import Terminated
+from etude.eval.run import Playing, Terminated
 from etude.eval.tournament import evaluating, played
 from etude.experiment import observe, state_of
 from etude.jobs import (
@@ -716,14 +716,24 @@ def test_a_failing_nvidia_driver_plays_direct(
 
 
 @pytest.mark.parametrize(
-    ("plat", "machine", "cpus", "memory_gb", "batch_inputs", "processes", "threads", "accelerator"),
+    (
+        "plat",
+        "machine",
+        "cpus",
+        "memory_gb",
+        "batch_inputs",
+        "processes",
+        "games",
+        "threads",
+        "accelerator",
+    ),
     [
-        ("darwin", "arm64", 8, None, 32, 7, 1, "metal"),
-        ("darwin", "arm64", 16, None, 8, 15, 1, "metal"),
-        ("darwin", "arm64", 1, None, 32, 1, 1, "metal"),
-        ("darwin", "arm64", 8, 15.5, 32, 2, 6, "metal"),
-        ("darwin", "x86_64", 8, None, 32, 8, 1, None),
-        ("linux", "arm64", 8, None, 32, 8, 1, None),
+        ("darwin", "arm64", 8, None, 32, 7, 5, 1, "metal"),
+        ("darwin", "arm64", 16, None, 8, 15, 1, 1, "metal"),
+        ("darwin", "arm64", 1, None, 32, 1, 32, 1, "metal"),
+        ("darwin", "arm64", 8, 15.5, 32, 2, 16, 6, "metal"),
+        ("darwin", "x86_64", 8, None, 32, 8, 4, 1, None),
+        ("linux", "arm64", 8, None, 32, 8, 4, 1, None),
     ],
 )
 def test_apple_silicon_plan_execution_bounds_games_by_cores_and_memory(
@@ -734,6 +744,7 @@ def test_apple_silicon_plan_execution_bounds_games_by_cores_and_memory(
     memory_gb: float | None,
     batch_inputs: int,
     processes: int,
+    games: int,
     threads: int,
     accelerator: Accelerator | None,
 ) -> None:
@@ -747,13 +758,13 @@ def test_apple_silicon_plan_execution_bounds_games_by_cores_and_memory(
     loader = Agents(load=load, memory_gb=memory_gb, max_batch=batch_inputs).plain(None)
     plan = plan_execution(64, loader, checkpoints=True)
     shared = accelerator is not None
-    assert (plan.processes, plan.threads, plan.inference) == (
+    assert (plan.processes, plan.games, plan.threads, plan.inference) == (
         processes,
+        games,
         threads,
         accelerator or "no accelerator detected",
     )
     held = int(memory_gb * 1024**3) if memory_gb is not None else 8 * 1024**3
-    assert plan.games == (1 if shared else 4)
     assert plan.checkpoint_bytes == (held if shared else held // processes)
 
 
@@ -835,7 +846,7 @@ def test_temporary_files_work_after_game_scratch_is_removed(
         ("cuda", 4, None, 3, 11),
         ("cuda", 4, 1.75, 1, 32),
         ("cuda", 8, None, 3, 11),
-        ("metal", 3, None, 2, 1),
+        ("metal", 3, None, 2, 16),
     ],
 )
 def test_group_execution_respects_declared_agent_memory(
@@ -1852,6 +1863,28 @@ async def vector_slots(
                 yield match, Result(tables={"vector_scores": [{"seat": 0, "score": score}]})
 
 
+def test_play_many_grants_spread_a_128_match_panel_across_12_processes(tmp_path: Path) -> None:
+    matches = [Match(players=(Code(name="one"),), index=index) for index in range(128)]
+    with evaluating(
+        environment("vector"), experiment="vector", matches=matches, run="slots", directory=tmp_path
+    ) as active:
+        playing = Playing(
+            run=active,
+            play=Function(module=__name__, name=vector_slots.__name__),
+            tournament="slots",
+            agent_loader=AgentLoader(),
+            streaming=True,
+        )
+        slots = 64
+        grants = [playing.grant(slots, processes=12) for _ in range(12)]
+        assert [len(grant) for grant in grants] == [11, 10, 9, 9, 8, 7, 7, 6, 6, 5, 5, 4]
+        refill = playing.grant(2, processes=12)
+        assert len(refill) == 2
+        tail = playing.grant(slots, processes=1)
+        assert [match for grant in (*grants, refill, tail) for match in grant] == matches
+        assert playing.grant(slots, processes=1) == ()
+
+
 @pytest.mark.parametrize("retry", [False, True])
 def test_play_many_backfills_after_a_yielded_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry: bool
@@ -1914,7 +1947,7 @@ def test_play_many_shares_one_agent_process_with_play(
                 name=name,
                 environment=environment("grouped"),
                 config=VectorRules(),
-                games=2,
+                games=1,
                 base_seed=seed,
             ),
             enter=(checkpoint("left"), checkpoint("right")),
@@ -1928,7 +1961,7 @@ def test_play_many_shares_one_agent_process_with_play(
     selected = group(*jobs, job("ordinary", agents))
     assert [spec.streaming for spec in selected.evaluations] == [True, True, False]
     results = hold_group(selected, directory=tmp_path)
-    assert [result.played for result in results] == [2, 2, 1]
+    assert [result.played for result in results] == [1, 1, 1]
     log = capfd.readouterr().err
     assert log.count("agents: shared inference") == 1
     assert f"shared inference for first, second, ordinary ({accelerator})" in log
@@ -1937,17 +1970,17 @@ def test_play_many_shares_one_agent_process_with_play(
         GameReport.model_validate_json(path.read_bytes()) for path in artifacts.glob("game-*.json")
     ]
     assert sorted((report.tournament, report.matches) for report in reports if report.matches) == [
-        ("first", 2),
+        ("first", 1),
         ("ordinary", 1),
-        ("second", 2),
+        ("second", 1),
     ]
     batches = json.loads((artifacts / "batches.json").read_text())
-    assert sum(batch["rows"] for batch in batches) == 6
+    assert sum(batch["rows"] for batch in batches) == 4
     assert max(batch["rows"] for batch in batches) <= 3
     assert sum(batch["requests"] for batch in batches) == 4
     db = statsdb("grouped", tmp_path)
     try:
-        assert db.sql("select count(*) from vector_scores").fetchone() == (4,)
+        assert db.sql("select count(*) from vector_scores").fetchone() == (2,)
         assert db.sql("select count(*) from scores").fetchone() == (2,)
     finally:
         db.close()

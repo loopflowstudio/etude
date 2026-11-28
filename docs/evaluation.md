@@ -190,10 +190,10 @@ its own checkpoints, uses one model-library thread, and gets a share of the
 checkpoint allowance (half of host memory by default).
 
 Pending matches, CPUs and available host memory bound the game process count.
-For `play`, CUDA and direct checkpoint inference divide `max_batch` across
-game processes, rounding up. Metal uses one match per game process and leaves
-a core for shared inference when possible. The startup line gives the mode,
-its reason, and the process, slot and thread counts.
+For `play` with checkpoint inference, Etude divides `max_batch` across game
+processes, rounding up. Shared inference leaves a core for the agent process
+when possible. The startup line gives the mode, its reason, and the process,
+slot and thread counts.
 
 Choose tensor placement in `load` and honor Etude's thread environment there.
 Keep model imports in the loading module so shared game processes stay light.
@@ -250,18 +250,16 @@ Etude schedules the matches, caches checkpoints and stores each outcome as
 the generator yields it.
 
 - `await matches.take(n)` pulls up to `n` pending `(match, agents)` pairs in one
-  step. Returning `[]` for `n > 0` means no pending matches remain (or the run
-  is stopping).
+  step. Etude caps each grant at the tournament's pending matches divided by
+  its active game processes, rounded up. Request the number of free slots
+  and step the matches you receive. Returning `[]` for `n > 0` means no
+  pending matches remain (or the run is stopping).
 - `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
   `rows=` for a pre-collated batch so the agent process never merges calls past
   `max_batch` rows and reports real row counts. A single pre-collated call
   above `max_batch` rows runs alone. An engine can choose smaller batches
   when its model needs a hard limit. Group ready rows by their shared `Forward`
   object to batch calls for the same checkpoint.
-- Size the engine's slots to the panel. Each process takes matches as it has
-  free slots, so a slot count near the whole panel puts every game's host work
-  on one or two cores while the GPU waits for requests. Fewer slots spread
-  matches across more processes.
 - Yield `(match, tables)` or `(match, Result(...))` with the match object
   returned by `take`. Yield as each slot finishes so it can backfill
   without waiting for stragglers.
