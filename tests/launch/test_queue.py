@@ -237,17 +237,24 @@ def test_cli_continue_waits_without_capacity(
     )
     monkeypatch.setattr(import_module("etude.launch.client"), "_client", lambda: b.scheduler)
     (parent,) = b.scheduler.launch(
-        Job(command="train", max_hours=1, max_usd=Decimal(1), until=Until.parse("steps=3")),
+        Job(
+            command="train",
+            experiment="capacity",
+            max_hours=1,
+            max_usd=Decimal(1),
+            until=Until.parse("steps=3"),
+        ),
         rent="l4",
     )
     b.run(601)
     # What the parent's job recorded, as tracking keeps it in its runs directory.
     weights = tmp_path / "weights.pt"
     weights.write_bytes(b"weights")
+    parent_name = parent.rsplit("/", 1)[-1]
     tracked = open_run(
         experiment="capacity",
         clocks=[Clock(name="steps", kind="step", meaning="steps")],
-        run=parent,
+        run=parent_name,
         directory=tmp_path,
     )
     tracked.checkpoint(weights, steps=3)
@@ -256,6 +263,11 @@ def test_cli_continue_waits_without_capacity(
     argv = ["continue", "--run", parent, "--until", "steps=7", "--source", str(tmp_path)]
     with advertise("http://127.0.0.1:8765"):
         monkeypatch.setenv("ETUDE_SERVER_LOCAL", "1")  # The receiving end of a forwarded command.
+        b.scheduler.set_limit("capacity", Decimal(1))
+        assert main(argv) == 1
+        assert "limited to $1.00" in capsys.readouterr().err
+        assert [run.id for run in b.store.runs()] == [parent]
+        b.scheduler.set_limit("capacity", Decimal(2))
         assert main(argv) == 0
     output = capsys.readouterr().out
     assert "view:" not in output
@@ -264,7 +276,7 @@ def test_cli_continue_waits_without_capacity(
     (given,) = record.launch.spec.environment
     handed = ParentRun.model_validate_json(given.value)
     assert handed.checkpoint is not None
-    assert (handed.parent.source_id, authored(handed.checkpoint.at)) == (parent, {"steps": 3})
+    assert (handed.parent.source_id, authored(handed.checkpoint.at)) == (parent_name, {"steps": 3})
     assert str(record.launch.spec.until) == "steps=7" and record.launch.autorun
     assert b.scheduler.read(child).phase == "queued"
 

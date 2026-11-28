@@ -17,6 +17,7 @@ Every time is timezone-aware UTC.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import ROUND_FLOOR, Decimal
 from typing import Literal, Self
@@ -65,6 +66,7 @@ __all__ = (
     "RentalCost",
     "LogStream",
     "Standing",
+    "ExperimentLimit",
 )
 
 
@@ -358,6 +360,10 @@ class Target(Record):
 
     pool: str | None = None
     rent: str | None = None
+
+    def ask_usd(self, job: Job) -> Decimal:
+        """Dollars a new run reserves against the experiment's spending limit."""
+        return (job.max_usd or Decimal(0)) if self.rent is not None else Decimal(0)
 
 
 MachineState = Literal["starting", "available", "unavailable", "deleted"]
@@ -673,12 +679,24 @@ class Quote(Record):
         return total
 
 
+class ExperimentLimit(Record):
+    """The stored spending ceiling and total committed under one experiment label."""
+
+    experiment: str
+    max_usd: Decimal
+    set_at: datetime
+    committed_usd: Decimal = Decimal(0)
+    estimated: bool = False
+
+
 class LaunchRequest(Record):
     run: str
     fingerprint: str
     requested_revision: str | None
     resolved_revision: str | None = None
     resume_version: int | None = None  # compare-and-set the existing run at admission
+    experiment: str | None = None
+    ask_usd: Decimal = Decimal(0)
 
 
 class Launch(Record):
@@ -687,7 +705,15 @@ class Launch(Record):
     id: str
     requests: tuple[LaunchRequest, ...]
     created_at: datetime
+    target: Target | None = None  # absent from evidence written before experiment limits
     state: Literal["preparing", "admitting", "admitted", "failed"] = "preparing"
+
+    def addressed(self, runs: Sequence[RunRequest]) -> tuple[RunRequest, ...]:
+        """Give the original requests their retained run addresses."""
+        return tuple(
+            run.model_copy(update={"id": request.run})
+            for run, request in zip(runs, self.requests, strict=True)
+        )
 
 
 class Diagnostic(Record):
@@ -768,10 +794,11 @@ class Standing(Record):
 
     @property
     def committed_usd(self) -> Decimal:
-        """What the run holds of an experiment's dollars: its cost once done, its limit until then."""
-        return (
-            self.status.usd if self.status.done else self.record.launch.spec.max_usd or Decimal(0)
-        )
+        """Actual spend plus any unspent dollars an unfinished run may still use."""
+        if self.status.done:
+            return self.status.usd
+        launch = self.record.launch
+        return max(self.status.usd, Target(pool=launch.pool, rent=launch.rent).ask_usd(launch.spec))
 
     @property
     def placement(self) -> Literal["queued", "running"]:

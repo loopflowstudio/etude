@@ -284,10 +284,13 @@ The total counts every paid run under that label in this launcher database
 since its first run, including runs recorded before the limit was set:
 training, evaluations, continuations, resumes, retries and smoke stages. An
 unfinished paid run commits `max(spent, max_usd)`; a finished run commits its
-attributed rental cost. Runs targeting an owned pool (which cannot rent) commit
-`$0`, so a full cloud limit does not block `--pool lab`. Not counted: idle time
-on a machine rented by hand with `etude rent` (which has its own `--max-usd`),
-storage and transfer charges, unlabelled runs, and runs in other databases.
+attributed rental cost. A launch reserves dollars before source preparation
+and holds them until its runs are recorded or the launch fails. A resume
+keeps the earlier run's spend and updates its remaining commitment. Runs
+targeting an owned pool add `$0`, so a full limit still allows `--pool lab`.
+The total excludes idle time on machines rented by hand with `etude rent`
+(which has its own `--max-usd`), storage and transfer charges, unlabelled
+runs, and runs in other databases.
 
 When a launch would exceed the limit:
 
@@ -298,9 +301,10 @@ When a launch would exceed the limit:
   refuse the whole submission before publishing source or renting a machine,
   naming the limit, committed total and the command to raise it.
 
-`--max-usd 0` freezes paid spend on the label while still allowing owned pools.
-Lowering a limit below what is already committed is allowed and does not stop
-running work. The limit lives in the launcher database, so it covers this
+`--max-usd 0` freezes new paid launches. Lowering a limit or receiving a
+revised bill can put the committed total above the ceiling. Both affect
+future admissions, while existing reservations and runs keep their funding.
+The limit lives in the launcher database, so it covers this
 computer or every client sharing one `etude server`. One limit across separate
 launcher databases, or a limit an agent sharing the same shell cannot raise,
 requires a hosted service; raising is its own command so shell permission rules

@@ -39,9 +39,11 @@ from etude.launch.records import (
     TRY_EXEMPT,
     Cause,
     Diagnostic,
+    ExperimentLimit,
     Hardware,
     Image,
     Launch,
+    LaunchRequest,
     LogStream,
     Machine,
     OnDemand,
@@ -472,7 +474,11 @@ class Database:
         ).fetchone()
         return None if row is None else datetime.fromisoformat(row[0])
 
-    def begin_launch(self, launch: Launch) -> None:
+    def claim_launch(
+        self, launch: Launch, check: Callable[[Sequence[LaunchRequest]], None]
+    ) -> None:
+        """Reserve the requests against one snapshot before source preparation can begin."""
+        refused: LauncherError | None = None
         with self._together():
             for request in launch.requests:
                 if (
@@ -499,11 +505,19 @@ class Database:
                         raise LauncherError(
                             f"run {request.run!r}: reconciling existing request {previous.id}"
                         )
-            self.save_launch(launch)
+            try:
+                check(launch.requests)
+            except LauncherError as error:
+                refused = error
+            self.save_launch(
+                launch if refused is None else launch.model_copy(update={"state": "failed"})
+            )
             self._db.executemany(
                 "INSERT INTO launch_runs(launch, run) VALUES (?, ?)",
                 ((launch.id, r.run) for r in launch.requests),
             )
+        if refused is not None:
+            raise refused
 
     def launch_evidence(self, identity: str) -> Launch:
         row = self._db.execute("SELECT body FROM launches WHERE id=?", (identity,)).fetchone()
@@ -511,16 +525,56 @@ class Database:
             raise LauncherError(f"unknown launch {identity}")
         return Launch.model_validate_json(row[0])
 
-    def claim_launch(self, identity: str) -> Launch:
+    def finish_preparation(self, identity: str, *, failed: bool = False) -> Launch:
         with self._together():
             launch = self.launch_evidence(identity)
             if launch.state != "preparing":
                 raise LauncherError(
                     f"launch {identity} already {launch.state}; inspect retained evidence"
                 )
-            launch = launch.model_copy(update={"state": "admitting"})
+            launch = launch.model_copy(update={"state": "failed" if failed else "admitting"})
             self.save_launch(launch)
             return launch
+
+    def reservations(self, experiment: str) -> tuple[LaunchRequest, ...]:
+        """Outstanding requests for this label, before they become runs or fail."""
+        return tuple(
+            LaunchRequest.model_validate_json(row[0])
+            for row in self._db.execute(
+                """SELECT request.value FROM launches l, json_each(l.body, '$.requests') request
+                   WHERE json_extract(l.body, '$.state') IN ('preparing', 'admitting')
+                     AND json_extract(request.value, '$.experiment') = ?""",
+                (experiment,),
+            )
+        )
+
+    def set_limit(self, limit: ExperimentLimit) -> None:
+        self._write(
+            """INSERT INTO experiment_limits(experiment, max_usd, set_at) VALUES (?,?,?)
+               ON CONFLICT(experiment) DO UPDATE SET max_usd=excluded.max_usd, set_at=excluded.set_at""",
+            (limit.experiment, str(limit.max_usd), limit.set_at.isoformat()),
+        )
+
+    def unset_limit(self, experiment: str) -> None:
+        if not self._write(
+            "DELETE FROM experiment_limits WHERE experiment=?", (experiment,)
+        ).rowcount:
+            raise LauncherError(f"experiment {experiment!r} has no spending limit")
+
+    def limit(self, experiment: str) -> ExperimentLimit | None:
+        row = self._db.execute(
+            "SELECT experiment, max_usd, set_at FROM experiment_limits WHERE experiment=?",
+            (experiment,),
+        ).fetchone()
+        return None if row is None else ExperimentLimit.model_validate(dict(row))
+
+    def limits(self) -> tuple[ExperimentLimit, ...]:
+        return tuple(
+            ExperimentLimit.model_validate(dict(row))
+            for row in self._db.execute(
+                "SELECT experiment, max_usd, set_at FROM experiment_limits ORDER BY experiment"
+            )
+        )
 
     def save_launch(self, launch: Launch) -> None:
         self._write(

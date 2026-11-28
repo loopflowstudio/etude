@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn
 
@@ -322,23 +322,24 @@ def prepare(address: str, submission: LaunchInput) -> LaunchInput:
     launch = Launch.model_validate_json(
         client._request(SubmissionRequest(operation="prepare_launch", submission=submission))
     )
-    requested = tuple(
-        run.model_copy(update={"id": request.run})
-        for run, request in zip(submission.runs, launch.requests, strict=True)
-    )
     try:
         return _with_sources(
             submission.model_copy(
-                update={"launch": launch.id, "runs": tuple(freeze(run) for run in requested)}
+                update={
+                    "launch": launch.id,
+                    "runs": tuple(freeze(run) for run in launch.addressed(submission.runs)),
+                }
             ),
             client,
         )
-    except Exception as error:
+    except BaseException as error:
         message = explain(error)
         try:
             client._request(FailLaunchRequest(launch=launch.id, message=message))
         except Exception:
             message += "; server evidence update unconfirmed"
+        if not isinstance(error, Exception):
+            raise
         raise LaunchError(launch.id, tuple(r.run for r in launch.requests), message) from error
 
 
@@ -566,23 +567,16 @@ def _answer(scheduler: Scheduler, request: Request) -> Response:
                 and not stored(run.job.repo, run.job.revision).is_file()
             )
         case SubmissionRequest(operation="launch", submission=submission):
-            try:
-                _retain(submission.sources)
-            except Exception as error:
-                if submission.launch is not None:
-                    scheduler.fail_launch(submission.launch, explain(error))
-                raise
-            if submission.launch is not None:
-                ids = scheduler.submit_launch(
-                    submission.launch,
-                    submission.runs,
-                    Target(pool=submission.pool, rent=submission.rent),
-                    queued=submission.queued,
-                )
-            else:
-                send = scheduler.queue if submission.queued else scheduler.launch
-                ids = send(submission.runs, submission.pool, rent=submission.rent)
-            response = tuple(ids)
+            identity, runs = submission.launch, submission.runs
+            if identity is None:
+                launch = scheduler.prepare_launch(runs, submission.pool, rent=submission.rent)
+                identity, runs = launch.id, launch.addressed(runs)
+            response = scheduler.submit_launch(
+                identity,
+                runs,
+                queued=submission.queued,
+                retain_source=partial(_retain, submission.sources),
+            )
         case SubmissionRequest(operation="quote", submission=submission):
             response = scheduler.quote(submission.runs, submission.pool, rent=submission.rent)
         case FailLaunchRequest():

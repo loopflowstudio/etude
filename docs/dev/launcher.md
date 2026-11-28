@@ -175,9 +175,10 @@ selected server and return the same Python values; setting or unsetting an
 experiment limit stays on `Scheduler` and the CLI. An explicitly constructed
 `Scheduler` remains the owner of a local database.
 
-Launch reads the experiment file and config on the client, runs the
-controller's pass there, freezes and publishes source there, and sends frozen
-runs and one source archive per repository/commit. The server stores archives
+Launch reads the experiment file and config on the client and runs the
+controller's pass there. The server reserves the requests in `prepare_launch`
+before the client freezes and publishes source and sends the frozen runs
+and one source archive per repository/commit. The server stores archives
 under `ETUDE_HOME/sources` and can launch or continue without a repository
 checkout. A pass asks the server once for where the experiment's runs stand and
 for its spending limit when targeting a rentable supply; with a server selected
@@ -827,8 +828,10 @@ provisioning and execution, while provisioners and workers remain independent.
   calls `launch` or `queue` for new work. It holds nothing between passes.
   Declaration reading, smoke and local composition live beside it.
 - **Scheduler.** `scheduler/loop.py` owns database writes, locks, runs, queue,
-  placement, job limits and stored experiment spending limits (enforced at
-  admission across `prepare_launch`, `_admit`, queue writes and `quote`).
+  placement, job limits and stored experiment spending limits. `prepare_launch`
+  reserves dollars atomically, and the transaction that writes the runs
+  replaces the reservation with their commitment. `quote` checks the same
+  limit on a read snapshot.
   `costs.py` holds dollar arithmetic and `placement.py`
   holds placement values; neither owns lifecycle state. `executor.py` composes
   startup (`startup.py`, `ssh.py`) with directory, SSH or bucket journals.
