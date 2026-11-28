@@ -19,7 +19,7 @@ from pydantic import BaseModel
 import etude.launch.client as client
 from etude.checkpoints import CheckpointRecord
 from etude.controller.advance import advance
-from etude.controller.declarations import Experiment, read_experiment, require_jobs
+from etude.controller.experiment import Experiment, read_experiment, require_jobs
 from etude.controller.local import _place_inputs
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval.match import environment

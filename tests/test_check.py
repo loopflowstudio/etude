@@ -664,9 +664,10 @@ def _import_experiment(
 
 
 def test_check_warns_once_at_the_import_in_shared_game_code(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     (tmp_path / "torch.py").write_text("# Local stand-in for a model library.\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
     file, build, observations = _import_experiment(
         tmp_path,
         module="check_warning_game",

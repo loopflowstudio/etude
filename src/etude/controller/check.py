@@ -20,17 +20,14 @@ from pydantic import computed_field
 
 from etude.call import changed_config, config_type
 from etude.controller.declarations import (
-    EvalFunction,
     asked,
-    declared_report,
-    read_experiment,
     read_training_jobs,
     require_checkout,
-    require_jobs,
     require_training_options,
     with_queued_runs,
 )
 from etude.controller.diagnostics import Issue, declaration
+from etude.controller.experiment import EvalFunction, declared_report, read_experiment, require_jobs
 from etude.controller.game_imports import check_game_imports
 from etude.controller.import_probe import ImportProbe
 from etude.errors import (

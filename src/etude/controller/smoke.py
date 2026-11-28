@@ -28,14 +28,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
-from etude.controller.declarations import (
-    Experiment,
-    asked,
-    read_experiment,
-    read_training_jobs,
-    require_training_options,
-)
+from etude.controller.declarations import asked, read_training_jobs, require_training_options
 from etude.controller.diagnostics import causes, declaration
+from etude.controller.experiment import Experiment, read_experiment
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Benchmark, RoundRobin
 from etude.eval.tournament import played

@@ -27,7 +27,7 @@ from etude.block_file import block_key, tail_key
 from etude.cache import Content
 from etude.checkpoints import CheckpointRecord
 from etude.cli import main
-from etude.controller.declarations import Experiment
+from etude.controller.experiment import Experiment
 from etude.errors import LauncherError, SourceLocation
 from etude.eval.records import Code, Match
 from etude.eval.result import Tables

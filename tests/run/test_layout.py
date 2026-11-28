@@ -1,9 +1,8 @@
 """What every run shares never depends on one kind of run, and no run depends on the launcher.
 
-Eval runs depend on neither training nor the launcher, and only the top-level
-command, typed jobs (`etude.jobs`), experiments (`etude.experiment`) and the
-report page (`etude.page`) compose them with the rest. The eval run knows nothing of the
-tournaments arranged on top of it.
+Eval runs depend on neither training nor the launcher. The CLI, experiment
+controller, typed jobs and report page compose them with the rest. The eval
+run knows nothing of the tournaments arranged on top of it.
 """
 
 import ast
@@ -51,11 +50,14 @@ def test_shared_run_code_imports_no_kind_of_run_and_training_imports_no_evaluati
             assert not [n for n in names for f in forbidden if _within(n, f)], path
 
 
-def test_only_the_top_level_command_and_typed_jobs_import_evaluation() -> None:
+def test_only_evaluation_composers_import_evaluation() -> None:
     composers = {
         SOURCE / "etude/cli.py",
         SOURCE / "etude/controller/advance.py",
+        SOURCE / "etude/controller/check.py",
         SOURCE / "etude/controller/declarations.py",
+        SOURCE / "etude/controller/game_imports.py",
+        SOURCE / "etude/controller/import_probe.py",
         SOURCE / "etude/jobs.py",
         SOURCE / "etude/experiment.py",
         SOURCE / "etude/page.py",

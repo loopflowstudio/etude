@@ -66,7 +66,8 @@ def check_experiment(
     file = _experiment_file(ctx, file, help)
     # Entry points load only the command being run.
     from etude.controller.check import show_check
-    from etude.controller.declarations import read_experiment, read_training_jobs
+    from etude.controller.declarations import read_training_jobs
+    from etude.controller.experiment import read_experiment
 
     if help:
         definition = read_experiment(file, experiment=experiment)
@@ -176,12 +177,8 @@ def _submit(
     from decimal import Decimal, InvalidOperation
 
     from etude.controller.advance import advance, source_for
-    from etude.controller.declarations import (
-        read_experiment,
-        read_training_jobs,
-        require_jobs,
-        require_training_options,
-    )
+    from etude.controller.declarations import read_training_jobs, require_training_options
+    from etude.controller.experiment import read_experiment, require_jobs
     from etude.spec import Until
     from etude.storage import storage_from_uri
 
@@ -380,7 +377,8 @@ def smoke_experiment(
     file = _experiment_file(ctx, file, help)
     from typing import cast
 
-    from etude.controller.declarations import read_experiment, read_training_jobs
+    from etude.controller.declarations import read_training_jobs
+    from etude.controller.experiment import read_experiment
     from etude.controller.smoke import STEPS, Step, smoke_file
     from etude.storage import storage_from_uri
 
@@ -548,7 +546,7 @@ def eval_experiment(
     import time
 
     from etude.controller.advance import advance
-    from etude.controller.declarations import read_experiment, require_jobs
+    from etude.controller.experiment import read_experiment, require_jobs
     from etude.storage import default_root, storage_from_uri
 
     definition = read_experiment(file, experiment=experiment)

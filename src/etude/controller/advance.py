@@ -13,7 +13,6 @@ from tempfile import TemporaryDirectory
 from typing import Literal
 
 from etude.controller.declarations import (
-    Experiment,
     asked,
     format_known_run,
     read_training_jobs,
@@ -22,6 +21,7 @@ from etude.controller.declarations import (
     with_queued_runs,
 )
 from etude.controller.diagnostics import declaration
+from etude.controller.experiment import Experiment
 from etude.controller.smoke import smoke_file
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import digest, find_line_experiments

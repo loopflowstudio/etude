@@ -34,8 +34,8 @@ EVAL_READERS = tuple(
         # recognises experiment files as `etude launch` does (`etude.experiment_file`).
         (
             ["report", "{directory}/pilot.py", "--source", "{directory}"],
-            32,  # run identity, delivery, job specification and Etude's home
-            ("boto3", "duckdb", *EVAL_READERS, "etude.train.tracking"),
+            37,  # shared experiment reader, declaration diagnostics and config formatting
+            ("boto3", "duckdb", *EVAL_READERS, "etude.jobs", "etude.train.tracking"),
         ),
         (
             ["sync", "--directory", "{directory}"],

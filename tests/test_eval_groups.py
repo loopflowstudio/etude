@@ -26,7 +26,7 @@ from etude.call import Function
 from etude.carriage import put_back, restore_set
 from etude.checkpoints import CheckpointRef
 from etude.controller.advance import advance
-from etude.controller.declarations import Experiment, read_experiment
+from etude.controller.experiment import Experiment, read_experiment
 from etude.controller.smoke import Step, smoke_file
 from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval import resources as eval_resources
@@ -912,11 +912,13 @@ def test_agent_device_declarations_validate_and_round_trip() -> None:
             model.model_validate({"load": load_function, "devices": ["mps"]})
         assert misspelled.value.error_count() == 1
         assert "'cuda', 'metal' or 'cpu'" in str(misspelled.value)
-        with pytest.raises(ValidationError, match="devices requires a checkpoint loader"):
+        refusal = LauncherError if model is Agents else ValidationError
+        with pytest.raises(refusal, match="devices requires a checkpoint loader"):
             model.model_validate({"devices": ["cuda", "metal"]})
     for unused in ({"max_batch": 8}, {"memory_gb": 1.0}):
-        with pytest.raises(ValidationError, match="requires a checkpoint loader"):
+        with pytest.raises(LauncherError, match="requires a checkpoint loader") as refused:
             Agents.model_validate(unused)
+        assert refused.value.fix == "Agents(load=load)"
 
     declaration = Agents(load=load, devices=("metal", "cpu", "cuda", "metal"))
     assert declaration.devices == ("cuda", "metal")

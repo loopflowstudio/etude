@@ -10,7 +10,7 @@ from __future__ import annotations
 import inspect
 import typing
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import cast
 
@@ -18,12 +18,12 @@ import typer
 from typer.main import get_command
 
 from etude.controller.diagnostics import declaration
-from etude.errors import EtudeError, LauncherError, SourceLocation
+from etude.controller.experiment import EvalFunction, Experiment, read_experiment
+from etude.errors import EtudeError, LauncherError
 from etude.experiment import observe
-from etude.experiment_file import execute_file, git_checkout
+from etude.experiment_file import git_checkout
 from etude.identity import run_address
 from etude.jobs import EvalJob, ExperimentState, TrainingJob, TrainingRunSummary, evaluation_group
-from etude.report import Report
 from etude.spec import Job, RunRequest, declared_address, expand_runs
 from etude.storage import default_root
 
@@ -258,77 +258,6 @@ def with_queued_runs(state: ExperimentState, requests: Sequence[RunRequest]) -> 
     return replace(state, runs=(*state.runs, *queued))
 
 
-type EvalFunction = Callable[[ExperimentState], object]
-
-
-@dataclass(frozen=True)
-class Experiment:
-    name: str
-    eval: EvalFunction | None
-    file: Path | None = None
-    training: Callable[..., object] | None = None
-    report: Callable[[], object] | None = None
-    train: Callable[..., object] | None = None
-
-
-def read_experiment(path: Path, *, experiment: str | None = None) -> Experiment:
-    """Read declarations, using top-level `train` only as a standalone training recipe."""
-    if path.suffix != ".py":
-        raise EtudeError("experiment_file_must_be_python", 422, detail=str(path))
-    if not path.is_file():
-        raise EtudeError("experiment_file_not_found", 404, detail=str(path))
-    with declaration(path):
-        namespace = execute_file(path)
-        evaluate = namespace.get("eval_jobs")
-        training = namespace.get("training_jobs")
-        report = namespace.get("report")
-        train = namespace.get("train") if training is None else None
-        for name, value, signature in (
-            ("training_jobs", training, "training_jobs()"),
-            ("eval_jobs", evaluate, "eval_jobs(state)"),
-        ):
-            if value is not None and not callable(value):
-                raise LauncherError(
-                    f"{path.name}: {name} must be a function", fix=f"def {signature}:"
-                )
-        if report is not None and not callable(report):
-            raise EtudeError(
-                "experiment_report_is_not_a_function",
-                422,
-                detail=f"report has type {type(report).__name__}",
-                fix="def report() -> Report:",
-            )
-        if train is not None and not callable(train) and evaluate is None and report is None:
-            raise LauncherError(
-                f"{path.name}: train must be a function",
-                fix="def train(config: Config) -> None:",
-            )
-    return Experiment(
-        name=experiment or path.stem,
-        eval=cast(EvalFunction | None, evaluate),
-        file=path,
-        training=training if callable(training) else None,
-        report=report if callable(report) else None,
-        train=train if callable(train) else None,
-    )
-
-
-def declared_report(experiment: Experiment) -> Report | None:
-    if experiment.report is None:
-        return None
-    assert experiment.file is not None
-    with declaration(experiment.file, experiment.report):
-        report = experiment.report()
-        if not isinstance(report, Report):
-            raise EtudeError(
-                "experiment_report_returns_a_report",
-                422,
-                detail=f"report() returned {type(report).__name__}",
-                fix="return Report()",
-            )
-    return report
-
-
 def require_training_options(
     given: Sequence[str], experiment: Experiment, *, read_training: bool = True
 ) -> None:
@@ -339,16 +268,6 @@ def require_training_options(
         raise typer.BadParameter("file has no training_jobs() options", param_hint=given[0])
     if not read_training:
         raise typer.BadParameter("this invocation skips training_jobs()", param_hint=given[0])
-
-
-def require_jobs(experiment: Experiment) -> None:
-    if experiment.training is None and experiment.eval is None:
-        assert experiment.file is not None
-        raise LauncherError(
-            "define training_jobs() or eval_jobs(state)",
-            fix="def training_jobs():\n    return TrainingJob(...)",
-            at=SourceLocation(experiment.file, 1),
-        )
 
 
 def asked(function: EvalFunction, state: ExperimentState) -> list[EvalJob]:

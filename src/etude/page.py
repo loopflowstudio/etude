@@ -88,7 +88,7 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import JsonValue, ValidationError
 
-from etude.controller.declarations import Experiment, asked, declared_report, read_experiment
+from etude.controller.experiment import Experiment, declared_report, read_experiment
 from etude.errors import EtudeError, explain
 from etude.eval.records import Gap, Scheduled, Tournament, find_line_experiments
 from etude.experiment_file import experiment_named
@@ -1646,6 +1646,9 @@ def _held_tournaments(
 
 def _wanted(want: Callable[..., object], state: ExperimentState) -> list[Tournament]:
     """The tournaments `eval_jobs(state)` returns, each with the checkpoints or entrants it holds."""
+    # Only reports with authored evaluations need the optional evaluation stack.
+    from etude.controller.declarations import asked  # noqa: PLC0415
+
     wanted = []
     for job in asked(want, state):
         recorded = job.recorded()
