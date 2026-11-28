@@ -85,7 +85,7 @@ class Imports(Record):
 
 
 class GameReport(Record):
-    """One game process's startup imports and measured work."""
+    """One game process's startup imports and measured work, including every sent outcome."""
 
     pid: int
     tournaments: tuple[str, ...]
@@ -110,6 +110,7 @@ class Stream:
     function: Function
     streaming: bool
     target_matches: int
+    uses_checkpoints: bool
 
 
 @dataclass(frozen=True)
@@ -134,6 +135,7 @@ class Outcome:
     error: BaseException | None = None
     loading_failures: tuple[CheckpointFailure, ...] = ()
     stream: int = 0
+    refused: bool = False
 
 
 @dataclass(frozen=True)
@@ -141,6 +143,7 @@ class StreamEnd:
     stream: int
     error: BaseException | None = None
     loading_failures: tuple[CheckpointFailure, ...] = ()
+    startup_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -227,7 +230,14 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
 
 type Play = Callable[..., Awaitable[Tables | Result]]
 type PlayMany = Callable[..., AsyncIterator[tuple[Match, Tables | Result | Exception]]]
-type _Outcomes = AsyncGenerator[tuple[Match, Tables | Result | BaseException]]
+type _Outcomes = AsyncGenerator[tuple[Match, object]]
+
+
+@dataclass(frozen=True)
+class _PlayFailure:
+    """A raised play exception, distinct from an invalid return value."""
+
+    error: BaseException
 
 
 @lru_cache(maxsize=128)
@@ -467,8 +477,6 @@ async def _drive_play(
             _match_errors.reset(token)
         if errors:
             raise errors[0]
-        if not isinstance(result, (Mapping, Result)):
-            raise TypeError("play must return tables or a Result")
         return result
 
     try:
@@ -482,7 +490,7 @@ async def _drive_play(
             for task in [t for t in active if t in done]:
                 match = active.pop(task)
                 error = task.exception()
-                yield match, task.result() if error is None else error
+                yield match, task.result() if error is None else _PlayFailure(error)
     finally:
         for task in active:
             task.cancel()
@@ -590,7 +598,7 @@ async def _serve_stream(
     bus: ForwardBus | None = None
     bus_report = BusReport()
     forwarder: _Forwarder | None = None
-    played_count = 0
+    outcomes_sent = 0
     pending_grant: asyncio.Future[Grant] | None = None
     take_lock = asyncio.Lock()
     drained = Grant(matches=(), drained=True)
@@ -622,7 +630,7 @@ async def _serve_stream(
             pid=os.getpid(),
             tournaments=tournaments,
             imports=imports.finish(),
-            matches=played_count,
+            matches=outcomes_sent,
             wall_seconds=time.monotonic() - started,
             bus=bus_report,
         )
@@ -670,22 +678,30 @@ async def _serve_stream(
         # active through wrapper loading and play so direct-mode inference-thread
         # imports are ignored while wrapper and lazy game imports stay visible.
         imports.capture_pre_bus()
-        if any(not isinstance(entry, Exception) for entry in loaded_streams):
+        loader_error: Exception | None = None
+        if any(
+            spec.uses_checkpoints and not isinstance(entry, Exception)
+            for spec, entry in zip(streams, loaded_streams, strict=True)
+        ):
             if load is not None:
                 with imports.paused():
                     # Process entry point: only direct-inference games import the local bus.
                     from etude.eval.batching import LocalForwardBus  # noqa: PLC0415
 
-                bus = LocalForwardBus(
+                local = LocalForwardBus(
                     load,
                     checkout=checkout,
                     max_batch=max_batch,
                     memory=checkpoint_bytes,
                     artifacts=artifacts,
                 )
+                bus = local
+                loader_error = await local.startup_error()
+                if isinstance(loader_error, RetryRequested):
+                    raise loader_error
             elif agents is not None:
                 bus = await SocketForwardBus.connect(agents)
-        if bus is not None:
+        if bus is not None and loader_error is None:
             forwarder = _Forwarder(bus, max_batch=max_batch)
 
         async def request_grant(stream_index: int, count: int) -> Grant:
@@ -706,8 +722,11 @@ async def _serve_stream(
         starting = False
         for stream_index, (spec, loaded) in enumerate(zip(streams, loaded_streams, strict=True)):
             stream_error: BaseException | None = None
+            setup_failed = True
             if isinstance(loaded, Exception):
-                stream_error = loaded
+                stream_error = RuntimeError(explain(loaded))
+            elif spec.uses_checkpoints and loader_error is not None:
+                stream_error = loader_error
             else:
                 if forwarder is not None:
                     forwarder.eager = spec.streaming
@@ -716,7 +735,7 @@ async def _serve_stream(
                     source: MatchStream = MatchStream(
                         partial(request_grant, stream_index),
                         kind,
-                        forwarder.bind if forwarder is not None else None,
+                        forwarder.bind if spec.uses_checkpoints and forwarder is not None else None,
                         build_hook,
                         target_matches=spec.target_matches,
                     )
@@ -731,21 +750,26 @@ async def _serve_stream(
                         if spec.streaming
                         else _drive_play(cast(Play, play), source)
                     )
+                    setup_failed = False
                     async with aclosing(stream):
                         async for match, outcome in stream:
                             taken = source._release(match)
                             elapsed = time.monotonic() - taken.started
-                            played_count += 1
                             result: Tables | Result | None = None
                             error: BaseException | None = None
-                            if isinstance(outcome, BaseException):
-                                error = outcome
-                            elif isinstance(outcome, (Result, Mapping)):
+                            refused = False
+                            if isinstance(outcome, (Result, Mapping)):
                                 result = outcome
+                            elif isinstance(outcome, _PlayFailure):
+                                error = outcome.error
+                            elif spec.streaming and isinstance(outcome, BaseException):
+                                error = outcome
                             else:
-                                raise TypeError(
-                                    "game outcomes must be tables, a Result or an exception"
+                                error = TypeError(
+                                    "game outcomes must be tables or a Result, "
+                                    f"got {type(outcome).__name__}"
                                 )
+                                refused = True
                             pipe.send(
                                 Outcome(
                                     match_key=taken.scheduled_key,
@@ -754,8 +778,10 @@ async def _serve_stream(
                                     error=_portable_error(error) if error is not None else None,
                                     loading_failures=drain_failures(error),
                                     stream=stream_index,
+                                    refused=refused,
                                 )
                             )
+                            outcomes_sent += 1
                 except RetryRequested:
                     raise
                 except Exception as error:
@@ -768,6 +794,7 @@ async def _serve_stream(
                     stream=stream_index,
                     error=_portable_error(stream_error) if stream_error is not None else None,
                     loading_failures=drain_failures(),
+                    startup_failed=setup_failed,
                 )
             )
         await close_bus()

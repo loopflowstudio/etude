@@ -291,9 +291,10 @@ Shared inference game processes keep one thread each.
 detected hardware and the number of game processes. Probe without
 importing the loader or its framework. The loader owns placement and GPU memory.
 Shared inference leaves a core for the agent process when possible. Pending
-matches and remaining host memory bound the process count. Checkpoint
-inference spreads `play` across processes before dividing `max_batch` among
-them. Code-only `play` runs one match per process. Direct `play_many` sizes
+matches and remaining host memory bound the process count. Shared inference
+spreads `play` across processes before dividing `max_batch` among them.
+Direct checkpoint `play` allows up to `max_batch` matches per process.
+Code-only `play` runs one match per process. Direct `play_many` sizes
 for one process per `max_batch` matches, rounded up. Both play modes size
 their targets and grants from their tournament's share of pending and held
 matches across processes, rounded up and reduced by what they hold. Grants

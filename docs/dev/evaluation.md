@@ -151,8 +151,10 @@ with evaluating(
 
   Each game process has one event loop. Async `play` flushes forwards on a
   zero-delay loop barrier. It sizes each stream's concurrency from its
-  tournament's match share, capped at the rounded-up `max_batch` per game
-  process with inference, or at one without it. Direct `play_many` sizes
+  tournament's match share. Shared `play` caps the share at
+  `ceil(max_batch / processes)`. Direct checkpoint `play` caps it at
+  `max_batch`, and code-only `play` runs one match per process and bypasses
+  the shared agent. Direct `play_many` sizes
   for one process per `max_batch` matches, rounded up. Shared and code-only
   `play_many` size for one process per match. Both play modes request their
   first matches after loading and setting up the callback. Active streams
@@ -164,12 +166,12 @@ with evaluating(
   Both play modes use the same share calculation for targets and grants.
   For `play_many`, `max_batch` caps the hint and each grant when a loader is
   declared. The startup line shows the targets given to the initial streams.
-  Shares account for held matches and reserve pending work for empty
+  Shares account for held matches and split pending work among empty
   processes. A positive request receives at
   least one while grants are open and work remains. Only processes serving
   that tournament count toward grant shares.
   The last grant closes the stream's requests locally, even if it includes matches.
-  Both kinds of tournament share an agent process when using shared inference.
+  Both play modes share the agent process for checkpoint inference.
   Per-process diagnostics go to `artifacts/agents/game-{pid}.json`
   (`GameReport` with `tournaments: tuple[str, ...]`), keeping a game-thread-filtered
   `builtins.__import__` hook active from module load through player wrapper
@@ -185,7 +187,8 @@ with evaluating(
   `artifacts/agents/batches-{pid}.json` per direct game process and
   `artifacts/agents/batches.json` for the shared agent process. The shared
   agent has up to two seconds within the run deadline to close its report
-  before termination. `evaluating` has no setting for process count.
+  and closes it on SIGTERM. Game reports count all outcomes sent, including
+  failed and refused outcomes. `evaluating` has no setting for process count.
 - **Order.** Matches start in the order `etude.eval.schedule.ordered` gives,
   so consecutive matches reuse the checkpoints kept loaded: first those
   loading the fewest checkpoints not yet used, then those reusing the most
@@ -246,13 +249,15 @@ with evaluating(
   `seat` and `group`, a seat or group the match lacks, a column named
   `player`, or a column whose type changes during a run is refused. A refused
   or raising match is recorded as failed with its error, nothing else of it
-  is stored. Ordinary `play` errors and returns of the wrong type fail one
-  match. In `play_many`, yield `(match, error)` for an ordinary error and
-  keep taking pending matches.
-  Refused tables, uncaught generator errors, invalid yields and early returns
-  stop new grants for the tournament. Broken streams fail their held matches.
-  Errors loading or setting up authored game code fail the tournament and
-  leave ungranted matches available on resume. Sibling tournaments continue.
+  is stored. Ordinary `play` errors fail one match. In `play_many`, yield
+  `(match, error)` for an ordinary error and keep taking pending matches.
+  Refused tables and invalid outcome types stop new grants while held matches
+  finish. Broken streams fail their held matches.
+  Errors importing or setting up authored game code fail the tournament with
+  `eval_startup_failed` and leave ungranted matches available on resume.
+  A loader import error fails its tournament in direct mode and the group in
+  shared mode. A stream error with no match failure to record uses
+  `eval_stream_failed`.
   A game process that exits without reporting, a failed shared-agent connection
   or an explicit retry interrupts the group and keeps unfinished matches
   eligible for retry.
@@ -527,7 +532,7 @@ fails its call with `ForwardError`. The shared contract suite in
 
 ## Measuring CUDA evaluation
 
-Read `game-*.json` for matches played by each process and `batches.json` for
+Read `game-*.json` for outcomes sent by each game process and `batches.json` for
 rows per forward and time spent waiting for requests.
 `max_batch` defaults to 32 rows and bounds how much the agent process merges.
 An oversized pre-collated request runs alone.

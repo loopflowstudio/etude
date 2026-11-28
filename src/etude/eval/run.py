@@ -534,12 +534,16 @@ class Playing:
     streaming: bool = False
     pending: deque[Match] = field(init=False)
     skipped: int = field(init=False)
+    uses_checkpoints: bool = field(init=False)
     played: int = 0
     failure: EtudeError | RetryRequested | None = None
 
     def __post_init__(self) -> None:
         self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
         self.skipped = len(self.run.matches) - len(self.pending)
+        self.uses_checkpoints = self.agent_loader.load is not None and any(
+            player_checkpoints(player) for match in self.pending for player in match.players
+        )
 
     def available_share(
         self,
@@ -550,7 +554,7 @@ class Playing:
         held: int = 0,
         limit: int | None = None,
     ) -> int:
-        """Share unfinished matches and reserve pending work for empty peers."""
+        """Split pending work among empty peers and give positive takes at least one."""
         pending = len(self.pending)
         share = math.ceil((pending + total_held) / processes)
         if not held:
@@ -569,7 +573,7 @@ class Playing:
         total_held: int = 0,
         limit: int | None = None,
     ) -> tuple[Match, ...]:
-        """Share unfinished matches while leaving pending work for empty game processes."""
+        """Grant up to the stream's share of unfinished matches."""
         share = self.available_share(
             processes=processes, unfed=unfed, held=held, total_held=total_held, limit=limit
         )
@@ -616,7 +620,8 @@ class Playing:
 
     def fail_matches(
         self, matches: Sequence[Match], error: BaseException, *, terminal: bool = False
-    ) -> None:
+    ) -> bool:
+        """Fail unfinished matches and return whether any failure was recorded."""
         if isinstance(error, RetryRequested):
             raise error
         if isinstance(error, ForwardError) and error.retry and not error.loading:
@@ -626,16 +631,17 @@ class Playing:
             for match in matches
             if match.key not in self.run._failed and match.key not in self.run.done
         ]
-        if affected or terminal:
+        if affected:
             self._remember_failure(self.run._record_failure(affected, error), terminal=terminal)
         if terminal:
             self.pending.clear()
+        return bool(affected)
 
     def accept(self, match: Match, outcome: Outcome, started: float) -> None:
         if match.key in self.run._failed:
             return
         if outcome.error is not None:
-            self.fail_matches((match,), outcome.error)
+            self.fail_matches((match,), outcome.error, terminal=outcome.refused)
             return
         try:
             if outcome.result is None:
@@ -714,10 +720,9 @@ def play_together(
             raise Terminated("evaluation stopped before its execution deadline")
         stopping = False
         warned_imports = False
-        needs_loading = False
         match_bytes = 0
-        if agents.load is not None:
-            for each in pending:
+        for each in pending:
+            if each.uses_checkpoints:
                 for match in each.pending:
                     sizes: dict[str, int] = {}
                     for player in match.players:
@@ -725,25 +730,34 @@ def play_together(
                             key = checkpoint.key
                             size = checkpoint.artifact.size_bytes or 0
                             sizes[key] = max(sizes.get(key, 0), size)
-                    if sizes:
-                        needs_loading = True
-                        match_bytes = max(match_bytes, sum(sizes.values()))
+                    match_bytes = max(match_bytes, sum(sizes.values()))
         placement = place(
             [TournamentQueue(len(each.pending), streaming=each.streaming) for each in pending],
             loader=agents,
-            checkpoints=needs_loading,
+            checkpoints=any(each.uses_checkpoints for each in pending),
             match_bytes=match_bytes,
         )
         load = agents.load if placement.bus == "local" else None
-        play_limit = math.ceil(agents.max_batch / placement.processes) if placement.bus else 1
-        stream_limit = agents.max_batch if agents.load is not None else None
+        limits = {
+            id(each): placement.match_limit(
+                streaming=each.streaming,
+                uses_checkpoints=each.uses_checkpoints,
+                max_batch=agents.max_batch if agents.load is not None else None,
+            )
+            for each in pending
+        }
 
         with ExitStack() as agent_lifetime:
             agent_process: AgentProcess | None = None
             if placement.bus == "socket":
-                agent_process = agent_lifetime.enter_context(
-                    running_agents(agents, checkout, owned, placement)
-                )
+                try:
+                    agent_process = agent_lifetime.enter_context(
+                        running_agents(agents, checkout, owned, placement)
+                    )
+                except EtudeError as error:
+                    for each in pending:
+                        each._remember_failure(error, terminal=True)
+                    return
             agent_address = agent_process.address if agent_process is not None else None
 
             def record_report(child: _GameProcess, report: GameReport | None) -> None:
@@ -755,7 +769,9 @@ def play_together(
                     DirectoryStorage(owned.artifacts).put(name, report.model_dump_json().encode())
                 except OSError as error:
                     raise RetryRequested(f"game report {name} could not be retained") from error
-                if placement.bus is not None and not warned_imports:
+                if not warned_imports and any(
+                    stream.playing.uses_checkpoints for stream in child.streams
+                ):
                     warning = report.imports.warning(
                         count_limit=placement.bus == "socket"
                         and not child.streams[0].playing.streaming
@@ -778,6 +794,7 @@ def play_together(
                         function=each.play,
                         streaming=each.streaming,
                         target_matches=match_targets[id(each)],
+                        uses_checkpoints=each.uses_checkpoints,
                     )
                     for each in targets
                 )
@@ -846,7 +863,7 @@ def play_together(
                             processes=serving[key] + starts[key],
                             unfed=unfed[key] + starts[key],
                             total_held=total_held[key],
-                            limit=stream_limit if each.streaming else play_limit,
+                            limit=limits[key],
                         )
                 while len(live) < placement.processes:
                     spawned = False
@@ -869,9 +886,19 @@ def play_together(
                         break
                 return started_targets
 
-            def fail_stream(stream: _GameStream, error: BaseException) -> None:
+            def fail_stream(
+                stream: _GameStream, error: BaseException, *, startup_failed: bool = False
+            ) -> None:
                 each = stream.playing
-                each.fail_matches(list(stream.held.values()), error, terminal=True)
+                if not each.fail_matches(list(stream.held.values()), error, terminal=True):
+                    if each.failure is not None and stream.held:
+                        return  # These matches already carry their checkpoint failure.
+                    code = "eval_startup_failed" if startup_failed else "eval_stream_failed"
+                    failure = EtudeError(
+                        code, 500, detail=str(error) if startup_failed else explain(error)
+                    )
+                    failure.__cause__ = error
+                    each._remember_failure(failure, terminal=True)
 
             def end_stream(stream: _GameStream) -> None:
                 stream.held.clear()
@@ -897,7 +924,7 @@ def play_together(
                             unfed=sum(not peer.held for peer in peers),
                             held=len(stream.held),
                             total_held=sum(len(peer.held) for peer in peers),
-                            limit=stream_limit if each.streaming else play_limit,
+                            limit=limits[id(each)],
                         )
                         stream.held.update((match.key, match) for match in granted)
                     child.pipe.send(Grant(matches=granted, drained=stopping or not each.pending))
@@ -913,7 +940,7 @@ def play_together(
                     stream = child.streams[message.stream]
                     each = stream.playing
                     if message.error is not None:
-                        fail_stream(stream, message.error)
+                        fail_stream(stream, message.error, startup_failed=message.startup_failed)
                     elif stream.held:
                         fail_stream(
                             stream,
@@ -934,11 +961,15 @@ def play_together(
                             if isinstance(message.error, RetryRequested):
                                 raise message.error
                             for stream in owners:
-                                each = stream.playing
-                                each._remember_failure(each.run._record_failure((), message.error))
                                 if not stream.ended:
                                     fail_stream(stream, message.error)
                                     end_stream(stream)
+                                else:
+                                    stream.playing._remember_failure(
+                                        EtudeError(
+                                            "eval_stream_failed", 500, detail=explain(message.error)
+                                        )
+                                    )
                     except RetryRequested:
                         failed_owner = tuple(stream.playing for stream in owners)
                         raise

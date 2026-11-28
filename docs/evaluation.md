@@ -163,9 +163,10 @@ when the job is declared.
   seating a checkpoint shares that checkpoint's `Forward` object. Sampling and
   action choice belong in game code, seeded from `match.seed`.
 - A bare checkpoint with no build hook receives its `Forward` directly. Code and
-  API players use `build` too; without checkpoint leaves they run one game per
-  process, start no model-loading process and perform no GPU probe. Your build
-  hook owns API credentials and clients.
+  API players use `build` too. A `play` tournament with no checkpoint leaves
+  runs one match at a time per game process and bypasses the shared agent.
+  A group with no checkpoint leaves skips GPU detection. Your build hook
+  owns API credentials and clients.
 
 [`agent_game.py`](../examples/agent_game.py) shows `Sampled(temperature=...)`
 as identity and `Sampler.choose` as the action method.
@@ -191,8 +192,9 @@ checkpoint cache and gets a share of the available model-library threads and
 checkpoint allowance (half of host memory by default).
 
 Pending matches, CPUs and available host memory bound the game process count.
-Etude spreads `play` matches across game processes first, then divides
-`max_batch` across those processes for checkpoint inference, rounding up.
+Etude spreads `play` matches across game processes first. Shared inference
+then divides `max_batch` across those processes, rounding up. Direct
+checkpoint inference allows up to `max_batch` matches per process.
 Each tournament sizes its `play` tasks from its own pending matches and
 available processes.
 Shared inference caps the number of game processes at `max_batch` and leaves
@@ -283,7 +285,9 @@ the generator yields it.
   pending `(match, agents)` pairs. With a loader, each grant contains at most
   `max_batch` matches. Both play modes take their first matches after loading
   and setting up the game code. Grants account for held matches and share
-  pending work among empty processes. An empty grant for `n > 0` means the
+  pending work among empty processes. A process that already holds matches
+  can still take at least one if grants are open and work remains.
+  An empty grant for `n > 0` means the
   tournament queue is drained or the run is stopping. Finish any matches you
   still hold. Further calls return immediately once that stream receives its
   final grant.
@@ -300,8 +304,8 @@ the generator yields it.
   or a copy whose key identifies exactly one held match. Yield as each slot
   finishes so it can backfill without waiting for stragglers.
 - Yield `(match, error)` for an ordinary game error and keep stepping the other
-  slots. Refused tables stop grants for that tournament. Uncaught generator
-  errors, invalid yields and returning with held or pending matches fail the
+  slots. Uncaught generator errors, yielding an unknown or duplicate match,
+  and returning with held or pending matches fail the
   stream and its held matches. `RetryRequested` interrupts the group and
   retains unfinished matches for retry.
 
@@ -395,16 +399,20 @@ queued and in-flight matches can retry. A failure after all of a game process's
 streams end applies to the tournaments it served. Stored results are reused.
 A stop records `stopped` for the group and the tournaments it interrupts.
 Tournaments that already finished or failed keep their status. An ordinary
-`play` error or a return of the wrong type fails one match. Failed matches
-of this kind require `--retry-failed`. Errors loading or setting up authored
-game code fail the tournament while sibling tournaments continue. Ungranted
-matches remain available on resume, including matches still queued when a
-table was refused or a stream broke.
+`play` error fails one match. A refused table or an invalid outcome type
+fails its match and stops grants for the tournament while held matches finish.
+Ordinary failed matches require `--retry-failed`. Errors importing or setting
+up authored game code fail the tournament while siblings continue. A loader
+import error fails its tournament in direct mode and the group in shared mode.
+Etude reports `eval_startup_failed` for setup errors and `eval_stream_failed`
+for stream errors with no match failure to record. Ungranted matches remain
+available on resume.
 
 A failed forward raises `ForwardError` at the awaiting call, with the checkpoint
 key on `.checkpoint`. In shared inference, a serialization error in a
-request or reply fails that call with a non-retryable `ForwardError`.
-Other calls in the same message or merged forward continue. A lost connection
+request or reply raises a non-retryable `ForwardError` at each call batched
+into that request. Other requests in the same message or merged forward
+continue. A lost connection
 interrupts the group and leaves unfinished matches eligible for retry. In
 `play`, Etude records the match as failed even if the game catches the error.
 In `play_many`, catch it to drop

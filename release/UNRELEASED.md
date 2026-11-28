@@ -185,8 +185,9 @@ match duration. Without a rental target, the run waits in the pool's queue
   `Agents`. Ready requests flush immediately.
 - **Remove `workers=`** from `EvalJob(...)` and `evaluating(...)`; it is
   refused. Etude sizes processes from CPU, memory and pending work. For
-  `play` with checkpoints, Etude divides `max_batch` across processes, rounding
-  up. Shared inference leaves a core for the agent process when possible.
+  `play`, shared inference divides `max_batch` across game processes, rounding
+  up, and leaves a core for the agent process when possible. Direct checkpoint
+  inference allows up to `max_batch` matches per process.
   Use `matches.target_matches` to size the `play_many` game pool, and request
   matches as slots free up. Mixed groups share placement and checkpoint
   inference.
@@ -210,11 +211,12 @@ match duration. Without a rental target, the run waits in the pool's queue
   `max_usd` are the totals of the eval jobs it plays, and `--max-usd` admits
   it as one run.
 - **Ordinary game errors fail one match.** In `play_many`, yield the match
-  with its error to release and refill the slot. Invalid result tables stop
-  new grants for their tournament. A failed checkpoint load applies to every
-  undelivered scheduled match seating that checkpoint across the group's
-  tournaments, including matches never dispatched. A load raising
-  `RetryRequested` marks those matches with `retry=True`.
+  with its error to release and refill the slot. Refused tables and invalid
+  outcome types stop new grants for their tournament while held matches
+  finish. A checkpoint load failure applies to every undelivered scheduled
+  match seating that checkpoint across the group's tournaments, including
+  matches never dispatched. A loader import error leaves matches pending.
+  A checkpoint load raising `RetryRequested` marks those matches with `retry=True`.
 - **Some failed matches are replayed without `--retry-failed`.** A match the
   machine failed rather than the game (unfinished at the run's time limit or
   SIGTERM, a failed delivery, an agent process that exited, or code that

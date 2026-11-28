@@ -16,6 +16,7 @@ import pickle
 import queue
 import select
 import selectors
+import signal
 import socket
 import sys
 import threading
@@ -24,8 +25,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from pathlib import Path
-from types import ModuleType
-from typing import TYPE_CHECKING, TextIO, cast
+from types import FrameType, ModuleType
+from typing import TYPE_CHECKING, NoReturn, TextIO, cast
 
 from etude.call import Function
 from etude.errors import RetryRequested, explain
@@ -421,41 +422,22 @@ def _encode_local(request_id: int, outcome: ForwardOutcome) -> _LocalReply:
 def _write_batches(report: TextIO | None, flushed: Sequence[Batch]) -> None:
     if report is None or not flushed:
         return
-    for batch in flushed:
-        if report.tell() > 1:
-            report.write(",")
-        report.write(batch.model_dump_json())
+    report.write(
+        ("," if report.tell() > 1 else "") + ",".join(batch.model_dump_json() for batch in flushed)
+    )
     report.flush()
 
 
-def _lazy_loader(
+def _resolve_loader(
     load: Function | Callable[..., object], checkout: str | None
-) -> Callable[[CheckpointRef], object]:
-    """Resolve an authored `Function` loader inside `Forwards.answer` on first use.
-
-    Keeping module resolution inside `Forwards.answer` ensures broken `load`
-    modules fail permanently (`loading=True, retry=False`) with redacted errors
-    on both local and socket transports, while true agent-process startup
-    crashes still raise `RetryRequested`.
-    """
-    if not isinstance(load, Function):
-        return load
-    resolved: Callable[..., object] | None = None
-    failed: Exception | None = None
-
-    def load_checkpoint(checkpoint: CheckpointRef) -> object:
-        nonlocal resolved, failed
-        if failed is not None:
-            raise failed
-        if resolved is None:
-            try:
-                resolved = load.load(checkout)
-            except Exception as error:
-                failed = error
-                raise
-        return resolved(checkpoint)
-
-    return load_checkpoint
+) -> Callable[..., object] | Exception:
+    """Resolve author code on its inference owner before grants start."""
+    try:
+        return load.load(checkout) if isinstance(load, Function) else load
+    except RetryRequested as error:
+        return RetryRequested(explain(error))
+    except Exception as error:
+        return RuntimeError(explain(error))
 
 
 def _inference_loop(
@@ -467,7 +449,7 @@ def _inference_loop(
     report_path: Path | None,
     loop: asyncio.AbstractEventLoop,
     deliver: Callable[[_LocalReply], None],
-    on_exit: Callable[[BaseException], None],
+    status: Callable[[Exception | None], None],
 ) -> None:
     """Dedicated inference thread body; owns `Forwards`, loader and all loaded models."""
     bound: dict[str, CheckpointRef] = {}
@@ -505,13 +487,18 @@ def _inference_loop(
     try:
         # Setup sits inside the guard: a report file that cannot open must fail
         # callers at once rather than leave them waiting for the deadline.
+        loader = _resolve_loader(load, checkout)
+        if isinstance(loader, Exception):
+            loop.call_soon_threadsafe(status, loader)
+            return
         batches: _Batches[_LocalReply] = _Batches(
-            _lazy_loader(load, checkout), max_batch, memory, encode=_encode_local, copy_outputs=True
+            loader, max_batch, memory, encode=_encode_local, copy_outputs=True
         )
         if report_path is not None:
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report = report_path.open("w")
             report.write("[")
+        loop.call_soon_threadsafe(status, None)
         while True:
             if not batches.pending:
                 wait_started = time.monotonic()
@@ -534,10 +521,9 @@ def _inference_loop(
                 _write_batches(report, flushed)
     except BaseException as error:
         cause = explain(error)
+        failure = RetryRequested(f"inference thread exited unexpectedly: {cause}")
         try:
-            loop.call_soon_threadsafe(
-                on_exit, RetryRequested(f"inference thread exited unexpectedly: {cause}")
-            )
+            loop.call_soon_threadsafe(status, failure)
         except RuntimeError:
             pass
         print(f"etude: agents: {cause}", file=sys.stderr, flush=True)
@@ -563,6 +549,7 @@ class LocalForwardBus:
         artifacts: Path | None = None,
     ) -> None:
         self._loop = asyncio.get_running_loop()
+        self._startup: asyncio.Future[Exception | None] = self._loop.create_future()
         self._inbox: queue.SimpleQueue[_LocalMessage] = queue.SimpleQueue()
         self._bound: set[str] = set()
         self._book = _FlightBook(_forward_error)
@@ -579,11 +566,25 @@ class LocalForwardBus:
                 report_path,
                 self._loop,
                 self._receive,
-                self._book.fail_all,
+                self._update_status,
             ),
             daemon=False,
         )
         self._thread.start()
+
+    def _update_status(self, error: Exception | None) -> None:
+        if error is not None:
+            self._book.fail_all(error)
+        if not self._startup.done():
+            self._startup.set_result(error)
+
+    async def startup_error(self) -> Exception | None:
+        """Wait for the inference thread to resolve the loader and open observations."""
+        try:
+            async with asyncio.timeout(seconds_left()):
+                return await asyncio.shield(self._startup)
+        except TimeoutError as error:
+            raise RetryRequested("inference thread failed to start before the deadline") from error
 
     @property
     def flight(self) -> Flight:
@@ -706,20 +707,31 @@ def _send_peer(peer: socket.socket) -> Callable[[_Message], None]:
     return send
 
 
+def _terminate(signum: int, frame: FrameType | None) -> NoReturn:
+    raise SystemExit(128 + signum)
+
+
 def _run_agents(
     address: str,
-    load: Callable[[CheckpointRef], object],
+    load: Function,
+    checkout: str | None,
     max_batch: int,
     memory: int,
     control: Connection,
     artifacts: str,
 ) -> None:
-    batches = _Batches(load, max_batch, memory, encode=encode_answer)
+    loader = _resolve_loader(load, checkout)
+    if isinstance(loader, Exception):
+        control.send(loader)
+        return
+    batches = _Batches(loader, max_batch, memory, encode=encode_answer)
     peers: list[socket.socket] = []
     report = Path(artifacts, "batches.json").open("w")
     report.write("[")
+    report_end = report.tell()
     wait_seconds = 0.0
     try:
+        signal.signal(signal.SIGTERM, _terminate)
         with (
             socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener,
             selectors.DefaultSelector() as selector,
@@ -769,11 +781,16 @@ def _run_agents(
                 if flushed:
                     wait_seconds = 0.0
                     _write_batches(report, flushed)
+                    report_end = report.tell()
     finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        # A signal can interrupt an append. Close the array at its last complete flush.
+        report.seek(report_end)
+        report.write("]")
+        report.truncate()
+        report.close()
         for peer in peers:
             peer.close()
-        report.write("]")
-        report.close()
         print(
             f"etude: agents: stopped; {batches.loads} checkpoints loaded, {batches.rows} rows in {batches.batches} batches",
             file=sys.stderr,

@@ -21,7 +21,7 @@ from multiprocessing.connection import Connection, wait
 from multiprocessing.reduction import ForkingPickler
 from typing import TYPE_CHECKING, Protocol
 
-from etude.errors import RetryRequested, explain
+from etude.errors import EtudeError, RetryRequested, explain
 from etude.eval.bus import (
     BusReport,
     Flight,
@@ -382,11 +382,12 @@ def _run(
     resources.configure(threads)
     try:
         # Process entry point: keep durable records and model loading out of game clients.
-        from etude.eval.batching import _lazy_loader, _run_agents  # noqa: PLC0415
+        from etude.eval.batching import _run_agents  # noqa: PLC0415
 
         _run_agents(
             address,
-            _lazy_loader(load, checkout),
+            load,
+            checkout,
             max_batch,
             memory,
             control,
@@ -428,11 +429,19 @@ def running_agents(
     try:
         ready = wait([parent, process.sentinel], timeout=seconds_left())
         if parent not in ready:
+            if ready:
+                raise RetryRequested("agent process exited during startup")
             raise RetryRequested("agent process failed to start before the deadline")
         try:
-            parent.recv()
+            startup_error: RuntimeError | RetryRequested | None = parent.recv()
         except EOFError as error:
             raise RetryRequested("agent process exited during startup") from error
+        if isinstance(startup_error, RetryRequested):
+            raise startup_error
+        if startup_error is not None:
+            raise EtudeError(
+                "eval_startup_failed", 500, detail=str(startup_error)
+            ) from startup_error
         yield agent
     finally:
         failed = sys.exc_info()[0] is not None
@@ -443,7 +452,7 @@ def running_agents(
         remaining = seconds_left()
         process.join(timeout=2.0 if remaining is None else min(remaining, 2.0))
         if process.is_alive():
-            process.terminate()
+            process.kill()
             process.join()
         parent.close()
         exitcode = process.exitcode

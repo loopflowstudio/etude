@@ -171,6 +171,16 @@ class Placement:
     checkpoint_bytes: int
     reason: Inference | Literal["no pending matches"]
 
+    def match_limit(
+        self, *, streaming: bool, uses_checkpoints: bool, max_batch: int | None
+    ) -> int | None:
+        """Cap the matches one stream can take per grant."""
+        if streaming:
+            return max_batch
+        if not uses_checkpoints or max_batch is None:
+            return 1
+        return math.ceil(max_batch / self.processes) if self.bus == "socket" else max_batch
+
     def process_shares(
         self, queues: Sequence[TournamentQueue], max_batch: int, *, available: int
     ) -> tuple[int, ...]:

@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import nullcontext
 from decimal import Decimal
 from hashlib import sha256
@@ -1521,7 +1521,7 @@ with TemporaryDirectory(dir="/tmp", prefix="etude-test-") as scratch, socket.soc
     run_game_process(
         child,
         Resources(scratch=Path(scratch), artifacts=Path(scratch)),
-        (Stream("light", Function(module="light_agent_game", name="play", path=sys.argv[1]), False, 1),),
+        (Stream("light", Function(module="light_agent_game", name="play", path=sys.argv[1]), False, 1, True),),
         checkpoint_bytes=0,
         agents=address,
     )
@@ -1799,7 +1799,7 @@ def test_agent_startup_failure_reports_retryable_matches(
     ],
 )
 @pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
-def test_broken_load_module_fails_permanently_on_both_transports(
+def test_broken_loader_import_leaves_matches_pending_on_both_transports(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
@@ -1813,7 +1813,7 @@ def test_broken_load_module_fails_permanently_on_both_transports(
     module_name = f"broken_loader_{kind}_fixture"
     if module_source is not None:
         (tmp_path / f"{module_name}.py").write_text(module_source)
-    selected = group(job("broken_loader", Agents(load=load)))
+    selected = group(job("broken_loader", Agents(load=load), games=2))
     spec = selected.evaluations[0]
     assert spec.agents is not None
     spec = spec.model_copy(
@@ -1823,25 +1823,71 @@ def test_broken_load_module_fails_permanently_on_both_transports(
             )
         }
     )
-    with pytest.raises(EtudeError, match="match_failed") as info:
+    with pytest.raises(EtudeError, match="eval_startup_failed") as info:
         hold_group(EvalGroup(evaluations=(spec,)), directory=tmp_path)
     assert expected_error in str(info.value)
     assert "synthetic-fixture-credential" not in str(info.value)
-    assert json.loads((outputs / "etude-result.json").read_text())["tally"]["failed"] == 1
+    assert json.loads((outputs / "etude-result.json").read_text())["tally"]["failed"] == 0
     found = played(
         spec.definition, experiment="grouped", enter=spec.tournament.entrants, directory=tmp_path
     )
-    assert len(found.failed) == 1 and not found.retry and not found.new
-    db = statsdb("grouped", tmp_path)
-    try:
-        rows = db.sql("select state, retry, error from matches").fetchall()
-        assert len(rows) == 1
-        state, retry, error = rows[0]
-        assert state == "failed" and retry is False
-        assert expected_error in error
-        assert "synthetic-fixture-credential" not in error
-    finally:
-        db.close()
+    assert len(found.new) == 2 and not found.failed and not found.retry
+
+
+def build_loader_fixture(player: object, leaves: Mapping[str, Forward]) -> object:
+    return player if isinstance(player, Code) else next(iter(leaves.values()))
+
+
+@pytest.mark.parametrize("shared_agents", [False, True], indirect=True)
+def test_code_only_tournament_bypasses_inference_in_a_mixed_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    shared = request.node.callspec.params["shared_agents"]
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 3)
+    module = f"code_only_mixed_fixture_{shared}"
+    (tmp_path / f"{module}.py").write_text(
+        "from multiprocessing import parent_process\n"
+        "from typing import NoReturn\n"
+        "from etude.eval.agents import SocketForwardBus\n"
+        "from etude.eval.records import Match\n"
+        "from etude.eval.result import Tables\n"
+        "async def reject_connection(address: str) -> NoReturn:\n"
+        "    raise AssertionError('code-only game tried to connect to the shared agent')\n"
+        "if parent_process() is not None:\n"
+        "    SocketForwardBus.connect = reject_connection\n"
+        "async def play(match: Match, agents: list[object]) -> Tables:\n"
+        "    return {'scores': [{'seat': 0, 'score': 7}]}\n"
+        "def load(checkpoint: object) -> NoReturn:\n"
+        "    raise AssertionError('loader should fail at import')\n"
+        + (
+            ""
+            if shared
+            else "if parent_process() is not None:\n    raise RuntimeError('fixture loader import')\n"
+        )
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    code_play = import_module(module).play if shared else plain
+    loader = load if shared else import_module(module).load
+    agents = Agents(load=loader, build=build_loader_fixture)
+    code_only = EvalJob(
+        tournament=tournament("code-only", games=3),
+        enter=(Code(name="one"), Code(name="two")),
+        play=code_play,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    model = job("models", agents)
+    selected = group(code_only, model)
+    if shared:
+        assert [result.played for result in hold_group(selected, directory=tmp_path)] == [3, 1]
+    else:
+        with pytest.raises(EtudeError, match="eval_startup_failed: .*fixture loader import"):
+            hold_group(selected, directory=tmp_path)
+        kept = played(
+            code_only.tournament, experiment="grouped", enter=code_only.enter, directory=tmp_path
+        )
+        assert len(kept.delivered) == 3 and not kept.failed
 
 
 @pytest.mark.parametrize("streaming", [False, True], ids=["play", "play_many"])
@@ -1879,8 +1925,9 @@ def test_game_import_failure_fails_its_tournament_and_leaves_siblings_running(
         job("healthy", None),
     )
     broken, healthy = [spec.address.split("/")[-1] for spec in selected.evaluations]
-    with pytest.raises(EtudeError, match="fixture game import failed"):
+    with pytest.raises(EtudeError, match="fixture game import failed") as caught:
         hold_group(selected, directory=tmp_path)
+    assert caught.value.code == "eval_startup_failed"
     db = statsdb("grouped", tmp_path)
     try:
         assert set(db.sql("select run, state from runs").fetchall()) == {
@@ -2240,6 +2287,51 @@ async def multi_round_play(match: Match[Config], agents: Sequence[Forward]) -> T
         [value] = await agents[step % len(agents)]([step])
         total += int(str(value))
     return {"scores": [{"seat": 0, "score": total}]}
+
+
+def test_direct_play_batches_eight_rows_per_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 2)
+    wait_for_games(monkeypatch, processes=2)
+    panel = [Match(players=(checkpoint("one"),), config={"rounds": 1}, index=i) for i in range(16)]
+    with evaluating(
+        environment("sizing"), experiment="sizing", matches=panel, run="direct", directory=tmp_path
+    ) as active:
+        agents = Agents(load=load, devices=("cpu",), max_batch=8)
+        assert active.play(multi_round_play, agents=agents).played == 16
+    artifacts = tmp_path / "sizing/direct/artifacts/agents"
+    assert sorted(report.matches for report in _game_reports(artifacts)) == [8, 8]
+    assert [
+        [batch["rows"] for batch in json.loads(path.read_bytes())]
+        for path in artifacts.glob("batches-*.json")
+    ] == [[8], [8]]
+
+
+def terminate_on_second_forward(checkpoint: CheckpointRef) -> ModelForward:
+    def forward(inputs: list[object]) -> list[object]:
+        if 1 in inputs:
+            os.kill(os.getpid(), signal.SIGTERM)
+        return inputs
+
+    return forward
+
+
+def test_agent_sigterm_keeps_completed_batches_in_valid_json(tmp_path: Path) -> None:
+    panel = [Match(players=(checkpoint("one"),), config={"rounds": 2}, index=i) for i in range(2)]
+    with (
+        pytest.raises(RetryRequested),
+        evaluating(
+            environment("signal"),
+            experiment="signal",
+            matches=panel,
+            run="term",
+            directory=tmp_path,
+        ) as active,
+    ):
+        active.play(multi_round_play, agents=Agents(load=terminate_on_second_forward))
+    batches = json.loads((tmp_path / "signal/term/artifacts/agents/batches.json").read_text())
+    assert 1 <= sum(batch["rows"] for batch in batches) <= 2
 
 
 @pytest.mark.parametrize(
@@ -4091,9 +4183,11 @@ async def invalid_stream(matches: MatchStream[Config]) -> AsyncIterator[tuple[Ma
         yield unknown, await plain(match, list(agents))
     if outcome == "escaped":
         raise ValueError("fixture escaped the generator")
-    if outcome == "early":
+    if outcome in ("early", "teardown"):
         for match, agents in taken:
             yield match, await plain(match, list(agents))
+        if outcome == "teardown":
+            raise RuntimeError("fixture teardown")
         return
     result = await plain(match, list(agents))
     yield match, result
@@ -4108,6 +4202,7 @@ async def invalid_stream(matches: MatchStream[Config]) -> AsyncIterator[tuple[Ma
         ("abandoned", "without yielding its held matches", 2),
         ("escaped", "fixture escaped the generator", 2),
         ("early", "returned before taking all pending matches", 0),
+        ("teardown", "fixture teardown", 0),
     ],
 )
 def test_play_many_retains_held_matches_on_a_broken_stream(
@@ -4119,7 +4214,7 @@ def test_play_many_retains_held_matches_on_a_broken_stream(
         for index in range(3)
     ]
     with (
-        pytest.raises(EtudeError, match=detail),
+        pytest.raises(EtudeError, match=detail) as caught,
         evaluating(
             environment("vector"),
             experiment="vector",
@@ -4129,6 +4224,7 @@ def test_play_many_retains_held_matches_on_a_broken_stream(
         ) as active,
     ):
         active.play_many(invalid_stream)
+    assert caught.value.code == ("match_failed" if failed else "eval_stream_failed")
     [report] = _game_reports(tmp_path / "vector/broken/artifacts/agents")
     assert report.matches == 2 - failed
     db = statsdb("vector", tmp_path)
@@ -4179,19 +4275,37 @@ async def checked_result(match: Match[Config], agents: Sequence[object]) -> Tabl
         return {}
     if outcome == "return":
         return cast(Tables, ["invalid return"])
+    if outcome == "return-exception":
+        return cast(Tables, ValueError("returned exception"))
     return await plain(match, list(agents))
 
 
-def test_play_invalid_return_fails_only_that_match(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def checked_pair(
+    matches: MatchStream[Config],
+) -> AsyncIterator[tuple[Match, Tables | Exception]]:
+    while taken := await matches.take(2):
+        for match, agents in taken:
+            yield match, await checked_result(match, agents)
+
+
+@pytest.mark.parametrize(
+    ("streaming", "invalid", "kind"),
+    [
+        (False, "return", "list"),
+        (True, "return", "list"),
+        (False, "return-exception", "ValueError"),
+    ],
+)
+def test_invalid_outcome_fails_one_match_stops_grants_and_retains_held_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, streaming: bool, invalid: str, kind: str
 ) -> None:
     monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
     panel = [
         Match(players=(checkpoint("one"),), config={"outcome": outcome}, index=i)
-        for i, outcome in enumerate(("return", "in-flight", "pending"))
+        for i, outcome in enumerate((invalid, "in-flight", "pending"))
     ]
     with (
-        pytest.raises(EtudeError, match="play must return tables or a Result"),
+        pytest.raises(EtudeError, match=f"game outcomes must be tables or a Result, got {kind}"),
         evaluating(
             environment("invalid_return"),
             experiment="invalid_return",
@@ -4200,20 +4314,24 @@ def test_play_invalid_return_fails_only_that_match(
             directory=tmp_path,
         ) as active,
     ):
-        active.play(checked_result, agents=Agents(load=echo, devices=("cpu",), max_batch=2))
+        agents = Agents(load=echo, devices=("cpu",), max_batch=2)
+        if streaming:
+            active.play_many(checked_pair, agents=agents)
+        else:
+            active.play(checked_result, agents=agents)
     db = statsdb("invalid_return", tmp_path)
     try:
         assert set(db.sql("select match, state, retry from matches").fetchall()) == {
             (panel[0].key, "failed", False),
             (panel[1].key, "done", False),
-            (panel[2].key, "done", False),
         }
         assert set(db.sql("select match from scores").fetchall()) == {
             (panel[1].key,),
-            (panel[2].key,),
         }
     finally:
         db.close()
+    reports = _game_reports(tmp_path / "invalid_return/policy/artifacts/agents")
+    assert [report.matches for report in reports] == [2]
 
 
 async def checked_stream(
