@@ -203,7 +203,7 @@ def test_pending_group_queues_during_training_within_budget(
         assert observed.provider == observed.bucket == observed.ssh == observed.git == 0
         if budget == "1":
             assert all(
-                d.state == "not queued" and d.reason == "limit $1.00: $0.00 committed"
+                d.state == "not queued" and d.reason == "limit $1.00: $0.00 committed; asks $2.00"
                 for d in decisions
             )
             assert b.scheduler.runs() == ()
