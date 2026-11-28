@@ -27,7 +27,7 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Generic, cast
 
 from etude.call import Function
-from etude.errors import RetryRequested
+from etude.errors import RetryRequested, explain
 from etude.eval.agents import AgentClient, Forward, ForwardError, ForwardResult
 from etude.eval.composition import build_agents
 from etude.eval.records import Match, _MatchConfig
@@ -146,7 +146,7 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
 
     @property
     def target_slots(self) -> int:
-        """Suggested pool size for this stream's initial share of pending matches."""
+        """Suggested pool size for this stream, capped at `max_batch` with a loader."""
         return self._target_slots
 
     async def take(self, count: int) -> list[tuple[Match[_MatchConfig], Sequence[object]]]:
@@ -426,6 +426,7 @@ async def _serve_stream(
     forwarder: _Forwarder | None = None
     played_count = 0
 
+    starting = True
     stream_error: BaseException | None = None
     try:
         play = game.play.load(game.checkout)
@@ -463,6 +464,7 @@ async def _serve_stream(
             build_hook,
             target_slots=game.target_slots,
         )
+        starting = False
         stream = (
             cast(Callable[[MatchStream], _Outcomes], play)(source)
             if game.streaming
@@ -480,7 +482,10 @@ async def _serve_stream(
                 failures = forwarder.drain_loading_failures() if forwarder else ()
                 pipe.send(Outcome(taken.scheduled_key, outcome, elapsed, failures))
     except Exception as error:
-        stream_error = _portable_error(error)
+        if starting and not isinstance(error, RetryRequested):
+            stream_error = RetryRequested(f"game process failed during startup: {explain(error)}")
+        else:
+            stream_error = _portable_error(error)
     finally:
         if client is not None:
             await client.close()

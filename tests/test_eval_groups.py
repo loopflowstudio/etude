@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import nullcontext
 from decimal import Decimal
 from importlib import import_module
-from multiprocessing import active_children
+from multiprocessing import active_children, get_context
 from multiprocessing.connection import Connection, wait
 from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
@@ -56,7 +56,7 @@ from etude.eval.resources import (
     resources,
 )
 from etude.eval.result import Result, Tables
-from etude.eval.run import Playing, Terminated
+from etude.eval.run import Playing, Terminated, _GameProcess
 from etude.eval.tournament import evaluating, played
 from etude.experiment import observe, state_of
 from etude.jobs import (
@@ -1464,6 +1464,75 @@ def test_agent_startup_failure_reports_retryable_matches(
     assert len(found.new) == len(found.retry) == len(found.failed) == 1
 
 
+@pytest.mark.parametrize("streaming", [False, True], ids=["play", "play_many"])
+def test_game_import_failure_leaves_unfinished_matches_retryable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, streaming: bool
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 1)
+    module = f"bad_game_import_fixture_{'stream' if streaming else 'play'}"
+    callback = "play_many" if streaming else "play"
+    (tmp_path / f"{module}.py").write_text(
+        "from multiprocessing import parent_process\n"
+        "if parent_process() is not None:\n"
+        "    raise RuntimeError('fixture game import failed')\n"
+        f"async def {callback}({'matches' if streaming else 'match, agents'}):\n"
+        f"    {'yield' if streaming else 'return'} {{}}\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    game = getattr(import_module(module), callback)
+    panel = [Match(players=(Code(name="one"),), index=i) for i in range(3)]
+    world = environment("game_startup")
+    with (
+        pytest.raises(
+            RetryRequested, match="game process failed during startup.*fixture game import"
+        ),
+        evaluating(
+            world, experiment="startup", matches=panel, run="games", directory=tmp_path
+        ) as active,
+    ):
+        if streaming:
+            active.play_many(game)
+        else:
+            active.play(game)
+    db = statsdb("startup", tmp_path)
+    try:
+        assert set(db.sql("select match, state, retry from matches").fetchall()) == {
+            (match.key, "failed", True) for match in panel
+        }
+    finally:
+        db.close()
+    with evaluating(
+        world, experiment="startup", matches=panel, run="games", directory=tmp_path, resume=True
+    ) as active:
+        assert active.play(plain).played == 3
+
+
+def test_game_teardown_error_leaves_ungranted_matches_unrecorded(tmp_path: Path) -> None:
+    panel = [Match(players=(Code(name="one"),))]
+    with evaluating(
+        environment("teardown"),
+        experiment="teardown",
+        matches=panel,
+        run="games",
+        directory=tmp_path,
+    ) as active:
+        playing = Playing(
+            run=active,
+            play=Function(module=__name__, name=plain.__name__),
+            tournament="games",
+            agent_loader=AgentLoader(),
+        )
+        context = get_context("spawn")
+        parent, child = context.Pipe()
+        with parent, child:
+            process = _GameProcess(playing=playing, process=context.Process(), pipe=parent)
+            process.finish(RuntimeError("fixture teardown"), stopping=False)
+            process.process.close()
+        assert isinstance(playing.failure, EtudeError)
+        assert "fixture teardown" in str(playing.failure)
+        assert active.failed == 0
+
+
 async def catches_agent_error(match: Match, agents: Sequence[Forward]) -> Tables:
     try:
         await agents[0]([1])
@@ -1924,17 +1993,47 @@ def test_play_many_grants_spread_a_128_match_panel_across_12_processes(tmp_path:
             agent_loader=AgentLoader(),
             streaming=True,
         )
-        grants = [playing.grant(64, processes=12, unfed=unfed) for unfed in range(12, 0, -1)]
+        grants: list[tuple[Match, ...]] = []
+        for unfed in range(12, 0, -1):
+            total_held = sum(map(len, grants))
+            grants.append(playing.grant(64, processes=12, unfed=unfed, total_held=total_held))
         assert [len(grant) for grant in grants] == [11] * 8 + [10] * 4
         assert [match for grant in grants for match in grant] == matches
         assert playing.grant(64) == ()
 
         playing.pending.extend(matches)
         first = playing.grant(64, processes=12, unfed=12)
-        refill = playing.grant(64, processes=12, unfed=11, held=len(first))
+        refill = playing.grant(64, processes=12, unfed=11, held=len(first), total_held=len(first))
         assert len(refill) == 1
-        second = playing.grant(64, processes=12, unfed=11)
+        second = playing.grant(64, processes=12, unfed=11, total_held=len(first) + len(refill))
         assert len(second) == 11
+
+
+def test_play_many_refills_four_slots_and_caps_an_empty_peers_tail_grant(tmp_path: Path) -> None:
+    panel = [Match(players=(Code(name="one"),), index=i) for i in range(300)]
+    with evaluating(
+        environment("vector"), experiment="vector", matches=panel, run="slots", directory=tmp_path
+    ) as active:
+        playing = Playing(
+            run=active,
+            play=Function(module=__name__, name=vector_slots.__name__),
+            tournament="slots",
+            agent_loader=AgentLoader(),
+            streaming=True,
+        )
+        for started in range(12):
+            grant = playing.grant(16, processes=12, unfed=12 - started, total_held=16 * started)
+            assert grant == tuple(panel[started * 16 : (started + 1) * 16])
+
+        # One process repeatedly finishes four of its sixteen matches while its peers play.
+        for next_match in range(192, 268, 4):
+            refill = playing.grant(4, processes=12, unfed=0, held=12, total_held=188)
+            assert refill == tuple(panel[next_match : next_match + 4])
+
+        # The same process empties all its slots with 32 pending and eleven peers still playing.
+        grant = playing.grant(64, processes=12, unfed=1, total_held=176)
+        assert grant == tuple(panel[268:286])
+        assert list(playing.pending) == panel[286:]
 
 
 async def records_target_slots(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables]]:
@@ -1943,15 +2042,22 @@ async def records_target_slots(matches: MatchStream) -> AsyncIterator[tuple[Matc
             yield match, {"scores": [{"seat": 0, "score": matches.target_slots}]}
 
 
-def test_play_many_targets_its_initial_share(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(("cpus", "max_batch"), [(3, None), (1, 2)], ids=["share", "batch-cap"])
+def test_play_many_targets_its_initial_share_bounded_by_batch_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cpus: int, max_batch: int | None
 ) -> None:
-    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 3)
-    panel = [Match(players=(Code(name="one"),), index=i) for i in range(5)]
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: cpus)
+    player = Code(name="one") if max_batch is None else checkpoint("one")
+    agents = (
+        None
+        if max_batch is None
+        else Agents(load=load_vector, devices=("cpu",), max_batch=max_batch)
+    )
+    panel = [Match(players=(player,), index=i) for i in range(5)]
     with evaluating(
         environment("vector"), experiment="vector", matches=panel, run="slots", directory=tmp_path
     ) as active:
-        assert active.play_many(records_target_slots).played == 5
+        assert active.play_many(records_target_slots, agents=agents).played == 5
     db = statsdb("vector", tmp_path)
     try:
         assert db.sql("select score, count(*) from scores group by score").fetchall() == [(2, 5)]
@@ -1988,7 +2094,7 @@ def test_play_many_backfills_after_an_author_error_and_stops_on_retry(
             directory=tmp_path,
         ) as active,
     ):
-        active.play_many(vector_slots, agents=Agents(load=load_vector, max_batch=1))
+        active.play_many(vector_slots, agents=Agents(load=load_vector, max_batch=2))
     if not retry:
         artifacts = tmp_path / "vector/slots/artifacts/agents"
         batches = json.loads((artifacts / "batches.json").read_text())
