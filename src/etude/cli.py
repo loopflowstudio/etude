@@ -11,7 +11,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 
@@ -34,6 +34,8 @@ def check_experiment(
     ctx: typer.Context,
     file: Annotated[Path | None, typer.Argument(help="the experiment's Python file")] = None,
     experiment: ExperimentOption = None,
+    source: Annotated[str | None, typer.Option(help="local runs directory")] = None,
+    format: Annotated[Literal["text", "json"], typer.Option(help="output format")] = "text",
 ) -> None:
     """Validate an experiment file offline before launching it."""
     # Entry points load only the command being run.
@@ -42,7 +44,9 @@ def check_experiment(
     if file is None:
         typer.echo("etude check: a Python experiment FILE is required", err=True)
         raise typer.Exit(2)
-    raise typer.Exit(show_check(file, ctx.args, experiment))
+    raise typer.Exit(
+        show_check(file, ctx.args, experiment=experiment, source=source, format=format)
+    )
 
 
 @app.command("train")
@@ -664,10 +668,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as error:
         # Entry points load failure-specific dependencies only on the failing command.
         from pydantic import ValidationError
+        from typer._click.exceptions import UsageError
 
         from etude.controller.diagnostics import validation_message
         from etude.storage_timeout import StorageUnavailable
 
+        if argv[:1] == ["check"] and isinstance(error, UsageError):
+            typer.echo(f"etude check: {sanitize(error.format_message())}", err=True)
+            return 2
         if isinstance(
             error,
             (

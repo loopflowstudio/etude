@@ -46,10 +46,10 @@ function and validated Pydantic config; do not specify another command. Their
 
 ```text
 $ uv run etude check exp.py
-game.py:6: error: play must be an async def function
-  fix: async def play(match: Match[Rules], agents: Sequence[Forward]) -> Tables:
 exp.py:12: error: seeds must be nonempty and distinct
   fix: seeds=(1, 2, 3)
+game.py:6: error: play must be an async def function
+  fix: async def play(match: Match[Rules], agents: Sequence[Forward]) -> Tables:
 models.py:3: warning: game module game imports torch via models
   fix: define play in a lightweight module and move the import to load's module
 exp.py: 2 errors, 1 warning
@@ -68,8 +68,8 @@ training  3 runs, up to 3 machine-hours, $15.00
   exp/base@2  max_hours 1  max_usd 5.00
   exp/base@3  max_hours 1  max_usd 5.00
 eval
-  ladder   round robin  3 entrants     3 matches  3 games
-  panel    benchmark    0 checkpoints  0 matches  (none stored yet)
+  ladder  round robin  3 entrants  3 matches  3 games  max_hours 1  max_usd 5.00
+  panel  benchmark  0 checkpoints  0 matches  (none stored yet)  max_hours 1  max_usd 5.00
 next: etude launch exp.py --quote
 ```
 
@@ -85,18 +85,20 @@ launch).
 
 - **Offline state.** By default `check` evaluates declarations as a first
   launch sees them (no stored runs, declared training runs queued). Pass
-  `--source DIR` to read a local runs directory instead. Bucket URIs are
-  refused: use `etude launch FILE --quote` to check against a bucket and price
-  capacity.
+  `--source DIR` to read an existing local runs directory. Training lists
+  runs that are missing from the source. Evaluation counts the matches the
+  file declares for the available checkpoints. Use `etude launch FILE --quote`
+  for bucket storage, delivered match history and prices.
 - **Budgets and warnings.** Jobs without `max_usd` are noted as
   `no max_usd: owned pools only` (owned pools and local runs accept them;
   renting refuses them). Heavy game-module imports are reported as warnings and
   keep exit status `0`.
-- **JSON and exit codes.** `--format json` prints one JSON object (`file`,
-  `experiment`, `ok`, `issues`, `training`, `evals`, `source`) on stdout.
+- **JSON and exit codes.** `--format json` prints one JSON object with
+  `file`, `experiment`, `ok`, `issues`, `training`, `evals`, and `source` on
+  stdout. `local_recipe` and `eval_skipped` describe those special cases.
+  Dollar caps are decimal strings.
   Exit status is `0` when there are no errors, `1` when the file has errors,
-  and `2` when nothing was checked (missing file, non-`.py` path, bucket
-  `--source`, or invalid flag).
+  and `2` when nothing was checked (unusable file, source or command-line option).
 - **Same fixes at runtime.** `launch`, `queue`, `eval` and `smoke` print the
   same `FILE:LINE` location and `fix:` line when they refuse a declaration.
 

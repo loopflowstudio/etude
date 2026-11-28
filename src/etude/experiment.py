@@ -55,11 +55,18 @@ def read_tournament_lines(
     listing: RunListing,
     state: jobs.ExperimentState,
     tournaments: Iterable[Tournament | TournamentRun],
+    *,
+    include_standing: bool = True,
 ) -> tuple[Line, ...]:
     """Read the lines reachable by these tournaments, sharing one source discovery."""
     found = list(state.lines)
     for name in sorted(find_line_experiments(tournaments) - {state.experiment}):
-        found.extend(line.seen_from(state.experiment) for line in observe(listing, name).lines)
+        outside = (
+            observe(listing, name)
+            if include_standing
+            else state_of(read_all(listing, name, metrics=frozenset()), name, retained=())
+        )
+        found.extend(line.seen_from(state.experiment) for line in outside.lines)
     return tuple(found)
 
 
