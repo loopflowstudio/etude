@@ -11,7 +11,7 @@ from collections.abc import Callable, Set
 from typing import TYPE_CHECKING, cast
 
 from etude.errors import RetryRequested, explain
-from etude.eval.agents import Answer, ModelForward
+from etude.eval.agents import ForwardError, ForwardResult, ModelForward
 
 if TYPE_CHECKING:
     from etude.checkpoints import CheckpointRef
@@ -22,7 +22,7 @@ class Forwards:
         self.load = load
         self.memory = memory
         self.loaded: OrderedDict[str, tuple[ModelForward, int]] = OrderedDict()
-        self.failed: dict[str, Answer] = {}
+        self.failed: dict[str, ForwardError] = {}
         self.loads = 0
         self.calls = 0
         self.inputs = 0
@@ -33,10 +33,10 @@ class Forwards:
         self,
         checkpoint: CheckpointRef,
         inputs: list[object],
-        protected: Set[str] = frozenset(),
+        protected: Set[str],
         *,
-        rows: int | None = None,
-    ) -> Answer:
+        rows: int,
+    ) -> ForwardResult:
         key = checkpoint.key
         if key in self.failed:
             return self.failed[key]
@@ -52,15 +52,13 @@ class Forwards:
                     if not callable(forward):
                         raise TypeError("load must return a callable batched forward")
                 except Exception as error:
-                    self.failed[key] = Answer(
-                        id=0,
-                        checkpoint=key,
-                        outputs=[],
-                        error=f"load failed for {key}: {explain(error)}",
+                    self.failed[key] = ForwardError(
+                        key,
+                        f"load failed for {key}: {explain(error)}",
                         retry=isinstance(error, RetryRequested),
                         loading=True,
                     )
-                    raise
+                    return self.failed[key]
                 finally:
                     self.load_seconds += time.monotonic() - started
                 self.loaded[key] = (cast(ModelForward, forward), length)
@@ -68,20 +66,18 @@ class Forwards:
             self.loaded.move_to_end(key)
             started = time.monotonic()
             self.calls += 1
-            self.inputs += len(inputs) if rows is None else rows
+            self.inputs += rows
             try:
                 outputs = list(self.loaded[key][0](inputs))
             finally:
                 self.forward_seconds += time.monotonic() - started
             if len(outputs) != len(inputs):
                 raise ValueError("forward must return one output per input")
-            return Answer(id=0, checkpoint=key, outputs=outputs)
+            return outputs
         except Exception as error:
-            return self.failed.get(key) or Answer(
-                id=0,
-                checkpoint=key,
-                outputs=[],
-                error=f"agent {key}: {explain(error)}",
+            return ForwardError(
+                key,
+                f"agent {key}: {explain(error)}",
                 retry=isinstance(error, RetryRequested),
             )
         finally:

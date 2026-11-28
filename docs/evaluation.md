@@ -172,9 +172,8 @@ as identity and `Sampler.choose` as the action method.
 [`agent_models.py`](../examples/agent_models.py) shows a loader. Both are used
 by the runnable [`agents.py`](../examples/agents.py) experiment.
 
-Each game process runs many `play` tasks on one `asyncio` event loop. When no
-running game in the process can add another input, pending calls flush together
-with no timer. Avoid blocking the event loop between `await`s.
+Each game process runs its `play` tasks on one `asyncio` event loop. Calls
+queued in the same loop turn flush together. Avoid blocking the event loop between `await`s.
 
 `Agents(load=load, devices=("cuda", "metal"))` shares inference on a visible
 NVIDIA GPU or an Apple Silicon Mac running native arm64 Python. This is the
@@ -211,7 +210,7 @@ write an async generator `play_many(matches)` instead of `play(match, agents)`:
 ```python
 from collections.abc import AsyncIterator
 
-from etude.eval.agents import Forward, ForwardError
+from etude.eval.agents import ForwardError
 from etude.eval.game import Matches
 from etude.eval.records import Match
 from etude.eval.result import Tables
@@ -247,9 +246,8 @@ job = EvalJob(
 )
 ```
 
-Give `EvalJob` either `play=` or `play_many=`, never both. Etude still owns
-scheduling, checkpoint caching and eviction, durable match storage and failure
-retention.
+Etude schedules the matches, caches checkpoints and stores each outcome as
+the generator yields it.
 
 - `await matches.take(n)` pulls up to `n` pending `(match, agents)` pairs in one
   step. Returning `[]` for `n > 0` means no pending matches remain (or the run
@@ -258,8 +256,8 @@ retention.
   `rows=` for a pre-collated batch so the agent process never merges calls past
   `max_batch` rows and reports real row counts. A single pre-collated call
   above `max_batch` rows runs alone. An engine can choose smaller batches
-  when its model needs a hard limit. Every match in the process shares one `Forward`
-  object per checkpoint, engines can group ready rows by forward identity.
+  when its model needs a hard limit. Group ready rows by their shared `Forward`
+  object to batch calls for the same checkpoint.
 - Size the engine's slots to the panel. Each process takes matches as it has
   free slots, so a slot count near the whole panel puts every game's host work
   on one or two cores while the GPU waits for requests. Fewer slots spread

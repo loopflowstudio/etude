@@ -11,7 +11,7 @@ import selectors
 import socket
 import sys
 import time
-from collections.abc import Callable, Set
+from collections.abc import Callable, Sequence, Set
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.reduction import ForkingPickler
@@ -20,7 +20,14 @@ from typing import cast
 
 from etude.call import Function
 from etude.errors import RetryRequested, explain
-from etude.eval.agents import Answer, BatchRequest, CheckpointRequest, recv_frame, send_frame
+from etude.eval.agents import (
+    Answer,
+    CheckpointRequest,
+    ForwardError,
+    ForwardResult,
+    recv_frame,
+    send_frame,
+)
 from etude.eval.forwards import Forwards
 from etude.records import Record
 
@@ -46,24 +53,14 @@ class _Pending:
     receive_seconds: float
 
 
-def _responses(answer: Answer, batch: list[_Pending]) -> list[memoryview]:
+def _responses(result: ForwardResult, batch: list[_Pending]) -> list[memoryview]:
     responses: list[memoryview] = []
     offset = 0
     for item in batch:
-        size = len(item.request.inputs)
-        responses.append(
-            ForkingPickler.dumps(
-                Answer(
-                    id=item.request.id,
-                    checkpoint=answer.checkpoint,
-                    outputs=answer.outputs[offset : offset + size],
-                    error=answer.error,
-                    retry=answer.retry,
-                    loading=answer.loading,
-                )
-            )
-        )
-        offset += size
+        stop = offset + len(item.request.inputs)
+        part = result if isinstance(result, ForwardError) else result[offset:stop]
+        responses.append(ForkingPickler.dumps(Answer(item.request.id, part)))
+        offset = stop
     return responses
 
 
@@ -99,16 +96,18 @@ class _Batches:
     def add_batch(
         self,
         peer: socket.socket,
-        batch: BatchRequest,
+        requests: Sequence[CheckpointRequest],
         receive_seconds: float = 0.0,
     ) -> None:
-        if not batch.requests:
+        if not requests:
             return
-        share = receive_seconds / len(batch.requests)
-        for request in batch.requests:
+        share = receive_seconds / len(requests)
+        for request in requests:
             self.add(peer, request, share)
 
-    def _forward(self, key: str, batch: list[_Pending], rows: int) -> tuple[Answer, list[Batch]]:
+    def _forward(
+        self, key: str, batch: list[_Pending], rows: int
+    ) -> tuple[ForwardResult, list[Batch]]:
         checkpoint = batch[0].request.checkpoint
         inputs = [item for pending in batch for item in pending.request.inputs]
         # Opaque pre-collated inputs have no Etude-owned row slicing operation.
@@ -142,10 +141,10 @@ class _Batches:
                     loads=loads,
                 )
             )
-            if answer.error is not None:
+            if isinstance(answer, ForwardError):
                 return answer, observations
-            outputs.extend(answer.outputs)
-        return Answer(id=0, checkpoint=key, outputs=outputs), observations
+            outputs.extend(answer)
+        return outputs, observations
 
     def flush(self, queue_wait_seconds: float = 0.0) -> list[Batch]:
         """Flush ready requests by checkpoint, batching up to `max_batch` rows."""
@@ -169,11 +168,9 @@ class _Batches:
             try:
                 responses = _responses(answer, batch)
             except Exception as error:
-                answer = Answer(
-                    id=0,
-                    checkpoint=key,
-                    outputs=[],
-                    error=f"agent {key}: {explain(error)}",
+                answer = ForwardError(
+                    key,
+                    f"agent {key}: {explain(error)}",
                     retry=isinstance(error, RetryRequested),
                 )
                 responses = _responses(answer, batch)
@@ -241,7 +238,7 @@ def _run_agents(
                         started = time.monotonic()
                         try:
                             payload = recv_frame(peer)
-                            request = cast(BatchRequest, ForkingPickler.loads(payload))
+                            request = cast(list[CheckpointRequest], ForkingPickler.loads(payload))
                         except (EOFError, OSError):
                             selector.unregister(peer)
                             peer.close()

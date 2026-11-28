@@ -32,7 +32,6 @@ from etude.errors import EtudeError, LauncherError, RetryRequested
 from etude.eval import resources as eval_resources
 from etude.eval.agents import (
     Answer,
-    BatchRequest,
     CheckpointRequest,
     Forward,
     ForwardError,
@@ -603,7 +602,7 @@ def test_play_arity_and_removed_workers_are_refused(tmp_path: Path) -> None:
         enter=(checkpoint("left"), checkpoint("right")),
         directory=tmp_path,
     ) as active:
-        with pytest.raises(TypeError, match="async def"):
+        with pytest.raises(LauncherError, match="async def"):
             active.play(sync_play)  # type: ignore[arg-type]
     with pytest.raises(ValidationError, match="workers"):
         EvalJob.model_validate({**job("bad", None).model_dump(), "workers": 2})
@@ -997,18 +996,18 @@ def test_batch_merges_rows_up_to_max_batch_and_runs_oversized_alone() -> None:
         batches.add(second_agent, CheckpointRequest(2, player.checkpoint, [("c", "d")], 2))
         batches.add(second_agent, CheckpointRequest(3, player.checkpoint, ["e"], 1))
         first = batches.flush()
-        assert ForkingPickler.loads(recv_frame(first_game)) == Answer(1, "one", [("a", "b")])
-        assert ForkingPickler.loads(recv_frame(second_game)) == Answer(2, "one", [("c", "d")])
+        assert ForkingPickler.loads(recv_frame(first_game)) == Answer(1, [("a", "b")])
+        assert ForkingPickler.loads(recv_frame(second_game)) == Answer(2, [("c", "d")])
         assert [b.rows for b in first] == [4]
         assert [b.requests for b in first] == [2]
         assert batches.loads == 1
         second = batches.flush()
-        assert ForkingPickler.loads(recv_frame(second_game)) == Answer(3, "one", ["e"])
+        assert ForkingPickler.loads(recv_frame(second_game)) == Answer(3, ["e"])
         assert [b.rows for b in second] == [1]
         # A single pre-collated call above max_batch runs alone and reports real rows.
         batches.add(first_agent, CheckpointRequest(4, player.checkpoint, ["big"], 6))
         oversized = batches.flush()
-        assert ForkingPickler.loads(recv_frame(first_game)) == Answer(4, "one", ["big"])
+        assert ForkingPickler.loads(recv_frame(first_game)) == Answer(4, ["big"])
         assert [b.rows for b in oversized] == [6]
 
 
@@ -1020,7 +1019,7 @@ def test_oversized_game_request_uses_bounded_forwards_and_one_ordered_reply() ->
     with game, agent:
         batches.add(agent, CheckpointRequest(1, player.checkpoint, inputs, len(inputs)))
         observed = batches.flush()
-        assert ForkingPickler.loads(recv_frame(game)) == Answer(1, "one", inputs)
+        assert ForkingPickler.loads(recv_frame(game)) == Answer(1, inputs)
         assert not wait([game], timeout=0)
         assert [(batch.rows, batch.forward_calls) for batch in observed] == [
             (2, 1),
@@ -1048,19 +1047,17 @@ def test_lru_charges_checkpoint_bytes_and_keeps_players_with_waiting_inputs() ->
         for index, player in enumerate((a, b), start=1):
             batches.add(child, CheckpointRequest(index, player.checkpoint, [player.name], 1))
             batches.flush()
-            assert ForkingPickler.loads(recv_frame(parent)) == Answer(
-                index, player.checkpoint.key, [player.name]
-            )
+            assert ForkingPickler.loads(recv_frame(parent)) == Answer(index, [player.name])
         # While a still has waiting rows in pending, loading c evicts b instead of a.
         batches.add(child, CheckpointRequest(3, c.checkpoint, ["c"], 1))
         batches.add(child, CheckpointRequest(4, a.checkpoint, ["a"], 1))
         batches.flush()
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(3, c.checkpoint.key, ["c"])
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(4, a.checkpoint.key, ["a"])
+        assert ForkingPickler.loads(recv_frame(parent)) == Answer(3, ["c"])
+        assert ForkingPickler.loads(recv_frame(parent)) == Answer(4, ["a"])
         assert batches.loads == 3
         batches.add(child, CheckpointRequest(5, b.checkpoint, ["b"], 1))
         batches.flush()
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(5, b.checkpoint.key, ["b"])
+        assert ForkingPickler.loads(recv_frame(parent)) == Answer(5, ["b"])
         assert batches.loads == 4  # b was evicted to make room for c.
     finally:
         parent.close()
@@ -1158,7 +1155,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
 
 
 def test_game_imports_only_play_module_with_one_send_and_receive_per_decision(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (tmp_path / "light_agent_game.py").write_text("""
 import sys
@@ -1168,85 +1165,20 @@ from etude.eval.records import Match
 from etude.eval.result import Tables
 
 async def play(match: Match, agents: Sequence[Forward]) -> Tables:
-    assert "separate_loading" not in sys.modules
+    assert "tests.eval.arithmetic" not in sys.modules
     assert "etude.eval.batching" not in sys.modules
     assert await agents[0]([]) == []
     return {"scores": [{"seat": 0, "score": int(str((await agents[0]([1]))[0]))}]}
 """)
-    (tmp_path / "separate_loading.py").write_text(
-        "raise RuntimeError('model module imported by game')\n"
-    )
-    program = """
-import json
-import multiprocessing
-import socket
-import sys
-import threading
-from multiprocessing.reduction import ForkingPickler
-from pathlib import Path
-from tempfile import TemporaryDirectory
-from etude.call import Function
-from etude.eval.agents import Answer, recv_frame, send_frame
-from etude.eval.game import Done, Grant, Outcome, Take, run_game_process
-from etude.eval.records import Match
-from etude.eval.resources import Resources
-from tests.eval.arithmetic import checkpoint
-
-
-counts = {"sent": 0, "received": 0}
-with TemporaryDirectory(dir="/tmp", prefix="etude-test-") as scratch, socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
-    address = scratch + "/a.sock"
-    listener.bind(address)
-    listener.listen()
-    def answer() -> None:
-        peer, _ = listener.accept()
-        with peer:
-            batch = ForkingPickler.loads(recv_frame(peer))
-            counts["received"] += 1
-            for req in batch.requests:
-                send_frame(peer, ForkingPickler.dumps(Answer(req.id, req.checkpoint.key, req.inputs)))
-                counts["sent"] += 1
-    thread = threading.Thread(target=answer)
-    thread.start()
-    parent, child = multiprocessing.Pipe()
-    match = Match(players=(checkpoint("one"),))
-    def drive() -> None:
-        req = parent.recv()
-        assert isinstance(req, Take)
-        parent.send(Grant((match,)))
-        outcome = parent.recv()
-        assert isinstance(outcome, Outcome) and outcome.error is None
-        req2 = parent.recv()
-        assert isinstance(req2, Take)
-        parent.send(Grant(()))
-        done = parent.recv()
-        assert isinstance(done, Done)
-        assert done.report.requests == done.report.answers == 1
-        assert done.report.matches == 1
-        print(done.report.imports.model_dump_json())
-    driver = threading.Thread(target=drive)
-    driver.start()
-    run_game_process(
-        child,
-        Resources(scratch=Path(scratch), artifacts=Path(scratch)),
-        Function(module="light_agent_game", name="play", path=sys.argv[1]),
-        "light",
-        1,
-        agents=address,
-    )
-    driver.join()
-    thread.join()
-    parent.close()
-assert counts == {"sent": 1, "received": 1}
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", program, str(tmp_path)],
-        capture_output=True,
-        text=True,
-        check=True,
-        timeout=15,
-    )
-    assert json.loads(result.stdout)["count"] == 1
+    monkeypatch.syspath_prepend(str(tmp_path))
+    selected = job("light", Agents(load=load), import_module("light_agent_game").play)
+    (result,) = hold_group(group(selected), directory=tmp_path)
+    assert result.played == 1
+    artifacts = tmp_path / "grouped/artifacts/agents"
+    (path,) = artifacts.glob("game-*.json")
+    report = GameReport.model_validate_json(path.read_bytes())
+    assert report.requests == report.answers == 1
+    assert report.imports.count == 1
 
 
 def test_eval_only_smoke_starts_one_agent_process(
@@ -1284,13 +1216,15 @@ def test_a_failed_load_is_not_attempted_again_in_the_run() -> None:
         batches.add(child, CheckpointRequest(1, player.checkpoint, [1], 1))
         batches.flush()
         first = ForkingPickler.loads(recv_frame(parent))
-        assert first.error and "fixture loading error" in first.error and first.loading
+        assert isinstance(first.result, ForwardError) and first.result.loading
+        assert "fixture loading error" in str(first.result)
         # If loading is attempted a second time this function would now succeed.
         batches.forwards.load = echo
         batches.add(child, CheckpointRequest(2, player.checkpoint, [2], 1))
         batches.flush()
         second = ForkingPickler.loads(recv_frame(parent))
-        assert second.error == first.error and second.loading
+        assert isinstance(second.result, ForwardError) and second.result.loading
+        assert str(second.result) == str(first.result)
         assert batches.loads == 0
     finally:
         parent.close()
@@ -1725,47 +1659,26 @@ def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoin
     # Small real sockets retain the wire bytes; no load or clock threshold.
     cp = checkpoint("wire")
     batches = _Batches(wire_agent, 2, 1024)
-    sockets = [socket.socketpair() for _ in range(2)]
-    clients = [parent for parent, _ in sockets]
-    receivers = [child for _, child in sockets]
-    answer_size = len(ForkingPickler.dumps(Answer(1, "wire", [WireValue(0)])))
+    first, first_peer = socket.socketpair()
+    second, second_peer = socket.socketpair()
+    peers = [(first, first_peer), (second, second_peer)]
     WireValue.serializations = 0
-    request_bytes = 0
     observations = []
-    try:
+    with first, first_peer, second, second_peer:
         for turn in range(2):
-            for index, (peer_client, receiver) in enumerate(zip(clients, receivers, strict=True)):
-                payload = ForkingPickler.dumps(
-                    BatchRequest(
-                        (
-                            CheckpointRequest(
-                                turn * 2 + index + 1, cp.checkpoint, [WireValue(turn)], 1
-                            ),
-                        )
-                    )
-                )
-                send_frame(peer_client, payload)
-                received = recv_frame(receiver)
-                request_bytes += len(received)
-                batches.add_batch(receiver, ForkingPickler.loads(received))
+            for client, peer in peers:
+                request = CheckpointRequest(turn, cp.checkpoint, [WireValue(turn)], 1)
+                send_frame(client, ForkingPickler.dumps([request]))
+                batches.add_batch(peer, ForkingPickler.loads(recv_frame(peer)))
             observations.extend(batches.flush())
-            for index, peer_client in enumerate(clients):
-                answer_payload = recv_frame(peer_client)
-                assert len(answer_payload) == answer_size
-                assert ForkingPickler.loads(answer_payload) == Answer(
-                    turn * 2 + index + 1, "wire", [str(turn)]
-                )
+            for client, _ in peers:
+                assert ForkingPickler.loads(recv_frame(client)) == Answer(turn, [str(turn)])
         assert WireValue.serializations == 8  # Four decisions, one encoding each way.
         assert [batch.rows for batch in observations] == [2, 2]
         assert [batch.requests for batch in observations] == [2, 2]
         assert [batch.forward_calls for batch in observations] == [1, 1]
         assert [batch.loads for batch in observations] == [1, 0]
         assert batches.loads == 1
-    finally:
-        for peer_client in clients:
-            peer_client.close()
-        for receiver in receivers:
-            receiver.close()
 
 
 def test_agentless_game_reports_have_no_inference_wait(tmp_path: Path) -> None:
@@ -1816,9 +1729,6 @@ async def multi_round_play(match: Match[Config], agents: Sequence[Forward]) -> T
 def test_barrier_batches_games_into_one_message_per_process_per_round(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 ) -> None:
-    # 6 games of unequal length (2, 2, 3, 3, 4, 4 decisions) in 1 game process:
-    # zero-delay barrier batches all waiting games every round, shrinking as games finish.
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     cp = checkpoint("one")
     lengths = (2, 2, 3, 3, 4, 4)
@@ -1858,31 +1768,31 @@ def test_barrier_batches_games_into_one_message_per_process_per_round(
 def test_barrier_batches_across_multiple_processes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 8 games of 3 rounds each across 2 game processes (4 games each, max_batch=8):
-    # each process sends 3 socket messages (P=2 -> 6 messages total, not N*3=24).
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3)
-    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
-    cp = checkpoint("one")
-    matches = [
-        Match(players=(cp,), config={"rounds": 3, "slot": index}, games=1) for index in range(8)
+    # Binding a four-match tournament to each process makes the count independent of startup order.
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 3)
+    agents = Agents(load=load, max_batch=8)
+    jobs = [
+        EvalJob(
+            tournament=RoundRobin(
+                name=name,
+                environment=environment("barrier"),
+                configs=tuple({"rounds": 3, "slot": slot} for slot in range(4)),
+                games=1,
+            ),
+            enter=(checkpoint("left"), checkpoint("right")),
+            play=multi_round_play,
+            agents=agents,
+            repo=None,
+            max_hours=0.1,
+        )
+        for name in ("first", "second")
     ]
-    with evaluating(
-        environment("barrier"),
-        experiment="barrier",
-        matches=matches,
-        run="multi-proc",
-        directory=tmp_path,
-    ) as active:
-        result = active.play(multi_round_play, agents=Agents(load=load, max_batch=8))
-    assert result.played == 8
-    artifacts = tmp_path / "barrier/multi-proc/artifacts/agents"
+    assert [result.played for result in hold_group(group(*jobs), directory=tmp_path)] == [4, 4]
+    artifacts = tmp_path / "grouped/artifacts/agents"
     reports = [
         GameReport.model_validate_json(p.read_bytes()) for p in artifacts.glob("game-*.json")
     ]
-    assert len(reports) == 2
-    assert sum(r.matches for r in reports) == 8
-    assert [r.requests for r in reports] == [3, 3]
-    assert [r.answers for r in reports] == [3, 3]
+    assert [(r.matches, r.requests, r.answers) for r in reports] == [(4, 3, 3)] * 2
     batches = json.loads((artifacts / "batches.json").read_text())
     assert sum(batch["rows"] for batch in batches) == 24
     assert all(batch["rows"] <= 8 for batch in batches)
@@ -2110,9 +2020,9 @@ def test_play_many_requires_one_async_generator_with_a_match_source(tmp_path: Pa
     with evaluating(
         environment("vector"), experiment="vector", matches=[], run="signature", directory=tmp_path
     ) as active:
-        with pytest.raises(TypeError, match="async def generator"):
+        with pytest.raises(LauncherError, match="async def generator"):
             active.play_many(plain)  # type: ignore[arg-type]
-        with pytest.raises(TypeError, match=r"Matches\[YourConfig\]"):
+        with pytest.raises(LauncherError, match=r"Matches\[YourConfig\]"):
             active.play_many(wrong_source)
 
 

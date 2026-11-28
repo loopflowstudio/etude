@@ -54,26 +54,20 @@ def test_mirror_trajectories_do_not_depend_on_other_inputs_in_the_batch() -> Non
     small = checkpoint("small")
     parent, child = socket.socketpair()
     batches = _Batches(load, 32, 1024)
-    next_id = 0
 
     async def shared(inputs: list[object], *, rows: int | None = None) -> list[object]:
-        nonlocal next_id
-        next_id += 1
-        batches.add(child, CheckpointRequest(next_id, small.checkpoint, [100], 1))
-        next_id += 1
+        batches.add(child, CheckpointRequest(1, small.checkpoint, [100], 1))
         batches.add(
             child,
-            CheckpointRequest(
-                next_id, small.checkpoint, inputs, len(inputs) if rows is None else rows
-            ),
+            CheckpointRequest(2, small.checkpoint, inputs, len(inputs) if rows is None else rows),
         )
         batches.flush()
         first = ForkingPickler.loads(recv_frame(parent))
-        assert first == Answer(next_id - 1, small.checkpoint.key, [101])
+        assert first == Answer(1, [101])
         answer = ForkingPickler.loads(recv_frame(parent))
         assert isinstance(answer, Answer)
-        assert answer.error is None
-        return answer.outputs
+        assert isinstance(answer.result, list)
+        return answer.result
 
     async def compare() -> None:
         for choice in ("greedy", "sample"):

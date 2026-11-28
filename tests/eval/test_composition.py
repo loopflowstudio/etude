@@ -185,8 +185,8 @@ def test_distinct_players_share_a_checkpoint_batch() -> None:
         for req_id, name in ((1, "bare"), (2, "composed")):
             batches.add(child, CheckpointRequest(req_id, small.checkpoint, [name], 1))
         observations = batches.flush()
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(1, "small", ["bare"])
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(2, "small", ["composed"])
+        assert ForkingPickler.loads(recv_frame(parent)) == Answer(1, ["bare"])
+        assert ForkingPickler.loads(recv_frame(parent)) == Answer(2, ["composed"])
         assert batches.loads == batches.batches == 1
         assert observations[0].checkpoint == "small"
         assert observations[0].rows == 2
