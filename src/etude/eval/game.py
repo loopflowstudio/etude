@@ -361,6 +361,7 @@ class Game:
     play: Function
     tournament: str
     concurrency: int | None
+    initial: tuple[Match, ...]
     agent_address: str | None
     checkout: str | None
     build: Function | None
@@ -445,9 +446,17 @@ async def _serve_stream(
         def build_seats(match: Match) -> Sequence[object]:
             return build_agents(match.players, bind, build_hook)
 
-        source: Matches = Matches(
-            partial(_request_grant, pipe, asyncio.Lock()), validate, build_seats
-        )
+        initial = game.initial
+        lock = asyncio.Lock()
+
+        async def take(count: int) -> Sequence[Match]:
+            nonlocal initial
+            if initial:
+                granted, initial = initial, ()
+                return granted
+            return await _request_grant(pipe, lock, count)
+
+        source: Matches = Matches(take, validate, build_seats)
         stream = (
             cast(Callable[[Matches], _Outcomes], play)(source)
             if game.concurrency is None

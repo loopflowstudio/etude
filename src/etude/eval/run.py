@@ -8,7 +8,6 @@ what play completed. Tournament scheduling lives in eval.tournament.
 from __future__ import annotations
 
 import inspect
-import math
 import multiprocessing
 import os
 import secrets
@@ -745,12 +744,24 @@ def _play_matches(
     live: list[_GameProcess] = []
     address = agent_process.address if agent_process is not None else None
 
+    def grant(each: Playing, count: int) -> tuple[Match, ...]:
+        granted: list[Match] = []
+        while each.pending and len(granted) < count:
+            match = each.pending.popleft()
+            if match.key not in each.run._failed and match.key not in each.run.done:
+                granted.append(match)
+        return tuple(granted)
+
     def spawn_one(each: Playing) -> _GameProcess:
         parent, child_pipe = context.Pipe()
+        # Starting play processes own their first matches even if another match fails
+        # before they finish importing the game. Streaming engines request their own slots.
+        initial = () if each.streaming else grant(each, plan.games)
         game = Game(
             play=each.play,
             tournament=each.tournament,
             concurrency=None if each.streaming else plan.games,
+            initial=initial,
             agent_address=address,
             checkout=checkout,
             build=each.agent_loader.build,
@@ -761,9 +772,12 @@ def _play_matches(
         process = context.Process(target=run_game_process, args=(child_pipe, resources, game))
         process.start()
         child_pipe.close()
-        return _GameProcess(playing=each, process=process, pipe=parent)
+        return _GameProcess(
+            playing=each, process=process, pipe=parent, held={m.key: m for m in initial}
+        )
 
     def spawn_ready() -> None:
+        nonlocal stopping
         while len(live) < plan.processes and not stopping:
             spawned = False
             for each in plays:
@@ -771,12 +785,13 @@ def _play_matches(
                     break
                 if not each.pending:
                     continue
-                active = sum(1 for child in live if child.playing is each)
-                needed = len(each.pending)
-                if not each.streaming:
-                    needed = math.ceil(needed / plan.games)
-                if active >= needed:
+                if each.streaming and sum(child.playing is each for child in live) >= len(
+                    each.pending
+                ):
                     continue
+                if each.run.should_stop:
+                    stopping = True
+                    return
                 live.append(spawn_one(each))
                 spawned = True
             if not spawned:
@@ -787,14 +802,9 @@ def _play_matches(
         each = child.playing
         if isinstance(message, Take):
             stopping = stopping or each.run.should_stop
-            granted: list[Match] = []
-            while not stopping and each.pending and len(granted) < message.count:
-                match = each.pending.popleft()
-                if match.key in each.run._failed or match.key in each.run.done:
-                    continue
-                child.held[match.key] = match
-                granted.append(match)
-            child.pipe.send(Grant(tuple(granted)))
+            granted = () if stopping else grant(each, message.count)
+            child.held.update((match.key, match) for match in granted)
+            child.pipe.send(Grant(granted))
         elif isinstance(message, Outcome):
             match = child.held.pop(message.match_key)
             accept(each, match, message)
