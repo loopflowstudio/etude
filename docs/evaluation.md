@@ -306,9 +306,10 @@ and matches that were never granted remain pending.
 Infrastructure failures retry, and ordinary failed matches require
 `--retry-failed`. A forward failure raises
 `ForwardError` (with `.checkpoint` naming the checkpoint key) at the awaiting
-call. In shared inference, a serialization error in a request or its reply
-raises a non-retryable `ForwardError` for that request. Other requests in the
-same message or merged forward continue. A lost connection interrupts the
+call. In shared inference, a game process sends each checkpoint's calls from
+one event-loop turn as one request, so a serialization error in one input or
+output raises a non-retryable `ForwardError` at every call in that request.
+Other checkpoints, other turns and other processes continue. A lost connection interrupts the
 group and leaves unfinished matches eligible for retry.
 Etude records a failed match even when `play` catches `ForwardError`.
 In `play_many`, catch `ForwardError`, drop affected slots and yield `(match,
