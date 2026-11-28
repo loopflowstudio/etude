@@ -151,11 +151,6 @@ class Take:
 
 
 @dataclass(frozen=True)
-class Grant:
-    matches: tuple[Match, ...]
-
-
-@dataclass(frozen=True)
 class Outcome:
     match_key: str
     result: Tables | Result | BaseException
@@ -169,46 +164,75 @@ class Done:
     loading_failures: tuple[ForwardError, ...] = ()
 
 
+@dataclass(frozen=True)
+class _TakenMatch:
+    match: Match  # Keep the object alive while its id identifies the grant.
+    key: str
+    started: float
+
+
 class Matches(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PEP 696 default syntax.
-    """Pull-based match source for a game process."""
+    """One game process's match grants and the seats built for them."""
 
     def __init__(
         self,
-        take_raw: Callable[[int], Awaitable[Sequence[Match]]],
-        validate: Callable[[Match], Match[_MatchConfig]],
-        build: Callable[[Match], Sequence[object]],
+        pipe: Connection,
+        initial: tuple[Match, ...],
+        kind: type[Match[_MatchConfig]],
+        bind: Callable[[CheckpointRef], Forward] | None,
+        build: Callable[[object, Mapping[str, Forward]], object] | None,
     ) -> None:
-        self._take_raw = take_raw
-        self._validate = validate
+        self._pipe = pipe
+        self._initial = initial
+        self._kind = kind
+        self._bind = bind
         self._build = build
+        self._lock = asyncio.Lock()
+        self._exhausted = False
+        self._held: dict[int, _TakenMatch] = {}
 
     async def take(self, count: int) -> list[tuple[Match[_MatchConfig], Sequence[object]]]:
         """Request up to `count` pending matches and their built seat agents."""
         if count <= 0:
             return []
-        granted = await self._take_raw(count)
-        return [(self._validate(match), self._build(match)) for match in granted]
+        async with self._lock:
+            if self._exhausted:
+                return []
+            if self._initial:
+                granted, self._initial = self._initial[:count], self._initial[count:]
+            else:
+                granted = await self._request(count)
+                # Pending work only shrinks. An empty grant ends requests from this stream.
+                self._exhausted = not granted
+        seats: list[tuple[Match[_MatchConfig], Sequence[object]]] = []
+        for match in granted:
+            if self._kind is Match:
+                # The callback accepts the scheduled match's original config type.
+                authored = cast(Match[_MatchConfig], match)
+            else:
+                authored = self._kind.model_validate_json(match.model_dump_json())
+            # Config validation can fill defaults. Retain the parent's scheduled key.
+            self._held[id(authored)] = _TakenMatch(authored, match.key, time.monotonic())
+            seats.append((authored, build_agents(match.players, self._bind, self._build)))
+        return seats
 
-
-async def _request_grant(pipe: Connection, lock: asyncio.Lock, count: int) -> Sequence[Match]:
-    # The pipe carries one grant per take, including concurrent takes by an engine.
-    async with lock:
+    async def _request(self, count: int) -> tuple[Match, ...]:
         loop = asyncio.get_running_loop()
-        ready: asyncio.Future[None] = loop.create_future()
-
-        def readable() -> None:
-            if not ready.done():
-                ready.set_result(None)
-
-        loop.add_reader(pipe.fileno(), readable)
+        ready = asyncio.Event()
+        loop.add_reader(self._pipe.fileno(), ready.set)
         try:
-            pipe.send(Take(count))
-            await ready
-            return cast(Grant, pipe.recv()).matches
-        except (EOFError, OSError):
-            return ()
+            self._pipe.send(Take(count))
+            await ready.wait()
+            return cast(tuple[Match, ...], self._pipe.recv())
         finally:
-            loop.remove_reader(pipe.fileno())
+            loop.remove_reader(self._pipe.fileno())
+
+    def _release(self, match: Match) -> _TakenMatch:
+        taken = self._held.pop(id(match), None)
+        if taken is None:
+            identity = match.key if isinstance(match, Match) else type(match).__name__
+            raise ValueError(f"play_many yielded an unknown or already-yielded match: {identity}")
+        return taken
 
 
 type Play = Callable[..., Awaitable[Tables | Result]]
@@ -393,15 +417,10 @@ async def _drive_play(
             if errors:
                 raise errors[0]
 
-    exhausted = False
     try:
         while True:
-            if not exhausted and len(active) < concurrency:
-                taken = await matches.take(concurrency - len(active))
-                if not taken:
-                    exhausted = True
-                for match, agents in taken:
-                    active[asyncio.create_task(run_one(match, agents))] = match
+            for match, agents in await matches.take(concurrency - len(active)):
+                active[asyncio.create_task(run_one(match, agents))] = match
             if not active:
                 return
             done, _ = await asyncio.wait(active, return_when=asyncio.FIRST_COMPLETED)
@@ -414,13 +433,6 @@ async def _drive_play(
             task.cancel()
         if active:
             await asyncio.gather(*active, return_exceptions=True)
-
-
-@dataclass(frozen=True)
-class _TakenMatch:
-    match: Match  # Keep the object alive while its id identifies the grant.
-    key: str
-    started: float
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -449,27 +461,6 @@ async def _serve_stream(
     local: Forwards | None = None
     forwarder: _Forwarder | None = None
     played_count = 0
-    held: dict[int, _TakenMatch] = {}
-
-    def make_report() -> GameReport:
-        return GameReport(
-            pid=os.getpid(),
-            tournament=game.tournament,
-            imports=observe_imports(),
-            matches=played_count,
-            requests=client.requests if client else 0,
-            answers=client.answers if client else 0,
-            request_bytes=client.request_bytes if client else 0,
-            answer_bytes=client.answer_bytes if client else 0,
-            round_trip_seconds=client.round_trip_seconds if client else 0.0,
-            transport_seconds=client.transport_seconds if client else 0.0,
-            wall_seconds=time.monotonic() - started,
-            local_inputs=local.inputs if local else 0,
-            local_forward_calls=local.calls if local else 0,
-            local_loads=local.loads if local else 0,
-            local_forward_seconds=local.forward_seconds if local else 0.0,
-            local_load_seconds=local.load_seconds if local else 0.0,
-        )
 
     stream_error: BaseException | None = None
     try:
@@ -500,32 +491,9 @@ async def _serve_stream(
             client = await AgentClient.connect(game.agent_address)
             forwarder = _Forwarder(client, game.max_batch)
 
-        bind: Callable[[CheckpointRef], Forward] | None = (
-            forwarder.bind if forwarder is not None else None
+        source: Matches = Matches(
+            pipe, game.initial, kind, forwarder.bind if forwarder else None, build_hook
         )
-
-        def validate(match: Match) -> Match:
-            authored = (
-                kind.model_validate_json(match.model_dump_json()) if kind is not Match else match
-            )
-            # The author's config type may fill defaults. Keep the scheduled key.
-            held[id(authored)] = _TakenMatch(authored, match.key, time.monotonic())
-            return authored
-
-        def build_seats(match: Match) -> Sequence[object]:
-            return build_agents(match.players, bind, build_hook)
-
-        initial = game.initial
-        lock = asyncio.Lock()
-
-        async def take(count: int) -> Sequence[Match]:
-            nonlocal initial
-            if initial:
-                granted, initial = initial, ()
-                return granted
-            return await _request_grant(pipe, lock, count)
-
-        source: Matches = Matches(take, validate, build_seats)
         stream = (
             cast(Callable[[Matches], _Outcomes], play)(source)
             if game.concurrency is None
@@ -533,12 +501,7 @@ async def _serve_stream(
         )
         async with aclosing(stream):
             async for match, outcome in stream:
-                taken = held.pop(id(match), None)
-                if taken is None:
-                    identity = match.key if isinstance(match, Match) else type(match).__name__
-                    raise ValueError(
-                        f"play_many yielded an unknown or already-yielded match: {identity}"
-                    )
+                taken = source._release(match)
                 elapsed = time.monotonic() - taken.started
                 played_count += 1
                 if isinstance(outcome, BaseException):
@@ -551,9 +514,27 @@ async def _serve_stream(
     finally:
         if client is not None:
             await client.close()
+    report = GameReport(
+        pid=os.getpid(),
+        tournament=game.tournament,
+        imports=observe_imports(),
+        matches=played_count,
+        requests=client.requests if client else 0,
+        answers=client.answers if client else 0,
+        request_bytes=client.request_bytes if client else 0,
+        answer_bytes=client.answer_bytes if client else 0,
+        round_trip_seconds=client.round_trip_seconds if client else 0.0,
+        transport_seconds=client.transport_seconds if client else 0.0,
+        wall_seconds=time.monotonic() - started,
+        local_inputs=local.inputs if local else 0,
+        local_forward_calls=local.calls if local else 0,
+        local_loads=local.loads if local else 0,
+        local_forward_seconds=local.forward_seconds if local else 0.0,
+        local_load_seconds=local.load_seconds if local else 0.0,
+    )
     failures = tuple(forwarder.loading_failures.values()) if forwarder else ()
     with suppress(EOFError, OSError):
-        pipe.send(Done(make_report(), stream_error, failures))
+        pipe.send(Done(report, stream_error, failures))
 
 
 def run_game_process(

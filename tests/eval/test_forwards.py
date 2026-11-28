@@ -56,10 +56,14 @@ def test_mirror_trajectories_do_not_depend_on_other_inputs_in_the_batch() -> Non
     batches = _Batches(load, 32, 1024)
 
     async def shared(inputs: list[object], *, rows: int | None = None) -> list[object]:
-        batches.add(child, CheckpointRequest(1, small.checkpoint, [100], 1))
         batches.add(
             child,
-            CheckpointRequest(2, small.checkpoint, inputs, len(inputs) if rows is None else rows),
+            [
+                CheckpointRequest(1, small.checkpoint, [100], 1),
+                CheckpointRequest(
+                    2, small.checkpoint, inputs, len(inputs) if rows is None else rows
+                ),
+            ],
         )
         batches.flush()
         first = ForkingPickler.loads(recv_frame(parent))

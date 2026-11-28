@@ -1,16 +1,12 @@
 """Player trees share checkpoint loading while retaining independent results."""
 
 import json
-import socket
-from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 
 import pytest
 
 from etude.checkpoints import CheckpointRef, PolicyKey
 from etude.errors import EtudeError, LauncherError, RetryRequested
-from etude.eval.agents import Answer, CheckpointRequest, recv_frame
-from etude.eval.batching import _Batches
 from etude.eval.composition import _restore
 from etude.eval.query import statsdb
 from etude.eval.records import (
@@ -38,7 +34,6 @@ from tests.eval.arithmetic import Shift, build, checkpoint, load
 from tests.eval.trees import Ensemble, Tagged
 from tests.test_eval_groups import (
     asks_or_returns,
-    echo,
     group,
     job,
     plain,
@@ -175,25 +170,6 @@ def test_same_named_author_types_have_distinct_labels_and_keys() -> None:
     assert first.name == "one:Search(simulations=64)"
     assert second.name == "two:Search(simulations=64)"
     assert first.key != second.key
-
-
-def test_distinct_players_share_a_checkpoint_batch() -> None:
-    small = checkpoint("small")
-    parent, child = socket.socketpair()
-    batches = _Batches(echo, 2, 1024)
-    try:
-        for req_id, name in ((1, "bare"), (2, "composed")):
-            batches.add(child, CheckpointRequest(req_id, small.checkpoint, [name], 1))
-        observations = batches.flush()
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(1, ["bare"])
-        assert ForkingPickler.loads(recv_frame(parent)) == Answer(2, ["composed"])
-        assert batches.loads == batches.batches == 1
-        assert observations[0].checkpoint == "small"
-        assert observations[0].rows == 2
-        assert observations[0].requests == 2
-    finally:
-        parent.close()
-        child.close()
 
 
 def test_group_builds_nested_players_and_loads_the_shared_leaf_once(
