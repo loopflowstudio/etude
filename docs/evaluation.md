@@ -184,16 +184,17 @@ loader, or `("cpu",)` for direct inference without a probe. Etude drops
 With a matching accelerator, game processes send their pending calls in one
 message to a shared agent process, which merges ready requests by checkpoint
 up to `max_batch` rows and writes observations to `artifacts/agents/batches.json`.
-An oversized request with one input per row uses multiple forwards and gets
-one ordered reply. Without a matching accelerator, each game process caches
-its own checkpoints, uses one model-library thread, and gets a share of the
-checkpoint allowance (half of host memory by default).
+Without a matching accelerator, each game process caches its own checkpoints,
+uses one model-library thread, and gets a share of the checkpoint allowance
+(half of host memory by default). Both modes split oversized requests with one
+input per row and return one ordered reply.
 
 Pending matches, CPUs and available host memory bound the game process count.
-For `play` with checkpoint inference, Etude divides `max_batch` across game
-processes, rounding up. Shared inference leaves a core for the agent process
-when possible. The startup line gives the mode, its reason, and the process,
-slot and thread counts.
+For `play` with checkpoint inference, Etude divides `max_batch` by the process
+limit, rounding up, to set each process's match capacity. A small panel can
+fill that capacity with fewer processes. Shared inference leaves a core for
+the agent process when possible. The startup line gives the mode, its reason,
+and the process, slot and thread counts.
 
 Choose tensor placement in `load` and honor Etude's thread environment there.
 Keep model imports in the loading module so shared game processes stay light.
@@ -220,7 +221,7 @@ from etude.jobs import Agents, EvalJob
 async def play_many(
     matches: MatchStream[Rules],
 ) -> AsyncIterator[tuple[Match[Rules], Tables | Exception]]:
-    pool = RolloutPool(slots=256)
+    pool = RolloutPool(slots=matches.target_slots)
     while True:
         for match, agents in await matches.take(pool.free):
             pool.load(match, agents)
@@ -249,25 +250,29 @@ job = EvalJob(
 Etude schedules the matches, caches checkpoints and stores each outcome as
 the generator yields it.
 
-- `await matches.take(n)` pulls up to `n` pending `(match, agents)` pairs in one
-  step. Etude caps each grant at the tournament's pending matches divided by
-  its active game processes, rounded up. Request the number of free slots
-  and step the matches you receive. Returning `[]` for `n > 0` means no
-  pending matches remain (or the run is stopping).
+- `matches.target_slots` suggests a pool size based on this process's initial
+  share of the tournament. Call `await matches.take(n)` with the number of free
+  slots to get up to `n` pending `(match, agents)` pairs. Etude shares pending
+  matches among empty processes and accounts for held matches when topping
+  up a process. An empty grant for `n > 0` means the tournament has no pending
+  matches or the run is stopping.
 - `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
   `rows=` for a pre-collated batch so the agent process never merges calls past
   `max_batch` rows and reports real row counts. A single pre-collated call
   above `max_batch` rows runs alone. An engine can choose smaller batches
   when its model needs a hard limit. Group ready rows by their shared `Forward`
-  object to batch calls for the same checkpoint.
-- Yield `(match, tables)` or `(match, Result(...))` with the match object
-  returned by `take`. Yield as each slot finishes so it can backfill
-  without waiting for stragglers.
-- Yield `(match, error)` to fail one match. The remaining slots keep stepping
-  and can take pending matches. An uncaught exception fails every match the
-  generator holds and stops new grants for that tournament.
-  Yielding an unknown or already-yielded match fails the generator and its held
-  matches; returning with held matches unyielded fails each unyielded match.
+  object to batch calls for the same checkpoint. When Etude merges requests,
+  the `ModelForward` returned by `load` can receive several pre-collated inputs
+  in one list. Return one output per input, in the same order.
+- Yield `(match, tables)` or `(match, Result(...))` with the match from `take` or
+  a copy whose key identifies exactly one held match. Yield as each slot
+  finishes so it can backfill without waiting for stragglers.
+- Yield `(match, error)` for an ordinary game error and the remaining slots
+  can keep stepping and take pending matches. Refused tables stop new grants
+  for that tournament. An uncaught exception, an invalid match in a yield,
+  or returning with held or pending matches fails the generator and its
+  held matches. A transient infrastructure failure such as
+  `RetryRequested` interrupts the group and retains unfinished matches for retry.
 
 ## Results and retry
 
@@ -283,13 +288,16 @@ return {"scores": [{"seat": 0, "won": True}, {"seat": 1, "won": False}]}
 ```
 
 A successful match is reused across an experiment's tournaments in the same
-environment. Errors retain completed results; infrastructure failures retry,
+environment. An ordinary game error fails that match and other matches keep
+playing. Errors retain completed results. Infrastructure failures retry, and
 ordinary game failures require `--retry-failed`. A forward failure raises
 `ForwardError` (with `.checkpoint` naming the checkpoint key) at the awaiting
 call. In `play`, catching `ForwardError` does not hide it from Etude's failure
 retention: the match still fails. In `play_many`, catching `ForwardError` lets
 you drop affected slots and yield `(match, error)` while unrelated matches
-complete. [Limits](limits.md) covers process, event-loop and API side effects.
+complete. A checkpoint load failure applies to unfinished matches seating
+that checkpoint, including matches that yield fallback tables.
+[Limits](limits.md) covers process, event-loop and API side effects.
 
 ## Querying
 

@@ -20,7 +20,7 @@ from contextlib import aclosing, suppress
 from contextvars import ContextVar
 from copy import copy
 from dataclasses import dataclass, field
-from functools import lru_cache, partial
+from functools import cached_property, lru_cache, partial
 from multiprocessing.connection import Connection
 from multiprocessing.reduction import ForkingPickler
 from types import ModuleType
@@ -83,7 +83,7 @@ class GameReport(Record):
     round_trip_seconds: float
     transport_seconds: float
     wall_seconds: float
-    local_inputs: int = 0
+    local_rows: int = 0
     local_forward_calls: int = 0
     local_loads: int = 0
     local_forward_seconds: float = 0.0
@@ -100,6 +100,7 @@ class Outcome:
     match_key: str
     result: Tables | Result | BaseException
     seconds: float
+    loading_failures: tuple[ForwardError, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -112,8 +113,12 @@ class Done:
 @dataclass(frozen=True)
 class _TakenMatch:
     match: Match  # Keep the object alive while its id identifies the grant.
-    key: str
+    scheduled_key: str
     started: float
+
+    @cached_property
+    def key(self) -> str:
+        return self.match.key
 
 
 class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PEP 696 default syntax.
@@ -126,15 +131,23 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
         kind: type[Match[_MatchConfig]],
         bind: Callable[[CheckpointRef], Forward] | None,
         build: Callable[[object, Mapping[str, Forward]], object] | None,
+        *,
+        target_slots: int,
     ) -> None:
         self._pipe = pipe
         self._initial = initial
         self._kind = kind
         self._bind = bind
         self._build = build
+        self._target_slots = target_slots
         self._lock = asyncio.Lock()
         self._exhausted = False
         self._held: dict[int, _TakenMatch] = {}
+
+    @property
+    def target_slots(self) -> int:
+        """Suggested pool size for this stream's initial share of pending matches."""
+        return self._target_slots
 
     async def take(self, count: int) -> list[tuple[Match[_MatchConfig], Sequence[object]]]:
         """Request up to `count` pending matches and their built seat agents."""
@@ -174,10 +187,18 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
 
     def _release(self, match: Match) -> _TakenMatch:
         taken = self._held.pop(id(match), None)
-        if taken is None:
-            identity = match.key if isinstance(match, Match) else type(match).__name__
-            raise ValueError(f"play_many yielded an unknown or already-yielded match: {identity}")
-        return taken
+        if taken is not None:
+            return taken
+        if isinstance(match, Match):
+            identity = match.key
+            matching = [key for key, held in self._held.items() if held.key == identity]
+            if len(matching) == 1:
+                return self._held.pop(matching[0])
+        else:
+            identity = type(match).__name__
+        raise ValueError(
+            f"play_many yielded an unknown, ambiguous or already-yielded match: {identity}"
+        )
 
 
 type Play = Callable[..., Awaitable[Tables | Result]]
@@ -254,7 +275,13 @@ class _Forwarder:
         self.max_batch = max_batch
         self._handles: dict[str, Forward] = {}
         self._pending: dict[str, list[_ForwardBatch]] = {}
-        self.loading_failures: dict[str, ForwardError] = {}
+        self._failed_loads: set[str] = set()
+        self._loading_failures: list[ForwardError] = []
+
+    def drain_loading_failures(self) -> tuple[ForwardError, ...]:
+        failures = tuple(self._loading_failures)
+        self._loading_failures.clear()
+        return failures
 
     def bind(self, checkpoint: CheckpointRef) -> Forward:
         if checkpoint.key not in self._handles:
@@ -289,8 +316,13 @@ class _Forwarder:
             raise
 
     def _deliver(self, batch: _ForwardBatch, result: ForwardResult) -> None:
-        if isinstance(result, ForwardError) and result.loading:
-            self.loading_failures.setdefault(result.checkpoint, result)
+        if (
+            isinstance(result, ForwardError)
+            and result.loading
+            and result.checkpoint not in self._failed_loads
+        ):
+            self._failed_loads.add(result.checkpoint)
+            self._loading_failures.append(result)
         batch.deliver(result)
 
     def _flush(self) -> None:
@@ -301,7 +333,7 @@ class _Forwarder:
                 result = self.inference.answer(
                     batch.checkpoint, batch.inputs, pending.keys(), rows=batch.rows
                 )
-                self._deliver(batch, result)
+                self._deliver(batch, result.result)
             return
 
         try:
@@ -368,11 +400,12 @@ async def _drive_play(
 
 @dataclass(frozen=True, kw_only=True)
 class Game:
-    """One tournament's game process configuration. Streaming engines choose their concurrency."""
+    """One tournament's callback, initial matches and inference setup."""
 
     play: Function
     tournament: str
-    concurrency: int | None
+    streaming: bool
+    target_slots: int
     initial: tuple[Match, ...]
     agent_address: str | None
     checkout: str | None
@@ -396,7 +429,7 @@ async def _serve_stream(
     stream_error: BaseException | None = None
     try:
         play = game.play.load(game.checkout)
-        kind = _match_type(play, streaming=game.concurrency is None)
+        kind = _match_type(play, streaming=game.streaming)
         build_hook = (
             None
             if game.build is None
@@ -416,19 +449,24 @@ async def _serve_stream(
                     loaded_fn = load.load(game.checkout)
                 return loaded_fn(checkpoint)
 
-            local = Forwards(load_checkpoint, game.memory)
+            local = Forwards(load_checkpoint, game.memory, game.max_batch)
             forwarder = _Forwarder(local, game.max_batch)
         elif game.agent_address is not None:
             client = await AgentClient.connect(game.agent_address)
             forwarder = _Forwarder(client, game.max_batch)
 
         source: MatchStream = MatchStream(
-            pipe, game.initial, kind, forwarder.bind if forwarder else None, build_hook
+            pipe,
+            game.initial,
+            kind,
+            forwarder.bind if forwarder else None,
+            build_hook,
+            target_slots=game.target_slots,
         )
         stream = (
             cast(Callable[[MatchStream], _Outcomes], play)(source)
-            if game.concurrency is None
-            else _drive_play(cast(Play, play), source, game.concurrency)
+            if game.streaming
+            else _drive_play(cast(Play, play), source, source.target_slots)
         )
         async with aclosing(stream):
             async for match, outcome in stream:
@@ -439,7 +477,8 @@ async def _serve_stream(
                     outcome = _portable_error(outcome)
                 elif not isinstance(outcome, (Result, Mapping)):
                     raise TypeError("game outcomes must be tables, a Result or an exception")
-                pipe.send(Outcome(taken.key, outcome, elapsed))
+                failures = forwarder.drain_loading_failures() if forwarder else ()
+                pipe.send(Outcome(taken.scheduled_key, outcome, elapsed, failures))
     except Exception as error:
         stream_error = _portable_error(error)
     finally:
@@ -457,13 +496,13 @@ async def _serve_stream(
         round_trip_seconds=client.round_trip_seconds if client else 0.0,
         transport_seconds=client.transport_seconds if client else 0.0,
         wall_seconds=time.monotonic() - started,
-        local_inputs=local.inputs if local else 0,
+        local_rows=local.rows if local else 0,
         local_forward_calls=local.calls if local else 0,
         local_loads=local.loads if local else 0,
         local_forward_seconds=local.forward_seconds if local else 0.0,
         local_load_seconds=local.load_seconds if local else 0.0,
     )
-    failures = tuple(forwarder.loading_failures.values()) if forwarder else ()
+    failures = forwarder.drain_loading_failures() if forwarder else ()
     with suppress(EOFError, OSError):
         pipe.send(Done(report, stream_error, failures))
 
