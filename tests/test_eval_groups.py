@@ -152,6 +152,12 @@ def group(*jobs: EvalJob) -> EvalGroup:
     )
 
 
+def _game_reports(directory: Path) -> list[GameReport]:
+    return [
+        GameReport.model_validate_json(path.read_bytes()) for path in directory.glob("game-*.json")
+    ]
+
+
 def test_a_pass_groups_by_agents_and_keeps_group_limits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -524,10 +530,7 @@ def test_two_tournaments_share_loaded_agents_and_resume_without_starting_them(
         )
         for batch in batches
     )
-    reports = [
-        GameReport.model_validate_json(path.read_bytes())
-        for path in (tmp_path / "grouped/artifacts/agents").glob("game-*.json")
-    ]
+    reports = _game_reports(tmp_path / "grouped/artifacts/agents")
     assert len(reports) == 2
     assert sum(r.matches for r in reports) == 2
     assert sum(r.bus.calls for r in reports) == 4
@@ -538,7 +541,7 @@ def test_two_tournaments_share_loaded_agents_and_resume_without_starting_them(
     assert "2 checkpoints loaded, 4 rows" in log
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [0, 0]
     assert "agents: shared inference" not in capfd.readouterr().err
-    assert len(list((tmp_path / "grouped/artifacts/agents").glob("game-*.json"))) == 2
+    assert len(_game_reports(tmp_path / "grouped/artifacts/agents")) == 2
     db = statsdb("grouped", tmp_path)
     try:
         assert db.sql("select score from scores").fetchall() == [(2,)] * 4
@@ -1260,10 +1263,7 @@ def test_bad_batch_answers_fail_all_asking_tournaments(
     selected = group(job("one", agents), job("two", agents))
     with pytest.raises(EtudeError, match="match_failed"):
         hold_group(selected, directory=tmp_path)
-    reports = [
-        GameReport.model_validate_json(path.read_bytes())
-        for path in (tmp_path / "grouped/artifacts/agents").glob("game-*.json")
-    ]
+    reports = _game_reports(tmp_path / "grouped/artifacts/agents")
     assert len(reports) == 2
     assert [r.bus.calls for r in reports] == [1, 1]
     assert [r.bus.answers for r in reports] == [1, 1]
@@ -2037,15 +2037,13 @@ def test_protocol_counts_one_serialization_each_way_and_batches_shared_checkpoin
 def test_agentless_game_reports_have_no_inference_wait(tmp_path: Path) -> None:
     selected = group(job("plain", None))
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [1]
-    paths = list((tmp_path / "grouped/artifacts/agents").glob("game-*.json"))
-    assert len(paths) == 1
-    report = GameReport.model_validate_json(paths[0].read_bytes())
+    [report] = _game_reports(tmp_path / "grouped/artifacts/agents")
     assert report.matches == 1
     assert report.wall_seconds >= 0.0
     assert report.bus.calls == report.bus.answers == 0
     assert report.bus.round_trip_seconds == report.bus.handoff_seconds == 0.0
     assert [r.played for r in hold_group(selected, directory=tmp_path)] == [0]
-    assert len(list((tmp_path / "grouped/artifacts/agents").glob("game-*.json"))) == 1
+    assert len(_game_reports(tmp_path / "grouped/artifacts/agents")) == 1
 
 
 def test_standalone_play_retains_game_report_without_a_group(tmp_path: Path) -> None:
@@ -2060,9 +2058,7 @@ def test_standalone_play_retains_game_report_without_a_group(tmp_path: Path) -> 
         storages=(bucket,),
     ) as active:
         assert active.play(plain).played == 1
-    paths = list((tmp_path / "grouped/standalone/artifacts/agents").glob("game-*.json"))
-    assert len(paths) == 1
-    report = GameReport.model_validate_json(paths[0].read_bytes())
+    [report] = _game_reports(tmp_path / "grouped/standalone/artifacts/agents")
     assert report.matches == 1
     assert report.wall_seconds >= 0.0
     assert bucket.uploads == 6
@@ -2123,9 +2119,7 @@ def test_direct_play_retains_match_checkpoints_within_its_cache(
         )
     assert result.played == 2
     artifacts = tmp_path / "sizing/direct/artifacts/agents"
-    reports = [
-        GameReport.model_validate_json(p.read_bytes()) for p in artifacts.glob("game-*.json")
-    ]
+    reports = _game_reports(artifacts)
     assert len(reports) == processes
     assert sum(report.matches for report in reports) == 2
     assert (
@@ -2163,9 +2157,7 @@ def test_barrier_batches_games_into_one_message_per_process_per_round(
         result = active.play(multi_round_play, agents=Agents(load=load, max_batch=6))
     assert result.played == 6
     artifacts = tmp_path / "barrier/unequal/artifacts/agents"
-    [report] = [
-        GameReport.model_validate_json(p.read_bytes()) for p in artifacts.glob("game-*.json")
-    ]
+    [report] = _game_reports(artifacts)
     assert report.matches == 6
     assert report.bus.calls == report.bus.answers == 4
     assert report.bus.wire_bytes == 0
@@ -2199,9 +2191,7 @@ def test_barrier_batches_across_multiple_processes(
         result = active.play(multi_round_play, agents=Agents(load=load, max_batch=8))
     assert result.played == 8
     artifacts = tmp_path / "barrier/multi-proc/artifacts/agents"
-    reports = [
-        GameReport.model_validate_json(p.read_bytes()) for p in artifacts.glob("game-*.json")
-    ]
+    reports = _game_reports(artifacts)
     assert len(reports) == 2
     assert sum(r.matches for r in reports) == 8
     assert [r.bus.calls for r in reports] == [3, 3]
@@ -2373,9 +2363,7 @@ def test_mixed_play_functions_share_checkpoint_inference(
         f"{processes}, 1 game each, slots requested by play_many; {threads}",
     ]
     artifacts = tmp_path / "grouped/artifacts/agents"
-    reports = [
-        GameReport.model_validate_json(path.read_bytes()) for path in artifacts.glob("game-*.json")
-    ]
+    reports = _game_reports(artifacts)
     if shared:
         for name in ("first", "second"):
             [stream] = [report for report in reports if report.tournaments == (name,)]
@@ -2846,9 +2834,7 @@ def test_play_many_caps_large_grants_across_game_processes(
         f"{processes} game processes, slots requested by play_many" in stderr
     )
     artifacts = tmp_path / "grouped/artifacts/agents"
-    reports = [
-        GameReport.model_validate_json(path.read_bytes()) for path in artifacts.glob("game-*.json")
-    ]
+    reports = _game_reports(artifacts)
     assert len(reports) == processes and sum(report.matches for report in reports) == 6
     assert all(
         (report.bus.wire_bytes > 0) == (mode == "shared") for report in reports if report.matches
@@ -2893,9 +2879,7 @@ def test_code_only_play_many_group_runs_without_bus(
     assert "agents:" not in stderr
     artifacts = tmp_path / "grouped/artifacts/agents"
     assert not list(artifacts.glob("batches*.json"))
-    reports = [
-        GameReport.model_validate_json(path.read_bytes()) for path in artifacts.glob("game-*.json")
-    ]
+    reports = _game_reports(artifacts)
     assert len(reports) == 4
     assert {report.tournaments for report in reports} == {("first",), ("second",)}
     assert sum(report.matches for report in reports) == 4
@@ -2940,9 +2924,7 @@ def test_direct_mixed_group_isolates_stream_failure_between_tournaments(
     with pytest.raises(EtudeError, match="first tournament failed"):
         hold_group(group(broken, healthy, job("ordinary", agents)), directory=tmp_path)
     artifacts = tmp_path / "grouped/artifacts/agents"
-    reports = [
-        GameReport.model_validate_json(path.read_bytes()) for path in artifacts.glob("game-*.json")
-    ]
+    reports = _game_reports(artifacts)
     [report] = reports
     assert report.tournaments == ("broken", "healthy", "ordinary")
     db = statsdb("grouped", tmp_path)

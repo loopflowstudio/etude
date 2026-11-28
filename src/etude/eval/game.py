@@ -154,25 +154,56 @@ class Fatal:
     loading_failures: tuple[CheckpointFailure, ...] = ()
 
 
+@dataclass(frozen=True)
+class _TakenMatch:
+    match: Match  # Keep the object alive while its id identifies the grant.
+    key: str
+    started: float
+
+
 class Matches(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PEP 696 default syntax.
-    """Pull-based match source for a game process."""
+    """One tournament stream's match grants and the seats built for them."""
 
     def __init__(
         self,
-        take_raw: Callable[[int], Awaitable[Sequence[Match]]],
-        validate: Callable[[Match], Match[_MatchConfig]],
-        build: Callable[[Match], Sequence[object]],
+        request: Callable[[int], Awaitable[tuple[Match, ...]]],
+        initial: tuple[Match, ...],
+        kind: type[Match[_MatchConfig]],
+        bind: Callable[[CheckpointRef], Forward] | None,
+        build: Callable[[object, Mapping[str, Forward]], object] | None,
     ) -> None:
-        self._take_raw = take_raw
-        self._validate = validate
+        self._request = request
+        self._initial = initial
+        self._kind = kind
+        self._bind = bind
         self._build = build
+        self._held: dict[int, _TakenMatch] = {}
 
     async def take(self, count: int) -> list[tuple[Match[_MatchConfig], Sequence[object]]]:
         """Request up to `count` pending matches and their built seat agents."""
         if count <= 0:
             return []
-        granted = await self._take_raw(count)
-        return [(self._validate(match), self._build(match)) for match in granted]
+        if self._initial:
+            granted, self._initial = self._initial[:count], self._initial[count:]
+        else:
+            granted = await self._request(count)
+        seats: list[tuple[Match[_MatchConfig], Sequence[object]]] = []
+        for match in granted:
+            if self._kind is Match:
+                authored = cast(Match[_MatchConfig], match)
+            else:
+                authored = self._kind.model_validate_json(match.model_dump_json())
+            # Config validation can fill defaults. Retain the parent's scheduled key.
+            self._held[id(authored)] = _TakenMatch(authored, match.key, time.monotonic())
+            seats.append((authored, build_agents(match.players, self._bind, self._build)))
+        return seats
+
+    def _release(self, match: Match) -> _TakenMatch:
+        taken = self._held.pop(id(match), None)
+        if taken is None:
+            identity = match.key if isinstance(match, Match) else type(match).__name__
+            raise ValueError(f"play_many yielded an unknown or already-yielded match: {identity}")
+        return taken
 
 
 type Play = Callable[..., Awaitable[Tables | Result]]
@@ -441,13 +472,6 @@ async def _drive_play(
             await asyncio.gather(*active, return_exceptions=True)
 
 
-@dataclass(frozen=True)
-class _TakenMatch:
-    match: Match  # Keep the object alive while its id identifies the grant.
-    key: str
-    started: float
-
-
 class _ImportTracker:
     """Thread-filtered game import observer spanning module load, wrappers and play."""
 
@@ -636,36 +660,13 @@ async def _serve_stream(
         if bus is not None:
             forwarder = _Forwarder(bus, max_batch=max_batch)
 
-        bind: Callable[[CheckpointRef], Forward] | None = (
-            forwarder.bind if forwarder is not None else None
-        )
-
-        def build_seats(match: Match) -> Sequence[object]:
-            return build_agents(match.players, bind, build_hook)
-
-        def validate(
-            target_kind: type[Match], target_held: dict[int, _TakenMatch], match: Match
-        ) -> Match:
-            authored = (
-                target_kind.model_validate_json(match.model_dump_json())
-                if target_kind is not Match
-                else match
-            )
-            # The author's config type may fill defaults. Keep the scheduled key.
-            target_held[id(authored)] = _TakenMatch(authored, match.key, time.monotonic())
-            return authored
-
-        initial = {index: spec.initial for index, spec in enumerate(streams) if spec.initial}
-
-        async def take_raw(current_stream: int, count: int) -> Sequence[Match]:
+        async def request_grant(stream_index: int, count: int) -> tuple[Match, ...]:
             nonlocal pending_grant
-            if reserved := initial.pop(current_stream, ()):
-                return reserved
             async with take_lock:
                 future: asyncio.Future[tuple[Match, ...]] = loop.create_future()
                 pending_grant = future
                 try:
-                    pipe.send(Take(count, stream=current_stream))
+                    pipe.send(Take(count, stream=stream_index))
                 except (EOFError, OSError):
                     pending_grant = None
                     return ()
@@ -675,7 +676,6 @@ async def _serve_stream(
                     pending_grant = None
 
         for stream_index, (spec, loaded) in enumerate(zip(streams, loaded_streams, strict=True)):
-            held: dict[int, _TakenMatch] = {}
             before_stream = played_count
             stream_error: BaseException | None = None
             if isinstance(loaded, Exception):
@@ -686,9 +686,11 @@ async def _serve_stream(
                 try:
                     play, kind = loaded
                     source: Matches = Matches(
-                        partial(take_raw, stream_index),
-                        partial(validate, kind, held),
-                        build_seats,
+                        partial(request_grant, stream_index),
+                        spec.initial,
+                        kind,
+                        forwarder.bind if forwarder is not None else None,
+                        build_hook,
                     )
                     stream = (
                         cast(
@@ -702,14 +704,7 @@ async def _serve_stream(
                     )
                     async with aclosing(stream):
                         async for match, outcome in stream:
-                            taken = held.pop(id(match), None)
-                            if taken is None:
-                                identity = (
-                                    match.key if isinstance(match, Match) else type(match).__name__
-                                )
-                                raise ValueError(
-                                    f"play_many yielded an unknown or already-yielded match: {identity}"
-                                )
+                            taken = source._release(match)
                             elapsed = time.monotonic() - taken.started
                             played_count += 1
                             result: Tables | Result | None = None
