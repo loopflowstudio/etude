@@ -191,10 +191,11 @@ checkpoint cache and gets a share of the available model-library threads and
 checkpoint allowance (half of host memory by default).
 
 Pending matches, CPUs and available host memory bound the game process count.
-For `play` with checkpoint inference, Etude divides `max_batch` across game
-processes, rounding up. Shared inference caps the number of game processes at
-`max_batch` and leaves a core for the agent process when possible. The startup
-line gives the mode, its reason, and the process, slot and thread counts.
+Etude spreads `play` matches across game processes first, then divides
+`max_batch` across those processes for checkpoint inference, rounding up.
+Shared inference caps the number of game processes at `max_batch` and leaves
+a core for the agent process when possible. The startup line gives the mode,
+its reason, and the process, slot and thread counts.
 
 Choose tensor placement in `load` and honor Etude's thread environment there.
 Keep model imports in the loading module so shared game processes stay light.
@@ -209,8 +210,10 @@ ETUDE_TRACK_DIR=/tmp/vectorized uv run etude eval examples/vectorized.py
 ```
 
 Etude can run several copies of `play_many` in separate game processes. Each
-generator asks for matches from the same tournament queue. Etude prints the
-group's process count and inference mode to stderr.
+generator asks for matches from the same tournament queue. For direct
+inference, Etude plans one process per `max_batch` pending matches, rounded up,
+subject to the host budget. Tournaments can use processes freed by siblings
+as their queues finish.
 
 In direct mode, Etude sets each game process's model and BLAS thread environment
 variables (`OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, etc.)
@@ -262,11 +265,11 @@ Etude schedules the matches, caches checkpoints and stores each outcome as
 the generator yields it.
 
 - `await matches.take(n)` pulls up to `n` pending `(match, agents)` pairs in one
-  step. Etude reserves a first match for each starting stream and caps each
-  grant at the matches available to that stream divided by the tournament's
-  planned process count, rounded up. Request the number of free slots and step
-  the matches you receive. Returning `[]` for `n > 0` means the queue is empty
-  or the run is stopping.
+  step. Etude reserves initial work for each starting stream. A take can draw
+  from its reservation or take a share of available matches based on the
+  tournament's active process count. Request the number of free slots and
+  step the matches you receive. Returning `[]` for `n > 0` means the queue is
+  empty for that stream or the run is stopping.
 - `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
   `rows=` for a pre-collated batch so batching never merges calls past
   `max_batch` rows and reports real row counts. An oversized pre-collated call
@@ -368,8 +371,8 @@ return {"scores": [{"seat": 0, "won": True}, {"seat": 1, "won": False}]}
 
 A successful match is reused across an experiment's tournaments in the same
 environment. If a game process exits unexpectedly or a wait for results expires,
-queued and in-flight matches can retry. A teardown failure also fails the
-tournaments served by that game process after their final results are stored.
+queued and in-flight matches can retry. A failure after all of a game process's
+streams end applies to the tournaments it served. Stored results are reused.
 A stop records `stopped` for the group and the tournaments it interrupts.
 Tournaments that already finished or failed keep their status. Matches dropped
 from the queue after an ordinary game failure remain unplayed. Retrying the

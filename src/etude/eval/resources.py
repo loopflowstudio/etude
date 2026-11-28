@@ -155,6 +155,9 @@ class TournamentQueue:
     matches: int
     streaming: bool = False
 
+    def process_demand(self, streaming_batch: int) -> int:
+        return math.ceil(self.matches / streaming_batch) if self.streaming else self.matches
+
 
 @dataclass(frozen=True)
 class Placement:
@@ -162,13 +165,19 @@ class Placement:
 
     bus: Literal["local", "socket"] | None
     processes: int
-    tournament_processes: tuple[int, ...]
     game_threads: int
     agent_threads: int
     games_per_process: int | None  # Concurrency of async play, if present.
     share_streams: bool
     checkpoint_bytes: int
     reason: Inference | Literal["no pending matches"]
+
+    def process_shares(self, queues: Sequence[TournamentQueue], max_batch: int) -> tuple[int, ...]:
+        """Share the available processes among unfinished tournament queues."""
+        demand = [queue.process_demand(max_batch if self.share_streams else 1) for queue in queues]
+        if self.share_streams:
+            return tuple(min(count, self.processes) for count in demand)
+        return _allocate_processes(demand, min(sum(demand), self.processes))
 
     def describe(self, tournaments: Sequence[str], *, streaming: bool) -> str | None:
         """Describe the placement of one evaluation group."""
@@ -234,14 +243,13 @@ def place(
     """Allocate one host to the pending async and streaming match queues.
 
     `match_bytes` is the largest known total of distinct checkpoints seated in
-    a pending match. Process counts follow the input queue order.
+    a pending match.
     """
     total = sum(queue.matches for queue in queues)
     if not total:
         return Placement(
             bus=None,
             processes=0,
-            tournament_processes=(0,) * len(queues),
             game_threads=1,
             agent_threads=0,
             games_per_process=None,
@@ -258,9 +266,6 @@ def place(
         return Placement(
             bus=None,
             processes=processes,
-            tournament_processes=_allocate_processes(
-                [queue.matches for queue in queues], processes
-            ),
             game_threads=1,
             agent_threads=0,
             games_per_process=1 if largest_play else None,
@@ -280,30 +285,17 @@ def place(
         # Each direct process needs room for a match in its own checkpoint cache.
         cap = min(cap, max(1, held // match_bytes))
 
-    processes = min(cap, total)
-    while True:
-        games = math.ceil(loader.max_batch / processes)
-        demand = [
-            queue.matches if queue.streaming else math.ceil(queue.matches / games)
-            for queue in queues
-        ]
-        # Direct processes can serve separate queues in turn. Recalculate when
-        # fewer processes increase async concurrency enough to shrink demand again.
-        needed = sum(demand) if accelerator else max(demand)
-        if needed >= processes:
-            break
-        processes = needed
-
+    demand = [queue.process_demand(1 if accelerator else loader.max_batch) for queue in queues]
+    # A direct process can serve multiple queues in turn.
+    processes = min(cap, sum(demand) if accelerator else max(demand))
     shared = accelerator and processes > 1
+    games = min(math.ceil(loader.max_batch / processes), math.ceil(largest_play / processes))
     return Placement(
         bus="socket" if shared else "local",
         processes=processes,
-        tournament_processes=_allocate_processes(demand, processes)
-        if shared
-        else tuple(min(count, processes) for count in demand),
         game_threads=1 if shared else max(1, (cpus - processes) // processes),
         agent_threads=max(1, cpus - processes) if shared else 0,
-        games_per_process=min(games, largest_play) if largest_play else None,
+        games_per_process=games or None,
         share_streams=not shared,
         checkpoint_bytes=held if shared else held // processes,
         reason=inference,

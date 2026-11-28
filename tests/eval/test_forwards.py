@@ -23,7 +23,8 @@ from tests.test_eval_groups import group, job
 def test_mirror_sends_all_branches_once_per_ply_and_builds_author_objects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shared: bool
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3 if shared else 1)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     monkeypatch.setattr(
         "etude.eval.resources._detect_accelerator",
         lambda: "cuda" if shared else "no accelerator detected",
@@ -33,21 +34,31 @@ def test_mirror_sends_all_branches_once_per_ply_and_builds_author_objects(
     greedy = mirror.model_copy(update={"choice": "greedy"})
     assert compose(mirror).key != compose(greedy).key
     assert compose(mirror).key != compose(mirror.model_copy(update={"temperature": 2.0})).key
-    selected = job("mirror", Agents(load=load, build=build)).model_copy(
-        update={"play": play, "enter": (compose(mirror), compose(greedy))}
+    branches = mirror.worlds * mirror.actions
+    games = 2 if shared else 1
+    selected = job("mirror", Agents(load=load, build=build, max_batch=branches))
+    selected = selected.model_copy(
+        update={
+            "play": play,
+            "enter": (compose(mirror), compose(greedy)),
+            "tournament": selected.tournament.model_copy(
+                update={"config": {}, "configs": (), "games": games}
+            ),
+        }
     )
-    assert hold_group(group(selected), directory=tmp_path)[0].played == 1
+    assert hold_group(group(selected), directory=tmp_path)[0].played == games
     artifacts = tmp_path / "grouped/artifacts/agents"
-    [report] = [json.loads(path.read_text()) for path in artifacts.glob("game-*.json")]
+    reports = [json.loads(path.read_text()) for path in artifacts.glob("game-*.json")]
+    assert len(reports) == games
+    assert all((report["bus"]["wire_bytes"] > 0) == shared for report in reports)
     if shared:
         batches = json.loads((artifacts / "batches.json").read_text())
-        assert report["bus"]["wire_bytes"] > 0
     else:
+        [report] = reports
         batches = json.loads((artifacts / f"batches-{report['pid']}.json").read_text())
-        assert report["bus"]["wire_bytes"] == 0
         assert not (artifacts / "batches.json").exists()
-    assert sum(batch["forward_calls"] for batch in batches) == 2 * 2 * mirror.depth
-    assert {batch["rows"] for batch in batches} == {mirror.worlds * mirror.actions}
+    assert sum(batch["forward_calls"] for batch in batches) == games * 2 * 2 * mirror.depth
+    assert {batch["rows"] for batch in batches} == {branches}
     assert sum(batch["loads"] for batch in batches) == 1
 
 

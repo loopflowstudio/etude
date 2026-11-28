@@ -134,9 +134,8 @@ with evaluating(
   `Seating` makes one match per config. Seat swaps belong
   inside `play`. Group `all` holds every seat; a player may sit in two seats.
 - **Game processes and placement.** `Placement` owns the group's process
-  layout, each tournament's process limit, checkpoint bytes per inference owner
-  and startup line. The checkpoint reservation is `Agents.memory_gb` or half
-  of host memory.
+  layout, checkpoint bytes per inference owner and startup line. The
+  checkpoint reservation is `Agents.memory_gb` or half of host memory.
   - Shared inference (`bus="socket"`) requires a declared, detected CUDA or
     Metal accelerator and more than one game process. Each game process serves
     one tournament and gets one thread. The agent process gets the remaining
@@ -152,12 +151,16 @@ with evaluating(
 
   Each game process has one event loop. Async `play` runs up to
   `games_per_process` matches at once and flushes forwards on a zero-delay
-  loop barrier. Placement sizes an async queue by the number of processes
-  needed to cover its pending matches at that concurrency. The parent reserves
-  the first async matches and one match per starting `play_many` stream before
-  handling requests. Each `play_many` generator submits forwards on the call
-  and requests matches for its free slots. A take grants at most the available
-  matches divided by that tournament's planned process count, rounded up.
+  loop barrier. Placement sizes for one process per async match first, then
+  divides the batch budget across processes. Direct `play_many` sizes for one
+  process per `max_batch` matches, rounded up. Shared and code-only
+  `play_many` size for one process per match. The parent redistributes process
+  shares as work finishes. It spreads the first async matches and reserves
+  one match per starting `play_many` stream, or up to a batch's share for
+  direct inference, before handling requests. Each `play_many` generator
+  submits forwards on the call and requests matches for its free slots. A
+  take draws on its reservation and shares available matches among the
+  tournament's active processes, rounding up.
   Both kinds of tournament share an agent process when using shared inference.
   Per-process diagnostics go to `artifacts/agents/game-{pid}.json`
   (`GameReport` with `tournaments: tuple[str, ...]`), keeping a game-thread-filtered
@@ -173,8 +176,9 @@ with evaluating(
   `round_trip_seconds`).
   Batch row counts and stage timings use one `Batch` record:
   `artifacts/agents/batches-{pid}.json` per direct game process and
-  `artifacts/agents/batches.json` for the shared agent process. `evaluating`
-  has no setting for process count.
+  `artifacts/agents/batches.json` for the shared agent process. The shared
+  agent has up to two seconds within the run deadline to close its report
+  before termination. `evaluating` has no setting for process count.
 - **Order.** Matches start in the order `etude.eval.schedule.ordered` gives,
   so consecutive matches reuse the checkpoints kept loaded: first those
   loading the fewest checkpoints not yet used, then those reusing the most
@@ -252,9 +256,9 @@ with evaluating(
   A retryable error is returned for each tournament with queued or in-flight
   matches. Matches dropped from the queue after a permanent failure remain
   unplayed. The group raises `Terminated` after closing its members when a stop
-  interrupted them. A game process teardown error also fails the tournaments
-  served by that process after their matches have settled. Already stored
-  matches are reused on retry.
+  interrupted them. A game process failure belongs to its unfinished streams.
+  A failure after all streams end applies to all tournaments that process
+  served. Already stored matches are reused on retry.
 - **Progress.** Each stored match prints one line to stderr:
   `etude: RUN: 12/36 matches played, 220s elapsed`.
 - **Storage.** Stored matches are sealed into blocks every five minutes (or

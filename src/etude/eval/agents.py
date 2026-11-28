@@ -385,14 +385,12 @@ def running_agents(
         yield agent
     finally:
         failed = sys.exc_info()[0] is not None
-        if failed and process.is_alive():
-            process.terminate()
         if process.is_alive():
-            try:
+            with suppress(OSError, EOFError):
                 parent.send(None)
-            except (OSError, EOFError):
-                pass
-        process.join(timeout=seconds_left())
+        # Let the agent close its batch report even when play failed.
+        remaining = seconds_left()
+        process.join(timeout=2.0 if remaining is None else min(remaining, 2.0))
         if process.is_alive():
             process.terminate()
             process.join()

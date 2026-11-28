@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import json
 import os
 import sys
 import threading
@@ -1555,29 +1556,7 @@ def test_play_barrier_runs_other_match_and_accepts_second_call_while_first_is_he
 def test_vectorized_example_uses_two_half_numpy_arrays_zero_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
-    eval_group = _load_example_group(Path("examples/vectorized.py"))
-    results = hold_group(eval_group, directory=tmp_path)
-    assert [r.played for r in results] == [8]
-    artifacts = tmp_path / "vectorized/artifacts/agents"
-    reports = [
-        GameReport.model_validate_json(path.read_bytes()) for path in artifacts.glob("game-*.json")
-    ]
-    assert len(reports) == 1
-    assert reports[0].tournaments == ("vector",)
-    assert reports[0].matches == 8
-    assert reports[0].imports.heavy == ()
-    assert reports[0].bus.arrays > 0
-    assert reports[0].bus.arrays_copied == 0
-    assert reports[0].bus.copied_bytes == 0
-    assert reports[0].bus.pickled == 0
-    assert reports[0].bus.wire_bytes == 0
-
-
-def test_vectorized_panel_reserves_work_before_a_fast_process_takes_twice(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 16)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 8 * 1024**3)
     rounds = 0
 
@@ -1599,11 +1578,13 @@ def test_vectorized_panel_reserves_work_before_a_fast_process_takes_twice(
     reports = [
         GameReport.model_validate_json(path.read_bytes()) for path in artifacts.glob("game-*.json")
     ]
-    assert [report.matches for report in reports] == [1] * 8
-    assert all(
-        report.bus.arrays > 0 and report.bus.arrays_copied == report.bus.wire_bytes == 0
-        for report in reports
-    )
+    assert [report.matches for report in reports] == [4, 4]
+    for report in reports:
+        assert report.tournaments == ("vector",)
+        assert report.imports.heavy == ()
+        assert report.bus.arrays >= 2
+        assert report.bus.arrays_copied == report.bus.copied_bytes == 0
+        assert report.bus.pickled == report.bus.wire_bytes == 0
 
 
 @pytest.mark.parametrize("transport", ["local", "socket"])
@@ -1773,6 +1754,26 @@ def test_unpicklable_request_disconnects_only_its_peer(
 async def _broken_request_play(match: Match, agents: Sequence[Forward]) -> Tables:
     await agents[0]([_ExplodingUnpickle()])
     return {"scores": [{"seat": 0, "score": 0}]}
+
+
+async def _retry_after_forward(match: Match, agents: Sequence[Forward]) -> Tables:
+    assert await agents[0]([1]) == [1]
+    raise RetryRequested("fixture game interrupted after inference")
+
+
+def test_shared_batch_report_is_retained_on_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3)
+    monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
+    monkeypatch.setattr("etude.eval.resources._detect_accelerator", lambda: "cuda")
+    agents = Agents(load=_identity_load)
+    interrupted = job("interrupted", agents, _retry_after_forward)
+    sibling = job("sibling", agents)
+    with pytest.raises(RetryRequested, match="fixture game interrupted after inference"):
+        hold_group(group(interrupted, sibling), directory=tmp_path)
+    batches = json.loads((tmp_path / "grouped/artifacts/agents/batches.json").read_bytes())
+    assert batches and sum(batch["rows"] for batch in batches) >= 1
 
 
 def test_socket_decode_error_stops_only_its_tournament(
