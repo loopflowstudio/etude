@@ -77,16 +77,18 @@ SSH call—and shares the runtime's own validation rules across syntax and
 renamed declarations, `training_jobs()`, `eval_jobs(state)`, and `report()`.
 For eval jobs with an accelerator-capable loader, a fresh interpreter checks
 the imports of the game module and its optional `build` hook. Pass any of the
-experiment file's own flags after `FILE`. A plain file defining only
+experiment file's own flags after `FILE`. Run `etude check FILE --help` to see
+its flags. A plain file defining only
 `train(config)` checks its signature and default config as a local recipe
-(`etude train FILE`; nothing to launch).
+(`etude train FILE`). A file defining only `report()` checks as a report-only
+file for `etude report FILE`.
 
 - **Offline state.** By default `check` evaluates declarations as a first
   launch sees them (no stored runs, declared training runs queued). Pass
   `--source DIR` to read an existing local runs directory. Training lists
-  runs that are missing from the source. Evaluation counts the matches the
-  file declares for the available checkpoints. Use `etude launch FILE --quote`
-  for bucket storage, delivered match history and prices.
+  runs that are missing from the source. Evaluation counts remaining matches
+  for the available checkpoints and entrants, taking delivered results into
+  account. Use `etude launch FILE --quote` for bucket storage and prices.
 - **Budgets and warnings.** Jobs without `max_usd` are noted as
   `no max_usd: owned pools only` (owned pools and local runs accept them;
   renting refuses them). Heavy game imports produce a warning and keep exit
@@ -99,7 +101,8 @@ experiment file's own flags after `FILE`. A plain file defining only
   ```
 - **JSON and exit codes.** `--format json` prints one JSON object with
   `file`, `experiment`, `ok`, `issues`, `training`, `evals`, and `source` on
-  stdout. `local_recipe` and `eval_skipped` describe those special cases.
+  stdout. `kind` is `experiment`, `local_recipe`, or `report_only`.
+  `eval_skipped` indicates that evaluation needs training declarations to pass.
   Dollar caps are decimal strings.
   Exit status is `0` when there are no errors, `1` when the file has errors,
   and `2` when nothing was checked (unusable file, source or command-line option).

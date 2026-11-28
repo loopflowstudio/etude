@@ -9,9 +9,10 @@ from pathlib import Path
 from typing import Literal, Self
 
 from pydantic import ValidationError
-from typer._click.exceptions import UsageError
 
+from etude.call import validation_message
 from etude.errors import EtudeError, LauncherError, SourceLocation, function_location, sanitize
+from etude.experiment_file import git_checkout
 from etude.records import Record
 
 
@@ -33,22 +34,40 @@ class Issue(Record):
         )
 
 
-def validation_message(error: ValidationError) -> str:
-    problem = error.errors(include_input=False, include_context=False, include_url=False)[0]
-    field = ".".join(map(str, (error.title, *problem["loc"])))
-    return f"{field}: {problem['msg']}"
+def declaration_error(
+    error: Exception | SystemExit, path: Path, function: Callable[..., object] | None = None
+) -> EtudeError | LauncherError:
+    """Describe an authored failure while keeping fixes and explicit locations."""
+    location = locate(error, path, function)
+    if isinstance(error, (LauncherError, EtudeError)):
+        error.location = location
+        return error
+    if isinstance(error, ValidationError):
+        message = validation_message(error)
+    else:
+        detail = error.msg if isinstance(error, SyntaxError) else str(error)
+        message = f"{type(error).__name__}: {' '.join(detail.splitlines())}"
+    fix = (
+        "use named fields, such as RunRequest(job=job, seed=1)"
+        if isinstance(error, TypeError) and "positional argument" in str(error)
+        else None
+    )
+    return LauncherError(message, fix=fix, at=location)
 
 
 def locate(
     error: BaseException, path: Path, function: Callable[..., object] | None = None
 ) -> SourceLocation:
     """Use the explicit location, the deepest authored frame, or the declaration's def."""
-    directory = path.resolve().parent
-    for cause in _causes(error):
+    causes = tuple(_causes(error))
+    for cause in causes:
         if isinstance(cause, (LauncherError, EtudeError)) and cause.location is not None:
             return cause.location
         if isinstance(cause, SyntaxError) and cause.filename and cause.lineno:
             return SourceLocation(Path(cause.filename), cause.lineno)
+    base = path.resolve()
+    directory = base if base.is_dir() else git_checkout(base.parent) or base.parent
+    for cause in reversed(causes):
         for frame in reversed(traceback.extract_tb(cause.__traceback__)):
             if frame.lineno is not None and not frame.filename.startswith("<"):
                 file = Path(frame.filename).resolve()
@@ -75,21 +94,8 @@ def declaration(path: Path, function: Callable[..., object] | None = None) -> It
     """Carry authored error locations through the shared runtime entry points."""
     try:
         yield
-    except UsageError:
-        raise
-    except (LauncherError, EtudeError) as error:
-        if error.location is None:
-            error.location = locate(error, path, function)
-        raise
     except (Exception, SystemExit) as error:
-        if isinstance(error, ValidationError):
-            message = validation_message(error)
-        else:
-            detail = error.msg if isinstance(error, SyntaxError) else str(error)
-            message = f"{type(error).__name__}: {' '.join(detail.splitlines())}"
-        fix = (
-            "use named fields, such as RunRequest(job=job, seed=1)"
-            if isinstance(error, TypeError) and "positional argument" in str(error)
-            else None
-        )
-        raise LauncherError(message, fix=fix, at=locate(error, path, function)) from error
+        diagnosed = declaration_error(error, path, function)
+        if diagnosed is error:
+            raise
+        raise diagnosed from error

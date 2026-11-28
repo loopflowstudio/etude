@@ -458,9 +458,9 @@ spending money, running the runtime's own checks across `training_jobs()`,
 imports (warning when a shared-inference game module pulls in heavy model
 libraries). It reports errors as `FILE:LINE: error: ...` with inline `fix:`
 lines (exit `1`), or prints the planned runs, budgets and tournaments as a
-first launch sees them (exit `0`). Pass `--source DIR` to read a local runs
-directory or `--format json` for machine-readable output; exit `2` means
-nothing was checked.
+first launch sees them (exit `0`). Pass `--source DIR` to count remaining
+runs and matches against local results, or `--format json` for machine-readable
+output. Exit `2` means nothing was checked.
 
 `etude launch`, `queue`, `eval` and `smoke` print the same `FILE:LINE` and
 `fix:` lines on declaration refusals. Job-intrinsic limits (`max_hours > 0`,

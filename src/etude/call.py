@@ -8,8 +8,7 @@ Pydantic config. The job's config text, at `ETUDE_CONFIG`, is validated back
 into that parameter's type before the call, and the function runs in the source
 checkout (`ETUDE_SOURCE_DIR`), which is the working directory. `Function` names
 it by import path; `changed_config` validates CLI overrides for local runs and
-continuations. It imports only the standard library, Pydantic and Typer, so a job
-starts by loading only its own code.
+continuations. Typer is loaded only when the command runs.
 """
 
 from __future__ import annotations
@@ -21,9 +20,7 @@ import sys
 import typing
 from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated
 
-import typer
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
 from etude.errors import LauncherError
@@ -84,6 +81,13 @@ def config_type(function: Callable[..., object]) -> type[BaseModel]:
     return kind
 
 
+def validation_message(error: ValidationError) -> str:
+    """Name the first invalid field without echoing the supplied value."""
+    problem = error.errors(include_input=False, include_context=False, include_url=False)[0]
+    field = ".".join(map(str, (error.title, *problem["loc"])))
+    return f"{field}: {problem['msg']}"
+
+
 def changed_config(kind: type[BaseModel], changes: str, *, stored: str | None = None) -> BaseModel:
     """Validate typed JSON changes; stored config supplies a continuation's unchanged fields."""
     values = {} if stored is None else kind.model_validate_json(stored).model_dump(mode="json")
@@ -104,27 +108,32 @@ def changed_config(kind: type[BaseModel], changes: str, *, stored: str | None = 
         raise ValueError(f"invalid config:\n{problems}") from None
 
 
-app = typer.Typer(add_completion=False, pretty_exceptions_enable=False, rich_markup_mode=None)
+def main() -> None:
+    # The call command owns its parser. Game processes only import Function.
+    import typer  # noqa: PLC0415
 
+    app = typer.Typer(add_completion=False, pretty_exceptions_enable=False, rich_markup_mode=None)
 
-@app.command()
-def main(
-    function: Annotated[str, typer.Option(help="MODULE:NAME, imported from the source checkout")],
-    path: Annotated[str, typer.Option(help="the folder below the checkout to import from")] = "",
-) -> None:
-    """Call FUNCTION with the job's config, validated into its parameter's type."""
-    module, colon, name = function.partition(":")
-    if not colon:
-        raise typer.BadParameter(f"{function!r} is not MODULE:NAME", param_hint="--function")
-    called = Function(module=module, name=name, path=path).load()
-    given = os.environ.get("ETUDE_CONFIG")
-    if not given:
-        raise SystemExit("etude.call: ETUDE_CONFIG is not set; the job has no config")
-    try:
-        called(config_type(called).model_validate_json(Path(given).read_text()))
-    except Stopped:
-        raise typer.Exit(75) from None
+    @app.command()
+    def call(
+        function: str = typer.Option(..., help="MODULE:NAME, imported from the source checkout"),
+        path: str = typer.Option("", help="the folder below the checkout to import from"),
+    ) -> None:
+        """Call FUNCTION with the job's config, validated into its parameter's type."""
+        module, colon, name = function.partition(":")
+        if not colon:
+            raise typer.BadParameter(f"{function!r} is not MODULE:NAME", param_hint="--function")
+        called = Function(module=module, name=name, path=path).load()
+        given = os.environ.get("ETUDE_CONFIG")
+        if not given:
+            raise SystemExit("etude.call: ETUDE_CONFIG is not set; the job has no config")
+        try:
+            called(config_type(called).model_validate_json(Path(given).read_text()))
+        except Stopped:
+            raise typer.Exit(75) from None
+
+    app()
 
 
 if __name__ == "__main__":
-    app()
+    main()

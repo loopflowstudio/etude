@@ -29,12 +29,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
 
-from etude.controller.declarations import asked, read_experiment, read_training_jobs
+from etude.controller.declarations import Experiment, asked, read_experiment, read_training_jobs
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import Benchmark, RoundRobin
 from etude.eval.tournament import played
 from etude.experiment import observe, read_tournament_lines
-from etude.experiment_file import defined_functions, experiment_named, refuse_renamed
 from etude.jobs import (
     EvalGroup,
     _group_key,
@@ -53,9 +52,10 @@ STEPS: tuple[Step, ...] = ("train", "eval", "report")
 
 
 def smoke_file(
-    path: Path,
+    file: Path | Experiment,
     runs: Sequence[RunRequest] | None = None,
     *,
+    given: Sequence[str] = (),
     steps: Collection[Step] = STEPS,
     source: Storage | None = None,
     keep: bool = False,
@@ -68,8 +68,10 @@ def smoke_file(
     calling, since the temporary home moves the default store. Raises
     `LauncherError` at the first failure, after printing its output.
     """
-    refuse_renamed(path)
-    if "training_jobs" not in defined_functions(path):
+    definition = read_experiment(file) if isinstance(file, Path) else file
+    path = definition.file
+    assert path is not None
+    if definition.training is None:
         steps = tuple(step for step in steps if step != "train")
         source = source or DirectoryStorage(default_root())
     if "train" in steps and source is not None:
@@ -77,8 +79,9 @@ def smoke_file(
     if "train" not in steps and source is None and set(steps) & {"eval", "report"}:
         raise LauncherError("smoking eval or report without train needs --source")
     if "train" in steps and runs is None:
-        runs = read_training_jobs(path)
-    experiment = experiment_named(path)
+        runs = read_training_jobs(
+            path, given, experiment=definition.name, function=definition.training
+        )
     train: dict[str, SmokeStep] = {}
     done: list[SmokeStep] = []
     with smoke_home(keep=keep) as folder:
@@ -86,21 +89,21 @@ def smoke_file(
         if "train" in steps:
             for trained in smoke_train(runs or (), folder):
                 step = trained.step
-                if trained.run is not None and experiment is not None:
+                if trained.run is not None:
                     step = step.model_copy(
-                        update={"detail": _saved(store, experiment, trained.run)}
+                        update={"detail": _saved(store, definition.name, trained.run)}
                     )
                 show(step)
                 train[trained.job] = step
         # What the temporary store holds a run of, so eval and report have something to read.
         stored = any(each.outcome == "passed" for each in train.values())
         if "eval" in steps:
-            for step in _evaluate(path, experiment, source or store, store):
+            for step in _evaluate(definition, source or store, store):
                 show(step)
                 done.append(step)
                 stored = stored or step.outcome == "passed"
         if "report" in steps:
-            step = _report(path, experiment, store if stored else source, store)
+            step = _report(definition, store if stored else source, store)
             show(step)
             done.append(step)
     return Smoked(train=train, rest=tuple(done))
@@ -116,19 +119,16 @@ def _saved(store: Storage, experiment: str, run: str) -> str:
     return f"{count} checkpoint{'' if count == 1 else 's'}"
 
 
-def _evaluate(
-    path: Path, experiment: str | None, source: Storage, store: DirectoryStorage
-) -> list[SmokeStep]:
+def _evaluate(definition: Experiment, source: Storage, store: DirectoryStorage) -> list[SmokeStep]:
     """Each evaluation `eval_jobs(state)` asks for on `source`, held tiny into `store`."""
-    if experiment is None or "eval_jobs" not in defined_functions(path):
+    function = definition.eval
+    if function is None:
         return [
             SmokeStep(step="eval", name="eval", outcome="skipped", detail="no eval_jobs(state)")
         ]
     listing = RunListing.read(source)
+    experiment = definition.name
     state = observe(listing, experiment)
-    definition = read_experiment(path)
-    function = definition.eval
-    assert function is not None
     jobs = _try_step("eval", "eval", lambda: asked(function, state))
     if not jobs:
         return [
@@ -224,19 +224,17 @@ def _tiny_tournament(tournament: Benchmark | RoundRobin) -> Benchmark | RoundRob
     return tournament.model_copy(update={"seatings": seatings})
 
 
-def _report(
-    path: Path, experiment: str | None, source: Storage | None, store: DirectoryStorage
-) -> SmokeStep:
+def _report(definition: Experiment, source: Storage | None, store: DirectoryStorage) -> SmokeStep:
     """`report()` drawn from `source`, written beside the temporary store."""
-    if experiment is None:
+    if all(each is None for each in (definition.training, definition.eval, definition.report)):
         return SmokeStep(
             step="report", name="report", outcome="skipped", detail="not an experiment file"
         )
     if source is None:
         return SmokeStep(step="report", name="report", outcome="not_smoked", detail="no runs")
     started = time.monotonic()
-    page = _try_step("report", "report", lambda: build(source, path))
-    write(render(page), store.root.parent / "reports" / f"{experiment}.html")
+    page = _try_step("report", "report", lambda: build(source, definition))
+    write(render(page), store.root.parent / "reports" / f"{definition.name}.html")
     return SmokeStep(
         step="report", name="report", outcome="passed", seconds=time.monotonic() - started
     )
@@ -248,9 +246,13 @@ def _try_step[T](step: Step, name: str, work: Callable[[], T]) -> T:
     try:
         return work()
     except Exception as error:
-        if isinstance(error, (LauncherError, EtudeError)) and error.fix is not None:
-            raise
-        traceback.print_exc()
+        location = None
+        if isinstance(error, (LauncherError, EtudeError)):
+            if error.fix is not None:
+                raise
+            location = error.location
+        if location is None:
+            traceback.print_exc()
         # Name the first error, not a wrapper such as eval's `match_failed`.
         first: BaseException = error
         # ProcessPoolExecutor attaches traceback transport metadata below the real error.
@@ -259,5 +261,6 @@ def _try_step[T](step: Step, name: str, work: Callable[[], T]) -> T:
         raise LauncherError(
             f"smoke {step}{'' if name == step else ' ' + name}: failed after"
             f" {time.monotonic() - started:.1f} s ({type(first).__name__}: {first});"
-            " nothing was submitted"
+            " nothing was submitted",
+            at=location,
         ) from error

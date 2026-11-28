@@ -5,6 +5,7 @@ new runs. The scheduler's public records are the only memory of a hand-down.
 """
 
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -16,9 +17,11 @@ from etude.controller.declarations import (
     asked,
     format_known_run,
     read_training_jobs,
+    require_checkout,
     select_runs,
     with_queued_runs,
 )
+from etude.controller.diagnostics import declaration
 from etude.controller.smoke import smoke_file
 from etude.errors import EtudeError, LauncherError
 from etude.eval.records import digest, find_line_experiments
@@ -199,9 +202,9 @@ def advance(
     if smoke_file_first and not quote:
         assert experiment.file is not None
         before = (
-            smoke_file(experiment.file, requests)
+            smoke_file(experiment, requests)
             if callable(experiment.training)
-            else smoke_file(experiment.file, steps=("eval", "report"), source=source)
+            else smoke_file(experiment, steps=("eval", "report"), source=source)
         )
         new = before.stamp(new)
         smoke = Smoke(steps=before.rest)
@@ -217,10 +220,10 @@ def advance(
     stopped_runs: set[str] = set()
     stored = StoredRuns.read(experiment.name, listing) if jobs else None
     groups: dict[str, list[_PendingEvaluation]] = {}
-    for declaration in jobs:
-        recorded = declaration.recorded()
+    for evaluation in jobs:
+        recorded = evaluation.recorded()
         found = played(
-            declaration.tournament,
+            evaluation.tournament,
             experiment=experiment.name,
             checkpoints=recorded.checkpoints,
             enter=recorded.entrants,
@@ -232,7 +235,7 @@ def advance(
         )
         pending = [match for match in new_matches if match.key not in running]
         done = TournamentDecision(
-            tournament=declaration.tournament.name,
+            tournament=evaluation.tournament.name,
             new=len(pending),
             running=len(new_matches) - len(pending),
             # Retryable failures are replayed with the new matches, not counted twice.
@@ -247,7 +250,16 @@ def advance(
                 match for match in pending if match.key not in failed or match.key in retryable
             ]
         if pending:
-            executable = declaration.lower(state, pending, policy_lines)
+            function = experiment.eval
+            assert function is not None
+            with (
+                declaration(experiment.file, function)
+                if experiment.file is not None
+                else nullcontext()
+            ):
+                executable = evaluation.lower(state, pending, policy_lines)
+                if mode != "local":
+                    require_checkout(executable, function)
             spec = evaluation_group(executable).evaluations[0]
             groups.setdefault(_group_key(executable, spec), []).append(
                 _PendingEvaluation(

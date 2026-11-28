@@ -19,7 +19,7 @@ import typer
 from etude.controller.diagnostics import declaration
 from etude.errors import EtudeError, LauncherError
 from etude.experiment import observe
-from etude.experiment_file import execute_file, refuse_renamed
+from etude.experiment_file import execute_file, git_checkout, refuse_renamed
 from etude.identity import run_address
 from etude.jobs import EvalJob, ExperimentState, TrainingJob, TrainingRunSummary, evaluation_group
 from etude.report import Report
@@ -76,13 +76,16 @@ def read_training_jobs(
     values: list[Any] = []
 
     def invoke(**kwargs: Any) -> None:
-        arguments.update(kwargs)
-        observed = state
-        if "state" in signature.parameters and observed is None:
-            observed = observe(default_root(), experiment or path.stem)
-        values.append(
-            function(**kwargs, **({"state": observed} if "state" in signature.parameters else {}))
-        )
+        with declaration(path, function):
+            arguments.update(kwargs)
+            observed = state
+            if "state" in signature.parameters and observed is None:
+                observed = observe(default_root(), experiment or path.stem)
+            values.append(
+                function(
+                    **kwargs, **({"state": observed} if "state" in signature.parameters else {})
+                )
+            )
 
     parameters = []
     for name, param in signature.parameters.items():
@@ -122,12 +125,11 @@ def read_training_jobs(
         rich_markup_mode=None, pretty_exceptions_enable=False, add_completion=False
     )
     job_app.command()(invoke)
-    with declaration(path, function):
-        job_app(
-            args=["--help"] if help else list(given),
-            prog_name=f"{path.name} parameters",
-            standalone_mode=False,
-        )
+    job_app(
+        args=["--help"] if help else list(given),
+        prog_name=f"{path.name} parameters",
+        standalone_mode=False,
+    )
     if help:
         return []
     returned = values[0]
@@ -152,15 +154,7 @@ def read_training_jobs(
         if not local:
             with declaration(path, function):
                 candidate.require_hours()
-            if candidate.repo is not None and not any(
-                (folder / ".git").exists()
-                for folder in (Path(candidate.repo), *Path(candidate.repo).parents)
-            ):
-                raise LauncherError(
-                    f"{candidate.repo} is in no git checkout",
-                    fix="put the experiment in a Git checkout or set repo= to its checkout",
-                    at=function,
-                )
+            require_checkout(candidate, function)
         if candidate not in jobs:
             jobs.append(candidate)
     names = [job.name for job in jobs]
@@ -199,6 +193,15 @@ def read_training_jobs(
             )
         )
     return expand_runs(normalized, params=params)
+
+
+def require_checkout(job: Job, function: Callable[..., object]) -> None:
+    if job.repo is not None and git_checkout(Path(job.repo)) is None:
+        raise LauncherError(
+            f"{job.repo} is in no git checkout",
+            fix="put the experiment in a Git checkout or set repo= to its checkout",
+            at=function,
+        )
 
 
 def format_known_run(request: RunRequest, prior: TrainingRunSummary) -> str:
@@ -262,10 +265,15 @@ def read_experiment(path: Path, *, experiment: str | None = None) -> Experiment:
         training = namespace.get("training_jobs")
         report = namespace.get("report")
         train = namespace.get("train")
-        if found is not None and not callable(found):
-            raise LauncherError(
-                f"{path.name}: eval_jobs must be a function", fix="def eval_jobs(state):"
-            )
+        for name, value, signature in (
+            ("training_jobs", training, "training_jobs()"),
+            ("eval_jobs", found, "eval_jobs(state)"),
+            ("train", train, "train(config: Config) -> None"),
+        ):
+            if value is not None and not callable(value):
+                raise LauncherError(
+                    f"{path.name}: {name} must be a function", fix=f"def {signature}:"
+                )
         if report is not None and not callable(report):
             raise EtudeError(
                 "experiment_report_is_not_a_function", 422, fix="def report() -> Report:"

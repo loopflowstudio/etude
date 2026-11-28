@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import runpy
 import signal
 import subprocess
 import sys
@@ -21,7 +20,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import FrameType
-from typing import cast
 
 from pydantic import BaseModel
 
@@ -29,12 +27,12 @@ from etude.cache import Artifact, Content, ContentMismatch, Corrupt
 from etude.call import changed_config, config_type
 from etude.controller.declarations import (
     format_known_run,
+    read_experiment,
     read_training_jobs,
     select_runs,
 )
 from etude.errors import EtudeError, LauncherError
 from etude.experiment import TrainingRuns, observe
-from etude.experiment_file import defined_functions, refuse_renamed
 from etude.identity import run_address
 from etude.jobs import load_job_function
 from etude.records import RunRecord
@@ -66,15 +64,14 @@ def train(
     """
     if seconds is not None and (not math.isfinite(seconds) or seconds <= 0):
         raise ValueError("--seconds must be finite and positive")
-    if file.suffix != ".py":
-        raise ValueError("a Python file defining train(config) or training_jobs() is required")
     file = file.resolve()
-    label = experiment or file.stem
-    functions = defined_functions(file)
-    refuse_renamed(file)
-    if "training_jobs" in functions:
+    definition = read_experiment(file, experiment=experiment)
+    label = definition.name
+    if definition.training is not None:
         state = observe(default_root(), label)
-        requests = read_training_jobs(file, experiment=experiment, local=True, state=state)
+        requests = read_training_jobs(
+            file, experiment=experiment, local=True, state=state, function=definition.training
+        )
         known = TrainingRuns(state.runs, requested=(r.id for r in requests))
         requests = select_runs(requests, job=job, seed=seed)
         with TemporaryDirectory(prefix="etude-inputs-") as folder:
@@ -123,31 +120,29 @@ def train(
         raise ValueError(
             "select the file's sole job and seed 0; define training_jobs() for other jobs or seeds"
         )
-    sys.path.insert(0, str(file.parent))
-    try:
-        found = runpy.run_path(str(file)).get("train")
-        if not callable(found):
-            raise ValueError(f"{file.name}: define train(config) or training_jobs()")
-        return _train_each(
-            [
-                _prepare(
-                    file,
-                    cast(Callable[[BaseModel], object], found),
-                    label=label,
-                    identity=label,
-                    job=file.stem,
-                    initial=None,
-                    config=config,
-                    seed=0,
-                    resume=resume,
-                    until=until,
-                    seconds=seconds,
-                )
-            ],
-            json_output=json_output,
+    if definition.train is None:
+        raise LauncherError(
+            f"{file.name}: define train(config) or training_jobs()",
+            fix="def train(config: Config) -> None:",
         )
-    finally:
-        sys.path.remove(str(file.parent))
+    return _train_each(
+        [
+            _prepare(
+                file,
+                definition.train,
+                label=label,
+                identity=label,
+                job=file.stem,
+                initial=None,
+                config=config,
+                seed=0,
+                resume=resume,
+                until=until,
+                seconds=seconds,
+            )
+        ],
+        json_output=json_output,
+    )
 
 
 def _prepare(

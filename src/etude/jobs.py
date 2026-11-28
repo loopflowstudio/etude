@@ -36,7 +36,7 @@ from pydantic import (
 )
 
 from etude.cache import Artifact, Content, ContentMismatch, Corrupt
-from etude.call import Function, changed_config, config_type
+from etude.call import Function, changed_config, config_type, validation_message
 from etude.carriage import CHECKPOINTS, OUT_PRESENT, checkpoint_file_name, checkpoint_key
 from etude.checkpoints import (
     CheckpointId,
@@ -75,6 +75,7 @@ from etude.eval.run import (
     play_together,
 )
 from etude.eval.tournament import _open_evaluation
+from etude.experiment_file import git_checkout
 from etude.identity import run_address, stored_owner
 from etude.launch.records import Standing, Status
 from etude.out import MEMBERSHIP, OutFile, OutFiles, OutMember
@@ -1321,7 +1322,8 @@ def _config_text(function: Callable[..., object], config: BaseModel) -> str:
         kind.model_validate_json(text)
     except ValidationError as error:
         raise LauncherError(
-            f"the {kind.__name__} config would not validate on the machine: {error}",
+            f"the {kind.__name__} config would not validate on the machine: "
+            f"{validation_message(error)}",
             fix=f"make {kind.__name__} accept its serialized fields",
         ) from None
     return text
@@ -1372,9 +1374,8 @@ def _repo(origin: Callable[..., object], options: JobOptions) -> Path | None:
         given = options["repo"]
         return None if given is None else Path(given).resolve()
     file = Path(inspect.getfile(inspect.unwrap(origin))).resolve()
-    for folder in file.parents:
-        if (folder / ".git").exists():
-            return folder
+    if (checkout := git_checkout(file.parent)) is not None:
+        return checkout
     # Without git, local training still needs the root from which Python imports it.
     if origin.__module__ not in ("__main__", "<run_path>"):
         parts = origin.__module__.split(".")

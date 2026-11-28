@@ -24,16 +24,19 @@ def experiment_named(path: Path) -> str | None:
 
     Recognised by its text, without running it; a file that does not parse is no experiment.
     """
-    return path.stem if defined_functions(path) & set(EXPERIMENT_FUNCTIONS) else None
-
-
-def defined_functions(path: Path) -> frozenset[str]:
-    """The functions a file defines at its top level, by its text; none if it does not parse."""
     try:
-        functions = _functions(path)
+        return path.stem if _functions(path).keys() & set(EXPERIMENT_FUNCTIONS) else None
     except SyntaxError:
-        return frozenset()
-    return frozenset(functions)
+        return None
+
+
+def git_checkout(directory: Path) -> Path | None:
+    """Find the enclosing checkout, including worktrees, without running Git."""
+    directory = directory.resolve()
+    return next(
+        (folder for folder in (directory, *directory.parents) if (folder / ".git").exists()),
+        None,
+    )
 
 
 def _functions(path: Path) -> dict[str, int]:

@@ -10,35 +10,27 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import TypeAdapter
 
-from etude.call import Function
-from etude.controller.diagnostics import Issue, declaration
-from etude.errors import EtudeError, LauncherError, SourceLocation, sanitize
-from etude.eval.game import GAME_IMPORT_FIX, Imports, _match_type, measure_imports
-from etude.eval.resources import Resources
-from etude.records import Record
+from etude.controller.diagnostics import Issue
+from etude.controller.import_probe import ImportProbe
+from etude.errors import SourceLocation, sanitize
+from etude.eval.game import GAME_IMPORT_FIX, Imports
 
 
-class GameImport(Record):
-    file: Path
+@dataclass(frozen=True)
+class GameImport:
+    probe: ImportProbe
     location: SourceLocation
-    checkout: str | None
-    play: Function
-    build: Function | None
-    streaming: bool
 
     @property
-    def modules(self) -> tuple[str | None, str, str, tuple[str, str] | None]:
-        build = (self.build.module, self.build.path) if self.build is not None else None
-        return self.checkout, self.play.module, self.play.path, build
-
-
-class _Request(Record):
-    game: GameImport
-    paths: tuple[str, ...]
+    def modules(self) -> tuple[Path, str, str, tuple[str, str] | None]:
+        probe = self.probe
+        build = (probe.build.module, probe.build.path) if probe.build is not None else None
+        return probe.checkout, probe.play.module, probe.play.path, build
 
 
 def check_game_imports(games: Iterable[GameImport]) -> Iterator[Issue]:
@@ -54,12 +46,12 @@ def check_game_imports(games: Iterable[GameImport]) -> Iterator[Issue]:
 
 
 def _check_game_imports(game: GameImport) -> Issue | None:
-    request = _Request(game=game, paths=tuple(sys.path))
+    probe = game.probe
     with tempfile.TemporaryDirectory(prefix="etude-check-") as scratch:
         result = Path(scratch) / "imports.json"
         process = subprocess.run(
-            [sys.executable, "-m", "etude.controller.game_imports", str(result)],
-            input=request.model_dump_json().encode(),
+            [sys.executable, "-m", "etude.controller.import_probe", str(result)],
+            input=probe.model_dump_json().encode(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -73,10 +65,14 @@ def _check_game_imports(game: GameImport) -> Issue | None:
             return Issue(
                 file=game.location.file,
                 line=game.location.line,
-                message=f"could not import game module {game.play.module}: {detail}",
+                message=f"could not import game module {probe.play.module}: {detail}",
             )
         measured = TypeAdapter(Imports | Issue).validate_json(result.read_bytes())
     if isinstance(measured, Issue):
+        if measured.file == probe.checkout:
+            return measured.model_copy(
+                update={"file": game.location.file, "line": game.location.line}
+            )
         return measured
     if (warning := measured.warning) is None:
         return None
@@ -87,24 +83,3 @@ def _check_game_imports(game: GameImport) -> Issue | None:
         message=sanitize(warning),
         fix=GAME_IMPORT_FIX,
     )
-
-
-def _measure_game_imports(request: _Request, result: Path) -> None:
-    game = request.game
-    sys.path[:] = request.paths
-    Resources(scratch=result.parent, artifacts=result.parent).configure(1)
-    measured: Imports | Issue
-    try:
-        with declaration(game.file), measure_imports(game.play.module) as observe:
-            play = game.play.load(game.checkout)
-            _match_type(play, streaming=game.streaming)
-            if game.build is not None:
-                game.build.load(game.checkout)
-            measured = observe()
-    except (EtudeError, LauncherError) as error:
-        measured = Issue.from_error(error, game.file)
-    result.write_bytes(measured.model_dump_json().encode())
-
-
-if __name__ == "__main__":
-    _measure_game_imports(_Request.model_validate_json(sys.stdin.buffer.read()), Path(sys.argv[1]))

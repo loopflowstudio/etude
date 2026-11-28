@@ -28,7 +28,8 @@ uv run etude report experiment.py --open
 
 - `etude check` runs offline (no bucket, database, git or SSH). It validates
   declarations with the runtime's own rules and prints the planned runs and
-  matches, or the file, line and fix for each problem.
+  matches, or the file, line and fix for each problem. Pass `--source DIR`
+  to count remaining work from local runs and match results.
 - `etude launch --quote` reads storage and provider availability to price the
   pass without submitting or renting.
 - `etude launch` starts what fits and queues the rest; `etude queue` records
@@ -45,7 +46,8 @@ uv run etude report experiment.py --open
 - **Experiment files.** Define `training_jobs()` (optionally taking
   `state: ExperimentState`), `eval_jobs(state: ExperimentState)` and optionally
   `report() -> Report`. A plain file with only `train(config)` is a local
-  recipe for `etude train`.
+  recipe for `etude train`. A file with only `report()` can be used with
+  `etude report`.
 - **Addresses and seeds.** Every declared run's address is
   `EXPERIMENT/JOB@SEED` (`EXPERIMENT` defaults to the file stem; `--experiment`
   overrides it). Training `seeds` must be nonempty and distinct; each makes an

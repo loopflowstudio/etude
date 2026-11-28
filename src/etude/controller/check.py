@@ -15,7 +15,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
-import typer
 from pydantic import computed_field
 
 from etude.call import changed_config, config_type
@@ -24,13 +23,22 @@ from etude.controller.declarations import (
     declared_report,
     read_experiment,
     read_training_jobs,
+    require_checkout,
     require_jobs,
     with_queued_runs,
 )
 from etude.controller.diagnostics import Issue, declaration
 from etude.controller.game_imports import GameImport, check_game_imports
-from etude.errors import EtudeError, LauncherError, SourceLocation, function_location
+from etude.controller.import_probe import ImportProbe
+from etude.errors import (
+    EtudeError,
+    LauncherError,
+    SourceLocation,
+    format_location,
+    function_location,
+)
 from etude.eval.records import RoundRobin
+from etude.eval.tournament import StoredRuns, played
 from etude.experiment import TrainingRuns, read_tournament_lines, state_of
 from etude.jobs import Evaluation, ExperimentState, evaluation_group
 from etude.records import Record
@@ -64,13 +72,17 @@ class Check(Record):
     training: tuple[PlannedRun, ...] = ()
     evals: tuple[PlannedTournament, ...] = ()
     source: Path | None = None
-    local_recipe: bool = False
+    kind: Literal["experiment", "local_recipe", "report_only"] = "experiment"
     eval_skipped: bool = False
 
     @computed_field  # type: ignore[prop-decorator]  # Pydantic serializes this property.
     @property
     def ok(self) -> bool:
         return all(issue.severity != "error" for issue in self.issues)
+
+
+class NoTrainingOptions(ValueError):
+    """The input file has no training declaration to receive its flags."""
 
 
 def check_file(
@@ -92,7 +104,7 @@ def check_file(
         )
 
     if given and definition.training is None:
-        raise typer.BadParameter("file has no training_jobs() options")
+        raise NoTrainingOptions("file has no training_jobs() options")
     issues: list[Issue] = []
     training: list[PlannedRun] = []
     evals: list[PlannedTournament] = []
@@ -103,7 +115,9 @@ def check_file(
         else state_of(read_all(listing, name, metrics=frozenset()), name, retained=())
     )
     recipe = definition.train
-    local_recipe = recipe is not None and definition.training is None and definition.eval is None
+    kind: Literal["experiment", "local_recipe", "report_only"] = "experiment"
+    if definition.training is None and definition.eval is None:
+        kind = "local_recipe" if recipe is not None else "report_only"
     try:
         if definition.training is not None:
             requests = read_training_jobs(
@@ -125,7 +139,7 @@ def check_file(
                     )
                 )
             state = with_queued_runs(state, requests)
-        elif recipe is not None and local_recipe:
+        elif recipe is not None and kind == "local_recipe":
             with declaration(file, recipe):
                 config = config_type(recipe)
                 default = changed_config(config, "{}")
@@ -135,10 +149,12 @@ def check_file(
 
     games: list[GameImport] = []
     eval_skipped = False
-    if definition.eval is not None:
+    if (evaluate := definition.eval) is not None:
         try:
-            with declaration(file, definition.eval):
-                jobs = asked(definition.eval, state)
+            with declaration(file, evaluate):
+                jobs = asked(evaluate, state)
+            stored = StoredRuns.read(name, listing) if jobs and listing is not None else None
+            with declaration(file, evaluate):
                 lines = (
                     state.lines
                     if listing is None
@@ -147,7 +163,19 @@ def check_file(
                     )
                 )
                 for job in jobs:
-                    lowered = job.lower(state, lines=lines)
+                    matches = None
+                    if stored is not None:
+                        recorded = job.recorded()
+                        matches = played(
+                            job.tournament,
+                            experiment=name,
+                            checkpoints=recorded.checkpoints,
+                            enter=recorded.entrants,
+                            lines=lines,
+                            runs=stored,
+                        ).new
+                    lowered = job.lower(state, matches, lines)
+                    require_checkout(lowered, evaluate)
                     (spec,) = evaluation_group(lowered).evaluations
                     evals.append(_plan_tournament(lowered, spec))
                     if spec.agents.load is not None and spec.agents.devices != ("cpu",):
@@ -155,12 +183,14 @@ def check_file(
                         assert function is not None  # A lowered job has one game function.
                         games.append(
                             GameImport(
-                                file=file,
+                                probe=ImportProbe(
+                                    checkout=Path(lowered.repo)
+                                    if lowered.repo
+                                    else file.resolve().parent,
+                                    play=spec.play,
+                                    build=spec.agents.build,
+                                ),
                                 location=function_location(function) or SourceLocation(file, 1),
-                                checkout=lowered.repo,
-                                play=spec.play,
-                                build=spec.agents.build,
-                                streaming=spec.streaming,
                             )
                         )
         except EtudeError as error:
@@ -184,7 +214,7 @@ def check_file(
         training=tuple(training),
         evals=tuple(evals),
         source=source,
-        local_recipe=local_recipe,
+        kind=kind,
         eval_skipped=eval_skipped,
     )
 
@@ -215,20 +245,20 @@ def show_check(
     format: Literal["text", "json"],
 ) -> int:
     if file.suffix != ".py" or not file.is_file():
-        typer.echo(f"{file}: expected an existing Python (.py) file", err=True)
+        print(f"{file}: expected an existing Python (.py) file", file=sys.stderr)
         return 2
     directory = None
     if source is not None:
         if "://" in source:
-            typer.echo(
+            print(
                 f"etude check: --source needs a local directory. "
                 f"Use etude launch {shlex.quote(str(file))} --quote for bucket storage.",
-                err=True,
+                file=sys.stderr,
             )
             return 2
         directory = Path(source)
         if not directory.is_dir():
-            typer.echo(f"{directory}: --source needs an existing directory", err=True)
+            print(f"{directory}: --source needs an existing directory", file=sys.stderr)
             return 2
     with redirect_stdout(sys.stderr) if format == "json" else nullcontext():
         checked = check_file(file, given, experiment=experiment, source=directory)
@@ -242,11 +272,8 @@ def show_check(
 def _show_text(checked: Check) -> None:
     file = checked.file
     for issue in checked.issues:
-        try:
-            path = issue.file.resolve().relative_to(Path.cwd())
-        except ValueError:
-            path = issue.file
-        print(f"{path}:{issue.line}: {issue.severity}: {issue.message}")
+        where = format_location(SourceLocation(issue.file, issue.line))
+        print(f"{where}: {issue.severity}: {issue.message}")
         if issue.fix:
             print(f"  fix: {issue.fix}")
     if checked.eval_skipped:
@@ -258,8 +285,11 @@ def _show_text(checked: Check) -> None:
         print(f"{file}: {', '.join(counts)}")
     if not checked.ok:
         return
-    if checked.local_recipe:
+    if checked.kind == "local_recipe":
         print(f"{file}: ok, local recipe: etude train {file}; nothing to launch")
+        return
+    if checked.kind == "report_only":
+        print(f"{file}: ok, report only: etude report {file}; nothing to launch")
         return
     if checked.source is not None:
         print(f"{file}: ok, from local runs in {checked.source}")

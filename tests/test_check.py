@@ -13,6 +13,9 @@ from typer.main import get_command_name
 from etude.checkpoints import CheckpointRecord
 from etude.cli import app, main
 from etude.controller import check
+from etude.eval.match import environment
+from etude.eval.records import Code, RoundRobin
+from etude.eval.tournament import evaluating
 from etude.launch import client, server
 from etude.launch.database import launcher_file
 from etude.records import ArtifactRef, Clock, RunRecord
@@ -201,6 +204,94 @@ def test_check_distinguishes_unchecked_input_syntax_and_local_recipes(
     assert "no training_jobs() options" in capsys.readouterr().err
     assert main(["check", str(file)]) == 0
     assert "local recipe" in capsys.readouterr().out
+    assert main(["check", str(file), "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["kind"] == "local_recipe"
+
+
+def test_check_reports_a_report_only_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = tmp_path / "notes.py"
+    file.write_text("from etude.report import Report\ndef report(): return Report()\n")
+    assert main(["check", str(file)]) == 0
+    assert f"ok, report only: etude report {file}; nothing to launch" in capsys.readouterr().out
+    assert main(["check", str(file), "--format", "json"]) == 0
+    checked = json.loads(capsys.readouterr().out)
+    assert checked["kind"] == "report_only"
+    assert checked["training"] == checked["evals"] == []
+
+
+@pytest.mark.parametrize("name", ["training_jobs", "train"])
+def test_commands_refuse_non_callable_training_declarations(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], name: str
+) -> None:
+    file = tmp_path / "exp.py"
+    file.write_text(f"{name} = 42\n")
+    for command in ("check", "train", "smoke", "launch"):
+        assert main([command, str(file)]) == 1
+        captured = capsys.readouterr()
+        output = captured.out if command == "check" else captured.err
+        assert f"{file.name}: {name} must be a function" in output
+        assert f"fix: def {name}(" in output
+
+
+def test_check_and_smoke_point_into_the_experiments_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".git").touch()
+    (tmp_path / "experiments").mkdir()
+    modules = tmp_path / "src"
+    modules.mkdir()
+    monkeypatch.syspath_prepend(str(modules))
+    (modules / "check_remote_declaration.py").write_text(
+        "def raise_game_error():\n    raise RuntimeError('bad game settings')\n"
+    )
+    file = tmp_path / "experiments" / "exp.py"
+    file.write_text(
+        "from check_remote_declaration import raise_game_error\n"
+        "def eval_jobs(state): raise_game_error()\n"
+    )
+    assert main(["check", str(file)]) == 1
+    assert (
+        "src/check_remote_declaration.py:2: error: RuntimeError: bad game settings"
+        in capsys.readouterr().out
+    )
+    assert main(["smoke", str(file), "--step", "eval", "--source", str(tmp_path / "runs")]) == 1
+    error = capsys.readouterr().err
+    assert error.startswith("etude: src/check_remote_declaration.py:2: smoke eval: failed")
+    assert "(RuntimeError: bad game settings)" in error
+
+
+def test_check_and_launch_require_a_checkout_for_eval_only_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    file = tmp_path / "code_only.py"
+    file.write_text(
+        dedent("""\
+        from etude.eval.match import environment
+        from etude.eval.records import Code, RoundRobin
+        from etude.jobs import EvalJob
+
+        async def play(match, agents):
+            raise AssertionError("must not play")
+
+        def eval_jobs(state):
+            tournament = RoundRobin(
+                name="panel", environment=environment("check"), config={}, games=1,
+            )
+            return EvalJob(tournament=tournament, play=play, max_hours=1,
+                           enter=(Code(name="a"), Code(name="b")))
+        """)
+    )
+    location = f"{file}:8:"
+    message = f"{tmp_path} is in no git checkout"
+    fix = "fix: put the experiment in a Git checkout or set repo= to its checkout"
+    assert main(["check", str(file)]) == 1
+    assert f"{location} error: {message}\n  {fix}" in capsys.readouterr().out
+    assert main(["launch", str(file), "--source", str(tmp_path / "runs"), "--quote"]) == 1
+    assert capsys.readouterr().err == f"etude: {location} {message}\n  {fix}\n"
 
 
 def test_check_formats_a_constructor_type_error_without_the_raw_input(
@@ -217,6 +308,31 @@ def test_check_formats_a_constructor_type_error_without_the_raw_input(
     assert f"{file}:8: error: TrainingJob.max_hours: Input should be a valid number" in issues
     assert "wrong" not in issues
     assert "pydantic.dev" not in issues
+
+
+def test_check_formats_config_round_trip_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = _experiment(tmp_path, module="check_excluded_config")
+    module = tmp_path / "check_excluded_config.py"
+    module.write_text(
+        module.read_text()
+        .replace("import BaseModel", "import BaseModel, Field")
+        .replace("    pass", "    width: int = Field(exclude=True)")
+        .replace("def play", "async def play")
+    )
+    file.write_text(
+        file.read_text()
+        .replace("seeds=(1, 1)", "seeds=(1,)")
+        .replace("Config()", "Config(width=8)")
+    )
+    assert main(["check", str(file)]) == 1
+    output = capsys.readouterr().out
+    assert (
+        "the Config config would not validate on the machine: Config.width: Field required"
+        in output
+    )
+    assert "pydantic.dev" not in output
 
 
 def _import_experiment(
@@ -291,20 +407,29 @@ def test_check_warns_once_at_the_import_in_shared_game_code(
         agents="load=load, build=build",
         build_import="import torch",
     )
+    build.write_text(
+        "import sys\n"
+        + build.read_text().replace(
+            "    import torch",
+            '    assert "typer" not in sys.modules\n'
+            '    assert "etude.controller.diagnostics" not in sys.modules\n'
+            "    import torch",
+        )
+    )
     message = "game module check_warning_game: imported torch via check_warning_game_build"
     fix = "define your game function in a lightweight module and move the import to load's module"
 
     assert main(["check", str(file), "--format", "json"]) == 0
     checked = json.loads(capsys.readouterr().out)
     assert checked["issues"] == [
-        {"severity": "warning", "file": str(build), "line": 3, "message": message, "fix": fix}
+        {"severity": "warning", "file": str(build), "line": 6, "message": message, "fix": fix}
     ]
     assert checked["ok"] is True
     assert observations.read_text() == "1\n"
 
     assert main(["check", str(file)]) == 0
     output = capsys.readouterr().out
-    assert f"{build}:3: warning: {message}\n  fix: {fix}\n" in output
+    assert f"{build}:6: warning: {message}\n  fix: {fix}\n" in output
     assert f"{file}: 1 warning\n" in output
 
 
@@ -327,14 +452,26 @@ def test_check_skips_import_probes_for_direct_games(
 
 
 def test_check_locates_import_failures_in_the_game_process(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    (tmp_path / ".git").mkdir()
+    modules = tmp_path / "src"
+    modules.mkdir()
+    monkeypatch.syspath_prepend(str(modules))
+    accidental = tmp_path / "external"
+    accidental.mkdir()
+    (accidental / "check_accidental_dependency.py").touch()
+    monkeypatch.syspath_prepend(str(accidental))
     file, build, _ = _import_experiment(
-        tmp_path,
+        modules,
         module="check_broken_game_import",
         agents="load=load, build=build",
-        build_import='raise ImportError("cannot import game dependency")',
+        build_import="import check_accidental_dependency",
     )
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    file.write_text(file.read_text().replace(", repo=None", ""))
+    file = file.rename(experiments / file.name)
     assert main(["check", str(file), "--format", "json"]) == 1
     checked = json.loads(capsys.readouterr().out)
     assert checked["ok"] is False
@@ -343,7 +480,7 @@ def test_check_locates_import_failures_in_the_game_process(
             "severity": "error",
             "file": str(build),
             "line": 3,
-            "message": "ImportError: cannot import game dependency",
+            "message": "ModuleNotFoundError: No module named 'check_accidental_dependency'",
             "fix": None,
         }
     ]
@@ -447,6 +584,22 @@ def test_check_summarizes_a_first_launch_with_job_flags(
     assert f"next: etude launch {file} --quote --experiment lab" in output
 
 
+def test_check_help_shows_declaration_flags_without_running_them(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = tmp_path / "exp.py"
+    file.write_text(
+        "def training_jobs(width: int = 64):\n    raise AssertionError('help ran the declaration')\n"
+    )
+    assert main(["check", "--help"]) == 0
+    assert "--source" in capsys.readouterr().out
+    for command in ("check", "launch", "smoke"):
+        assert main([command, str(file), "--help"]) == 0
+        captured = capsys.readouterr()
+        assert "--width" in captured.out
+        assert captured.err == ""
+
+
 def _save_checkpoint(source: DirectoryStorage, experiment: str, job: str, seed: int) -> None:
     address = f"{experiment}@{seed}"
     record = RunRecord(
@@ -489,6 +642,14 @@ def test_check_source_resolves_stored_aliases_and_cross_experiment_seats_offline
     source = DirectoryStorage(directory)
     _save_checkpoint(source, "plan", "base", 1)
     _save_checkpoint(source, "baseline", "bot", 9)
+    ladder: RoundRobin = RoundRobin(
+        name="ladder", environment=environment("check"), games=1, config={}
+    )
+    with evaluating(
+        ladder, experiment="plan", enter=(Code(name="a"), Code(name="b")), directory=directory
+    ) as active:
+        (match,) = active.matches
+        active.store(match, {"scores": [{"seat": 0, "score": 1}]})
     measured = MeasuredStorage(source)
     monkeypatch.setattr(check, "DirectoryStorage", lambda root: measured)
 
@@ -496,10 +657,15 @@ def test_check_source_resolves_stored_aliases_and_cross_experiment_seats_offline
     result = json.loads(capsys.readouterr().out)
     assert result["source"] == str(directory)
     assert [run["address"] for run in result["training"]] == ["plan/base@2", "plan/compare@3"]
-    _, panel = result["evals"]
+    ladder_result, panel = result["evals"]
+    assert (ladder_result["entrants"], ladder_result["matches"], ladder_result["games"]) == (
+        3,
+        5,
+        5,
+    )
     # The three games are divided across two held seeds. Only the first has saved.
     assert (panel["checkpoints"], panel["matches"], panel["games"]) == (1, 1, 2)
-    assert (measured.listings, measured.requests, measured.ranges) == (1, 4, 0)
+    assert (measured.listings, measured.requests, measured.ranges) == (1, 8, 0)
     assert not launcher_file(home).exists()
 
 

@@ -588,7 +588,7 @@ class Pages:
         self._built: dict[tuple[Path | None, str], _BuiltPage] = {}
         self._known: set[Path] = set()
 
-    def build(self, file: Path | None, *, experiment: str | None = None) -> Page:
+    def build(self, file: Path | Experiment | None, *, experiment: str | None = None) -> Page:
         """`build`'s page, kept from the last call while its inputs are the same."""
         return self._build(file, self._listings(), experiment)
 
@@ -613,20 +613,26 @@ class Pages:
             self._local_declarations,
         )
 
-    def _build(self, file: Path | None, runs: _ReportRuns, experiment: str | None = None) -> Page:
-        name = _experiment_name(file, experiment)
-        key = (file, name)
+    def _build(
+        self, file: Path | Experiment | None, runs: _ReportRuns, experiment: str | None = None
+    ) -> Page:
+        definition = file if isinstance(file, Experiment) else None
+        path = file.file if isinstance(file, Experiment) else file
+        name = _experiment_name(path, definition.name if definition else experiment)
+        key = (path, name)
         kept = self._built.get(key)
-        sources = _source_versions(file, kept.sources if kept else ())
+        sources = _source_versions(path, kept.sources if kept else ())
         if (
-            kept is not None
+            definition is None
+            and kept is not None
             and kept.sources == sources
             and kept.versions == runs.source.versions_for(kept.experiments)
             and (kept.local_versions is None or kept.local_versions == runs.local_versions(name))
         ):
             return kept.page
-        built = _build_page(name, _ReportFile(file, sources), runs)
-        self._built[key] = built
+        built = _build_page(name, _ReportFile(path, sources, definition), runs)
+        if definition is None:
+            self._built[key] = built
         return built.page
 
 
@@ -692,11 +698,11 @@ def _experiment_name(file: Path | None, experiment: str | None) -> str:
 
 
 def build(
-    source: Storage | Path | str, file: Path | None, *, experiment: str | None = None
+    source: Storage | Path | str, file: Path | Experiment | None, *, experiment: str | None = None
 ) -> Page:
     """The page of the experiment `file` names, from the runs under `source`.
 
-    The file is run each time, so an edited `report()` shows on the next
+    A path is run each time, so an edited `report()` shows on the next
     build. Raises `ValueError` naming the experiments `source` holds when it
     holds no run of this one, and `EtudeError` for a file that is not an
     experiment's.
@@ -1041,12 +1047,15 @@ class ReportDeclaration(Record):
 class _ReportFile:
     """The authored declarations for this build and the sources they used."""
 
-    def __init__(self, path: Path | None, before: SourceVersions) -> None:
+    def __init__(
+        self, path: Path | None, before: SourceVersions, definition: Experiment | None = None
+    ) -> None:
         self.path = path
         self._before = before
         self.sources: SourceVersions = ()
         with self._imports():
-            definition = _run_file(path) if path else None
+            if definition is None and path is not None:
+                definition = _run_file(path)
             report = declared_report(definition) if definition else None
             self.report = DEFAULT_REPORT if report is None else report
             self.origin = f"{path.name}:report" if path and report is not None else None

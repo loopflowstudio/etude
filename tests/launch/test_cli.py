@@ -294,8 +294,7 @@ def training_jobs(): return TrainingJob(train=train_command, runtime=RUNTIME, co
         "new, running" in run(capsys, "launch", str(path), "--experiment", "free")[0]
     )  # no dollars needed here
     for old in ("--on", "--reserve"):
-        with pytest.raises(SystemExit):
-            main(["launch", str(path), old])
+        assert main(["launch", str(path), old]) == 2
         capsys.readouterr()
 
 

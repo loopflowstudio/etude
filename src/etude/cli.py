@@ -17,7 +17,7 @@ from typing import Annotated, Literal
 import typer
 from typer.core import TyperGroup
 
-from etude.errors import EtudeError, LauncherError, RetryRequested, sanitize
+from etude.errors import EtudeError, LauncherError, RetryRequested, format_location, sanitize
 from etude.launch import cli as launch_cli
 from etude.launch.commands import Kind, kind
 from etude.train.cli import checkpoints, sync
@@ -28,9 +28,16 @@ app = launch_cli.app
 ExperimentOption = Annotated[
     str | None, typer.Option(help="experiment label, defaulting to the file stem")
 ]
+FileHelp = Annotated[
+    bool, typer.Option("--help", "-h", help="show these options, then the file's own parameters")
+]
 
 
-@app.command("check", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@app.command(
+    "check",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    add_help_option=False,
+)
 @kind(Kind.read)
 def check_experiment(
     ctx: typer.Context,
@@ -38,17 +45,31 @@ def check_experiment(
     experiment: ExperimentOption = None,
     source: Annotated[str | None, typer.Option(help="local runs directory")] = None,
     format: Annotated[Literal["text", "json"], typer.Option(help="output format")] = "text",
+    help: FileHelp = False,
 ) -> None:
     """Validate an experiment file offline before launching it."""
-    # Entry points load only the command being run.
-    from etude.controller.check import show_check
-
+    if help:
+        print(ctx.get_help())
     if file is None:
+        if help:
+            return
         typer.echo("etude check: a Python experiment FILE is required", err=True)
         raise typer.Exit(2)
-    raise typer.Exit(
-        show_check(file, ctx.args, experiment=experiment, source=source, format=format)
-    )
+    # Entry points load only the command being run.
+    from etude.controller.check import NoTrainingOptions, show_check
+    from etude.controller.declarations import read_experiment, read_training_jobs
+
+    if help:
+        definition = read_experiment(file, experiment=experiment)
+        if definition.training is not None:
+            read_training_jobs(file, help=True, function=definition.training)
+        return
+    try:
+        status = show_check(file, ctx.args, experiment=experiment, source=source, format=format)
+    except NoTrainingOptions as error:
+        typer.echo(f"etude check: {error}", err=True)
+        status = 2
+    raise typer.Exit(status)
 
 
 @app.command()
@@ -216,9 +237,6 @@ SmokeOption = Annotated[
         help="smoke the file here first, as etude smoke does, and submit nothing if it fails"
     ),
 ]
-FileHelp = Annotated[
-    bool, typer.Option("--help", "-h", help="show these options, then the file's own parameters")
-]
 # `launch` and `queue` take the same experiment options.
 JobOption = Annotated[str | None, typer.Option(help="select a declared job")]
 SeedOption = Annotated[int | None, typer.Option(help="select a declared seed")]
@@ -356,25 +374,22 @@ def smoke_experiment(
         raise typer.BadParameter("an experiment FILE is required")
     from typing import cast
 
-    from etude.controller.declarations import read_training_jobs
+    from etude.controller.declarations import read_experiment, read_training_jobs
     from etude.controller.smoke import STEPS, Step, smoke_file
-    from etude.experiment_file import defined_functions
     from etude.storage import storage_from_uri
 
     steps = step or list(STEPS)
     unknown = sorted(set(steps) - set(STEPS))
     if unknown:
         raise typer.BadParameter(f"--step is train, eval or report, not {', '.join(unknown)}")
-    runs = (
-        read_training_jobs(file, ctx.args, help=help)
-        if "train" in steps and "training_jobs" in defined_functions(file)
-        else None
-    )
     if help:
+        definition = read_experiment(file)
+        if "train" in steps and definition.training is not None:
+            read_training_jobs(file, help=True, function=definition.training)
         return
     smoke_file(
         file,
-        runs,
+        given=ctx.args,
         steps=[cast(Step, each) for each in steps],
         source=storage_from_uri(source) if source else None,
         keep=keep,
@@ -700,14 +715,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as error:
         # Entry points load failure-specific dependencies only on the failing command.
         from pydantic import ValidationError
-        from typer._click.exceptions import UsageError
 
-        from etude.controller.diagnostics import validation_message
+        from etude.call import validation_message
         from etude.storage_timeout import StorageUnavailable
 
-        if argv[:1] == ["check"] and isinstance(error, UsageError):
-            typer.echo(f"etude check: {sanitize(error.format_message())}", err=True)
-            return 2
+        # Typer's parser attaches context to bad values. A command can also
+        # raise a context-free BadParameter as a domain refusal.
+        if (
+            hasattr(error, "format_message")
+            and hasattr(error, "exit_code")
+            and (not isinstance(error, typer.BadParameter) or error.ctx is not None)
+        ):
+            typer.echo(f"etude: {sanitize(error.format_message())}", err=True)
+            return int(error.exit_code)
         if isinstance(
             error,
             (
@@ -727,13 +747,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 said = str(error)
             if isinstance(error, (LauncherError, EtudeError)) and error.location is not None:
-                said = f"{error.location.file}:{error.location.line}: {said}"
+                said = f"{format_location(error.location)}: {said}"
             print(f"etude: {sanitize(said)}", file=sys.stderr)
             if isinstance(error, (LauncherError, EtudeError)) and error.fix:
                 print(f"  fix: {sanitize(error.fix)}", file=sys.stderr)
             return 1
-        # Typer's public invocation formats usage failures without importing its private parser.
-        if hasattr(error, "show") and hasattr(error, "exit_code"):
-            error.show()
-            raise SystemExit(error.exit_code) from None
         raise

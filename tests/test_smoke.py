@@ -228,12 +228,18 @@ def test_eval_and_report_alone_read_a_source_and_deliver_nothing_to_it(
     _trained(source, tmp_path)
     before = sorted(source.rglob("*"))
     file = experiment(tmp_path / "lab")
+    reads = tmp_path / "declaration-loads"
+    file.write_text(
+        "from pathlib import Path\n"
+        f"with Path({str(reads)!r}).open('a') as log: log.write('loaded\\n')\n" + file.read_text()
+    )
     steps = ["--step", "eval", "--step", "report"]
     assert main(["smoke", str(file), *steps, "--source", str(source)]) == 0
     err = capsys.readouterr().err
     assert "smoke eval ladder: passed" in err and "smoke report: passed" in err
     assert "smoke train" not in err
     assert sorted(source.rglob("*")) == before
+    assert reads.read_text() == "loaded\n"
     assert main(["smoke", str(file), "--step", "eval"]) == 1
     assert "needs --source" in capsys.readouterr().err
 

@@ -17,6 +17,14 @@ class SourceLocation(NamedTuple):
     line: int
 
 
+def format_location(location: SourceLocation) -> str:
+    path = location.file.resolve()
+    cwd = Path.cwd()
+    if path.is_relative_to(cwd):
+        path = path.relative_to(cwd)
+    return f"{path}:{location.line}"
+
+
 def function_location(function: Callable[..., object]) -> SourceLocation | None:
     try:
         authored = inspect.unwrap(function)
