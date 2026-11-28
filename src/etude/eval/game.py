@@ -15,14 +15,23 @@ import os
 import sys
 import time
 import typing
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import aclosing, suppress
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
+from contextlib import aclosing, contextmanager, suppress
 from contextvars import ContextVar
 from copy import copy
 from dataclasses import dataclass, field
 from functools import lru_cache, partial
 from multiprocessing.connection import Connection
 from multiprocessing.reduction import ForkingPickler
+from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Generic, cast
 
@@ -43,6 +52,9 @@ if TYPE_CHECKING:
 
 MAX_GAME_IMPORTS = 256
 _HEAVY = frozenset({"torch", "jax", "tensorflow", "mlx"})
+GAME_IMPORT_FIX = (
+    "define your game function in a lightweight module and move the import to load's module"
+)
 
 # Per-match ForwardError tracker for `play` tasks so caught forward errors still fail the match.
 _match_errors: ContextVar[list[ForwardError] | None] = ContextVar("_match_errors", default=None)
@@ -55,6 +67,8 @@ class Imports(Record):
     total: int
     heavy: tuple[str, ...]
     importer: str | None
+    file: Path | None = None
+    line: int | None = None
 
     @property
     def warning(self) -> str | None:
@@ -63,10 +77,51 @@ class Imports(Record):
         reason = (
             f"imported {', '.join(self.heavy)}" if self.heavy else f"loaded {self.count} modules"
         )
-        return (
-            f"etude: game module {self.module}: {reason} via {self.importer or self.module}; "
-            "define your game function in a lightweight module and move the import to load's module"
+        return f"game module {self.module}: {reason} via {self.importer or self.module}"
+
+
+@contextmanager
+def measure_imports(module: str) -> Iterator[Callable[[], Imports]]:
+    """Observe imports in a dedicated game or check process."""
+    before = frozenset(sys.modules)
+    first_importer: str | None = None
+    file: Path | None = None
+    line: int | None = None
+    original = builtins.__import__
+
+    def importing(
+        name: str,
+        globals: Mapping[str, object] | None = None,
+        locals: Mapping[str, object] | None = None,
+        fromlist: Sequence[str] | None = (),
+        level: int = 0,
+    ) -> ModuleType:
+        nonlocal first_importer, file, line
+        if first_importer is None and level == 0 and name.partition(".")[0] in _HEAVY:
+            first_importer = str((globals or {}).get("__name__", "__main__"))
+            frame = sys._getframe(1)
+            if not frame.f_code.co_filename.startswith("<"):
+                file = Path(frame.f_code.co_filename).resolve()
+                line = frame.f_lineno
+        return original(name, globals, locals, fromlist, level)
+
+    def observe_imports() -> Imports:
+        return Imports(
+            pid=os.getpid(),
+            module=module,
+            count=len(set(sys.modules) - before),
+            total=len(sys.modules),
+            heavy=tuple(sorted(_HEAVY.intersection(sys.modules))),
+            importer=first_importer,
+            file=file,
+            line=line,
         )
+
+    builtins.__import__ = importing
+    try:
+        yield observe_imports
+    finally:
+        builtins.__import__ = original
 
 
 class GameReport(Record):
@@ -508,36 +563,5 @@ def run_game_process(
 ) -> None:
     """Spawn target for one game process; configures child environment before author imports."""
     resources.configure(1)
-    before = frozenset(sys.modules)
-    first_importer: str | None = None
-    original = builtins.__import__
-
-    def importing(
-        name: str,
-        globals: Mapping[str, object] | None = None,
-        locals: Mapping[str, object] | None = None,
-        fromlist: Sequence[str] | None = (),
-        level: int = 0,
-    ) -> ModuleType:
-        nonlocal first_importer
-        if first_importer is None and name.split(".", 1)[0] in _HEAVY:
-            first_importer = str((globals or {}).get("__name__", "__main__"))
-        return original(name, globals, locals, fromlist, level)
-
-    builtins.__import__ = importing
-
-    def observe_imports() -> Imports:
-        return Imports(
-            pid=os.getpid(),
-            module=game.play.module,
-            count=len(set(sys.modules) - before),
-            total=len(sys.modules),
-            heavy=tuple(sorted(_HEAVY.intersection(sys.modules))),
-            importer=first_importer,
-        )
-
-    try:
+    with pipe, measure_imports(game.play.module) as observe_imports:
         asyncio.run(_serve_stream(pipe, game, observe_imports))
-    finally:
-        builtins.__import__ = original
-        pipe.close()

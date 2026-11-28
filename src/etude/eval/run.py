@@ -40,6 +40,7 @@ from etude.eval.block import (
     stage,
 )
 from etude.eval.game import (
+    GAME_IMPORT_FIX,
     Done,
     Game,
     GameReport,
@@ -674,9 +675,10 @@ def _play_matches(
     def record_report(report: GameReport) -> None:
         nonlocal warned_imports
         _retain(f"game-{report.pid}.json", report, resources.artifacts)
-        if agent_process is not None and report.imports.warning and not warned_imports:
-            print(report.imports.warning, file=sys.stderr, flush=True)
-            warned_imports = True
+        if agent_process is not None and not warned_imports:
+            if (warning := report.imports.warning) is not None:
+                print(f"etude: {warning}; {GAME_IMPORT_FIX}", file=sys.stderr, flush=True)
+                warned_imports = True
 
     def accept(each: Playing, match: Match, outcome: Outcome) -> None:
         payload = outcome.result

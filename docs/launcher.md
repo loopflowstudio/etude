@@ -50,9 +50,7 @@ exp.py:12: error: seeds must be nonempty and distinct
   fix: seeds=(1, 2, 3)
 game.py:6: error: play must be an async def function
   fix: async def play(match: Match[Rules], agents: Sequence[Forward]) -> Tables:
-models.py:3: warning: game module game imports torch via models
-  fix: define play in a lightweight module and move the import to load's module
-exp.py: 2 errors, 1 warning
+exp.py: 2 errors
 $ echo $?
 1
 ```
@@ -76,12 +74,12 @@ next: etude launch exp.py --quote
 `etude check FILE [--experiment NAME] [--source DIR] [--format text|json]`
 runs offline on this computer—with no provider key, bucket, database, git or
 SSH call—and shares the runtime's own validation rules across syntax and
-renamed declarations, `training_jobs()`, `eval_jobs(state)`, `report()`, and
-(for shared-inference eval jobs) a child-process check that the game module
-does not import heavy model libraries. Pass any of the experiment file's own
-flags after `FILE`. A plain file defining only `train(config)` checks its
-signature and default config as a local recipe (`etude train FILE`; nothing to
-launch).
+renamed declarations, `training_jobs()`, `eval_jobs(state)`, and `report()`.
+For eval jobs with an accelerator-capable loader, a fresh interpreter checks
+the imports of the game module and its optional `build` hook. Pass any of the
+experiment file's own flags after `FILE`. A plain file defining only
+`train(config)` checks its signature and default config as a local recipe
+(`etude train FILE`; nothing to launch).
 
 - **Offline state.** By default `check` evaluates declarations as a first
   launch sees them (no stored runs, declared training runs queued). Pass
@@ -91,8 +89,14 @@ launch).
   for bucket storage, delivered match history and prices.
 - **Budgets and warnings.** Jobs without `max_usd` are noted as
   `no max_usd: owned pools only` (owned pools and local runs accept them;
-  renting refuses them). Heavy game-module imports are reported as warnings and
-  keep exit status `0`.
+  renting refuses them). Heavy game imports produce a warning and keep exit
+  status `0` when the declarations pass. For example, a game module importing
+  `torch` through `models.py` reports:
+
+  ```text
+  models.py:3: warning: game module game: imported torch via models
+    fix: define your game function in a lightweight module and move the import to load's module
+  ```
 - **JSON and exit codes.** `--format json` prints one JSON object with
   `file`, `experiment`, `ok`, `issues`, `training`, `evals`, and `source` on
   stdout. `local_recipe` and `eval_skipped` describe those special cases.

@@ -1407,6 +1407,14 @@ hold_group(EvalGroup(evaluations=tuple(evaluation_group(job.lower(ExperimentStat
     )
     if with_agents:
         assert "move the import to load's module" in result.stderr
+    reports = [
+        GameReport.model_validate_json(path.read_bytes())
+        for path in (tmp_path / "heavy/artifacts/agents").glob("game-*.json")
+    ]
+    assert reports
+    for report in reports:
+        assert report.imports.file == tmp_path / "heavy_fixture_game.py"
+        assert report.imports.line == 1
 
 
 @pytest.mark.parametrize("grouped", [False, True], ids=["standalone", "group"])

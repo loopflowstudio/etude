@@ -1,6 +1,7 @@
-"""The same declaration failures reach offline checks and launch refusals."""
+"""Offline checks report the runtime's declaration failures and import warnings."""
 
 import json
+import os
 from hashlib import sha256
 from pathlib import Path
 from textwrap import dedent
@@ -161,6 +162,136 @@ def test_check_formats_a_constructor_type_error_without_the_raw_input(
     assert f"{file}:8: error: TrainingJob.max_hours: Input should be a valid number" in issues
     assert "wrong" not in issues
     assert "pydantic.dev" not in issues
+
+
+def _import_experiment(
+    folder: Path, *, module: str, agents: str, build_import: str
+) -> tuple[Path, Path, Path]:
+    observations = folder / "game-imports"
+    build = folder / f"{module}_build.py"
+    build.write_text(
+        dedent(f"""\
+        import os
+        if os.getpid() != {os.getpid()}:
+            {build_import}
+
+        def build(player, leaves):
+            raise AssertionError("check must not build agents")
+        """)
+    )
+    (folder / f"{module}.py").write_text(
+        dedent(f"""\
+        import os
+        from pathlib import Path
+
+        if os.getpid() != {os.getpid()}:
+            print("output from importing a game")
+            with Path({str(observations)!r}).open("a") as log:
+                log.write(os.environ["OMP_NUM_THREADS"] + "\\n")
+
+        async def play(match, agents):
+            raise AssertionError("check must not play")
+        """)
+    )
+    (folder / f"{module}_load.py").write_text(
+        dedent(f"""\
+        import os
+        if os.getpid() != {os.getpid()}:
+            raise AssertionError("check must not import the loader in the game process")
+
+        def load(checkpoint):
+            raise AssertionError("check must not load checkpoints")
+        """)
+    )
+    file = folder / "import_experiment.py"
+    file.write_text(
+        dedent(f"""\
+        from {module} import play
+        from {module}_build import build
+        from {module}_load import load
+        from etude.eval.match import environment
+        from etude.eval.records import Benchmark
+        from etude.jobs import Agents, EvalJob
+
+        def eval_jobs(state):
+            return [
+                EvalJob(
+                    tournament=Benchmark(name=name, environment=environment("check")),
+                    play=play, agents=Agents({agents}), max_hours=1, repo=None,
+                )
+                for name in ("first", "second")
+            ]
+        """)
+    )
+    return file, build, observations
+
+
+def test_check_warns_once_at_the_import_in_shared_game_code(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "torch.py").write_text("# Local stand-in for a model library.\n")
+    file, build, observations = _import_experiment(
+        tmp_path,
+        module="check_warning_game",
+        agents="load=load, build=build",
+        build_import="import torch",
+    )
+    message = "game module check_warning_game: imported torch via check_warning_game_build"
+    fix = "define your game function in a lightweight module and move the import to load's module"
+
+    assert main(["check", str(file), "--format", "json"]) == 0
+    checked = json.loads(capsys.readouterr().out)
+    assert checked["issues"] == [
+        {"severity": "warning", "file": str(build), "line": 3, "message": message, "fix": fix}
+    ]
+    assert checked["ok"] is True
+    assert observations.read_text() == "1\n"
+
+    assert main(["check", str(file)]) == 0
+    output = capsys.readouterr().out
+    assert f"{build}:3: warning: {message}\n  fix: {fix}\n" in output
+    assert f"{file}: 1 warning\n" in output
+
+
+@pytest.mark.parametrize(
+    ("module", "agents"),
+    [
+        ("check_code_only_game", "build=build"),
+        ("check_cpu_only_game", 'load=load, build=build, devices=("cpu",)'),
+    ],
+)
+def test_check_skips_import_probes_for_direct_games(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], module: str, agents: str
+) -> None:
+    file, _, observations = _import_experiment(
+        tmp_path, module=module, agents=agents, build_import='raise RuntimeError("probe ran")'
+    )
+    assert main(["check", str(file), "--format", "json"]) == 0
+    assert json.loads(capsys.readouterr().out)["issues"] == []
+    assert not observations.exists()
+
+
+def test_check_locates_import_failures_in_the_game_process(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file, build, _ = _import_experiment(
+        tmp_path,
+        module="check_broken_game_import",
+        agents="load=load, build=build",
+        build_import='raise ImportError("cannot import game dependency")',
+    )
+    assert main(["check", str(file), "--format", "json"]) == 1
+    checked = json.loads(capsys.readouterr().out)
+    assert checked["ok"] is False
+    assert checked["issues"] == [
+        {
+            "severity": "error",
+            "file": str(build),
+            "line": 3,
+            "message": "ImportError: cannot import game dependency",
+            "fix": None,
+        }
+    ]
 
 
 def _planned_experiment(tmp_path: Path) -> Path:

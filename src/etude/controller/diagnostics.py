@@ -6,11 +6,31 @@ import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Literal, Self
 
 from pydantic import ValidationError
 from typer._click.exceptions import UsageError
 
-from etude.errors import EtudeError, LauncherError, SourceLocation, function_location
+from etude.errors import EtudeError, LauncherError, SourceLocation, function_location, sanitize
+from etude.records import Record
+
+
+class Issue(Record):
+    severity: Literal["error", "warning"] = "error"
+    file: Path
+    line: int
+    message: str
+    fix: str | None = None
+
+    @classmethod
+    def from_error(cls, error: EtudeError | LauncherError, file: Path) -> Self:
+        location = locate(error, file)
+        return cls(
+            file=location.file,
+            line=location.line,
+            message=sanitize(str(error)),
+            fix=sanitize(error.fix) if error.fix else None,
+        )
 
 
 def validation_message(error: ValidationError) -> str:

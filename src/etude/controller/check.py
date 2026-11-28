@@ -27,23 +27,17 @@ from etude.controller.declarations import (
     require_jobs,
     with_queued_runs,
 )
-from etude.controller.diagnostics import declaration, locate
-from etude.errors import EtudeError, LauncherError, sanitize
-from etude.eval.records import Line, RoundRobin
+from etude.controller.diagnostics import Issue, declaration
+from etude.controller.game_imports import GameImport, check_game_imports
+from etude.errors import EtudeError, LauncherError, SourceLocation, function_location
+from etude.eval.records import RoundRobin
 from etude.experiment import TrainingRuns, read_tournament_lines, state_of
-from etude.jobs import EvalJob, ExperimentState, evaluation_group
+from etude.jobs import Evaluation, ExperimentState, evaluation_group
 from etude.records import Record
 from etude.run import RunListing
+from etude.spec import Job
 from etude.storage import DirectoryStorage
 from etude.train.read import read_all
-
-
-class Issue(Record):
-    severity: Literal["error", "warning"] = "error"
-    file: Path
-    line: int
-    message: str
-    fix: str | None = None
 
 
 class PlannedRun(Record):
@@ -79,16 +73,6 @@ class Check(Record):
         return all(issue.severity != "error" for issue in self.issues)
 
 
-def _issue(error: EtudeError | LauncherError, file: Path) -> Issue:
-    location = locate(error, file)
-    return Issue(
-        file=location.file,
-        line=location.line,
-        message=sanitize(str(error)),
-        fix=sanitize(error.fix) if error.fix else None,
-    )
-
-
 def check_file(
     file: Path,
     given: Sequence[str] = (),
@@ -103,7 +87,9 @@ def check_file(
         if all(each is None for each in (definition.train, definition.report)):
             require_jobs(definition)
     except (EtudeError, LauncherError) as error:
-        return Check(file=file, experiment=name, source=source, issues=(_issue(error, file),))
+        return Check(
+            file=file, experiment=name, source=source, issues=(Issue.from_error(error, file),)
+        )
 
     if given and definition.training is None:
         raise typer.BadParameter("file has no training_jobs() options")
@@ -145,8 +131,9 @@ def check_file(
                 default = changed_config(config, "{}")
                 config.model_validate_json(default.model_dump_json(round_trip=True))
     except (EtudeError, LauncherError) as error:
-        issues.append(_issue(error, file))
+        issues.append(Issue.from_error(error, file))
 
+    games: list[GameImport] = []
     eval_skipped = False
     if definition.eval is not None:
         try:
@@ -160,18 +147,36 @@ def check_file(
                     )
                 )
                 for job in jobs:
-                    evals.append(_plan_tournament(job, state, lines))
+                    lowered = job.lower(state, lines=lines)
+                    (spec,) = evaluation_group(lowered).evaluations
+                    evals.append(_plan_tournament(lowered, spec))
+                    if spec.agents.load is not None and spec.agents.devices != ("cpu",):
+                        function = job.play or job.play_many
+                        assert function is not None  # A lowered job has one game function.
+                        games.append(
+                            GameImport(
+                                file=file,
+                                location=function_location(function) or SourceLocation(file, 1),
+                                checkout=lowered.repo,
+                                play=spec.play,
+                                build=spec.agents.build,
+                                streaming=spec.streaming,
+                            )
+                        )
         except EtudeError as error:
             if issues and error.code in {"run_not_found", "policy_not_found"}:
                 eval_skipped = True
             else:
-                issues.append(_issue(error, file))
+                issues.append(Issue.from_error(error, file))
         except LauncherError as error:
-            issues.append(_issue(error, file))
+            issues.append(Issue.from_error(error, file))
     try:
         declared_report(definition)
     except (EtudeError, LauncherError) as error:
-        issues.append(_issue(error, file))
+        issues.append(Issue.from_error(error, file))
+    for issue in check_game_imports(games):
+        if issue not in issues:
+            issues.append(issue)
     return Check(
         file=file,
         experiment=name,
@@ -184,11 +189,7 @@ def check_file(
     )
 
 
-def _plan_tournament(
-    job: EvalJob, state: ExperimentState, lines: Sequence[Line]
-) -> PlannedTournament:
-    lowered = job.lower(state, lines=lines)
-    (spec,) = evaluation_group(lowered).evaluations
+def _plan_tournament(job: Job, spec: Evaluation) -> PlannedTournament:
     held = spec.tournament
     # Several seatings can describe the same match.
     matches = {match.key: match for match in spec.matches}
@@ -200,8 +201,8 @@ def _plan_tournament(
         checkpoints=None if robin else len({ref.key for ref in held.checkpoints}),
         matches=len(matches),
         games=sum(match.games for match in matches.values()),
-        max_hours=lowered.require_hours(),
-        max_usd=lowered.max_usd,
+        max_hours=job.require_hours(),
+        max_usd=job.max_usd,
     )
 
 
