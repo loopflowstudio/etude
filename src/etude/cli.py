@@ -33,17 +33,17 @@ FileHelp = Annotated[
 ]
 
 
-def _experiment_file(ctx: typer.Context, file: Path | None, help: bool) -> Path | None:
+def _experiment_file(ctx: typer.Context, file: Path | None, help: bool = False) -> Path:
+    if file is not None and (file.suffix != ".py" or not file.is_file()):
+        raise typer.BadParameter(
+            f"{file}: expected an existing Python (.py) file", param_hint="FILE"
+        )
     if help:
         print(ctx.get_help())
     if file is None:
         if help:
-            return None
+            raise typer.Exit()
         raise typer.BadParameter("a Python experiment FILE is required", param_hint="FILE")
-    if file.suffix != ".py" or not file.is_file():
-        raise typer.BadParameter(
-            f"{file}: expected an existing Python (.py) file", param_hint="FILE"
-        )
     return file
 
 
@@ -62,8 +62,7 @@ def check_experiment(
     help: FileHelp = False,
 ) -> None:
     """Validate an experiment file offline before launching it."""
-    if (file := _experiment_file(ctx, file, help)) is None:
-        return
+    file = _experiment_file(ctx, file, help)
     # Entry points load only the command being run.
     from etude.controller.check import show_check
     from etude.controller.declarations import read_experiment, read_training_jobs
@@ -110,6 +109,7 @@ def _guide_commands(group: TyperGroup, prefix: str) -> Iterator[str]:
 @app.command("train")
 @kind(Kind.wait)
 def train_recipe(
+    ctx: typer.Context,
     file: Annotated[
         Path, typer.Argument(help="a Python file defining train(config) or training_jobs()")
     ],
@@ -129,6 +129,8 @@ def train_recipe(
     json_output: Annotated[bool, typer.Option("--json", help="print a JSON result")] = False,
 ) -> None:
     """Train a recipe on this computer; 0 finished, 75 stopped, other failed."""
+    file = _experiment_file(ctx, file)
+    # Entry points load only the command being run.
     from etude.controller.local import train
     from etude.spec import Until
 
@@ -168,8 +170,7 @@ def _submit(
     watch: float | None = None,
     retry_failed: bool = False,
 ) -> None:
-    if (file := _experiment_file(ctx, file, help)) is None:
-        return
+    file = _experiment_file(ctx, file, help)
     import time
     from decimal import Decimal, InvalidOperation
 
@@ -375,8 +376,7 @@ def smoke_experiment(
     help: FileHelp = False,
 ) -> None:
     """Run a file's training, evaluation and report in smoke form on this computer. Spends nothing."""
-    if (file := _experiment_file(ctx, file, help)) is None:
-        return
+    file = _experiment_file(ctx, file, help)
     from typing import cast
 
     from etude.controller.declarations import read_experiment, read_training_jobs
@@ -517,6 +517,7 @@ def report(
 @app.command("eval")
 @kind(Kind.wait)
 def eval_experiment(
+    ctx: typer.Context,
     file: Annotated[
         Path,
         typer.Argument(
@@ -541,6 +542,7 @@ def eval_experiment(
     ] = False,
 ) -> None:
     """Play here the matches eval_jobs(state) wants that no run delivered."""
+    file = _experiment_file(ctx, file)
     # Experiments join tracking, evaluation and the launcher.
     import time
 
@@ -724,17 +726,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         from etude.call import validation_message
         from etude.storage_timeout import StorageUnavailable
 
-        # Typer attaches context to parse errors. A command can name a parameter
-        # explicitly for an input error or leave it unnamed for a domain refusal.
-        if (
-            hasattr(error, "format_message")
-            and hasattr(error, "exit_code")
-            and (
-                not isinstance(error, typer.BadParameter)
-                or error.ctx is not None
-                or error.param_hint is not None
-            )
-        ):
+        if hasattr(error, "format_message") and hasattr(error, "exit_code"):
             typer.echo(f"etude: {sanitize(error.format_message())}", err=True)
             return int(error.exit_code)
         if isinstance(
@@ -746,12 +738,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 StorageUnavailable,
                 OSError,
                 ValueError,
-                typer.BadParameter,
             ),
         ):
-            if isinstance(error, typer.BadParameter):
-                said = error.format_message()
-            elif isinstance(error, ValidationError):
+            if isinstance(error, ValidationError):
                 said = validation_message(error)
             else:
                 said = str(error)

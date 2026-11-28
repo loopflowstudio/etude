@@ -15,6 +15,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
+import typer
 from pydantic import computed_field
 
 from etude.call import changed_config, config_type
@@ -115,12 +116,6 @@ def check_file(
     if definition.training is None and definition.eval is None:
         kind = "local_recipe" if recipe is not None else "report_only"
     try:
-        if recipe is not None:
-            with declaration(file, recipe):
-                config = config_type(recipe)
-                if all(not field.is_required() for field in config.model_fields.values()):
-                    default = changed_config(config, "{}")
-                    config.model_validate_json(default.model_dump_json(round_trip=True))
         if definition.training is not None:
             requests = read_training_jobs(
                 file, given, experiment=definition.name, state=state, function=definition.training
@@ -141,6 +136,12 @@ def check_file(
                     )
                 )
             state = with_queued_runs(state, requests)
+        elif recipe is not None:
+            with declaration(file, recipe):
+                config = config_type(recipe)
+                if all(not field.is_required() for field in config.model_fields.values()):
+                    default = changed_config(config, "{}")
+                    config.model_validate_json(default.model_dump_json(round_trip=True))
     except (EtudeError, LauncherError) as error:
         issues.append(Issue.from_error(error, file))
 
@@ -248,16 +249,16 @@ def show_check(
     directory = None
     if source is not None:
         if "://" in source:
-            print(
-                f"etude check: --source needs a local directory. "
-                f"Use etude launch {shlex.quote(str(file))} --quote for bucket storage.",
-                file=sys.stderr,
+            raise typer.BadParameter(
+                f"expected a local directory. Use etude launch {shlex.quote(str(file))} --quote "
+                "for bucket storage.",
+                param_hint="--source",
             )
-            return 2
         directory = Path(source)
         if not directory.is_dir():
-            print(f"{directory}: --source needs an existing directory", file=sys.stderr)
-            return 2
+            raise typer.BadParameter(
+                f"{directory}: expected an existing directory", param_hint="--source"
+            )
     with redirect_stdout(sys.stderr) if format == "json" else nullcontext():
         checked = check_file(file, given, experiment=experiment, source=directory)
     if format == "json":
@@ -328,7 +329,7 @@ def _show_text(checked: Check) -> None:
             command.extend(("--experiment", checked.experiment))
         print(f"next: {shlex.join(command)}")
     else:
-        print("nothing left to launch")
+        print("nothing to launch" if checked.source is None else "nothing left to launch")
 
 
 def _budget(hours: float, usd: Decimal | None) -> str:

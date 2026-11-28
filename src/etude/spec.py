@@ -259,8 +259,10 @@ class Job(Record):
     def require_hours(self) -> float:
         """The machine allowance; launch, queue and smoke require it."""
         if self.max_hours is None:
+            job = f"job {self.name!r}" if self.name else "a job"
             raise LauncherError(
-                "a job needs max_hours: the most hours it may hold a machine", fix="max_hours=1"
+                f"{job} needs max_hours: the most hours it may hold a machine",
+                fix="max_hours=1",
             )
         return self.max_hours
 

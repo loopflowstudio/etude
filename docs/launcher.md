@@ -75,8 +75,9 @@ next: etude launch exp.py --quote
 runs offline on this computer—with no provider key, bucket, database, git or
 SSH call—and shares the runtime's own validation rules across syntax and
 renamed declarations, `training_jobs()`, `eval_jobs(state)`, `train(config)`,
-and `report()`. When `train` is present, `check` validates its config type
-and verifies that a fully defaulted config survives a JSON round trip.
+and `report()`. In a file without `training_jobs()`, `check` validates a
+`train(config)` recipe's config type and verifies that a fully defaulted
+config survives a JSON round trip.
 For eval jobs with an accelerator-capable loader, a fresh interpreter checks
 the imports of the game module and its optional `build` hook. Run
 `etude check FILE --help` to see the flags defined by `training_jobs()`.
@@ -109,8 +110,8 @@ file for `etude report FILE`.
   Dollar caps are decimal strings.
   Exit status is `0` when there are no errors, `1` when the file has errors,
   and `2` when nothing was checked (unusable file, source or command-line option).
-  `launch`, `queue` and `smoke` also exit `2` for missing files or unused
-  file flags.
+  `launch`, `queue`, `smoke`, `train` and `eval` also exit `2` for unusable
+  experiment files. `launch`, `queue` and `smoke` exit `2` for unused file flags.
 - **Same fixes at runtime.** `launch`, `queue`, `eval` and `smoke` print the
   same `FILE:LINE` location and `fix:` line when they refuse a declaration.
 

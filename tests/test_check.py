@@ -211,7 +211,9 @@ def test_check_reports_a_report_only_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     file = tmp_path / "notes.py"
-    file.write_text("from etude.report import Report\ndef report(): return Report()\n")
+    file.write_text(
+        'from etude.report import Report\ntrain = "base@0"\ndef report(): return Report()\n'
+    )
     assert main(["check", str(file)]) == 0
     assert f"ok, report only: etude report {file}; nothing to launch" in capsys.readouterr().out
     assert main(["check", str(file), "--format", "json"]) == 0
@@ -240,7 +242,7 @@ def test_report_refusals_describe_the_authored_value(
 
 
 @pytest.mark.parametrize("command", ["check", "launch", "queue", "smoke"])
-def test_experiment_commands_refuse_missing_files_and_unused_options(
+def test_experiment_commands_refuse_unused_file_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -251,8 +253,6 @@ def test_experiment_commands_refuse_missing_files_and_unused_options(
     file = tmp_path / "eval_only.py"
     assert main([command]) == 2
     assert "a Python experiment FILE is required" in capsys.readouterr().err
-    assert main([command, str(file)]) == 2
-    assert f"{file}: expected an existing Python" in capsys.readouterr().err
     file.write_text("def eval_jobs(state): raise AssertionError('must refuse the flag first')\n")
     assert main([command, str(file), "--typo"]) == 2
     captured = capsys.readouterr()
@@ -260,6 +260,33 @@ def test_experiment_commands_refuse_missing_files_and_unused_options(
     assert "file has no training_jobs() options" in captured.err
     assert captured.out == ""
     assert not launcher_file(home).exists()
+
+
+@pytest.mark.parametrize("command", ["check", "launch", "queue", "smoke", "train", "eval"])
+def test_experiment_commands_refuse_unusable_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], command: str
+) -> None:
+    non_python = tmp_path / "experiment.txt"
+    non_python.touch()
+    for file in (tmp_path / "missing.py", non_python):
+        assert main([command, str(file)]) == 2
+        captured = capsys.readouterr()
+        assert captured.err.startswith("etude: ")
+        assert f"{file}: expected an existing Python" in captured.err
+        assert captured.out == ""
+
+
+def test_report_names_the_unusable_experiment_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    non_python = tmp_path / "experiment.txt"
+    non_python.touch()
+    for file, code in (
+        (tmp_path / "missing.py", "experiment_file_not_found"),
+        (non_python, "experiment_file_must_be_python"),
+    ):
+        assert main(["report", str(file), "--source", str(tmp_path / "runs")]) == 1
+        assert f"etude: {code}: {file}" in capsys.readouterr().err
 
 
 def test_smoke_refuses_training_flags_without_the_train_step(
@@ -283,6 +310,59 @@ def test_commands_refuse_non_callable_training_declarations(
         output = captured.out if command == "check" else captured.err
         assert f"{file.name}: {name} must be a function" in output
         assert f"fix: def {name}(" in output
+
+
+@pytest.mark.parametrize(
+    ("module", "binding"),
+    [
+        ("check_train_helper", "def train(step, model): pass"),
+        (
+            "check_train_record",
+            'train = TrainingJob(name="base", train=run, config=Config(), repo=None)',
+        ),
+    ],
+)
+def test_training_jobs_owns_training_even_when_train_is_bound(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], module: str, binding: str
+) -> None:
+    (tmp_path / f"{module}.py").write_text(
+        dedent("""\
+        from pydantic import BaseModel
+
+        class Config(BaseModel):
+            pass
+
+        def run(config: Config) -> None:
+            raise AssertionError("planning must not run training")
+        """)
+    )
+    file = tmp_path / "experiment.py"
+    file.write_text(
+        dedent(f"""\
+        from {module} import Config, run
+        from etude.jobs import TrainingJob
+
+        def training_jobs():
+            return TrainingJob(name="base", train=run, config=Config(), max_hours=1, repo=None)
+        """)
+        + binding
+        + "\n"
+    )
+    assert main(["check", str(file)]) == 0
+    assert "experiment/base@0" in capsys.readouterr().out
+    assert main(["launch", str(file), "--quote", "--source", str(tmp_path / "runs")]) == 0
+    assert "experiment/base@0  new, would" in capsys.readouterr().out
+
+
+def test_eval_only_file_can_bind_train_as_a_run_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = tmp_path / "eval_only.py"
+    file.write_text('train = "base@0"\ndef eval_jobs(state): print(train); return []\n')
+    assert main(["check", str(file)]) == 0
+    assert "base@0" in capsys.readouterr().out.splitlines()
+    assert main(["eval", str(file), "--source", str(tmp_path / "runs")]) == 0
+    assert "base@0" in capsys.readouterr().out.splitlines()
 
 
 def test_check_and_smoke_point_into_the_experiments_checkout(
@@ -444,8 +524,12 @@ def test_check_validates_train_alongside_eval_and_accepts_required_config_fields
     assert main(["check", str(file)]) == 0
     output = capsys.readouterr().out
     assert "panel  benchmark  0 checkpoints  0 matches" in output
-    assert "nothing left to launch" in output
+    assert "nothing to launch" in output.splitlines()
     assert "next:" not in output
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    assert main(["check", str(file), "--source", str(runs)]) == 0
+    assert "nothing left to launch" in capsys.readouterr().out.splitlines()
 
 
 def test_check_formats_config_round_trip_errors(
@@ -722,6 +806,18 @@ def test_check_summarizes_a_first_launch_with_job_flags(
     assert f"next: etude launch {file} --quote --experiment lab" in output
 
 
+def test_check_and_launch_name_the_job_missing_max_hours(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = _planned_experiment(tmp_path)
+    file.write_text(file.read_text().replace("max_hours=1, repo=None),", "repo=None),", 1))
+    message = "job 'compare' needs max_hours"
+    assert main(["check", str(file)]) == 1
+    assert f"error: {message}" in capsys.readouterr().out
+    assert main(["launch", str(file), "--quote", "--source", str(tmp_path / "runs")]) == 1
+    assert message in capsys.readouterr().err
+
+
 def test_check_help_shows_declaration_flags_without_running_them(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -731,11 +827,16 @@ def test_check_help_shows_declaration_flags_without_running_them(
     )
     assert main(["check", "--help"]) == 0
     assert "--source" in capsys.readouterr().out
-    for command in ("check", "launch", "smoke"):
+    for command in ("check", "launch", "queue", "smoke"):
         assert main([command, str(file), "--help"]) == 0
         captured = capsys.readouterr()
         assert "--width" in captured.out
         assert captured.err == ""
+        missing = tmp_path / "missing.py"
+        assert main([command, str(missing), "--help"]) == 2
+        captured = capsys.readouterr()
+        assert f"{missing}: expected an existing Python" in captured.err
+        assert captured.out == ""
 
 
 def _save_checkpoint(source: DirectoryStorage, experiment: str, job: str, seed: int) -> None:
@@ -810,8 +911,11 @@ def test_check_source_resolves_stored_aliases_and_cross_experiment_seats_offline
 @pytest.mark.parametrize(
     ("options", "message"),
     [
-        (["--source", "r2://test/runs"], "--quote for bucket storage"),
-        (["--source", "check-directory-does-not-exist"], "--source needs an existing directory"),
+        (["--source", "s3://test/runs"], "--quote for bucket storage"),
+        (
+            ["--source", "check-directory-does-not-exist"],
+            "check-directory-does-not-exist: expected an existing directory",
+        ),
         (["--format", "yaml"], "Invalid value for"),
         (["--format"], "requires an argument"),
         (["--typo"], "No such option"),
@@ -825,4 +929,9 @@ def test_check_rejects_unusable_options(
 ) -> None:
     file = _planned_experiment(tmp_path)
     assert main(["check", str(file), *options]) == 2
-    assert message in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert captured.err.startswith("etude: ")
+    assert message in captured.err
+    if options[0] == "--source":
+        assert "--source" in captured.err
+        assert captured.out == ""

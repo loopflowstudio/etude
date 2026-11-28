@@ -254,21 +254,25 @@ class Experiment:
 
 
 def read_experiment(path: Path, *, experiment: str | None = None) -> Experiment:
+    """Read declarations, using top-level `train` only as a standalone training recipe."""
     if path.suffix != ".py":
-        raise EtudeError("experiment_file_must_be_python", 422) from ValueError(path)
+        raise EtudeError("experiment_file_must_be_python", 422, detail=str(path)) from ValueError(
+            path
+        )
     if not path.is_file():
-        raise EtudeError("experiment_file_not_found", 404) from FileNotFoundError(path)
+        raise EtudeError("experiment_file_not_found", 404, detail=str(path)) from FileNotFoundError(
+            path
+        )
     with declaration(path):
         refuse_renamed(path)
         namespace = execute_file(path)
-        found = namespace.get("eval_jobs")
+        evaluate = namespace.get("eval_jobs")
         training = namespace.get("training_jobs")
         report = namespace.get("report")
-        train = namespace.get("train")
+        train = namespace.get("train") if training is None else None
         for name, value, signature in (
             ("training_jobs", training, "training_jobs()"),
-            ("eval_jobs", found, "eval_jobs(state)"),
-            ("train", train, "train(config: Config) -> None"),
+            ("eval_jobs", evaluate, "eval_jobs(state)"),
         ):
             if value is not None and not callable(value):
                 raise LauncherError(
@@ -281,9 +285,14 @@ def read_experiment(path: Path, *, experiment: str | None = None) -> Experiment:
                 detail=f"report has type {type(report).__name__}",
                 fix="def report() -> Report:",
             )
+        if train is not None and not callable(train) and evaluate is None and report is None:
+            raise LauncherError(
+                f"{path.name}: train must be a function",
+                fix="def train(config: Config) -> None:",
+            )
     return Experiment(
         name=experiment or path.stem,
-        eval=cast(EvalFunction | None, found),
+        eval=cast(EvalFunction | None, evaluate),
         file=path,
         training=training if callable(training) else None,
         report=report if callable(report) else None,
