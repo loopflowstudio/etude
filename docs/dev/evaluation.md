@@ -142,7 +142,8 @@ with evaluating(
   CPUs (leaving one core for the shared agent process when present) and memory.
   For `play`, shared inference allows up to `ceil(max_batch / processes)`
   matches per process, and direct checkpoint inference allows up to
-  `max_batch` per process. Code-only `play` uses one match per process.
+  `max_batch` per process. Code-only `play` uses one match at a time per
+  process and bypasses the shared agent.
   Pending forwards flush on a zero-delay loop barrier.
   The inference thread and checkpoint budgets use the count of processes
   started for the panel. The startup line gives the initial `target_matches`
@@ -154,7 +155,8 @@ with evaluating(
   open and work remains. Per-process diagnostics are written to
   `game-{pid}.json`, and shared agent runs record batch row counts and stage
   timings in `batches.json`. The agent closes the batch array on SIGTERM.
-  Direct game reports count rows in `local_rows`.
+  Game reports count outcomes sent to the parent in `matches`, including
+  failed and refused outcomes. Direct game reports count rows in `local_rows`.
   `evaluating` has no setting for process count.
 - **Order.** Matches start in the order `etude.eval.schedule.ordered` gives,
   so consecutive matches reuse the checkpoints kept loaded: first those
@@ -224,9 +226,11 @@ with evaluating(
   held matches unyielded fails each unyielded match. Errors importing or
   setting up authored game code fail that tournament and leave ungranted
   matches pending. A loader import error fails its tournament in direct mode
-  and the group in shared mode. A game process that exits
-  without reporting, a failed shared-agent connection or `RetryRequested`
-  interrupts the group and leaves unfinished matches eligible for retry.
+  and the group in shared mode. These setup errors use `eval_startup_failed`.
+  Stream errors with no match failure to record use `eval_stream_failed`.
+  A game process that exits without reporting, a failed shared-agent
+  connection or `RetryRequested` interrupts the group and leaves unfinished
+  matches eligible for retry.
   A run with failed matches ends failed.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each drawn value from the
@@ -426,7 +430,7 @@ with evaluating(
 
 ## Measuring CUDA evaluation
 
-Read `game-*.json` for matches played by each process and `batches.json` for
+Read `game-*.json` for outcomes sent by each game process and `batches.json` for
 rows per forward and time spent waiting for requests.
 `max_batch` defaults to 32 rows and bounds how much the agent process merges.
 An oversized pre-collated request runs alone.

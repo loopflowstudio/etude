@@ -163,9 +163,10 @@ when the job is declared.
   seating a checkpoint shares that checkpoint's `Forward` object. Sampling and
   action choice belong in game code, seeded from `match.seed`.
 - A bare checkpoint with no build hook receives its `Forward` directly. Code and
-  API players use `build` too; without checkpoint leaves they run one game per
-  process, start no model-loading process and perform no GPU probe. Your build
-  hook owns API credentials and clients.
+  API players use `build` too. A `play` tournament with no checkpoint leaves
+  runs one match at a time per game process and bypasses the shared agent.
+  A group with no checkpoint leaves skips GPU detection. Your build hook
+  owns API credentials and clients.
 
 [`agent_game.py`](../examples/agent_game.py) shows `Sampled(temperature=...)`
 as identity and `Sampler.choose` as the action method.
@@ -190,6 +191,8 @@ uses one model-library thread, and gets a share of the checkpoint allowance
 input per row and return one ordered reply.
 
 Pending matches, CPUs and available host memory bound the game process count.
+An async `play` panel can start a process per available game core even when
+its pending matches fit into one inference batch.
 With `play`, shared inference divides `max_batch` across game processes,
 rounding up. Direct checkpoint inference gives each process up to `max_batch`
 matches. Shared inference leaves a core for the agent process when possible.
@@ -302,7 +305,9 @@ its match and stops grants for the tournament while held matches finish.
 Errors importing or setting up authored game code fail its tournament while
 sibling tournaments continue. A loader import error fails its tournament in
 direct mode and the group in shared mode. Completed results are retained,
-and matches that were never granted remain pending.
+and matches that were never granted remain pending. Etude reports
+`eval_startup_failed` for setup errors before the match stream starts.
+A stream error with no match failure to record reports `eval_stream_failed`.
 Infrastructure failures retry, and ordinary failed matches require
 `--retry-failed`. A forward failure raises
 `ForwardError` (with `.checkpoint` naming the checkpoint key) at the awaiting

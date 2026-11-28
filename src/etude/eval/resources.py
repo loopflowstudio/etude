@@ -1,13 +1,12 @@
 """Process environment for game and agent processes.
 
-`plan_execution` chooses shared or direct inference and returns game, thread
+`plan_execution` chooses shared or direct inference and returns process, thread
 and per-owner checkpoint-byte budgets for startup and dispatch. `resources`
 owns temporary fast scratch; `Resources.configure` sets child-only environment
 before author imports, leaving the calling process untouched. Observations are
 kept in the run's durable artifact folder by the group owner.
 """
 
-import math
 import os
 import platform
 import shutil
@@ -154,12 +153,9 @@ class ExecutionPlan:
     `threads` is each inference owner's thread budget: the shared agent process's
     in shared mode, and each game process's (always one) in direct mode.
     `inference` names the shared accelerator or explains direct play.
-    `games` is the per-process concurrency for async `play`. Streaming authors
-    request matches for their free slots.
     """
 
     processes: int
-    max_batch: int
     inference: Inference
     cpus: int
     checkpoint_memory: int
@@ -167,12 +163,6 @@ class ExecutionPlan:
     @property
     def shared(self) -> bool:
         return self.inference in ("cuda", "metal")
-
-    @property
-    def games(self) -> int:
-        if self.inference in ("no loader", "no checkpoints"):
-            return 1
-        return math.ceil(self.max_batch / self.processes) if self.shared else self.max_batch
 
     @property
     def threads(self) -> int:
@@ -205,10 +195,9 @@ def plan_execution(
     *,
     checkpoints: bool,
 ) -> ExecutionPlan:
-    """Choose shared or direct inference and size games, threads and checkpoint bytes.
+    """Choose shared or direct inference and budget processes, threads and checkpoint bytes.
 
     Shared inference leaves a core for the agent process when possible.
-    Direct inference gives each game process its own batch allowance.
     """
     if pending < 1:
         raise ValueError("an execution plan needs pending matches")
@@ -226,7 +215,6 @@ def plan_execution(
     return ExecutionPlan(
         inference=inference,
         processes=processes,
-        max_batch=loader.max_batch,
         cpus=cpus,
         checkpoint_memory=held,
     )

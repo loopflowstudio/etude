@@ -352,7 +352,7 @@ def running_agents(
             raise startup_error
         if startup_error is not None:
             raise EtudeError(
-                "agent_startup_failed", 500, detail=str(startup_error)
+                "eval_startup_failed", 500, detail=str(startup_error)
             ) from startup_error
         yield agent
     finally:

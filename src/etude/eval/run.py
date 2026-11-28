@@ -21,7 +21,7 @@ import time
 from collections import Counter, deque
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from hashlib import sha256
 from multiprocessing.connection import Connection, wait
 from pathlib import Path
@@ -526,12 +526,16 @@ class Playing:
     streaming: bool = False
     pending: deque[Match] = field(init=False)
     skipped: int = field(init=False)
+    uses_checkpoints: bool = field(init=False)
     played: int = 0
     failure: EtudeError | RetryRequested | None = None
 
     def __post_init__(self) -> None:
         self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
         self.skipped = len(self.run.matches) - len(self.pending)
+        self.uses_checkpoints = self.agent_loader.load is not None and any(
+            player_checkpoints(player) for match in self.pending for player in match.players
+        )
 
     def available_share(
         self,
@@ -599,7 +603,8 @@ class Playing:
 
     def fail_matches(
         self, matches: Sequence[Match], error: BaseException, *, terminal: bool = False
-    ) -> None:
+    ) -> bool:
+        """Fail unfinished matches and return whether any failure was recorded."""
         if isinstance(error, RetryRequested):
             raise error
         if isinstance(error, ForwardError) and error.retry and not error.loading:
@@ -609,10 +614,11 @@ class Playing:
             for match in matches
             if match.key not in self.run._failed and match.key not in self.run.done
         ]
-        if affected or terminal:
+        if affected:
             self._remember_failure(self.run._record_failure(affected, error), terminal=terminal)
         if terminal:
             self.pending.clear()
+        return bool(affected)
 
     def accept(self, match: Match, outcome: Outcome, started: float) -> None:
         if isinstance(outcome.result, BaseException):
@@ -684,19 +690,10 @@ def _play_pending(plays: Sequence[Playing], resources: Resources, checkout: str 
     definition = plays[0].agent_loader
     if any(each.agent_loader != definition for each in plays):
         raise EtudeError("incompatible_eval_agents", 422)
-    checkpoint_tournaments = {
-        each.run.id
-        for each in plays
-        if definition.load is not None
-        and any(player_checkpoints(player) for match in each.pending for player in match.players)
-    }
     matches = sum(len(each.pending) for each in plays)
-    plan = plan_execution(matches, definition, checkpoints=bool(checkpoint_tournaments))
-    initial = _reserve_games(plays, plan, ())
-    if not initial:
-        return
-    # Small panels may need fewer game processes than the host allows.
-    plan = replace(plan, processes=len(initial))
+    plan = plan_execution(
+        matches, definition, checkpoints=any(each.uses_checkpoints for each in plays)
+    )
     with (
         running_agents(definition, checkout, resources, plan) if plan.shared else nullcontext()
     ) as process:
@@ -704,10 +701,8 @@ def _play_pending(plays: Sequence[Playing], resources: Resources, checkout: str 
             plays,
             resources=resources,
             plan=plan,
-            initial=initial,
             checkout=checkout,
             agent_process=process,
-            direct_checkpoints=checkpoint_tournaments if not plan.shared else set(),
         )
         if process is not None:
             process.check()
@@ -738,12 +733,7 @@ def _reserve_games(
         before = len(reserved)
         for each in plays:
             key = id(each)
-            limit = (
-                math.ceil(len(each.pending) / plan.games)
-                if plan.shared and not each.streaming
-                else len(each.pending)
-            )
-            if counts[key] >= limit:
+            if counts[key] >= len(each.pending):
                 continue
             reserved.append(each)
             counts[key] += 1
@@ -758,10 +748,16 @@ def _reserve_games(
         target = each.available_share(
             processes=counts[key], unfed=unfed[key], held=0, total_held=held[key]
         )
-        if not each.streaming:
-            target = min(target, plan.games)
-        elif each.agent_loader.load is not None:
-            target = min(target, each.agent_loader.max_batch)
+        if each.streaming:
+            if each.agent_loader.load is not None:
+                target = min(target, each.agent_loader.max_batch)
+        elif not each.uses_checkpoints:
+            target = 1
+        else:
+            cap = each.agent_loader.max_batch
+            if plan.shared:
+                cap = math.ceil(cap / plan.processes)
+            target = min(target, cap)
         slots.append(_GameSlot(each, target))
     return slots
 
@@ -775,10 +771,11 @@ class _GameProcess:
     done: bool = False
     exhausted: bool = False
 
-    def finish(self, error: BaseException | None, *, stopping: bool) -> None:
+    def finish(self, message: Done, *, stopping: bool) -> None:
         self.done = True
         self.pipe.close()
         each = self.playing
+        error = message.error
         if error is None:
             if self.held:
                 error = RuntimeError("play_many returned without yielding its held matches")
@@ -786,7 +783,11 @@ class _GameProcess:
                 error = RuntimeError("play_many returned before taking all pending matches")
             else:
                 return
-        each.fail_matches(list(self.held.values()), error, terminal=True)
+        if not each.fail_matches(list(self.held.values()), error, terminal=True):
+            code = "eval_startup_failed" if message.startup_failed else "eval_stream_failed"
+            failure = EtudeError(code, 500, detail=explain(error))
+            failure.__cause__ = error
+            each._remember_failure(failure, terminal=True)
 
 
 def _play_matches(
@@ -794,10 +795,8 @@ def _play_matches(
     *,
     resources: Resources,
     plan: ExecutionPlan,
-    initial: Sequence[_GameSlot],
     checkout: str | None,
     agent_process: AgentProcess | None,
-    direct_checkpoints: set[str],
 ) -> None:
     """Play tournament streams in spawned processes and retain outcomes on the invoking thread."""
     if any(each.run.should_stop for each in plays):
@@ -828,7 +827,6 @@ def _play_matches(
     stopping = False
     context = multiprocessing.get_context("spawn")
     live: list[_GameProcess] = []
-    address = agent_process.address if agent_process is not None else None
 
     def spawn_one(slot: _GameSlot) -> _GameProcess:
         parent, child_pipe = context.Pipe()
@@ -838,10 +836,12 @@ def _play_matches(
             tournament=each.tournament,
             streaming=each.streaming,
             target_matches=slot.target_matches,
-            agent_address=address,
+            agent_address=agent_process.address
+            if each.uses_checkpoints and agent_process
+            else None,
             checkout=checkout,
             build=each.agent_loader.build,
-            load=each.agent_loader.load if each.run.id in direct_checkpoints else None,
+            load=each.agent_loader.load if each.uses_checkpoints and not plan.shared else None,
             memory=plan.checkpoint_bytes,
             max_batch=each.agent_loader.max_batch,
         )
@@ -882,11 +882,12 @@ def _play_matches(
         elif isinstance(message, Done):
             fail_checkpoints(message.loading_failures)
             record_report(message.report)
-            child.finish(message.error, stopping=stopping)
+            child.finish(message, stopping=stopping)
         else:
             raise TypeError(f"unexpected game message {type(message).__name__}")
 
     try:
+        initial = _reserve_games(plays, plan, ())
         for grant in initial:
             live.append(spawn_one(grant))
         _log_execution(plays, plan, initial)

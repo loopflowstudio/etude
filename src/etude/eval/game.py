@@ -70,7 +70,7 @@ class Imports(Record):
 
 
 class GameReport(Record):
-    """One game process's startup imports and measured work."""
+    """One game process's startup imports and measured work, including every sent outcome."""
 
     pid: int
     tournament: str
@@ -109,6 +109,7 @@ class Done:
     report: GameReport
     error: BaseException | None = None
     loading_failures: tuple[ForwardError, ...] = ()
+    startup_failed: bool = False
 
 
 @dataclass(frozen=True)
@@ -426,7 +427,8 @@ async def _serve_stream(
     client: AgentClient | None = None
     local: Forwards | None = None
     forwarder: _Forwarder | None = None
-    played_count = 0
+    outcomes_sent = 0
+    setting_up = True
 
     stream_error: BaseException | None = None
     try:
@@ -461,6 +463,7 @@ async def _serve_stream(
             if game.streaming
             else _drive_play(cast(Play, play), source, source.target_matches)
         )
+        setting_up = False
         async with aclosing(stream):
             async for match, outcome in stream:
                 taken = source._release(match)
@@ -478,9 +481,9 @@ async def _serve_stream(
                         f"game outcomes must be tables or a Result, got {type(outcome).__name__}"
                     )
                     refused = True
-                played_count += not refused
                 failures = forwarder.drain_loading_failures() if forwarder else ()
                 pipe.send(Outcome(taken.scheduled_key, result, elapsed, failures, refused=refused))
+                outcomes_sent += 1
     except Exception as error:
         stream_error = _portable_error(error)
     finally:
@@ -490,7 +493,7 @@ async def _serve_stream(
         pid=os.getpid(),
         tournament=game.tournament,
         imports=observe_imports(),
-        matches=played_count,
+        matches=outcomes_sent,
         requests=client.requests if client else 0,
         answers=client.answers if client else 0,
         request_bytes=client.request_bytes if client else 0,
@@ -506,7 +509,7 @@ async def _serve_stream(
     )
     failures = forwarder.drain_loading_failures() if forwarder else ()
     with suppress(EOFError, OSError):
-        pipe.send(Done(report, stream_error, failures))
+        pipe.send(Done(report, stream_error, failures, startup_failed=setting_up))
 
 
 def run_game_process(

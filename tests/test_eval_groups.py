@@ -10,7 +10,6 @@ import sys
 import tempfile
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import nullcontext
-from dataclasses import replace
 from decimal import Decimal
 from importlib import import_module
 from multiprocessing import active_children, get_context
@@ -619,19 +618,19 @@ def test_play_arity_and_removed_workers_are_refused(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("cpus", "pending", "agents", "memory_gb", "processes", "games"),
+    ("cpus", "pending", "agents", "memory_gb", "processes"),
     [
-        (32, 64, True, None, 32, 32),
-        (16, 64, True, None, 16, 32),
-        (3, 20, True, None, 3, 32),
-        (2, 20, True, None, 2, 32),
-        (8, 20, False, None, 8, 1),
-        (8, 20, True, None, 4, 32),
-        (8, 20, True, 1.5, 2, 32),
-        (8, 1, True, None, 1, 32),
-        (1, 20, True, None, 1, 32),
-        (1, 20, False, None, 1, 1),
-        (8, 20, True, 2.0, 1, 32),
+        (32, 64, True, None, 32),
+        (16, 64, True, None, 16),
+        (3, 20, True, None, 3),
+        (2, 20, True, None, 2),
+        (8, 20, False, None, 8),
+        (8, 20, True, None, 4),
+        (8, 20, True, 1.5, 2),
+        (8, 1, True, None, 1),
+        (1, 20, True, None, 1),
+        (1, 20, False, None, 1),
+        (8, 20, True, 2.0, 1),
     ],
 )
 def test_plan_execution_respects_cpu_pending_and_memory(
@@ -641,7 +640,6 @@ def test_plan_execution_respects_cpu_pending_and_memory(
     agents: bool,
     memory_gb: float | None,
     processes: int,
-    games: int,
 ) -> None:
     monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: "no accelerator detected")
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
@@ -651,36 +649,28 @@ def test_plan_execution_respects_cpu_pending_and_memory(
     loader = Agents(load=load, memory_gb=memory_gb).plain(None)
     plan = plan_execution(pending, loader, checkpoints=agents)
     reason = "no accelerator detected" if agents else "no checkpoints"
-    assert (plan.processes, plan.games, plan.threads, plan.inference) == (
-        processes,
-        games,
-        1,
-        reason,
-    )
+    assert (plan.processes, plan.threads, plan.inference) == (processes, 1, reason)
 
 
 @pytest.mark.parametrize(
-    ("pending", "batch_inputs", "memory_gb", "agents", "visible", "processes", "games"),
+    ("pending", "memory_gb", "agents", "visible", "processes"),
     [
-        (64, 32, None, True, "0", 3, 11),
-        (3, 32, None, True, "0", 3, 11),
-        (64, 8, None, True, "0", 3, 3),
-        (64, 32, 15.5, True, "0", 2, 16),
-        (64, 32, None, False, "0", 4, 1),
-        (64, 32, None, True, "", 4, 32),
-        (64, 32, None, True, "-1", 4, 32),
+        (64, None, True, "0", 3),
+        (3, None, True, "0", 3),
+        (64, 15.5, True, "0", 2),
+        (64, None, False, "0", 4),
+        (64, None, True, "", 4),
+        (64, None, True, "-1", 4),
     ],
 )
-def test_gpu_games_fill_a_batch_with_pending_and_memory_bounds(
+def test_cuda_plan_bounds_processes_by_cores_pending_and_memory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     pending: int,
-    batch_inputs: int,
     memory_gb: float | None,
     agents: bool,
     visible: str,
     processes: int,
-    games: int,
 ) -> None:
     monkeypatch.setattr(eval_resources, "_detect_accelerator", _detect_accelerator)
     monkeypatch.setattr("etude.eval.resources.sys.platform", "linux")
@@ -692,10 +682,10 @@ def test_gpu_games_fill_a_batch_with_pending_and_memory_bounds(
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
-    loader = Agents(load=load, max_batch=batch_inputs, memory_gb=memory_gb).plain(None)
+    loader = Agents(load=load, memory_gb=memory_gb).plain(None)
     plan = plan_execution(pending, loader, checkpoints=agents)
     expected_shared = agents and visible == "0"
-    assert (plan.processes, plan.games) == (processes, games)
+    assert plan.processes == processes
     assert plan.threads == (max(1, 4 - processes) if expected_shared else 1)
     assert plan.shared is expected_shared
     assert (tmp_path / "nvidia-smi.ran").exists() is expected_shared
@@ -720,39 +710,27 @@ def test_a_failing_nvidia_driver_plays_direct(
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
     plan = plan_execution(64, Agents(load=load).plain(None), checkpoints=True)
-    assert (plan.inference, plan.processes, plan.games) == ("nvidia-smi failed", 4, 32)
+    assert (plan.inference, plan.processes) == ("nvidia-smi failed", 4)
 
 
 @pytest.mark.parametrize(
-    (
-        "plat",
-        "machine",
-        "cpus",
-        "memory_gb",
-        "batch_inputs",
-        "processes",
-        "games",
-        "threads",
-        "accelerator",
-    ),
+    ("plat", "machine", "cpus", "memory_gb", "processes", "threads", "accelerator"),
     [
-        ("darwin", "arm64", 8, None, 32, 7, 5, 1, "metal"),
-        ("darwin", "arm64", 16, None, 8, 15, 1, 1, "metal"),
-        ("darwin", "arm64", 1, None, 32, 1, 32, 1, "metal"),
-        ("darwin", "arm64", 8, 15.5, 32, 2, 16, 6, "metal"),
-        ("darwin", "x86_64", 8, None, 32, 8, 32, 1, None),
-        ("linux", "arm64", 8, None, 32, 8, 32, 1, None),
+        ("darwin", "arm64", 8, None, 7, 1, "metal"),
+        ("darwin", "arm64", 16, None, 15, 1, "metal"),
+        ("darwin", "arm64", 1, None, 1, 1, "metal"),
+        ("darwin", "arm64", 8, 15.5, 2, 6, "metal"),
+        ("darwin", "x86_64", 8, None, 8, 1, None),
+        ("linux", "arm64", 8, None, 8, 1, None),
     ],
 )
-def test_apple_silicon_plan_execution_bounds_games_by_cores_and_memory(
+def test_apple_silicon_plan_bounds_processes_by_cores_and_memory(
     monkeypatch: pytest.MonkeyPatch,
     plat: str,
     machine: str,
     cpus: int,
     memory_gb: float | None,
-    batch_inputs: int,
     processes: int,
-    games: int,
     threads: int,
     accelerator: Accelerator | None,
 ) -> None:
@@ -763,12 +741,11 @@ def test_apple_silicon_plan_execution_bounds_games_by_cores_and_memory(
     monkeypatch.setattr("etude.eval.resources.shutil.which", lambda _: None)
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 16 * 1024**3)
-    loader = Agents(load=load, memory_gb=memory_gb, max_batch=batch_inputs).plain(None)
+    loader = Agents(load=load, memory_gb=memory_gb).plain(None)
     plan = plan_execution(64, loader, checkpoints=True)
     shared = accelerator is not None
-    assert (plan.processes, plan.games, plan.threads, plan.inference) == (
+    assert (plan.processes, plan.threads, plan.inference) == (
         processes,
-        games,
         threads,
         accelerator or "no accelerator detected",
     )
@@ -812,15 +789,14 @@ def test_probe_skipped_without_checkpoint_loading_or_accelerator(
         (Agents(load=load).plain(None), False, "no checkpoints"),
     ):
         plan = plan_execution(8, loader, checkpoints=checkpoints)
-        assert (plan.inference, plan.processes, plan.games, plan.checkpoint_bytes) == (
+        assert (plan.inference, plan.processes, plan.checkpoint_bytes) == (
             reason,
             8,
-            1,
             0,
         )
-    loader = Agents(load=load, devices=("cpu",), max_batch=16).plain(None)
+    loader = Agents(load=load, devices=("cpu",)).plain(None)
     cpu = plan_execution(8, loader, checkpoints=True)
-    assert (cpu.inference, cpu.processes, cpu.games, cpu.threads) == ("cpu-only loader", 8, 16, 1)
+    assert (cpu.inference, cpu.processes, cpu.threads) == ("cpu-only loader", 8, 1)
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -1336,7 +1312,7 @@ def test_eval_only_smoke_starts_one_agent_process(
     assert all(step.outcome == "passed" for step in result.rest)
     log = capfd.readouterr().err
     assert log.count("agents: shared inference") == log.count("agents: stopped") == 1
-    assert "2 game processes" in log
+    assert "3 game processes" in log
 
 
 async def stop_parent(match: Match, agents: Sequence[Forward]) -> Tables:
@@ -1641,6 +1617,8 @@ def test_loader_import_failure_preserves_pending_matches(
     ) as caught:
         hold_group(group(*jobs), directory=tmp_path)
     if not retry:
+        assert isinstance(caught.value, EtudeError)
+        assert caught.value.code == "eval_startup_failed"
         assert "fixture loader import: [redacted]" in str(caught.value)
         if shared:
             assert str(caught.value.__cause__).startswith("RuntimeError: fixture loader import")
@@ -1694,8 +1672,9 @@ def test_game_import_failure_fails_its_tournament_and_leaves_siblings_running(
         job("healthy", None),
     )
     broken, healthy = [spec.address.split("/")[-1] for spec in selected.evaluations]
-    with pytest.raises(EtudeError, match="fixture game import failed"):
+    with pytest.raises(EtudeError, match="fixture game import failed") as caught:
         hold_group(selected, directory=tmp_path)
+    assert caught.value.code == "eval_startup_failed"
     db = statsdb("grouped", tmp_path)
     try:
         assert set(db.sql("select run, state from runs").fetchall()) == {
@@ -1713,32 +1692,6 @@ def test_game_import_failure_fails_its_tournament_and_leaves_siblings_running(
     repaired, sibling = hold_group(selected, directory=tmp_path)
     assert (repaired.played, repaired.skipped) == (1, 0)
     assert (sibling.played, sibling.skipped) == (0, 1)
-
-
-def test_game_teardown_error_leaves_ungranted_matches_unrecorded(tmp_path: Path) -> None:
-    panel = [Match(players=(Code(name="one"),))]
-    with evaluating(
-        environment("teardown"),
-        experiment="teardown",
-        matches=panel,
-        run="games",
-        directory=tmp_path,
-    ) as active:
-        playing = Playing(
-            run=active,
-            play=Function(module=__name__, name=plain.__name__),
-            tournament="games",
-            agent_loader=AgentLoader(),
-        )
-        context = get_context("spawn")
-        parent, child = context.Pipe()
-        with parent, child:
-            process = _GameProcess(playing=playing, process=context.Process(), pipe=parent)
-            process.finish(RuntimeError("fixture teardown"), stopping=False)
-            process.process.close()
-        assert isinstance(playing.failure, EtudeError)
-        assert "fixture teardown" in str(playing.failure)
-        assert active.failed == 0
 
 
 async def catches_agent_error(match: Match, agents: Sequence[Forward]) -> Tables:
@@ -2042,14 +1995,16 @@ def test_inference_budgets_follow_started_processes(
         assert active.play(multi_round_play, agents=Agents(load=loader, max_batch=24)).played == 6
     artifacts = tmp_path / "budget/small/artifacts/agents"
     reports = _game_reports(artifacts)
-    assert len(reports) == 2
     assert sum(report.matches for report in reports) == 6
     log = capfd.readouterr().err
-    assert "2 game processes, play (initial target_matches=3)" in log
     if shared:
-        assert "6 inference threads" in log
-        assert set(json.loads((artifacts / "threads.json").read_text()).values()) == {"6"}
+        assert len(reports) == 6
+        assert "6 game processes, play (initial target_matches=1)" in log
+        assert "2 inference threads" in log
+        assert set(json.loads((artifacts / "threads.json").read_text()).values()) == {"2"}
     else:
+        assert len(reports) == 2
+        assert "2 game processes, play (initial target_matches=3)" in log
         assert [r.local_loads for r in reports] == [int(r.matches > 0) for r in reports]
 
 
@@ -2065,9 +2020,72 @@ def test_direct_play_reserves_all_32_cores_with_eight_matches_each(
         loader = Agents(load=load, devices=("cpu",)).plain(None)
         playing = Playing(active, Function(module=__name__, name=play.__name__), "cpu", loader)
         plan = plan_execution(len(panel), loader, checkpoints=True)
-        assert [slot.target_matches for slot in _reserve_games([playing], plan, [])] == [8] * 32
-    shared = plan_execution(len(panel), Agents(load=load).plain(None), checkpoints=True)
-    assert (shared.games, replace(shared, processes=2).games) == (2, 16)
+        slots = _reserve_games([playing], plan, [])
+    assert [slot.target_matches for slot in slots] == [8] * 32
+
+
+@pytest.mark.parametrize("accelerator", ["cuda", "metal"])
+@pytest.mark.parametrize(("max_batch", "target"), [(256, 3), (16, 2)])
+def test_shared_play_spreads_a_32_match_panel_across_12_cores(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    accelerator: Accelerator,
+    max_batch: int,
+    target: int,
+) -> None:
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: accelerator)
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 13)
+    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 8 * 1024**3)
+    panel = [Match(players=(checkpoint("one"),), index=i) for i in range(32)]
+    with evaluating(
+        environment("sizing"), experiment="sizing", matches=panel, run="shared", directory=tmp_path
+    ) as active:
+        loader = Agents(load=load, max_batch=max_batch).plain(None)
+        playing = Playing(active, Function(module=__name__, name=play.__name__), "shared", loader)
+        plan = plan_execution(len(panel), loader, checkpoints=True)
+        slots = _reserve_games([playing], plan, [])
+    assert [slot.target_matches for slot in slots] == [target] * 12
+
+
+def test_code_only_play_in_a_shared_group_uses_one_match_and_no_agent_socket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 3)
+    module = "code_only_shared_group_fixture"
+    (tmp_path / f"{module}.py").write_text(
+        "from multiprocessing import parent_process\n"
+        "from typing import NoReturn\n"
+        "from etude.eval.agents import AgentClient\n"
+        "from etude.eval.records import Match\n"
+        "from etude.eval.result import Tables\n"
+        "async def reject_connection(address: str) -> NoReturn:\n"
+        "    raise AssertionError('code-only game tried to connect to the shared agent')\n"
+        "if parent_process() is not None:\n"
+        "    AgentClient.connect = reject_connection\n"
+        "async def play(match: Match, agents: list[object]) -> Tables:\n"
+        "    return {'scores': [{'seat': 0, 'score': 7}]}\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    agents = Agents(load=load, build=build_loader_fixture)
+    code_only = EvalJob(
+        tournament=RoundRobin(
+            name="code-only",
+            environment=environment("grouped"),
+            configs=tuple({"index": index} for index in range(3)),
+            games=1,
+        ),
+        enter=(Code(name="one"), Code(name="two")),
+        play=import_module(module).play,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    results = hold_group(group(code_only, job("models", agents)), directory=tmp_path)
+    assert [result.played for result in results] == [3, 1]
+    log = capfd.readouterr().err
+    assert "2 game processes, play (initial target_matches=1)" in log
+    reports = _game_reports(tmp_path / "grouped/artifacts/agents")
+    assert sum(report.requests for report in reports if report.tournament == "models") == 2
 
 
 def test_direct_play_batches_eight_rows_per_process(
@@ -2476,9 +2494,11 @@ async def invalid_stream(matches: MatchStream[Config]) -> AsyncIterator[tuple[Ma
         yield unknown, await plain(match, list(agents))
     if outcome == "escaped":
         raise ValueError("fixture escaped the generator")
-    if outcome == "early":
+    if outcome in ("early", "teardown"):
         for match, agents in taken:
             yield match, await plain(match, list(agents))
+        if outcome == "teardown":
+            raise RuntimeError("fixture teardown")
         return
     result = await plain(match, list(agents))
     yield match, result
@@ -2493,6 +2513,7 @@ async def invalid_stream(matches: MatchStream[Config]) -> AsyncIterator[tuple[Ma
         ("abandoned", "without yielding its held matches", 2),
         ("escaped", "fixture escaped the generator", 2),
         ("early", "returned before taking all pending matches", 0),
+        ("teardown", "fixture teardown", 0),
     ],
 )
 def test_play_many_retains_held_matches_on_a_broken_stream(
@@ -2504,7 +2525,7 @@ def test_play_many_retains_held_matches_on_a_broken_stream(
         for index in range(3)
     ]
     with (
-        pytest.raises(EtudeError, match=detail),
+        pytest.raises(EtudeError, match=detail) as caught,
         evaluating(
             environment("vector"),
             experiment="vector",
@@ -2514,6 +2535,7 @@ def test_play_many_retains_held_matches_on_a_broken_stream(
         ) as active,
     ):
         active.play_many(invalid_stream)
+    assert caught.value.code == ("match_failed" if failed else "eval_stream_failed")
     [report] = _game_reports(tmp_path / "vector/broken/artifacts/agents")
     assert report.matches == 2 - failed
     db = statsdb("vector", tmp_path)
@@ -2620,7 +2642,7 @@ def test_invalid_outcome_fails_one_match_stops_grants_and_retains_held_matches(
     finally:
         db.close()
     reports = _game_reports(tmp_path / "invalid_return/policy/artifacts/agents")
-    assert [report.matches for report in reports] == [1]
+    assert [report.matches for report in reports] == [2]
 
 
 async def checked_stream(
