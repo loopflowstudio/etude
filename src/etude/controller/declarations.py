@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import cast
 
 import typer
+from typer.main import get_command
 
 from etude.controller.diagnostics import declaration
 from etude.errors import EtudeError, LauncherError, SourceLocation
@@ -55,7 +56,15 @@ def read_training_jobs(
     with declaration(path, function):
         signature = inspect.signature(function)
         job_app = _training_command(path, function, signature)
-    parsed = job_app(
+        try:
+            command = get_command(job_app)
+        except RuntimeError as error:
+            raise LauncherError(
+                f"training_jobs() options: {error}",
+                fix="annotate file options with a command-line type such as str, int, float or bool",
+                at=function,
+            ) from error
+    parsed = command(
         args=["--help"] if help else list(given),
         prog_name=f"{path.name} parameters",
         standalone_mode=False,

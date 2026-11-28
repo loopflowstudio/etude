@@ -883,6 +883,23 @@ def test_check_help_shows_declaration_flags_without_running_them(
         assert captured.out == ""
 
 
+def test_check_and_launch_locate_an_option_type_typer_cannot_parse(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file = tmp_path / "exp.py"
+    file.write_text("\ndef training_jobs(config: dict[str, int]):\n    return []\n")
+
+    assert main(["check", str(file), "--format", "json"]) == 1
+    checked = json.loads(capsys.readouterr().out)
+    (issue,) = checked["issues"]
+    assert (issue["file"], issue["line"]) == (str(file), 2)
+    assert "Type not yet supported: dict[str, int]" in issue["message"]
+    assert "annotate file options" in issue["fix"]
+
+    assert main(["launch", str(file), "--quote", "--source", str(tmp_path / "runs")]) == 1
+    assert f"{file}:2: {issue['message']}\n  fix: {issue['fix']}" in capsys.readouterr().err
+
+
 def _save_checkpoint(source: DirectoryStorage, experiment: str, job: str, seed: int) -> None:
     address = f"{experiment}@{seed}"
     record = RunRecord(

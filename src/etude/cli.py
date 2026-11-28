@@ -675,17 +675,14 @@ app.command()(kind(Kind.wait)(checkpoints))
 app.command()(kind(Kind.wait)(sync))
 
 
+_EXPERIMENT_COMMANDS = ("check", "launch", "queue", "smoke", "train", "eval")
+
 # Commands that run on this computer even when a server is chosen: they read
 # local files or a bucket, run a machine's worker, or submit through the server
 # themselves. Every other command is sent to a chosen server.
 _HERE = (
-    "check",
+    *_EXPERIMENT_COMMANDS,
     "guide",
-    "launch",
-    "queue",
-    "smoke",
-    "train",
-    "eval",
     "database",
     "source",
     "fetch",
@@ -722,6 +719,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(error.exit_code)
     except TyperException as error:
         typer.echo(f"etude: {sanitize(error.format_message())}", err=True)
+        if isinstance(error, typer.BadParameter) and not (argv and argv[0] in _EXPERIMENT_COMMANDS):
+            return 1
         return error.exit_code
     except Exception as error:
         # Entry points load failure-specific dependencies only on the failing command.
