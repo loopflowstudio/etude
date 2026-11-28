@@ -176,6 +176,9 @@ def training_jobs() -> list[TrainingJob]:
     (resumed,) = b.store.runs()
     assert resumed.id == prior.id and resumed.launch.spec.max_usd == 2
     assert b.scheduler.limits()[0].committed_usd == 2
+    # Resuming at the same cap asks nothing more, so a lowered limit does not refuse it.
+    b.scheduler.set_limit("ppo", Decimal(1))
+    assert main([*argv, "--resume"]) == 0
 
 
 def test_server_reserves_before_client_publication_and_releases_a_failed_intent(

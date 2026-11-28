@@ -413,7 +413,7 @@ class Scheduler:
                 ),
             }
         )
-        if requests and committed + ask > limit.max_usd:
+        if requests and ask > 0 and committed + ask > limit.max_usd:
             raise LauncherError(
                 f"experiment {limit.experiment!r} is limited to ${limit.max_usd:.2f}: "
                 f"{measured.format_committed()} committed and this launch asks ${ask:.2f}; "

@@ -250,14 +250,14 @@ def test_an_experiment_limit_refuses_hand_down_before_any_rental(
     assert b.scheduler.runs() == ()
     assert b.service.creates == 0
     assert "not queued: limit $0.50 ($0.00 committed)" in capsys.readouterr().out
-    with pytest.raises(LauncherError, match=r"limited to \$0.50.*asks \$2.00"):
-        advance(
-            read_experiment(file),
-            source=DirectoryStorage(tmp_path / "source"),
-            rent="l4",
-            mode="launch",
-            quote=True,
-        )
+    advance(
+        read_experiment(file),
+        source=DirectoryStorage(tmp_path / "source"),
+        rent="l4",
+        mode="launch",
+        quote=True,
+    )
+    assert "not queued: limit $0.50 ($0.00 committed)" in capsys.readouterr().out
     assert b.scheduler.limits()[0].committed_usd == 0
     assert b.service.creates == 0
 

@@ -132,13 +132,13 @@ def advance(
     limit = None
     if mode != "local":
         spending = client._read_limits(
-            experiment.name, include_default=pool is None and rent is None and not (resume or quote)
+            experiment.name, include_default=pool is None and rent is None and not resume
         )
         if spending.limits:
             limit = spending.limits[0]
             target = spending.default_target or target
     committed = limit.committed_usd if limit is not None else Decimal(0)
-    budget = None if resume or quote else limit
+    budget = None if resume else limit
     spending_line = ""
     if limit is not None:
         spending_line = f"; {limit.format_committed()} of ${limit.max_usd:.2f} committed"
