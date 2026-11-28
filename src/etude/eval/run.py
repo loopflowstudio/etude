@@ -569,13 +569,13 @@ def play_together(
     artifacts: Path,
     checkout: str | None = None,
 ) -> tuple[EvalResult | EtudeError | RetryRequested, ...]:
-    """Run the play phase, then the play_many phase, sharing outcomes and progress."""
-    pending = [each for each in plays if each.pending]
+    """Run all pending tournament queues under one placement."""
+    pending = tuple(each for each in plays if each.pending)
+    teardown_plays = pending
     agents = pending[0].agent_loader if pending else AgentLoader()
     if any(each.agent_loader != agents for each in pending):
         raise EtudeError("incompatible_eval_agents", 422)
     started = time.monotonic()
-    warned_imports = False
     failed_checkpoints: set[str] = set()
 
     def fail_checkpoints(failures: Sequence[CheckpointFailure] = ()) -> None:
@@ -671,14 +671,16 @@ def play_together(
                 remember_failure(each, match_error)
                 each.pending.clear()
 
-    def run_phase(active_plays: tuple[Playing, ...], owned: Resources, *, streaming: bool) -> None:
-        if any(each.run.should_stop for each in active_plays):
+    def run_pending(owned: Resources) -> None:
+        nonlocal teardown_plays
+        if any(each.run.should_stop for each in pending):
             raise Terminated("evaluation stopped before its execution deadline")
         stopping = False
+        warned_imports = False
         needs_loading = False
         match_bytes = 0
         if agents.load is not None:
-            for each in active_plays:
+            for each in pending:
                 for match in each.pending:
                     sizes: dict[str, int] = {}
                     for player in match.players:
@@ -690,8 +692,8 @@ def play_together(
                         needs_loading = True
                         match_bytes = max(match_bytes, sum(sizes.values()))
         placement = place(
-            [len(each.pending) for each in active_plays],
-            streaming=streaming,
+            [len(each.pending) for each in pending if not each.streaming],
+            streaming=[len(each.pending) for each in pending if each.streaming],
             loader=agents,
             checkpoints=needs_loading,
             match_bytes=match_bytes,
@@ -707,11 +709,15 @@ def play_together(
                 )
             agent_address = agent_process.address if agent_process is not None else None
 
-            def record_report(report: GameReport | None) -> None:
-                nonlocal warned_imports
+            def record_report(child: _GameProcess, report: GameReport | None) -> None:
+                nonlocal warned_imports, teardown_plays
                 if report is None:
                     return
-                _retain(f"game-{report.pid}.json", report, owned.artifacts)
+                try:
+                    _retain(f"game-{report.pid}.json", report, owned.artifacts)
+                except RetryRequested:
+                    teardown_plays = child.plays
+                    raise
                 if placement.bus is not None and not warned_imports:
                     warning = report.imports.warning(count_limit=placement.bus == "socket")
                     if warning:
@@ -720,9 +726,7 @@ def play_together(
 
             context = multiprocessing.get_context("spawn")
             live: list[_GameProcess] = []
-            stream_groups = (
-                [active_plays] if placement.share_streams else [(each,) for each in active_plays]
-            )
+            stream_groups = [pending] if placement.share_streams else [(each,) for each in pending]
 
             def spawn_one(targets: tuple[Playing, ...]) -> _GameProcess:
                 parent, child_pipe = context.Pipe()
@@ -730,7 +734,7 @@ def play_together(
                     Stream(
                         tournament=each.tournament,
                         function=each.play,
-                        concurrency=games_per_process,
+                        concurrency=None if each.streaming else games_per_process,
                     )
                     for each in targets
                 )
@@ -757,16 +761,11 @@ def play_together(
                     for targets in stream_groups:
                         if len(live) >= placement.processes:
                             break
-                        pending = max(len(each.pending) for each in targets)
-                        if not pending:
+                        remaining = max(len(each.pending) for each in targets)
+                        if not remaining:
                             continue
                         active = sum(child.plays is targets for child in live)
-                        needed = (
-                            1
-                            if games_per_process is None
-                            else math.ceil(pending / games_per_process)
-                        )
-                        if active >= needed:
+                        if active >= remaining:
                             continue
                         live.append(spawn_one(targets))
                         spawned = True
@@ -774,15 +773,20 @@ def play_together(
                         break
 
             def handle_message(child: _GameProcess, message: object) -> None:
-                nonlocal stopping
+                nonlocal stopping, teardown_plays
                 if isinstance(message, Take):
                     each = child.plays[message.stream]
                     if not stopping and each.pending and each.run.should_stop:
                         stopping = True
                     granted: list[Match] = []
                     if not stopping and message.count > 0:
+                        count = message.count
+                        if each.streaming:
+                            # Keep one engine's slot request from taking the whole queue.
+                            fair_share = max(1, math.ceil(len(each.pending) / placement.processes))
+                            count = min(count, fair_share)
                         held = child.held.setdefault(message.stream, {})
-                        while each.pending and len(granted) < message.count:
+                        while each.pending and len(granted) < count:
                             match = each.pending[0]
                             if match.key not in each.run._failed and match.key not in each.run.done:
                                 held[match.key] = match
@@ -816,9 +820,10 @@ def play_together(
                     child.held.pop(message.stream, None)
                 elif isinstance(message, (Done, Fatal)):
                     fail_checkpoints(message.loading_failures)
-                    record_report(message.report)
+                    record_report(child, message.report)
                     if isinstance(message, Fatal):
                         if isinstance(message.error, RetryRequested):
+                            teardown_plays = child.plays
                             raise message.error
                         for index, each in enumerate(child.plays):
                             fail_held(each, child.held.get(index, {}), message.error)
@@ -838,7 +843,10 @@ def play_together(
 
             try:
                 spawn_ready()
-                description = placement.describe([each.tournament for each in active_plays])
+                description = placement.describe(
+                    [each.tournament for each in pending],
+                    streaming=any(each.streaming for each in pending),
+                )
                 if description is not None:
                     print(description, file=sys.stderr, flush=True)
                 while live:
@@ -846,7 +854,7 @@ def play_together(
                     allowance = (
                         None
                         if left is None
-                        else max(0.0, left - max(each.run._slowest for each in active_plays))
+                        else max(0.0, left - max(each.run._slowest for each in pending))
                     )
                     handles: list[Connection | int] = []
                     for child in live:
@@ -872,6 +880,7 @@ def play_together(
                             receive(child)
                         child.process.join()
                         if not child.done or child.process.exitcode != 0:
+                            teardown_plays = child.plays
                             raise RetryRequested("game process exited before returning its match")
                         live.remove(child)
                         child.process.close()
@@ -896,16 +905,10 @@ def play_together(
             if stopping:
                 raise Terminated("evaluation stopped before its execution deadline")
 
-    active_phase: tuple[Playing, ...] = ()
     try:
-        with _terminable(), resources(artifacts) as owned:
-            for streaming in (False, True):
-                active_plays = tuple(
-                    each for each in plays if each.streaming == streaming and each.pending
-                )
-                if active_plays:
-                    active_phase = active_plays
-                    run_phase(active_plays, owned, streaming=streaming)
+        if pending:
+            with _terminable(), resources(artifacts) as owned:
+                run_pending(owned)
     except RetryRequested as error:
         affected = False
         for each in plays:
@@ -914,11 +917,10 @@ def play_together(
                 affected = True
             each.pending.clear()
         if not affected:
-            # A teardown error after a phase's last match belongs to that phase,
-            # so tournaments in earlier phases keep their own outcomes.
-            if not active_phase:
+            # A late teardown error belongs to the owner of the failed process.
+            if not teardown_plays:
                 raise
-            for each in active_phase:
+            for each in teardown_plays:
                 each.failure = error
     finally:
         for each in plays:

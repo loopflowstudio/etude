@@ -155,23 +155,23 @@ class Placement:
     processes: int
     game_threads: int
     agent_threads: int
-    games_per_process: int | None  # `play_many` requests its own slots.
+    games_per_process: int | None  # Concurrency of async play, if present.
     share_streams: bool
     checkpoint_bytes: int
-    reason: Inference | Literal["no pending matches", "play_many"]
+    reason: Inference | Literal["no pending matches"]
 
-    def describe(self, tournaments: Sequence[str]) -> str | None:
-        """Describe the placement of one evaluation phase."""
-        if not self.processes or (self.bus is None and self.games_per_process is not None):
+    def describe(self, tournaments: Sequence[str], *, streaming: bool) -> str | None:
+        """Describe the placement of one evaluation group."""
+        if not self.processes or (self.bus is None and not streaming):
             return None
         process = "game process" if self.processes == 1 else "game processes"
         game = "game" if self.games_per_process == 1 else "games"
-        capacity = (
-            "slots requested by play_many"
-            if self.games_per_process is None
-            else f"{self.games_per_process} {game} each"
-        )
-        games = f"{self.processes} {process}, {capacity}"
+        capacity = []
+        if self.games_per_process is not None:
+            capacity.append(f"{self.games_per_process} {game} each")
+        if streaming:
+            capacity.append("slots requested by play_many")
+        games = ", ".join((f"{self.processes} {process}", *capacity))
         if self.bus is None:
             return f"etude: {games}"
         mode = "shared" if self.bus == "socket" else "direct"
@@ -203,19 +203,19 @@ def _select_inference(loader: "AgentLoader", checkpoints: bool) -> Inference:
 def place(
     pending: Sequence[int],
     *,
-    streaming: bool = False,
+    streaming: Sequence[int] = (),
     loader: "AgentLoader",
     checkpoints: bool,
     match_bytes: int = 0,
 ) -> Placement:
-    """Allocate the host to tournaments using the same kind of play function.
+    """Allocate one host to the pending async and streaming match queues.
 
-    `pending` gives the match count per tournament. `match_bytes` is the largest
-    known total of distinct checkpoints seated in a pending match. A streaming
-    phase serves every tournament in one process and skips the GPU probe.
+    `match_bytes` is the largest known total of distinct checkpoints seated in
+    a pending match.
     """
     queues = tuple(count for count in pending if count > 0)
-    if not queues:
+    streams = tuple(count for count in streaming if count > 0)
+    if not queues and not streams:
         return Placement(
             bus=None,
             processes=0,
@@ -226,64 +226,55 @@ def place(
             checkpoint_bytes=0,
             reason="no pending matches",
         )
-    loading = loader.load is not None and checkpoints
-    memory_gb = loader.memory_gb
-    cpus = available_cpus()
-    # One reservation covers the shared cache or all direct caches combined.
-    host_bytes = memory_bytes() if not streaming or (loading and memory_gb is None) else 0
-    held = 0
-    if loading:
-        held = int(memory_gb * 1024**3) if memory_gb is not None else host_bytes // 2
-    if streaming:
-        return Placement(
-            bus="local" if loading else None,
-            processes=1,
-            game_threads=max(1, cpus - 1) if loading else cpus,
-            agent_threads=0,
-            games_per_process=None,
-            share_streams=True,
-            checkpoint_bytes=held,
-            reason="play_many" if loading else _select_inference(loader, checkpoints),
-        )
     inference = _select_inference(loader, checkpoints)
+    cpus = available_cpus()
+    host_bytes = memory_bytes()
+    loading = loader.load is not None and checkpoints
     if not loading:
         cap = min(cpus, max(1, host_bytes // GAME_BYTES))
         return Placement(
             bus=None,
-            processes=min(cap, sum(queues)),
+            processes=min(cap, sum(queues) + sum(streams)),
             game_threads=1,
             agent_threads=0,
-            games_per_process=1,
+            games_per_process=1 if queues else None,
             share_streams=False,
             checkpoint_bytes=0,
             reason=inference,
         )
-    shared = inference in ("cuda", "metal")
-    share_streams = not shared
+    # One reservation covers the shared cache or all direct caches combined.
+    memory_gb = loader.memory_gb
+    held = int(memory_gb * 1024**3) if memory_gb is not None else host_bytes // 2
+    accelerator = inference in ("cuda", "metal")
     memory_processes = max(1, (host_bytes - held) // GAME_BYTES)
-    cap = min(max(1, cpus - 1) if shared else cpus, memory_processes)
+    cap = min(max(1, cpus - 1) if accelerator else cpus, memory_processes)
     if inference == "cuda":
         cap = min(cap, loader.max_batch)
-    if share_streams and match_bytes > 0:
+    if not accelerator and match_bytes > 0:
         # Each direct process needs room for a match in its own checkpoint cache.
         cap = min(cap, max(1, held // match_bytes))
-    largest = max(queues)
-    # Direct processes share every queue and can reuse their checkpoint cache.
-    if share_streams:
-        queues = (largest,)
-    games_per_process = (
-        1
-        if inference == "metal"
-        else min(math.ceil(loader.max_batch / min(cap, sum(queues))), largest)
-    )
-    processes = min(cap, sum(math.ceil(count / games_per_process) for count in queues))
+    largest = max(queues, default=0)
+    if not accelerator:
+        # Direct processes reuse their cache and serve the same queues in turn.
+        queues = (largest,) if queues else ()
+        streams = (max(streams),) if streams else ()
+    # Each streaming generator can take its own slots. Size async demand at
+    # the host's process limit, then divide the batch across the processes chosen.
+    streaming_demand = sum(streams)
+    games = math.ceil(loader.max_batch / min(cap, sum(queues) + streaming_demand))
+    async_demand = sum(math.ceil(count / games) for count in queues)
+    demand = async_demand + streaming_demand if accelerator else max(async_demand, streaming_demand)
+    processes = min(cap, demand)
+    shared = accelerator and processes > 1
     return Placement(
         bus="socket" if shared else "local",
         processes=processes,
         game_threads=1 if shared else max(1, (cpus - processes) // processes),
         agent_threads=max(1, cpus - processes) if shared else 0,
-        games_per_process=games_per_process,
-        share_streams=share_streams,
+        games_per_process=min(math.ceil(loader.max_batch / processes), largest)
+        if largest
+        else None,
+        share_streams=not shared,
         checkpoint_bytes=held if shared else held // processes,
         reason=inference,
     )

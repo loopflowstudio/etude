@@ -287,19 +287,20 @@ as shared inference and report failures to the parent even when play catches
 them. Loaders must honor their inference budget when configuring the library.
 Shared inference game processes keep one thread each.
 `Agents.devices` declares loader capabilities in hardware terms (default
-`("cuda", "metal")`). For `play`, derive shared or direct inference from that
-declaration and detected hardware. Probe without
+`("cuda", "metal")`). Derive shared or direct inference from that declaration,
+detected hardware and the number of game processes. Probe without
 importing the loader or its framework. The loader owns placement and GPU memory.
 Shared inference leaves a core for the agent process when possible. Pending
-matches and remaining host memory bound the process count. CUDA and direct
-checkpoint inference divide `max_batch` across processes for `play`. Metal
-and code-only games use one match per process. `play_many` sizes its slots and
-runs in one direct game process with the host inference budget.
+matches and remaining host memory bound the process count. Checkpoint
+inference divides `max_batch` across processes for `play`. Code-only `play`
+runs one match per process. `play_many` chooses its slots and each grant is
+capped at the remaining queue divided by the planned game process count,
+rounded up. Mixed groups use one placement and share their inference budget.
 Cap merged forwards at `max_batch`. Split oversized requests with one
 input per row and preserve their reply order. Opaque oversized inputs run
 alone. An absent or undeclared accelerator plays direct. Skip the probe for
-CPU-only loaders, plays without a loader or checkpoints, and every
-`play_many` phase. Log the mode, reason and sizing once per phase.
+CPU-only loaders and plays without a loader or checkpoints. Log the mode,
+reason and sizing once per group.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any

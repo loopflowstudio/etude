@@ -176,14 +176,14 @@ Each game process runs many `play` tasks on one `asyncio` event loop. When no
 running game in the process can add another input, pending calls flush together
 with no timer. Avoid blocking the event loop between `await`s.
 
-For `play`, `Agents(load=load, devices=("cuda", "metal"))` shares inference on a
-visible NVIDIA GPU or an Apple Silicon Mac running native arm64 Python.
-These are the default devices. Use `("cuda",)` for a CUDA-only loader,
+`Agents(load=load, devices=("cuda", "metal"))` can share inference on a visible
+NVIDIA GPU or an Apple Silicon Mac running native arm64 Python. These are the
+default devices. Use `("cuda",)` for a CUDA-only loader,
 `("metal",)` for an Apple GPU loader, or `("cpu",)` for direct inference
 without a probe. Etude drops `"cpu"` from mixed declarations.
 
-With a matching accelerator, game processes send their pending calls in one
-message to a shared agent process, which merges ready requests by checkpoint
+With a matching accelerator and multiple game processes, the games send
+pending calls to a shared agent process, which merges ready requests by checkpoint
 up to `max_batch` rows and writes observations to `artifacts/agents/batches.json`.
 An oversized request with one input per row uses multiple forwards and gets
 one ordered reply. With direct inference, each game process keeps its own
@@ -191,10 +191,10 @@ checkpoint cache and gets a share of the available model-library threads and
 checkpoint allowance (half of host memory by default).
 
 Pending matches, CPUs and available host memory bound the game process count.
-For `play`, CUDA and direct checkpoint inference divide `max_batch` across
-game processes, rounding up. Metal uses one match per game process and leaves
-a core for shared inference when possible. The startup line gives the mode,
-its reason, and the process, slot and thread counts.
+For `play` with checkpoint inference, Etude divides `max_batch` across game
+processes, rounding up. Shared inference leaves a core for the agent process
+when possible. The startup line gives the mode, its reason, and the process,
+slot and thread counts.
 
 Choose tensor placement in `load` and honor Etude's thread environment there.
 Keep model imports in the loading module so shared game processes stay light.
@@ -208,16 +208,11 @@ Run the [vectorized example](../examples/vectorized.py):
 uv run etude eval examples/vectorized.py --source /tmp/vectorized
 ```
 
-A `play_many` phase with a loader runs inference directly inside one game
-process on CPU, Apple Silicon, and NVIDIA GPU hosts. That phase skips the
-accelerator probe and uses the same placement for every `Agents.devices`
-setting. Etude prints the placement to stderr.
+Etude can run several copies of `play_many` in separate game processes. Each
+generator asks for matches from the same tournament queue. Etude prints the
+group's process count and inference mode to stderr.
 
-```text
-etude: agents: direct inference for vector (play_many); 1 game process, slots requested by play_many; 15 inference threads
-```
-
-Direct-mode `threads` sets the game process's model and BLAS thread environment
+In direct mode, Etude sets each game process's model and BLAS thread environment
 variables (`OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, etc.)
 before author modules are imported.
 
@@ -268,8 +263,10 @@ scheduling, checkpoint caching and eviction, durable match storage and failure
 retention.
 
 - `await matches.take(n)` pulls up to `n` pending `(match, agents)` pairs in one
-  step. Returning `[]` for `n > 0` means no pending matches remain (or the run
-  is stopping).
+  step. Etude caps each grant at the pending count divided by the planned
+  game process count, rounding up. The generator can ask for more as slots
+  free up. Returning `[]` for `n > 0` means the queue is empty or the run
+  is stopping.
 - `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
   `rows=` for a pre-collated batch so batching never merges calls past
   `max_batch` rows and reports real row counts. An oversized pre-collated call
@@ -347,19 +344,14 @@ the end of the event-loop turn.
   back to the game loop, so outputs never alias an in-flight input array or a
   reused buffer inside `load`.
 
-When a group contains both kinds of play function, Etude finishes its `play`
-tournaments first and then runs its `play_many` tournaments on the same host.
-Each phase gets the host's thread budget and the full checkpoint allowance
-from `Agents.memory_gb`. A checkpoint used in both phases loads in each phase.
+Grouped `play` and `play_many` tournaments share a process budget and the
+`Agents.memory_gb` checkpoint allowance.
 
-| Host | Play function | Inference transport |
-|---|---|---|
-| Any host (CPU, Mac, GPU) | `play_many` | Direct inference thread in one game process. It serves each tournament in turn, keeps checkpoints loaded across tournaments, and gets `max(1, cpus - 1)` inference threads. |
-| No declared accelerator detected | `play` | Direct inference thread in each game process. Each process serves the tournament queues in turn and reuses its loaded checkpoints. |
-| Declared CUDA or Metal accelerator detected | `play` | Shared agent process over a private Unix socket. |
-
-Code-only players (no loader) start neither an inference thread nor an agent
-process. Code-only `play_many` tournaments run in turn in one game process.
+| Placement | Inference transport |
+|---|---|
+| Declared CUDA or Metal accelerator detected and more than one game process | One shared agent process over a private Unix socket. Its checkpoint cache serves every tournament. |
+| One game process or no matching accelerator | A direct inference thread and checkpoint cache in each game process. Each process can reuse loaded checkpoints across tournament queues. |
+| No checkpoint loader or no checkpoints | Game processes only. |
 
 ## Results and retry
 

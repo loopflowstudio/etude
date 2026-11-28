@@ -1379,15 +1379,24 @@ def test_local_and_socket_store_identical_rows(
             lambda t=transport: "cuda" if t == "socket" else "no accelerator detected",
         )
         monkeypatch.setattr(
-            "etude.eval.resources.available_cpus", lambda t=transport: 2 if t == "socket" else 1
+            "etude.eval.resources.available_cpus", lambda t=transport: 3 if t == "socket" else 1
         )
         root = tmp_path / f"mirror-{transport}"
         selected = job(
-            "mirror", Agents(load=mirror_panel.load, build=mirror_panel.build)
-        ).model_copy(
-            update={"play": mirror_panel.play, "enter": (compose(mirror), compose(greedy))}
+            "mirror", Agents(load=mirror_panel.load, build=mirror_panel.build, max_batch=2)
         )
-        assert hold_group(group(selected), directory=root)[0].played == 1
+        selected = selected.model_copy(
+            update={
+                "play": mirror_panel.play,
+                "enter": (compose(mirror), compose(greedy)),
+                "tournament": selected.tournament.model_copy(
+                    update={"config": {}, "configs": (), "games": 2}
+                ),
+            }
+        )
+        assert hold_group(group(selected), directory=root)[0].played == 2
+        artifacts = root / "grouped/artifacts/agents"
+        assert (artifacts / "batches.json").exists() == (transport == "socket")
         db = statsdb("grouped", root)
         try:
             mirror_results[transport] = db.sql(
@@ -1396,7 +1405,7 @@ def test_local_and_socket_store_identical_rows(
         finally:
             db.close()
     assert mirror_results["local"] == mirror_results["socket"]
-    assert len(mirror_results["local"]) == 4
+    assert len(mirror_results["local"]) == 8
 
     # 2. examples/agents.py under local vs socket.
     eval_group = _load_example_group(Path("examples/agents.py"))
@@ -1543,10 +1552,7 @@ def test_play_barrier_runs_other_match_and_accepts_second_call_while_first_is_he
 def test_vectorized_example_uses_two_half_numpy_arrays_zero_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(
-        "etude.eval.resources._detect_accelerator", lambda: "no accelerator detected"
-    )
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 8)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 1)
     eval_group = _load_example_group(Path("examples/vectorized.py"))
     results = hold_group(eval_group, directory=tmp_path)
     assert [r.played for r in results] == [8]
@@ -1684,11 +1690,11 @@ def test_unpicklable_reply_fails_fast_redacts_secrets_and_unlocks_arrays(
 def test_unpicklable_request_disconnects_only_its_peer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 2)
+    monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 3)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 2 * 1024**3)
     monkeypatch.setattr("etude.eval.resources._detect_accelerator", lambda: "cuda")
     definition = Agents(load=_identity_load).plain(None)
-    placement = place((2,), loader=definition, checkpoints=True)
+    placement = place((), streaming=(2,), loader=definition, checkpoints=True)
     cp = checkpoint("bad_request").checkpoint
     other = checkpoint("other_request").checkpoint
 

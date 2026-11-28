@@ -158,10 +158,10 @@ A pass hands down compatible eval jobs as one run on one machine.
 An eval job may declare `agents=Agents(load=..., build=...)`. You write the
 game as `async def play(match, agents)` or as a streaming `play_many(matches)`
 async generator. `load(checkpoint)` returns a deterministic model forward.
-For `play`, Etude shares checkpoint inference on declared, detected NVIDIA or
-Apple Silicon hardware (native arm64 Python). Direct game processes cache
-their own forwards. A `play_many` phase uses one game process with a dedicated
-inference thread and passes C-contiguous NumPy input arrays without copying.
+Etude shares checkpoint inference across multiple game processes on declared,
+detected NVIDIA or Apple Silicon hardware (native arm64 Python). Direct game
+processes cache their own forwards on dedicated inference threads and pass
+C-contiguous NumPy input arrays without copying.
 The forward returns one output per input, in order, independently of batch
 composition. Your game owns sampling, seeded from `match.seed`; player-record
 fields describe greedy/sample choice and temperature. The build hook returns
@@ -184,10 +184,9 @@ match duration. Without a rental target, the run waits in the pool's queue
   Ready requests flush immediately.
 - **Remove `workers=`** from `EvalJob(...)` and `evaluating(...)`; it is
   refused. Etude sizes processes from CPU, memory and pending work. For
-  `play`, CUDA and direct checkpoint inference divide `max_batch` across
-  processes. Metal uses one match per process and leaves a core for shared
-  inference when possible. `play_many` chooses its own slot count. In a mixed
-  group, the `play_many` phase starts after `play` finishes.
+  `play` with checkpoints, Etude divides `max_batch` across processes.
+  `play_many` chooses its slot count and gets a share of pending matches per
+  request. Mixed groups share placement and checkpoint inference.
 - **Guard Python scripts that play.** `evaluating(...)` without `workers=`
   played in its own process; its games now play in fresh processes, which
   import the script again. Put `run.play` under `if __name__ == "__main__":`.

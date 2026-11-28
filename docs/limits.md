@@ -25,12 +25,11 @@ failure recovery requires.
   must be importable top-level definitions. Games run in spawned processes.
   Multiple `async def play` matches share one `asyncio` event loop per game
   process; blocking the loop without awaiting stalls the other games in that
-  process until the run deadline. With a loader, a `play_many` phase runs
-  direct inference in one game process with the host inference thread budget.
-  A `play` phase uses a shared agent process for a declared, detected CUDA or
-  Metal accelerator. Other `play` phases use a direct inference thread in each
-  game process. Your loader must honor the thread environment and owns device
-  selection and GPU memory residency. If a game process crashes during
+  process until the run deadline. Checkpoint workloads with a declared,
+  detected CUDA or Metal accelerator and multiple game processes use one
+  shared agent process. Other checkpoint workloads use direct inference in
+  each game process. Your loader must honor the thread environment and owns
+  device selection and GPU memory residency. If a game process crashes during
   play, queued and in-flight matches are recorded as retryable failures.
   Tournaments that already finished or failed keep their status.
 - Direct inference isolates loaded models on the inference thread, but a game

@@ -133,50 +133,28 @@ with evaluating(
   `games`: the unit Etude schedules, resumes and resamples. A tournament's
   `Seating` makes one match per config. Seat swaps belong
   inside `play`. Group `all` holds every seat; a player may sit in two seats.
-- **Game processes and placement.** A group runs its pending `play`
-  tournaments first, then its pending `play_many` tournaments. Each phase
-  places its active queues after the previous phase's processes exit. The
-  phases share scratch, progress and checkpoint failures. `Placement` owns
-  the process layout, stream sharing, checkpoint bytes per inference owner
-  and the startup line. Each phase starts with `Agents.memory_gb` or half of
-  host memory. With `share_streams=True`, its game processes serve the queues
-  in tournament order.
-  - `play_many` with loader (`bus="local"`, `processes=1`,
-    `game_threads=max(1, cpus - 1)`, `agent_threads=0`, `games_per_process=None`,
-    `share_streams=True`): 1 direct game process on every host (skipping the GPU
-    probe), configuring the process's model/BLAS thread environment variables
-    to `game_threads` and running the phase's tournaments in turn on one
-    `LocalForwardBus` so checkpoints stay loaded.
-  - Code-only `play_many` (`bus=None`, `processes=1`, `game_threads=cpus`,
-    `agent_threads=0`, `games_per_process=None`, `share_streams=True`): no bus, no GPU
-    probe, 1 game process owning the host's BLAS thread budget.
-  - Code-only `play` (`bus=None`, `game_threads=1`, `agent_threads=0`,
-    `games_per_process=1`, `share_streams=False`): no bus, no GPU probe, one match at
-    a time per game process.
-  - Declared CUDA or Metal accelerator detected, `play` (`bus="socket"`,
-    `game_threads=1`, `agent_threads=max(1, cpus - processes)`,
-    `share_streams=False`): one shared agent process. Each game process serves
-    one tournament, which can use up to `ceil(pending / games_per_process)`
-    processes. CUDA bounds the process count by `max_batch`. Metal assigns
-    one match per process. Unused cores go to `agent_threads`.
-  - No declared accelerator detected, `play` (`bus="local"`,
-    `game_threads=max(1, (cpus - processes) // processes)`, `agent_threads=0`,
-    `share_streams=True`): one direct inference thread per game
-    process, splitting unused host cores across inference threads and dividing
-    checkpoint memory by `processes`. The largest `play` match queue sizes
-    the `play` processes. The total process count is capped so each cache can
-    fit the known checkpoint bytes of the largest pending match, counting each
-    checkpoint key once per match. If those bytes exceed the full allowance,
-    only one game process runs at a time. This sizing uses artifact lengths.
-    Several in-flight matches can still contend for the same cache. Each process
-    takes matches from every active `play` tournament in turn and keeps its
-    checkpoint cache across streams.
+- **Game processes and placement.** `Placement` owns the group's process
+  layout, checkpoint bytes per inference owner and startup line. The one
+  checkpoint reservation is `Agents.memory_gb` or half of host memory.
+  - Shared inference (`bus="socket"`) requires a declared, detected CUDA or
+    Metal accelerator and more than one game process. Each game process serves
+    one tournament and gets one thread. The agent process gets the remaining
+    cores and the full checkpoint reservation. CUDA bounds the game process
+    count by `max_batch`.
+  - In direct inference (`bus="local"`), each process can serve the tournament
+    queues in turn and keeps its cache across streams. Direct copies share the
+    checkpoint reservation and use `max(1, (cpus - processes) // processes)`
+    inference threads each. Process count is capped so each cache can fit the
+    largest pending match's known checkpoint bytes, with a one-process floor.
+  - Code-only games (`bus=None`) use one thread per game process and skip the
+    accelerator probe.
 
-  Each game process runs one `asyncio` event loop. For `play` with a loader,
-  each process keeps up to `placement.games_per_process` matches in flight and
-  flushes pending forwards on a zero-delay loop barrier. A `play_many`
-  placement sets `games_per_process=None` so the process takes up to
-  `matches.take(n)`'s requested count from pending matches.
+  Each game process has one event loop. Async `play` runs up to
+  `games_per_process` matches at once and flushes forwards on a zero-delay
+  loop barrier. Each `play_many` generator requests its own slots. A take
+  grants at most the remaining queue divided by the planned process count,
+  rounded up. Both kinds of tournament share an agent process when using
+  shared inference.
   Per-process diagnostics go to `artifacts/agents/game-{pid}.json`
   (`GameReport` with `tournaments: tuple[str, ...]`), keeping a game-thread-filtered
   `builtins.__import__` hook active from module load through player wrapper
@@ -267,12 +245,11 @@ with evaluating(
   `run.play_many(play_many)` to carry on.
   A launched retry resumes automatically. Matches already delivered to any
   of `storages` are skipped, even on a machine with an empty disk.
-  A retryable phase error is returned for each tournament with queued or
-  in-flight matches. Matches dropped from the queue after a permanent failure
-  remain unplayed. The group raises
-  `Terminated` after closing its members when a stop interrupted them.
-  If teardown fails after all matches have settled, the tournaments in the
-  active phase receive the error. Earlier phases keep their outcomes.
+  A retryable error is returned for each tournament with queued or in-flight
+  matches. Matches dropped from the queue after a permanent failure remain
+  unplayed. The group raises `Terminated` after closing its members when a stop
+  interrupted them. A game process teardown error after all matches have
+  settled belongs to the tournaments served by that process.
 - **Progress.** Each stored match prints one line to stderr:
   `etude: RUN: 12/36 matches played, 220s elapsed`.
 - **Storage.** Stored matches are sealed into blocks every five minutes (or

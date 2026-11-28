@@ -22,7 +22,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
                 seatings=(Seating(name="self play", players=(model, model), games=8),),
             ),
             play_many=play_many,
-            agents=Agents(load=load, max_batch=4),
+            agents=Agents(load=load, devices=("cpu",), max_batch=4),
             max_hours=0.1,
         )
     ]
