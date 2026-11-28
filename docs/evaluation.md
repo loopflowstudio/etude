@@ -172,9 +172,9 @@ as identity and `Sampler.choose` as the action method.
 [`agent_models.py`](../examples/agent_models.py) shows a loader. Both are used
 by the runnable [`agents.py`](../examples/agents.py) experiment.
 
-Each game process runs many `play` tasks on one `asyncio` event loop. When no
-running game in the process can add another input, pending calls flush together
-with no timer. Avoid blocking the event loop between `await`s.
+Each game process runs its `play` tasks on one `asyncio` event loop. Calls
+queued in the same loop turn flush together. Avoid blocking the event loop
+between `await`s.
 
 `Agents(load=load, devices=("cuda", "metal"))` can share inference on a visible
 NVIDIA GPU or an Apple Silicon Mac running native arm64 Python. These are the
@@ -222,7 +222,7 @@ write an async generator `play_many(matches)` instead of `play(match, agents)`:
 ```python
 from collections.abc import AsyncIterator
 
-from etude.eval.agents import Forward, ForwardError
+from etude.eval.agents import ForwardError
 from etude.eval.game import Matches
 from etude.eval.records import Match
 from etude.eval.result import Tables
@@ -258,15 +258,14 @@ job = EvalJob(
 )
 ```
 
-Give `EvalJob` either `play=` or `play_many=`, never both. Etude still owns
-scheduling, checkpoint caching and eviction, durable match storage and failure
-retention.
+Etude schedules the matches, caches checkpoints and stores each outcome as
+the generator yields it.
 
 - `await matches.take(n)` pulls up to `n` pending `(match, agents)` pairs in one
-  step. Etude caps each grant at the pending count divided by the planned
-  game process count, rounding up. The generator can ask for more as slots
-  free up. Returning `[]` for `n > 0` means the queue is empty or the run
-  is stopping.
+  step. Etude caps each grant at the tournament's pending matches divided by
+  its active game processes, rounded up. Request the number of free slots and
+  step the matches you receive. Returning `[]` for `n > 0` means the queue is
+  empty or the run is stopping.
 - `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
   `rows=` for a pre-collated batch so batching never merges calls past
   `max_batch` rows and reports real row counts. An oversized pre-collated call

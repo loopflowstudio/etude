@@ -109,6 +109,7 @@ class Stream:
     tournament: str
     function: Function
     concurrency: int | None
+    initial: tuple[Match, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -657,8 +658,12 @@ async def _serve_stream(
             target_held[id(authored)] = _TakenMatch(authored, match.key, time.monotonic())
             return authored
 
+        initial = {index: spec.initial for index, spec in enumerate(streams) if spec.initial}
+
         async def take_raw(current_stream: int, count: int) -> Sequence[Match]:
             nonlocal pending_grant
+            if reserved := initial.pop(current_stream, ()):
+                return reserved
             async with take_lock:
                 future: asyncio.Future[tuple[Match, ...]] = loop.create_future()
                 pending_grant = future

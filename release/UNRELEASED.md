@@ -184,9 +184,11 @@ match duration. Without a rental target, the run waits in the pool's queue
   Ready requests flush immediately.
 - **Remove `workers=`** from `EvalJob(...)` and `evaluating(...)`; it is
   refused. Etude sizes processes from CPU, memory and pending work. For
-  `play` with checkpoints, Etude divides `max_batch` across processes.
-  `play_many` chooses its slot count and gets a share of pending matches per
-  request. Mixed groups share placement and checkpoint inference.
+  `play` with checkpoints, Etude divides `max_batch` across processes, rounding
+  up. Shared inference leaves a core for the agent process when possible.
+  `play_many` requests matches for free slots and gets a share of its
+  tournament's pending matches per request. Mixed groups share placement and
+  checkpoint inference.
 - **Guard Python scripts that play.** `evaluating(...)` without `workers=`
   played in its own process; its games now play in fresh processes, which
   import the script again. Put `run.play` under `if __name__ == "__main__":`.
@@ -240,12 +242,15 @@ Large-checkpoint results below.
 
 On an Apple Silicon Mac (native arm64 Python), `play` can batch checkpoint
 inference through one shared agent process, with up to `cpus - 1` game processes
-and merged batches up to `max_batch` rows. On a 16-core M4 Max, 128 held-out
-Manabot `w160l8` games reached 6,992 games/hour with 15 concurrent games and
-shared MPS (7.43 mean rows/forward), 6,470 games/hour with 32 concurrent
-games and shared MPS, and 6,183 games/hour with direct CPU inference. The
-single-thread shared CPU comparison reached 1,222 games/hour. These results
-measure one checkpoint and one host.
+and merged batches up to `max_batch` rows. Before the move to async play and
+immediate flushing, 128 held-out Manabot `w160l8` games on a 16-core M4 Max
+reached 6,992 games/hour with 15 concurrent games and shared MPS (7.43 mean
+rows/forward), 6,470 games/hour with 32 concurrent games and shared MPS,
+and 6,183 games/hour with direct CPU inference. The single-thread shared
+CPU comparison reached 1,222 games/hour. In a separate Apple Silicon check
+using `examples/agents.py` with one match per process, immediate flushing
+processed 24 rows in 20 batches, compared with two batches before the change.
+Scores matched.
 
 `Agents(load=load, devices=("cuda", "metal"))` is the default for checkpoint
 loaders. Use `("cuda",)` or `("metal",)` to share only on the corresponding

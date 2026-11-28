@@ -60,7 +60,7 @@ from etude.eval.resources import (
     resources,
 )
 from etude.eval.result import Result, Tables
-from etude.eval.run import EvalRun, Terminated
+from etude.eval.run import EvalRun, Playing, Terminated
 from etude.eval.tournament import evaluating, played
 from etude.experiment import observe, state_of
 from etude.jobs import (
@@ -2235,6 +2235,28 @@ async def vector_slots(
                 yield match, Result(tables={"vector_scores": [{"seat": 0, "score": score}]})
 
 
+def test_play_many_grants_spread_a_128_match_panel_across_12_processes(tmp_path: Path) -> None:
+    matches = [Match(players=(Code(name="one"),), index=index) for index in range(128)]
+    with evaluating(
+        environment("vector"), experiment="vector", matches=matches, run="slots", directory=tmp_path
+    ) as active:
+        playing = Playing(
+            run=active,
+            play=Function(module=__name__, name=vector_slots.__name__),
+            tournament="slots",
+            agent_loader=AgentLoader(),
+            streaming=True,
+        )
+        slots = 64
+        grants = [playing.grant(slots, processes=12) for _ in range(12)]
+        assert [len(grant) for grant in grants] == [11, 10, 9, 9, 8, 7, 7, 6, 6, 5, 5, 4]
+        refill = playing.grant(2, processes=12)
+        assert len(refill) == 2
+        tail = playing.grant(slots, processes=1)
+        assert [match for grant in (*grants, refill, tail) for match in grant] == matches
+        assert playing.grant(slots, processes=1) == ()
+
+
 @pytest.mark.parametrize("retry", [False, True])
 def test_play_many_backfills_after_a_yielded_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry: bool
@@ -2293,6 +2315,8 @@ def test_mixed_play_functions_share_checkpoint_inference(
     shared = accelerator in ("cuda", "metal")
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 4)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 4 * 1024**3)
+    if shared:
+        wait_for_games(monkeypatch, processes=3)
     players = (checkpoint("left"), checkpoint("right"))
     # A cache big enough for these two two-byte checkpoints retains both across streams.
     agents = Agents(load=load_array_checkpoint, max_batch=3, memory_gb=4 / 1024**3)
@@ -2331,10 +2355,11 @@ def test_mixed_play_functions_share_checkpoint_inference(
         GameReport.model_validate_json(path.read_bytes()) for path in artifacts.glob("game-*.json")
     ]
     if shared:
-        for name, count in (("first", 2), ("ordinary", 1), ("second", 2)):
-            assert sum(report.matches for report in reports if report.tournaments == (name,)) == (
-                count
-            )
+        for name in ("first", "second"):
+            [stream] = [report for report in reports if report.tournaments == (name,)]
+            assert (stream.matches, stream.bus.calls) == (2, 2)
+        [ordinary] = [report for report in reports if report.tournaments == ("ordinary",)]
+        assert ordinary.matches == 1
         assert all(report.bus.wire_bytes > 0 for report in reports if report.matches)
         [batch_file] = artifacts.glob("batches.json")
         assert not list(artifacts.glob("batches-*.json"))

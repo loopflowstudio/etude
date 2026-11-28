@@ -545,13 +545,23 @@ class Playing:
         self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
         self.skipped = len(self.run.matches) - len(self.pending)
 
+    def grant(self, count: int, *, processes: int = 1) -> tuple[Match, ...]:
+        """Reserve up to one process's share of the remaining matches."""
+        count = min(count, math.ceil(len(self.pending) / processes))
+        granted: list[Match] = []
+        while self.pending and len(granted) < count:
+            match = self.pending.popleft()
+            if match.key not in self.run._failed and match.key not in self.run.done:
+                granted.append(match)
+        return tuple(granted)
+
 
 @dataclass
 class _GameProcess:
     plays: tuple[Playing, ...]
     process: multiprocessing.context.SpawnProcess
     pipe: Connection
-    held: dict[int, dict[str, Match]] = field(default_factory=dict)
+    held: dict[int, dict[str, Match]]  # Every open stream, including those between grants.
     done: bool = False
 
 
@@ -730,11 +740,16 @@ def play_together(
 
             def spawn_one(targets: tuple[Playing, ...]) -> _GameProcess:
                 parent, child_pipe = context.Pipe()
+                # Starting async games own their initial matches before any outcome is handled.
+                # Streaming engines request work when they have free slots.
                 streams = tuple(
                     Stream(
                         tournament=each.tournament,
                         function=each.play,
                         concurrency=None if each.streaming else games_per_process,
+                        initial=each.grant(games_per_process)
+                        if not each.streaming and games_per_process is not None
+                        else (),
                     )
                     for each in targets
                 )
@@ -751,22 +766,43 @@ def play_together(
                         "max_batch": agents.max_batch,
                     },
                 )
-                process.start()
+                try:
+                    process.start()
+                except BaseException:
+                    for each, spec in zip(targets, streams, strict=True):
+                        each.pending.extendleft(reversed(spec.initial))
+                    parent.close()
+                    child_pipe.close()
+                    raise
                 child_pipe.close()
-                return _GameProcess(plays=targets, process=process, pipe=parent)
+                held = {
+                    index: {match.key: match for match in spec.initial}
+                    for index, spec in enumerate(streams)
+                }
+                return _GameProcess(plays=targets, process=process, pipe=parent, held=held)
+
+            def active_streams(targets: tuple[Playing, ...], stream: int) -> int:
+                return sum(child.plays is targets and stream in child.held for child in live)
 
             def spawn_ready() -> None:
+                nonlocal stopping
                 while len(live) < placement.processes and not stopping:
                     spawned = False
                     for targets in stream_groups:
                         if len(live) >= placement.processes:
                             break
-                        remaining = max(len(each.pending) for each in targets)
-                        if not remaining:
+                        if not any(
+                            each.pending
+                            and (
+                                not each.streaming
+                                or active_streams(targets, index) < len(each.pending)
+                            )
+                            for index, each in enumerate(targets)
+                        ):
                             continue
-                        active = sum(child.plays is targets for child in live)
-                        if active >= remaining:
-                            continue
+                        if any(each.pending and each.run.should_stop for each in targets):
+                            stopping = True
+                            return
                         live.append(spawn_one(targets))
                         spawned = True
                     if not spawned:
@@ -778,21 +814,14 @@ def play_together(
                     each = child.plays[message.stream]
                     if not stopping and each.pending and each.run.should_stop:
                         stopping = True
-                    granted: list[Match] = []
+                    granted: tuple[Match, ...] = ()
                     if not stopping and message.count > 0:
-                        count = message.count
-                        if each.streaming:
-                            # Keep one engine's slot request from taking the whole queue.
-                            fair_share = max(1, math.ceil(len(each.pending) / placement.processes))
-                            count = min(count, fair_share)
-                        held = child.held.setdefault(message.stream, {})
-                        while each.pending and len(granted) < count:
-                            match = each.pending[0]
-                            if match.key not in each.run._failed and match.key not in each.run.done:
-                                held[match.key] = match
-                                granted.append(match)
-                            each.pending.popleft()
-                    child.pipe.send(Grant(tuple(granted)))
+                        processes = (
+                            active_streams(child.plays, message.stream) if each.streaming else 1
+                        )
+                        granted = each.grant(message.count, processes=processes)
+                        child.held[message.stream].update((match.key, match) for match in granted)
+                    child.pipe.send(Grant(granted))
                 elif isinstance(message, Outcome):
                     each = child.plays[message.stream]
                     held = child.held[message.stream]
