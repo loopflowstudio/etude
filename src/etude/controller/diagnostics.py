@@ -48,9 +48,11 @@ def declaration_error(
     else:
         detail = error.msg if isinstance(error, SyntaxError) else str(error)
         message = f"{type(error).__name__}: {' '.join(detail.splitlines())}"
+    # Etude's records are Pydantic models; only their constructors refuse positional
+    # arguments with this text, so an author's own arity mistake gets no invented fix.
     fix = (
-        "use named fields, such as RunRequest(job=job, seed=1)"
-        if isinstance(error, TypeError) and "positional argument" in str(error)
+        "pass fields by name, such as TrainingJob(name='base', ...)"
+        if isinstance(error, TypeError) and str(error).startswith("BaseModel.__init__()")
         else None
     )
     return LauncherError(message, fix=fix, at=location)

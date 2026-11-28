@@ -264,11 +264,11 @@ def show_check(
     if format == "json":
         print(checked.model_dump_json())
     else:
-        _show_text(checked)
+        _show_text(checked, given)
     return 0 if checked.ok else 1
 
 
-def _show_text(checked: Check) -> None:
+def _show_text(checked: Check, given: Sequence[str]) -> None:
     file = checked.file
     for issue in checked.issues:
         where = format_location(SourceLocation(issue.file, issue.line))
@@ -285,10 +285,10 @@ def _show_text(checked: Check) -> None:
     if not checked.ok:
         return
     if checked.kind == "local_recipe":
-        print(f"{file}: ok, local recipe: etude train {file}; nothing to launch")
+        print(f"{file}: ok, local recipe: {_command(checked, 'train')}; nothing to launch")
         return
     if checked.kind == "report_only":
-        print(f"{file}: ok, report only: etude report {file}; nothing to launch")
+        print(f"{file}: ok, report only: {_command(checked, 'report')}; nothing to launch")
         return
     if checked.source is not None:
         print(f"{file}: ok, from local runs in {checked.source}")
@@ -324,10 +324,7 @@ def _show_text(checked: Check) -> None:
                 f"  {_budget(tournament.max_hours, tournament.max_usd)}"
             )
     if checked.training or any(tournament.matches for tournament in checked.evals):
-        command = ["etude", "launch", str(file), "--quote"]
-        if checked.experiment != file.stem:
-            command.extend(("--experiment", checked.experiment))
-        print(f"next: {shlex.join(command)}")
+        print(f"next: {_command(checked, 'launch', '--quote', *given)}")
     else:
         print("nothing to launch" if checked.source is None else "nothing left to launch")
 
@@ -335,6 +332,14 @@ def _show_text(checked: Check) -> None:
 def _budget(hours: float, usd: Decimal | None) -> str:
     cap = f"max_usd {usd:.2f}" if usd is not None else "no max_usd: owned pools only"
     return f"max_hours {hours:g}  {cap}"
+
+
+def _command(checked: Check, verb: str, *flags: str) -> str:
+    """Spell the command that repeats this check's pass, quoted for a shell."""
+    command = ["etude", verb, str(checked.file), *flags]
+    if checked.experiment != checked.file.stem:
+        command.extend(("--experiment", checked.experiment))
+    return shlex.join(command)
 
 
 def _count(number: int, noun: str, *, plural: str | None = None) -> str:

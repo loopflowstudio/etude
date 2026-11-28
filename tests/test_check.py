@@ -491,6 +491,32 @@ def test_check_formats_a_constructor_type_error_without_the_raw_input(
         assert f"{file}:9: {message}" in capsys.readouterr().err
 
 
+def test_check_offers_named_fields_only_for_positional_record_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path / "home"))
+    (tmp_path / ".git").touch()
+    file = tmp_path / "positional.py"
+    for call, fix in (
+        (
+            'TrainingJob("base")',
+            "  fix: pass fields by name, such as TrainingJob(name='base', ...)",
+        ),
+        ("helper(1, 2)", None),
+    ):
+        file.write_text(
+            "from etude.jobs import TrainingJob\n"
+            "def helper(x):\n"
+            "    return x\n"
+            "def training_jobs():\n"
+            f"    return {call}\n"
+        )
+        assert main(["check", str(file)]) == 1
+        output = capsys.readouterr().out
+        assert f"{file}:5: error: TypeError: " in output
+        assert (fix in output) if fix else ("fix:" not in output)
+
+
 def test_check_validates_train_alongside_eval_and_accepts_required_config_fields(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -803,7 +829,7 @@ def test_check_summarizes_a_first_launch_with_job_flags(
     assert "lab/compare@3  max_hours 1  no max_usd: owned pools only" in output
     assert "ladder  round robin  3 entrants  6 matches  6 games" in output
     assert "panel  benchmark  0 checkpoints  0 matches  (none stored yet)" in output
-    assert f"next: etude launch {file} --quote --experiment lab" in output
+    assert f"next: etude launch {file} --quote --hours 1.5 --experiment lab" in output
 
 
 def test_check_and_launch_name_the_job_missing_max_hours(
