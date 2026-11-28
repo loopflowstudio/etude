@@ -43,7 +43,7 @@ from pydantic import Field
 from etude.call import Function
 from etude.errors import RetryRequested
 from etude.eval.agents import Forward, ForwardError, SocketForwardBus
-from etude.eval.bus import BusReport, Flight, ForwardBus, ForwardCall
+from etude.eval.bus import BusReport, ForwardBus, ForwardCall
 from etude.eval.composition import build_agents
 from etude.eval.records import Match, _MatchConfig
 from etude.eval.resources import Resources, seconds_left
@@ -307,7 +307,6 @@ class _Forwarder:
         self.eager = eager
         self._handles: dict[str, _BoundForward] = {}
         self._pending: dict[str, list[_PendingCall]] = {}
-        self._flight = Flight()
         self._loading_failures: list[CheckpointFailure] = []
         self._failed_checkpoints: set[str] = set()
 
@@ -327,8 +326,7 @@ class _Forwarder:
         if self.eager:
             self._submit([(checkpoint, [_PendingCall(inputs, rows, future)])])
         else:
-            # The barrier holds these locks through the bus reply, even on cancellation.
-            pending = _PendingCall(inputs, rows, future, self._flight.lock(inputs))
+            pending = _PendingCall(inputs, rows, future, self._bus.flight.lock(inputs))
             if not self._pending:
                 loop.call_soon(self._flush)
             self._pending.setdefault(checkpoint, []).append(pending)
@@ -338,7 +336,7 @@ class _Forwarder:
         """Release locks on calls that have not yet reached the bus."""
         for calls in self._pending.values():
             for call in calls:
-                self._flight.unlock(call.locked)
+                self._bus.flight.unlock(call.locked)
                 call.future.cancel()
         self._pending.clear()
 
@@ -377,17 +375,20 @@ class _Forwarder:
         except BaseException as error:
             for _, chunk in groups:
                 for call in chunk:
-                    self._flight.unlock(call.locked)
                     call.fail(error)
             return
+        finally:
+            # Submit acquires its own references before the barrier releases
+            # its references, so overlapping calls never unlock shared inputs.
+            for _, chunk in groups:
+                for call in chunk:
+                    self._bus.flight.unlock(call.locked)
         for (_, chunk), bus_future in zip(groups, futures, strict=True):
             bus_future.add_done_callback(partial(self._on_answer, chunk))
 
     def _on_answer(
         self, chunk: list[_PendingCall], bus_future: asyncio.Future[list[object]]
     ) -> None:
-        for call in chunk:
-            self._flight.unlock(call.locked)
         if bus_future.cancelled():
             return
         raised = bus_future.exception()

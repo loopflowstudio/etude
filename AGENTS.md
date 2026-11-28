@@ -295,9 +295,9 @@ matches and remaining host memory bound the process count. Checkpoint
 inference spreads `play` across processes before dividing `max_batch` among
 them. Code-only `play` runs one match per process. Direct `play_many` sizes
 for one process per `max_batch` matches, rounded up. A `play_many` request
-draws on its startup reservation and shares available matches among its
-tournament's active processes, rounding up. Mixed groups use one placement
-and share their inference budget.
+draws from its tournament's pending queue. Its grant is capped by its share of
+pending and held matches across active processes, rounded up and reduced by
+what it holds. Mixed groups use one placement and share their inference budget.
 Cap merged forwards at `max_batch`. Split oversized requests with one
 input per row and preserve their reply order. Opaque oversized inputs run
 alone. An absent or undeclared accelerator plays direct. Skip the probe for

@@ -6,9 +6,10 @@ per call with its outputs, or with `ForwardError`. Two transports implement it:
 process) and `SocketForwardBus` (`etude.eval.agents`, the shared agent process).
 
 Both transports normalize buffer and CPU DLPack leaves on the producing
-thread. Leaves are found inside lists, tuples, dicts and dataclass instances. NumPy inputs can travel by pointer. `Flight` holds them read-only
-through the reply and `freeze` protects the model's inputs. `_FlightBook`
-owns request IDs, lock rollback and the transfer counts in `BusReport`.
+thread. Leaves are found inside lists, tuples, dicts and dataclass instances.
+NumPy inputs can travel by pointer. `_FlightBook` owns their locks from
+barrier staging through the reply, along with request IDs and transfer counts.
+`freeze` protects the model's inputs.
 Games exchanging plain values can run without importing NumPy.
 """
 
@@ -77,6 +78,10 @@ class BusReport(Record):
 
 
 class ForwardBus(Protocol):
+    @property
+    def flight(self) -> Flight:
+        """The bus's lock ledger, also used by the game before submitting a batch."""
+
     def bind(self, checkpoint: CheckpointRef) -> None:
         """Make `checkpoint` callable by key; binding twice is a no-op."""
 
@@ -319,7 +324,7 @@ class _FlightStage:
 
     def add(self, call: ForwardCall) -> tuple[int, asyncio.Future[list[object]]]:
         """Lock `inputs`, reserve a request id and future, and record for commit/rollback."""
-        locked = self._book._flight.lock(call.inputs)
+        locked = self._book.flight.lock(call.inputs)
         request_id = self._book._reserve_id()
         future: asyncio.Future[list[object]] = self._loop.create_future()
         self._entries.append(_Flight(request_id, call.checkpoint, future, locked, self._sent_at))
@@ -328,7 +333,7 @@ class _FlightStage:
     def rollback_last(self) -> None:
         """Undo the most recently staged call (e.g. when its input packing failed)."""
         entry = self._entries.pop()
-        self._book._flight.unlock(entry.locked)
+        self._book.flight.unlock(entry.locked)
 
     def rollback(self) -> None:
         """Unlock every uncommitted staged call."""
@@ -368,7 +373,7 @@ class _FlightBook:
 
     def __init__(self, make_error: Callable[[ForwardOutcome], BaseException]) -> None:
         self._make_error = make_error
-        self._flight = Flight()
+        self.flight = Flight()
         self._next_id = 0
         self._in_flight: dict[int, _Flight] = {}
         self.closed_error: _FlightError | None = None
@@ -412,7 +417,7 @@ class _FlightBook:
         entry = self._in_flight.pop(request_id, None)
         if entry is None:
             return
-        self._flight.unlock(entry.locked)
+        self.flight.unlock(entry.locked)
         self._answers += 1
         self._round_trip_seconds += time.monotonic() - entry.sent_at
         future = entry.future
@@ -427,7 +432,7 @@ class _FlightBook:
         if self.closed_error is None:
             self.closed_error = error
         for entry in self._in_flight.values():
-            self._flight.unlock(entry.locked)
+            self.flight.unlock(entry.locked)
             if not entry.future.done():
                 entry.future.set_exception(
                     error if isinstance(error, BaseException) else error(entry.checkpoint)

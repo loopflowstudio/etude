@@ -62,7 +62,7 @@ from etude.eval.resources import (
     resources,
 )
 from etude.eval.result import Result, Tables
-from etude.eval.run import EvalRun, Playing, Terminated
+from etude.eval.run import EvalRun, Terminated
 from etude.eval.tournament import evaluating, played
 from etude.experiment import observe, state_of
 from etude.jobs import (
@@ -631,24 +631,24 @@ def test_play_arity_and_removed_workers_are_refused(tmp_path: Path) -> None:
     ),
     [
         # Saturated play CPU: 64 pending, max_batch=32 -> 16/32 processes.
-        (32, (64,), True, 32, None, ("local", 32, 1, 0, 1, True)),
-        (16, (64,), True, 32, None, ("local", 16, 1, 0, 2, True)),
-        (16, (5,), True, 32, None, ("local", 5, 2, 0, 1, True)),
-        (16, (30,), True, 256, None, ("local", 16, 1, 0, 2, True)),
-        (16, (16,), True, 32, None, ("local", 16, 1, 0, 1, True)),
+        (32, (64,), True, 32, None, ("local", 32, 1, 1)),
+        (16, (64,), True, 32, None, ("local", 16, 1, 2)),
+        (16, (5,), True, 32, None, ("local", 5, 2, 1)),
+        (16, (30,), True, 256, None, ("local", 16, 1, 2)),
+        (16, (16,), True, 32, None, ("local", 16, 1, 1)),
         # Direct processes share queues, so the largest determines their count.
-        (8, (4, 3, 2), True, 8, None, ("local", 4, 1, 0, 1, True)),
-        (3, (20,), True, 32, None, ("local", 3, 1, 0, 7, True)),
-        (2, (20,), True, 32, None, ("local", 2, 1, 0, 10, True)),
-        (8, (20,), False, 32, None, (None, 8, 1, 0, 1, False)),
-        (8, (20,), True, 32, None, ("local", 4, 1, 0, 5, True)),
-        (8, (20,), True, 32, 1.5, ("local", 2, 3, 0, 10, True)),
-        (8, (1,), True, 32, None, ("local", 1, 7, 0, 1, True)),
-        (1, (20,), True, 32, None, ("local", 1, 1, 0, 20, True)),
-        (1, (20,), False, 32, None, (None, 1, 1, 0, 1, False)),
-        (8, (), True, 32, None, (None, 0, 1, 0, None, False)),
-        (8, (0,), True, 32, None, (None, 0, 1, 0, None, False)),
-        (8, (20,), True, 32, 2.0, ("local", 1, 7, 0, 20, True)),
+        (8, (4, 3, 2), True, 8, None, ("local", 4, 1, 1)),
+        (3, (20,), True, 32, None, ("local", 3, 1, 7)),
+        (2, (20,), True, 32, None, ("local", 2, 1, 10)),
+        (8, (20,), False, 32, None, (None, 8, 0, 1)),
+        (8, (20,), True, 32, None, ("local", 4, 1, 5)),
+        (8, (20,), True, 32, 1.5, ("local", 2, 3, 10)),
+        (8, (1,), True, 32, None, ("local", 1, 7, 1)),
+        (1, (20,), True, 32, None, ("local", 1, 1, 20)),
+        (1, (20,), False, 32, None, (None, 1, 0, 1)),
+        (8, (), True, 32, None, (None, 0, 0, None)),
+        (8, (0,), True, 32, None, (None, 0, 0, None)),
+        (8, (20,), True, 32, 2.0, ("local", 1, 7, 20)),
     ],
 )
 def test_place_respects_cpu_pending_and_memory(
@@ -658,7 +658,7 @@ def test_place_respects_cpu_pending_and_memory(
     agents: bool,
     max_batch: int,
     memory_gb: float | None,
-    expected: tuple[str | None, int, int, int, int | None, bool],
+    expected: tuple[str | None, int, int, int | None],
 ) -> None:
     monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: "no accelerator detected")
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: cpus)
@@ -673,10 +673,8 @@ def test_place_respects_cpu_pending_and_memory(
     assert (
         chosen.bus,
         chosen.processes,
-        chosen.game_threads,
-        chosen.agent_threads,
+        chosen.inference_threads,
         chosen.games_per_process,
-        chosen.share_streams,
     ) == expected
 
 
@@ -699,7 +697,7 @@ def test_place_sizes_direct_caches_for_a_match(
     assert placement.bus == "local"
     assert placement.processes == processes
     assert placement.games_per_process == games
-    assert placement.game_threads == threads
+    assert placement.inference_threads == threads
     assert placement.checkpoint_bytes == 2 * 1024**3 // processes
 
 
@@ -716,20 +714,20 @@ def test_place_sizes_direct_caches_for_a_match(
     ),
     [
         # Saturated play GPU (4 cores).
-        (4, (64,), False, 32, None, True, "0", ("socket", 3, 1, 1, 11, False)),
+        (4, (64,), False, 32, None, True, "0", ("socket", 3, 1, 11)),
         # A single game process keeps inference local even on a declared accelerator.
-        (4, (1,), False, 32, None, True, "0", ("local", 1, 3, 0, 1, True)),
-        (16, (16,), False, 32, None, True, "0", ("socket", 15, 1, 1, 2, False)),
+        (4, (1,), False, 32, None, True, "0", ("local", 1, 3, 1)),
+        (16, (16,), False, 32, None, True, "0", ("socket", 15, 1, 2)),
         # Three 1-match play tournaments on 4 cores -> 3 processes, 1 game each, 1 agent thread.
-        (4, (1, 1, 1), False, 32, None, True, "0", ("socket", 3, 1, 1, 1, False)),
-        (4, (64,), False, 8, None, True, "0", ("socket", 3, 1, 1, 3, False)),
-        (16, (64,), False, 4, None, True, "0", ("socket", 4, 1, 12, 1, False)),
-        (4, (64,), False, 32, 15.5, True, "0", ("socket", 2, 1, 2, 16, False)),
-        (4, (2, 3), True, 32, None, True, "0", ("socket", 3, 1, 1, None, False)),
-        (4, (64,), False, 32, None, False, "0", (None, 4, 1, 0, 1, False)),
-        (4, (2, 3), True, 32, None, False, "0", (None, 4, 1, 0, None, False)),
-        (4, (64,), False, 32, None, True, "", ("local", 4, 1, 0, 8, True)),
-        (4, (2, 3), True, 32, None, True, "", ("local", 1, 3, 0, None, True)),
+        (4, (1, 1, 1), False, 32, None, True, "0", ("socket", 3, 1, 1)),
+        (4, (64,), False, 8, None, True, "0", ("socket", 3, 1, 3)),
+        (16, (64,), False, 4, None, True, "0", ("socket", 4, 12, 1)),
+        (4, (64,), False, 32, 15.5, True, "0", ("socket", 2, 2, 16)),
+        (4, (2, 3), True, 32, None, True, "0", ("socket", 3, 1, None)),
+        (4, (64,), False, 32, None, False, "0", (None, 4, 0, 1)),
+        (4, (2, 3), True, 32, None, False, "0", (None, 4, 0, None)),
+        (4, (64,), False, 32, None, True, "", ("local", 4, 1, 8)),
+        (4, (2, 3), True, 32, None, True, "", ("local", 1, 3, None)),
     ],
 )
 def test_cuda_placement_routes_both_play_functions(
@@ -742,7 +740,7 @@ def test_cuda_placement_routes_both_play_functions(
     memory_gb: float | None,
     agents: bool,
     visible: str,
-    expected: tuple[str | None, int, int, int, int | None, bool],
+    expected: tuple[str | None, int, int, int | None],
 ) -> None:
     monkeypatch.setattr(eval_resources, "_detect_accelerator", _detect_accelerator)
     monkeypatch.setattr("etude.eval.resources.sys.platform", "linux")
@@ -762,10 +760,8 @@ def test_cuda_placement_routes_both_play_functions(
     assert (
         chosen.bus,
         chosen.processes,
-        chosen.game_threads,
-        chosen.agent_threads,
+        chosen.inference_threads,
         chosen.games_per_process,
-        chosen.share_streams,
     ) == expected
     assert (tmp_path / "nvidia-smi.ran").exists() is (agents and visible == "0")
     if agents:
@@ -782,9 +778,9 @@ def test_place_allocates_the_remaining_accelerator_processes_to_streaming(
     queues = (TournamentQueue(10), TournamentQueue(128, streaming=True))
     plan = place(queues, loader=Agents(load=load, max_batch=32).plain(None), checkpoints=True)
     assert plan.bus == "socket"
-    assert plan.games_per_process == 1
+    assert plan.games_per_process == 2
     assert plan.processes == 15
-    assert plan.process_shares(queues, 32) == (8, 7)
+    assert plan.process_shares(queues, 32, available=plan.processes) == (8, 7)
 
 
 def test_code_only_and_cpu_streaming_do_not_probe_gpu(
@@ -799,10 +795,8 @@ def test_code_only_and_cpu_streaming_do_not_probe_gpu(
     assert place((TournamentQueue(6),), loader=AgentLoader(), checkpoints=False) == Placement(
         bus=None,
         processes=4,
-        game_threads=1,
-        agent_threads=0,
+        inference_threads=0,
         games_per_process=1,
-        share_streams=False,
         checkpoint_bytes=0,
         reason="no loader",
     )
@@ -813,10 +807,8 @@ def test_code_only_and_cpu_streaming_do_not_probe_gpu(
     ) == Placement(
         bus=None,
         processes=4,
-        game_threads=1,
-        agent_threads=0,
+        inference_threads=0,
         games_per_process=None,
-        share_streams=False,
         checkpoint_bytes=0,
         reason="no loader",
     )
@@ -828,10 +820,8 @@ def test_code_only_and_cpu_streaming_do_not_probe_gpu(
     ) == Placement(
         bus="local",
         processes=1,
-        game_threads=3,
-        agent_threads=0,
+        inference_threads=3,
         games_per_process=None,
-        share_streams=True,
         checkpoint_bytes=8 * 1024**3,
         reason="cpu-only loader",
     )
@@ -907,7 +897,7 @@ def test_apple_silicon_placement_bounds_games_by_cores_and_memory(
     loader = Agents(load=load, memory_gb=memory_gb, max_batch=batch_inputs).plain(None)
     plan = place((TournamentQueue(64),), loader=loader, checkpoints=True)
     shared = accelerator is not None and processes > 1
-    assert (plan.processes, (plan.agent_threads or plan.game_threads), plan.reason) == (
+    assert (plan.processes, plan.inference_threads, plan.reason) == (
         processes,
         threads,
         accelerator or "no accelerator detected",
@@ -962,7 +952,7 @@ def test_probe_skipped_without_checkpoint_loading_or_accelerator(
         )
     loader = Agents(load=load, devices=("cpu",), max_batch=16).plain(None)
     cpu = place((TournamentQueue(8),), loader=loader, checkpoints=True)
-    assert (cpu.reason, cpu.processes, cpu.games_per_process, cpu.game_threads) == (
+    assert (cpu.reason, cpu.processes, cpu.games_per_process, cpu.inference_threads) == (
         "cpu-only loader",
         8,
         1,
@@ -2242,28 +2232,6 @@ async def vector_slots(
                 yield match, Result(tables={"vector_scores": [{"seat": 0, "score": score}]})
 
 
-def test_play_many_grants_spread_a_128_match_panel_across_12_processes(tmp_path: Path) -> None:
-    matches = [Match(players=(Code(name="one"),), index=index) for index in range(128)]
-    with evaluating(
-        environment("vector"), experiment="vector", matches=matches, run="slots", directory=tmp_path
-    ) as active:
-        playing = Playing(
-            run=active,
-            play=Function(module=__name__, name=vector_slots.__name__),
-            tournament="slots",
-            agent_loader=AgentLoader(),
-            streaming=True,
-        )
-        slots = 64
-        grants = [playing.grant(slots, processes=12) for _ in range(12)]
-        assert [len(grant) for grant in grants] == [11, 10, 9, 9, 8, 7, 7, 6, 6, 5, 5, 4]
-        refill = playing.grant(2, processes=12)
-        assert len(refill) == 2
-        tail = playing.grant(slots, processes=1)
-        assert [match for grant in (*grants, refill, tail) for match in grant] == matches
-        assert playing.grant(slots, processes=1) == ()
-
-
 @pytest.mark.parametrize("retry", [False, True])
 def test_play_many_backfills_after_a_yielded_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retry: bool
@@ -2798,11 +2766,15 @@ def test_mixed_eval_group_attributes_checkpoint_failures_to_both_play_functions(
 
 async def large_slot_request(
     matches: MatchStream[VectorRules],
-) -> AsyncIterator[tuple[Match[VectorRules], Tables]]:
+) -> AsyncIterator[tuple[Match[VectorRules], Tables | Exception]]:
     while granted := await matches.take(64):
         for match, agents in granted:
-            await cast(Forward, agents[0])([1])
-            yield match, {"grants": [{"seat": 0, "size": len(granted)}]}
+            try:
+                await cast(Forward, agents[0])([1])
+            except ForwardError as error:
+                yield match, error
+            else:
+                yield match, {"grants": [{"seat": 0, "size": len(granted)}]}
 
 
 @pytest.mark.parametrize(
@@ -2847,6 +2819,111 @@ def test_play_many_caps_large_grants_across_game_processes(
             6,
             math.ceil(6 / processes),
         )
+
+
+@pytest.mark.parametrize("broken", [False, True])
+def test_fast_direct_stream_takes_pending_matches_while_its_peer_waits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, broken: bool
+) -> None:
+    monkeypatch.setattr(eval_resources, "_detect_accelerator", lambda: "no accelerator detected")
+    first: Connection | None = None
+
+    def wait_for_first(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal first
+        if first is None:
+            first = next(handle for handle in handles if isinstance(handle, Connection))
+        if not first.closed:
+            assert first.poll(10), "the first stream stopped sending results"
+            return (first,)
+        return wait(handles, timeout=timeout)
+
+    monkeypatch.setattr("etude.eval.run.wait", wait_for_first)
+    healthy, broken_player = checkpoint("left"), checkpoint("broken")
+    matches = [
+        Match(players=(broken_player if broken and index < 5 else healthy,), index=index)
+        for index in range(8)
+    ]
+    with (
+        pytest.raises(EtudeError, match="fixture broken player") if broken else nullcontext(),
+        evaluating(
+            environment("vector"),
+            experiment="vector",
+            run="uneven",
+            matches=matches,
+            directory=tmp_path,
+        ) as active,
+    ):
+        active.play_many(large_slot_request, agents=Agents(load=selective_load, max_batch=4))
+    reports = _game_reports(tmp_path / "vector/uneven/artifacts/agents")
+    assert sorted(report.matches for report in reports) == [0, 7 if broken else 8]
+    with statsdb("vector", tmp_path) as db:
+        assert db.sql("select count(*) from grants").fetchone() == (3 if broken else 8,)
+        assert set(
+            db.sql("select match, retry from matches where state = 'failed'").fetchall()
+        ) == ({(match.key, False) for match in matches[:5]} if broken else set())
+
+
+def test_drained_async_queue_releases_process_while_peer_still_holds_games(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(eval_resources, "available_cpus", lambda: 5)
+    monkeypatch.setattr(eval_resources, "memory_bytes", lambda: 4 * 1024**3)
+    first: tuple[Connection, int] | None = None
+    exited = False
+    replaced = False
+
+    def wait_for_first(
+        handles: Sequence[Connection | int], timeout: float | None = None
+    ) -> Sequence[object]:
+        nonlocal first, exited, replaced
+        if first is None:
+            pipe, sentinel = handles[0], handles[1]
+            assert isinstance(pipe, Connection) and isinstance(sentinel, int)
+            first = (pipe, sentinel)
+        pipe, sentinel = first
+        if not pipe.closed:
+            assert pipe.poll(10), "the first async process stopped sending results"
+            return (pipe,)
+        if not exited:
+            ready = wait([sentinel], timeout=10)
+            assert ready, "the first async process did not exit"
+            exited = True
+            return ready
+        if not replaced:
+            # The other async process still holds its startup matches. A new
+            # stream must be scheduled before we let any other child report.
+            assert sum(isinstance(handle, Connection) for handle in handles) == 4
+            replaced = True
+        return wait(handles, timeout=timeout)
+
+    monkeypatch.setattr("etude.eval.run.wait", wait_for_first)
+    agents = Agents(load=load, max_batch=16)
+    ordinary = job("ordinary", agents, plain).model_copy(
+        update={
+            "tournament": RoundRobin(
+                name="ordinary", environment=environment("grouped"), config={}, games=8
+            )
+        }
+    )
+    stream = EvalJob(
+        tournament=RoundRobin(
+            name="stream", environment=environment("grouped"), config=VectorRules(), games=8
+        ),
+        enter=ordinary.enter,
+        play_many=code_only_vector_slots,
+        agents=agents,
+        repo=None,
+        max_hours=0.1,
+    )
+    assert [
+        result.played for result in hold_group(group(ordinary, stream), directory=tmp_path)
+    ] == [
+        8,
+        8,
+    ]
+    assert replaced
 
 
 def test_streaming_tournament_uses_processes_released_by_its_siblings(
@@ -3270,9 +3347,9 @@ assert lazy_report.imports.warning() is not None
     assert result.stderr.count("game module lazy_mlx_game_fixture: imported mlx") == 1
 
 
-@pytest.mark.parametrize("gpu", [False, True])
-def test_local_import_warning_ignores_module_count_while_socket_warns(
-    tmp_path: Path, gpu: bool
+@pytest.mark.parametrize(("gpu", "streaming"), [(False, False), (True, False), (True, True)])
+def test_only_socket_play_warns_about_module_count(
+    tmp_path: Path, gpu: bool, streaming: bool
 ) -> None:
     package = tmp_path / "many_mods_pkg"
     package.mkdir()
@@ -3288,13 +3365,18 @@ def test_local_import_warning_ignores_module_count_while_socket_warns(
         "    return lambda inputs: [1 for _ in inputs]\n"
     )
     (tmp_path / "many_mods_game.py").write_text(
-        "\n".join(imports) + "\nfrom collections.abc import Sequence\n"
+        "\n".join(imports) + "\nfrom collections.abc import AsyncIterator, Sequence\n"
         "from etude.eval.agents import Forward\n"
-        "from etude.eval.records import Match\n"
+        "from etude.eval.game import MatchStream\n"
+        "from etude.eval.records import Config, Match\n"
         "from etude.eval.result import Tables\n"
         "async def play(match: Match, agents: Sequence[Forward]) -> Tables:\n"
         "    [score] = await agents[0]([0])\n"
         "    return {'scores': [{'seat': 0, 'score': int(str(score))}]}\n"
+        "async def play_many(matches: MatchStream[Config]) -> AsyncIterator[tuple[Match, Tables]]:\n"
+        "    while granted := await matches.take(1):\n"
+        "        for match, agents in granted:\n"
+        "            yield match, await play(match, agents)\n"
     )
     program = """
 import sys
@@ -3306,10 +3388,11 @@ from etude.eval.match import environment
 from etude.eval.records import RoundRobin
 from etude.jobs import Agents, EvalJob, ExperimentState, evaluation_group, hold_group
 from tests.eval.arithmetic import checkpoint
-from many_mods_game import play
+from many_mods_game import play, play_many
 from many_mods_loader import load
 
 gpu = sys.argv[2] == "True"
+streaming = sys.argv[3] == "True"
 etude.eval.resources._detect_accelerator = lambda: "cuda" if gpu else "no accelerator detected"
 etude.eval.resources.available_cpus = lambda: 3 if gpu else 1
 etude.eval.resources.memory_bytes = lambda: 2 * 1024**3
@@ -3317,7 +3400,8 @@ root = Path(sys.argv[1]) / "run"
 job = EvalJob(
     tournament=RoundRobin(name="many", environment=environment("many"), config={}, games=2),
     enter=(checkpoint("one"), checkpoint("two")),
-    play=play,
+    play=play if not streaming else None,
+    play_many=play_many if streaming else None,
     agents=Agents(load=load, max_batch=1 if not gpu else 2),
     repo=None,
     max_hours=0.1,
@@ -3333,14 +3417,14 @@ for path in paths:
     assert report.imports.warning(count_limit=True) is not None
 """
     result = subprocess.run(
-        [sys.executable, "-c", program, str(tmp_path), str(gpu)],
+        [sys.executable, "-c", program, str(tmp_path), str(gpu), str(streaming)],
         capture_output=True,
         text=True,
         check=False,
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    expected = 1 if gpu else 0
+    expected = 1 if gpu and not streaming else 0
     assert result.stderr.count("game module many_mods_game: loaded ") == expected
 
 

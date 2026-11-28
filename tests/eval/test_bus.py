@@ -662,7 +662,10 @@ def test_atomic_submit_rollback_when_later_call_is_unbound(transport: _Transport
 
 
 @pytest.mark.parametrize("transport", ["local", "socket"])
-def test_play_locks_inputs_immediately_on_call_before_barrier_flush(transport: _Transport) -> None:
+@pytest.mark.parametrize("eager_second", [False, True])
+def test_play_locks_inputs_immediately_on_call_before_barrier_flush(
+    transport: _Transport, eager_second: bool
+) -> None:
     cp = checkpoint("play_lock").checkpoint
     first_entered = threading.Event()
     release_first = threading.Event()
@@ -705,14 +708,16 @@ def test_play_locks_inputs_immediately_on_call_before_barrier_flush(transport: _
 
             # Enqueue a second call sharing `obs` while call 1 is in flight, then
             # let call 1 finish while call 2 is held; `obs` stays locked throughout.
+            forwarder.eager = eager_second
             second = forward([obs])
             release_first.set()
-            assert await first_task == [5.0, 7.0]
-            assert await asyncio.to_thread(second_entered.wait, 5.0)
-            with pytest.raises(ValueError, match="read-only"):
-                obs[0] = 888.0
-
-            release_second.set()
+            try:
+                assert await first_task == [5.0, 7.0]
+                assert await asyncio.to_thread(second_entered.wait, 5.0)
+                with pytest.raises(ValueError, match="read-only"):
+                    obs[0] = 888.0
+            finally:
+                release_second.set()
             assert await second == [5.0]
             obs[0] = 42.0
             assert obs[0] == 42.0
@@ -1558,20 +1563,20 @@ def test_vectorized_example_uses_two_half_numpy_arrays_zero_copy(
 ) -> None:
     monkeypatch.setattr("etude.eval.resources.available_cpus", lambda: 16)
     monkeypatch.setattr("etude.eval.resources.memory_bytes", lambda: 8 * 1024**3)
-    rounds = 0
+    startup = iter((0, 0, 1, 1))
 
-    def first_process_twice(
+    def wait_for_each_half(
         handles: Sequence[Connection | int], timeout: float | None = None
     ) -> Sequence[object]:
-        nonlocal rounds
-        if rounds < 2:
-            rounds += 1
-            first = next(handle for handle in handles if isinstance(handle, Connection))
-            assert first.poll(10), "vectorized process did not request its next half"
-            return (first,)
-        return wait(handles, timeout=timeout)
+        index = next(startup, None)
+        if index is None:
+            return wait(handles, timeout=timeout)
+        pipes = [handle for handle in handles if isinstance(handle, Connection)]
+        pipe = pipes[index]
+        assert pipe.poll(10), "vectorized process did not request its next half"
+        return (pipe,)
 
-    monkeypatch.setattr("etude.eval.run.wait", first_process_twice)
+    monkeypatch.setattr("etude.eval.run.wait", wait_for_each_half)
     eval_group = _load_example_group(Path("examples/vectorized.py"))
     assert [result.played for result in hold_group(eval_group, directory=tmp_path)] == [8]
     artifacts = tmp_path / "vectorized/artifacts/agents"

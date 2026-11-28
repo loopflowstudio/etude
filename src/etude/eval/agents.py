@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Protocol
 from etude.errors import RetryRequested, explain
 from etude.eval.bus import (
     BusReport,
+    Flight,
     ForwardCall,
     ForwardOutcome,
     _FlightBook,
@@ -175,6 +176,10 @@ class SocketForwardBus:
         self._transport = transport
         self._checkpoints: dict[str, CheckpointRef] = {}
         self._book = _FlightBook(_forward_error)
+
+    @property
+    def flight(self) -> Flight:
+        return self._book.flight
 
     @classmethod
     async def connect(cls, address: str) -> SocketForwardBus:
@@ -366,7 +371,7 @@ def running_agents(
             checkout,
             definition.max_batch,
             placement.checkpoint_bytes,
-            placement.agent_threads,
+            placement.inference_threads,
             child,
             resources,
         ),

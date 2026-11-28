@@ -152,15 +152,15 @@ with evaluating(
   Each game process has one event loop. Async `play` runs up to
   `games_per_process` matches at once and flushes forwards on a zero-delay
   loop barrier. Placement sizes for one process per async match first, then
-  divides the batch budget across processes. Direct `play_many` sizes for one
-  process per `max_batch` matches, rounded up. Shared and code-only
-  `play_many` size for one process per match. The parent redistributes process
-  shares as work finishes. It spreads the first async matches and reserves
-  one match per starting `play_many` stream, or up to a batch's share for
-  direct inference, before handling requests. Each `play_many` generator
-  submits forwards on the call and requests matches for its free slots. A
-  take draws on its reservation and shares available matches among the
-  tournament's active processes, rounding up.
+  divides the batch budget across processes. Each async tournament bounds
+  the slots it needs using its own process share. Direct `play_many` sizes
+  for one process per `max_batch` matches, rounded up. Shared and code-only
+  `play_many` size for one process per match. The parent spreads initial
+  async matches across starting processes and uses pending queues to fill
+  slots as children exit. Each `play_many` generator submits forwards on the
+  call and requests matches for its free slots. Each stream can take up to
+  its share of pending plus held matches, rounded up, minus what it holds.
+  Only processes currently serving that tournament count toward the share.
   Both kinds of tournament share an agent process when using shared inference.
   Per-process diagnostics go to `artifacts/agents/game-{pid}.json`
   (`GameReport` with `tournaments: tuple[str, ...]`), keeping a game-thread-filtered
@@ -168,9 +168,8 @@ with evaluating(
   loading and play until process exit (with `"mlx"` alongside `"torch"`,
   `"jax"`, `"tensorflow"` in `_HEAVY`) so inference-thread imports are ignored
   while wrapper and lazy game imports stay visible. Import warnings print once
-  on stderr whenever `placement.bus is not None`—for heavy ML libraries on
-  `local`, and for heavy libraries or module count above `MAX_GAME_IMPORTS` on
-  `socket`. `GameReport` embeds a
+  on stderr for heavy ML libraries when a bus is active. Socket `play` also
+  warns when the module count exceeds `MAX_GAME_IMPORTS`. `GameReport` embeds a
   frozen `BusReport` (`calls`, `answers`, `arrays`, `arrays_copied`, `pickled`,
   `pickled_bytes`, `copied_bytes`, `wire_bytes`, `handoff_seconds`,
   `round_trip_seconds`).
@@ -300,6 +299,9 @@ class ForwardCall:
 
 
 class ForwardBus(Protocol):
+    @property
+    def flight(self) -> Flight: ...
+
     def bind(self, checkpoint: CheckpointRef) -> None: ...
     def submit(self, calls: Sequence[ForwardCall]) -> list[asyncio.Future[list[object]]]: ...
     async def close(self) -> BusReport: ...
@@ -312,8 +314,9 @@ checkpoint and row budget. Both paths resolve each caller's future with its
 slice of the reply. The forwarder records loading failures even when a match
 abandons its awaitable.
 
-Both transports use `_FlightBook` to allocate request IDs, roll back locks on
-failed submissions, and count transfers. A writable NumPy input stays locked
+Both transports use `_FlightBook` to allocate request IDs, own the input locks
+and count transfers. The barrier holds a reference in the same lock ledger
+until submission acquires its own. A writable NumPy input stays locked
 through the last reply using it, including after cancellation. Batching uses
 `_Batches` to merge ready requests up to `max_batch` and `Forwards` to load
 and evict checkpoints. It encodes all replies from a forward before delivering

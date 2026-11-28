@@ -41,6 +41,7 @@ from etude.eval.agents import (
 )
 from etude.eval.bus import (
     BusReport,
+    Flight,
     ForwardCall,
     ForwardOutcome,
     Normalized,
@@ -575,6 +576,10 @@ class LocalForwardBus:
             daemon=False,
         )
         self._thread.start()
+
+    @property
+    def flight(self) -> Flight:
+        return self._book.flight
 
     def bind(self, checkpoint: CheckpointRef) -> None:
         if checkpoint.key in self._bound:

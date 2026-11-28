@@ -161,23 +161,22 @@ class TournamentQueue:
 
 @dataclass(frozen=True)
 class Placement:
-    """Process topology, stream sharing, and resources per inference owner."""
+    """Process topology and resources per inference owner."""
 
     bus: Literal["local", "socket"] | None
     processes: int
-    game_threads: int
-    agent_threads: int
+    inference_threads: int
     games_per_process: int | None  # Concurrency of async play, if present.
-    share_streams: bool
     checkpoint_bytes: int
     reason: Inference | Literal["no pending matches"]
 
-    def process_shares(self, queues: Sequence[TournamentQueue], max_batch: int) -> tuple[int, ...]:
-        """Share the available processes among unfinished tournament queues."""
-        demand = [queue.process_demand(max_batch if self.share_streams else 1) for queue in queues]
-        if self.share_streams:
-            return tuple(min(count, self.processes) for count in demand)
-        return _allocate_processes(demand, min(sum(demand), self.processes))
+    def process_shares(
+        self, queues: Sequence[TournamentQueue], max_batch: int, *, available: int
+    ) -> tuple[int, ...]:
+        """Allocate free process slots according to pending match demand."""
+        direct = self.bus == "local"
+        demand = [queue.process_demand(max_batch if direct else 1) for queue in queues]
+        return _allocate_processes(demand, available, direct=direct)
 
     def describe(self, tournaments: Sequence[str], *, streaming: bool) -> str | None:
         """Describe the placement of one evaluation group."""
@@ -194,7 +193,7 @@ class Placement:
         if self.bus is None:
             return f"etude: {games}"
         mode = "shared" if self.bus == "socket" else "direct"
-        threads = self.agent_threads if self.bus == "socket" else self.game_threads
+        threads = self.inference_threads
         unit = "thread" if threads == 1 else "threads"
         each = " each" if self.bus == "local" and self.processes > 1 else ""
         return (
@@ -219,18 +218,18 @@ def _select_inference(loader: "AgentLoader", checkpoints: bool) -> Inference:
             return unavailable
 
 
-def _allocate_processes(demand: Sequence[int], processes: int) -> tuple[int, ...]:
-    """Share the host in tournament order, leaving one slot for queues that start later."""
+def _allocate_processes(demand: Sequence[int], processes: int, *, direct: bool) -> tuple[int, ...]:
+    """Assign processes in tournament order, sharing direct caches across queues."""
+    if direct:
+        return tuple(min(count, processes) for count in demand)
     allocated = [0] * len(demand)
     eligible = deque(index for index, count in enumerate(demand) if count)
-    for _ in range(processes):
+    for _ in range(min(sum(demand), processes)):
         index = eligible.popleft()
         allocated[index] += 1
         if allocated[index] < demand[index]:
             eligible.append(index)
-    return tuple(
-        max(1, slots) if count else 0 for slots, count in zip(allocated, demand, strict=True)
-    )
+    return tuple(allocated)
 
 
 def place(
@@ -250,26 +249,23 @@ def place(
         return Placement(
             bus=None,
             processes=0,
-            game_threads=1,
-            agent_threads=0,
+            inference_threads=0,
             games_per_process=None,
-            share_streams=False,
             checkpoint_bytes=0,
             reason="no pending matches",
         )
     inference = _select_inference(loader, checkpoints)
     cpus = available_cpus()
     host_bytes = memory_bytes()
-    largest_play = max((queue.matches for queue in queues if not queue.streaming), default=0)
     if inference in ("no loader", "no checkpoints"):
         processes = min(cpus, max(1, host_bytes // GAME_BYTES), total)
         return Placement(
             bus=None,
             processes=processes,
-            game_threads=1,
-            agent_threads=0,
-            games_per_process=1 if largest_play else None,
-            share_streams=False,
+            inference_threads=0,
+            games_per_process=1
+            if any(queue.matches and not queue.streaming for queue in queues)
+            else None,
             checkpoint_bytes=0,
             reason=inference,
         )
@@ -289,14 +285,23 @@ def place(
     # A direct process can serve multiple queues in turn.
     processes = min(cap, sum(demand) if accelerator else max(demand))
     shared = accelerator and processes > 1
-    games = min(math.ceil(loader.max_batch / processes), math.ceil(largest_play / processes))
+    shares = _allocate_processes(demand, processes, direct=not shared)
+    games = min(
+        math.ceil(loader.max_batch / processes),
+        max(
+            (
+                math.ceil(queue.matches / max(1, share))
+                for queue, share in zip(queues, shares, strict=True)
+                if not queue.streaming
+            ),
+            default=0,
+        ),
+    )
     return Placement(
         bus="socket" if shared else "local",
         processes=processes,
-        game_threads=1 if shared else max(1, (cpus - processes) // processes),
-        agent_threads=max(1, cpus - processes) if shared else 0,
+        inference_threads=max(1, (cpus - processes) // (1 if shared else processes)),
         games_per_process=games or None,
-        share_streams=not shared,
         checkpoint_bytes=held if shared else held // processes,
         reason=inference,
     )

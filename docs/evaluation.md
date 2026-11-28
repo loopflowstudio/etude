@@ -264,12 +264,12 @@ job = EvalJob(
 Etude schedules the matches, caches checkpoints and stores each outcome as
 the generator yields it.
 
-- `await matches.take(n)` pulls up to `n` pending `(match, agents)` pairs in one
-  step. Etude reserves initial work for each starting stream. A take can draw
-  from its reservation or take a share of available matches based on the
-  tournament's active process count. Request the number of free slots and
-  step the matches you receive. Returning `[]` for `n > 0` means the queue is
-  empty for that stream or the run is stopping.
+- `await matches.take(n)` pulls up to `n` pending `(match, agents)` pairs from
+  the tournament's queue. Etude gives each active stream a share of unfinished
+  matches, including those it already holds. Request the number of free slots
+  and step the matches you receive. If a take returns `[]`, finish any matches
+  you still hold and request work again when a slot frees up. An empty take
+  with nothing held means the queue is drained or the run is stopping.
 - `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
   `rows=` for a pre-collated batch so batching never merges calls past
   `max_batch` rows and reports real row counts. An oversized pre-collated call
