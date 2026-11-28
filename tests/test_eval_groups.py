@@ -605,7 +605,7 @@ def test_play_arity_and_removed_workers_are_refused(tmp_path: Path) -> None:
         with pytest.raises(LauncherError, match="async def"):
             active.play(sync_play)  # type: ignore[arg-type]
     with pytest.raises(ValidationError, match="workers"):
-        EvalJob.model_validate({**job("bad", None).model_dump(), "workers": 2})
+        EvalJob.model_validate({**job("bad", None).model_dump(exclude_unset=True), "workers": 2})
     with pytest.raises(ValidationError, match="max_delay_seconds"):
         Agents.model_validate({"max_delay_seconds": 0.05})
 
