@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
@@ -38,6 +38,7 @@ def _app(*, help: str | None = None, invoke_without_command: bool = False) -> ty
 app = _app(help="Launch runs on your own or rented machines, and track what they record.")
 pool_app = _app(help="Add a pool of machines you own, or change whether it takes runs.")
 ondemand_app = _app(help="Add an on-demand to rent from: a machine template and a budget.")
+limit_app = _app(help="Set or remove a stored spending limit for an experiment label.")
 machine_app = _app(help="Add a machine you own.")
 server_app = _app(
     help="Show or choose the machine that holds the database, or run its loop.",
@@ -49,6 +50,7 @@ database_app = _app(help="Inspect local schema or explicitly upgrade the launche
 for name, sub in (
     ("pool", pool_app),
     ("ondemand", ondemand_app),
+    ("limit", limit_app),
     ("machine", machine_app),
     ("server", server_app),
     ("provider", provider_app),
@@ -311,6 +313,42 @@ def ondemands() -> None:
     from etude.launch.listing import show_ondemands
 
     show_ondemands(default())
+
+
+@app.command()
+@kind(Kind.read)
+def limits() -> None:
+    """List experiment spending limits and committed totals from the database."""
+    from etude.launch import server
+
+    scheduler = default()
+    for limit in scheduler.limits():
+        print(f"{limit.experiment}  {limit.format_committed(show_limit=True)}")
+    server.show_freshness(scheduler)
+
+
+@limit_app.command("set")
+@kind(Kind.ask)
+def limit_set(
+    experiment: Annotated[str, typer.Argument(help="the experiment label")],
+    max_usd: Annotated[str, typer.Option(help="the total dollar ceiling; zero freezes paid spend")],
+) -> None:
+    """Store or change the ceiling for future launches under an experiment label."""
+    from etude.errors import LauncherError
+
+    try:
+        amount = Decimal(max_usd)
+    except InvalidOperation:
+        raise LauncherError("--max-usd must be a dollar amount") from None
+    limit = default().set_limit(experiment, amount)
+    print(f"{experiment}  limited to {limit.format_usd(limit.max_usd)}; {limit.format_committed()}")
+
+
+@limit_app.command("unset")
+@kind(Kind.ask)
+def limit_unset(experiment: Annotated[str, typer.Argument(help="the experiment label")]) -> None:
+    """Remove the stored spending limit for an experiment label."""
+    default().unset_limit(experiment)
 
 
 @app.command()

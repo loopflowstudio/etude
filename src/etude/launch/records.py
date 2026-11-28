@@ -17,6 +17,7 @@ Every time is timezone-aware UTC.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 from decimal import ROUND_FLOOR, Decimal
 from typing import Literal, Self
@@ -65,6 +66,7 @@ __all__ = (
     "RentalCost",
     "LogStream",
     "Standing",
+    "ExperimentLimit",
 )
 
 
@@ -358,6 +360,10 @@ class Target(Record):
 
     pool: str | None = None
     rent: str | None = None
+
+    def ask_usd(self, job: Job) -> Decimal:
+        """Dollars a new run reserves against the experiment's spending limit."""
+        return (job.max_usd or Decimal(0)) if self.rent is not None else Decimal(0)
 
 
 MachineState = Literal["starting", "available", "unavailable", "deleted"]
@@ -673,12 +679,58 @@ class Quote(Record):
         return total
 
 
+class ExperimentCeiling(Record):
+    """The stored spending ceiling for one experiment label."""
+
+    experiment: str
+    max_usd: Decimal = Field(ge=0, allow_inf_nan=False)
+    set_at: datetime
+
+    def allows(self, committed: Decimal, ask: Decimal) -> bool:
+        """A lowered ceiling still admits work that asks for no additional dollars."""
+        return ask == 0 or committed + ask <= self.max_usd
+
+
+class ExperimentLimit(ExperimentCeiling):
+    """A spending ceiling with the commitments measured at read time."""
+
+    # The total compared against `max_usd`: recorded runs plus `reserved_usd`,
+    # unlike `ExperimentState.committed_usd`, which counts recorded runs only.
+    committed_usd: Decimal
+    # Held by launches still preparing, admitting or settling a rental.
+    reserved_usd: Decimal
+    estimated: bool
+
+    @staticmethod
+    def format_usd(amount: Decimal, *, estimated: bool = False) -> str:
+        """Show cents, with three significant digits for positive sub-cent amounts."""
+        if 0 < amount < Decimal("0.01"):
+            dollars = f"{amount:.{2 - amount.adjusted()}f}".rstrip("0")
+        else:
+            dollars = f"{amount:.2f}"
+        return f"{'~' if estimated else ''}${dollars}"
+
+    def format_committed(
+        self, committed: Decimal | None = None, *, show_limit: bool = False
+    ) -> str:
+        amount = self.committed_usd if committed is None else committed
+        total = self.format_usd(amount, estimated=self.estimated)
+        if show_limit:
+            total += f" of {self.format_usd(self.max_usd)}"
+        total += " committed"
+        if self.reserved_usd:
+            total += f" ({self.format_usd(self.reserved_usd)} in flight)"
+        return total
+
+
 class LaunchRequest(Record):
     run: str
     fingerprint: str
     requested_revision: str | None
     resolved_revision: str | None = None
     resume_version: int | None = None  # compare-and-set the existing run at admission
+    experiment: str | None = None
+    ask_usd: Decimal = Decimal(0)
 
 
 class Launch(Record):
@@ -687,7 +739,23 @@ class Launch(Record):
     id: str
     requests: tuple[LaunchRequest, ...]
     created_at: datetime
+    target: Target | None = None  # absent from evidence written before experiment limits
     state: Literal["preparing", "admitting", "admitted", "failed"] = "preparing"
+    expires_at: datetime | None = None
+
+    @property
+    def pending(self) -> bool:
+        return self.state in {"preparing", "admitting"}
+
+    def lease_live(self, at: datetime) -> bool:
+        return self.pending and self.expires_at is not None and self.expires_at > at
+
+    def addressed(self, runs: Sequence[RunRequest]) -> tuple[RunRequest, ...]:
+        """Give the original requests their retained run addresses."""
+        return tuple(
+            run.model_copy(update={"id": request.run})
+            for run, request in zip(runs, self.requests, strict=True)
+        )
 
 
 class Diagnostic(Record):
@@ -737,18 +805,22 @@ class LogStream(Record):
 
 
 class LogSnapshot(Record):
+    """Launch, run and session settlement at observation time, with available log streams."""
+
     settled: bool = False
     observed_at: datetime
     launches: tuple[Launch, ...] = ()
     diagnostics: tuple[Diagnostic, ...] = ()
     streams: tuple[LogStream, ...] = ()
+    expired_launches: frozenset[str] = frozenset()
+
+    def launch_state(self, launch: Launch) -> str:
+        return "expired" if launch.id in self.expired_launches else launch.state
 
     @property
     def complete(self) -> bool:
-        return (
-            self.settled
-            and all(launch.state not in {"preparing", "admitting"} for launch in self.launches)
-            and all(stream.complete and not stream.retrieval_error for stream in self.streams)
+        return self.settled and all(
+            stream.complete and not stream.retrieval_error for stream in self.streams
         )
 
 
@@ -768,10 +840,11 @@ class Standing(Record):
 
     @property
     def committed_usd(self) -> Decimal:
-        """What the run holds of an experiment's dollars: its cost once done, its limit until then."""
-        return (
-            self.status.usd if self.status.done else self.record.launch.spec.max_usd or Decimal(0)
-        )
+        """Actual spend plus any unspent dollars an unfinished run may still use."""
+        if self.status.done:
+            return self.status.usd
+        launch = self.record.launch
+        return max(self.status.usd, Target(pool=launch.pool, rent=launch.rent).ask_usd(launch.spec))
 
     @property
     def placement(self) -> Literal["queued", "running"]:

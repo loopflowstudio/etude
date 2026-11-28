@@ -38,7 +38,7 @@ from uuid import uuid4
 from etude.carriage import RecordMismatch
 from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError, explain, sanitize
-from etude.identity import resume_conflicts, run_address
+from etude.identity import SAFE_NAME, resume_conflicts, run_address
 from etude.launch import source
 from etude.launch.commands import ProviderKind
 from etude.launch.database import Database
@@ -58,6 +58,8 @@ from etude.launch.records import (
     Availability,
     Cause,
     Diagnostic,
+    ExperimentCeiling,
+    ExperimentLimit,
     Hardware,
     HourlyRate,
     Image,
@@ -179,6 +181,34 @@ def _pace_state(statuses: Sequence[Status], ending: Sequence[Session]) -> _PaceS
 def _limit_usd(job: Job) -> Decimal:
     """A job's dollar limit. None is allowed only where nothing can be spent."""
     return Decimal("Infinity") if job.max_usd is None else job.max_usd
+
+
+def _validate_experiment(experiment: str) -> None:
+    if experiment.endswith(".py"):
+        raise LauncherError("give the experiment label instead of its .py file")
+    if not SAFE_NAME.fullmatch(experiment):
+        raise LauncherError(f"invalid experiment label {experiment!r}")
+
+
+def _additional_usd(requests: Sequence[LaunchRequest], commitments: dict[str, Decimal]) -> Decimal:
+    total = Decimal(0)
+    for request in requests:
+        # A resume replaces its run's commitment only after successful admission.
+        prior = commitments[request.run] if request.resume_version is not None else Decimal(0)
+        total += max(Decimal(0), request.ask_usd - prior)
+    return total
+
+
+def _launch_request(run: RunRequest, target: Target, prior: RunRecord | None) -> LaunchRequest:
+    assert run.id is not None
+    return LaunchRequest(
+        run=run.id,
+        fingerprint=hashlib.sha256(run.model_dump_json().encode()).hexdigest(),
+        requested_revision=sanitize(run.job.revision) if run.job.revision else None,
+        resume_version=prior.launch.version if prior is not None else None,
+        experiment=run.job.experiment,
+        ask_usd=target.ask_usd(run.job),
+    )
 
 
 def _remaining_budget(
@@ -336,6 +366,74 @@ class Scheduler:
 
     def ondemands(self) -> tuple[OnDemand, ...]:
         return self._store.ondemands()
+
+    def set_limit(self, experiment: str, max_usd: Decimal) -> ExperimentLimit:
+        """Set a label's ceiling. Existing runs and outstanding reservations keep their funding."""
+        _validate_experiment(experiment)
+        if not max_usd.is_finite() or max_usd < 0:
+            raise LauncherError("an experiment spending limit must be nonnegative and finite")
+        limit = ExperimentCeiling(experiment=experiment, max_usd=max_usd, set_at=self._clock())
+        self._store.set_limit(limit)
+        with self._store.reading():
+            return self._measure_limit(limit, self._clock())
+
+    def unset_limit(self, experiment: str) -> None:
+        """Remove the ceiling for future launches under the label."""
+        _validate_experiment(experiment)
+        self._store.unset_limit(experiment)
+
+    def limit(self, experiment: str) -> ExperimentLimit | None:
+        """Read the label's ceiling and committed dollars from retained evidence."""
+        with self._store.reading():
+            limit = self._store.limit(experiment)
+            return None if limit is None else self._measure_limit(limit, self._clock())
+
+    def limits(self) -> tuple[ExperimentLimit, ...]:
+        """Read all configured spending limits on one database snapshot."""
+        with self._store.reading():
+            now = self._clock()
+            return tuple(self._measure_limit(limit, now) for limit in self._store.limits())
+
+    def _measure_limit(
+        self, limit: ExperimentCeiling, now: datetime, requests: Sequence[LaunchRequest] = ()
+    ) -> ExperimentLimit:
+        standing = self.standing(limit.experiment)
+        commitments = {item.record.id: item.committed_usd for item in standing}
+        reserved = _additional_usd(self._store.reservations(limit.experiment, now), commitments)
+        measured = ExperimentLimit(
+            experiment=limit.experiment,
+            max_usd=limit.max_usd,
+            set_at=limit.set_at,
+            committed_usd=sum(commitments.values(), Decimal(0)) + reserved,
+            reserved_usd=reserved,
+            estimated=any(
+                item.status.estimated and commitments[item.record.id] == item.status.usd
+                for item in standing
+            ),
+        )
+        ask = _additional_usd(requests, commitments)
+        if not limit.allows(measured.committed_usd, ask):
+            suggestion = (
+                "Retry after in-flight launches settle, or use"
+                if limit.allows(measured.committed_usd - reserved, ask)
+                else "Use"
+            )
+            raise LauncherError(
+                f"experiment {limit.experiment!r} is limited to "
+                f"{measured.format_usd(limit.max_usd)}: {measured.format_committed()} "
+                f"and this launch asks {measured.format_usd(ask)}. "
+                f"{suggestion} `etude limit set {limit.experiment} --max-usd D` to raise the limit"
+            )
+        return measured
+
+    def _check_limits(self, requests: Sequence[LaunchRequest], now: datetime) -> None:
+        experiments: dict[str, list[LaunchRequest]] = {}
+        for request in requests:
+            if request.experiment and request.ask_usd > 0:
+                experiments.setdefault(request.experiment, []).append(request)
+        for experiment, asks in experiments.items():
+            if (limit := self._store.limit(experiment)) is not None:
+                self._measure_limit(limit, now, asks)
 
     def set_startup(self, name: str, seconds: float | None) -> None:
         """Change a pool's or on-demand's startup allowance for future sessions; None removes it."""
@@ -594,8 +692,7 @@ class Scheduler:
         rent: str | None = None,
     ) -> tuple[str, ...]:
         """Record runs for the next free slots, without requiring capacity now."""
-        given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
-        return self._submit(expand_runs(given), self._target(pool, rent), queued=True)
+        return self._submit(expand_runs(runs), pool, rent, queued=True)
 
     def launch(
         self,
@@ -605,8 +702,7 @@ class Scheduler:
         rent: str | None = None,
     ) -> tuple[str, ...]:
         """Place the runs that fit now and queue the rest; refuse if none fit."""
-        given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
-        return self._submit(expand_runs(given), self._target(pool, rent), queued=False)
+        return self._submit(expand_runs(runs), pool, rent, queued=False)
 
     def quote(
         self,
@@ -626,8 +722,10 @@ class Scheduler:
         records = []
         labels = {}
         requested = self._address_requests(runs, target)
+        asks = []
         for index, (run, addressed) in enumerate(zip(runs, requested, strict=True)):
             prior = self._resumed(addressed) if run.resume else None
+            asks.append(_launch_request(addressed, target, prior))
             assert addressed.id is not None
             identity = addressed.id
             labels[identity] = (
@@ -653,6 +751,8 @@ class Scheduler:
                     seed=run.seed,
                 )
             )
+        with self._store.reading():
+            self._check_limits(asks, self._clock())
         quoted = []
         waiting_usd = Decimal(0)
         for name in (target.pool, target.rent):
@@ -690,14 +790,10 @@ class Scheduler:
         )
 
     def _submit(
-        self, runs: Sequence[RunRequest], target: Target, *, queued: bool
+        self, runs: Sequence[RunRequest], pool: str | None, rent: str | None, *, queued: bool
     ) -> tuple[str, ...]:
-        launch = self.prepare_launch(runs, target.pool, rent=target.rent)
-        requested = tuple(
-            run.model_copy(update={"id": request.run})
-            for run, request in zip(runs, launch.requests, strict=True)
-        )
-        return self.submit_launch(launch.id, requested, target, queued=queued)
+        launch = self.prepare_launch(runs, pool, rent=rent)
+        return self.submit_launch(launch.id, launch.addressed(runs), queued=queued)
 
     def _address_requests(
         self, runs: Sequence[RunRequest], target: Target
@@ -725,69 +821,76 @@ class Scheduler:
         launch = Launch(
             id=_id(),
             created_at=self._clock(),
+            target=target,
             requests=tuple(
-                LaunchRequest(
-                    run=str(run.id),
-                    fingerprint=hashlib.sha256(run.model_dump_json().encode()).hexdigest(),
-                    requested_revision=sanitize(run.job.revision) if run.job.revision else None,
-                    # Refuses a resume before the client publishes source.
-                    resume_version=self._resumed(run).launch.version if run.resume else None,
-                )
+                _launch_request(run, target, self._resumed(run) if run.resume else None)
                 for run in requested
             ),
         )
-        self._store.begin_launch(launch)
+        launch = self._store.claim_launch(launch, self._clock, self._check_limits)
         self._diagnose(
             "preparation", "awaiting prepared source; job command not started", launch=launch.id
         )
         return launch
 
     def fail_launch(self, identity: str, message: str) -> None:
-        launch = self._store.claim_launch(identity)
-        self._store.save_launch(launch.model_copy(update={"state": "failed"}))
+        self._store.fail_launch(identity, expected="preparing")
         self._diagnose("source preparation", message, launch=identity)
+
+    def renew_preparation(self, identity: str) -> None:
+        """Keep the client's reservation while it assembles the missing source archives."""
+        self._store.renew_launch(identity, self._clock, state="preparing")
 
     def submit_launch(
         self,
         identity: str,
         runs: Sequence[RunRequest],
-        target: Target,
         *,
         queued: bool,
+        retain_source: Callable[[], None] | None = None,
     ) -> tuple[str, ...]:
-        launch = self._store.claim_launch(identity)
-        selected = self._target(target.pool, target.rent)
-        requested = tuple(runs)
+        launch = self._store.finish_preparation(identity, self._clock)
         ids = tuple(request.run for request in launch.requests)
-        if tuple(run.id for run in requested) != ids:
-            self._store.save_launch(launch.model_copy(update={"state": "failed"}))
-            raise LauncherError("prepared run identities differ from launch intent")
         operation = "source preparation"
-        self._diagnose(
-            operation, "preparing requested work; job command not started", launch=launch.id
-        )
         try:
-            records = tuple(self._freeze(run, selected) for run in requested)
-            launch = launch.model_copy(
-                update={
-                    "requests": tuple(
-                        request.model_copy(
-                            update={"resolved_revision": record.launch.spec.revision}
-                        )
-                        for request, record in zip(launch.requests, records, strict=True)
-                    )
-                }
+            self._diagnose(
+                operation, "preparing requested work; job command not started", launch=launch.id
             )
+            target = launch.target
+            if target is None:
+                raise LauncherError(
+                    "launch intent predates spending reservations; prepare it again"
+                )
+            if tuple(run.id for run in runs) != ids:
+                raise LauncherError("prepared run identities differ from launch intent")
+            for request, run in zip(launch.requests, runs, strict=True):
+                if (
+                    run.job.experiment != request.experiment
+                    or target.ask_usd(run.job) != request.ask_usd
+                    or run.resume != (request.resume_version is not None)
+                ):
+                    raise LauncherError("prepared run spending differs from launch intent")
+            if retain_source is not None:
+                retain_source()
+            records = tuple(self._freeze(run, target) for run in runs)
             for request, record in zip(launch.requests, records, strict=True):
                 if (
                     request.resume_version is not None
                     and record.launch.version != request.resume_version
                 ):
                     raise Stale(f"run {record.id!r} changed during source preparation")
-            self._store.save_launch(launch)
             operation = "admission"
+            self._store.renew_launch(
+                launch.id,
+                self._clock,
+                state="admitting",
+                requests=tuple(
+                    request.model_copy(update={"resolved_revision": record.launch.spec.revision})
+                    for request, record in zip(launch.requests, records, strict=True)
+                ),
+            )
             if queued:
-                self._store.launch(records, launch=launch.id)
+                self._store.launch(records, launch=launch.id, clock=self._clock)
             else:
                 self._admit(records, launch.id)
         except BaseException as error:
@@ -800,7 +903,7 @@ class Scheduler:
                 raise LaunchError(
                     launch.id, ids, "run admitted; delivery unconfirmed; " + explain(error)
                 ) from error
-            self._store.save_launch(launch.model_copy(update={"state": "failed"}))
+            self._store.fail_launch(launch.id, expected="admitting")
             self._diagnose(operation, "admission failed; no run recorded", error, launch=launch.id)
             if not isinstance(error, Exception):
                 raise
@@ -890,7 +993,9 @@ class Scheduler:
             self._affordable_seconds(ondemand, price, cap),
         )
 
-    def _stage(self, ondemand: OnDemand, runs: Sequence[RunRecord]) -> None:
+    def _stage(
+        self, ondemand: OnDemand, runs: Sequence[RunRecord], *, launch: str | None = None
+    ) -> None:
         """Put the runs' source archives in the on-demand's storage before renting for them.
 
         A rental's window starts when it is made, so no paid machine waits on an upload.
@@ -903,6 +1008,8 @@ class Scheduler:
                 if r.launch.spec.repo and r.launch.spec.revision
             }
         ):
+            if launch is not None:
+                self._store.renew_launch(launch, self._clock, state="admitting")
             service.stage(repo, commit)
 
     def _admit(self, records: Sequence[RunRecord], launch: str) -> None:
@@ -910,7 +1017,8 @@ class Scheduler:
         names = [name for name in (target.pool, target.rent) if name is not None]
         if target.rent is not None:
             # Before the locks: an upload can outlast their lease.
-            self._stage(self._store.ondemand(target.rent), records)
+            self._stage(self._store.ondemand(target.rent), records, launch=launch)
+            self._store.renew_launch(launch, self._clock, state="admitting")
         with ExitStack() as locks:
             for name in names:  # pools before on-demands, as tick takes them
                 if not locks.enter_context(self._store.lock(name, self._clock)):
@@ -977,8 +1085,10 @@ class Scheduler:
                                         continue
                                     except LauncherError:
                                         pass
-                                if attempts:
-                                    break  # keep confirmed placements; later runs stay queued
+                                # Admitting would hand the reservation to the runs while
+                                # this unassigned paid machine could still be out there.
+                                if attempts and (rented is None or session.refused_at is not None):
+                                    break
                                 reason = (
                                     _refused(session, owned=rented is None)
                                     if session.refused_at is not None
@@ -989,6 +1099,7 @@ class Scheduler:
                                     " etude queue would wait"
                                 ) from None
                     else:
+                        self._store.renew_launch(launch, self._clock, state="admitting")
                         session = self._store.session(existing.id)
                         if not self._live(session, now):
                             raise LauncherError(
@@ -1038,7 +1149,7 @@ class Scheduler:
                 ):
                     raise LauncherError("capacity expired during launch; etude queue would wait")
                 # Runs and claims become visible together, under the same locks.
-                self._store.launch(records, attempts, launch=launch)
+                self._store.launch(records, attempts, launch=launch, clock=self._clock)
             except BaseException:
                 for session in made:
                     try:
@@ -1244,8 +1355,9 @@ class Scheduler:
         self, experiment: str | None = None, *, job: str | None = None
     ) -> tuple[Standing, ...]:
         """Read all runs labelled with this experiment, including completed runs."""
+        now = self._clock()
         return tuple(
-            Standing(record=r, status=self.read(r.id))
+            Standing(record=r, status=self._read(r, now))
             for r in self._store.runs(experiment=experiment, job=job)
         )
 
@@ -1357,29 +1469,43 @@ class Scheduler:
         """
         if timeout is not None and not refresh:
             raise ValueError("a log timeout bounds a refresh")
-        selection = self._log_selection(run, machine)
+        with self._store.reading():
+            observed_at = self._clock()
+            selection = self._log_selection(run, machine)
+            reserving = {
+                launch.id
+                for launch in selection.launches
+                if self._store.launch_reserves(launch, observed_at)
+            }
+            settled = not reserving and all(
+                session.ended_at is not None or session.refused_at is not None
+                for session in selection.sessions
+            )
+            if (
+                settled
+                and run is not None
+                and (
+                    not selection.launches
+                    or any(launch.state == "admitted" for launch in selection.launches)
+                )
+            ):
+                settled = self.read(run).done
         streams = (
             self._collect_logs(selection.sessions, selection.attempts, timeout)
             if refresh
             else self._retained_logs(selection.sessions, selection.attempts)
         )
-        settled = all(
-            session.ended_at is not None or session.refused_at is not None
-            for session in selection.sessions
-        )
-        if run is not None:
-            if not selection.launches or any(
-                launch.state == "admitted" for launch in selection.launches
-            ):
-                settled = settled and self.read(run).done
-            else:
-                settled = settled and all(launch.state == "failed" for launch in selection.launches)
         return LogSnapshot(
             settled=settled,
-            observed_at=self._clock(),
+            observed_at=observed_at,
             launches=selection.launches,
             diagnostics=self._diagnostics(selection),
             streams=streams,
+            expired_launches=frozenset(
+                launch.id
+                for launch in selection.launches
+                if launch.pending and launch.id not in reserving
+            ),
         )
 
     def _collect_logs(
@@ -1495,8 +1621,10 @@ class Scheduler:
 
     def read(self, run: str) -> Status:
         """A run's state from the records as they are, without looking at any pool."""
-        now = self._clock()
-        record = self._store.run(run)
+        return self._read(self._store.run(run), self._clock())
+
+    def _read(self, record: RunRecord, now: datetime) -> Status:
+        run = record.id
         attempts = self._store.attempts(run=run)
         paid = _paid(attempts)
         last = attempts[-1] if attempts else None
@@ -1605,6 +1733,7 @@ class Scheduler:
                         self._tick_supply(supply, self._clock())
                     except Stale:
                         continue
+        self._store.expire_launches(self._clock)
         self._bills(self._clock())
 
     def _tick_supply(self, supply: Supply, now: datetime) -> None:

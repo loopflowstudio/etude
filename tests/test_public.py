@@ -43,11 +43,11 @@ SURFACE: dict[str, tuple[str, ...]] = {
         "Job RunRequest Until Input Variable Runtime Preparation SmokeForm".split()
     ),
     "etude.launch.client": tuple(
-        "queue launch quote status wait cancel logs fetch default usage standing".split()
+        "queue launch quote status wait cancel logs fetch default usage standing limit limits".split()
     ),
     "etude.launch.records": tuple(
         "MachineTemplate OnDemand Provider Pool Storage Image GPU CPU Availability Offer Status "
-        "Quote Diagnostic Machine MachineStatus RentalCost LogStream Standing".split()
+        "Quote Diagnostic Machine MachineStatus RentalCost LogStream Standing ExperimentLimit".split()
     ),
     "etude.launch.database": tuple("Database inspect upgrade Schema Upgrade".split()),
     "etude.launch.provisioner.images": ("resolve_image",),

@@ -120,7 +120,7 @@ def render(snapshot: LogSnapshot, *, job_only: bool = False) -> str:
     lines: list[str] = []
     if not job_only:
         for launch in snapshot.launches:
-            lines.append(f"launch {launch.id}: {launch.state}\n")
+            lines.append(f"launch {launch.id}: {snapshot.launch_state(launch)}\n")
         lines.extend(_render_diagnostic(diagnostic) for diagnostic in snapshot.diagnostics)
     for stream in snapshot.streams:
         if job_only and stream.producer != "job":
@@ -148,9 +148,10 @@ class LogCursor:
         output: list[str] = []
         if not job_only:
             for launch in snapshot.launches:
-                if self._launches.get(launch.id) != launch.state:
-                    output.append(f"launch {launch.id}: {launch.state}\n")
-                    self._launches[launch.id] = launch.state
+                launch_state = snapshot.launch_state(launch)
+                if self._launches.get(launch.id) != launch_state:
+                    output.append(f"launch {launch.id}: {launch_state}\n")
+                    self._launches[launch.id] = launch_state
             fresh = tuple(d for d in snapshot.diagnostics if d.id not in self._diagnostics)
             output.extend(_render_diagnostic(diagnostic) for diagnostic in fresh)
             self._diagnostics.update(d.id for d in fresh)

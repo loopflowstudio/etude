@@ -10,6 +10,8 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import UTC, datetime, timedelta, tzinfo
 from decimal import Decimal
 from pathlib import Path
@@ -19,6 +21,7 @@ from urllib.request import Request
 
 import pytest
 
+from etude.cli import main
 from etude.errors import LauncherError
 from etude.launch import logging, source
 from etude.launch.aws import Keys
@@ -44,6 +47,7 @@ from etude.launch.schemas import (
     attempt_log,
     log_piece,
 )
+from etude.launch.server import PythonClient
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.disk import DirectoryJournal
 from etude.launch.storage.files import write
@@ -498,7 +502,7 @@ def test_log_reads_never_drive_execution(tmp_path: Path) -> None:
     with counting.record():
         b.scheduler.logs(refresh=True, run=run)
         count = counting.snapshot()
-    assert count == Counts(bucket=3, database=26)
+    assert count == Counts(bucket=3, database=28)
     with counting.record():
         assert b.scheduler.diagnostics(run=run)
         count = counting.snapshot()
@@ -659,16 +663,47 @@ def test_client_chosen_id_freezes_source_before_admission(
     assert record.launch.spec.revision != "HEAD"
 
 
+@pytest.mark.parametrize("swept", [False, True])
 def test_remote_preparation_failure_keeps_server_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    swept: bool,
 ) -> None:
     b = bench(tmp_path)
-    launch = b.scheduler.prepare_launch((RunRequest(id="remote-id", job=job()),), rent="l4")
-    b.scheduler.fail_launch(launch.id, "source publication failed: denied")
-    assert "source publication failed" in render(b.scheduler.logs(refresh=True, run="remote-id"))
+    requested = RunRequest(id="remote-id", job=job())
+
+    def exchange(
+        address: str, argv: Sequence[str], *, input: bytes, capture_output: bool
+    ) -> subprocess.CompletedProcess[bytes]:
+        with monkeypatch.context() as scope:
+            scope.setattr("etude.launch.cli.default", lambda: b.scheduler)
+            scope.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(input)))
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(argv)
+        return subprocess.CompletedProcess(
+            argv, code, stdout.getvalue().encode(), stderr.getvalue().encode()
+        )
+
+    def publication_failed(run: RunRequest) -> RunRequest:
+        if swept:
+            b.run(301)
+            (expired,) = b.store.launches("remote-id")
+            assert expired.state == "failed"
+        raise OSError("source publication failed: denied")
+
+    monkeypatch.setattr("etude.launch.server._ssh", exchange)
+    with monkeypatch.context() as scope:
+        scope.setattr("etude.launch.server.freeze", publication_failed)
+        with pytest.raises(LaunchError, match="source publication failed: denied") as caught:
+            PythonClient("fixture").queue(requested, rent="l4")
+    assert "server evidence update unconfirmed" not in str(caught.value)
+    evidence = render(b.scheduler.logs(run="remote-id"))
+    assert f"launch {caught.value.launch}: failed" in evidence
+    assert "source preparation: OSError: source publication failed: denied" in evidence
+    assert ("reservation expired" in evidence) is swept
     assert b.store.runs() == () and b.service.creates == 0
-    assert b.scheduler.launch(RunRequest(id="remote-id", job=job()), rent="l4")[0] == "remote-id"
+    assert b.scheduler.launch(requested, rent="l4") == ("remote-id",)
 
 
 @pytest.mark.parametrize("failure", ["install", "spawn", "import", "entry"])

@@ -46,8 +46,17 @@ failure recovery requires.
   Outages can delay deletion. External storage/transfer/API costs are excluded.
   An EC2 machine reading or writing a bucket outside its AWS region (any R2
   bucket) pays AWS for that transfer, outside the quote.
+  An experiment spending limit (`etude limit set`) bounds paid runs under that
+  label within one launcher database (this computer, or clients sharing one
+  `etude server`). Owned-pool launches add no commitment. Unlabelled runs,
+  idle time on hand-rented machines (`etude rent`), and runs in other databases
+  fall outside the limit. A limit spanning separate launcher databases, or one
+  an agent sharing the same shell cannot raise, requires a hosted service.
   Rental windows cannot outlast scoped storage grants (7 days on R2, 36 hours
   on S3). Queues require a scheduling loop to keep advancing.
+- `etude launch` targeting an on-demand renews its five-minute reservation
+  before each source archive upload. If one upload outlasts the lease, the
+  launch fails before renting, even for a label with no spending limit.
 - `availability` and `--quote` report a provider's stock signal, not a
   reservation. A provider can call hardware `rentable now` and refuse the
   create seconds later; the launch then fails with the provider's reason and

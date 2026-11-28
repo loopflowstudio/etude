@@ -20,7 +20,7 @@ import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
 from typing import Annotated, Any, Literal, NoReturn
 
@@ -35,13 +35,13 @@ from etude.launch.logs import ConsoleTail
 from etude.launch.openssh import ssh_command
 from etude.launch.provisioner.providers.package import program_archive
 from etude.launch.records import (
+    ExperimentLimit,
     Launch,
     LogSnapshot,
     MachineStatus,
     Quote,
     Standing,
     Status,
-    Target,
 )
 from etude.launch.scheduler.loop import Pacer, Scheduler
 from etude.launch.source import freeze, retain, source_archive, stored
@@ -119,6 +119,36 @@ class StandingRequest(Record):
     job: str | None = None
 
 
+class LimitsRequest(Record):
+    operation: Literal["limits"] = "limits"
+    experiment: str | None = None
+    for_default_target: bool = False
+
+    def read(self) -> tuple[ExperimentLimit, ...]:
+        if address := selected():
+            return TypeAdapter(tuple[ExperimentLimit, ...]).validate_json(
+                PythonClient(address)._request(self)
+            )
+        return self.read_local()
+
+    def read_local(self) -> tuple[ExperimentLimit, ...]:
+        with retained_scheduler() as scheduler:
+            if scheduler is None or (
+                self.for_default_target and scheduler.default_target().rent is None
+            ):
+                return ()
+            if self.experiment is None:
+                return scheduler.limits()
+            limit = scheduler.limit(self.experiment)
+            return (limit,) if limit is not None else ()
+
+
+def read_limit(experiment: str, *, for_default_target: bool = False) -> ExperimentLimit | None:
+    """For a declaration using the default target, only a rentable target needs a ceiling."""
+    limits = LimitsRequest(experiment=experiment, for_default_target=for_default_target).read()
+    return limits[0] if limits else None
+
+
 class ObservationRequest(Record):
     operation: Literal["observation"] = "observation"
     consoles: tuple[str, ...]
@@ -192,6 +222,7 @@ type Request = Annotated[
     | OutputRequest
     | RunOperation
     | StandingRequest
+    | LimitsRequest
     | ObservationRequest
     | WaitRequest
     | EvidenceRequest
@@ -211,6 +242,7 @@ type Response = (
     | Usage
     | LogSnapshot
     | LauncherObservation
+    | tuple[ExperimentLimit, ...]
     | tuple[RunRecord, ...]
     | tuple[Standing, ...]
     | Launch
@@ -322,23 +354,24 @@ def prepare(address: str, submission: LaunchInput) -> LaunchInput:
     launch = Launch.model_validate_json(
         client._request(SubmissionRequest(operation="prepare_launch", submission=submission))
     )
-    requested = tuple(
-        run.model_copy(update={"id": request.run})
-        for run, request in zip(submission.runs, launch.requests, strict=True)
-    )
     try:
         return _with_sources(
             submission.model_copy(
-                update={"launch": launch.id, "runs": tuple(freeze(run) for run in requested)}
+                update={
+                    "launch": launch.id,
+                    "runs": tuple(freeze(run) for run in launch.addressed(submission.runs)),
+                }
             ),
             client,
         )
-    except Exception as error:
+    except BaseException as error:
         message = explain(error)
         try:
             client._request(FailLaunchRequest(launch=launch.id, message=message))
         except Exception:
             message += "; server evidence update unconfirmed"
+        if not isinstance(error, Exception):
+            raise
         raise LaunchError(launch.id, tuple(r.run for r in launch.requests), message) from error
 
 
@@ -417,21 +450,8 @@ class PythonClient:
             raise LauncherError(detail or "server request failed; outcome unknown")
         return done.stdout
 
-    def _submit(
-        self,
-        runs: Sequence[RunRequest],
-        target: Target,
-        queued: bool,
-    ) -> tuple[str, ...]:
-        submission = prepare(
-            self.address,
-            LaunchInput(
-                runs=tuple(runs),
-                pool=target.pool,
-                rent=target.rent,
-                queued=queued,
-            ),
-        )
+    def _submit(self, submission: LaunchInput) -> tuple[str, ...]:
+        submission = prepare(self.address, submission)
         try:
             return TypeAdapter(tuple[str, ...]).validate_json(
                 self._request(SubmissionRequest(operation="launch", submission=submission))
@@ -449,8 +469,9 @@ class PythonClient:
         *,
         rent: str | None = None,
     ) -> tuple[str, ...]:
-        given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
-        return self._submit(expand_runs(given), Target(pool=pool, rent=rent), True)
+        return self._submit(
+            LaunchInput(runs=tuple(expand_runs(runs)), pool=pool, rent=rent, queued=True)
+        )
 
     def launch(
         self,
@@ -459,8 +480,7 @@ class PythonClient:
         *,
         rent: str | None = None,
     ) -> tuple[str, ...]:
-        given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
-        return self._submit(expand_runs(given), Target(pool=pool, rent=rent), False)
+        return self._submit(LaunchInput(runs=tuple(expand_runs(runs)), pool=pool, rent=rent))
 
     def quote(
         self,
@@ -540,11 +560,13 @@ class PythonClient:
 
 def receive(open_scheduler: Callable[[], Scheduler]) -> int:
     request = _REQUEST.validate_json(sys.stdin.buffer.read())
-    response = (
-        LauncherObservation.read(request.consoles)
-        if isinstance(request, ObservationRequest)
-        else _answer(open_scheduler(), request)
-    )
+    response: Response
+    if isinstance(request, ObservationRequest):
+        response = LauncherObservation.read(request.consoles)
+    elif isinstance(request, LimitsRequest):
+        response = request.read_local()
+    else:
+        response = _answer(open_scheduler(), request)
     print(ServerReply(response).model_dump_json())
     return 0
 
@@ -557,6 +579,8 @@ def _answer(scheduler: Scheduler, request: Request) -> Response:
                 submission.runs, submission.pool, rent=submission.rent
             )
         case SubmissionRequest(operation="missing_sources", submission=submission):
+            if submission.launch is not None:
+                scheduler.renew_preparation(submission.launch)
             response = tuple(
                 run.id
                 for run in submission.runs
@@ -566,23 +590,16 @@ def _answer(scheduler: Scheduler, request: Request) -> Response:
                 and not stored(run.job.repo, run.job.revision).is_file()
             )
         case SubmissionRequest(operation="launch", submission=submission):
-            try:
-                _retain(submission.sources)
-            except Exception as error:
-                if submission.launch is not None:
-                    scheduler.fail_launch(submission.launch, explain(error))
-                raise
-            if submission.launch is not None:
-                ids = scheduler.submit_launch(
-                    submission.launch,
-                    submission.runs,
-                    Target(pool=submission.pool, rent=submission.rent),
-                    queued=submission.queued,
-                )
-            else:
-                send = scheduler.queue if submission.queued else scheduler.launch
-                ids = send(submission.runs, submission.pool, rent=submission.rent)
-            response = tuple(ids)
+            identity, runs = submission.launch, submission.runs
+            if identity is None:
+                launch = scheduler.prepare_launch(runs, submission.pool, rent=submission.rent)
+                identity, runs = launch.id, launch.addressed(runs)
+            response = scheduler.submit_launch(
+                identity,
+                runs,
+                queued=submission.queued,
+                retain_source=partial(_retain, submission.sources),
+            )
         case SubmissionRequest(operation="quote", submission=submission):
             response = scheduler.quote(submission.runs, submission.pool, rent=submission.rent)
         case FailLaunchRequest():

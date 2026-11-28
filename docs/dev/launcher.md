@@ -114,9 +114,11 @@ for event in snapshot.diagnostics:
 
 Diagnostics read retained database facts without provider or
 bucket calls. With a server selected, those facts live on the server.
-Preparation intent is recorded there before the submitting client publishes its
-source. A disconnected submitting client can leave a preparing launch; it is
-reported as unresolved and does not authorize automatic resubmission.
+Launch intent is recorded before the submitting client publishes its source.
+A spending limit refusal records the reason with the failed launch. If a client
+disconnects during preparation, logs show the launch as expired when its lease
+runs out. A source failure reported after the scheduler records expiry appears
+alongside the expiry reason.
 
 ## The server
 
@@ -169,19 +171,22 @@ Provider and storage credentials belong in the server's own environment;
 the client sends none. How a server obtains them is not settled: a command
 arriving over SSH does not see secrets that a terminal session there loads.
 
-The functions in `etude.launch.client` (`queue`, `launch`, `status`, `wait`,
-`cancel`, `logs` and `fetch`) use the selected server and return the same
-Python values. An explicitly constructed `Scheduler` remains the owner of a
-local database.
+The functions in `etude.launch.client` (`queue`, `launch`, `quote`, `status`,
+`wait`, `cancel`, `logs`, `fetch`, `standing`, `limit` and `limits`) use the
+selected server and return the same Python values; setting or unsetting an
+experiment limit stays on `Scheduler` and the CLI. An explicitly constructed
+`Scheduler` remains the owner of a local database.
 
-Launch reads the experiment file and config on the client, runs the
-controller's pass there, freezes and publishes source there, and sends frozen
-runs and one source archive per repository/commit. The server stores archives
+Launch reads the experiment file and config on the client and runs the
+controller's pass there. The server reserves the requests in `prepare_launch`
+before the client freezes and publishes source and sends the frozen runs
+and one source archive per repository/commit. The server stores archives
 under `ETUDE_HOME/sources` and can launch or continue without a repository
-checkout. A pass asks the server once for where the experiment's runs stand;
-with a server selected it needs `--source` to say where their stored state
-is. Logs stream back over SSH. Fetch copies to the client's
-chosen directory and checks the returned digest before replacing its output.
+checkout. A pass reads the experiment's standing from the server. For an
+on-demand or a default target, one further read returns the applicable spending
+limit. With a server selected, `--source` locates the stored experiment data.
+Logs stream back over SSH. Fetch copies to the client's chosen directory and
+checks the returned digest before replacing its output.
 A lost SSH reply is an error; launch is not automatically retried.
 
 Run the standing loop on the server under a process supervisor:
@@ -306,7 +311,10 @@ recovery snapshots are retained without automatic pruning. A failed migration
 rolls back its transaction. Rerun the explicit upgrade after resolving the error.
 
 The live inventory's additive migration, `live_machine_inventory.sql`, creates
-indexes for machines, sessions and allocated attempts.
+indexes for machines, sessions and allocated attempts. Stored experiment limits
+add `experiment_limits.sql` with a `-- breaks:` fence so older clients of a
+shared database cannot admit runs past a stored limit; every client using that
+database must upgrade.
 
 A backup restores database facts, not provider state: stop scheduling and
 reconcile live machines and attempts before restoring or resuming any queue.
@@ -817,16 +825,24 @@ provisioning and execution, while provisioners and workers remain independent.
 | Worker | `etude/launch/worker/` | packet execution, local evidence and delivery |
 
 - **Controller.** `controller/advance.py` reads declarations, observes state
-  through `client.standing(experiment)` and storage, and calls `launch` or
-  `queue` for new work. It holds the experiment's `--max-usd` and nothing else
-  between passes. Declaration reading, smoke and local composition live beside it.
+  through `client.standing(experiment)` and storage, checks any stored limit
+  through `read_limit` in `server.py`, and calls `launch` or `queue`
+  for new work. It holds nothing between passes.
+  Declaration reading, smoke and local composition live beside it.
 - **Scheduler.** `scheduler/loop.py` owns database writes, locks, runs, queue,
-  placement and job limits. `costs.py` holds dollar arithmetic and `placement.py`
+  placement, job limits and stored experiment spending limits. `prepare_launch`
+  reserves dollars atomically under a five-minute lease, renewed at source
+  preparation, before each staged archive, after staging and at placement.
+  An unsettled rental acquired by the launch retains the reservation even
+  after lease expiry. Logs recognize an abandoned launch at expiry and the
+  scheduler records its failure on the next tick. The transaction that writes
+  admitted runs replaces the reservation with their commitment. `quote`
+  checks the same limit on a read snapshot.
+  `costs.py` holds dollar arithmetic and `placement.py`
   holds placement values; neither owns lifecycle state. `executor.py` composes
   startup (`startup.py`, `ssh.py`) with directory, SSH or bucket journals.
   `server.py` forwards CLI commands and runs the standing loop; `source.py`
-  freezes and publishes git source. These modules read no experiment file and
-  hold no limit spanning runs.
+  freezes and publishes git source. These modules read no experiment file.
 - **Provisioner.** `provisioner/machines.py` defines allocations, requests,
   safeguards and definite capacity refusal. Provider implementations obtain
   machines, supply stock-image boot, read prices/bills and terminate exact
@@ -1037,8 +1053,8 @@ loop's last pass and prints when that was (`last loop: ...`); run `etude wait` o
 
 | Kind | Commands | Allowed dependency | Expected result |
 | --- | --- | --- | --- |
-| Read | `status`, `runs`, `logs`, `pools`, `ondemands`, `machines`, `providers`, `storages`, `server`, `usage` | database only | immediate answer with freshness |
-| Ask | `queue`, `cancel`, `terminate`, `rent`, `pool` and `ondemand` mutations, `default`, `machine add`, `provider set`, `storage add` | database only | recorded intent and an id where applicable |
+| Read | `status`, `runs`, `logs`, `pools`, `ondemands`, `machines`, `providers`, `storages`, `server`, `usage`, `limits` | database only | immediate answer with freshness |
+| Ask | `queue`, `cancel`, `terminate`, `rent`, `pool` and `ondemand` mutations, `limit set`, `limit unset`, `default`, `machine add`, `provider set`, `storage add` | database only | recorded intent and an id where applicable |
 | Wait | `wait`, `launch` (with or without `--quote` or `--resume`), `availability`, `fetch`, `logs --follow`, `source`, `continue`, `report`, `view` | other machines with a time limit | completion or the limit |
 
 Server selection mutations are asks. `worker` and `server run` are waits

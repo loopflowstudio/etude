@@ -38,7 +38,7 @@ from etude.jobs import (
 )
 from etude.launch import client
 from etude.launch.listing import show_quote
-from etude.launch.server import selected
+from etude.launch.server import read_limit, selected
 from etude.run import RunListing
 from etude.spec import Job, RunRequest, Smoke, Until
 from etude.storage import Storage, default_root
@@ -96,10 +96,6 @@ def source_for(pool: str | None, rent: str | None, source: str | None = None) ->
     return str(next(iter(uris), default_root()))
 
 
-def _fits(job: Job, committed: Decimal, max_usd: Decimal | None) -> bool:
-    return max_usd is None or committed + (job.max_usd or Decimal(0)) <= max_usd
-
-
 def advance(
     experiment: Experiment,
     *,
@@ -109,7 +105,6 @@ def advance(
     directory: Path | str | None = None,
     retry_failed: bool = False,
     mode: Literal["local", "launch", "queue"] = "local",
-    max_usd: Decimal | None = None,
     quote: bool = False,
     smoke_file_first: bool = False,
     given: Sequence[str] = (),
@@ -124,15 +119,31 @@ def advance(
     `scoped` lists only this experiment, and any other its tournament lines
     name: only for a source in Etude's own layout, such as derived delivery storage.
     """
-    if max_usd is not None and (not max_usd.is_finite() or max_usd < 0):
-        raise LauncherError("--max-usd must be a finite, nonnegative dollar limit")
     listing = RunListing.read(source, experiments=(experiment.name,) if scoped else None)
     state = observe(listing, experiment.name)
-    committed = state.committed_usd
+    limit = None
+    if mode != "local" and (rent is not None or pool is None):
+        limit = read_limit(experiment.name, for_default_target=rent is None)
+    committed = limit.committed_usd if limit is not None else Decimal(0)
+
+    def plan_spend(job: Job) -> str | None:
+        nonlocal committed
+        # The scheduler checks a resume against the run's existing commitment.
+        if limit is None or resume:
+            return None
+        ask = job.max_usd or Decimal(0)
+        if limit.allows(committed, ask):
+            committed += ask
+            return None
+        return (
+            f"limit {limit.format_usd(limit.max_usd)}: {limit.format_committed(committed)}; "
+            f"asks {limit.format_usd(ask)}"
+        )
+
     print(
         f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: "
         f"{_count(len(state.runs), 'training run')}, {_count(len(state.eval_runs), 'eval run')}"
-        + (f"; ${committed:.2f} of ${max_usd:.2f} committed" if max_usd is not None else "")
+        + (f"; {limit.format_committed(show_limit=True)}" if limit is not None else "")
     )
     # A training selection or resume is a pass over those runs alone.
     evaluate = job is None and seed is None and not resume and until is None
@@ -158,8 +169,6 @@ def advance(
             prior = known.find(request.id, request.job, request.seed)
             if resume:
                 standing = prior.standing if prior else None
-                if standing:
-                    committed -= standing.committed_usd
                 request = request.model_copy(
                     update={
                         "id": standing.record.id if standing else request.id,
@@ -170,15 +179,11 @@ def advance(
             elif prior is not None:
                 lines[request.id] = format_known_run(request, prior), prior.address
                 continue
-            if not _fits(request.job, committed, max_usd):
-                lines[request.id] = (
-                    f"{request.id}  new, not queued: --max-usd {max_usd} (${committed:.2f} committed)",
-                    None,
-                )
+            if reason := plan_spend(request.job):
+                lines[request.id] = f"{request.id}  new, not queued: {reason}", None
                 continue
             new.append(request)
             lines[request.id] = f"{request.id}  new", None
-            committed += request.job.max_usd or Decimal(0)
     jobs: list[EvalJob] = []
     if experiment.eval is not None and evaluate:
         # This pass's new runs have no checkpoints yet, but their policies already exist
@@ -194,7 +199,7 @@ def advance(
         try:
             jobs = asked(experiment.eval, asking)
         except EtudeError:
-            # A policy of a run this pass left out (`--max-usd`) is missing; say which and why.
+            # A policy of a run left out by the spending limit may be missing.
             for line, _ in lines.values():
                 print(line)
             raise
@@ -285,18 +290,14 @@ def advance(
             identity = f"{stem}-{number}"
             number += 1
         request = RunRequest(id=identity, job=executable, smoke=smoke)
-        held_back: Literal["not queued"] | None = None
-        reason: str | None = None
-        if not _fits(executable, committed, max_usd):
-            held_back = "not queued"
-            reason = f"--max-usd {max_usd} (${committed:.2f} committed)"
-        else:
+        reason = plan_spend(executable)
+        if reason is None:
             planned.append(request)
             taken.add(identity)
-            committed += executable.max_usd or Decimal(0)
         for each in group:
-            each.decision.state, each.decision.reason = held_back, reason
-            each.decision.launched = identity if held_back is None else None
+            each.decision.state = "not queued" if reason else None
+            each.decision.reason = reason
+            each.decision.launched = identity if reason is None else None
     quoted = None
     if planned:
         if quote:

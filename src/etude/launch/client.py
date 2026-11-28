@@ -47,6 +47,7 @@ from etude.launch.provisioner.providers.runpod.machines import RunPodMachines
 from etude.launch.provisioner.providers.vast.api import VastAPI
 from etude.launch.provisioner.providers.vast.machines import VastMachines
 from etude.launch.records import (
+    ExperimentLimit,
     LogSnapshot,
     Machine,
     MachineTemplate,
@@ -58,13 +59,19 @@ from etude.launch.records import (
     Storage,
 )
 from etude.launch.scheduler.loop import Scheduler
-from etude.launch.server import PythonClient, retained_scheduler, selected
+from etude.launch.server import (
+    LimitsRequest,
+    PythonClient,
+    read_limit,
+    retained_scheduler,
+    selected,
+)
 from etude.launch.ssh import SSH, SSHJournal, SSHStart
 from etude.launch.storage.bucket import BucketJournal
 from etude.launch.storage.s3 import Bucket, _send, open_bucket
 from etude.launch.storage.transport import HTTPReply, observe
 from etude.launch.usage import Usage
-from etude.spec import Job, RunRequest, expand_runs
+from etude.spec import Job, RunRequest
 
 __all__ = (
     "queue",
@@ -78,6 +85,8 @@ __all__ = (
     "default",
     "usage",
     "standing",
+    "limit",
+    "limits",
 )
 
 
@@ -218,17 +227,13 @@ def _client() -> Scheduler | PythonClient:
     return PythonClient(address) if address else default()
 
 
-def _runs(runs: RunRequest | Job | Sequence[RunRequest | Job]) -> list[RunRequest]:
-    return expand_runs([runs] if isinstance(runs, (Job, RunRequest)) else runs)
-
-
 def queue(
     runs: RunRequest | Job | Sequence[RunRequest | Job],
     pool: str | None = None,
     *,
     rent: str | None = None,
 ) -> tuple[str, ...]:
-    return _client().queue(_runs(runs), pool, rent=rent)
+    return _client().queue(runs, pool, rent=rent)
 
 
 def launch(
@@ -237,7 +242,7 @@ def launch(
     *,
     rent: str | None = None,
 ) -> tuple[str, ...]:
-    return _client().launch(_runs(runs), pool, rent=rent)
+    return _client().launch(runs, pool, rent=rent)
 
 
 def quote(
@@ -291,3 +296,13 @@ def standing(
         return PythonClient(address).standing(experiment, job=job)
     with retained_scheduler() as reader:
         return reader.standing(experiment, job=job) if reader is not None else ()
+
+
+def limit(experiment: str) -> ExperimentLimit | None:
+    """Read a label's spending ceiling and commitments from the launcher database."""
+    return read_limit(experiment)
+
+
+def limits() -> tuple[ExperimentLimit, ...]:
+    """Read all configured spending ceilings and commitments from the launcher database."""
+    return LimitsRequest().read()

@@ -113,8 +113,9 @@ uv run etude provider set runpod --kind runpod --storage west
 uv run etude ondemand add gpu --provider runpod --gpu "NVIDIA L4" \
     --vcpus 6 --memory-gb 48 --disk-gb 40 --max 1 --max-usd-per-hour 0.80
 uv run etude availability gpu --timeout 30
-uv run etude launch experiment.py --rent gpu --max-usd 2 --quote
-uv run etude launch experiment.py --rent gpu --max-usd 2
+uv run etude limit set experiment --max-usd 2
+uv run etude launch experiment.py --rent gpu --quote
+uv run etude launch experiment.py --rent gpu
 ```
 
 A pool names owned capacity; an on-demand names a provider template and rental
@@ -143,7 +144,7 @@ $ uv run etude availability l4
 l4  g6.xlarge: L4 with at least 4 vCPUs, 16 GB at $0.8226/hour (ceiling $0.90)  available  0 of 1 in use  rentable now  asked 2026-11-17 19:02:11 UTC
 $ uv run etude availability l4-spot
 l4-spot  g6.xlarge: L4 with at least 4 vCPUs, 16 GB at $0.6510/hour, spot (ceiling $0.70)  available  0 of 1 in use  rentable now  asked 2026-11-17 19:02:14 UTC
-$ uv run etude launch experiment.py --rent l4-spot --max-usd 2
+$ uv run etude launch experiment.py --rent l4-spot
 $ uv run etude status experiment/base@0
 experiment/base@0  base  running, steps 1400, ~$0.41, machine l4-spot-41840a01c3b1 (g6.xlarge: L4 with at least 4 vCPUs, 16 GB), 1 of 3 attempts used
 ```
@@ -169,7 +170,8 @@ $ uv run etude availability pod-spot
 pod-spot  none available: Etude rents no spot machines from RunPod  0 of 1 in use  not rentable now  asked 2026-11-17 19:03:40 UTC
 ```
 
-`--max-usd` bounds the submitted allocation; each job also has its own cap.
+Each job has its own `max_hours` and `max_usd` cap; use `etude limit set` to
+bound an experiment's total across launches ([Spending limits](#spending-limits)).
 Quotes rent nothing. A rental has an independent deadline guardian, but a
 provider outage can delay deletion and billing can exceed admission estimates.
 Storage charges are separate. See [limits](limits.md).
@@ -183,7 +185,7 @@ the provider then declines to make the machine, launch fails with the
 provider's own words and records no run:
 
 ```text
-$ uv run etude launch experiment.py --rent gpu --max-usd 2
+$ uv run etude launch experiment.py --rent gpu
 etude: launch 215b6457f928 for experiment/base@0: cannot launch on 'gpu': provider refused: There are no longer any instances available with the requested specifications. Please refresh and try again.; etude queue would wait
 ```
 
@@ -252,6 +254,61 @@ alone), while actual spend is split among the places held on the machine. Use
 [Several runs on one machine](dev/providers.md#several-runs-on-one-machine) for
 window sizing, provider rounding and retries.
 
+## Spending limits
+
+```text
+$ uv run etude limit set ppo --max-usd 50
+ppo  limited to $50.00; $0.00 committed
+$ uv run etude launch ppo.py --rent gpu
+ppo: state from s3://YOUR_BUCKET/etude/launch: 0 training runs, 0 eval runs; $0.00 of $50.00 committed
+ppo/base@0  new, running
+$ uv run etude continue --run ppo/base@0 --until steps=90000
+etude: experiment 'ppo' is limited to $50.00: $46.00 committed and this launch asks $6.00. Use `etude limit set ppo --max-usd D` to raise the limit
+$ uv run etude limits
+ppo  $46.00 of $50.00 committed
+last loop: 12 seconds ago
+$ uv run etude limit set ppo --max-usd 60
+ppo  limited to $60.00; $46.00 committed
+$ uv run etude limit unset ppo
+```
+
+`limit set` takes the experiment label. The ceiling covers every run with that
+label in one launcher database, including runs recorded before you set it.
+Clients sharing an `etude server` share its limit. Use `etude limits` to read
+totals and the last loop time from the database. This read needs no provider
+keys or provider calls. A `~` marks an estimated total, and `in flight` shows
+the portion held by launches awaiting admission or rental reconciliation.
+
+An unfinished paid run commits the greater of its attributed spend and its
+job's `max_usd`. A finished run commits its attributed spend. Training,
+evaluation, retries, continuations and smoke stages all count. A resume
+reserves any increase over the run's current commitment. Owned-only launches
+ask for zero dollars. Idle time on hand-rented machines, storage, transfers
+and unlabelled runs fall outside the total.
+
+The scheduler reserves dollars before source preparation. Admitted runs take
+over the reservation. An abandoned preparation expires after five minutes.
+If a paid create reply is lost, the launch fails even if an earlier machine
+confirmed capacity. The reservation holds until the scheduler confirms
+refusal or deletion.
+
+- `etude launch FILE` and `etude queue FILE` consider declarations in order
+  and skip each run that would exceed the limit. `etude launch FILE --quote`
+  previews the same selection.
+- `--resume`, `etude continue` and Python `launch`, `queue` and `quote`
+  refuse the whole request. The refusal gives the limit, committed amount
+  and command to raise it. It suggests retrying if settling in-flight launches
+  could leave enough room. For a refused submission, `etude logs --run RUN`
+  shows the reason. `etude launch FILE` labels runs with the file's stem; a
+  `Job` or `TrainingJob` passed to Python `launch` counts only with
+  `experiment="LABEL"` set, and is otherwise unlabelled.
+
+Lowering a ceiling or revising a bill affects future admissions. A zero
+ceiling freezes new commitments. `etude limit unset EXPERIMENT` restores
+unlimited admission. A limit across separate databases, or one an agent
+sharing the same shell cannot raise, requires a hosted service. Raising the
+ceiling has its own command so shell permission rules can restrict it.
+
 ## Queue, launch and wait
 
 ```text
@@ -265,7 +322,7 @@ eval prediction: 100 new, 0 running, 0 failed, queued experiment/evals-a1b2c3d4e
 ```
 
 `launch` and `queue` accept the same experiment options (`--job`, `--seed`,
-`--resume`, `--until`, `--watch`, `--max-usd`, `--source`, `--retry-failed`).
+`--resume`, `--until`, `--watch`, `--source`, `--retry-failed`).
 They differ only in whether capacity is required right away (`launch`, plus
 `--quote`) or may wait in the queue (`queue`).
 
@@ -284,6 +341,9 @@ explicitly lists that whole prefix so experiment-folder sources
 
 | Command | What it does |
 | --- | --- |
+| `limit set EXPERIMENT --max-usd D` | Stores or changes an experiment label's spending limit (`0` freezes paid spend). |
+| `limit unset EXPERIMENT` | Removes a stored spending limit for an experiment label. |
+| `limits` | Reads every stored limit and its committed total from the database. |
 | `queue FILE.py` | Records intent and returns ids; waits for no provider (`--watch SECONDS` loops passes). |
 | `launch FILE.py` | Acquires capacity, starts what fits and queues the rest; fails with no runs recorded if none fit. |
 | `launch FILE.py --quote` | Plans without submitting or renting. |
@@ -358,8 +418,11 @@ The server holds the provider credentials. Jobs receive only scoped grants.
 ## Upgrading Etude
 
 Run `etude database upgrade` explicitly when installing a newer release.
-The live machine inventory adds indexes to the launcher database. Run the
-upgrade on the computer holding that database, including a selected server.
+The live machine inventory adds indexes to the launcher database, and stored
+experiment limits add a breaking migration that raises the reader floor so
+older clients sharing `launcher.sqlite` cannot admit runs past a stored limit.
+Run the upgrade on the computer holding that database, including a selected
+server, and upgrade every client that reads or writes it.
 Ordinary reads never migrate your operational `launcher.sqlite` or silently
 select a backup. Mixed client/worker releases must meet the release's reader
 floor. Keep the running server's version aligned with its database.
@@ -368,8 +431,10 @@ runs and development databases.
 
 ## Launching from Python
 
-Import `launch`, `queue`, `status`, `wait`, `logs`, `cancel` and `quote` from
-`etude.launch.client`. They use the same selected server as the CLI.
+Import `launch`, `queue`, `status`, `wait`, `logs`, `cancel`, `quote`, `limit`
+and `limits` from `etude.launch.client`. They use the same selected server as
+the CLI; `limit` and `limits` are read-only, while setting or unsetting limits
+uses `etude limit set`/`unset` or `Scheduler`.
 `etude.spec` defines `Job`, `RunRequest`, `Input`, `Variable`, `Until` and runtime
 preparation records. Machine configuration records live in `etude.launch.records`.
 `etude.storage.Storage` is the tracking transport; the launcher's `Storage` is

@@ -28,20 +28,24 @@ from decimal import Decimal
 from functools import cache, partial
 from importlib.metadata import version
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 
 from etude.deadline import limit_time, remaining
 from etude.errors import LauncherError
 from etude.launch.errors import SchemaAdvanced
+from etude.launch.logging import bounded
 from etude.launch.provenance import frontier
 from etude.launch.records import (
     RETRYABLE,
     TRY_EXEMPT,
     Cause,
     Diagnostic,
+    ExperimentCeiling,
     Hardware,
     Image,
     Launch,
+    LaunchRequest,
     LogStream,
     Machine,
     OnDemand,
@@ -66,6 +70,7 @@ __all__ = ("Database", "inspect", "upgrade", "Schema", "Upgrade")
 
 
 Fact = str | int | float | None
+_LEASE = timedelta(minutes=5)
 
 # The schema is the packaged migrations, applied in order and recorded in this ledger.
 # PRAGMA user_version counts its rows: one pragma tells a process the file moved on.
@@ -360,6 +365,27 @@ _OPEN_SESSION_MACHINES = (
 )
 
 
+# Compare UTC wall times without the zone suffix so a whole second sorts
+# before the same second with fractional digits. Historical rows lack a lease
+# and sort before every expiry.
+_PENDING_LAUNCH = "json_extract(l.body, '$.state') IN ('preparing', 'admitting')"
+_LAUNCH_EXPIRY = "rtrim(coalesce(json_extract(l.body, '$.expires_at'), ''), 'Z')"
+_LIVE_LAUNCH_LEASE = f"{_PENDING_LAUNCH} AND {_LAUNCH_EXPIRY} > :now"
+_UNSETTLED_LAUNCH_RENTAL = """s.acquired = 1 AND m.kind = 'rented'
+    AND w.ended_at IS NULL AND w.refused_at IS NULL
+    AND json_extract(l.body, '$.state') != 'admitted'"""
+_HAS_LAUNCH_RENTAL = f"""EXISTS (
+    SELECT 1 FROM launch_sessions s
+    JOIN sessions w ON w.id = s.session
+    JOIN machines m ON m.name = w.machine
+    WHERE s.launch = l.id AND {_UNSETTLED_LAUNCH_RENTAL}
+)"""
+
+
+def _utc_wall_time(at: datetime) -> str:
+    return at.astimezone(UTC).replace(tzinfo=None).isoformat()
+
+
 def _machine_from_row(row: sqlite3.Row) -> Machine:
     return Machine.model_validate(
         {
@@ -472,8 +498,16 @@ class Database:
         ).fetchone()
         return None if row is None else datetime.fromisoformat(row[0])
 
-    def begin_launch(self, launch: Launch) -> None:
+    def claim_launch(
+        self,
+        launch: Launch,
+        clock: Callable[[], datetime],
+        check: Callable[[Sequence[LaunchRequest], datetime], None],
+    ) -> Launch:
+        """Reserve the requests against one snapshot before source preparation can begin."""
+        refused: LauncherError | None = None
         with self._together():
+            now = clock()
             for request in launch.requests:
                 if (
                     request.resume_version is None
@@ -483,27 +517,30 @@ class Database:
                         f"run {request.run!r} already admitted; choose --experiment NAME for a new run; "
                         "use --resume to carry on, or --resume --until CLOCK=TARGET to train further"
                     )
-                # An unsettled rental from a failed launch may be a paid machine; wait for its
-                # provider to settle it. An owned host's session never got the run's work and
-                # keeps the host busy itself, and settling it can wait on the host answering.
-                for previous in self.launches(request.run):
-                    if previous.state in {"preparing", "admitting"} or (
-                        previous.state != "admitted"
-                        and any(
-                            session.refused_at is None
-                            and session.ended_at is None
-                            and isinstance(self.supply(session.supply), OnDemand)
-                            for session in self.launch_sessions(previous.id, acquired_only=True)
-                        )
-                    ):
-                        raise LauncherError(
-                            f"run {request.run!r}: reconciling existing request {previous.id}"
-                        )
-            self.save_launch(launch)
+                previous = self._db.execute(
+                    f"""SELECT l.id FROM launch_runs r JOIN launches l ON l.id = r.launch
+                        WHERE r.run = :run
+                          AND (({_LIVE_LAUNCH_LEASE}) OR {_HAS_LAUNCH_RENTAL}) LIMIT 1""",
+                    {"run": request.run, "now": _utc_wall_time(now)},
+                ).fetchone()
+                if previous is not None:
+                    raise LauncherError(
+                        f"run {request.run!r}: reconciling existing request {previous[0]}"
+                    )
+            try:
+                check(launch.requests, now)
+            except LauncherError as error:
+                refused = error
+                self._record_admission_failure(launch, now, str(error))
+            else:
+                launch = self._renew_launch(launch, clock())
             self._db.executemany(
                 "INSERT INTO launch_runs(launch, run) VALUES (?, ?)",
                 ((launch.id, r.run) for r in launch.requests),
             )
+        if refused is not None:
+            raise refused
+        return launch
 
     def launch_evidence(self, identity: str) -> Launch:
         row = self._db.execute("SELECT body FROM launches WHERE id=?", (identity,)).fetchone()
@@ -511,18 +548,156 @@ class Database:
             raise LauncherError(f"unknown launch {identity}")
         return Launch.model_validate_json(row[0])
 
-    def claim_launch(self, identity: str) -> Launch:
+    def _launch_in_state(self, identity: str, state: str) -> Launch:
+        launch = self.launch_evidence(identity)
+        if launch.state != state:
+            raise LauncherError(
+                f"launch {identity} already {launch.state}; inspect retained evidence"
+            )
+        return launch
+
+    def launch_reserves(self, launch: Launch, at: datetime) -> bool:
+        """An unexpired lease or an unsettled rental acquired by this launch holds dollars."""
+        return launch.lease_live(at) or (
+            launch.state != "admitted"
+            and self._db.execute(
+                f"SELECT 1 FROM launches l WHERE l.id = ? AND {_HAS_LAUNCH_RENTAL}",
+                (launch.id,),
+            ).fetchone()
+            is not None
+        )
+
+    def _require_reservation(self, launch: Launch, at: datetime) -> None:
+        if not self.launch_reserves(launch, at):
+            raise LauncherError(f"launch {launch.id} reservation expired; prepare it again")
+
+    def _renew_launch(self, launch: Launch, at: datetime) -> Launch:
+        launch = launch.model_copy(update={"expires_at": at.astimezone(UTC) + _LEASE})
+        self._save_launch(launch)
+        return launch
+
+    def finish_preparation(self, identity: str, clock: Callable[[], datetime]) -> Launch:
+        with self._together():
+            launch = self._launch_in_state(identity, "preparing")
+            now = clock()
+            if launch.lease_live(now):
+                return self._renew_launch(launch.model_copy(update={"state": "admitting"}), now)
+            self._record_admission_failure(launch, now, "reservation expired")
+        raise LauncherError(f"launch {identity} reservation expired; prepare it again")
+
+    def renew_launch(
+        self,
+        identity: str,
+        clock: Callable[[], datetime],
+        *,
+        state: Literal["preparing", "admitting"],
+        requests: tuple[LaunchRequest, ...] | None = None,
+    ) -> None:
+        with self._together():
+            launch = self._launch_in_state(identity, state)
+            if requests is not None:
+                launch = launch.model_copy(update={"requests": requests})
+            self._keep_launch(launch, clock())
+
+    def fail_launch(self, identity: str, *, expected: Literal["preparing", "admitting"]) -> None:
+        """Fail a pending launch. A sweep may already have recorded its expiry."""
         with self._together():
             launch = self.launch_evidence(identity)
-            if launch.state != "preparing":
-                raise LauncherError(
-                    f"launch {identity} already {launch.state}; inspect retained evidence"
-                )
-            launch = launch.model_copy(update={"state": "admitting"})
-            self.save_launch(launch)
-            return launch
+            if launch.state == "failed":
+                return
+            if launch.state != expected:
+                raise LauncherError(f"launch {identity} already {launch.state}")
+            self._save_launch(launch.model_copy(update={"state": "failed"}))
 
-    def save_launch(self, launch: Launch) -> None:
+    def _keep_launch(self, launch: Launch, at: datetime) -> None:
+        if launch.lease_live(at):
+            self._renew_launch(launch, at)
+        else:
+            # An acquisition can keep the reservation without renewing an expired lease.
+            self._require_reservation(launch, at)
+
+    def expire_launches(self, clock: Callable[[], datetime]) -> None:
+        """Retain expiry for abandoned requests without an unsettled acquisition."""
+        expired = f"""FROM launches l WHERE {_PENDING_LAUNCH}
+                      AND {_LAUNCH_EXPIRY} <= :now AND NOT {_HAS_LAUNCH_RENTAL}"""
+        # Idle ticks take no write lock. Once locked, settle only launches still expired.
+        candidate = self._db.execute(
+            f"SELECT 1 {expired} LIMIT 1", {"now": _utc_wall_time(clock())}
+        ).fetchone()
+        if candidate is None:
+            return
+        with self._together():
+            at = clock()
+            rows = self._db.execute(
+                f"SELECT l.body {expired}", {"now": _utc_wall_time(at)}
+            ).fetchall()
+            for row in rows:
+                self._record_admission_failure(
+                    Launch.model_validate_json(row[0]), at, "reservation expired"
+                )
+
+    def _record_admission_failure(self, launch: Launch, at: datetime, message: str) -> None:
+        self._save_launch(launch.model_copy(update={"state": "failed"}))
+        self.retain_diagnostic(
+            Diagnostic(
+                id=uuid4().hex,
+                observed_at=at,
+                operation="admission",
+                message=bounded(message),
+                launch=launch.id,
+            )
+        )
+
+    def reservations(self, experiment: str, at: datetime) -> tuple[LaunchRequest, ...]:
+        """Requests with a live lease or an unsettled rental."""
+        return tuple(
+            LaunchRequest.model_validate_json(row[0])
+            for row in self._db.execute(
+                f"""WITH live AS (
+                        SELECT l.id FROM launches l WHERE {_LIVE_LAUNCH_LEASE}
+                        UNION
+                        SELECT l.id FROM sessions w INDEXED BY sessions_open_machines
+                        CROSS JOIN machines m ON m.name = w.machine
+                        CROSS JOIN launch_sessions s ON s.session = w.id
+                        CROSS JOIN launches l ON l.id = s.launch
+                        WHERE {_UNSETTLED_LAUNCH_RENTAL}
+                    )
+                    SELECT request.value FROM live
+                    JOIN launches l ON l.id = live.id, json_each(l.body, '$.requests') request
+                    WHERE json_extract(request.value, '$.experiment') = :experiment""",
+                {"now": _utc_wall_time(at), "experiment": experiment},
+            )
+        )
+
+    def set_limit(self, limit: ExperimentCeiling) -> None:
+        self._write(
+            """INSERT INTO experiment_limits(experiment, max_usd, set_at) VALUES (?,?,?)
+               ON CONFLICT(experiment) DO UPDATE SET max_usd=excluded.max_usd, set_at=excluded.set_at""",
+            (limit.experiment, str(limit.max_usd), limit.set_at.isoformat()),
+        )
+
+    def unset_limit(self, experiment: str) -> None:
+        if not self._write(
+            "DELETE FROM experiment_limits WHERE experiment=?", (experiment,)
+        ).rowcount:
+            raise LauncherError(f"experiment {experiment!r} has no spending limit")
+
+    def limit(self, experiment: str) -> ExperimentCeiling | None:
+        row = self._db.execute(
+            "SELECT experiment, max_usd, set_at FROM experiment_limits WHERE experiment=?",
+            (experiment,),
+        ).fetchone()
+        return None if row is None else ExperimentCeiling.model_validate(dict(row))
+
+    def limits(self) -> tuple[ExperimentCeiling, ...]:
+        return tuple(
+            ExperimentCeiling.model_validate(dict(row))
+            for row in self._db.execute(
+                "SELECT experiment, max_usd, set_at FROM experiment_limits ORDER BY experiment"
+            )
+        )
+
+    def _save_launch(self, launch: Launch) -> None:
         self._write(
             "INSERT OR REPLACE INTO launches(id, body) VALUES (?, ?)",
             (launch.id, launch.model_dump_json()),
@@ -544,12 +719,11 @@ class Database:
             (launch, session, int(acquired)),
         )
 
-    def launch_sessions(self, launch: str, *, acquired_only: bool = False) -> tuple[Session, ...]:
+    def launch_sessions(self, launch: str) -> tuple[Session, ...]:
         return tuple(
             self.session(row[0])
             for row in self._db.execute(
-                "SELECT session FROM launch_sessions WHERE launch=? AND (NOT ? OR acquired)",
-                (launch, int(acquired_only)),
+                "SELECT session FROM launch_sessions WHERE launch=?", (launch,)
             )
         )
 
@@ -629,7 +803,7 @@ class Database:
                     """INSERT INTO locks(supply, owner, expires_at) VALUES (?,?,?) ON CONFLICT(supply) DO UPDATE
                 SET owner=excluded.owner, expires_at=excluded.expires_at
                 WHERE locks.expires_at <= ?""",
-                    (supply, owner, (now + timedelta(minutes=5)).isoformat(), now.isoformat()),
+                    (supply, owner, (now + _LEASE).isoformat(), now.isoformat()),
                 ).rowcount
                 == 1
             )
@@ -643,7 +817,7 @@ class Database:
             self._locks.pop(supply)
             self._write("DELETE FROM locks WHERE supply=? AND owner=?", (supply, owner))
 
-    def check_lock(self, supply: str) -> None:
+    def check_lock(self, supply: str) -> datetime:
         """Fence stale processes before effects and inside placement transactions."""
         held = self._locks.get(supply)
         if held is None:
@@ -652,10 +826,11 @@ class Database:
         now = clock()
         changed = self._write(
             "UPDATE locks SET expires_at=? WHERE supply=? AND owner=? AND expires_at>?",
-            ((now + timedelta(minutes=5)).isoformat(), supply, owner, now.isoformat()),
+            ((now + _LEASE).isoformat(), supply, owner, now.isoformat()),
         )
         if changed.rowcount != 1:
             raise Stale(f"{supply!r} placement lock expired")
+        return now
 
     def _change(self, table: str, id: str, version: int, **facts: Fact) -> None:
         sets = "".join(f"{name} = ?, " for name in facts)
@@ -888,17 +1063,15 @@ class Database:
         runs: Sequence[RunRecord],
         attempts: Sequence[RunAttempt] = (),
         *,
-        launch: str | None = None,
+        launch: str,
+        clock: Callable[[], datetime],
     ) -> None:
         with self._together():
             for supply in {self.session(a.session).supply for a in attempts}:
                 self.check_lock(supply)
-            evidence = self.launch_evidence(launch) if launch is not None else None
-            resuming = (
-                {r.run for r in evidence.requests if r.resume_version is not None}
-                if evidence is not None
-                else set()
-            )
+            evidence = self._launch_in_state(launch, "admitting")
+            self._require_reservation(evidence, clock())
+            resuming = {r.run for r in evidence.requests if r.resume_version is not None}
             for run in runs:
                 if run.launch.created_at is None:
                     raise LauncherError(f"run {run.id!r} has no submission timestamp")
@@ -944,8 +1117,7 @@ class Database:
                 )
 
             self._place(attempts)
-            if evidence is not None:
-                self.save_launch(evidence.model_copy(update={"state": "admitted"}))
+            self._save_launch(evidence.model_copy(update={"state": "admitted"}))
 
     def cancel(self, run: RunRecord, at: datetime) -> None:
         self._change("runs", run.id, run.launch.version, cancel_requested_at=at.isoformat())
@@ -1027,7 +1199,9 @@ class Database:
     ) -> None:
         """Record a session, its attempts and any machine to rent, before any provider is asked."""
         with self._together():
-            self.check_lock(session.supply)
+            now = self.check_lock(session.supply)
+            if launch is not None:
+                self._keep_launch(self._launch_in_state(launch, "admitting"), now)
             if self.machine_busy(session.machine):
                 raise Stale(f"machine {session.machine!r} still has a run on it")
             live = [w for w in self.unsettled_sessions() if w.supply == session.supply]
@@ -1378,7 +1552,7 @@ def _snapshot(source: Path, target: Path, timeout: float) -> None:
             writer.execute("PRAGMA journal_mode=DELETE")
 
 
-def _invalid_records(db: sqlite3.Connection) -> list[str]:
+def _invalid_records(db: sqlite3.Connection, applied: set[str]) -> list[str]:
     """Every row that the current records reject, so a migration can be refused whole."""
     rows: dict[str, tuple[str, Callable[[sqlite3.Row], object]]] = {
         "pools": ("SELECT * FROM pools", lambda row: Pool.model_validate(dict(row))),
@@ -1393,6 +1567,11 @@ def _invalid_records(db: sqlite3.Connection) -> list[str]:
         ),
         "storages": ("SELECT * FROM storages", lambda row: Storage.model_validate(dict(row))),
     }
+    if "experiment_limits" in applied:
+        rows["experiment_limits"] = (
+            "SELECT * FROM experiment_limits",
+            lambda row: ExperimentCeiling.model_validate(dict(row)),
+        )
     bodies: dict[str, type[Record]] = {
         "launches": Launch,
         "diagnostics": Diagnostic,
@@ -1628,7 +1807,7 @@ def _apply(db: sqlite3.Connection, path: Path, exports: list[Path]) -> tuple[str
                 _program(path),
             ),
         )
-    if problems := _invalid_records(db):
+    if problems := _invalid_records(db, existing.union(changed)):
         raise LauncherError("launcher rows do not validate:\n" + "\n".join(problems))
     if db.execute("PRAGMA foreign_key_check").fetchone():
         raise LauncherError("launcher has broken foreign key references")

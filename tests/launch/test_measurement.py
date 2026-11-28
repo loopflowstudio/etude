@@ -49,10 +49,11 @@ def baseline(count: int) -> dict[str, Counts]:
     selection and one indexed delivery timestamp (2026-11-11).
     """
     # One indexed finishing-session read per on-demand settles already requested ends.
+    # One indexed read finds expired launch reservations for the whole tick.
     return {
         "status": Counts(database=49 * count + 1),
         "runs": Counts(database=17 * count + 1),
-        "tick": Counts(provider=2 * count, bucket=count, database=30 * count + 22),
+        "tick": Counts(provider=2 * count, bucket=count, database=30 * count + 23),
     }
 
 
@@ -98,6 +99,7 @@ def test_command_kinds() -> None:
         cli.app,
         cli.pool_app,
         cli.ondemand_app,
+        cli.limit_app,
         cli.machine_app,
         cli.provider_app,
         cli.storage_app,
@@ -119,11 +121,11 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
         with pytest.raises(TimeoutError):
             b.scheduler.wait(id, timeout=0)
         wait = counting.snapshot()
-    assert ask == Counts(database=37)  # target: ask records intent without remote effects
+    assert ask == Counts(database=38)  # intent and lease, without remote effects
     # Creation also reads provider safeguards for affordable time and the reserved budget,
     # and the status it returns reads the machine's attempts for how many shared it.
     # Refusal pause and shutdown settlement add three indexed local reads.
-    assert wait == Counts(provider=4, bucket=1, database=105)  # known debt: wait advances work
+    assert wait == Counts(provider=4, bucket=1, database=106)  # known debt: wait advances work
 
 
 @pytest.mark.parametrize("history", [1, 4096])
@@ -164,13 +166,13 @@ def test_refusal_status_and_pause_query_counts(tmp_path: Path, history: int) -> 
     with counting.record():
         b.scheduler.tick()
         planning = counting.snapshot()
-    assert planning == Counts(database=47)
+    assert planning == Counts(database=48)
     assert b.service.creates == 1
     b.clock.advance(60)
     with counting.record():
         b.scheduler.tick()
         admission = counting.snapshot()
-    assert admission == Counts(provider=4, bucket=1, database=110), admission.model_dump()
+    assert admission == Counts(provider=4, bucket=1, database=111), admission.model_dump()
     assert b.scheduler.attempts(run)[-1].number == history + 1
     assert b.scheduler.read(run).attempts == 1
     since = b.clock() - timedelta(seconds=60)
@@ -198,7 +200,7 @@ def test_several_run_git_and_database_counts(
             rent="l4",
         )
         result = counting.snapshot()
-    assert result == Counts(git=57, database=49)  # known debt: 19 git calls per run
+    assert result == Counts(git=57, database=50)  # known debt: 19 git calls per run
 
 
 @pytest.mark.parametrize(
@@ -311,6 +313,7 @@ def test_reads_need_no_provider_key(
         "storages": ["storages"],
         "server_show": ["server"],
         "usage": ["usage", "--machine", machine],
+        "limits": ["limits"],
         "logs": ["logs", "--run", ids[0]],
     }
     declared = {
@@ -421,7 +424,7 @@ def test_idle_pace_query_count_ignores_finished_run_history(
         with pytest.raises(_Stop):
             server.loop(b.scheduler)
         idle_tick = counting.snapshot()
-    assert idle_tick == Counts(database=41), idle_tick.model_dump()
+    assert idle_tick == Counts(database=42), idle_tick.model_dump()
     plan = query_plan(b.store, lambda: b.store.runs(unfinished=True))
     assert not any("SCAN a" in step for step in plan), plan
 

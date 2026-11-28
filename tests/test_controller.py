@@ -1,6 +1,7 @@
 """One pass deduplicates addresses using only storage and public scheduler records."""
 
 import re
+from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -171,13 +172,13 @@ def test_a_pass_leaves_known_runs_alone_and_queues_only_a_new_stage(
     file.write_text(FILE)
     definition = read_experiment(file)
     source = DirectoryStorage(tmp_path / "source")
-    advance(definition, source=source, pool="waiting", mode="queue", max_usd=Decimal(3))
+    advance(definition, source=source, pool="waiting", mode="queue")
     assert [r.id for r in b.scheduler.runs()] == ["two/base@0", "two/base@1"]
     counts = Counting(b.store, b.service)
     measured = MeasuredStorage(source)
     with counts.record():
-        advance(definition, source=measured, pool="waiting", mode="queue", max_usd=Decimal(3))
-    assert counts.snapshot() == Counts(database=5)
+        advance(definition, source=measured, pool="waiting", mode="queue")
+    assert counts.snapshot() == Counts(database=3)
     assert (measured.listings, measured.requests) == (1, 0)
     assert len(b.scheduler.runs()) == 2
     # Stored compact spelling must match its declared job and seed.
@@ -185,8 +186,8 @@ def test_a_pass_leaves_known_runs_alone_and_queues_only_a_new_stage(
         pass
     measured = MeasuredStorage(source)
     with counts.record():
-        advance(definition, source=measured, pool="waiting", mode="queue", max_usd=Decimal(3))
-    assert counts.snapshot() == Counts(database=48)
+        advance(definition, source=measured, pool="waiting", mode="queue")
+    assert counts.snapshot() == Counts(database=44)
     assert measured.listings == 1
     assert [r.id for r in b.scheduler.runs()] == ["two/base@0", "two/base@1", "two/fine@0"]
     assert "two/base@0  finished" in capsys.readouterr().out
@@ -224,21 +225,22 @@ def test_declared_queue_and_resume_leave_an_independent_same_seed_request_alone(
                 job="base",
                 seed=0,
                 resume=resume,
-                max_usd=Decimal(1),
             )
         assert backend.scheduler.record(repeat) == prior
         assert backend.scheduler.record("two/base@0").launch.version == (2 if resume else 1)
-    # The resume uses the standing that established the original commitment.
-    assert counts.snapshot() == Counts(database=50)
+    assert counts.snapshot() == Counts(database=47)
     backend.store.close()
 
 
+@pytest.mark.parametrize("quote", [False, True])
 def test_an_experiment_limit_refuses_hand_down_before_any_rental(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], quote: bool
 ) -> None:
     b = bench(tmp_path)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
     monkeypatch.setattr(client, "_client", lambda: b.scheduler)
     monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    b.scheduler.set_limit("two", Decimal("0.5"))
     file = tmp_path / "two.py"
     file.write_text(FILE)
     advance(
@@ -246,18 +248,21 @@ def test_an_experiment_limit_refuses_hand_down_before_any_rental(
         source=DirectoryStorage(tmp_path / "source"),
         rent="l4",
         mode="launch",
-        max_usd=Decimal("0.5"),
+        quote=quote,
     )
+    assert "not queued: limit $0.50: $0.00 committed" in capsys.readouterr().out
     assert b.scheduler.runs() == ()
+    assert b.scheduler.limits()[0].committed_usd == 0
     assert b.service.creates == 0
-    assert "not queued: --max-usd 0.5 ($0.00 committed)" in capsys.readouterr().out
 
 
 def test_a_pass_prints_one_line_per_run_in_declared_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     b = bench(tmp_path)
-    b.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    b.scheduler.set_limit("two", Decimal("1.5"))
+    b.scheduler.set_default(rent="l4")
     monkeypatch.setattr(client, "_client", lambda: b.scheduler)
     monkeypatch.setattr(client, "standing", b.scheduler.standing)
     file = tmp_path / "two.py"
@@ -265,14 +270,44 @@ def test_a_pass_prints_one_line_per_run_in_declared_order(
     advance(
         read_experiment(file),
         source=DirectoryStorage(tmp_path / "source"),
-        pool="waiting",
         mode="queue",
-        max_usd=Decimal("1.5"),
     )
     assert capsys.readouterr().out.splitlines()[1:] == [
         "two/base@0  new, queued",
-        "two/base@1  new, not queued: --max-usd 1.5 ($1.00 committed)",
+        "two/base@1  new, not queued: limit $1.50: $1.00 committed; asks $1.00",
     ]
+    b.scheduler.add_pool(Pool(name="waiting"))
+    b.scheduler.set_default("waiting")
+    b.scheduler.set_limit("two", Decimal(0))
+    advance(read_experiment(file), source=DirectoryStorage(tmp_path / "source"), mode="queue")
+    assert "two/base@1  new, queued" in capsys.readouterr().out
+    assert b.scheduler.limits()[0].committed_usd == 1
+
+
+def test_a_pass_shows_the_in_flight_hold_that_prevents_admission(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    b = bench(tmp_path)
+    b.clock.now = datetime.now(UTC)
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    monkeypatch.setattr(client, "standing", b.scheduler.standing)
+    b.scheduler.set_limit("two", Decimal(1))
+    b.scheduler.prepare_launch(
+        (RunRequest(job=Job(command="train", experiment="two", max_hours=1, max_usd=Decimal(1))),),
+        rent="l4",
+    )
+    file = tmp_path / "two.py"
+    file.write_text(FILE)
+    advance(
+        read_experiment(file),
+        source=DirectoryStorage(tmp_path / "source"),
+        rent="l4",
+        mode="launch",
+    )
+    assert b.scheduler.runs() == () and b.service.creates == 0
+    out = capsys.readouterr().out
+    assert "$1.00 of $1.00 committed ($1.00 in flight)" in out
+    assert "not queued: limit $1.00: $1.00 committed ($1.00 in flight)" in out
 
 
 def test_wrong_eval_kind_refuses_before_training_is_submitted(tmp_path: Path) -> None:
@@ -520,8 +555,8 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     assert re.search(r"eval free: 0 new, [1-9]\d* running", second.out)
     assert "launched_pass_failed" in second.err
     assert len(b.scheduler.runs(done=True)) == 3
-    assert first_counts == Counts(database=52)
-    assert second_counts == Counts(database=7)
+    assert first_counts == Counts(database=49)
+    assert second_counts == Counts(database=4)
     assert main(["launch", *args[1:], "--quote"]) == 0
     quoted = capsys.readouterr()
     assert f"failed runs {held.id} (--retry-failed" in quoted.out
@@ -1037,7 +1072,8 @@ def test_policy_key_of_a_run_over_budget_says_why_it_is_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     b = bench(tmp_path)
-    b.scheduler.add_pool(Pool(name="waiting"))
+    monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
+    b.scheduler.set_limit("over_budget", Decimal("1.5"))
     monkeypatch.setattr(client, "_client", lambda: b.scheduler)
     monkeypatch.setattr(client, "standing", b.scheduler.standing)
     file = tmp_path / "over_budget.py"
@@ -1066,11 +1102,10 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
         advance(
             read_experiment(file),
             source=source,
-            pool="waiting",
+            rent="l4",
             mode="queue",
-            max_usd=Decimal("1.5"),
         )
-    assert "over_budget/large@0  new, not queued: --max-usd 1.5" in capsys.readouterr().out
+    assert "over_budget/large@0  new, not queued: limit $1.50" in capsys.readouterr().out
     assert b.scheduler.runs() == ()
 
 

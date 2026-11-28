@@ -246,16 +246,22 @@ def test_additive_upgrade_preserves_open_writer_and_backup(
 def test_breaking_upgrade_fences_stale_writer_and_refuses_reader(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    upgrade(tmp_path, development=True)
-    older = open_home(tmp_path)
     known = migrations()
-    change = _migration("CREATE TABLE future(value TEXT);", floor="0.5.0")
-    monkeypatch.setattr(database, "migrations", lambda: (*known, change))
-    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in (*known, change)})
+    previous = tuple(m for m in known if m.name != "experiment_limits")
+    (change,) = (m for m in known if m.name == "experiment_limits")
+    (released,) = (m for m in database.release("0.5.0") if m.name == change.name)
+    assert released.floor == "0.5.0"
+    with monkeypatch.context() as before:
+        before.setattr(database, "migrations", lambda: previous)
+        upgrade(tmp_path, development=True)
+        older = open_home(tmp_path)
+    change = change.model_copy(update={"floor": released.floor})
+    monkeypatch.setattr(database, "migrations", lambda: (*previous, change))
+    monkeypatch.setattr(database, "_merged", lambda: {m.name: m.sha256 for m in known})
     monkeypatch.setattr(database, "version", lambda package: "0.5.0")
     upgrade(tmp_path)
-    monkeypatch.setattr(database, "migrations", lambda: known)
-    monkeypatch.setattr(database, "version", lambda package: "0.4.0")
+    monkeypatch.setattr(database, "migrations", lambda: previous)
+    monkeypatch.setattr(database, "version", lambda package: "0.4.7")
     with pytest.raises(LauncherError, match="needs etude >= 0.5.0"):
         open_home(tmp_path)
     with pytest.raises(SchemaAdvanced):
