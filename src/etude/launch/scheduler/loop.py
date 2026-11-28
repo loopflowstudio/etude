@@ -373,7 +373,7 @@ class Scheduler:
         limit = ExperimentLimit(experiment=experiment, max_usd=max_usd, set_at=self._clock())
         self._store.set_limit(limit)
         with self._store.reading():
-            return self._measure_limit(limit)
+            return self._measure_limit(limit, self._clock())
 
     def unset_limit(self, experiment: str) -> None:
         """Remove the ceiling for future launches under the label."""
@@ -384,22 +384,27 @@ class Scheduler:
         """Read the label's ceiling and committed dollars from retained evidence."""
         with self._store.reading():
             limit = self._store.limit(experiment)
-            return None if limit is None else self._measure_limit(limit)
+            return None if limit is None else self._measure_limit(limit, self._clock())
 
     def limits(self) -> tuple[ExperimentLimit, ...]:
         """Read all configured spending limits on one database snapshot."""
         with self._store.reading():
-            return tuple(self._measure_limit(limit) for limit in self._store.limits())
+            now = self._clock()
+            return tuple(self._measure_limit(limit, now) for limit in self._store.limits())
 
     def _measure_limit(
-        self, limit: ExperimentLimit, requests: Sequence[LaunchRequest] = ()
+        self, limit: ExperimentLimit, now: datetime, requests: Sequence[LaunchRequest] = ()
     ) -> ExperimentLimit:
         standing = {item.record.id: item for item in self.standing(limit.experiment)}
         committed = sum((item.committed_usd for item in standing.values()), Decimal(0))
-        committed += sum(
-            _additional_usd(request, standing.get(request.run))
-            for request in self._store.reservations(limit.experiment)
+        reserved = sum(
+            (
+                _additional_usd(request, standing.get(request.run))
+                for request in self._store.reservations(limit.experiment, now)
+            ),
+            Decimal(0),
         )
+        committed += reserved
         ask = sum(
             (_additional_usd(request, standing.get(request.run)) for request in requests),
             Decimal(0),
@@ -407,6 +412,7 @@ class Scheduler:
         measured = limit.model_copy(
             update={
                 "committed_usd": committed,
+                "reserved_usd": reserved,
                 "estimated": any(
                     item.status.estimated and item.committed_usd == item.status.usd
                     for item in standing.values()
@@ -415,20 +421,20 @@ class Scheduler:
         )
         if requests and ask > 0 and committed + ask > limit.max_usd:
             raise LauncherError(
-                f"experiment {limit.experiment!r} is limited to ${limit.max_usd:.2f}: "
-                f"{measured.format_committed()} committed and this launch asks ${ask:.2f}; "
+                f"experiment {limit.experiment!r} is limited to {limit.format_usd(limit.max_usd)}: "
+                f"{measured.format_committed()} committed and this launch asks {limit.format_usd(ask)}; "
                 f"`etude limit set {limit.experiment} --max-usd D` raises it"
             )
         return measured
 
-    def _check_limits(self, requests: Sequence[LaunchRequest]) -> None:
+    def _check_limits(self, requests: Sequence[LaunchRequest], now: datetime) -> None:
         experiments: dict[str, list[LaunchRequest]] = {}
         for request in requests:
             if request.experiment and request.ask_usd > 0:
                 experiments.setdefault(request.experiment, []).append(request)
         for experiment, asks in experiments.items():
             if (limit := self._store.limit(experiment)) is not None:
-                self._measure_limit(limit, asks)
+                self._measure_limit(limit, now, asks)
 
     def set_startup(self, name: str, seconds: float | None) -> None:
         """Change a pool's or on-demand's startup allowance for future sessions; None removes it."""
@@ -749,7 +755,7 @@ class Scheduler:
                 )
             )
         with self._store.reading():
-            self._check_limits(asks)
+            self._check_limits(asks, self._clock())
         quoted = []
         waiting_usd = Decimal(0)
         for name in (target.pool, target.rent):
@@ -824,15 +830,19 @@ class Scheduler:
                 for run in requested
             ),
         )
-        self._store.claim_launch(launch, self._check_limits)
+        launch = self._store.claim_launch(launch, self._clock, self._check_limits)
         self._diagnose(
             "preparation", "awaiting prepared source; job command not started", launch=launch.id
         )
         return launch
 
     def fail_launch(self, identity: str, message: str) -> None:
-        self._store.finish_preparation(identity, failed=True)
+        self._store.finish_preparation(identity, self._clock, failed=True)
         self._diagnose("source preparation", message, launch=identity)
+
+    def renew_preparation(self, identity: str) -> None:
+        """Keep the client's reservation while it assembles the missing source archives."""
+        self._store.renew_launch(identity, self._clock, state="preparing")
 
     def submit_launch(
         self,
@@ -842,7 +852,7 @@ class Scheduler:
         queued: bool,
         retain_source: Callable[[], None] | None = None,
     ) -> tuple[str, ...]:
-        launch = self._store.finish_preparation(identity)
+        launch = self._store.finish_preparation(identity, self._clock)
         ids = tuple(request.run for request in launch.requests)
         operation = "source preparation"
         try:
@@ -866,26 +876,24 @@ class Scheduler:
             if retain_source is not None:
                 retain_source()
             records = tuple(self._freeze(run, target) for run in runs)
-            launch = launch.model_copy(
-                update={
-                    "requests": tuple(
-                        request.model_copy(
-                            update={"resolved_revision": record.launch.spec.revision}
-                        )
-                        for request, record in zip(launch.requests, records, strict=True)
-                    )
-                }
-            )
             for request, record in zip(launch.requests, records, strict=True):
                 if (
                     request.resume_version is not None
                     and record.launch.version != request.resume_version
                 ):
                     raise Stale(f"run {record.id!r} changed during source preparation")
-            self._store.save_launch(launch)
             operation = "admission"
+            self._store.renew_launch(
+                launch.id,
+                self._clock,
+                state="admitting",
+                requests=tuple(
+                    request.model_copy(update={"resolved_revision": record.launch.spec.revision})
+                    for request, record in zip(launch.requests, records, strict=True)
+                ),
+            )
             if queued:
-                self._store.launch(records, launch=launch.id)
+                self._store.launch(records, launch=launch.id, clock=self._clock)
             else:
                 self._admit(records, launch.id)
         except BaseException as error:
@@ -898,7 +906,7 @@ class Scheduler:
                 raise LaunchError(
                     launch.id, ids, "run admitted; delivery unconfirmed; " + explain(error)
                 ) from error
-            self._store.save_launch(launch.model_copy(update={"state": "failed"}))
+            self._store.fail_admission(launch.id)
             self._diagnose(operation, "admission failed; no run recorded", error, launch=launch.id)
             if not isinstance(error, Exception):
                 raise
@@ -1075,8 +1083,10 @@ class Scheduler:
                                         continue
                                     except LauncherError:
                                         pass
-                                if attempts:
-                                    break  # keep confirmed placements; later runs stay queued
+                                # Admitting would hand the reservation to the runs while
+                                # this unassigned paid machine could still be out there.
+                                if attempts and (rented is None or session.refused_at is not None):
+                                    break
                                 reason = (
                                     _refused(session, owned=rented is None)
                                     if session.refused_at is not None
@@ -1136,7 +1146,7 @@ class Scheduler:
                 ):
                     raise LauncherError("capacity expired during launch; etude queue would wait")
                 # Runs and claims become visible together, under the same locks.
-                self._store.launch(records, attempts, launch=launch)
+                self._store.launch(records, attempts, launch=launch, clock=self._clock)
             except BaseException:
                 for session in made:
                     try:

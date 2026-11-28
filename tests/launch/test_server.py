@@ -109,9 +109,13 @@ def training_jobs() -> list[TrainingJob]:
     assert backend.scheduler.runs() == ()
     assert exchanges == 10  # Standing and limits, including the server's default in the limit read.
 
+    assert main(["queue", str(file), "--pool", "lab", "--source", str(tmp_path / "tracking")]) == 0
+    assert "ppo/base@0  new, queued" in capsys.readouterr().out
+    assert exchanges == 15  # Standing before and after prepare, missing sources and submit.
+
     assert main(["limit", "unset", "ppo"]) == 0
     assert limit("ppo") is None
-    assert exchanges == 12
+    assert exchanges == 17
     assert not launcher_file(local).exists()
     assert backend.service.creates == 0
 

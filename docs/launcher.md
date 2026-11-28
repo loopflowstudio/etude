@@ -278,17 +278,22 @@ under that label — `launch`, `queue`, `continue`, `--resume`, `--quote`, or
 Python `launch`/`queue`/`quote` — is checked against the label's committed
 total. An experiment without a limit is unlimited; `etude limit unset
 EXPERIMENT` removes a limit, and `etude limits` lists all active limits from
-the database without provider keys or network (printing freshness, and `~`
-when any figure includes an estimate).
+the database without provider keys or network. It shows how much of the
+committed total is in flight, when the loop last ran, and `~` for a total
+that includes an estimate.
 
 The total counts every paid run under that label in this launcher database
 since its first run, including runs recorded before the limit was set:
 training, evaluations, continuations, resumes, retries and smoke stages. An
 unfinished paid run commits `max(spent, max_usd)`; a finished run commits its
-attributed rental cost. A launch reserves dollars before source preparation
-and holds them until its runs are recorded or the launch fails. A resume
-keeps the earlier run's spend and updates its remaining commitment. Runs
-targeting an owned pool add `$0`, so a full limit still allows `--pool lab`.
+attributed rental cost. A launch reserves dollars before source preparation.
+An abandoned preparation releases its reservation when its five-minute lease
+expires. If a provider's create reply is lost, the reservation stays until the
+scheduler confirms refusal or deletion. A lost paid create reply fails the
+launch even if an earlier machine confirmed capacity. Admitted runs take over
+their launch's commitment. A resume keeps the earlier run's spend and updates
+its remaining commitment. Runs targeting an owned pool add `$0`, so a full
+limit still allows `--pool lab`.
 The total excludes idle time on machines rented by hand with `etude rent`
 (which has its own `--max-usd`), storage and transfer charges, unlabelled
 runs, and runs in other databases.

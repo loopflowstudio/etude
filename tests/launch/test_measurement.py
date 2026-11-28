@@ -120,7 +120,7 @@ def test_ask_wait_counts(tmp_path: Path) -> None:
         with pytest.raises(TimeoutError):
             b.scheduler.wait(id, timeout=0)
         wait = counting.snapshot()
-    assert ask == Counts(database=37)  # target: ask records intent without remote effects
+    assert ask == Counts(database=38)  # intent and lease, without remote effects
     # Creation also reads provider safeguards for affordable time and the reserved budget,
     # and the status it returns reads the machine's attempts for how many shared it.
     # Refusal pause and shutdown settlement add three indexed local reads.
@@ -199,7 +199,7 @@ def test_several_run_git_and_database_counts(
             rent="l4",
         )
         result = counting.snapshot()
-    assert result == Counts(git=57, database=49)  # known debt: 19 git calls per run
+    assert result == Counts(git=57, database=50)  # known debt: 19 git calls per run
 
 
 @pytest.mark.parametrize(

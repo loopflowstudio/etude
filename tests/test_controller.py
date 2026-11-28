@@ -186,7 +186,7 @@ def test_a_pass_leaves_known_runs_alone_and_queues_only_a_new_stage(
     measured = MeasuredStorage(source)
     with counts.record():
         advance(definition, source=measured, pool="waiting", mode="queue")
-    assert counts.snapshot() == Counts(database=43)
+    assert counts.snapshot() == Counts(database=44)
     assert measured.listings == 1
     assert [r.id for r in b.scheduler.runs()] == ["two/base@0", "two/base@1", "two/fine@0"]
     assert "two/base@0  finished" in capsys.readouterr().out
@@ -227,7 +227,7 @@ def test_declared_queue_and_resume_leave_an_independent_same_seed_request_alone(
             )
         assert backend.scheduler.record(repeat) == prior
         assert backend.scheduler.record("two/base@0").launch.version == (2 if resume else 1)
-    assert counts.snapshot() == Counts(database=46)
+    assert counts.snapshot() == Counts(database=47)
     backend.store.close()
 
 
@@ -535,7 +535,7 @@ def eval_jobs(state: ExperimentState) -> list[EvalJob]:
     assert re.search(r"eval free: 0 new, [1-9]\d* running", second.out)
     assert "launched_pass_failed" in second.err
     assert len(b.scheduler.runs(done=True)) == 3
-    assert first_counts == Counts(database=48)
+    assert first_counts == Counts(database=49)
     assert second_counts == Counts(database=4)
     assert main(["launch", *args[1:], "--quote"]) == 0
     quoted = capsys.readouterr()

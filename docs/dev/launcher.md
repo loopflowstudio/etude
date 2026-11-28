@@ -829,9 +829,11 @@ provisioning and execution, while provisioners and workers remain independent.
   Declaration reading, smoke and local composition live beside it.
 - **Scheduler.** `scheduler/loop.py` owns database writes, locks, runs, queue,
   placement, job limits and stored experiment spending limits. `prepare_launch`
-  reserves dollars atomically, and the transaction that writes the runs
-  replaces the reservation with their commitment. `quote` checks the same
-  limit on a read snapshot.
+  reserves dollars atomically under a five-minute lease, renewed at source
+  and placement boundaries. An unsettled rental retains the reservation
+  even after lease expiry. The transaction that writes admitted runs replaces
+  the reservation with their commitment. `quote` checks the same limit on a
+  read snapshot.
   `costs.py` holds dollar arithmetic and `placement.py`
   holds placement values; neither owns lifecycle state. `executor.py` composes
   startup (`startup.py`, `ssh.py`) with directory, SSH or bucket journals.

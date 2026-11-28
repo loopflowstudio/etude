@@ -686,13 +686,21 @@ class ExperimentLimit(Record):
     max_usd: Decimal
     set_at: datetime
     committed_usd: Decimal = Decimal(0)
+    reserved_usd: Decimal = Decimal(0)
     estimated: bool = False
 
+    @staticmethod
+    def format_usd(amount: Decimal, *, estimated: bool = False) -> str:
+        """Show cents, with three significant digits for positive sub-cent amounts."""
+        if 0 < amount < Decimal("0.01"):
+            dollars = f"{amount:.{2 - amount.adjusted()}f}".rstrip("0")
+        else:
+            dollars = f"{amount:.2f}"
+        return f"{'~' if estimated else ''}${dollars}"
+
     def format_committed(self, committed: Decimal | None = None) -> str:
-        """Keep sub-cent spend visible when it can still block admission."""
         amount = self.committed_usd if committed is None else committed
-        dollars = f"{amount:.3g}" if 0 < amount < Decimal("0.01") else f"{amount:.2f}"
-        return f"{'~' if self.estimated else ''}${dollars}"
+        return self.format_usd(amount, estimated=self.estimated)
 
 
 class LaunchRequest(Record):
@@ -713,6 +721,7 @@ class Launch(Record):
     created_at: datetime
     target: Target | None = None  # absent from evidence written before experiment limits
     state: Literal["preparing", "admitting", "admitted", "failed"] = "preparing"
+    expires_at: datetime | None = None
 
     def addressed(self, runs: Sequence[RunRequest]) -> tuple[RunRequest, ...]:
         """Give the original requests their retained run addresses."""

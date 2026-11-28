@@ -135,12 +135,14 @@ class LimitsReply(Record):
         with retained_scheduler() as scheduler:
             if scheduler is None:
                 return cls()
+            target = scheduler.default_target() if include_default else None
+            if target is not None and target.rent is None:
+                return cls(default_target=target)
             if experiment is None:
                 limits = scheduler.limits()
             else:
                 limit = scheduler.limit(experiment)
                 limits = (limit,) if limit is not None else ()
-            target = scheduler.default_target() if limits and include_default else None
             return cls(limits=limits, default_target=target)
 
 
@@ -592,6 +594,8 @@ def _answer(scheduler: Scheduler, request: Request) -> Response:
                 submission.runs, submission.pool, rent=submission.rent
             )
         case SubmissionRequest(operation="missing_sources", submission=submission):
+            if submission.launch is not None:
+                scheduler.renew_preparation(submission.launch)
             response = tuple(
                 run.id
                 for run in submission.runs
