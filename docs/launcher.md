@@ -272,53 +272,40 @@ ppo  limited to $60.00; $46.00 committed
 $ uv run etude limit unset ppo
 ```
 
-`etude limit set EXPERIMENT --max-usd D` stores a dollar ceiling for an
-experiment label (name the label, not the `.py` file). Every later submission
-under that label — `launch`, `queue`, `continue`, `--resume`, `--quote`, or
-Python `launch`/`queue`/`quote` — is checked against the label's committed
-total. An experiment without a limit is unlimited; `etude limit unset
-EXPERIMENT` removes a limit, and `etude limits` lists all active limits from
-the database without provider keys or network. It shows when the loop last
-ran. Limit listings, updates, launch previews and refusals show dollars in
-flight and use `~` for a total that includes an estimate.
+`limit set` takes the experiment label. The ceiling covers every run with that
+label in one launcher database, including runs recorded before you set it.
+Clients sharing an `etude server` share its limit. Use `etude limits` to read
+totals and the last loop time from the database. This read needs no provider
+keys or provider calls. A `~` marks an estimated total, and `in flight` shows
+the portion held by launches awaiting admission or rental reconciliation.
 
-The total counts every paid run under that label in this launcher database
-since its first run, including runs recorded before the limit was set:
-training, evaluations, continuations, resumes, retries and smoke stages. An
-unfinished paid run commits `max(spent, max_usd)`; a finished run commits its
-attributed rental cost. A launch reserves dollars before source preparation.
-An abandoned preparation releases its reservation when its five-minute lease
-expires. If a provider's create reply is lost, the reservation stays until the
-scheduler confirms refusal or deletion. A lost paid create reply fails the
-launch even if an earlier machine confirmed capacity. Admitted runs take over
-their launch's commitment. A resume keeps the earlier run's spend and updates
-its remaining commitment. Runs targeting an owned pool add `$0`, so a full
-limit still allows `--pool lab`.
-The total excludes idle time on machines rented by hand with `etude rent`
-(which has its own `--max-usd`), storage and transfer charges, unlabelled
-runs, and runs in other databases.
+An unfinished paid run commits the greater of its attributed spend and its
+job's `max_usd`. A finished run commits its attributed spend. Training,
+evaluation, retries, continuations and smoke stages all count. A resume
+reserves any increase over the run's current commitment. Owned-only launches
+ask for zero dollars. Idle time on hand-rented machines, storage, transfers
+and unlabelled runs fall outside the total.
 
-When a launch would exceed the limit:
+The scheduler reserves dollars before source preparation. Admitted runs take
+over the reservation. An abandoned preparation expires after five minutes.
+If a paid create reply is lost, the launch fails even if an earlier machine
+confirmed capacity. The reservation holds until the scheduler confirms
+refusal or deletion.
 
-- `etude launch FILE`, `etude queue FILE` and their `--quote` admit declared
-  runs in order while they fit; each remaining run prints
-  `new, not queued: limit $50.00: $46.00 committed`.
-- `--resume`, `etude continue`, and Python `launch`/`queue`/`quote`
-  refuse the whole submission before publishing source or renting a machine,
-  naming the limit, committed total and the command to raise it. If in-flight
-  reservations leave too little room, retry after those launches settle.
+- `etude launch FILE` and `etude queue FILE` consider declarations in order
+  and skip each run that would exceed the limit. `etude launch FILE --quote`
+  previews the same selection.
+- `--resume`, `etude continue` and Python `launch`, `queue` and `quote`
+  refuse the whole request. The refusal gives the limit, committed amount
+  and command to raise it. It suggests retrying if settling in-flight launches
+  could leave enough room. For a refused submission, `etude logs --run RUN`
+  shows the reason.
 
-When the scheduler refuses a launch for exceeding its limit,
-`etude logs --run RUN` shows the retained reason.
-
-`--max-usd 0` freezes new paid launches. Lowering a limit or receiving a
-revised bill can put the committed total above the ceiling. Both affect
-future admissions, while existing reservations and runs keep their funding.
-The limit lives in the launcher database, so it covers this
-computer or every client sharing one `etude server`. One limit across separate
-launcher databases, or a limit an agent sharing the same shell cannot raise,
-requires a hosted service; raising is its own command so shell permission rules
-can deny it.
+Lowering a ceiling or revising a bill affects future admissions. A zero
+ceiling freezes new commitments. `etude limit unset EXPERIMENT` restores
+unlimited admission. A limit across separate databases, or one an agent
+sharing the same shell cannot raise, requires a hosted service. Raising the
+ceiling has its own command so shell permission rules can restrict it.
 
 ## Queue, launch and wait
 

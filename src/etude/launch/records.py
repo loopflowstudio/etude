@@ -686,6 +686,10 @@ class ExperimentCeiling(Record):
     max_usd: Decimal = Field(ge=0, allow_inf_nan=False)
     set_at: datetime
 
+    def allows(self, committed: Decimal, ask: Decimal) -> bool:
+        """A lowered ceiling still admits work that asks for no additional dollars."""
+        return ask == 0 or committed + ask <= self.max_usd
+
 
 class ExperimentLimit(ExperimentCeiling):
     """A spending ceiling with the commitments measured at read time."""

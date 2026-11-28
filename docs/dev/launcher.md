@@ -182,11 +182,11 @@ controller's pass there. The server reserves the requests in `prepare_launch`
 before the client freezes and publishes source and sends the frozen runs
 and one source archive per repository/commit. The server stores archives
 under `ETUDE_HOME/sources` and can launch or continue without a repository
-checkout. A pass asks the server once for where the experiment's runs stand and
-for its spending limit when targeting a rentable supply; with a server selected
-it needs `--source` to say where their stored state
-is. Logs stream back over SSH. Fetch copies to the client's
-chosen directory and checks the returned digest before replacing its output.
+checkout. A pass reads the experiment's standing from the server. For an
+on-demand or a default target, one further read returns the applicable spending
+limit. With a server selected, `--source` locates the stored experiment data.
+Logs stream back over SSH. Fetch copies to the client's chosen directory and
+checks the returned digest before replacing its output.
 A lost SSH reply is an error; launch is not automatically retried.
 
 Run the standing loop on the server under a process supervisor:
@@ -826,7 +826,7 @@ provisioning and execution, while provisioners and workers remain independent.
 
 - **Controller.** `controller/advance.py` reads declarations, observes state
   through `client.standing(experiment)` and storage, checks any stored limit
-  through `LimitsReply.read` in `server.py`, and calls `launch` or `queue`
+  through `read_limit` in `server.py`, and calls `launch` or `queue`
   for new work. It holds nothing between passes.
   Declaration reading, smoke and local composition live beside it.
 - **Scheduler.** `scheduler/loop.py` owns database writes, locks, runs, queue,

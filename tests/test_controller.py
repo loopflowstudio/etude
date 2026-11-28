@@ -232,8 +232,9 @@ def test_declared_queue_and_resume_leave_an_independent_same_seed_request_alone(
     backend.store.close()
 
 
+@pytest.mark.parametrize("quote", [False, True])
 def test_an_experiment_limit_refuses_hand_down_before_any_rental(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], quote: bool
 ) -> None:
     b = bench(tmp_path)
     monkeypatch.setenv("ETUDE_HOME", str(tmp_path))
@@ -247,18 +248,10 @@ def test_an_experiment_limit_refuses_hand_down_before_any_rental(
         source=DirectoryStorage(tmp_path / "source"),
         rent="l4",
         mode="launch",
+        quote=quote,
     )
+    assert "not queued: limit $0.50: $0.00 committed" in capsys.readouterr().out
     assert b.scheduler.runs() == ()
-    assert b.service.creates == 0
-    assert "not queued: limit $0.50: $0.00 committed" in capsys.readouterr().out
-    advance(
-        read_experiment(file),
-        source=DirectoryStorage(tmp_path / "source"),
-        rent="l4",
-        mode="launch",
-        quote=True,
-    )
-    assert "not queued: limit $0.50: $0.00 committed" in capsys.readouterr().out
     assert b.scheduler.limits()[0].committed_usd == 0
     assert b.service.creates == 0
 

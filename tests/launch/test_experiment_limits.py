@@ -345,8 +345,12 @@ def test_abandoned_preparation_expires_and_fences_the_late_ssh_client(tmp_path: 
     assert other.limits()[0].reserved_usd == 0
 
 
+@pytest.mark.parametrize("historical", [False, True], ids=["expired", "predates-leases"])
 def test_abandoned_launch_logs_finish_after_retry_before_the_scheduler_sweeps(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    historical: bool,
 ) -> None:
     b = bench(tmp_path)
     monkeypatch.setattr("etude.launch.client._client", lambda: b.scheduler)
@@ -355,7 +359,14 @@ def test_abandoned_launch_logs_finish_after_retry_before_the_scheduler_sweeps(
     abandoned = b.scheduler.prepare_launch((request,), rent="l4")
     assert not b.scheduler.logs(run="ppo/retry").complete
 
-    b.clock.advance(300)
+    if historical:
+        with b.store._db:
+            b.store._db.execute(
+                "UPDATE launches SET body=json_remove(body, '$.expires_at') WHERE id=?",
+                (abandoned.id,),
+            )
+    else:
+        b.clock.advance(300)
     (run,) = b.scheduler.queue(request, rent="l4")
     b.store.cancel(b.store.run(run), b.clock())
     assert b.scheduler.read(run).done
@@ -649,7 +660,7 @@ def test_unlimited_admission_and_limited_queries_use_bounded_reads(tmp_path: Pat
     assert any("SEARCH r USING INDEX runs_experiment" in step for step in runs), runs
     for index in ("launches_reserving", "sessions_open_machines", "launch_acquisitions"):
         assert any(index in step for step in reservations), reservations
-    assert sum("SEARCH l USING INDEX launches_reserving" in step for step in sweep) == 2, sweep
+    assert sum("SEARCH l USING INDEX launches_reserving" in step for step in sweep) == 1, sweep
 
 
 def test_unfinished_run_commits_its_spend_when_the_bill_exceeds_its_cap(tmp_path: Path) -> None:

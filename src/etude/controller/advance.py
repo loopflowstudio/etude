@@ -38,8 +38,7 @@ from etude.jobs import (
 )
 from etude.launch import client
 from etude.launch.listing import show_quote
-from etude.launch.records import ExperimentLimit, Target
-from etude.launch.server import LimitsReply, selected
+from etude.launch.server import read_limit, selected
 from etude.run import RunListing
 from etude.spec import Job, RunRequest, Smoke, Until
 from etude.storage import Storage, default_root
@@ -97,12 +96,6 @@ def source_for(pool: str | None, rent: str | None, source: str | None = None) ->
     return str(next(iter(uris), default_root()))
 
 
-def _limit_reason(limit: ExperimentLimit | None, committed: Decimal, ask: Decimal) -> str | None:
-    if limit is None or ask == 0 or committed + ask <= limit.max_usd:
-        return None
-    return f"limit {limit.format_usd(limit.max_usd)}: {limit.format_committed(committed)}"
-
-
 def advance(
     experiment: Experiment,
     *,
@@ -128,22 +121,26 @@ def advance(
     """
     listing = RunListing.read(source, experiments=(experiment.name,) if scoped else None)
     state = observe(listing, experiment.name)
-    target = Target(pool=pool, rent=rent)
     limit = None
     if mode != "local" and (rent is not None or pool is None):
-        spending = LimitsReply.read(experiment.name, include_default=pool is None and rent is None)
-        if spending.limits:
-            limit = spending.limits[0]
-        target = spending.default_target or target
+        limit = read_limit(experiment.name, for_default_target=rent is None)
     committed = limit.committed_usd if limit is not None else Decimal(0)
-    budget = None if resume else limit
-    spending_line = ""
-    if limit is not None:
-        spending_line = f"; {limit.format_committed(show_limit=True)}"
+
+    def plan_spend(job: Job) -> str | None:
+        nonlocal committed
+        # The scheduler checks a resume against the run's existing commitment.
+        if limit is None or resume:
+            return None
+        ask = job.max_usd or Decimal(0)
+        if limit.allows(committed, ask):
+            committed += ask
+            return None
+        return f"limit {limit.format_usd(limit.max_usd)}: {limit.format_committed(committed)}"
+
     print(
         f"{experiment.name}: state from {source.uri('run.json').removesuffix('/run.json')}: "
         f"{_count(len(state.runs), 'training run')}, {_count(len(state.eval_runs), 'eval run')}"
-        + spending_line
+        + (f"; {limit.format_committed(show_limit=True)}" if limit is not None else "")
     )
     # A training selection or resume is a pass over those runs alone.
     evaluate = job is None and seed is None and not resume and until is None
@@ -179,13 +176,11 @@ def advance(
             elif prior is not None:
                 lines[request.id] = format_known_run(request, prior), prior.address
                 continue
-            ask = target.ask_usd(request.job)
-            if reason := _limit_reason(budget, committed, ask):
+            if reason := plan_spend(request.job):
                 lines[request.id] = f"{request.id}  new, not queued: {reason}", None
                 continue
             new.append(request)
             lines[request.id] = f"{request.id}  new", None
-            committed += ask
     jobs: list[EvalJob] = []
     if experiment.eval is not None and evaluate:
         # This pass's new runs have no checkpoints yet, but their policies already exist
@@ -292,12 +287,10 @@ def advance(
             identity = f"{stem}-{number}"
             number += 1
         request = RunRequest(id=identity, job=executable, smoke=smoke)
-        ask = target.ask_usd(executable)
-        reason = _limit_reason(budget, committed, ask)
+        reason = plan_spend(executable)
         if reason is None:
             planned.append(request)
             taken.add(identity)
-            committed += ask
         for each in group:
             each.decision.state = "not queued" if reason else None
             each.decision.reason = reason

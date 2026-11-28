@@ -366,9 +366,10 @@ _OPEN_SESSION_MACHINES = (
 
 
 # Compare UTC wall times without the zone suffix so a whole second sorts
-# before the same second with fractional digits.
+# before the same second with fractional digits. Historical rows lack a lease
+# and sort before every expiry.
 _PENDING_LAUNCH = "json_extract(l.body, '$.state') IN ('preparing', 'admitting')"
-_LAUNCH_EXPIRY = "rtrim(json_extract(l.body, '$.expires_at'), 'Z')"
+_LAUNCH_EXPIRY = "rtrim(coalesce(json_extract(l.body, '$.expires_at'), ''), 'Z')"
 _LIVE_LAUNCH_LEASE = f"{_PENDING_LAUNCH} AND {_LAUNCH_EXPIRY} > :now"
 _UNSETTLED_LAUNCH_RENTAL = """s.acquired = 1 AND m.kind = 'rented'
     AND w.ended_at IS NULL AND w.refused_at IS NULL
@@ -530,10 +531,9 @@ class Database:
                 check(launch.requests, now)
             except LauncherError as error:
                 refused = error
-            if refused is None:
-                launch = self._renew_launch(launch, clock())
+                self._record_admission_failure(launch, now, str(error))
             else:
-                self._record_admission_failure(launch, now, str(refused))
+                launch = self._renew_launch(launch, clock())
             self._db.executemany(
                 "INSERT INTO launch_runs(launch, run) VALUES (?, ?)",
                 ((launch.id, r.run) for r in launch.requests),
@@ -618,22 +618,23 @@ class Database:
 
     def expire_launches(self, clock: Callable[[], datetime]) -> None:
         """Retain expiry for abandoned requests without an unsettled acquisition."""
-        rows = self._db.execute(
-            f"""SELECT l.id FROM launches l
-                WHERE {_PENDING_LAUNCH} AND {_LAUNCH_EXPIRY} <= :now AND NOT {_HAS_LAUNCH_RENTAL}
-                UNION ALL
-                SELECT l.id FROM launches l
-                WHERE {_PENDING_LAUNCH} AND {_LAUNCH_EXPIRY} IS NULL AND NOT {_HAS_LAUNCH_RENTAL}""",
-            {"now": _utc_wall_time(clock())},
-        ).fetchall()
-        if not rows:
+        expired = f"""FROM launches l WHERE {_PENDING_LAUNCH}
+                      AND {_LAUNCH_EXPIRY} <= :now AND NOT {_HAS_LAUNCH_RENTAL}"""
+        # Idle ticks take no write lock. Once locked, settle only launches still expired.
+        candidate = self._db.execute(
+            f"SELECT 1 {expired} LIMIT 1", {"now": _utc_wall_time(clock())}
+        ).fetchone()
+        if candidate is None:
             return
         with self._together():
             at = clock()
+            rows = self._db.execute(
+                f"SELECT l.body {expired}", {"now": _utc_wall_time(at)}
+            ).fetchall()
             for row in rows:
-                launch = self.launch_evidence(row[0])
-                if launch.pending and not self.launch_reserves(launch, at):
-                    self._record_admission_failure(launch, at, "reservation expired")
+                self._record_admission_failure(
+                    Launch.model_validate_json(row[0]), at, "reservation expired"
+                )
 
     def _record_admission_failure(self, launch: Launch, at: datetime, message: str) -> None:
         self._save_launch(launch.model_copy(update={"state": "failed"}))
@@ -1551,7 +1552,7 @@ def _snapshot(source: Path, target: Path, timeout: float) -> None:
             writer.execute("PRAGMA journal_mode=DELETE")
 
 
-def _invalid_records(db: sqlite3.Connection) -> list[str]:
+def _invalid_records(db: sqlite3.Connection, applied: set[str]) -> list[str]:
     """Every row that the current records reject, so a migration can be refused whole."""
     rows: dict[str, tuple[str, Callable[[sqlite3.Row], object]]] = {
         "pools": ("SELECT * FROM pools", lambda row: Pool.model_validate(dict(row))),
@@ -1565,11 +1566,12 @@ def _invalid_records(db: sqlite3.Connection) -> list[str]:
             lambda row: Provider.model_validate(dict(row)),
         ),
         "storages": ("SELECT * FROM storages", lambda row: Storage.model_validate(dict(row))),
-        "experiment_limits": (
+    }
+    if "experiment_limits" in applied:
+        rows["experiment_limits"] = (
             "SELECT * FROM experiment_limits",
             lambda row: ExperimentCeiling.model_validate(dict(row)),
-        ),
-    }
+        )
     bodies: dict[str, type[Record]] = {
         "launches": Launch,
         "diagnostics": Diagnostic,
@@ -1579,12 +1581,8 @@ def _invalid_records(db: sqlite3.Connection) -> list[str]:
     }
     for table, record in bodies.items():
         rows[table] = (f"SELECT * FROM {table}", partial(_body, record))
-    # A database may stop at a migration set older than a table's own migration.
-    present = {name for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     problems: list[str] = []
     for table, (query, read) in rows.items():
-        if table not in present:
-            continue
         invalid = 0
         for row in db.execute(query):
             remaining()
@@ -1809,7 +1807,7 @@ def _apply(db: sqlite3.Connection, path: Path, exports: list[Path]) -> tuple[str
                 _program(path),
             ),
         )
-    if problems := _invalid_records(db):
+    if problems := _invalid_records(db, existing.union(changed)):
         raise LauncherError("launcher rows do not validate:\n" + "\n".join(problems))
     if db.execute("PRAGMA foreign_key_check").fetchone():
         raise LauncherError("launcher has broken foreign key references")

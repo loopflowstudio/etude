@@ -292,7 +292,7 @@ class Job(Record):
         """
         if seeds:
             return [RunRequest(job=self, seed=seed, params=dict(params or {})) for seed in seeds]
-        return expand_runs([self], params=params)
+        return expand_runs(self, params=params)
 
 
 def declared_address(experiment: str | None, job: str, seed: int) -> str:
@@ -302,7 +302,7 @@ def declared_address(experiment: str | None, job: str, seed: int) -> str:
 
 
 def expand_runs(
-    given: Sequence[Job | RunRequest], *, params: dict[str, Param] | None = None
+    given: Job | RunRequest | Sequence[Job | RunRequest], *, params: dict[str, Param] | None = None
 ) -> list[RunRequest]:
     """Expand declared seeds with stable job@seed addresses.
 
@@ -310,6 +310,8 @@ def expand_runs(
     happens after expansion, so selecting one seed never changes its address.
     """
     requests: list[RunRequest] = []
+    if isinstance(given, (Job, RunRequest)):
+        given = (given,)
     for each in given:
         if isinstance(each, RunRequest):
             requests.append(each)

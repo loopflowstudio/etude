@@ -6,7 +6,7 @@ CREATE TABLE experiment_limits (
     set_at TEXT NOT NULL
 );
 
-CREATE INDEX launches_reserving ON launches(rtrim(json_extract(body, '$.expires_at'), 'Z'))
+CREATE INDEX launches_reserving ON launches(rtrim(coalesce(json_extract(body, '$.expires_at'), ''), 'Z'))
     WHERE json_extract(body, '$.state') IN ('preparing', 'admitting');
 
 CREATE INDEX launch_acquisitions ON launch_sessions(session, launch) WHERE acquired = 1;

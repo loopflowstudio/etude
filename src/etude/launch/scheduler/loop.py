@@ -190,12 +190,13 @@ def _validate_experiment(experiment: str) -> None:
         raise LauncherError(f"invalid experiment label {experiment!r}")
 
 
-def _additional_usd(request: LaunchRequest, prior: Standing | None) -> Decimal:
-    if request.resume_version is None:
-        return request.ask_usd
-    assert prior is not None
-    # Keep the old commitment until the resume lands. A failed resume cannot release it.
-    return max(Decimal(0), request.ask_usd - prior.committed_usd)
+def _additional_usd(requests: Sequence[LaunchRequest], commitments: dict[str, Decimal]) -> Decimal:
+    total = Decimal(0)
+    for request in requests:
+        # A resume replaces its run's commitment only after successful admission.
+        prior = commitments[request.run] if request.resume_version is not None else Decimal(0)
+        total += max(Decimal(0), request.ask_usd - prior)
+    return total
 
 
 def _launch_request(run: RunRequest, target: Target, prior: RunRecord | None) -> LaunchRequest:
@@ -396,35 +397,25 @@ class Scheduler:
     def _measure_limit(
         self, limit: ExperimentCeiling, now: datetime, requests: Sequence[LaunchRequest] = ()
     ) -> ExperimentLimit:
-        standing = {item.record.id: item for item in self.standing(limit.experiment)}
-        committed = sum((item.committed_usd for item in standing.values()), Decimal(0))
-        reserved = sum(
-            (
-                _additional_usd(request, standing.get(request.run))
-                for request in self._store.reservations(limit.experiment, now)
-            ),
-            Decimal(0),
-        )
-        committed += reserved
-        ask = sum(
-            (_additional_usd(request, standing.get(request.run)) for request in requests),
-            Decimal(0),
-        )
+        standing = self.standing(limit.experiment)
+        commitments = {item.record.id: item.committed_usd for item in standing}
+        reserved = _additional_usd(self._store.reservations(limit.experiment, now), commitments)
         measured = ExperimentLimit(
             experiment=limit.experiment,
             max_usd=limit.max_usd,
             set_at=limit.set_at,
-            committed_usd=committed,
+            committed_usd=sum(commitments.values(), Decimal(0)) + reserved,
             reserved_usd=reserved,
             estimated=any(
-                item.status.estimated and item.committed_usd == item.status.usd
-                for item in standing.values()
+                item.status.estimated and commitments[item.record.id] == item.status.usd
+                for item in standing
             ),
         )
-        if requests and ask > 0 and committed + ask > limit.max_usd:
+        ask = _additional_usd(requests, commitments)
+        if not limit.allows(measured.committed_usd, ask):
             suggestion = (
                 "Retry after in-flight launches settle, or use"
-                if committed - reserved + ask <= limit.max_usd
+                if limit.allows(measured.committed_usd - reserved, ask)
                 else "Use"
             )
             raise LauncherError(
@@ -701,8 +692,7 @@ class Scheduler:
         rent: str | None = None,
     ) -> tuple[str, ...]:
         """Record runs for the next free slots, without requiring capacity now."""
-        given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
-        return self._submit(expand_runs(given), self._target(pool, rent), queued=True)
+        return self._submit(expand_runs(runs), pool, rent, queued=True)
 
     def launch(
         self,
@@ -712,8 +702,7 @@ class Scheduler:
         rent: str | None = None,
     ) -> tuple[str, ...]:
         """Place the runs that fit now and queue the rest; refuse if none fit."""
-        given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
-        return self._submit(expand_runs(given), self._target(pool, rent), queued=False)
+        return self._submit(expand_runs(runs), pool, rent, queued=False)
 
     def quote(
         self,
@@ -801,9 +790,9 @@ class Scheduler:
         )
 
     def _submit(
-        self, runs: Sequence[RunRequest], target: Target, *, queued: bool
+        self, runs: Sequence[RunRequest], pool: str | None, rent: str | None, *, queued: bool
     ) -> tuple[str, ...]:
-        launch = self.prepare_launch(runs, target.pool, rent=target.rent)
+        launch = self.prepare_launch(runs, pool, rent=rent)
         return self.submit_launch(launch.id, launch.addressed(runs), queued=queued)
 
     def _address_requests(

@@ -42,7 +42,6 @@ from etude.launch.records import (
     Quote,
     Standing,
     Status,
-    Target,
 )
 from etude.launch.scheduler.loop import Pacer, Scheduler
 from etude.launch.source import freeze, retain, source_archive, stored
@@ -123,34 +122,31 @@ class StandingRequest(Record):
 class LimitsRequest(Record):
     operation: Literal["limits"] = "limits"
     experiment: str | None = None
-    include_default: bool = False
+    for_default_target: bool = False
 
-
-class LimitsReply(Record):
-    limits: tuple[ExperimentLimit, ...] = ()
-    default_target: Target | None = None
-
-    @classmethod
-    def read(cls, experiment: str | None, *, include_default: bool = False) -> LimitsReply:
-        """Read limits and, when requested, the default target in one exchange."""
+    def read(self) -> tuple[ExperimentLimit, ...]:
         if address := selected():
-            return PythonClient(address).read_limits(experiment, include_default=include_default)
-        return cls._read_local(experiment, include_default=include_default)
+            return TypeAdapter(tuple[ExperimentLimit, ...]).validate_json(
+                PythonClient(address)._request(self)
+            )
+        return self.read_local()
 
-    @classmethod
-    def _read_local(cls, experiment: str | None, *, include_default: bool) -> LimitsReply:
+    def read_local(self) -> tuple[ExperimentLimit, ...]:
         with retained_scheduler() as scheduler:
-            if scheduler is None:
-                return cls()
-            target = scheduler.default_target() if include_default else None
-            if target is not None and target.rent is None:
-                return cls(default_target=target)
-            if experiment is None:
-                limits = scheduler.limits()
-            else:
-                limit = scheduler.limit(experiment)
-                limits = (limit,) if limit is not None else ()
-            return cls(limits=limits, default_target=target)
+            if scheduler is None or (
+                self.for_default_target and scheduler.default_target().rent is None
+            ):
+                return ()
+            if self.experiment is None:
+                return scheduler.limits()
+            limit = scheduler.limit(self.experiment)
+            return (limit,) if limit is not None else ()
+
+
+def read_limit(experiment: str, *, for_default_target: bool = False) -> ExperimentLimit | None:
+    """For a declaration using the default target, only a rentable target needs a ceiling."""
+    limits = LimitsRequest(experiment=experiment, for_default_target=for_default_target).read()
+    return limits[0] if limits else None
 
 
 class ObservationRequest(Record):
@@ -246,7 +242,7 @@ type Response = (
     | Usage
     | LogSnapshot
     | LauncherObservation
-    | LimitsReply
+    | tuple[ExperimentLimit, ...]
     | tuple[RunRecord, ...]
     | tuple[Standing, ...]
     | Launch
@@ -454,21 +450,8 @@ class PythonClient:
             raise LauncherError(detail or "server request failed; outcome unknown")
         return done.stdout
 
-    def _submit(
-        self,
-        runs: Sequence[RunRequest],
-        target: Target,
-        queued: bool,
-    ) -> tuple[str, ...]:
-        submission = prepare(
-            self.address,
-            LaunchInput(
-                runs=tuple(runs),
-                pool=target.pool,
-                rent=target.rent,
-                queued=queued,
-            ),
-        )
+    def _submit(self, submission: LaunchInput) -> tuple[str, ...]:
+        submission = prepare(self.address, submission)
         try:
             return TypeAdapter(tuple[str, ...]).validate_json(
                 self._request(SubmissionRequest(operation="launch", submission=submission))
@@ -486,8 +469,9 @@ class PythonClient:
         *,
         rent: str | None = None,
     ) -> tuple[str, ...]:
-        given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
-        return self._submit(expand_runs(given), Target(pool=pool, rent=rent), True)
+        return self._submit(
+            LaunchInput(runs=tuple(expand_runs(runs)), pool=pool, rent=rent, queued=True)
+        )
 
     def launch(
         self,
@@ -496,8 +480,7 @@ class PythonClient:
         *,
         rent: str | None = None,
     ) -> tuple[str, ...]:
-        given = [runs] if isinstance(runs, (Job, RunRequest)) else runs
-        return self._submit(expand_runs(given), Target(pool=pool, rent=rent), False)
+        return self._submit(LaunchInput(runs=tuple(expand_runs(runs)), pool=pool, rent=rent))
 
     def quote(
         self,
@@ -516,11 +499,6 @@ class PythonClient:
     ) -> tuple[Standing, ...]:
         return TypeAdapter(tuple[Standing, ...]).validate_json(
             self._request(StandingRequest(experiment=experiment, job=job))
-        )
-
-    def read_limits(self, experiment: str | None, *, include_default: bool = False) -> LimitsReply:
-        return LimitsReply.model_validate_json(
-            self._request(LimitsRequest(experiment=experiment, include_default=include_default))
         )
 
     def observation(self, consoles: tuple[str, ...]) -> LauncherObservation:
@@ -586,9 +564,7 @@ def receive(open_scheduler: Callable[[], Scheduler]) -> int:
     if isinstance(request, ObservationRequest):
         response = LauncherObservation.read(request.consoles)
     elif isinstance(request, LimitsRequest):
-        response = LimitsReply._read_local(
-            request.experiment, include_default=request.include_default
-        )
+        response = request.read_local()
     else:
         response = _answer(open_scheduler(), request)
     print(ServerReply(response).model_dump_json())
