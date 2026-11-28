@@ -1956,7 +1956,7 @@ async def vector_slots(
 ) -> AsyncIterator[tuple[Match[VectorRules], Result | Exception]]:
     active: list[tuple[Match[VectorRules], Forward, int]] = []
     while True:
-        for match, agents in await matches.take(min(matches.target_slots, 2) - len(active)):
+        for match, agents in await matches.take(min(matches.target_matches, 2) - len(active)):
             forward = cast(Forward, agents[0])
             active.append((match, forward, match.config.turns))
         if not active:
@@ -2036,10 +2036,10 @@ def test_play_many_refills_four_slots_and_caps_an_empty_peers_tail_grant(tmp_pat
         assert list(playing.pending) == panel[286:]
 
 
-async def records_target_slots(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables]]:
-    while taken := await matches.take(matches.target_slots):
+async def records_target_matches(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables]]:
+    while taken := await matches.take(matches.target_matches):
         for match, _ in taken:
-            yield match, {"scores": [{"seat": 0, "score": matches.target_slots}]}
+            yield match, {"scores": [{"seat": 0, "score": matches.target_matches}]}
 
 
 @pytest.mark.parametrize(("cpus", "max_batch"), [(3, None), (1, 2)], ids=["share", "batch-cap"])
@@ -2057,7 +2057,7 @@ def test_play_many_targets_its_initial_share_bounded_by_batch_size(
     with evaluating(
         environment("vector"), experiment="vector", matches=panel, run="slots", directory=tmp_path
     ) as active:
-        assert active.play_many(records_target_slots, agents=agents).played == 5
+        assert active.play_many(records_target_matches, agents=agents).played == 5
     db = statsdb("vector", tmp_path)
     try:
         assert db.sql("select score, count(*) from scores group by score").fetchall() == [(2, 5)]

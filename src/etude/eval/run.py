@@ -702,7 +702,7 @@ def _play_pending(plays: Sequence[Playing], resources: Resources, checkout: str 
 class _GameGrant:
     playing: Playing
     matches: tuple[Match, ...]
-    target_slots: int
+    target_matches: int
 
 
 def _reserve_games(
@@ -726,12 +726,12 @@ def _reserve_games(
             break
     grants: list[_GameGrant] = []
     for each, matches in reserved:
-        target_slots = plan.games
+        target_matches = plan.games
         if each.streaming:
-            target_slots = math.ceil(len(each.pending) / counts[id(each)])
+            target_matches = math.ceil(len(each.pending) / counts[id(each)])
             if each.agent_loader.load is not None:
-                target_slots = min(target_slots, each.agent_loader.max_batch)
-        grants.append(_GameGrant(each, matches, target_slots))
+                target_matches = min(target_matches, each.agent_loader.max_batch)
+        grants.append(_GameGrant(each, matches, target_matches))
     return grants
 
 
@@ -808,7 +808,7 @@ def _play_matches(
             play=each.play,
             tournament=each.tournament,
             streaming=each.streaming,
-            target_slots=grant.target_slots,
+            target_matches=grant.target_matches,
             initial=grant.matches,
             agent_address=address,
             checkout=checkout,

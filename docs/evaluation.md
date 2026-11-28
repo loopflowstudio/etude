@@ -223,7 +223,7 @@ ENGINE_MAX_SLOTS = 128  # Size for the engine's arena memory budget.
 async def play_many(
     matches: MatchStream[Rules],
 ) -> AsyncIterator[tuple[Match[Rules], Tables | Exception]]:
-    pool = RolloutPool(slots=min(ENGINE_MAX_SLOTS, matches.target_slots))
+    pool = RolloutPool(slots=min(ENGINE_MAX_SLOTS, matches.target_matches))
     while True:
         for match, agents in await matches.take(pool.free):
             pool.load(match, agents)
@@ -252,8 +252,10 @@ job = EvalJob(
 Etude schedules the matches, caches checkpoints and stores each outcome as
 the generator yields it.
 
-- `matches.target_slots` suggests a pool size based on this process's initial
-  share of the tournament, capped at `max_batch` when a loader is declared.
+- `matches.target_matches` suggests how many matches this process should hold
+  at once, from its initial share of the tournament, capped at `max_batch`
+  when a loader is declared. Size an engine with several games per match
+  accordingly.
   Call `await matches.take(n)` with the number of free slots to get up to `n`
   pending `(match, agents)` pairs. Etude shares pending matches among empty
   processes and accounts for held matches when topping up a process. An empty

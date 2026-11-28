@@ -132,22 +132,22 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
         bind: Callable[[CheckpointRef], Forward] | None,
         build: Callable[[object, Mapping[str, Forward]], object] | None,
         *,
-        target_slots: int,
+        target_matches: int,
     ) -> None:
         self._pipe = pipe
         self._initial = initial
         self._kind = kind
         self._bind = bind
         self._build = build
-        self._target_slots = target_slots
+        self._target_matches = target_matches
         self._lock = asyncio.Lock()
         self._exhausted = False
         self._held: dict[int, _TakenMatch] = {}
 
     @property
-    def target_slots(self) -> int:
-        """Suggested pool size for this stream, capped at `max_batch` with a loader."""
-        return self._target_slots
+    def target_matches(self) -> int:
+        """Suggested matches to hold at once in this process, capped at `max_batch` with a loader."""
+        return self._target_matches
 
     async def take(self, count: int) -> list[tuple[Match[_MatchConfig], Sequence[object]]]:
         """Request up to `count` pending matches and their built seat agents."""
@@ -405,7 +405,7 @@ class Game:
     play: Function
     tournament: str
     streaming: bool
-    target_slots: int
+    target_matches: int
     initial: tuple[Match, ...]
     agent_address: str | None
     checkout: str | None
@@ -462,13 +462,13 @@ async def _serve_stream(
             kind,
             forwarder.bind if forwarder else None,
             build_hook,
-            target_slots=game.target_slots,
+            target_matches=game.target_matches,
         )
         starting = False
         stream = (
             cast(Callable[[MatchStream], _Outcomes], play)(source)
             if game.streaming
-            else _drive_play(cast(Play, play), source, source.target_slots)
+            else _drive_play(cast(Play, play), source, source.target_matches)
         )
         async with aclosing(stream):
             async for match, outcome in stream:
