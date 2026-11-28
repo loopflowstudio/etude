@@ -6,6 +6,7 @@ See docs/hanabi.md. The SDK and its offline tests never import OpenSpiel.
 
 from __future__ import annotations
 
+import asyncio
 import random
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -64,9 +65,9 @@ def _policy(game: pyspiel.Game) -> torch.nn.Linear:
     return torch.nn.Linear(game.observation_tensor_shape()[0], game.num_distinct_actions())
 
 
-def _episode(
+async def _episode(
     game: pyspiel.Game,
-    policies: Sequence[Callable[[torch.Tensor], torch.Tensor] | None],
+    policies: Sequence[Callable[[torch.Tensor], Awaitable[torch.Tensor]] | None],
     *,
     seed: int,
     learn: bool = False,
@@ -93,7 +94,7 @@ def _episode(
             action = chance.choice(legal)
         else:
             observation = torch.tensor(state.observation_tensor(player), dtype=torch.float32)
-            logits = policy(observation)
+            logits = await policy(observation)
             mask = torch.full_like(logits, -torch.inf)
             mask[legal] = 0
             distribution = torch.distributions.Categorical(logits=logits + mask)
@@ -116,13 +117,19 @@ def _episode(
 def train(config: Config) -> None:
     torch.set_num_threads(1)
     game = _game()
-    with track(config=config) as run:
+    with track(config=config) as run, asyncio.Runner() as loop:
         torch.manual_seed(run.seed)
         policy = _policy(game)
+
+        async def forward(observation: torch.Tensor) -> torch.Tensor:
+            return policy(observation)
+
         optimizer = torch.optim.Adam(policy.parameters(), lr=config.lr)
         counts = run.resume(policy=policy, optimizer=optimizer, extra=Counts())
         for update in run.steps("updates", to=config.updates, save_every=1):
-            episode = _episode(game, (policy, policy), seed=run.seed + update, learn=True)
+            episode = loop.run(
+                _episode(game, (forward, forward), seed=run.seed + update, learn=True)
+            )
             if episode.loss is None:
                 raise RuntimeError("Hanabi ended without a policy decision")
             optimizer.zero_grad()
@@ -190,41 +197,6 @@ def build(player: object, leaves: Mapping[str, Forward]) -> Forward | None:
     raise TypeError(f"unknown player {type(player).__name__}")
 
 
-async def _eval_episode(
-    game: pyspiel.Game,
-    policies: Sequence[Callable[[torch.Tensor], Awaitable[torch.Tensor]] | None],
-    *,
-    seed: int,
-) -> Episode:
-    chance = random.Random(seed)
-    generator = torch.Generator().manual_seed(seed)
-    state = game.new_initial_state()
-    transitions = 0
-    while not state.is_terminal():
-        if state.is_chance_node():
-            outcomes = state.chance_outcomes()
-            state.apply_action(
-                chance.choices([a for a, _ in outcomes], [p for _, p in outcomes])[0]
-            )
-            continue
-        player = state.current_player()
-        legal = state.legal_actions()
-        policy = policies[player]
-        if policy is None:
-            action = chance.choice(legal)
-        else:
-            observation = torch.tensor(state.observation_tensor(player), dtype=torch.float32)
-            logits = await policy(observation)
-            mask = torch.full_like(logits, -torch.inf)
-            mask[legal] = 0
-            distribution = torch.distributions.Categorical(logits=logits + mask)
-            selected = torch.multinomial(distribution.probs, 1, generator=generator).squeeze(0)
-            action = int(selected.item())
-        state.apply_action(action)
-        transitions += 1
-    return Episode(score=float(state.returns()[0]), transitions=transitions, loss=None)
-
-
 class Policy:
     def __init__(self, forward: Forward) -> None:
         self.forward = forward
@@ -237,8 +209,7 @@ async def play(match: Match, agents: Sequence[Forward | None]) -> Tables:
     torch.set_num_threads(1)
     game = _game()
     policies = [Policy(agent) if agent is not None else None for agent in agents]
-    with torch.no_grad():
-        episode = await _eval_episode(game, policies, seed=match.seed)
+    episode = await _episode(game, policies, seed=match.seed)
     return {"teams": [{"group": "all", "score": episode.score, "transitions": episode.transitions}]}
 
 

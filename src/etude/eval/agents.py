@@ -44,12 +44,6 @@ class Forward(Protocol):
     ) -> Awaitable[list[object]]: ...
 
 
-def _unpickle_forward_error(
-    checkpoint: str, message: str, retry: bool, loading: bool
-) -> ForwardError:
-    return ForwardError(checkpoint, message, retry=retry, loading=loading)
-
-
 class ForwardError(RuntimeError):
     """A checkpoint load or forward call failed."""
 
@@ -66,10 +60,15 @@ class ForwardError(RuntimeError):
         self.retry = retry
         self.loading = loading
 
-    def __reduce__(
-        self,
-    ) -> tuple[Callable[[str, str, bool, bool], ForwardError], tuple[str, str, bool, bool]]:
-        return _unpickle_forward_error, (self.checkpoint, str(self), self.retry, self.loading)
+    def __reduce__(self) -> tuple[type[ForwardError], tuple[str, str], dict[str, bool]]:
+        return (
+            ForwardError,
+            (self.checkpoint, str(self)),
+            {"retry": self.retry, "loading": self.loading},
+        )
+
+
+type ForwardResult = list[object] | ForwardError
 
 
 @dataclass(frozen=True)
@@ -81,28 +80,9 @@ class CheckpointRequest:
 
 
 @dataclass(frozen=True)
-class BatchRequest:
-    requests: tuple[CheckpointRequest, ...]
-
-
-@dataclass(frozen=True)
 class Answer:
     id: int
-    checkpoint: str
-    outputs: list[object]
-    error: str | None = None
-    retry: bool = False
-    loading: bool = False
-
-    def result(self) -> list[object]:
-        if self.error is not None:
-            raise ForwardError(
-                self.checkpoint,
-                self.error,
-                retry=self.retry,
-                loading=self.loading,
-            )
-        return self.outputs
+    result: ForwardResult
 
 
 _HEADER = struct.Struct("!Q")
@@ -132,39 +112,13 @@ def recv_frame(sock: socket.socket) -> bytes:
     return _recv_exact(sock, size)
 
 
-class _FrameProtocol(asyncio.Protocol):
-    def __init__(self, on_frame: Callable[[bytes], None], on_eof: Callable[[], None]) -> None:
-        self._on_frame = on_frame
-        self._on_eof = on_eof
-        self._buffer = bytearray()
-        self._expected: int | None = None
-
-    def data_received(self, data: bytes) -> None:
-        self._buffer.extend(data)
-        while True:
-            if self._expected is None:
-                if len(self._buffer) < _HEADER.size:
-                    return
-                (self._expected,) = _HEADER.unpack(self._buffer[: _HEADER.size])
-                del self._buffer[: _HEADER.size]
-            if len(self._buffer) < self._expected:
-                return
-            payload = bytes(self._buffer[: self._expected])
-            del self._buffer[: self._expected]
-            self._expected = None
-            self._on_frame(payload)
-
-    def connection_lost(self, exc: Exception | None) -> None:
-        self._on_eof()
-
-
 class AgentClient:
     """Async Unix-socket channel from one game process to the shared agent process."""
 
-    def __init__(self, transport: asyncio.Transport) -> None:
-        self._transport = transport
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self._writer = writer
         self._next_id = 0
-        self._in_flight: dict[int, tuple[asyncio.Future[Answer], float]] = {}
+        self._in_flight: dict[int, tuple[asyncio.Future[ForwardResult], float]] = {}
         self._closed_error: BaseException | None = None
         self.requests = 0
         self.answers = 0
@@ -172,53 +126,37 @@ class AgentClient:
         self.answer_bytes = 0
         self.round_trip_seconds = 0.0
         self.transport_seconds = 0.0
+        self._reader_task = asyncio.create_task(self._read_answers(reader))
 
     @classmethod
     async def connect(cls, address: str) -> AgentClient:
-        loop = asyncio.get_running_loop()
-        client: AgentClient | None = None
-
-        def on_frame(payload: bytes) -> None:
-            assert client is not None
-            client._receive(payload)
-
-        def on_eof() -> None:
-            if client is not None:
-                client._fail_all(RetryRequested("agent process exited before answering"))
-
         try:
-            transport, _ = await asyncio.wait_for(
-                loop.create_unix_connection(lambda: _FrameProtocol(on_frame, on_eof), address),
-                timeout=seconds_left(),
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_unix_connection(address), timeout=seconds_left()
             )
         except TimeoutError as error:
             raise RetryRequested("agent connection exceeded the evaluation deadline") from error
         except OSError as error:
             raise RetryRequested("agent process is unavailable") from error
-        client = cls(transport)
-        return client
+        return cls(reader, writer)
 
     def send_batch(
         self, calls: Sequence[tuple[CheckpointRef, list[object], int]]
-    ) -> list[asyncio.Future[Answer]]:
+    ) -> list[asyncio.Future[ForwardResult]]:
         if self._closed_error is not None:
             raise self._closed_error
         loop = asyncio.get_running_loop()
         now = time.monotonic()
-        items: list[CheckpointRequest] = []
-        futures: list[asyncio.Future[Answer]] = []
-        for checkpoint, inputs, rows in calls:
-            self._next_id += 1
-            request_id = self._next_id
-            future: asyncio.Future[Answer] = loop.create_future()
-            self._in_flight[request_id] = (future, now)
-            items.append(CheckpointRequest(request_id, checkpoint, inputs, rows))
-            futures.append(future)
+        items = [
+            CheckpointRequest(self._next_id + index, checkpoint, inputs, rows)
+            for index, (checkpoint, inputs, rows) in enumerate(calls, start=1)
+        ]
+        self._next_id += len(items)
         started = time.monotonic()
         try:
-            payload = ForkingPickler.dumps(BatchRequest(tuple(items)))
-            self._transport.write(_HEADER.pack(len(payload)))
-            self._transport.write(payload)
+            payload = ForkingPickler.dumps(items)
+            self._writer.write(_HEADER.pack(len(payload)))
+            self._writer.write(payload)
             self.requests += 1
             self.request_bytes += len(payload)
         except OSError as error:
@@ -227,21 +165,32 @@ class AgentClient:
             raise failure from error
         finally:
             self.transport_seconds += time.monotonic() - started
+        # Register only sent requests. Encoding can fail on author-defined inputs.
+        futures: list[asyncio.Future[ForwardResult]] = []
+        for item in items:
+            future: asyncio.Future[ForwardResult] = loop.create_future()
+            self._in_flight[item.id] = (future, now)
+            futures.append(future)
         return futures
 
-    def _receive(self, payload: bytes) -> None:
-        started = time.monotonic()
-        answer = cast(Answer, ForkingPickler.loads(payload))
-        now = time.monotonic()
-        self.answers += 1
-        self.answer_bytes += len(payload)
-        self.transport_seconds += now - started
-        entry = self._in_flight.pop(answer.id, None)
-        if entry is not None:
-            future, sent = entry
-            self.round_trip_seconds += now - sent
-            if not future.done():
-                future.set_result(answer)
+    async def _read_answers(self, reader: asyncio.StreamReader) -> None:
+        try:
+            while True:
+                (size,) = _HEADER.unpack(await reader.readexactly(_HEADER.size))
+                payload = await reader.readexactly(size)
+                started = time.monotonic()
+                answer = cast(Answer, ForkingPickler.loads(payload))
+                now = time.monotonic()
+                self.answers += 1
+                self.answer_bytes += len(payload)
+                self.transport_seconds += now - started
+                future, sent = self._in_flight.pop(answer.id)
+                self.round_trip_seconds += now - sent
+                future.set_result(answer.result)
+        except (EOFError, OSError):
+            self._fail_all(RetryRequested("agent process exited before answering"))
+        except Exception as error:
+            self._fail_all(RetryRequested(f"invalid agent response: {explain(error)}"))
 
     def _fail_all(self, error: BaseException) -> None:
         if self._closed_error is None:
@@ -251,9 +200,11 @@ class AgentClient:
                 future.set_exception(error)
         self._in_flight.clear()
 
-    def close(self) -> None:
-        with suppress(OSError):
-            self._transport.close()
+    async def close(self) -> None:
+        self._reader_task.cancel()
+        self._writer.close()
+        with suppress(asyncio.CancelledError):
+            await self._reader_task
 
 
 @dataclass(frozen=True)
