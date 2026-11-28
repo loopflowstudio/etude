@@ -187,9 +187,9 @@ match duration. Without a rental target, the run waits in the pool's queue
   refused. Etude sizes processes from CPU, memory and pending work. For
   `play` with checkpoints, Etude divides `max_batch` across processes, rounding
   up. Shared inference leaves a core for the agent process when possible.
-  `play_many` requests matches for free slots and gets a share of its
-  tournament's pending matches per request. Mixed groups share placement and
-  checkpoint inference.
+  Use `matches.target_slots` to size the `play_many` game pool, and request
+  matches as slots free up. Mixed groups share placement and checkpoint
+  inference.
 - **Guard Python scripts that play.** `evaluating(...)` without `workers=`
   played in its own process; its games now play in fresh processes, which
   import the script again. Put `run.play` under `if __name__ == "__main__":`.
@@ -209,15 +209,12 @@ match duration. Without a rental target, the run waits in the pool's queue
 - **A run's limits are its jobs' summed.** The eval run's `max_hours` and
   `max_usd` are the totals of the eval jobs it plays, and `--max-usd` admits
   it as one run.
-- **A failed `play` match stops its tournament.** Matches already in flight retain
-  their outcomes, so successful matches are not replayed and failed ones keep
-  their retry flags. The other tournaments keep playing, and the run ends
-  failed. A loader failure instead fails every
-  undelivered scheduled match containing that checkpoint across the group's
-  tournaments, including matches never dispatched, with the load error.
-  Matches without that checkpoint continue; delivered results stay unchanged.
-  A load raising `RetryRequested` applies the same scope with `retry=True`.
-  `play_many` can yield an error for one slot and refill it.
+- **Ordinary game errors fail one match.** In `play_many`, yield the match
+  with its error to release and refill the slot. Invalid result tables stop
+  new grants for their tournament. A failed checkpoint load applies to every
+  undelivered scheduled match seating that checkpoint across the group's
+  tournaments, including matches never dispatched. A load raising
+  `RetryRequested` marks those matches with `retry=True`.
 - **Some failed matches are replayed without `--retry-failed`.** A match the
   machine failed rather than the game (unfinished at the run's time limit or
   SIGTERM, a failed delivery, an agent process that exited, or code that

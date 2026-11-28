@@ -156,11 +156,14 @@ with evaluating(
   the slots it needs using its own process share. Direct `play_many` sizes
   for one process per `max_batch` matches, rounded up. Shared and code-only
   `play_many` size for one process per match. The parent spreads initial
-  async matches across starting processes and uses pending queues to fill
-  slots as children exit. Each `play_many` generator submits forwards on the
-  call and requests matches for its free slots. Each stream can take up to
-  its share of pending plus held matches, rounded up, minus what it holds.
-  Only processes currently serving that tournament count toward the share.
+  matches for the first async stream across starting processes. Later streams
+  request matches when they start, and pending queues fill slots as children
+  exit. Each `play_many` generator submits forwards on the call and requests
+  matches for its free slots. `MatchStream.target_slots` suggests the initial
+  share, capped at `max_batch` when a loader is declared. Grants account for
+  held matches and reserve a share of pending work for empty processes. A
+  positive request receives at least one while grants are open and work
+  remains. Only processes serving that tournament count toward grant shares.
   Both kinds of tournament share an agent process when using shared inference.
   Per-process diagnostics go to `artifacts/agents/game-{pid}.json`
   (`GameReport` with `tournaments: tuple[str, ...]`), keeping a game-thread-filtered
@@ -238,11 +241,13 @@ with evaluating(
   `seat` and `group`, a seat or group the match lacks, a column named
   `player`, or a column whose type changes during a run is refused. A refused
   or raising match is recorded as failed with its error, nothing else of it
-  is stored. A raised `play` error or refused table stops new grants for the
-  tournament. In-flight outcomes are retained. In `play_many`, yield
-  `(match, error)` to fail one slot and keep taking pending matches. A raised
-  error or an unknown or duplicate yield fails every held match. Returning with
-  held matches unyielded fails each unyielded match.
+  is stored. Ordinary `play` errors fail one match. In `play_many`, yield
+  `(match, error)` for an ordinary error and keep taking pending matches.
+  Refused tables, uncaught generator errors, invalid yields and early returns
+  stop new grants for the tournament. Broken streams fail their held matches.
+  An import failure leaves the affected tournament's unfinished matches
+  eligible for retry. A shared startup failure or an explicit retry from play
+  interrupts the group. Completed outcomes remain available for resumption.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each drawn value from the
   environment whose latest match is newest, noting only overlaps on values

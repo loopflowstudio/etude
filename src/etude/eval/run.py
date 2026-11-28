@@ -541,8 +541,21 @@ class Playing:
         self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
         self.skipped = len(self.run.matches) - len(self.pending)
 
-    def grant(self, count: int) -> tuple[Match, ...]:
-        """Remove up to count pending matches for a game process."""
+    def grant(
+        self,
+        count: int,
+        *,
+        processes: int = 1,
+        unfed: int = 1,
+        held: int = 0,
+        total_held: int = 0,
+    ) -> tuple[Match, ...]:
+        """Share unfinished matches while leaving pending work for empty game processes."""
+        pending = len(self.pending)
+        share = math.ceil((pending + total_held) / processes)
+        if not held:
+            share = min(share, math.ceil(pending / unfed))
+        count = min(count, max(1, share - held))
         granted: list[Match] = []
         while self.pending and len(granted) < count:
             match = self.pending.popleft()
@@ -550,9 +563,12 @@ class Playing:
                 granted.append(match)
         return tuple(granted)
 
-    def _remember_failure(self, error: EtudeError | RetryRequested) -> None:
+    def _remember_failure(
+        self, error: EtudeError | RetryRequested, *, terminal: bool = False
+    ) -> None:
         if self.failure is None or (
-            isinstance(error, RetryRequested) and not isinstance(self.failure, RetryRequested)
+            not isinstance(self.failure, RetryRequested)
+            and (terminal or isinstance(error, RetryRequested))
         ):
             self.failure = error
 
@@ -580,16 +596,21 @@ class Playing:
         self.run._seal()
         self.pending = deque(match for match in self.pending if match.key not in self.run._failed)
 
-    def fail_matches(self, matches: Sequence[Match], error: BaseException) -> None:
-        if not self.streaming:
-            # A retry raised by per-match play interrupts the whole pass.
-            if isinstance(error, RetryRequested):
-                raise error
-            if isinstance(error, ForwardError) and error.retry:
-                raise RetryRequested(str(error)) from error
-        self._remember_failure(self.run._record_failure(matches, error))
-        if not self.streaming:
-            # Stop grants while already-running matches report their outcomes.
+    def fail_matches(
+        self, matches: Sequence[Match], error: BaseException, *, terminal: bool = False
+    ) -> None:
+        if isinstance(error, RetryRequested):
+            raise error
+        if isinstance(error, ForwardError) and error.retry and not error.loading:
+            raise RetryRequested(str(error)) from error
+        affected = [
+            match
+            for match in matches
+            if match.key not in self.run._failed and match.key not in self.run.done
+        ]
+        if affected or terminal:
+            self._remember_failure(self.run._record_failure(affected, error), terminal=terminal)
+        if terminal:
             self.pending.clear()
 
     def accept(self, match: Match, outcome: Outcome, started: float) -> None:
@@ -607,7 +628,7 @@ class Playing:
         except EtudeError as error:
             if error.code != "match_failed":
                 raise
-            self._remember_failure(error)
+            self._remember_failure(error, terminal=True)
             self.pending.clear()
             return
         self.played += 1
@@ -728,18 +749,23 @@ def play_together(
             live: list[_GameProcess] = []
             stream_groups = [pending] if placement.bus == "local" else [(each,) for each in pending]
 
-            def spawn_one(targets: tuple[Playing, ...], starts: dict[int, int]) -> _GameProcess:
+            def spawn_one(
+                targets: tuple[Playing, ...], starts: dict[int, int], slots: dict[int, int]
+            ) -> _GameProcess:
                 parent, child_pipe = context.Pipe()
-                # Starting async games own their initial matches before any outcome is handled.
-                # Streaming engines request work when they have free slots.
+                # Reserve initial async matches only for the stream that starts with the process.
                 specs = []
                 streams = []
-                for each in targets:
-                    concurrency = None if each.streaming else games_per_process
+                for index, each in enumerate(targets):
                     initial: tuple[Match, ...] = ()
-                    if concurrency is not None:
-                        share = math.ceil(len(each.pending) / starts[id(each)])
-                        initial = each.grant(min(concurrency, share))
+                    if each.streaming:
+                        target_slots = slots[id(each)]
+                    else:
+                        assert games_per_process is not None
+                        target_slots = games_per_process
+                        if index == 0:
+                            share = math.ceil(len(each.pending) / starts[id(each)])
+                            initial = each.grant(min(target_slots, share))
                     streams.append(
                         _GameStream(
                             playing=each,
@@ -750,7 +776,8 @@ def play_together(
                         Stream(
                             tournament=each.tournament,
                             function=each.play,
-                            concurrency=concurrency,
+                            streaming=each.streaming,
+                            target_slots=target_slots,
                             initial=initial,
                         )
                     )
@@ -797,6 +824,16 @@ def play_together(
                         strict=True,
                     )
                 )
+                slots: dict[int, int] = {}
+                for each in pending:
+                    if each.streaming and starts[id(each)]:
+                        serving = sum(
+                            active.playing is each
+                            for child in live
+                            if (active := child.active_stream) is not None
+                        )
+                        share = math.ceil(len(each.pending) / (serving + starts[id(each)]))
+                        slots[id(each)] = min(share, agents.max_batch) if agents.load else share
                 while len(live) < placement.processes:
                     spawned = False
                     for group in stream_groups:
@@ -808,7 +845,7 @@ def play_together(
                         if any(each.run.should_stop for each in targets):
                             stopping = True
                             return
-                        live.append(spawn_one(targets, starts))
+                        live.append(spawn_one(targets, starts, slots))
                         for each in targets:
                             starts[id(each)] -= 1
                         spawned = True
@@ -817,18 +854,7 @@ def play_together(
 
             def fail_stream(stream: _GameStream, error: BaseException) -> None:
                 each = stream.playing
-                matches = list(stream.held.values())
-                if not matches and not each.streaming and each.pending:
-                    matches = [each.pending[0]]
-                matches = [
-                    match
-                    for match in matches
-                    if match.key not in each.run._failed and match.key not in each.run.done
-                ]
-                if matches or each.streaming:
-                    each.fail_matches(matches, error)
-                if each.streaming:
-                    each.pending.clear()
+                each.fail_matches(list(stream.held.values()), error, terminal=True)
 
             def end_stream(stream: _GameStream) -> None:
                 stream.held.clear()
@@ -843,7 +869,6 @@ def play_together(
                         stopping = True
                     granted: tuple[Match, ...] = ()
                     if not stopping and message.count > 0:
-                        count = message.count
                         if each.streaming and each.pending:
                             peers = [
                                 active
@@ -851,12 +876,15 @@ def play_together(
                                 if (active := peer.active_stream) is not None
                                 and active.playing is each
                             ]
-                            # A stream's share includes matches it still holds.
-                            unfinished = len(each.pending) + sum(len(peer.held) for peer in peers)
-                            count = min(
-                                count, math.ceil(unfinished / len(peers)) - len(stream.held)
+                            granted = each.grant(
+                                message.count,
+                                processes=len(peers),
+                                unfed=sum(not peer.held for peer in peers),
+                                held=len(stream.held),
+                                total_held=sum(len(peer.held) for peer in peers),
                             )
-                        granted = each.grant(count)
+                        else:
+                            granted = each.grant(message.count)
                         stream.held.update((match.key, match) for match in granted)
                     child.pipe.send(Grant(granted))
                 elif isinstance(message, Outcome):
@@ -870,17 +898,22 @@ def play_together(
                     fail_checkpoints(message.loading_failures)
                     stream = child.streams[message.stream]
                     each = stream.playing
-                    if message.error is not None:
+                    if isinstance(message.error, RetryRequested):
+                        # A tournament's game import can fail while its siblings use the bus.
+                        each.run.fail_pending(message.error)
+                        each._remember_failure(message.error)
+                        each.pending.clear()
+                    elif message.error is not None:
                         fail_stream(stream, message.error)
                     elif stream.held:
                         fail_stream(
                             stream,
                             RuntimeError("play_many returned without yielding its held matches"),
                         )
-                    elif each.streaming and not stopping and each.pending and not message.matches:
+                    elif each.streaming and not stopping and each.pending:
                         fail_stream(
                             stream,
-                            RuntimeError("play_many returned without taking pending matches"),
+                            RuntimeError("play_many returned before taking all pending matches"),
                         )
                     end_stream(stream)
                 elif isinstance(message, (Done, Fatal)):

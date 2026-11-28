@@ -185,8 +185,8 @@ without a probe. Etude drops `"cpu"` from mixed declarations.
 With a matching accelerator and multiple game processes, the games send
 pending calls to a shared agent process, which merges ready requests by checkpoint
 up to `max_batch` rows and writes observations to `artifacts/agents/batches.json`.
-An oversized request with one input per row uses multiple forwards and gets
-one ordered reply. With direct inference, each game process keeps its own
+Both modes split oversized requests with one input per row and return one
+ordered reply. With direct inference, each game process keeps its own
 checkpoint cache and gets a share of the available model-library threads and
 checkpoint allowance (half of host memory by default).
 
@@ -235,7 +235,7 @@ from etude.jobs import Agents, EvalJob
 async def play_many(
     matches: MatchStream[Rules],
 ) -> AsyncIterator[tuple[Match[Rules], Tables | Exception]]:
-    pool = RolloutPool(slots=256)
+    pool = RolloutPool(slots=min(256, matches.target_slots))
     while True:
         for match, agents in await matches.take(pool.free):
             pool.load(match, agents)
@@ -264,26 +264,30 @@ job = EvalJob(
 Etude schedules the matches, caches checkpoints and stores each outcome as
 the generator yields it.
 
-- `await matches.take(n)` pulls up to `n` pending `(match, agents)` pairs from
-  the tournament's queue. Etude gives each active stream a share of unfinished
-  matches, including those it already holds. Request the number of free slots
-  and step the matches you receive. If a take returns `[]`, finish any matches
-  you still hold and request work again when a slot frees up. An empty take
-  with nothing held means the queue is drained or the run is stopping.
+- `matches.target_slots` suggests a pool size using this process's initial
+  share of the tournament, capped at `max_batch` when a loader is declared.
+  Call `await matches.take(n)` with the number of free slots to get up to `n`
+  pending `(match, agents)` pairs. Grants account for held matches and share
+  pending work among empty processes. An empty grant for `n > 0` means the
+  tournament queue is drained or the run is stopping. Finish any matches
+  you still hold.
 - `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
   `rows=` for a pre-collated batch so batching never merges calls past
   `max_batch` rows and reports real row counts. An oversized pre-collated call
   runs alone. Engines that need a hard limit should collate fewer rows per
   call. Because every match in the process shares one `Forward`
   object per checkpoint, engines can group ready rows by forward identity.
-- Yield `(match, tables)` or `(match, Result(...))` with the match object
-  returned by `take`. Yield as each slot finishes so it can backfill
-  without waiting for stragglers.
-- Yield `(match, error)` to fail one match. The remaining slots keep stepping
-  and can take pending matches. An uncaught exception fails every match the
-  generator holds and stops new grants for that tournament.
-  Yielding an unknown or already-yielded match fails the generator and its held
-  matches; returning with held matches unyielded fails each unyielded match.
+  A merged call can pass several pre-collated inputs to `ModelForward`, which
+  returns one output per input in the same order. Grouped `play` and
+  `play_many` tournaments use the same loader and must pass compatible inputs.
+- Yield `(match, tables)` or `(match, Result(...))` with the match from `take`
+  or a copy whose key identifies exactly one held match. Yield as each slot
+  finishes so it can backfill without waiting for stragglers.
+- Yield `(match, error)` for an ordinary game error and keep stepping the other
+  slots. Refused tables stop grants for that tournament. Uncaught generator
+  errors, invalid yields and returning with held or pending matches fail the
+  stream and its held matches. `RetryRequested` interrupts the group and
+  retains unfinished matches for retry.
 
 ## How a forward travels
 
@@ -374,17 +378,19 @@ environment. If a game process exits unexpectedly or a wait for results expires,
 queued and in-flight matches can retry. A failure after all of a game process's
 streams end applies to the tournaments it served. Stored results are reused.
 A stop records `stopped` for the group and the tournaments it interrupts.
-Tournaments that already finished or failed keep their status. Matches dropped
-from the queue after an ordinary game failure remain unplayed. Retrying the
-recorded failure requires `--retry-failed`.
+Tournaments that already finished or failed keep their status. Ordinary
+game errors fail one match and require `--retry-failed`. Matches dropped
+after a refused table or broken stream remain unplayed.
 
 An undecodable request or reply on shared inference closes that game process's
 connection and fails its pending forwards. Other game processes keep playing.
 A failed forward raises `ForwardError` at the awaiting call, with the checkpoint
 key on `.checkpoint`. In `play`, Etude records the match as failed even if the
 game catches the error. In `play_many`, catch it to drop affected slots and
-yield `(match, error)` while unrelated matches complete. [Limits](limits.md)
-covers process, event-loop and API side effects.
+yield `(match, error)` while unrelated matches complete. Checkpoint load
+failures apply to unfinished matches seating that checkpoint, including any
+that yield fallback tables. [Limits](limits.md) covers process, event-loop and
+API side effects.
 
 ## Querying
 

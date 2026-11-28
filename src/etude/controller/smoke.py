@@ -24,7 +24,6 @@ from __future__ import annotations
 import time
 import traceback
 from collections.abc import Callable, Collection, Sequence
-from concurrent.futures.process import _RemoteTraceback
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal
@@ -251,8 +250,7 @@ def _try_step[T](step: Step, name: str, work: Callable[[], T]) -> T:
         traceback.print_exc()
         # Name the first error, not a wrapper such as eval's `match_failed`.
         first: BaseException = error
-        # ProcessPoolExecutor attaches traceback transport metadata below the real error.
-        while first.__cause__ is not None and not isinstance(first.__cause__, _RemoteTraceback):
+        while first.__cause__ is not None:
             first = first.__cause__
         raise LauncherError(
             f"smoke {step}{'' if name == step else ' ' + name}: failed after"

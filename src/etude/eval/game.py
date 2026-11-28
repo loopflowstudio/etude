@@ -31,7 +31,7 @@ from collections.abc import (
 from contextlib import aclosing, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from functools import lru_cache, partial
+from functools import cached_property, lru_cache, partial
 from multiprocessing.connection import Connection
 from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Generic, cast
 from pydantic import Field
 
 from etude.call import Function
-from etude.errors import RetryRequested
+from etude.errors import RetryRequested, explain
 from etude.eval.agents import Forward, ForwardError, SocketForwardBus
 from etude.eval.bus import BusReport, ForwardBus, ForwardCall
 from etude.eval.composition import build_agents
@@ -108,7 +108,8 @@ class Stream:
 
     tournament: str
     function: Function
-    concurrency: int | None
+    streaming: bool
+    target_slots: int
     initial: tuple[Match, ...] = ()
 
 
@@ -136,7 +137,6 @@ class Outcome:
 @dataclass(frozen=True)
 class StreamEnd:
     stream: int
-    matches: int
     error: BaseException | None = None
     loading_failures: tuple[CheckpointFailure, ...] = ()
 
@@ -157,8 +157,12 @@ class Fatal:
 @dataclass(frozen=True)
 class _TakenMatch:
     match: Match  # Keep the object alive while its id identifies the grant.
-    key: str
+    scheduled_key: str
     started: float
+
+    @cached_property
+    def authored_key(self) -> str:
+        return self.match.key
 
 
 class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PEP 696 default syntax.
@@ -171,22 +175,32 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
         kind: type[Match[_MatchConfig]],
         bind: Callable[[CheckpointRef], Forward] | None,
         build: Callable[[object, Mapping[str, Forward]], object] | None,
+        *,
+        target_slots: int,
     ) -> None:
         self._request = request
         self._initial = initial
         self._kind = kind
         self._bind = bind
         self._build = build
+        self._target_slots = target_slots
+        self._exhausted = False
         self._held: dict[int, _TakenMatch] = {}
+
+    @property
+    def target_slots(self) -> int:
+        """Suggested pool size for this stream, capped at `max_batch` with a loader."""
+        return self._target_slots
 
     async def take(self, count: int) -> list[tuple[Match[_MatchConfig], Sequence[object]]]:
         """Request up to `count` pending matches and their built seat agents."""
-        if count <= 0:
+        if count <= 0 or self._exhausted:
             return []
         if self._initial:
             granted, self._initial = self._initial[:count], self._initial[count:]
         else:
             granted = await self._request(count)
+            self._exhausted = not granted
         seats: list[tuple[Match[_MatchConfig], Sequence[object]]] = []
         for match in granted:
             if self._kind is Match:
@@ -200,10 +214,18 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
 
     def _release(self, match: Match) -> _TakenMatch:
         taken = self._held.pop(id(match), None)
-        if taken is None:
-            identity = match.key if isinstance(match, Match) else type(match).__name__
-            raise ValueError(f"play_many yielded an unknown or already-yielded match: {identity}")
-        return taken
+        if taken is not None:
+            return taken
+        if isinstance(match, Match):
+            identity = match.key
+            matching = [key for key, held in self._held.items() if held.authored_key == identity]
+            if len(matching) == 1:
+                return self._held.pop(matching[0])
+        else:
+            identity = type(match).__name__
+        raise ValueError(
+            f"play_many yielded an unknown, ambiguous or already-yielded match: {identity}"
+        )
 
 
 type Play = Callable[..., Awaitable[Tables | Result]]
@@ -287,9 +309,9 @@ class _BoundForward:
         self._checkpoint = checkpoint
 
     def __call__(self, inputs: list[object], *, rows: int | None = None) -> Awaitable[list[object]]:
-        if rows is not None and rows < 0:
-            raise ValueError("rows must be non-negative")
         if not inputs:
+            if rows:
+                raise ValueError("rows must be 0 or omitted for empty inputs")
             return _PendingAnswer(None)
         count = len(inputs) if rows is None else rows
         if count < 1:
@@ -430,9 +452,9 @@ def _portable_error(error: BaseException) -> BaseException:
 async def _drive_play(
     play: Callable[[Match, Sequence[object]], Awaitable[Tables | Result]],
     matches: MatchStream,
-    concurrency: int,
 ) -> _Outcomes:
-    """Run up to `concurrency` async `play` tasks at once, backfilling each slot."""
+    """Run async `play` tasks up to the stream's slot count and backfill each slot."""
+    concurrency = matches.target_slots
     active: dict[asyncio.Task[Tables | Result], Match] = {}
 
     async def run_one(match: Match, agents: Sequence[object]) -> Tables | Result:
@@ -621,6 +643,7 @@ async def _serve_stream(
         if pending_grant is not None and not pending_grant.done():
             pending_grant.set_result(message.matches)
 
+    starting = True
     loop.add_reader(pipe.fileno(), on_pipe_readable)
     try:
         build_hook = (
@@ -632,11 +655,16 @@ async def _serve_stream(
         for spec in streams:
             try:
                 play_fn = spec.function.load(checkout)
-                kind = _match_type(play_fn, streaming=spec.concurrency is None)
-            except RetryRequested:
-                raise
+                kind = _match_type(play_fn, streaming=spec.streaming)
             except Exception as load_error:
-                loaded_streams.append(load_error)
+                startup_error = (
+                    load_error
+                    if isinstance(load_error, RetryRequested)
+                    else RetryRequested(
+                        f"game process failed during startup: {explain(load_error)}"
+                    )
+                )
+                loaded_streams.append(startup_error)
             else:
                 loaded_streams.append((play_fn, kind))
         # Capture pre-bus top-level imports, then keep the thread-filtered hook
@@ -676,14 +704,14 @@ async def _serve_stream(
                 finally:
                     pending_grant = None
 
+        starting = False
         for stream_index, (spec, loaded) in enumerate(zip(streams, loaded_streams, strict=True)):
-            before_stream = played_count
             stream_error: BaseException | None = None
             if isinstance(loaded, Exception):
                 stream_error = loaded
             else:
                 if forwarder is not None:
-                    forwarder.eager = spec.concurrency is None
+                    forwarder.eager = spec.streaming
                 try:
                     play, kind = loaded
                     source: MatchStream = MatchStream(
@@ -692,6 +720,7 @@ async def _serve_stream(
                         kind,
                         forwarder.bind if forwarder is not None else None,
                         build_hook,
+                        target_slots=spec.target_slots,
                     )
                     stream = (
                         cast(
@@ -701,8 +730,8 @@ async def _serve_stream(
                             ],
                             play,
                         )(source)
-                        if spec.concurrency is None
-                        else _drive_play(cast(Play, play), source, spec.concurrency)
+                        if spec.streaming
+                        else _drive_play(cast(Play, play), source)
                     )
                     async with aclosing(stream):
                         async for match, outcome in stream:
@@ -721,7 +750,7 @@ async def _serve_stream(
                                 )
                             pipe.send(
                                 Outcome(
-                                    match_key=taken.key,
+                                    match_key=taken.scheduled_key,
                                     result=result,
                                     seconds=elapsed,
                                     error=_portable_error(error) if error is not None else None,
@@ -739,7 +768,6 @@ async def _serve_stream(
             pipe.send(
                 StreamEnd(
                     stream=stream_index,
-                    matches=played_count - before_stream,
                     error=_portable_error(stream_error) if stream_error is not None else None,
                     loading_failures=drain_failures(),
                 )
@@ -749,6 +777,8 @@ async def _serve_stream(
     except Exception as error:
         with suppress(Exception):
             await close_bus()
+        if starting and not isinstance(error, RetryRequested):
+            error = RetryRequested(f"game process failed during startup: {explain(error)}")
         try:
             pipe.send(
                 Fatal(
