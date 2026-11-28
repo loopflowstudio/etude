@@ -34,7 +34,7 @@ from etude.eval.agents import (
 from etude.eval.batching import LocalForwardBus, _run_agents
 from etude.eval.bus import BusReport, ForwardBus, ForwardCall, arrays, normalize_inputs
 from etude.eval.composition import build_agents
-from etude.eval.game import GameReport, Matches, _Forwarder
+from etude.eval.game import GameReport, MatchStream, _Forwarder
 from etude.eval.match import environment
 from etude.eval.query import statsdb
 from etude.eval.records import Match, compose
@@ -1638,7 +1638,7 @@ def test_unawaited_play_many_future_on_early_exit_emits_no_warning_and_unlocks(
 
 
 async def _early_exit_play_many(
-    matches: Matches,
+    matches: MatchStream,
 ) -> AsyncIterator[tuple[Match, Tables]]:
     taken = await matches.take(2)
     assert taken

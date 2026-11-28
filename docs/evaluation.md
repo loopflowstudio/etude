@@ -226,14 +226,14 @@ write an async generator `play_many(matches)` instead of `play(match, agents)`:
 from collections.abc import AsyncIterator
 
 from etude.eval.agents import ForwardError
-from etude.eval.game import Matches
+from etude.eval.game import MatchStream
 from etude.eval.records import Match
 from etude.eval.result import Tables
 from etude.jobs import Agents, EvalJob
 
 
 async def play_many(
-    matches: Matches[Rules],
+    matches: MatchStream[Rules],
 ) -> AsyncIterator[tuple[Match[Rules], Tables | Exception]]:
     pool = RolloutPool(slots=256)
     while True:

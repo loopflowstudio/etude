@@ -44,7 +44,7 @@ from etude.eval.agents import (
 )
 from etude.eval.batching import Batch, _add_socket_batch, _Batches, _encode_socket, _send_peer
 from etude.eval.bus import ForwardOutcome
-from etude.eval.game import GameReport, Matches
+from etude.eval.game import GameReport, MatchStream
 from etude.eval.loader import AgentLoader
 from etude.eval.match import environment
 from etude.eval.query import _kept_path, statsdb
@@ -2216,7 +2216,7 @@ def load_vector(checkpoint: CheckpointRef) -> ModelForward:
 
 
 async def vector_slots(
-    matches: Matches[VectorRules],
+    matches: MatchStream[VectorRules],
 ) -> AsyncIterator[tuple[Match[VectorRules], Result | Exception]]:
     active: list[tuple[Match[VectorRules], Forward, int]] = []
     while True:
@@ -2406,7 +2406,7 @@ def load_mixed_stream_probe(ref: CheckpointRef) -> ModelForward:
 
 
 async def overlapping_stream(
-    matches: Matches,
+    matches: MatchStream,
 ) -> AsyncIterator[tuple[Match, Tables]]:
     [(match, agents)] = await matches.take(1)
     forward = cast(Forward, agents[0])
@@ -2467,7 +2467,7 @@ def test_direct_mixed_group_switches_submission_mode_between_streams(
 
 
 async def array_vector_slots(
-    matches: Matches[VectorRules],
+    matches: MatchStream[VectorRules],
 ) -> AsyncIterator[tuple[Match[VectorRules], Result | Exception]]:
     import numpy as np  # noqa: PLC0415  # Test fixture keeps NumPy local to array tests.
 
@@ -2495,7 +2495,7 @@ async def array_vector_slots(
 
 
 async def failing_stream(
-    matches: Matches[VectorRules],
+    matches: MatchStream[VectorRules],
 ) -> AsyncIterator[tuple[Match[VectorRules], Result]]:
     taken = await matches.take(2)
     assert taken
@@ -2504,7 +2504,7 @@ async def failing_stream(
 
 
 async def code_only_vector_slots(
-    matches: Matches[VectorRules],
+    matches: MatchStream[VectorRules],
 ) -> AsyncIterator[tuple[Match[VectorRules], Result | RetryRequested]]:
     while True:
         taken = await matches.take(2)
@@ -2606,7 +2606,7 @@ def test_interrupted_tournament_keeps_completed_tournament_finished(
         assert len(interrupted.new) == len(interrupted.failed) == len(interrupted.retry) == 3
 
 
-async def hold_stream_match(matches: Matches) -> AsyncIterator[tuple[Match, Tables]]:
+async def hold_stream_match(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables]]:
     [(match, _)] = await matches.take(1)
     signal.pause()
     yield match, {"scores": [{"seat": 0, "score": 1}]}
@@ -2655,7 +2655,7 @@ def test_report_failure_fails_its_owner_while_a_sibling_is_running(
 
 
 async def fail_first_stream_match(
-    matches: Matches[VectorRules],
+    matches: MatchStream[VectorRules],
 ) -> AsyncIterator[tuple[Match[VectorRules], Exception]]:
     for match, _ in await matches.take(1):
         yield match, ValueError("fixture stream error")
@@ -2797,7 +2797,7 @@ def test_mixed_eval_group_attributes_checkpoint_failures_to_both_play_functions(
 
 
 async def large_slot_request(
-    matches: Matches[VectorRules],
+    matches: MatchStream[VectorRules],
 ) -> AsyncIterator[tuple[Match[VectorRules], Tables]]:
     while granted := await matches.take(64):
         for match, agents in granted:
@@ -3076,10 +3076,10 @@ def test_direct_imports_snapshot_excludes_loader_and_detects_mlx_in_game_module(
         "from collections.abc import AsyncIterator\n"
         "from typing import cast\n"
         "from etude.eval.agents import Forward\n"
-        "from etude.eval.game import Matches\n"
+        "from etude.eval.game import MatchStream\n"
         "from etude.eval.records import Match\n"
         "from etude.eval.result import Tables\n"
-        "async def play_many(matches: Matches) -> AsyncIterator[tuple[Match, Tables]]:\n"
+        "async def play_many(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables]]:\n"
         "    while True:\n"
         "        taken = await matches.take(2)\n"
         "        if not taken:\n"
@@ -3371,7 +3371,7 @@ def test_async_startup_grants_keep_every_shared_game_process_busy(
     assert sorted(report.matches for report in reports) == [1] * 14 + [2]
 
 
-async def invalid_stream(matches: Matches[Config]) -> AsyncIterator[tuple[Match, Tables]]:
+async def invalid_stream(matches: MatchStream[Config]) -> AsyncIterator[tuple[Match, Tables]]:
     taken = await matches.take(2)
     match, agents = taken[0]
     outcome = match.config["outcome"]
@@ -3448,7 +3448,7 @@ def test_play_many_requires_one_async_generator_with_a_match_source(tmp_path: Pa
     ) as active:
         with pytest.raises(TypeError, match="async def generator"):
             active.play_many(plain)  # type: ignore[arg-type]
-        with pytest.raises(TypeError, match=r"Matches\[YourConfig\]"):
+        with pytest.raises(TypeError, match=r"MatchStream\[YourConfig\]"):
             active.play_many(wrong_source)
 
 

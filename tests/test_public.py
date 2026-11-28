@@ -27,7 +27,7 @@ SURFACE: dict[str, tuple[str, ...]] = {
     "etude.errors": tuple("EtudeError LauncherError".split()),
     "etude.deadline": ("limit_time",),
     "etude.eval.agents": ("Forward", "ModelForward", "ForwardError"),
-    "etude.eval.game": ("Matches",),
+    "etude.eval.game": ("MatchStream",),
     "etude.eval.records": tuple(
         "CheckpointPlayer Code CheckpointSlot checkpoint_player Composition compose Benchmark RoundRobin Seating Seat Earlier "
         "Fraction At Final Aligned Match Environment Player Rollup".split()

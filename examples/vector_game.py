@@ -6,7 +6,7 @@ from typing import cast
 import numpy as np
 
 from etude.eval.agents import Forward, ForwardError
-from etude.eval.game import Matches
+from etude.eval.game import MatchStream
 from etude.eval.records import Match
 from etude.eval.result import Tables
 
@@ -22,7 +22,7 @@ def _submit_half(half: list[_Slot]) -> Awaitable[list[object]] | None:
     return forward([batch], rows=len(half))
 
 
-async def play_many(matches: Matches) -> AsyncIterator[tuple[Match, Tables | Exception]]:
+async def play_many(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables | Exception]]:
     halves: list[list[_Slot]] = [[], []]
     half_capacity = 2
     while True:
