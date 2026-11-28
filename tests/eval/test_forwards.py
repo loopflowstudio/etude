@@ -3,13 +3,12 @@
 import asyncio
 import json
 import socket
-from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from random import Random
 
 import pytest
 
-from etude.eval.agents import Answer, CheckpointRequest, recv_frame
+from etude.eval.agents import Answer, CheckpointRequest, decode_answer, recv_frame
 from etude.eval.batching import _Batches
 from etude.eval.records import Code, compose
 from etude.jobs import Agents, hold_group
@@ -66,9 +65,9 @@ def test_mirror_trajectories_do_not_depend_on_other_inputs_in_the_batch() -> Non
             ],
         )
         batches.flush()
-        first = ForkingPickler.loads(recv_frame(parent))
-        assert first == Answer(1, [101])
-        answer = ForkingPickler.loads(recv_frame(parent))
+        first = decode_answer(recv_frame(parent))
+        assert first == Answer(1, small.checkpoint.key, [101])
+        answer = decode_answer(recv_frame(parent))
         assert isinstance(answer, Answer)
         assert isinstance(answer.result, list)
         return answer.result

@@ -146,6 +146,7 @@ with evaluating(
   The inference thread and checkpoint budgets use the count of processes
   started for the panel. For `play_many`, the startup line prints the initial
   `target_matches` hints, capped at `max_batch` when a loader is declared.
+  Both play modes request grants after loading and setting up the callback.
   Grants share unfinished matches across processes, accounting for matches
   already held and pending work for empty processes. A positive request
   receives at least one while grants are
@@ -219,10 +220,10 @@ with evaluating(
   `(match, error)` to fail one slot and keep taking pending matches. A raised
   error or an unknown or duplicate yield fails every held match. Returning with
   held matches unyielded fails each unyielded match. Errors loading or
-  setting up authored game code fail that tournament and its held matches.
-  Sibling tournaments continue. A game process that exits without reporting,
-  a failed shared-agent connection or `RetryRequested` interrupts the group
-  and leaves unfinished matches eligible for retry.
+  setting up authored game code fail that tournament and leave ungranted
+  matches pending. Sibling tournaments continue. A game process that exits
+  without reporting, a failed shared-agent connection or `RetryRequested`
+  interrupts the group and leaves unfinished matches eligible for retry.
   A run with failed matches ends failed.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each drawn value from the

@@ -533,6 +533,21 @@ class Playing:
         self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
         self.skipped = len(self.run.matches) - len(self.pending)
 
+    def available_share(
+        self,
+        *,
+        processes: int,
+        unfed: int,
+        held: int,
+        total_held: int,
+    ) -> int:
+        """Size a grant from unfinished work, leaving pending matches for empty peers."""
+        pending = len(self.pending)
+        share = math.ceil((pending + total_held) / processes)
+        if not held:
+            share = min(share, math.ceil(pending / unfed))
+        return min(pending, max(1, share - held))
+
     def grant(
         self,
         count: int,
@@ -542,12 +557,12 @@ class Playing:
         held: int = 0,
         total_held: int = 0,
     ) -> tuple[Match, ...]:
-        """Reserve a share of unfinished matches while leaving work for empty peers."""
-        pending = len(self.pending)
-        share = math.ceil((pending + total_held) / processes)
-        if not held:
-            share = min(share, math.ceil(pending / unfed))
-        count = min(count, max(1, share - held))
+        count = min(
+            count,
+            self.available_share(
+                processes=processes, unfed=unfed, held=held, total_held=total_held
+            ),
+        )
         granted: list[Match] = []
         while self.pending and len(granted) < count:
             match = self.pending.popleft()
@@ -680,7 +695,7 @@ def _play_pending(plays: Sequence[Playing], resources: Resources, checkout: str 
     initial = _reserve_games(plays, plan, ())
     if not initial:
         return
-    # Per-match play can reserve the entire panel with fewer processes than the host allows.
+    # Small panels may need fewer game processes than the host allows.
     plan = replace(plan, processes=len(initial))
     with (
         running_agents(definition, checkout, resources, plan) if plan.shared else nullcontext()
@@ -699,40 +714,54 @@ def _play_pending(plays: Sequence[Playing], resources: Resources, checkout: str 
 
 
 @dataclass(frozen=True)
-class _GameGrant:
+class _GameSlot:
     playing: Playing
-    matches: tuple[Match, ...]
     target_matches: int
 
 
 def _reserve_games(
     plays: Sequence[Playing], plan: ExecutionPlan, live: Sequence[_GameProcess]
-) -> list[_GameGrant]:
-    """Assign free process slots in tournament order, reserving play's first matches."""
+) -> list[_GameSlot]:
+    """Assign free process slots in tournament order before any matches are granted."""
     capacity = plan.processes - len(live)
-    counts = Counter(id(child.playing) for child in live)
-    reserved: list[tuple[Playing, tuple[Match, ...]]] = []
+    counts: Counter[int] = Counter()
+    unfed: Counter[int] = Counter()
+    held: Counter[int] = Counter()
+    for child in live:
+        if not child.done:
+            key = id(child.playing)
+            counts[key] += 1
+            unfed[key] += not child.held
+            held[key] += len(child.held)
+    reserved: list[Playing] = []
     while len(reserved) < capacity:
         before = len(reserved)
         for each in plays:
-            if not each.pending or each.streaming and counts[id(each)] >= len(each.pending):
+            key = id(each)
+            limit = (
+                len(each.pending) if each.streaming else math.ceil(len(each.pending) / plan.games)
+            )
+            if counts[key] >= limit:
                 continue
-            matches = () if each.streaming else each.grant(plan.games)
-            reserved.append((each, matches))
-            counts[id(each)] += 1
+            reserved.append(each)
+            counts[key] += 1
+            unfed[key] += 1
             if len(reserved) == capacity:
                 break
         if len(reserved) == before:
             break
-    grants: list[_GameGrant] = []
-    for each, matches in reserved:
-        target_matches = plan.games
-        if each.streaming:
-            target_matches = math.ceil(len(each.pending) / counts[id(each)])
-            if each.agent_loader.load is not None:
-                target_matches = min(target_matches, each.agent_loader.max_batch)
-        grants.append(_GameGrant(each, matches, target_matches))
-    return grants
+    slots: list[_GameSlot] = []
+    for each in reserved:
+        key = id(each)
+        target = each.available_share(
+            processes=counts[key], unfed=unfed[key], held=0, total_held=held[key]
+        )
+        if not each.streaming:
+            target = min(target, plan.games)
+        elif each.agent_loader.load is not None:
+            target = min(target, each.agent_loader.max_batch)
+        slots.append(_GameSlot(each, target))
+    return slots
 
 
 @dataclass
@@ -763,7 +792,7 @@ def _play_matches(
     *,
     resources: Resources,
     plan: ExecutionPlan,
-    initial: Sequence[_GameGrant],
+    initial: Sequence[_GameSlot],
     checkout: str | None,
     agent_process: AgentProcess | None,
     load: Function | None,
@@ -799,17 +828,14 @@ def _play_matches(
     live: list[_GameProcess] = []
     address = agent_process.address if agent_process is not None else None
 
-    def spawn_one(grant: _GameGrant) -> _GameProcess:
+    def spawn_one(slot: _GameSlot) -> _GameProcess:
         parent, child_pipe = context.Pipe()
-        each = grant.playing
-        # Starting play processes own their first matches even if another match fails
-        # before they finish importing the game. Streaming engines request their own slots.
+        each = slot.playing
         game = Game(
             play=each.play,
             tournament=each.tournament,
             streaming=each.streaming,
-            target_matches=grant.target_matches,
-            initial=grant.matches,
+            target_matches=slot.target_matches,
             agent_address=address,
             checkout=checkout,
             build=each.agent_loader.build,
@@ -825,9 +851,7 @@ def _play_matches(
             raise
         finally:
             child_pipe.close()
-        return _GameProcess(
-            playing=each, process=process, pipe=parent, held={m.key: m for m in grant.matches}
-        )
+        return _GameProcess(playing=each, process=process, pipe=parent)
 
     def handle_message(child: _GameProcess, message: object) -> None:
         nonlocal stopping
@@ -837,7 +861,7 @@ def _play_matches(
             granted: tuple[Match, ...]
             if stopping:
                 granted = ()
-            elif each.streaming:
+            else:
                 peers = [other for other in live if other.playing is each and not other.done]
                 granted = each.grant(
                     message.count,
@@ -846,8 +870,6 @@ def _play_matches(
                     held=len(child.held),
                     total_held=sum(len(other.held) for other in peers),
                 )
-            else:
-                granted = each.grant(message.count)
             child.exhausted = not granted
             child.held.update((match.key, match) for match in granted)
             child.pipe.send(granted)
@@ -928,7 +950,7 @@ def _play_matches(
 
 
 def _log_execution(
-    plays: Sequence[Playing], plan: ExecutionPlan, initial: Sequence[_GameGrant]
+    plays: Sequence[Playing], plan: ExecutionPlan, initial: Sequence[_GameSlot]
 ) -> None:
     streaming = any(each.streaming for each in plays)
     processes = plan.processes

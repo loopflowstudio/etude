@@ -258,10 +258,11 @@ the generator yields it.
   when a loader is declared. Size an engine with several games per match
   accordingly.
   Call `await matches.take(n)` with the number of free slots to get up to `n`
-  pending `(match, agents)` pairs. Etude shares pending matches among empty
-  processes and accounts for held matches when topping up a process. An empty
-  grant for `n > 0` means the tournament has no pending matches or the run is
-  stopping.
+  pending `(match, agents)` pairs. In both play modes, processes take their first
+  matches after loading and setting up the game code. Etude shares pending
+  matches among empty processes and accounts for held matches when refilling.
+  An empty grant for `n > 0` means the tournament has no pending matches or
+  the run is stopping.
 - `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
   `rows=` for a pre-collated batch so the agent process never merges calls past
   `max_batch` rows and reports real row counts. A single pre-collated call
@@ -299,12 +300,15 @@ return {"scores": [{"seat": 0, "won": True}, {"seat": 1, "won": False}]}
 A successful match is reused across an experiment's tournaments in the same
 environment. An ordinary `play` error or a return of the wrong type fails that
 match and other matches keep playing. Errors loading or setting up authored
-game code fail its tournament while sibling tournaments continue. Errors
-retain completed results. Infrastructure failures retry, and ordinary failed
-matches require `--retry-failed`. A forward failure raises
+game code fail its tournament while sibling tournaments continue. Completed
+results are retained, and matches that were never granted remain pending.
+Infrastructure failures retry, and ordinary failed matches require
+`--retry-failed`. A forward failure raises
 `ForwardError` (with `.checkpoint` naming the checkpoint key) at the awaiting
-call. If the shared agent process cannot deserialize a request's inputs, it
-answers that request with `ForwardError` and continues serving other requests.
+call. In shared inference, a serialization error in a request or its reply
+raises a non-retryable `ForwardError` for that request. Other requests in the
+same message or merged forward continue. A lost connection interrupts the
+group and leaves unfinished matches eligible for retry.
 Etude records a failed match even when `play` catches `ForwardError`.
 In `play_many`, catch `ForwardError`, drop affected slots and yield `(match,
 error)` while unrelated matches complete. A checkpoint load failure applies

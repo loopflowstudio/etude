@@ -14,18 +14,17 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
-from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
 from typing import cast
 
 from etude.call import Function
-from etude.errors import RetryRequested, explain
 from etude.eval.agents import (
     Answer,
     CheckpointRequest,
     ForwardError,
     ForwardResult,
     decode_requests,
+    encode_answer,
     recv_frame,
     send_frame,
 )
@@ -54,13 +53,15 @@ class _Pending:
     receive_seconds: float
 
 
-def _responses(result: ForwardResult, batch: list[_Pending]) -> list[memoryview]:
-    responses: list[memoryview] = []
+def _responses(
+    key: str, result: ForwardResult, batch: list[_Pending]
+) -> list[tuple[bytes, memoryview]]:
+    responses: list[tuple[bytes, memoryview]] = []
     offset = 0
     for item in batch:
         stop = offset + len(item.request.inputs)
         part = result if isinstance(result, ForwardError) else result[offset:stop]
-        responses.append(ForkingPickler.dumps(Answer(item.request.id, part)))
+        responses.append(encode_answer(Answer(item.request.id, key, part)))
         offset = stop
     return responses
 
@@ -137,24 +138,14 @@ class _Batches:
             if not items:
                 del self.pending[key]
             answer, forwarded = self._forward(key, batch, rows)
-            # Serialize every reply before delivery: an unpicklable answer fails
-            # the whole batch, while successful payloads are encoded only once.
             started = time.monotonic()
-            try:
-                responses = _responses(answer, batch)
-            except Exception as error:
-                answer = ForwardError(
-                    key,
-                    f"agent {key}: {explain(error)}",
-                    retry=isinstance(error, RetryRequested),
-                )
-                responses = _responses(answer, batch)
+            responses = _responses(key, answer, batch)
             encode_seconds = time.monotonic() - started
             receive_seconds = sum(p.receive_seconds for p in batch)
             started = time.monotonic()
             for item, response in zip(batch, responses, strict=True):
                 try:
-                    send_frame(item.peer, response)
+                    send_frame(item.peer, *response)
                 except (OSError, EOFError):
                     pass  # The game may have been cancelled at its deadline.
             send_seconds = time.monotonic() - started
@@ -215,7 +206,7 @@ def _run_agents(
                             requests: list[CheckpointRequest] = []
                             for request in decode_requests(recv_frame(peer)):
                                 if isinstance(request, Answer):
-                                    send_frame(peer, ForkingPickler.dumps(request))
+                                    send_frame(peer, *encode_answer(request))
                                 else:
                                     requests.append(request)
                         except (EOFError, OSError):

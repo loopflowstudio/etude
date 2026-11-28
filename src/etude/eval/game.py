@@ -127,7 +127,6 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
     def __init__(
         self,
         pipe: Connection,
-        initial: tuple[Match, ...],
         kind: type[Match[_MatchConfig]],
         bind: Callable[[CheckpointRef], Forward] | None,
         build: Callable[[object, Mapping[str, Forward]], object] | None,
@@ -135,7 +134,6 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
         target_matches: int,
     ) -> None:
         self._pipe = pipe
-        self._initial = initial
         self._kind = kind
         self._bind = bind
         self._build = build
@@ -156,12 +154,9 @@ class MatchStream(Generic[_MatchConfig]):  # noqa: UP046  # Python 3.12 lacks PE
         async with self._lock:
             if self._exhausted:
                 return []
-            if self._initial:
-                granted, self._initial = self._initial[:count], self._initial[count:]
-            else:
-                granted = await self._request(count)
-                # Pending work only shrinks. An empty grant ends requests from this stream.
-                self._exhausted = not granted
+            granted = await self._request(count)
+            # Pending work only shrinks. An empty grant ends requests from this stream.
+            self._exhausted = not granted
         seats: list[tuple[Match[_MatchConfig], Sequence[object]]] = []
         for match in granted:
             if self._kind is Match:
@@ -403,13 +398,12 @@ async def _drive_play(
 
 @dataclass(frozen=True, kw_only=True)
 class Game:
-    """One tournament's callback, initial matches and inference setup."""
+    """One tournament's callback, match capacity and inference setup."""
 
     play: Function
     tournament: str
     streaming: bool
     target_matches: int
-    initial: tuple[Match, ...]
     agent_address: str | None
     checkout: str | None
     build: Function | None
@@ -460,7 +454,6 @@ async def _serve_stream(
 
         source: MatchStream = MatchStream(
             pipe,
-            game.initial,
             kind,
             forwarder.bind if forwarder else None,
             build_hook,
